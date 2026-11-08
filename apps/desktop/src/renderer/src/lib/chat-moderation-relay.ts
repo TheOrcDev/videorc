@@ -82,6 +82,8 @@ export interface ChatModerationRelay {
 
 // Loaded in the same chunk: answers to Buddy's voice command cards.
 export { startCohostCommandRelay } from '@/lib/cohost-command-relay'
+// And `/buddy <words>` from the Stream Manager (plan 209 S20).
+export { startBuddyActRelay } from '@/lib/buddy-act-relay'
 
 export const REMOVAL_TOAST_ID_PREFIX = 'chat-removal:'
 

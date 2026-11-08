@@ -1,6 +1,7 @@
 import { ChevronDownIcon, CloseIcon, HeartbeatIcon, WarningIcon } from '@/components/icons'
 import { useEffect, useId, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
@@ -11,7 +12,6 @@ import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
-  useStudioAudio,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
@@ -19,6 +19,7 @@ import {
 } from '@/hooks/use-studio'
 import type {
   BackendCrashRecord,
+  CompositorFramePipelineStatus,
   DiagnosticStats,
   SessionLogEntry,
   SystemPermissionPane,
@@ -30,6 +31,7 @@ import { NO_VALUE, compactTime, formatDroppedFrames, formatMetric, plural } from
 import { formatBitrate, formatFrameRate } from '@/lib/format-video'
 import {
   RECORDING_AT_RISK_ADVICE,
+  cameraNoVideoAdvice,
   checkNeedsAttention,
   formatBytes,
   healthChecks,
@@ -49,8 +51,17 @@ import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/
 import { unknownDeviceWarnings } from '@/lib/source-status'
 import { previewSourceStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
-import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { mediaAccessStatusForPane, systemAccessAction } from '@/lib/system-access'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
+import { useVirtualCamera } from '@/hooks/use-virtual-camera'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
+import { toast } from '@/lib/toast'
+import {
+  VIDEORC_CAMERA,
+  VIDEORC_CAMERA_COPY,
+  virtualCameraHidden,
+  virtualCameraStateLabel
+} from '@/lib/virtual-camera-view'
 
 // Health (plan 174 S3.18, I-4, I-25, V-7, D9): the page answers "is anything
 // wrong?" first. One verdict, the warnings the streamer can act on, the
@@ -79,11 +90,19 @@ export function DiagnosticsTab(): ReactElement {
     runtimeInfo,
     health
   } = useStudioCore()
-  const { audioMeter } = useStudioAudio()
   const { recording } = useStudioRecording()
   const { previewLiveStatus, previewCameraStatus, previewScreenStatus } = useStudioPreview()
-  const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, recordLatency, streamHealth } =
-    useStudioDiagnostics()
+  const {
+    diagnosticStats,
+    healthEvents,
+    logs,
+    previewSurfaceStatus,
+    recentStreamDrops,
+    recordLatency,
+    streamHealth
+  } = useStudioDiagnostics()
+  // Plan 214 E3: Videorc Camera's group, never where the camera is hidden.
+  const camera = useVirtualCamera()
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
   const platform = runtimeInfo?.platform
   const currentSession = sessions.find((session) => session.id === recording.sessionId) ?? null
@@ -96,15 +115,15 @@ export function DiagnosticsTab(): ReactElement {
     }
   }, [logSessionId, loadSessionDetails])
 
-  const accessRows = systemAccessRows({ deviceList, audioMeter, platform, mediaAccess })
+  const accessRows = useSystemAccessRows()
   const deviceWarnings = unknownDeviceWarnings(deviceList.warnings)
   const permissionAction = (pane: SystemPermissionPane) =>
     systemAccessAction({
       pane,
+      checking: accessRows.find((row) => row.id === pane)?.checking,
       state: accessRows.find((row) => row.id === pane)?.state,
       platform,
-      mediaAccessStatus:
-        pane === 'camera' || pane === 'microphone' ? mediaAccess?.[pane] : undefined
+      mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, pane)
     })
   const warnings = permissionWarnings(
     healthEvents,
@@ -127,6 +146,7 @@ export function DiagnosticsTab(): ReactElement {
         previewLiveStatus,
         previewScreenStatus,
         previewSurfaceStatus,
+        recentStreamDrops,
         streamHealth,
         streamTargets
       }),
@@ -141,6 +161,7 @@ export function DiagnosticsTab(): ReactElement {
       previewLiveStatus,
       previewScreenStatus,
       previewSurfaceStatus,
+      recentStreamDrops,
       streamHealth,
       streamTargets
     ]
@@ -152,6 +173,7 @@ export function DiagnosticsTab(): ReactElement {
       return name ? `${name} permission` : 'A permission'
     }),
     advice:
+      cameraNoVideoAdvice(previewCameraStatus, captureConfig.sources.cameraName) ??
       slowdownAdvice(diagnosticStats.bottleneck) ??
       (diagnosticStats.recordingAtRisk ? RECORDING_AT_RISK_ADVICE : null)
   })
@@ -285,6 +307,14 @@ export function DiagnosticsTab(): ReactElement {
             </ul>
           ) : null}
         </MetricGroup>
+        {virtualCameraHidden(camera.status) ? null : (
+          <MetricGroup
+            attention={camera.status?.available === false || camera.status?.state === 'unavailable'}
+            title={VIDEORC_CAMERA}
+          >
+            <VideorcCameraMetrics />
+          </MetricGroup>
+        )}
         {/* The one Pipeline (V-7): the recording's stages, each state in words. */}
         <MetricGroup attention={pipelineFailed} title="Pipeline">
           {recording.pipeline ? (
@@ -456,7 +486,7 @@ function TechnicalDetails({ children }: { children: ReactNode }): ReactElement {
     <Collapsible className="border-b border-border" data-testid="health-technical-details">
       <h2>
         <CollapsibleTrigger className="group flex w-full items-center gap-2 px-gutter py-3 text-left text-section font-semibold text-foreground hover:bg-accent">
-          <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+          <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-panel-open:rotate-180" />
           Technical details
         </CollapsibleTrigger>
       </h2>
@@ -491,7 +521,7 @@ function MetricGroup({
     >
       <h3>
         <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 rounded-row px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-          <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+          <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-panel-open:rotate-180" />
           <span className="shrink-0">{title}</span>
           {attention ? (
             <>
@@ -580,6 +610,112 @@ function OverviewMetrics({
       <DiagnosticMetric label="Bridge drops" value={stats.encoderBridgeDroppedFrames.toString()} />
       <DiagnosticMetric label="Bridge error" value={stats.encoderBridgeError ?? NO_VALUE} />
     </MetricGrid>
+  )
+}
+
+/** How often the open Videorc Camera group re-reads the camera's counters. */
+const VIDEORC_CAMERA_COUNTERS_MS = 2_000
+
+/**
+ * Videorc Camera in Health (plan 214 E3): its state, the apps using it and
+ * what its output did (A4's counters), read while the group is open. On
+ * macOS, Remove Videorc Camera takes the extension out of the system after
+ * one confirm (B3's deactivation): other apps stop listing it.
+ */
+function VideorcCameraMetrics(): ReactElement | null {
+  const camera = useVirtualCamera()
+  const { status, readFramePipeline } = camera
+  const [pipeline, setPipeline] = useState<CompositorFramePipelineStatus | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const [removing, setRemoving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    const read = (): void => {
+      void readFramePipeline().then((next) => {
+        if (active) setPipeline(next)
+      })
+    }
+    read()
+    const timer = window.setInterval(read, VIDEORC_CAMERA_COUNTERS_MS)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [readFramePipeline])
+
+  if (!status) return null
+  // A4 leaves each counter off the wire while it is 0; unread is "–", never 0.
+  const counter = (value?: number): string =>
+    pipeline ? formatOptionalCounter(value ?? 0) : NO_VALUE
+
+  const remove = async (): Promise<void> => {
+    setRemoving(true)
+    try {
+      // Off first, so the next launch doesn't install it again.
+      if (status.on) await camera.setOn(false)
+      const result = await camera.runAction('remove')
+      if (result.ok) {
+        toast.success(
+          VIDEORC_CAMERA_COPY.removed,
+          result.message ? { description: result.message } : undefined
+        )
+      } else {
+        toast.error("Couldn't remove Videorc Camera", {
+          description: result.message ?? 'Try again in a moment.'
+        })
+      }
+    } finally {
+      setRemoving(false)
+      setConfirming(false)
+    }
+  }
+
+  return (
+    <>
+      <MetricGrid>
+        <DiagnosticMetric label="State" value={virtualCameraStateLabel(status.state)} />
+        <DiagnosticMetric
+          label="Apps using it"
+          value={status.viewers === undefined ? NO_VALUE : plural(status.viewers, 'app')}
+        />
+        <DiagnosticMetric label="Frames sent" value={counter(pipeline?.virtualCameraPushed)} />
+        <DiagnosticMetric
+          label="Repeated frames"
+          value={counter(pipeline?.virtualCameraRepeated)}
+        />
+        <DiagnosticMetric
+          label="Slowest conversion"
+          value={pipeline ? formatMs(pipeline.virtualCameraConvertMsMax ?? 0) : NO_VALUE}
+        />
+      </MetricGrid>
+      {isMacPlatform(camera.platform ?? 'darwin') && status.available ? (
+        <div className="mt-3 px-2">
+          <Button
+            data-testid="health-remove-videorc-camera"
+            disabled={!camera.connected || removing}
+            size="xs"
+            type="button"
+            variant="destructive"
+            onClick={() => setConfirming(true)}
+          >
+            {VIDEORC_CAMERA_COPY.remove}
+          </Button>
+        </div>
+      ) : null}
+      <ConfirmDialog
+        confirmDisabled={removing}
+        confirmLabel={removing ? VIDEORC_CAMERA_COPY.removing : VIDEORC_CAMERA_COPY.remove}
+        description={VIDEORC_CAMERA_COPY.removeDescription}
+        open={confirming}
+        testId="health-remove-videorc-camera"
+        title={VIDEORC_CAMERA_COPY.removeTitle}
+        onCancel={() => {
+          if (!removing) setConfirming(false)
+        }}
+        onConfirm={() => void remove()}
+      />
+    </>
   )
 }
 

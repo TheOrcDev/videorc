@@ -7,6 +7,7 @@ import {
   nativePreviewFramePollingResponseCanCommit,
   nativePreviewFramePollingShouldSuppress,
   nativePreviewMainStatusReadGenerationMatches,
+  nativePreviewProofPollingRecording,
   previewSurfaceStatusWithoutMainAuthority,
   previewSurfaceStatusRequiresMainAuthority,
   nativePreviewSurfaceSyncCanCommit,
@@ -373,3 +374,21 @@ function canonicalWindowsStatus(): PreviewSurfaceStatus {
     }
   }
 }
+
+describe('nativePreviewProofPollingRecording', () => {
+  it('keeps the idle Preview profile while only Clips runs', () => {
+    // The always-on replay buffer reports `recording` + replayOnly: the
+    // Studio reads Ready, so the Preview must not drop to 960 px / 8 fps.
+    expect(nativePreviewProofPollingRecording(true, true)).toBe(false)
+  })
+
+  it('contains the Preview for a real recording, with or without Clips', () => {
+    expect(nativePreviewProofPollingRecording(true, false)).toBe(true)
+    expect(nativePreviewProofPollingRecording(true, undefined)).toBe(true)
+  })
+
+  it('stays idle when nothing runs', () => {
+    expect(nativePreviewProofPollingRecording(false, undefined)).toBe(false)
+    expect(nativePreviewProofPollingRecording(false, true)).toBe(false)
+  })
+})

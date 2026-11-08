@@ -1,7 +1,7 @@
 // Plan 069 S7: pure assessment logic for `pnpm smoke:system-audio` and
 // `measure:av-sync --system-audio`.
 //
-// Every verdict is computed from the finished artifact's decoded audio. The
+// Artifact verdicts are computed from the finished artifact's decoded audio. The
 // measure is 1 kHz-selective (a sliding Goertzel filter), so other sound the
 // computer plays during a run (music, a notification) cannot fake a tone or,
 // unless it carries real energy at 1 kHz, fail a silence check. Broadband
@@ -321,6 +321,23 @@ export function mixSourcesIncludeSystemAudio(status) {
   )
 }
 
+/**
+ * The `recording.status` that starts the session a case drives (Record or
+ * Go Live). With Clips on (plan 181) the ring's buffer-only session re-arms
+ * right after every Stop and publishes its own `recording` status, marked
+ * `replayOnly`; the Record that follows hands over from it and runs under a
+ * new session id. A waiter that accepts the ring's status latches onto a
+ * session that ends at the handover, so it never sees the mix or the terminal
+ * status it then waits for.
+ */
+export function startedSessionStatus(status) {
+  return (
+    (status?.state === 'recording' || status?.state === 'streaming') &&
+    typeof status?.sessionId === 'string' &&
+    status.replayOnly !== true
+  )
+}
+
 function describeRegions(regions) {
   if (regions.length === 0) return 'none'
   return regions
@@ -385,6 +402,84 @@ function checkBandSilent(envelope, range, gates, what, failures) {
 
 function verdict(failures, evidence) {
   return { pass: failures.length === 0, failures, evidence }
+}
+
+/** Plan 201 S0: the idle Clips bus, measured on the renderer's audio.levels wire. */
+export const CLIPS_IDLE_LEVEL_GATES = Object.freeze({
+  settleMs: 500,
+  minReadings: 3,
+  tonePresentDbfs: -50,
+  expectedDropDb: 12,
+  dropToleranceDb: 2,
+  floorDbfs: -120
+})
+
+/**
+ * Receive times are monotonic milliseconds, as recorded by the smoke. Ignore
+ * the capture/playout and gain-update edges; compare the median window peaks
+ * of the steady tone, then require continued readings at the wire floor.
+ * Keep all payloads in failure evidence so a STOP reports what the ring sent.
+ */
+export function evaluateClipsIdleCase(
+  { levels, sessionId, toneStartAt, gainChangedAt, toneEndAt },
+  gates = CLIPS_IDLE_LEVEL_GATES
+) {
+  const failures = []
+  if (!sessionId || levels.some(({ payload }) => payload?.sessionId !== sessionId)) {
+    failures.push('clips-idle: every audio.levels event must carry the ring session id')
+  }
+  const readings = levels.filter(({ payload }) => Number.isFinite(payload?.systemAudio?.peakDb))
+  const window = (from, to) =>
+    readings
+      .filter(({ at }) => at >= from && at < to)
+      .map(({ payload }) => payload.systemAudio.peakDb)
+  const before = window(toneStartAt + gates.settleMs, gainChangedAt)
+  const after = window(gainChangedAt + gates.settleMs, toneEndAt)
+  const floor = window(toneEndAt + gates.settleMs, Infinity)
+  for (const [name, samples] of [
+    ['before gain', before],
+    ['after gain', after],
+    ['after tone', floor]
+  ]) {
+    if (samples.length < gates.minReadings) {
+      failures.push(`clips-idle: only ${samples.length} systemAudio readings ${name}`)
+    }
+  }
+  const beforeDbfs = median(before)
+  const afterDbfs = median(after)
+  const dropDb = beforeDbfs === null || afterDbfs === null ? null : beforeDbfs - afterDbfs
+  if (
+    beforeDbfs === null ||
+    afterDbfs === null ||
+    beforeDbfs < gates.tonePresentDbfs ||
+    afterDbfs < gates.tonePresentDbfs
+  ) {
+    failures.push('clips-idle: no systemAudio tone readings before and after the gain change')
+  }
+  if (dropDb === null || Math.abs(dropDb - gates.expectedDropDb) > gates.dropToleranceDb) {
+    failures.push(
+      `clips-idle: gain dropped the peak by ${dropDb ?? 'unmeasured'} dB, expected ${gates.expectedDropDb} +/- ${gates.dropToleranceDb} dB`
+    )
+  }
+  const floorPeakDbfs = floor.length ? Math.max(...floor) : null
+  if (floorPeakDbfs === null || floorPeakDbfs > gates.floorDbfs) {
+    failures.push(
+      `clips-idle: readings did not return to the ${gates.floorDbfs} dBFS floor after the tone`
+    )
+  }
+  return verdict(failures, {
+    sessionId,
+    levelEventCount: levels.length,
+    systemAudioReadingCount: readings.length,
+    beforeCount: before.length,
+    afterCount: after.length,
+    floorCount: floor.length,
+    beforeDbfs,
+    afterDbfs,
+    dropDb,
+    floorPeakDbfs,
+    ...(failures.length ? { levels } : {})
+  })
 }
 
 /**

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "kind": "videorc-linux-alpha-owner-waiver",
+  "status": "OWNER_WAIVED",
+  "releaseId": "0.16.0-alpha.1",
+  "sourceCommit": "f44c841305f2250f2ace17264d2182b1c26b1143",
+  "candidateIdentity": "linux:0.16.0-alpha.1:f44c841305f2250f2ace17264d2182b1c26b1143a-testers",
+  "physicalAcceptance": {
+    "performed": false
+  }
+}

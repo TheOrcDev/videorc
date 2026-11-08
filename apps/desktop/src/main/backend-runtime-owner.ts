@@ -47,6 +47,22 @@ export function backendRuntimeAcceptsBootstrap(runtime: { state: BackendRuntimeS
 }
 
 /**
+ * The runtime's own child pid when its exit/close event was observed, which is
+ * the only proof that this pid is dead. A forced shutdown that timed out after
+ * SIGKILL observed no exit (`code` and `signal` are both null), so its pid must
+ * pass the same ownership probe as every other owned pid instead of being
+ * dropped as confirmed dead with its ledger record.
+ */
+export function observedExitedPid(
+  pid: number | undefined,
+  code: number | null,
+  signal: NodeJS.Signals | null
+): number | undefined {
+  if (pid === undefined) return undefined
+  return code !== null || signal !== null ? pid : undefined
+}
+
+/**
  * Keep ledger evidence unless identity-aware probing proves that the recorded
  * process is gone. The captured child pid is already proven dead by that
  * child's exit/close event; every additional runtime-owned pid must pass its

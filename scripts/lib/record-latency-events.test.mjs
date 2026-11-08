@@ -9,7 +9,8 @@ import {
   disposeRecordLatencyRun,
   startRecordLatencyCycle,
   stopRecordLatencyCycle,
-  waitForPublishedMp4
+  waitForPublishedMp4,
+  warningEvents
 } from './record-latency-events.mjs'
 
 const ORIGINAL_TIMEOUT_MS = 120000
@@ -699,3 +700,50 @@ function settle(promise) {
     (reason) => ({ status: 'rejected', reason })
   )
 }
+
+test('local ACK wait ignores a frame that is not JSON and still takes the real ACK', async (t) => {
+  const observed = await withFixture(t, async (fixture) => {
+    const wait = createRemoteAckWait(fixture.remote, { timeoutMs: ORIGINAL_TIMEOUT_MS })
+    const outcome = settle(wait.promise)
+    fixture.remote.emit('message', 'not json {')
+    fixture.remote.emit('message', '"a bare string"')
+    fixture.ack()
+    return { outcome: await outcome, listeners: fixture.remote.listenerCount('message') }
+  })
+
+  assert.equal(observed.outcome.status, 'fulfilled')
+  assert.equal(observed.listeners, 0)
+})
+
+test('the report lists Warn and Error health events and session logs only', () => {
+  const events = [
+    { event: 'health.event', payload: { level: 'info', code: 'ffmpeg-ready' } },
+    {
+      event: 'health.event',
+      payload: { level: 'warn', code: 'audio-writer-lag', sessionId: null, message: 'slow' }
+    },
+    {
+      event: 'session.log',
+      payload: { level: 'error', code: 'ffmpeg-exit', sessionId: 's1', message: 'exited 1' }
+    },
+    { event: 'session.log', payload: { level: 'info', code: 'recording-compositor-armed' } },
+    { event: 'recording.status', payload: { level: 'error', state: 'failed' } }
+  ]
+
+  assert.deepEqual(warningEvents(events), [
+    {
+      event: 'health.event',
+      level: 'warn',
+      code: 'audio-writer-lag',
+      sessionId: null,
+      message: 'slow'
+    },
+    {
+      event: 'session.log',
+      level: 'error',
+      code: 'ffmpeg-exit',
+      sessionId: 's1',
+      message: 'exited 1'
+    }
+  ])
+})

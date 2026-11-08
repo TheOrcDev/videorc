@@ -77,7 +77,7 @@ fn gate_status_label(status: &GateStatus) -> &'static str {
 
 fn gate_status_path(status: &GateStatus) -> &str {
     match status {
-        GateStatus::Ready { path }
+        GateStatus::Ready { path, .. }
         | GateStatus::Repaired { path, .. }
         | GateStatus::NotHundredPercent { path, .. }
         | GateStatus::Failed { path, .. } => path,
@@ -103,7 +103,10 @@ pub async fn assess_file(
     let cancel_token = _maintenance.cancel_token();
 
     let probe_path = path.clone();
+    let cancel_on_drop = cancel_token.cancel_on_drop();
+    let worker = cancel_token.worker();
     let assessment = tokio::task::spawn_blocking(move || {
+        let _worker = worker;
         let ffprobe_path = ffprobe_path_for(&ffmpeg_path);
         let is_cancelled = || cancel_token.is_cancelled();
         let (probe, report) = analyze_recording_cancellable(
@@ -118,8 +121,9 @@ pub async fn assess_file(
         let repairable = select_repair_plan(&report, &probe, &expectations, encoder).is_some();
         Ok::<_, String>((report, repairable))
     })
-    .await
-    .map_err(|error| format!("assess task failed: {error}"))?;
+    .await;
+    cancel_on_drop.disarm();
+    let assessment = assessment.map_err(|error| format!("assess task failed: {error}"))?;
     let (report, repairable) = match assessment {
         Ok(result) => result,
         Err(error) if error.contains(MAINTENANCE_CANCELLED) => {
@@ -163,7 +167,12 @@ pub async fn repair_file(state: AppState, params: RepairFileParams) -> Result<Ga
     emit_status(&state, &path, "repairing");
 
     let gate_path = path.clone();
+    // Plan 200 C6: a dropped request kills the repair's FFmpeg, and quit
+    // waits for the thread to exit.
+    let cancel_on_drop = cancel_token.cancel_on_drop();
+    let worker = cancel_token.worker();
     let status = tokio::task::spawn_blocking(move || {
+        let _worker = worker;
         let ffprobe_path = ffprobe_path_for(&ffmpeg_path);
         let is_cancelled = || cancel_token.is_cancelled();
         gate_recording_cancellable(
@@ -175,8 +184,9 @@ pub async fn repair_file(state: AppState, params: RepairFileParams) -> Result<Ga
             &is_cancelled,
         )
     })
-    .await
-    .map_err(|error| format!("repair task failed: {error}"))?;
+    .await;
+    cancel_on_drop.disarm();
+    let status = status.map_err(|error| format!("repair task failed: {error}"))?;
 
     if matches!(&status, GateStatus::Failed { reason, .. } if reason.contains(MAINTENANCE_CANCELLED))
     {
@@ -216,6 +226,48 @@ pub async fn restore_file(state: AppState, params: RepairRestoreParams) -> Resul
     .map_err(|error| format!("restore task failed: {error}"))?
 }
 
+/// Plan 200 C6: how far back the startup sweep looks for recording folders.
+const REPAIR_TEMP_SWEEP_DAYS: i64 = 90;
+
+/// Startup sweep, before the repair service resumes: deletes leftover
+/// `.<stem>.videorc-repair.<ext>` temps in the default recordings folder and
+/// in every folder sessions of the last 90 days recorded into. It holds the
+/// maintenance permit, so no repair can write a temp while it runs.
+pub async fn sweep_leftover_repair_temps(state: &AppState) {
+    let since = (chrono::Utc::now() - chrono::Duration::days(REPAIR_TEMP_SWEEP_DAYS)).to_rfc3339();
+    let mut directories = vec![crate::recording::default_recordings_dir()];
+    match state.database.session_media_directories_since(&since) {
+        Ok(found) => directories.extend(found),
+        Err(error) => state.emit_log(
+            "warn",
+            format!("Could not list recording folders for the repair-temp sweep: {error:#}"),
+        ),
+    }
+    let _maintenance = state.ffmpeg_work.begin_maintenance_when_idle().await;
+    let sweep =
+        match tokio::task::spawn_blocking(move || crate::repair::sweep_repair_temps(&directories))
+            .await
+        {
+            Ok(sweep) => sweep,
+            Err(error) => {
+                state.emit_log("warn", format!("Repair-temp sweep failed: {error}"));
+                return;
+            }
+        };
+    if sweep.removed > 0 {
+        state.emit_log(
+            "info",
+            format!(
+                "Removed {} leftover repair temp file(s) ({} bytes).",
+                sweep.removed, sweep.bytes
+            ),
+        );
+    }
+    for error in sweep.errors {
+        state.emit_log("warn", format!("Could not remove a repair temp: {error}"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,7 +300,8 @@ mod tests {
     fn gate_status_labels_match_renderer_statuses() {
         assert_eq!(
             gate_status_label(&GateStatus::Ready {
-                path: "/m/a.mp4".to_string()
+                path: "/m/a.mp4".to_string(),
+                sampled: false,
             }),
             "ready"
         );
@@ -264,6 +317,7 @@ mod tests {
                 path: "/m/a.mp4".to_string(),
                 reasons: vec!["bad".to_string()],
                 needs_attention: false,
+                sampled: false,
             }),
             "not-100"
         );

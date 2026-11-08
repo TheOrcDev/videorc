@@ -155,7 +155,10 @@ export async function runScheduledOperation<T = unknown>(
   }
   if (operation.state !== 'complete') {
     throw new Error(
-      operation.error?.message ?? 'Operation is still running. Check Upcoming before retrying.'
+      operation.error?.message ??
+        (operation.state === 'pending'
+          ? 'Operation is still running. Check Upcoming before retrying.'
+          : 'The operation did not finish. Check Upcoming before retrying.')
     )
   }
   return operation.result as T

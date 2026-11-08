@@ -1,4 +1,5 @@
 import type {
+  PerformanceCheckProgress,
   PerformanceCheckResult,
   PerformanceCheckRunParams,
   PerformanceCheckState,
@@ -36,29 +37,34 @@ const dominates = (a: VideoSettings, b: VideoSettings): boolean =>
  * The largest output worth testing: whatever is selected, or the display's
  * native size when that is larger (capped at 4K). A 1080p laptop never spends
  * time on 4K rungs; a 1440p selection on that laptop still gets its verdict.
+ * When the next take also writes the Screen and Camera files, the check is
+ * told so and counts their encoders (plan 200 D4).
  */
 export function performanceCheckCeiling(
   selected: VideoSettings,
-  display?: { width: number; height: number }
+  display?: { width: number; height: number },
+  separateSourceRecordings = false
 ): PerformanceCheckRunParams {
   const ceilingFps = Math.max(30, selected.fps)
+  const separate = separateSourceRecordings ? { separateSourceRecordings: true } : {}
   if (!display || pixels(display) <= pixels(selected)) {
-    return { ceilingWidth: selected.width, ceilingHeight: selected.height, ceilingFps }
+    return { ceilingWidth: selected.width, ceilingHeight: selected.height, ceilingFps, ...separate }
   }
   if (pixels(display) > MAX_CEILING_PIXELS) {
-    return { ceilingWidth: 3840, ceilingHeight: 2160, ceilingFps }
+    return { ceilingWidth: 3840, ceilingHeight: 2160, ceilingFps, ...separate }
   }
   return {
     ceilingWidth: Math.round(display.width),
     ceilingHeight: Math.round(display.height),
-    ceilingFps
+    ceilingFps,
+    ...separate
   }
 }
 
 /**
  * Linux v1 `belowFloor` + every measured rung `did-not-start` is a failed
  * ladder, not a machine class (ogre / Omarchy 2026-09-28). Do not apply it
- * or show "too heavy" from it. Packaged auto-run still fires once.
+ * or show "too heavy" from it; `shouldRunPerformanceCheck` asks for a new one.
  */
 export function isUntrustedPerformanceCheckResult(
   result: PerformanceCheckResult | undefined
@@ -130,6 +136,39 @@ export function shouldRunPerformanceCheck(state: PerformanceCheckState | undefin
     !state.running &&
     (state.result === undefined || state.stale || isUntrustedPerformanceCheckResult(state.result))
   )
+}
+
+/**
+ * Plan 212 D1: the check runs once per machine, never at launch and never
+ * after an update. First-run setup starts it as it opens, behind the setup
+ * card, so the Studio's Preview never shows the measurement; otherwise only
+ * Recording → Output's "Check this computer" does. A replay of setup (from
+ * Settings) is not a first run. A take that is running keeps its studio: the
+ * default Clips ring is replay-only and not a take, so it does not count.
+ */
+export function firstRunSetupStartsPerformanceCheck(
+  mode: { kind: string },
+  state: PerformanceCheckState | undefined,
+  sessionActive: boolean
+): boolean {
+  return mode.kind === 'first-run' && !sessionActive && shouldRunPerformanceCheck(state)
+}
+
+/**
+ * Plan 212 S5: the words under the Preview while a check runs. The backend
+ * holds the Preview's last picture for the whole check, so this says why it
+ * stopped moving: "Checking this computer · 2 of 3", then nothing.
+ */
+export function previewHoldLabel(
+  state: PerformanceCheckState | undefined,
+  progress: PerformanceCheckProgress | null
+): string | null {
+  if (!state?.running) {
+    return null
+  }
+  return progress && progress.rungCount > 0
+    ? `Checking this computer · ${progress.rungIndex + 1} of ${progress.rungCount}`
+    : 'Checking this computer'
 }
 
 /** "1080p · 30 fps": the one video spelling (plan 174 S1.4). */

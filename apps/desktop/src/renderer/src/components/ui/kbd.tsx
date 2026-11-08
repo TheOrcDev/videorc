@@ -1,12 +1,12 @@
-import * as React from 'react'
+import type { ComponentProps } from 'react'
 
 import { cn } from '@/lib/utils'
 
 /**
- * Inside a filled button (primary, destructive) the gray glass keycap read at
- * 2.38:1 (plan 174 J1-16): there the chip takes the button's own text colour
- * on a faint fill of it, with no glass. Matched by ancestry, so no call site
- * has to remember it.
+ * Inside a filled button (the chrome primary, destructive, the record LED) the
+ * gray glass keycap read at 2.38:1: there the chip takes the button's own text
+ * colour on a faint fill of it, with no glass. Matched by ancestry, so no call
+ * site has to remember it.
  */
 const KBD_ON_FILLED_BUTTON = [
   '[[data-slot=button][data-variant=default]_&]:border-current/30',
@@ -18,34 +18,39 @@ const KBD_ON_FILLED_BUTTON = [
   '[[data-slot=button][data-variant=destructive]_&]:bg-current/10',
   '[[data-slot=button][data-variant=destructive]_&]:bg-none',
   '[[data-slot=button][data-variant=destructive]_&]:text-current',
-  '[[data-slot=button][data-variant=destructive]_&]:shadow-none'
+  '[[data-slot=button][data-variant=destructive]_&]:shadow-none',
+  '[[data-slot=button][data-variant=record]_&]:border-current/30',
+  '[[data-slot=button][data-variant=record]_&]:bg-current/10',
+  '[[data-slot=button][data-variant=record]_&]:bg-none',
+  '[[data-slot=button][data-variant=record]_&]:text-current',
+  '[[data-slot=button][data-variant=record]_&]:shadow-none'
 ].join(' ')
 
 /**
- * Key chip (plan 050, D9): a glass keycap with a bright top edge and a dark
- * bottom edge, and the secondary-gray glyph. A shortcut goes through
- * ShortcutKeys (plan 174 S1.2), which prints it per platform into this chip.
+ * Key chip: a glass keycap with a bright top edge and a dark bottom edge, and
+ * the secondary-gray glyph. A shortcut goes through ShortcutKeys, which prints
+ * it per platform into this chip.
  */
-function Kbd({ className, ...props }: React.ComponentProps<'kbd'>) {
+function Kbd({ className, ...props }: ComponentProps<'kbd'>) {
   return (
     <kbd
-      data-slot="kbd"
       className={cn(
-        'inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-chip border px-1 font-sans text-[11px] font-medium text-muted-foreground select-none glass-keycap',
+        "rounded-chip text-muted-foreground glass-keycap inline-flex h-5 w-fit min-w-5 shrink-0 items-center justify-center gap-1 border px-1 font-sans text-[11px] font-medium select-none [&_svg:not([class*='size-'])]:size-3",
         KBD_ON_FILLED_BUTTON,
         className
       )}
+      data-slot="kbd"
       {...props}
     />
   )
 }
 
 /** Lays out key chips side by side with the standard gap (↑ ↓, or two shortcuts). */
-function KbdGroup({ className, ...props }: React.ComponentProps<'span'>) {
+function KbdGroup({ className, ...props }: ComponentProps<'span'>) {
   return (
     <span
-      data-slot="kbd-group"
       className={cn('inline-flex items-center gap-1', className)}
+      data-slot="kbd-group"
       {...props}
     />
   )

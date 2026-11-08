@@ -13,8 +13,10 @@
 //! `linux_portal_session` / `linux_pipewire_stream` behind
 //! `cfg(target_os = "linux")`.
 
+#[cfg(target_os = "linux")]
+use std::path::Path;
 #[cfg(any(test, target_os = "linux"))]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[cfg(any(test, target_os = "linux"))]
 use serde::{Deserialize, Serialize};
@@ -26,7 +28,7 @@ use crate::source_status::SourceLifecycleStatus;
 
 pub const PORTAL_MONITOR_SOURCE_ID: &str = "screen:portal:monitor";
 pub const PORTAL_WINDOW_SOURCE_ID: &str = "window:portal:window";
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 const RESTORE_TOKENS_DIRECTORY_NAME: &str = "linux-portal";
 #[cfg(any(test, target_os = "linux"))]
 const RESTORE_TOKENS_FILE: &str = "restore-tokens.json";
@@ -68,6 +70,14 @@ pub enum PortalCaptureState {
     Revoked,
     /// The portal (or the compositor's backend) is not available at all.
     MissingSource { reason: String },
+    /// The portal is there but did not answer in time: a share dialog it
+    /// already shows (for Videorc or another app), or a wedged backend. An
+    /// orphaned picker held xdg-desktop-portal-hyprland for every app and the
+    /// copy said to install a portal (ogre, 2026-11-05).
+    Unanswered { reason: String },
+    /// The portal service went away (crashed or restarted) while its share
+    /// dialog was open, so its answer will never come.
+    PortalLost,
     /// A revoked session is being restarted with its restore token.
     Reconnecting,
 }
@@ -80,10 +90,12 @@ impl PortalCaptureState {
                 SourceLifecycleStatus::Starting
             }
             PortalCaptureState::Granted { .. } => SourceLifecycleStatus::Live,
-            PortalCaptureState::Cancelled => SourceLifecycleStatus::PermissionNeeded,
-            PortalCaptureState::Revoked | PortalCaptureState::MissingSource { .. } => {
-                SourceLifecycleStatus::SourceMissing
+            PortalCaptureState::Cancelled | PortalCaptureState::PortalLost => {
+                SourceLifecycleStatus::PermissionNeeded
             }
+            PortalCaptureState::Revoked
+            | PortalCaptureState::MissingSource { .. }
+            | PortalCaptureState::Unanswered { .. } => SourceLifecycleStatus::SourceMissing,
         }
     }
 
@@ -99,11 +111,17 @@ impl PortalCaptureState {
             PortalCaptureState::Cancelled => {
                 "Screen sharing was cancelled in the desktop portal dialog; pick a source to try again.".to_string()
             }
+            PortalCaptureState::PortalLost => {
+                "The screen share dialog closed unexpectedly. Choose your screen again.".to_string()
+            }
             PortalCaptureState::Revoked => {
                 "The compositor ended the screen share; pick the source again to restart it.".to_string()
             }
             PortalCaptureState::MissingSource { reason } => format!(
                 "Portal screen capture is unavailable: {reason} (needs xdg-desktop-portal with a compositor backend such as xdg-desktop-portal-hyprland, -wlr, -gnome or -kde, and PipeWire)."
+            ),
+            PortalCaptureState::Unanswered { reason } => format!(
+                "The desktop's screen sharing service did not answer ({reason}). Close any open share dialog, then choose your screen again. If it keeps happening, restart xdg-desktop-portal or sign out and back in."
             ),
             PortalCaptureState::Reconnecting => {
                 "Reconnecting the portal screen share with its saved token.".to_string()
@@ -135,6 +153,7 @@ impl RestoreTokenStore {
 
     /// Beside the database, like the VAAPI quarantine, so an isolated smoke
     /// never redeems or overwrites the owner's tokens.
+    #[cfg(target_os = "linux")]
     pub fn default_directory() -> PathBuf {
         let database = crate::storage::default_database_path();
         database
@@ -230,6 +249,9 @@ pub fn portal_capture_devices(environment: Result<(), String>) -> Vec<Device> {
     };
     vec![
         Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
             id: PORTAL_MONITOR_SOURCE_ID.to_string(),
             name: "Screen (portal)".to_string(),
             kind: DeviceKind::Screen,
@@ -239,6 +261,9 @@ pub fn portal_capture_devices(environment: Result<(), String>) -> Vec<Device> {
             height: None,
         },
         Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
             id: PORTAL_WINDOW_SOURCE_ID.to_string(),
             name: "Window (portal)".to_string(),
             kind: DeviceKind::Window,
@@ -349,6 +374,17 @@ mod tests {
             PortalCaptureState::Cancelled.lifecycle_status(),
             SourceLifecycleStatus::PermissionNeeded
         );
+        // A portal that went away mid-dialog asks the person again; it is not
+        // a missing source (that would also forget a saved restore token).
+        assert_eq!(
+            PortalCaptureState::PortalLost.lifecycle_status(),
+            SourceLifecycleStatus::PermissionNeeded
+        );
+        assert!(
+            PortalCaptureState::PortalLost
+                .message()
+                .contains("Choose your screen again")
+        );
         assert_eq!(
             PortalCaptureState::Revoked.lifecycle_status(),
             SourceLifecycleStatus::SourceMissing
@@ -362,6 +398,19 @@ mod tests {
         );
         assert!(missing.message().contains("xdg-desktop-portal"));
         assert!(missing.message().contains("no portal"));
+        // A portal that is there but busy must not tell the person to
+        // install one.
+        let unanswered = PortalCaptureState::Unanswered {
+            reason: "CreateSession did not answer within 10s".to_string(),
+        };
+        assert_eq!(
+            unanswered.lifecycle_status(),
+            SourceLifecycleStatus::SourceMissing
+        );
+        assert!(unanswered.message().contains("did not answer"));
+        assert!(unanswered.message().contains("Close any open share dialog"));
+        assert!(!unanswered.message().contains("needs xdg-desktop-portal"));
+        assert!(!unanswered.message().contains('\u{2014}'));
         assert!(
             PortalCaptureState::Cancelled
                 .message()

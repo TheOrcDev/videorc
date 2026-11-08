@@ -2,8 +2,22 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  APP_EMBEDDED_PROFILE_RELATIVE_PATH,
+  CAMERA_EXTENSION_ENTITLEMENT_KEYS,
+  CAMERA_EXTENSION_FORBIDDEN_ENTITLEMENTS,
+  CAMERA_EXTENSION_RELATIVE_PATH,
+  CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS,
+  INHERIT_ENTITLEMENT_KEYS,
+  RESTRICTED_CAMERA_ENTITLEMENTS,
   artifactKindFromPath,
+  bareBinaryCheckTargets,
   buildMacosReleaseArtifactChecks,
+  cameraExtensionCheckTargets,
+  entitlementKeyFailures,
+  evaluatePathAbsentCheck,
+  evaluateSingleEmbeddedProfileCheck,
+  nestedExecutableCheckTargets,
+  outputExclusionFailures,
   BUNDLED_X_OAUTH1_CONSUMER_ENVS,
   BUNDLED_YOUTUBE_OAUTH_ENVS,
   bundledXOauth1ConsumerCheckTargets,
@@ -52,9 +66,32 @@ describe('buildMacosReleaseArtifactChecks', () => {
         'capture entitlements (app)',
         'capture entitlements (videorc-backend)',
         'capture entitlements (native_preview_host_helper)',
+        'capture entitlements (videorc-mcp)',
         'capture entitlements (ffmpeg)',
         'capture entitlements (ffprobe)',
         'native preview addon signature',
+        'Videorc Camera extension Info.plist bundle identifier',
+        'Videorc Camera extension package type (SYSX)',
+        'Videorc Camera extension CMIOExtensionMachServiceName',
+        'Videorc Camera extension usage description',
+        'Videorc Camera extension signature',
+        'Videorc Camera extension entitlements (exactly sandbox + app group)',
+        'Videorc Camera extension embeds no profile',
+        'app embedded profile (Videorc Camera)',
+        'one embedded profile, in the app only',
+        'system extension entitlements (app)',
+        'inherit entitlements only (videorc-backend)',
+        'inherit entitlements only (native_preview_host_helper)',
+        'inherit entitlements only (videorc-mcp)',
+        'inherit entitlements only (ffmpeg)',
+        'inherit entitlements only (ffprobe)',
+        'no restricted entitlement (videorc_native_preview.node)',
+        'inherit entitlements only (Videorc Helper.app)',
+        'inherit entitlements only (Videorc Helper (GPU).app)',
+        'inherit entitlements only (Videorc Helper (Plugin).app)',
+        'inherit entitlements only (Videorc Helper (Renderer).app)',
+        'inherit entitlements only (chrome_crashpad_handler)',
+        'inherit entitlements only (ShipIt)',
         'bundled X OAuth1 consumer key (videorc-backend)',
         'bundled X OAuth1 consumer secret (videorc-backend)',
         'bundled YouTube OAuth client ID (videorc-backend)',
@@ -214,6 +251,7 @@ describe('capture entitlement gate', () => {
         '/release/Videorc.app',
         '/release/Videorc.app/Contents/Resources/videorc-backend',
         '/release/Videorc.app/Contents/Resources/native_preview_host_helper',
+        '/release/Videorc.app/Contents/Resources/videorc-mcp',
         '/release/Videorc.app/Contents/Resources/ffmpeg/bin/ffmpeg',
         '/release/Videorc.app/Contents/Resources/ffmpeg/bin/ffprobe'
       ]
@@ -346,7 +384,7 @@ describe('capture entitlement gate', () => {
   it('targets the same tool set the signing scripts sign', () => {
     assert.deepEqual(
       captureEntitlementCheckTargets('/a/Videorc.app').map((target) => target.id),
-      ['app', 'videorc-backend', 'native-preview-host-helper', 'ffmpeg', 'ffprobe']
+      ['app', 'videorc-backend', 'native-preview-host-helper', 'videorc-mcp', 'ffmpeg', 'ffprobe']
     )
   })
 
@@ -366,6 +404,244 @@ describe('capture entitlement gate', () => {
         '/a/Videorc.app/Contents/Resources/videorc_native_preview.node'
       ]
     })
+  })
+})
+
+// Plan 214 B5, shape fixed by spike P0a: a release without the app profile is
+// red here; so is the pre-P0a two-profile shape.
+describe('Videorc Camera release gate', () => {
+  const app = '/a/Videorc.app'
+  const extension = `${app}/${CAMERA_EXTENSION_RELATIVE_PATH}`
+
+  it('places the extension where OSSystemExtensionRequest looks, named by its bundle id', () => {
+    assert.equal(
+      CAMERA_EXTENSION_RELATIVE_PATH,
+      'Contents/Library/SystemExtensions/dev.theorcdev.videorc.camera.systemextension'
+    )
+    assert.deepEqual(RESTRICTED_CAMERA_ENTITLEMENTS, [
+      'com.apple.developer.system-extension.install',
+      'com.apple.security.application-groups',
+      'com.apple.application-identifier',
+      'com.apple.developer.team-identifier'
+    ])
+    assert.deepEqual(CAMERA_EXTENSION_ENTITLEMENT_KEYS, [
+      'com.apple.security.app-sandbox',
+      'com.apple.security.application-groups'
+    ])
+    assert.deepEqual(CAMERA_EXTENSION_FORBIDDEN_ENTITLEMENTS, [
+      'com.apple.developer.system-extension.install',
+      'com.apple.application-identifier',
+      'com.apple.developer.team-identifier'
+    ])
+    assert.deepEqual(INHERIT_ENTITLEMENT_KEYS, [
+      'com.apple.security.cs.allow-jit',
+      'com.apple.security.cs.allow-unsigned-executable-memory',
+      'com.apple.security.cs.disable-library-validation',
+      'com.apple.security.device.audio-input',
+      'com.apple.security.device.camera'
+    ])
+    assert.equal(APP_EMBEDDED_PROFILE_RELATIVE_PATH, 'Contents/embedded.provisionprofile')
+  })
+
+  it('checks the extension bundle, its Info.plist keys, SYSX, signature and exact entitlements', () => {
+    const checks = cameraExtensionCheckTargets(app)
+    const byId = Object.fromEntries(checks.map((check) => [check.id, check]))
+    assert.equal(
+      byId['camera-extension-bundle-identifier'].expectStdoutEquals,
+      'dev.theorcdev.videorc.camera'
+    )
+    assert.ok(
+      byId['camera-extension-bundle-identifier'].args.includes(`${extension}/Contents/Info.plist`)
+    )
+    assert.equal(byId['camera-extension-package-type'].expectStdoutEquals, 'SYSX')
+    assert.equal(
+      byId['camera-extension-mach-service'].expectStdoutEquals,
+      'C2PA37RB58.dev.theorcdev.videorc.camera'
+    )
+    assert.equal(byId['camera-extension-usage-description'].expectStdoutNonEmpty, true)
+    assert.deepEqual(byId['camera-extension-signature'].args, [
+      '--verify',
+      '--strict',
+      '--verbose=2',
+      extension
+    ])
+    const entitlements = byId['camera-extension-entitlements']
+    assert.deepEqual(entitlements.args, ['-d', '--entitlements', ':-', extension])
+    assert.deepEqual(entitlements.expectOutputIncludes, CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS)
+    assert.deepEqual(CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS, [
+      'com.apple.security.app-sandbox',
+      'com.apple.security.application-groups',
+      'C2PA37RB58.dev.theorcdev.videorc'
+    ])
+    assert.deepEqual(entitlements.expectEntitlementKeys, CAMERA_EXTENSION_ENTITLEMENT_KEYS)
+    assert.deepEqual(entitlements.expectOutputExcludes, CAMERA_EXTENSION_FORBIDDEN_ENTITLEMENTS)
+    assert.deepEqual(byId['camera-extension-no-profile'], {
+      id: 'camera-extension-no-profile',
+      label: 'Videorc Camera extension embeds no profile',
+      type: 'path-absent',
+      path: `${extension}/Contents/embedded.provisionprofile`
+    })
+    assert.equal(
+      checks.some((check) => check.id === 'camera-extension-profile'),
+      false
+    )
+  })
+
+  it('requires the one app profile and the restricted keys on the app only', () => {
+    const byId = Object.fromEntries(
+      cameraExtensionCheckTargets(app).map((check) => [check.id, check])
+    )
+    assert.deepEqual(byId['app-profile'].args, [
+      'cms',
+      '-D',
+      '-i',
+      `${app}/Contents/embedded.provisionprofile`
+    ])
+    assert.deepEqual(byId['app-profile'].expectOutputIncludes, [
+      'C2PA37RB58.dev.theorcdev.videorc',
+      'com.apple.developer.system-extension.install'
+    ])
+    assert.deepEqual(byId['single-embedded-profile'], {
+      id: 'single-embedded-profile',
+      label: 'one embedded profile, in the app only',
+      type: 'single-embedded-profile',
+      path: app
+    })
+    assert.deepEqual(byId['restricted-entitlements-app'].args, ['-d', '--entitlements', ':-', app])
+    assert.deepEqual(byId['restricted-entitlements-app'].expectOutputIncludes, [
+      'com.apple.developer.system-extension.install',
+      'com.apple.security.application-groups',
+      'C2PA37RB58.dev.theorcdev.videorc'
+    ])
+  })
+
+  it('pins every other executable to exactly the inherit keys: bare tools, helpers, crashpad, ShipIt', () => {
+    assert.deepEqual(
+      bareBinaryCheckTargets(app).map((target) => target.id),
+      [
+        'videorc-backend',
+        'native-preview-host-helper',
+        'videorc-mcp',
+        'ffmpeg',
+        'ffprobe',
+        'native-preview-addon'
+      ]
+    )
+    assert.deepEqual(
+      nestedExecutableCheckTargets(app).map((target) => [target.id, posixPath(target.path)]),
+      [
+        ['helper-main', '/a/Videorc.app/Contents/Frameworks/Videorc Helper.app'],
+        ['helper-gpu', '/a/Videorc.app/Contents/Frameworks/Videorc Helper (GPU).app'],
+        ['helper-plugin', '/a/Videorc.app/Contents/Frameworks/Videorc Helper (Plugin).app'],
+        ['helper-renderer', '/a/Videorc.app/Contents/Frameworks/Videorc Helper (Renderer).app'],
+        [
+          'crashpad-handler',
+          '/a/Videorc.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Helpers/chrome_crashpad_handler'
+        ],
+        [
+          'shipit',
+          '/a/Videorc.app/Contents/Frameworks/Squirrel.framework/Versions/A/Resources/ShipIt'
+        ]
+      ]
+    )
+    const nested = cameraExtensionCheckTargets(app).filter((check) =>
+      check.id.startsWith('no-restricted-entitlements-')
+    )
+    assert.equal(nested.length, 12)
+    for (const check of nested) {
+      assert.deepEqual(check.expectOutputExcludes, RESTRICTED_CAMERA_ENTITLEMENTS)
+      assert.equal(check.args[0], '-d')
+      if (check.id === 'no-restricted-entitlements-native-preview-addon') {
+        // codesign embeds no entitlements into a Mach-O bundle: only the
+        // restricted keys are forbidden, there is no exact set to expect.
+        assert.equal(check.expectEntitlementKeys, undefined)
+      } else {
+        assert.deepEqual(check.expectEntitlementKeys, INHERIT_ENTITLEMENT_KEYS)
+      }
+    }
+    const backend = nested.find(
+      (check) => check.id === 'no-restricted-entitlements-videorc-backend'
+    )
+    assert.deepEqual(
+      outputExclusionFailures(backend, '<key>com.apple.security.device.camera</key><true/>'),
+      []
+    )
+    assert.deepEqual(
+      outputExclusionFailures(
+        backend,
+        '<key>com.apple.developer.system-extension.install</key><true/>'
+      ),
+      ['forbidden entitlement present: com.apple.developer.system-extension.install']
+    )
+    assert.deepEqual(outputExclusionFailures({ command: 'codesign', args: [] }, 'anything'), [])
+  })
+
+  it('judges the exact entitlement key set a binary printed', () => {
+    const five = INHERIT_ENTITLEMENT_KEYS.map((key) => `<key>${key}</key><true/>`).join('')
+    const check = { expectEntitlementKeys: INHERIT_ENTITLEMENT_KEYS }
+    assert.deepEqual(entitlementKeyFailures(check, `Executable=/x\n<dict>${five}</dict>`), [])
+    assert.deepEqual(
+      entitlementKeyFailures(
+        check,
+        `<dict>${five}<key>com.apple.security.application-groups</key><array/></dict>`
+      ),
+      ['unexpected entitlement: com.apple.security.application-groups']
+    )
+    assert.deepEqual(
+      entitlementKeyFailures(
+        check,
+        '<dict><key>com.apple.security.device.camera</key><true/></dict>'
+      ),
+      [
+        'missing entitlement: com.apple.security.cs.allow-jit',
+        'missing entitlement: com.apple.security.cs.allow-unsigned-executable-memory',
+        'missing entitlement: com.apple.security.cs.disable-library-validation',
+        'missing entitlement: com.apple.security.device.audio-input'
+      ]
+    )
+    assert.deepEqual(entitlementKeyFailures({ command: 'codesign' }, 'anything'), [])
+  })
+
+  it('refuses a profile inside the extension and more than the one app profile', () => {
+    const absent = { type: 'path-absent', path: `${extension}/Contents/embedded.provisionprofile` }
+    assert.deepEqual(evaluatePathAbsentCheck(absent, { exists: () => false }), {
+      ok: true,
+      output: ''
+    })
+    assert.equal(evaluatePathAbsentCheck(absent, { exists: () => true }).ok, false)
+    assert.throws(() => evaluatePathAbsentCheck({ type: 'other' }, { exists: () => false }))
+
+    const single = { type: 'single-embedded-profile', path: app }
+    assert.deepEqual(
+      evaluateSingleEmbeddedProfileCheck(single, {
+        profiles: () => ['Contents/embedded.provisionprofile']
+      }),
+      { ok: true, output: '' }
+    )
+    const two = evaluateSingleEmbeddedProfileCheck(single, {
+      profiles: () => [
+        'Contents/Library/SystemExtensions/dev.theorcdev.videorc.camera.systemextension/Contents/embedded.provisionprofile',
+        'Contents/embedded.provisionprofile'
+      ]
+    })
+    assert.equal(two.ok, false)
+    assert.match(
+      two.output,
+      /expected exactly one embedded profile at Contents\/embedded\.provisionprofile, found Contents\/Library/
+    )
+    const none = evaluateSingleEmbeddedProfileCheck(single, { profiles: () => [] })
+    assert.equal(none.ok, false)
+    assert.match(none.output, /found none/)
+  })
+
+  it('leaves DMGs to the inner app', () => {
+    const labels = buildMacosReleaseArtifactChecks('/release/Videorc.dmg').map(
+      (check) => check.label
+    )
+    assert.equal(
+      labels.some((label) => label.includes('Videorc Camera')),
+      false
+    )
   })
 })
 

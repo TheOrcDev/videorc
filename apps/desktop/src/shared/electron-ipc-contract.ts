@@ -1,10 +1,13 @@
+import type { FrontAppChanged } from './front-app'
+import { APP_ICONS_MAX_IDS } from './app-icons'
 import {
   validateChatDelivery,
   validateChatDeliveryBoundary,
   type ChatDeliveryBoundary
 } from './chat-delivery'
+import { AGENT_TOKEN_PATTERN } from './agent-config-entry'
 import { isGlobalShortcutConfigKey } from './global-shortcut-bindings'
-import { GLOBAL_SHORTCUT_ACTIONS, type GlobalShortcutAction } from './global-shortcuts'
+import { isGlobalShortcutAction, type GlobalShortcutAction } from './global-shortcuts'
 import type {
   AccountCallbackEnvelope,
   BackendConnection,
@@ -43,11 +46,30 @@ import {
   markerRelayResolutionSchema,
   markerRelayResultSchema
 } from './session-markers'
+import type { BannerRelayCommand, BannerSummary } from './banner-commands'
+import type { SoundRelayCommand, SoundboardSummary } from './sound-commands'
+import {
+  BUDDY_SENTENCE_MAX_CHARS,
+  type BuddyActRelayCommand,
+  type CohostActAnswer
+} from './buddy-act'
+import { isSoundStarterSlug } from './sound-assets'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
 import { sessionChatTotalsSchema } from './session-chat-totals'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
-import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
+import {
+  BANNER_MAX_COUNT,
+  COMMENT_HIGHLIGHT_ANCHORS,
+  DOCK_SLOTS,
+  LAYOUT_PRESET_VALUES,
+  SOUND_HOTKEYS,
+  SOUND_MAX_COUNT,
+  SOUND_MAX_DURATION_MS,
+  SOUND_MAX_VOICES,
+  SOUND_MODES,
+  SOUND_NAME_MAX_CHARS
+} from './backend'
 import {
   CHAT_AVATAR_MAX_BYTES,
   chatAvatarBytesWithinCap,
@@ -94,10 +116,17 @@ export const electronInvokeApiMethods = {
   'backend:get-connection': 'getBackendConnection',
   'backend:get-logs': 'getBackendLogs',
   'app:get-runtime-info': 'getRuntimeInfo',
+  'app:front-window-watch': 'setFrontWindowWatch',
+  'app:self-bundle-ids': 'getSelfBundleIds',
+  'app:icons': 'getAppIcons',
   'app:retry-hardware-acceleration': 'retryHardwareAcceleration',
   'app:set-native-theme': 'setNativeTheme',
   'app:exit': 'exitApp',
   'screens:pick-image': 'pickScreenImage',
+  'banners:pick-image': 'pickBannerImage',
+  'sounds:pick-files': 'pickSoundFiles',
+  'sounds:starter-list': 'getStarterSounds',
+  'sounds:starter-files': 'getStarterSoundFiles',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
   'buddy-assets:remove': 'removeBuddyPersona',
@@ -156,6 +185,7 @@ export const electronInvokeApiMethods = {
   'comments-window:toggle': 'toggleCommentsWindow',
   'comments-window:get-state': 'getCommentsWindowState',
   'comments-window:set-always-on-top': 'setCommentsWindowAlwaysOnTop',
+  'comments-window:set-hidden-from-stream': 'setCommentsWindowHiddenFromStream',
   'comments-window:set-highlight-anchor': 'setCommentsWindowHighlightAnchor',
   'comments-window:set-auto-show-activity': 'setCommentsWindowAutoShowActivity',
   'comments-window:push-snapshot': 'pushCommentsSnapshot',
@@ -176,9 +206,23 @@ export const electronInvokeApiMethods = {
   'comments-window:marker-result-push': 'pushMarkerResult',
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
+  'comments-window:banners-get': 'getCommentsBanners',
+  'comments-window:banners-push': 'pushCommentsBanners',
+  'comments-window:banner': 'bannerFromCommentsWindow',
+  'comments-window:banner-result-push': 'pushBannerResult',
+  'comments-window:sounds-get': 'getCommentsSounds',
+  'comments-window:sounds-push': 'pushCommentsSounds',
+  'comments-window:sound': 'soundFromCommentsWindow',
+  'comments-window:sound-result-push': 'pushSoundResult',
+  // Plan 209 S20: `/buddy <words>`, relayed to Studio like `/sound`.
+  'comments-window:buddy-act': 'buddyActFromCommentsWindow',
+  'comments-window:buddy-act-result-push': 'pushBuddyActResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
+  'comments-window:open-destination': 'openDestinationFromCommentsWindow',
+  // Plan 215 A3: "Sign in to Videorc" on a chat row, started by the main window.
+  'comments-window:sign-in-videorc': 'signInToVideorcFromCommentsWindow',
   'comments-window:moderation': 'moderateFromCommentsWindow',
   'comments-window:moderation-result-push': 'pushModerationResult',
   'comments-window:viewers-push': 'pushViewerSample',
@@ -203,14 +247,21 @@ export const electronInvokeApiMethods = {
   'captions-window:push-lines': 'pushCaptionLines',
   'captions-window:get-lines': 'getCaptionLines',
   'system:open-permissions': 'openSystemPermissions',
+  'virtual-camera:action': 'virtualCameraAction',
   'system:media-access-status': 'getMediaAccessStatus',
   'system:request-media-access': 'requestMediaAccess',
+  'system:request-screen-access': 'requestScreenAccess',
+  'system:recheck-permission-grants': 'recheckPermissionGrants',
+  'app:relaunch-for-permission': 'relaunchForPermission',
+  'app:workspace-shown': 'workspaceShown',
   'system:reveal-permission-target': 'revealPermissionTarget',
   'resource:reveal-selection': 'revealSelectedResource',
   'resource:authorize-output-directory': 'authorizeOutputDirectory',
   'resource:reveal-session': 'revealSession',
   'resource:reveal-background': 'revealBackgroundAsset',
   'resource:reveal-support-bundle': 'revealSupportBundle',
+  'agents:bridge': 'getAgentBridge',
+  'agents:add-to-app': 'addAgentToApp',
   'resource:open-session': 'openSession',
   'media:grant-session': 'grantSessionMedia',
   'resource:trash-session-deletion': 'trashSessionDeletion',
@@ -228,9 +279,9 @@ export const electronInvokeApiMethods = {
 
 export type ElectronInvokeChannel = keyof typeof electronInvokeApiMethods
 export type ElectronIpcInvokeMap = {
-  [TChannel in ElectronInvokeChannel]: InvokeDefinition<
-    NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>
-  >
+  [TChannel in ElectronInvokeChannel]: TChannel extends 'app:front-window-watch'
+    ? { args: [options: { enabled: boolean }]; result: void }
+    : InvokeDefinition<NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>>
 }
 export type ElectronInvokeArgs<TChannel extends ElectronInvokeChannel> =
   ElectronIpcInvokeMap[TChannel]['args']
@@ -252,7 +303,13 @@ export interface BuddyDeepLinkNavigation {
   tab?: string
 }
 
+/** Plan 213 J1: the destination whose connection the main window opens. */
+export interface DestinationNavigation {
+  targetId: string
+}
+
 export interface ElectronIpcEventMap {
+  'app:front-changed': FrontAppChanged
   'account:callback': AccountCallbackEnvelope
   'backend:connection': BackendConnection
   'backend:lifecycle': BackendLifecycleEvent
@@ -272,6 +329,11 @@ export interface ElectronIpcEventMap {
   'comments-window:marker-context': MarkerContext | null
   'comments-window:marker-request': MarkerRelayCommand
   'comments-window:clip-mark-request': ClipMarkCommand
+  'comments-window:banners': BannerSummary[] | null
+  'comments-window:banner-request': BannerRelayCommand
+  'comments-window:sounds': SoundboardSummary | null
+  'comments-window:sound-request': SoundRelayCommand
+  'comments-window:buddy-act-request': BuddyActRelayCommand
   'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
@@ -285,6 +347,9 @@ export interface ElectronIpcEventMap {
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
   'buddy:deep-link': BuddyDeepLinkNavigation
+  'livestream:open-destination': DestinationNavigation
+  /** Plan 215 A3: the Stream Manager asked for the Videorc sign-in; the shell starts it. */
+  'account:sign-in-request': undefined
   'shortcut:modifier': boolean
   'window:visible': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
@@ -319,6 +384,11 @@ export const electronEventChannels = [
   'comments-window:marker-context',
   'comments-window:marker-request',
   'comments-window:clip-mark-request',
+  'comments-window:banners',
+  'comments-window:banner-request',
+  'comments-window:sounds',
+  'comments-window:sound-request',
+  'comments-window:buddy-act-request',
   'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
@@ -332,8 +402,11 @@ export const electronEventChannels = [
   'oauth:callback-url',
   'shortcut:navigate',
   'buddy:deep-link',
+  'livestream:open-destination',
+  'account:sign-in-request',
   'shortcut:modifier',
   'window:visible',
+  'app:front-changed',
   'global-shortcuts:triggered',
   'shortcut-recorder:key',
   'shortcut-recorder:disarmed',
@@ -539,6 +612,11 @@ const chatImageLocalUrlSchema = runtimeSchema<string | null>(
   }
 )
 const boundedIdentifier = stringSchema({ minLength: 1, maxLength: 1024 })
+const agentTokenSchema = runtimeSchema<string>('an agent token', (value, path) => {
+  const input = stringSchema({ minLength: 74, maxLength: 74 }).parse(value, path)
+  if (!AGENT_TOKEN_PATTERN.test(input)) throw new RuntimeSchemaError(path, 'an agent token')
+  return input
+})
 const boundedStatusText = stringSchema({ maxLength: 16_384 })
 const nonNegativeSafeIntegerSchema = runtimeSchema<number>(
   'a non-negative safe integer',
@@ -711,7 +789,14 @@ const globalShortcutsSchema = runtimeSchema<GlobalShortcutsConfig>(
       throw new RuntimeSchemaError(path, 'shortcut bindings')
     const bindings = value as Record<string, unknown>
     for (const [key, entry] of Object.entries(bindings)) {
-      if (key === 'layouts') {
+      if (key === 'scenes') {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+          throw new RuntimeSchemaError(path, 'scene bindings')
+        for (const [id, accelerator] of Object.entries(entry)) {
+          if (!id.trim() || id.length > 128) throw new RuntimeSchemaError(path, 'a scene ID')
+          stringSchema({ maxLength: 160 }).parse(accelerator, `${path}.scenes.${id}`)
+        }
+      } else if (key === 'layouts') {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry))
           throw new RuntimeSchemaError(path, 'layout bindings')
         for (const [id, accelerator] of Object.entries(entry)) {
@@ -762,7 +847,10 @@ const previewBoundsSchema = objectSchema(
     cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(nonNegativeSafeIntegerSchema),
-    elevated: optionalSchema(booleanSchema)
+    elevated: optionalSchema(booleanSchema),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -808,6 +896,21 @@ const cameraTransformSchema = objectSchema(
   { allowUnknown: false }
 )
 
+// A freeform box; the screen's crop rides along when it has one (plan 213 G2).
+const sourceTransformOverrideSchema = objectSchema(
+  {
+    x: numberSchema(),
+    y: numberSchema(),
+    width: numberSchema(),
+    height: numberSchema(),
+    cropLeft: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropTop: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropRight: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropBottom: optionalSchema(numberSchema({ min: 0, max: 1 }))
+  },
+  { allowUnknown: false }
+)
+
 const layoutSettingsSchema = objectSchema(
   {
     layoutPreset: enumSchema(LAYOUT_PRESET_VALUES),
@@ -818,6 +921,16 @@ const layoutSettingsSchema = objectSchema(
     cameraShape: enumSchema(['rectangle', 'rounded', 'circle']),
     cameraCornerRadiusPct: numberSchema(),
     cameraAspect: enumSchema(['source', 'square', 'portrait']),
+    cameraLook: optionalSchema(
+      objectSchema(
+        {
+          brightness: numberSchema({ min: -0.25, max: 0.25 }),
+          contrast: numberSchema({ min: 0.5, max: 1.5 }),
+          saturation: numberSchema({ min: 0, max: 2 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraChromaKeyEnabled: booleanSchema,
     cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
     cameraChromaKeySimilarityPct: numberSchema(),
@@ -832,6 +945,7 @@ const layoutSettingsSchema = objectSchema(
     sideBySideSplit: enumSchema(['50-50', '60-40', '70-30']),
     sideBySideCameraSide: enumSchema(['left', 'right']),
     verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit'])),
+    horizontalScreenFraming: optionalSchema(enumSchema(['fit', 'fill'])),
     arrangementMode: optionalSchema(enumSchema(['preset', 'freeform'])),
     sourceVisibility: optionalSchema(
       objectSchema(
@@ -839,7 +953,9 @@ const layoutSettingsSchema = objectSchema(
         { allowUnknown: false }
       )
     ),
-    sourceTransformOverrides: optionalSchema(recordSchema(cameraTransformSchema, { maxKeys: 16 }))
+    sourceTransformOverrides: optionalSchema(
+      recordSchema(sourceTransformOverrideSchema, { maxKeys: 16 })
+    )
   },
   { allowUnknown: false }
 )
@@ -1019,6 +1135,7 @@ const previewSurfaceStatusFieldsSchema = objectSchema(
         'backend-d3d11-presenter'
       ])
     ),
+    nativePreviewHostWindow: optionalSchema(enumSchema(['main', 'preview'])),
     bounds: optionalSchema(previewBoundsSchema),
     updatedAt: stringSchema({ minLength: 1, maxLength: 128 })
   },
@@ -1116,6 +1233,16 @@ const optionalGenerationArgs = runtimeSchema<unknown[]>(
 const optionalGenerationOnlyArgs = tupleSchema([optionalSchema(nonNegativeSafeIntegerSchema)])
 
 const noArgs = tupleSchema([])
+/** A picked file as main hands it to the renderer: an opaque single-use
+ * `input-file` capability and the name to show, never the path itself. */
+const inputFileSelectionSchema = objectSchema(
+  {
+    capabilityId: boundedIdentifier,
+    kind: literalSchema('input-file'),
+    displayName: stringSchema({ maxLength: 32_768 })
+  },
+  { allowUnknown: false }
+)
 const videorcAccountSnapshotSchema = objectSchema(
   {
     status: enumSchema(['signed-out', 'signed-in']),
@@ -1176,7 +1303,8 @@ const moderationOperationIpcSchema = boundedSemanticValue(
       sessionId: boundedIdentifier,
       messageId: boundedIdentifier,
       // A saved wire value (plan 170 D22): never rename 'orcle-voice'.
-      source: enumSchema(['manual', 'orcle-voice']),
+      // 'agent': an AI agent's removal (plan 209 S12).
+      source: enumSchema(['manual', 'orcle-voice', 'agent']),
       phase: enumSchema(MODERATION_PHASES)
     },
     { allowUnknown: true }
@@ -1264,7 +1392,179 @@ const dashboardSchema = runtimeSchema<LiveDashboardState | null>(
     return state
   }
 )
+// Banners in the Stream Manager (plan 186 S7): `{id, name, shown}` and one
+// explicit action by id. Never an image, a file name or a path.
+const bannerStrict = { allowUnknown: false } as const
+/** The backend's id rule (`backend-rpc-contract.ts`): an opaque token. */
+const bannerIdSchema = runtimeSchema<string>('a banner id', (value, path) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a banner id')
+  }
+  return value
+})
+const bannerRequestIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+
+const bannerSummarySchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    name: stringSchema({ minLength: 1, maxLength: 256 }),
+    shown: booleanSchema
+  },
+  bannerStrict
+)
+/** Null until Studio has read the list once. */
+const bannerSummariesSchema = nullableSchema(
+  arraySchema(bannerSummarySchema, { maxLength: BANNER_MAX_COUNT })
+)
+const bannerRelayCommandSchema = unionSchema([
+  objectSchema(
+    { requestId: bannerRequestIdSchema, action: enumSchema(['show', 'hide']), id: bannerIdSchema },
+    bannerStrict
+  ),
+  objectSchema({ requestId: bannerRequestIdSchema, action: literalSchema('hideAll') }, bannerStrict)
+])
+/** Studio's answer: done, or the sentence that says why not. */
+const bannerRelayResolutionSchema = unionSchema([
+  objectSchema(
+    { requestId: bannerRequestIdSchema, ok: literalSchema(true), value: literalSchema(true) },
+    bannerStrict
+  ),
+  objectSchema(
+    {
+      requestId: bannerRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    bannerStrict
+  )
+])
+// Sounds in the Stream Manager (plan 189 S9): the board as `{id, name,
+// mode}` plus what plays, and one action by id. Never a file, a path or audio.
+const soundStrict = { allowUnknown: false } as const
+/** The backend's sound id rule (`backend-rpc-contract.ts`): an opaque token. */
+const soundIdSchema = runtimeSchema<string>('a sound id', (value, path) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new RuntimeSchemaError(path, 'a sound id')
+  }
+  return value
+})
+const soundRequestIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const soundNameSchema = stringSchema({ minLength: 1, maxLength: SOUND_NAME_MAX_CHARS })
+const soundboardSummarySchema = objectSchema(
+  {
+    sounds: arraySchema(
+      objectSchema(
+        { id: soundIdSchema, name: soundNameSchema, mode: enumSchema(SOUND_MODES) },
+        soundStrict
+      ),
+      { maxLength: SOUND_MAX_COUNT }
+    ),
+    voices: arraySchema(
+      objectSchema(
+        {
+          soundId: soundIdSchema,
+          startedAtMs: numberSchema({ integer: true, min: 0 }),
+          durationMs: numberSchema({ integer: true, min: 1, max: SOUND_MAX_DURATION_MS }),
+          loop: booleanSchema
+        },
+        soundStrict
+      ),
+      { maxLength: SOUND_MAX_VOICES }
+    )
+  },
+  soundStrict
+)
+/** Null until Studio has read the board once. */
+const soundboardSummaryOrNullSchema = nullableSchema(soundboardSummarySchema)
+// Plan 209 S20: `/buddy <words>` from the Stream Manager, and Buddy's final
+// answer (what ran, or why not), which the composer shows.
+const buddyActRelayCommandSchema = objectSchema(
+  {
+    requestId: soundRequestIdSchema,
+    sentence: stringSchema({ minLength: 1, maxLength: BUDDY_SENTENCE_MAX_CHARS * 4 })
+  },
+  soundStrict
+) as RuntimeSchema<BuddyActRelayCommand>
+const cohostActAnswerSchema = objectSchema(
+  {
+    actId: soundRequestIdSchema,
+    status: enumSchema(['working', 'done', 'refused', 'unavailable', 'not-found']),
+    message: stringSchema({ minLength: 1, maxLength: 2000 })
+  },
+  soundStrict
+) as RuntimeSchema<CohostActAnswer>
+const buddyActResolutionSchema = unionSchema([
+  objectSchema(
+    { requestId: soundRequestIdSchema, ok: literalSchema(true), value: cohostActAnswerSchema },
+    soundStrict
+  ),
+  objectSchema(
+    {
+      requestId: soundRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    soundStrict
+  )
+])
+const soundRelayCommandSchema = unionSchema([
+  objectSchema(
+    {
+      requestId: soundRequestIdSchema,
+      action: enumSchema(['play', 'stop', 'press']),
+      id: soundIdSchema
+    },
+    soundStrict
+  ),
+  objectSchema({ requestId: soundRequestIdSchema, action: literalSchema('stopAll') }, soundStrict)
+])
+/** Studio's answer: done, or the sentence that says why not. */
+const soundRelayResolutionSchema = unionSchema([
+  objectSchema(
+    { requestId: soundRequestIdSchema, ok: literalSchema(true), value: literalSchema(true) },
+    soundStrict
+  ),
+  objectSchema(
+    {
+      requestId: soundRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    soundStrict
+  )
+])
+// Plan 189: the bundled starter sounds, by slug, name and key; with a file,
+// only as a single-use input-file capability.
+const starterSoundSlugSchema = runtimeSchema<string>('a starter sound slug', (value, path) => {
+  if (!isSoundStarterSlug(value)) throw new RuntimeSchemaError(path, 'a starter sound slug')
+  return value
+})
+const starterSoundFields = {
+  slug: starterSoundSlugSchema,
+  name: soundNameSchema,
+  hotkey: optionalSchema(enumSchema(SOUND_HOTKEYS))
+}
+const starterSoundsSchema = arraySchema(objectSchema(starterSoundFields, soundStrict), {
+  maxLength: SOUND_MAX_COUNT
+})
+const starterSoundFilesSchema = arraySchema(
+  objectSchema({ ...starterSoundFields, selection: inputFileSelectionSchema }, soundStrict),
+  { maxLength: SOUND_MAX_COUNT }
+)
+
 const specificRuntimeInvokeContracts = {
+  'app:front-window-watch': invokeContract(
+    tupleSchema([objectSchema({ enabled: booleanSchema }, { allowUnknown: false })]),
+    undefinedSchema
+  ),
+  'app:self-bundle-ids': invokeContract(noArgs, arraySchema(stringSchema({ maxLength: 1024 }))),
+  // Plan 210 S4/S5: icons for the apps New scene… lists, by bundle id.
+  'app:icons': invokeContract(
+    tupleSchema([
+      arraySchema(stringSchema({ minLength: 1, maxLength: 1024 }), { maxLength: APP_ICONS_MAX_IDS })
+    ]),
+    recordSchema(stringSchema({ maxLength: 4_000_000 }), { maxKeys: APP_ICONS_MAX_IDS })
+  ),
   'comments-window:marker-context-get': invokeContract(noArgs, markerContextSchema),
   'comments-window:marker-context-push': invokeContract(
     tupleSchema([markerContextSchema]),
@@ -1278,10 +1578,54 @@ const specificRuntimeInvokeContracts = {
     tupleSchema([markerRelayResolutionSchema]),
     booleanSchema
   ),
+  // Banners in the Stream Manager (plan 186 S7): a read-only `{id, name,
+  // shown}` list one way, and one explicit show or hide the other. Never an
+  // image, a file name or a path.
+  'comments-window:banners-get': invokeContract(noArgs, bannerSummariesSchema),
+  'comments-window:banners-push': invokeContract(
+    tupleSchema([bannerSummariesSchema]),
+    booleanSchema
+  ),
+  'comments-window:banner': invokeContract(
+    tupleSchema([bannerRelayCommandSchema]),
+    literalSchema(true)
+  ),
+  'comments-window:banner-result-push': invokeContract(
+    tupleSchema([bannerRelayResolutionSchema]),
+    booleanSchema
+  ),
+  // Sounds in the Stream Manager (plan 189 S9): the read-only board one way,
+  // and one pad press, `/sound` or Stop all the other. Never a file or a path.
+  'comments-window:sounds-get': invokeContract(noArgs, soundboardSummaryOrNullSchema),
+  'comments-window:sounds-push': invokeContract(
+    tupleSchema([soundboardSummaryOrNullSchema]),
+    booleanSchema
+  ),
+  'comments-window:sound': invokeContract(
+    tupleSchema([soundRelayCommandSchema]),
+    literalSchema(true)
+  ),
+  'comments-window:sound-result-push': invokeContract(
+    tupleSchema([soundRelayResolutionSchema]),
+    booleanSchema
+  ),
+  'comments-window:buddy-act': invokeContract(
+    tupleSchema([buddyActRelayCommandSchema]),
+    cohostActAnswerSchema
+  ),
+  'comments-window:buddy-act-result-push': invokeContract(
+    tupleSchema([buddyActResolutionSchema]),
+    booleanSchema
+  ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
   'comments-window:dashboard-get': invokeContract(noArgs, dashboardSchema),
-  'comments-window:push-snapshot': invokeContract(tupleSchema([commentsViewSchema])),
-  'comments-window:push-delta': invokeContract(tupleSchema([commentsDeltaSchema])),
+  // Plan 191: void. The main renderer discards both results; a view here would
+  // be a full validation walk and clone of up to 2,000 messages per message.
+  'comments-window:push-snapshot': invokeContract(
+    tupleSchema([commentsViewSchema]),
+    undefinedSchema
+  ),
+  'comments-window:push-delta': invokeContract(tupleSchema([commentsDeltaSchema]), undefinedSchema),
   'comments-window:get-snapshot': invokeContract(noArgs, commentsViewSchema),
   'account:begin-sign-in': invokeContract(tupleSchema([accountAuthorizeUrl])),
   'account:refresh': invokeContract(noArgs, videorcAccountRefreshResultSchema),
@@ -1305,6 +1649,8 @@ const specificRuntimeInvokeContracts = {
   ),
   // Plan 156: the Activity auto-show switch is one boolean, nothing else.
   'comments-window:set-auto-show-activity': invokeContract(tupleSchema([booleanSchema])),
+  // Plan 215 D6: Hide from stream is one boolean, nothing else.
+  'comments-window:set-hidden-from-stream': invokeContract(tupleSchema([booleanSchema])),
   // Plan 140, S5: the window names a platform and nothing else. Main picks
   // the scopes, so a forged command can never widen what is requested.
   'comments-window:reconnect-scopes': invokeContract(
@@ -1325,6 +1671,23 @@ const specificRuntimeInvokeContracts = {
         { allowUnknown: false }
       )
     ]),
+    booleanSchema
+  ),
+  // Plan 213 J1: "Use Sign in" names one destination and nothing else; the
+  // shell opens it only if it is one of the saved destinations.
+  'comments-window:open-destination': invokeContract(
+    tupleSchema([
+      objectSchema(
+        { requestId: boundedIdentifier, targetId: stringSchema({ minLength: 1, maxLength: 128 }) },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
+  ),
+  // Plan 215 A3: "Sign in to Videorc" carries nothing but its request id;
+  // main shows the main window, which starts the sign-in it owns.
+  'comments-window:sign-in-videorc': invokeContract(
+    tupleSchema([objectSchema({ requestId: boundedIdentifier }, { allowUnknown: false })]),
     booleanSchema
   ),
   // Plan 140, S6: one manual removal or one card answer, relayed to Studio.
@@ -1403,6 +1766,36 @@ const specificRuntimeInvokeContracts = {
   'resource:reveal-session': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-background': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-support-bundle': invokeContract(tupleSchema([pathSchema])),
+  // Plan 209 S7: install (Connect) or not; the bridge's absolute path and
+  // whether this install has it. Never a token.
+  'agents:bridge': invokeContract(
+    tupleSchema([booleanSchema]),
+    objectSchema({ path: pathSchema, exists: booleanSchema }, { allowUnknown: false })
+  ),
+  // Plan 209 S22: the app and the token Connect just minted, nothing else;
+  // main resolves the bridge's path itself. The answer is a sentence.
+  'agents:add-to-app': invokeContract(
+    tupleSchema([
+      enumSchema(['claude-desktop', 'claude-code', 'cursor', 'codex', 'vs-code']),
+      agentTokenSchema
+    ]),
+    objectSchema(
+      { added: booleanSchema, message: stringSchema({ minLength: 1, maxLength: 512 }) },
+      { allowUnknown: false }
+    )
+  ),
+  // Plan 214 E: one named Videorc Camera action in; whether it ran and, when
+  // it didn't, a plain sentence.
+  'virtual-camera:action': invokeContract(
+    tupleSchema([enumSchema(['open-approval-settings', 'remove', 'set-up', 'load-module'])]),
+    objectSchema(
+      {
+        ok: booleanSchema,
+        message: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 }))
+      },
+      { allowUnknown: false }
+    )
+  ),
   'resource:open-session': invokeContract(tupleSchema([boundedIdentifier])),
   'media:grant-session': invokeContract(
     tupleSchema([boundedIdentifier]),
@@ -1477,7 +1870,39 @@ const specificRuntimeInvokeContracts = {
   'updates:install': invokeContract(noArgs, undefinedSchema),
   // Plan 174 S3.1 (D2): the renderer's answer after the livestream ended,
   // one of two words, nothing else.
-  'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema)
+  'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema),
+  // Plan 186: no arguments; null on cancel, else an input-file capability.
+  'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
+  // Plan 189: Import sounds… (several files at once, none on cancel), and the
+  // starter sounds the main window seeds and restores.
+  // Release test 147, plan 0006: the files main couldn't open come back by
+  // name with a fixed sentence, so the renderer can say so.
+  'sounds:pick-files': invokeContract(
+    noArgs,
+    objectSchema(
+      {
+        selections: arraySchema(inputFileSelectionSchema, { maxLength: SOUND_MAX_COUNT }),
+        leftOut: arraySchema(
+          objectSchema(
+            {
+              displayName: stringSchema({ maxLength: 32_768 }),
+              reason: stringSchema({ minLength: 1, maxLength: 512 })
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: SOUND_MAX_COUNT }
+        )
+      },
+      { allowUnknown: false }
+    )
+  ),
+  'sounds:starter-list': invokeContract(noArgs, starterSoundsSchema),
+  'sounds:starter-files': invokeContract(
+    tupleSchema([
+      optionalSchema(arraySchema(starterSoundSlugSchema, { maxLength: SOUND_MAX_COUNT }))
+    ]),
+    starterSoundFilesSchema
+  )
 } satisfies Partial<Record<ElectronInvokeChannel, IpcRuntimeContract>>
 
 /** Channels deliberately using structural bounds instead of a semantic schema.
@@ -1546,6 +1971,10 @@ export const boundedPassthroughElectronInvokeChannels = [
   'system:open-permissions',
   'system:media-access-status',
   'system:request-media-access',
+  'system:request-screen-access',
+  'system:recheck-permission-grants',
+  'app:relaunch-for-permission',
+  'app:workspace-shown',
   'system:reveal-permission-target',
   'system:pick-file',
   'system:pick-directory',
@@ -1617,6 +2046,11 @@ const specificRuntimeEventSchemas = {
   'comments-window:marker-context': markerContextSchema,
   'comments-window:marker-request': markerRelayCommandSchema,
   'comments-window:dashboard': dashboardSchema,
+  'comments-window:banners': bannerSummariesSchema,
+  'comments-window:banner-request': bannerRelayCommandSchema,
+  'comments-window:sounds': soundboardSummaryOrNullSchema,
+  'comments-window:sound-request': soundRelayCommandSchema,
+  'comments-window:buddy-act-request': buddyActRelayCommandSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'comments-window:moderation-request': commentsModerationCommandSchema,
@@ -1640,6 +2074,14 @@ const specificRuntimeEventSchemas = {
     },
     { allowUnknown: false }
   ),
+  // Plan 213 J1: the Stream Manager's "Use Sign in" opens that destination
+  // in Livestream → Setup.
+  'livestream:open-destination': objectSchema(
+    { targetId: stringSchema({ minLength: 1, maxLength: 128 }) },
+    { allowUnknown: false }
+  ),
+  // Plan 215 A3: the ask carries nothing; the shell owns the sign-in.
+  'account:sign-in-request': undefinedSchema,
   // Whether the command modifier is physically down. Main is the only place
   // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
   // never receives those chords — nor, in practice, the keyup that ends them.
@@ -1649,7 +2091,24 @@ const specificRuntimeEventSchemas = {
   // Page Visibility API, so document.visibilityState reads 'visible' even when
   // the window is minimised or hidden.
   'window:visible': booleanSchema,
-  'global-shortcuts:triggered': enumSchema(GLOBAL_SHORTCUT_ACTIONS),
+  'app:front-changed': objectSchema(
+    {
+      bundleId: optionalSchema(nullableSchema(stringSchema({ maxLength: 1024 }))),
+      name: stringSchema({ maxLength: 4096 }),
+      pid: numberSchema({ integer: true, min: 0 }),
+      frontWindowId: optionalSchema(stringSchema({ maxLength: 128 })),
+      at: numberSchema({ min: 0 })
+    },
+    { allowUnknown: false }
+  ),
+  'global-shortcuts:triggered': runtimeSchema<GlobalShortcutAction>(
+    'shortcut action',
+    (value, path) => {
+      if (!isGlobalShortcutAction(value))
+        throw new RuntimeSchemaError(path, 'a known shortcut action')
+      return value
+    }
+  ),
   // Plan 062: keys main captured while the Settings shortcut recorder is armed.
   'shortcut-recorder:key': objectSchema({
     type: enumSchema(['keyDown', 'keyUp']),

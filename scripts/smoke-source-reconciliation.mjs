@@ -40,6 +40,17 @@ try {
     device('microphone:coreaudio:podcast', 'Podcast Mic', 'microphone'),
     device('microphone:coreaudio:laptop', 'Laptop Mic', 'microphone')
   ]
+  // Plan 213 E1: a pick that a stand-in holds for is kept as wanted*; these
+  // expectations hold none unless they say so.
+  const noStandIn = {
+    wantedScreenId: undefined,
+    wantedScreenName: undefined,
+    wantedScreenUuid: undefined,
+    wantedWindowId: undefined,
+    wantedWindowName: undefined,
+    wantedCameraId: undefined,
+    wantedCameraName: undefined
+  }
 
   localStorage.setItem(
     STORAGE_KEYS.captureConfig,
@@ -70,10 +81,13 @@ try {
   })
   const reloadedSources = reconcileSourceSelection(loaded.sources, devices)
   assert.deepEqual(reloadedSources, {
+    ...noStandIn,
     screenId: 'screen:screencapturekit:222',
     screenName: 'Built-in Display',
+    screenUuid: undefined,
     windowId: undefined,
     windowName: undefined,
+    captureOff: undefined,
     cameraId: 'camera:avfoundation-native:face-time',
     cameraName: 'FaceTime HD Camera',
     cameraOff: undefined,
@@ -132,10 +146,13 @@ try {
       devices
     ),
     {
+      ...noStandIn,
       screenId: 'screen:screencapturekit:222',
       screenName: 'Built-in Display',
+      screenUuid: undefined,
       windowId: undefined,
       windowName: undefined,
+      captureOff: undefined,
       cameraId: 'camera:avfoundation-native:face-time',
       cameraName: 'FaceTime HD Camera',
       cameraOff: undefined,
@@ -160,10 +177,13 @@ try {
       devices
     ),
     {
+      ...noStandIn,
       screenId: undefined,
       screenName: undefined,
+      screenUuid: undefined,
       windowId: 'window:screencapturekit:111',
       windowName: 'Editor',
+      captureOff: undefined,
       cameraId: 'camera:avfoundation-native:desk',
       cameraName: 'Desk Camera',
       cameraOff: undefined,
@@ -181,11 +201,19 @@ try {
     microphoneId: 'missing-mic',
     microphoneName: 'Missing Mic'
   }
+  // The stand-ins hold for the missing picks, which stay the picks (plan 213 E1).
   assert.deepEqual(reconcileSourceSelection(missingSources, devices), {
+    ...noStandIn,
+    wantedScreenId: 'missing-screen',
+    wantedScreenName: 'Missing Display',
+    wantedCameraId: 'missing-camera',
+    wantedCameraName: 'Missing Camera',
     screenId: 'screen:screencapturekit:222',
     screenName: 'Built-in Display',
+    screenUuid: undefined,
     windowId: undefined,
     windowName: undefined,
+    captureOff: undefined,
     cameraId: 'camera:avfoundation-native:face-time',
     cameraName: 'FaceTime HD Camera',
     cameraOff: undefined,
@@ -222,10 +250,15 @@ try {
       devices.map((item) => (item.kind === 'camera' ? { ...item, status: 'unavailable' } : item))
     ),
     {
+      ...noStandIn,
+      wantedCameraId: 'camera:avfoundation-native:face-time',
+      wantedCameraName: 'FaceTime HD Camera',
       screenId: 'screen:screencapturekit:222',
       screenName: 'Built-in Display',
+      screenUuid: undefined,
       windowId: undefined,
       windowName: undefined,
+      captureOff: undefined,
       cameraId: undefined,
       cameraName: undefined,
       cameraOff: undefined,
@@ -244,10 +277,13 @@ try {
   }
   const offSources = reconcileSourceSelection(explicitCameraOff, devices)
   assert.deepEqual(offSources, {
+    ...noStandIn,
     screenId: 'screen:screencapturekit:222',
     screenName: 'Built-in Display',
+    screenUuid: undefined,
     windowId: undefined,
     windowName: undefined,
+    captureOff: undefined,
     cameraId: undefined,
     cameraName: undefined,
     cameraOff: true,
@@ -274,6 +310,25 @@ try {
   assert.equal(noneSources.microphoneOff, true)
   assert.deepEqual(reconcileSourceSelection(noneSources, [...devices].reverse()), noneSources)
 
+  // Plan 0002 (#742): Screen None is a choice too. Reconcile keeps it on
+  // every device refresh instead of falling back to the first screen.
+  const explicitCaptureNone = {
+    captureOff: true,
+    cameraId: 'camera:avfoundation-native:face-time',
+    cameraName: 'FaceTime HD Camera',
+    microphoneId: 'microphone:coreaudio:podcast',
+    microphoneName: 'Podcast Mic'
+  }
+  const captureNoneSources = reconcileSourceSelection(explicitCaptureNone, devices)
+  assert.equal(captureNoneSources.screenId, undefined)
+  assert.equal(captureNoneSources.windowId, undefined)
+  assert.equal(captureNoneSources.captureOff, true)
+  assert.deepEqual(sourceSelectionChangeEvents(explicitCaptureNone, captureNoneSources), [])
+  assert.deepEqual(
+    reconcileSourceSelection(captureNoneSources, [...devices].reverse()),
+    captureNoneSources
+  )
+
   // Legacy profiles without an explicit Off still select an available camera.
   const legacySources = {
     screenId: 'screen:screencapturekit:222',
@@ -283,10 +338,13 @@ try {
   }
   assert.equal(Object.hasOwn(legacySources, 'cameraOff'), false)
   assert.deepEqual(reconcileSourceSelection(legacySources, devices), {
+    ...noStandIn,
     screenId: 'screen:screencapturekit:222',
     screenName: 'Built-in Display',
+    screenUuid: undefined,
     windowId: undefined,
     windowName: undefined,
+    captureOff: undefined,
     cameraId: 'camera:avfoundation-native:face-time',
     cameraName: 'FaceTime HD Camera',
     cameraOff: undefined,
@@ -319,7 +377,7 @@ try {
   assert.equal(avfoundationOnly.microphoneId, 'microphone:avfoundation:2')
 
   console.log(
-    'Source reconciliation smoke OK - persisted IDs, name rematch, explicit Camera Off, explicit Microphone None, legacy fallback, and fallback-mic migration verified.'
+    'Source reconciliation smoke OK - persisted IDs, name rematch, explicit Camera Off, explicit Microphone None, explicit Screen None, legacy fallback, and fallback-mic migration verified.'
   )
 } finally {
   await rm(tempDir, { recursive: true, force: true })

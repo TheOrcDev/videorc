@@ -76,7 +76,7 @@ export function CohostStatus({
   return (
     <>
       <Tooltip>
-        <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+        <TooltipTrigger render={trigger} />
         <TooltipContent className="flex-col items-start gap-0.5" side="bottom">
           {lines.map((line, index) => (
             <span key={`${line}:${index}`}>{line}</span>
@@ -226,9 +226,7 @@ export function CohostListeningIndicator({
   // tooltip and, for a screen reader, text beside the label (plan 174 S1.10).
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <ListeningChip className={className} view={view} />
-      </TooltipTrigger>
+      <TooltipTrigger render={<ListeningChip className={className} view={view} />} />
       <TooltipContent>{view.detail}</TooltipContent>
     </Tooltip>
   )

@@ -31,8 +31,8 @@ export function remoteRequest(ws, method, params, { timeoutMs = 90000 } = {}) {
       rejectRequest(new Error(`${method} timed out`))
     }, timeoutMs)
     const onMessage = (raw) => {
-      const message = JSON.parse(String(raw))
-      if (message.id !== id) return
+      const message = parseRemoteFrame(raw)
+      if (!message || message.id !== id) return
       cleanup()
       resolveRequest(message)
     }
@@ -60,8 +60,8 @@ export function waitForRemoteEvent(ws, event, predicate = () => true, { timeoutM
     }, timeoutMs)
     let cleanedUp = false
     const onMessage = (raw) => {
-      const message = JSON.parse(String(raw))
-      if (message.event === event && predicate(message.payload)) {
+      const message = parseRemoteFrame(raw)
+      if (message && message.event === event && predicate(message.payload)) {
         cleanup()
         resolveEvent(message.payload)
       }
@@ -117,5 +117,19 @@ export async function waitForRemoteDescribe(remote, { timeoutMs = 90000, pollMs 
       throw new Error('renderer never published its remote surface (describe/state stayed empty)')
     }
     await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs))
+  }
+}
+
+/**
+ * One remote frame as an object, or null for a frame that is not JSON or not
+ * an object: a stray frame must not throw inside the socket's `message`
+ * listener and crash the smoke; the caller's timeout still bounds the wait.
+ */
+export function parseRemoteFrame(raw) {
+  try {
+    const message = JSON.parse(String(raw))
+    return message && typeof message === 'object' ? message : null
+  } catch {
+    return null
   }
 }

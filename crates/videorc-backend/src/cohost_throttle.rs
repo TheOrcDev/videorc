@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::cohost::CohostActivityTemplateKind;
-use crate::cohost_greetings::ActivityFacts;
+use crate::cohost_greetings::{ActivityFacts, GreetingKind};
 
 pub(crate) const PER_MINUTE_MAX: usize = 6;
 pub(crate) const MIN_GAP: Duration = Duration::from_secs(5);
@@ -20,16 +20,21 @@ const MINUTE: Duration = Duration::from_secs(60);
 /// More than this many same-kind events inside the cooldown collapse.
 pub(crate) const COLLAPSE_THRESHOLD: usize = 3;
 
-/// The cooldown between two greetings of one kind on one destination (D9).
-pub(crate) fn kind_cooldown(kind: CohostActivityTemplateKind) -> Duration {
+/// The cooldown between two greetings of one kind on one destination (D9;
+/// plan 192 S1.2 adds the welcomes: first-time 5 s, returning 10 s).
+pub(crate) fn kind_cooldown(kind: GreetingKind) -> Duration {
     use CohostActivityTemplateKind as K;
     Duration::from_secs(match kind {
-        K::Follow => 10,
-        K::Sub | K::Resub | K::SubGift | K::CommunitySubGift | K::Membership => 5,
-        K::Cheer | K::Kicks | K::SuperChat | K::SuperSticker => 5,
-        K::Raid => 60,
-        K::WatchStreak => 15,
-        K::PowerUp | K::Redemption => 10,
+        GreetingKind::FirstTime => 5,
+        GreetingKind::Returning => 10,
+        GreetingKind::Activity(kind) => match kind {
+            K::Follow => 10,
+            K::Sub | K::Resub | K::SubGift | K::CommunitySubGift | K::Membership => 5,
+            K::Cheer | K::Kicks | K::SuperChat | K::SuperSticker => 5,
+            K::Raid => 60,
+            K::WatchStreak => 15,
+            K::PowerUp | K::Redemption => 10,
+        },
     })
 }
 
@@ -51,7 +56,7 @@ struct Bucket {
     events: Vec<ActivityFacts>,
 }
 
-type KindKey = (String, CohostActivityTemplateKind);
+type KindKey = (String, GreetingKind);
 
 #[derive(Debug, Default)]
 pub(crate) struct AutoChatThrottle {
@@ -60,7 +65,7 @@ pub(crate) struct AutoChatThrottle {
     /// The last greeting per (destination, kind).
     kind_last: HashMap<KindKey, Instant>,
     /// (destination, viewer, kind) already greeted this session.
-    greeted: HashSet<(String, String, CohostActivityTemplateKind)>,
+    greeted: HashSet<(String, String, GreetingKind)>,
     buckets: HashMap<KindKey, Bucket>,
 }
 
@@ -203,7 +208,7 @@ mod tests {
 
     fn follow(viewer: &str) -> ActivityFacts {
         ActivityFacts {
-            kind: CohostActivityTemplateKind::Follow,
+            kind: GreetingKind::Activity(CohostActivityTemplateKind::Follow),
             platform: StreamPlatform::Twitch,
             destination_id: "twitch:main".to_string(),
             viewer_key: viewer.to_lowercase(),
@@ -215,13 +220,22 @@ mod tests {
             count: None,
             amount: None,
             reward: None,
+            first_message_text: None,
         }
     }
 
     fn cheer(viewer: &str) -> ActivityFacts {
         ActivityFacts {
-            kind: CohostActivityTemplateKind::Cheer,
+            kind: GreetingKind::Activity(CohostActivityTemplateKind::Cheer),
             amount: Some("100 bits".into()),
+            ..follow(viewer)
+        }
+    }
+
+    fn welcome(viewer: &str, kind: GreetingKind) -> ActivityFacts {
+        ActivityFacts {
+            kind,
+            first_message_text: Some("hi".into()),
             ..follow(viewer)
         }
     }
@@ -353,10 +367,49 @@ mod tests {
             throttle.offer_greeting(other, start + secs(1)),
             GreetingOffer::SendNow(_)
         ));
-        assert_eq!(kind_cooldown(CohostActivityTemplateKind::Raid), secs(60));
         assert_eq!(
-            kind_cooldown(CohostActivityTemplateKind::WatchStreak),
+            kind_cooldown(GreetingKind::Activity(CohostActivityTemplateKind::Raid)),
+            secs(60)
+        );
+        assert_eq!(
+            kind_cooldown(GreetingKind::Activity(
+                CohostActivityTemplateKind::WatchStreak
+            )),
             secs(15)
         );
+    }
+
+    /// Plan 192 S1.2: the welcomes keep their own cooldowns and dedupe per
+    /// (destination, viewer, kind), apart from the Activity kinds.
+    #[test]
+    fn welcomes_have_their_own_cooldowns_and_dedupe_per_kind() {
+        assert_eq!(kind_cooldown(GreetingKind::FirstTime), secs(5));
+        assert_eq!(kind_cooldown(GreetingKind::Returning), secs(10));
+        let start = Instant::now();
+        let mut throttle = AutoChatThrottle::default();
+        assert!(matches!(
+            throttle.offer_greeting(welcome("Ana", GreetingKind::FirstTime), start),
+            GreetingOffer::SendNow(_)
+        ));
+        // Another first-timer inside the 5 s waits in the first-time bucket.
+        match throttle.offer_greeting(welcome("Bo", GreetingKind::FirstTime), start + secs(1)) {
+            GreetingOffer::Held { due } => assert_eq!(due, start + secs(5)),
+            other => panic!("{other:?}"),
+        }
+        // A follow from Ana is another kind: not deduped by her welcome.
+        assert!(matches!(
+            throttle.offer_greeting(follow("Ana"), start + secs(1)),
+            GreetingOffer::Held { .. }
+        ));
+        // Ana's second message would be another welcome: deduped.
+        assert_eq!(
+            throttle.offer_greeting(welcome("Ana", GreetingKind::FirstTime), start + secs(2)),
+            GreetingOffer::Deduped
+        );
+        // Both buckets are due at +5 s; the 5 s gap lets one out per drain.
+        assert_eq!(throttle.drain_due(start + secs(5)).len(), 1);
+        assert!(throttle.drain_due(start + secs(9)).is_empty());
+        assert_eq!(throttle.drain_due(start + secs(10)).len(), 1);
+        assert_eq!(throttle.next_due(), None);
     }
 }

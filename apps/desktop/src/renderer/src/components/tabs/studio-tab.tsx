@@ -1,8 +1,16 @@
 import { lazy, Suspense, useEffect, useEffectEvent, type ReactElement } from 'react'
 
+import { PANE_STABLE_GUTTER } from '@/components/pane'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { QuickSettings } from '@/components/studio/quick-settings'
+import {
+  RetroQuickSettings,
+  RetroSessionPanel,
+  RetroSessionStatus,
+  RetroSessionTransport,
+  RetroTakeoverSection
+} from '@/components/studio/retro-lcd-studio'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import {
   SessionPanel,
@@ -41,15 +49,21 @@ import {
   sessionStopControl
 } from '@/lib/studio-session-view'
 import { spaceShortcutBlocked } from '@/lib/studio-space-shortcut'
+import { studioChatShows } from '@/lib/studio-chat'
 import { connectionBlockedReason } from '@/lib/state-labels'
 
 const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
     .StudioDashboardBottomRow
 }))
-// The meter brings audiocn: its own chunk, so the inspector paints first.
-const MicrophoneSection = lazy(async () => ({
-  default: (await import('@/components/studio/microphone-section')).MicrophoneSection
+// The meters and faders bring audiocn: their own chunk, so the inspector paints first.
+const AudioSection = lazy(async () => ({
+  default: (await import('@/components/studio/audio-section')).AudioSection
+}))
+// Chat in Studio (plan 204): the rows, the list and their imports are their
+// own chunk; the page holds only the gate (`lib/studio-chat.ts`).
+const StudioChatSection = lazy(async () => ({
+  default: (await import('@/components/studio/studio-chat')).StudioChatSection
 }))
 // Rare (a cloud show this computer stopped feeding): its own chunk.
 const CloudResumeNotice = lazy(async () => ({
@@ -58,6 +72,11 @@ const CloudResumeNotice = lazy(async () => ({
 
 export function StudioTab(): ReactElement {
   const studio = useStudioCore()
+  // Settings → General → Retro LCD (plan 197): the inspector on LCD screens.
+  const retro = studio.settings.retroLcdStudio === true
+  const Transport = retro ? RetroSessionTransport : SessionTransport
+  const StatusPill = retro ? RetroSessionStatus : SessionStatusPill
+  const InspectorSession = retro ? RetroSessionPanel : SessionPanel
   const { recording } = useStudioRecordingState()
   const {
     canStop,
@@ -82,7 +101,7 @@ export function StudioTab(): ReactElement {
     retrySessionStart
   } = studio
 
-  const active = isSessionTransportActive(recording.state)
+  const active = isSessionTransportActive(recording.state, recording.replayOnly)
   const banner = studioBlocker(studio)
   // A Go Live in flight owns the transport (plan 174 S3.1, the Phase 0
   // review): while its preflight runs or a start is in flight, Record,
@@ -153,13 +172,14 @@ export function StudioTab(): ReactElement {
   const sessionStatus = (
     <span className="flex items-center gap-1.5">
       <SessionMicSliver
+        ink={retro}
         deviceName={studio.selectedMicrophone?.name}
         muted={captureConfig.audio.microphoneMuted}
         sessionActive={active}
       />
       {/* "Not ready" only when nothing can start (B-17): one working button
           is a ready Studio. */}
-      <SessionStatusPill
+      <StatusPill
         recording={recording}
         startBlocked={Boolean(recordBlockedReason && liveStreamBlockedReason)}
         wsStatus={wsStatus}
@@ -177,7 +197,9 @@ export function StudioTab(): ReactElement {
   // The Go Live confirmation is the shell's (GoLiveDialogGate), so it opens
   // over every page, not only this one (plan 174 S0.6, B-5).
   return (
-    <div className={STUDIO_CONTAINER}>
+    // The page keeps its width when the inspector grows past the pane (Chat
+    // showing up on air): the pane keeps the scrollbar's gutter (plan 0009).
+    <div className={STUDIO_CONTAINER} {...PANE_STABLE_GUTTER}>
       {/* The Studio bench: the preview pane leads, and the inspector (the
           transport, session facts, microphone, sources, takeover) sits beside
           it, split by a hairline, from 720 px of content (a container query,
@@ -199,7 +221,7 @@ export function StudioTab(): ReactElement {
           {/* Record, Go Live…, and the clock sit at the top of the
               inspector, right above Session (owner call, 2026-09-23); Space
               still records. */}
-          <SessionTransport
+          <Transport
             active={active}
             blockedJump={
               banner?.jumpTo && banner.jumpLabel
@@ -212,10 +234,12 @@ export function StudioTab(): ReactElement {
             liveStreamBlockedReason={liveStreamBlockedReason}
             recordBlockedReason={recordBlockedReason}
             startRequestPending={startRequestPending}
+            startingLivestream={sessionStartIntent?.stream === true}
             status={sessionStatus}
             stopLabel={stopControl.label}
             stopNote={stopControl.note}
             stopOverrun={sessionStopOverrun}
+            stopRequestPending={stopRequestPending}
             onLiveStream={handleLiveStream}
             onRecord={handleRecord}
             onStop={() => handleStop('button')}
@@ -229,7 +253,7 @@ export function StudioTab(): ReactElement {
             pending={startsBusy}
             onResumeClick={() => noteRecordClick('start')}
           />
-          <SessionPanel
+          <InspectorSession
             active={active}
             live={sessionIsLive(recording)}
             runtimeNotice={sessionRuntimeNotice}
@@ -239,16 +263,29 @@ export function StudioTab(): ReactElement {
             onDismissStartFailure={dismissSessionStartFailure}
             onRetryStart={retrySessionStart}
           />
-          {/* The microphone and its live level, between Session and Inputs
-              (owner call, 2026-10-02): a check that runs all the time. */}
-          <Suspense fallback={<MicrophoneSectionFallback />}>
-            <MicrophoneSection />
+          {/* Chat in Studio (plan 204, owner 2026-10-27): while on air and
+              switched on, the livestream's chat under Session, where the
+              streamer glances most, and a click puts a message on stream.
+              The same section in both looks (owner: no Retro LCD screen in
+              the first version). The inspector keeps its width, so the
+              docked preview's slot never moves when it appears. */}
+          {studioChatShows({ settings: studio.settings, recording }) ? (
+            <Suspense fallback={<StudioChatSectionFallback />}>
+              <StudioChatSection />
+            </Suspense>
+          ) : null}
+          {/* Audio: the Microphone and System audio levels on one scale, each
+              with its Gain, between Session and Sources (plan 201 D1; the
+              Microphone section since the owner call of 2026-10-02): a check
+              that runs all the time. */}
+          <Suspense fallback={<AudioSectionFallback retro={retro} />}>
+            <AudioSection />
           </Suspense>
-          {/* Sources (Screen, Camera, System audio) and Captions: compact
-              mirrors editing the same captureConfig, each with a way to its
-              page. Output is the Session row above (plan 174 S3.3, B-15). */}
-          <QuickSettings />
-          <TakeoverSection />
+          {/* Sources (Screen and Camera) and Captions: compact mirrors editing
+              the same captureConfig, each with a way to its page. Output is
+              the Session row above (plan 174 S3.3, B-15). */}
+          {retro ? <RetroQuickSettings /> : <QuickSettings />}
+          {retro ? <RetroTakeoverSection /> : <TakeoverSection />}
         </aside>
       </div>
     </div>
@@ -302,11 +339,37 @@ function StudioDashboardBottomRowFallback(): ReactElement {
   )
 }
 
-/** The Microphone section's height while its chunk loads: the picker and the meter row. */
-function MicrophoneSectionFallback(): ReactElement {
+/**
+ * The Chat section's height while its chunk loads: the header row and the
+ * fixed list area (`STUDIO_CHAT_LIST_HEIGHT`), so nothing under it jumps.
+ */
+function StudioChatSectionFallback(): ReactElement {
   return (
-    <PanelSection title="Microphone">
+    <PanelSection title="Chat">
+      <Skeleton className="h-64 rounded-row" />
+    </PanelSection>
+  )
+}
+
+/**
+ * The Audio section's height while its chunk loads: the picker, two level
+ * bars and two Gain faders, or with Retro LCD the Microphone screen (about
+ * 150 px).
+ */
+function AudioSectionFallback({ retro }: { retro: boolean }): ReactElement {
+  if (retro) {
+    return (
+      <PanelSection>
+        <Skeleton className="h-36 rounded-row" />
+      </PanelSection>
+    )
+  }
+  return (
+    <PanelSection title="Audio">
       <Skeleton className="h-control rounded-chip" />
+      <Skeleton className="h-4 rounded-chip" />
+      <Skeleton className="h-4 rounded-chip" />
+      <Skeleton className="h-4 rounded-chip" />
       <Skeleton className="h-4 rounded-chip" />
     </PanelSection>
   )
@@ -323,7 +386,7 @@ function StudioPreviewPanel(): ReactElement {
   const { recording } = useStudioRecordingState()
   const { previewLiveStatus } = useStudioPreview()
   const { diagnosticStats, previewSurfaceStatus } = useStudioDiagnostics()
-  const active = isSessionTransportActive(recording.state)
+  const active = isSessionTransportActive(recording.state, recording.replayOnly)
   const previewHealth = studioHealth(
     diagnosticStats,
     active,

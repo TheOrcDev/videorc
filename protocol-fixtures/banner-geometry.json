@@ -1,0 +1,213 @@
+{
+  "schemaVersion": 1,
+  "description": "Plan 186: where a banner image lands on a canvas. Rust banner_draw_rect and TS bannerDrawRect must both reproduce every case byte for byte.",
+  "cases": [
+    {
+      "name": "wide default 1080p",
+      "image": {
+        "width": 2400,
+        "height": 400
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "rect": {
+        "x": 0.2,
+        "y": 0.782222,
+        "w": 0.6,
+        "h": 0.177778
+      },
+      "expected": {
+        "x": 384,
+        "y": 845,
+        "w": 1152,
+        "h": 192
+      }
+    },
+    {
+      "name": "wide default 4K",
+      "image": {
+        "width": 2400,
+        "height": 400
+      },
+      "canvas": {
+        "width": 3840,
+        "height": 2160
+      },
+      "rect": {
+        "x": 0.2,
+        "y": 0.782222,
+        "w": 0.6,
+        "h": 0.177778
+      },
+      "expected": {
+        "x": 768,
+        "y": 1690,
+        "w": 2304,
+        "h": 384
+      }
+    },
+    {
+      "name": "logo in a wide rect, top right",
+      "image": {
+        "width": 512,
+        "height": 512
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "rect": {
+        "x": 0.7,
+        "y": 0.05,
+        "w": 0.25,
+        "h": 0.2
+      },
+      "expected": {
+        "x": 1608,
+        "y": 54,
+        "w": 216,
+        "h": 216
+      }
+    },
+    {
+      "name": "tall on the vertical canvas, left",
+      "image": {
+        "width": 400,
+        "height": 1200
+      },
+      "canvas": {
+        "width": 1080,
+        "height": 1920
+      },
+      "rect": {
+        "x": 0.05,
+        "y": 0.3,
+        "w": 0.3,
+        "h": 0.4
+      },
+      "expected": {
+        "x": 54,
+        "y": 576,
+        "w": 256,
+        "h": 768
+      }
+    },
+    {
+      "name": "full frame downscaled",
+      "image": {
+        "width": 3840,
+        "height": 2160
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      },
+      "expected": {
+        "x": 0,
+        "y": 0,
+        "w": 1920,
+        "h": 1080
+      }
+    },
+    {
+      "name": "tiny rect at the corner",
+      "image": {
+        "width": 512,
+        "height": 512
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "rect": {
+        "x": 0.98,
+        "y": 0.98,
+        "w": 0.02,
+        "h": 0.02
+      },
+      "expected": {
+        "x": 1898,
+        "y": 1058,
+        "w": 22,
+        "h": 22
+      }
+    },
+    {
+      "name": "centre band, bottom half",
+      "image": {
+        "width": 1000,
+        "height": 100
+      },
+      "canvas": {
+        "width": 1280,
+        "height": 720
+      },
+      "rect": {
+        "x": 0.25,
+        "y": 0.6,
+        "w": 0.51,
+        "h": 0.3
+      },
+      "expected": {
+        "x": 320,
+        "y": 583,
+        "w": 653,
+        "h": 65
+      }
+    },
+    {
+      "name": "wide image in a tall rect, right",
+      "image": {
+        "width": 1200,
+        "height": 200
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "rect": {
+        "x": 0.8,
+        "y": 0.1,
+        "w": 0.15,
+        "h": 0.6
+      },
+      "expected": {
+        "x": 1536,
+        "y": 108,
+        "w": 288,
+        "h": 48
+      }
+    },
+    {
+      "name": "vertical wide default",
+      "image": {
+        "width": 2400,
+        "height": 400
+      },
+      "canvas": {
+        "width": 1080,
+        "height": 1920
+      },
+      "rect": {
+        "x": 0.071111,
+        "y": 0.699583,
+        "w": 0.857778,
+        "h": 0.080417
+      },
+      "expected": {
+        "x": 77,
+        "y": 1344,
+        "w": 926,
+        "h": 154
+      }
+    }
+  ]
+}

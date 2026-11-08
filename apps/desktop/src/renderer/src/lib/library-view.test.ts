@@ -342,6 +342,20 @@ describe('quality chip (E-OD: problem states only)', () => {
     expect(
       libraryQualityChip({ status: 'failed', path: '/x.mp4', reason: 'ffprobe: EOF' })
     ).toEqual(expect.objectContaining({ label: 'Not checked' }))
+    // Plan 200 C8: a long recording's quick check says so; a clean one stays quiet.
+    expect(libraryQualityChip({ status: 'ready', path: '/x.mp4', sampled: true })).toBeNull()
+    expect(
+      libraryQualityChip({
+        status: 'not-hundred-percent',
+        path: '/x.mp4',
+        reasons: ['frames'],
+        sampled: true
+      })?.detail
+    ).toContain('Quick check (long recording)')
+    expect(
+      libraryQualityChip({ status: 'not-hundred-percent', path: '/x.mp4', reasons: ['frames'] })
+        ?.detail
+    ).not.toContain('Quick check')
     // Raw backend text never reaches the chip.
     expect(
       libraryQualityChip({ status: 'failed', path: '/x.mp4', reason: 'ffprobe: EOF' })?.detail

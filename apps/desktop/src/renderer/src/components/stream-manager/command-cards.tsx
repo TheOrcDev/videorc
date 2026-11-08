@@ -206,8 +206,12 @@ function CommandConfirm({
       decline={{ label: 'Cancel', testId: 'command-cancel' }}
       icon={PreviewIcon}
       keys={!view.busy}
-      label="Show this comment on stream?"
-      primary={{ label: 'Show', testId: 'command-show' }}
+      label={view.kind === 'act' ? 'Buddy asks first' : 'Show this comment on stream?'}
+      primary={
+        view.kind === 'act'
+          ? { label: 'Yes', testId: 'command-yes' }
+          : { label: 'Show', testId: 'command-show' }
+      }
       testId="command-confirm"
       timer={view.timer}
       title={view.title}

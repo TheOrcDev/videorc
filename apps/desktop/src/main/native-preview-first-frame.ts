@@ -10,7 +10,7 @@
 // healing action to fire next, and the truthful reason string for the preview
 // window's waiting hint. index.ts owns the timers and executes the actions.
 
-import type { PreviewSurfaceStatus } from '../shared/backend'
+import type { DockHiddenReason, PreviewHoldReason, PreviewSurfaceStatus } from '../shared/backend'
 import { isWindowsD3d11PreviewCapability } from '../shared/native-preview-capability'
 
 export interface FirstFrameSnapshot {
@@ -27,6 +27,94 @@ export interface FirstFrameSnapshot {
   compositorSceneRevision: number | null
   compositorFrameSceneRevision: number | null
   metalTargetPresent: boolean
+  /**
+   * Plan 212 S2: `compositor.status.previewHold`. The Preview holds its
+   * last program frame: for a performance check (frames advance on the
+   * benchmark's canvas while nothing new is presented and the frame scene
+   * revision stays), or because the packaged backstop refused a
+   * test-pattern frame. Neither is a broken Preview, and no heal may fire.
+   */
+  previewHold: PreviewHoldReason | null
+  /**
+   * Plan 213 D: why the docked surface is hidden on purpose right now, from
+   * the one dock predicate (`decideDockVisibility`): the Studio slot scrolled
+   * away or unmounted (Library, Livestream, Sources, Settings), a dialog over
+   * it, the app window hidden, minimized or full screen. A hidden surface
+   * presents nothing, so the chain reads as broken; it is not, and no heal
+   * may fire. `null` while the surface shows, and always for a floating
+   * Preview.
+   */
+  dockHidden: DockHiddenReason | null
+}
+
+/** The waiting reason shown while the Preview holds for a check (plan 212 S2). */
+export const PREVIEW_HOLD_REASON = 'Checking this computer'
+/** The waiting reason while the packaged backstop keeps the last frame. */
+export const PREVIEW_SYNTHETIC_REFUSED_REASON = 'Preview keeps its last frame.'
+
+export function previewHoldReasonText(hold: PreviewHoldReason): string {
+  return hold === 'performance-check' ? PREVIEW_HOLD_REASON : PREVIEW_SYNTHETIC_REFUSED_REASON
+}
+
+/** The waiting reason while the docked surface is hidden on purpose. */
+export function dockHiddenReasonText(reason: DockHiddenReason): string {
+  switch (reason) {
+    case 'scrolled-away':
+      return 'Preview is hidden while scrolled away.'
+    case 'slot-unmounted':
+      return 'Preview is hidden on another page.'
+    case 'overlay-open':
+      return 'Preview is hidden under a window.'
+    case 'main-window-hidden':
+      return 'Preview is hidden with the app window.'
+    case 'main-window-fullscreen':
+      return 'Preview is hidden in fullscreen.'
+    case 'no-slot-report':
+      return 'Preview is waiting for its place in the app window.'
+  }
+}
+
+/** The two states in which the watchdog stands down instead of judging. */
+export type FirstFrameStandDown = Pick<FirstFrameSnapshot, 'previewHold' | 'dockHidden'>
+
+/**
+ * Why the watchdog stands down this tick, or `null` when it judges the
+ * chain: a Preview hold (plan 212 S2), or a docked surface hidden on purpose
+ * (plan 213 D). Neither is a broken Preview: no heal fires, no stall is
+ * declared, and nothing is charged against the ladder.
+ */
+export function firstFrameStandDownReason(snapshot: FirstFrameStandDown): string | null {
+  if (snapshot.previewHold) {
+    return previewHoldReasonText(snapshot.previewHold)
+  }
+  if (snapshot.dockHidden) {
+    return dockHiddenReasonText(snapshot.dockHidden)
+  }
+  return null
+}
+
+/**
+ * What main resets when the watchdog comes back from standing down (a hold
+ * ending, review of S2; the docked surface showing again): the first-frame
+ * clock and ledger start over, so the budget never counts the held or hidden
+ * seconds against the contract, and the present-driving heartbeat is fresh,
+ * so the quiet socket of the hold never reads as a stalled pump on the first
+ * tick after it. A hold ending while the dock is still hidden is not a
+ * hand-back; the watchdog is still standing down. Pure; `null` when nothing
+ * changed.
+ */
+export function firstFrameStandDownHandback(input: {
+  previous: FirstFrameStandDown
+  current: FirstFrameStandDown
+  nowMs: number
+}): { startedAtMs: number; heartbeatAtMs: number } | null {
+  if (
+    firstFrameStandDownReason(input.previous) == null ||
+    firstFrameStandDownReason(input.current) != null
+  ) {
+    return null
+  }
+  return { startedAtMs: input.nowMs, heartbeatAtMs: input.nowMs }
 }
 
 export type FirstFrameHealingAction = 'present-kick' | 'resync-scene' | 'reset-native-path'
@@ -203,6 +291,23 @@ export function proofPresentationFallbackReason(params: {
     return `Windows preview source frames have not advanced for ${Math.round(params.sourceFrameAgeMs)}ms; keeping the last good frame while polling retries.`
   }
   return `Windows preview source frame liveness did not update within ${Math.round(params.pendingElapsedMs)}ms.`
+}
+
+// The proof surface also presents the Linux Preview; its source-frame status
+// is shown in the Preview window, so it names the platform the user is on.
+function proofPreviewName(platform: NodeJS.Platform): string {
+  return platform === 'linux' ? 'Linux preview' : 'Windows preview'
+}
+
+export function proofSourceLiveReason(platform: NodeJS.Platform): string {
+  return `${proofPreviewName(platform)} pixels are live.`
+}
+
+export function proofSourceStalledReason(
+  platform: NodeJS.Platform,
+  sourceFrameAgeMs: number
+): string {
+  return `${proofPreviewName(platform)} source frames have not advanced for ${Math.round(sourceFrameAgeMs)}ms; keeping the last good frame while polling retries.`
 }
 
 export function boundedProofWatchdogRead<T>(
@@ -515,6 +620,13 @@ export function assessPresenting(
   tickMs: number,
   budgets: PresentingWatchBudgets = DEFAULT_PRESENTING_WATCH_BUDGETS
 ): { assessment: PresentingAssessment; watch: PresentingWatchState } {
+  const standDown = firstFrameStandDownReason(snapshot)
+  if (standDown) {
+    // Plan 212 S2 and plan 213 D: a hold, or a docked surface hidden on
+    // purpose, is observed, never charged against the stall ladder; the
+    // watch resumes where it was when the watchdog comes back.
+    return { assessment: { kind: 'observing', reason: standDown }, watch }
+  }
   if (firstFrameContractMet(snapshot) && snapshot.presentationAdvancing) {
     // Recovery resets everything, so the next stall gets a fresh ladder.
     return { assessment: { kind: 'presenting' }, watch: emptyPresentingWatch() }
@@ -567,6 +679,13 @@ export function assessFirstFrame(
   budgets: FirstFrameBudgets = DEFAULT_FIRST_FRAME_BUDGETS,
   { requirePresentationAdvancing = false }: { requirePresentationAdvancing?: boolean } = {}
 ): { assessment: FirstFrameAssessment; ledger: FirstFrameLedger } {
+  const standDown = firstFrameStandDownReason(snapshot)
+  if (standDown) {
+    // Plan 212 S2 and plan 213 D: pending for as long as the hold or the
+    // hidden dock lasts, with the ledger and the clock untouched; no action,
+    // no fallback.
+    return { assessment: { kind: 'pending', reason: standDown }, ledger }
+  }
   if (
     firstFrameContractMet(snapshot) &&
     (!requirePresentationAdvancing || snapshot.presentationAdvancing)

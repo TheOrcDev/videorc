@@ -78,6 +78,22 @@ export function BuddyReactionsSection({
             const outcome = buddyTriggerOutcome(trigger, table, reactions)
             const fallback = buddyTriggerOutcome(trigger, {}, reactions)
             const label = `${copy.title} reaction`
+            const defaultItem = {
+              value: BUDDY_REACTION_DEFAULT_VALUE,
+              label: `Default: ${buddyOutcomeLabel(fallback)}`
+            }
+            const reactionItems = [
+              ...choosable.map((id) => ({ value: id, label: buddyReactionLabel(id) })),
+              ...(missing
+                ? [
+                    {
+                      value: override,
+                      label: `${buddyReactionLabel(override)} (not in these moves)`
+                    }
+                  ]
+                : []),
+              { value: BUDDY_REACTION_NONE, label: 'None' }
+            ]
             return (
               <ListRow
                 key={trigger}
@@ -88,29 +104,27 @@ export function BuddyReactionsSection({
                 data-trigger={trigger}
                 title={copy.title}
               >
-                <Select value={value} onValueChange={(next) => save(trigger, next)}>
+                <Select
+                  items={[defaultItem, ...reactionItems]}
+                  value={value}
+                  onValueChange={(next) => {
+                    if (next !== null) save(trigger, next)
+                  }}
+                >
                   <SelectTrigger aria-label={label} className="w-40" size="xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
-                      <SelectItem value={BUDDY_REACTION_DEFAULT_VALUE}>
-                        Default: {buddyOutcomeLabel(fallback)}
-                      </SelectItem>
+                      <SelectItem value={defaultItem.value}>{defaultItem.label}</SelectItem>
                     </SelectGroup>
                     <SelectSeparator />
                     <SelectGroup>
-                      {choosable.map((id) => (
-                        <SelectItem key={id} value={id}>
-                          {buddyReactionLabel(id)}
+                      {reactionItems.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
                         </SelectItem>
                       ))}
-                      {missing ? (
-                        <SelectItem value={override}>
-                          {buddyReactionLabel(override)} (not in these moves)
-                        </SelectItem>
-                      ) : null}
-                      <SelectItem value={BUDDY_REACTION_NONE}>None</SelectItem>
                     </SelectGroup>
                   </SelectContent>
                 </Select>

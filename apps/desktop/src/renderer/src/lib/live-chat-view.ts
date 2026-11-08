@@ -18,7 +18,8 @@ import type {
 import { isActivityOnlyEvent } from '../../../shared/backend'
 import { platformLabel } from './platform-copy'
 
-/** Platforms that can appear in the unified feed, in display order. */
+/** Platforms that can appear in the unified feed, in display order.
+ * Facebook joins with its connected Page (plan 206 S9). */
 export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'kick', 'x']
 
 /** Max persisted messages projected into the renderer at once; SQLite remains authoritative. */
@@ -267,6 +268,17 @@ export function sortMessagesChronological(messages: LiveChatMessage[]): LiveChat
   return [...messages].sort(compareMessagesChronological)
 }
 
+/**
+ * Whether the rows are already in `sortMessagesChronological` order (plan 191):
+ * one O(n) scan, so a buffer that arrives sorted is not copied and re-sorted.
+ */
+export function isSortedChronologically(messages: readonly LiveChatMessage[]): boolean {
+  for (let index = 1; index < messages.length; index++) {
+    if (compareMessagesChronological(messages[index - 1], messages[index]) > 0) return false
+  }
+  return true
+}
+
 function boundMessages(messages: LiveChatMessage[]): LiveChatMessage[] {
   return messages.length > MAX_LIVE_CHAT_VIEW_MESSAGES
     ? messages.slice(messages.length - MAX_LIVE_CHAT_VIEW_MESSAGES)
@@ -385,7 +397,13 @@ export const MAX_RENDERED_LIVE_CHAT_MESSAGES = 200
 function providerStatePriority(provider: LiveChatProviderState): number {
   if (provider.state === 'failed' || provider.read === 'failed') return 0
   if (provider.write === 'missing-scope') return 1
-  if (provider.read === 'unavailable') return 2
+  if (
+    provider.read === 'unavailable' ||
+    provider.read === 'needs-sign-in' ||
+    provider.read === 'needs-videorc-sign-in'
+  ) {
+    return 2
+  }
   if (provider.state === 'unsupported') return 3
   return 4
 }
@@ -416,6 +434,23 @@ export function chatSetupToastWarnings(providers: LiveChatProviderState[]): Chat
     }))
 }
 
+/**
+ * Destinations whose chat waits on the Videorc sign-in (plan 215 A3). They
+ * are not failures (never "isn't connected"), but a live streamer must hear
+ * it once, with Sign in as the fix: the go-live toast names the account.
+ */
+export function chatVideorcSignInWarnings(
+  providers: readonly LiveChatProviderState[]
+): ChatSetupWarning[] {
+  return providers
+    .filter((provider) => provider.read === 'needs-videorc-sign-in')
+    .map((provider) => ({
+      id: provider.id,
+      platform: provider.platform,
+      message: provider.message
+    }))
+}
+
 /** True when some destination's comments could be fixed by (re)connecting an account. */
 export function chatNeedsConnectionAction(providers: LiveChatProviderState[]): boolean {
   return providers.some((provider) => providerStatePriority(provider) <= 2)
@@ -430,10 +465,20 @@ export function liveChatEmptyMessage(
   if (snapshot.providers.length === 0) {
     return noProviderMessage
   }
-  const provider = snapshot.providers
+  return liveChatProviderNotice(snapshot.providers) ?? healthyMessage
+}
+
+/**
+ * What the destination whose chat most needs the streamer says (failed,
+ * reconnect, unavailable, unsupported), or null when none does. The one
+ * choice behind the empty chat's words and the Studio's Chat notice
+ * (plan 204).
+ */
+export function liveChatProviderNotice(providers: readonly LiveChatProviderState[]): string | null {
+  const provider = providers
     .filter(providerNeedsAction)
     .sort((left, right) => providerStatePriority(left) - providerStatePriority(right))[0]
-  return provider?.message ?? healthyMessage
+  return provider ? provider.message : null
 }
 
 /**
@@ -502,6 +547,7 @@ export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   twitch: platformLabel('twitch'),
   kick: platformLabel('kick'),
   x: platformLabel('x'),
+  facebook: platformLabel('facebook'),
   tiktok: platformLabel('tiktok'),
   instagram: platformLabel('instagram'),
   custom: platformLabel('custom')

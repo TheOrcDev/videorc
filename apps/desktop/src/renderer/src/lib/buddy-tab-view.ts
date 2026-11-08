@@ -69,7 +69,7 @@ export const CLOUD_AI_USES: readonly string[] = [
   BUDDY_HEARS_YOU_USE,
   "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
   "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Buddy you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the Buddy or your account.",
-  "Buddy replies in chat as you: with Answers or Banter on, its replies are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
+  "Buddy talks on stream: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI. It says them in its bubble, and posts one on your own account only when you click its card in Suggest.",
   CLOUD_AI_CLEAN_CUT_USE
 ]
 
@@ -279,6 +279,23 @@ export const BUDDY_VOICE_COMMANDS: readonly {
     title: 'Answer',
     result: 'Confirms or stops a removal.',
     phrases: ['Yes', 'Do it', 'Remove it', 'No', 'Cancel', 'Never mind']
+  },
+  {
+    // Plan 186 S11: banners by name (`cohost_command.rs`, the banner grammar).
+    title: 'Banners',
+    result: 'Shows or hides your banners by name.',
+    phrases: [
+      'Buddy, show the sponsor banner',
+      'Buddy, take the sponsor banner down',
+      'Buddy, hide the banners'
+    ]
+  },
+  {
+    // The Buddy itself (`cohost_command.rs`, the presence grammar): the same
+    // switch as "{name} on stream" in the Stream Manager's Buddy pane.
+    title: 'On stream',
+    result: 'Puts Buddy on the stream, or takes it off.',
+    phrases: ['Buddy, show up', 'Buddy, come on screen', 'Buddy, hide', 'Buddy, go away']
   },
   {
     // Plan 174 F-16: the marker command (`marker_voice.rs`), with your title.

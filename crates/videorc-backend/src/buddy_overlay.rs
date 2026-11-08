@@ -16,7 +16,20 @@
 //! → `talk` / `laugh` / `think` while a bubble is up → `idle` when it ends. A
 //! new bubble replaces the current one (a laugh overrides a talk); the expiry
 //! of a replaced bubble is a no-op.
+//!
+//! Plan 211 D7: Buddy's own lines (greetings, answers, banter, a Suggest card
+//! that landed) enter through [`queue_for_utterance`], a bounded queue in
+//! front of `show_bubble`: a line waits for the bubble that is up to end plus
+//! [`BUDDY_BUBBLE_GAP`], at most [`BUDDY_BUBBLE_QUEUE_MAX`] wait, and a line
+//! that waited [`BUDDY_BUBBLE_QUEUE_MAX_WAIT`] is dropped. The streamer's own
+//! Say line ([`show_for_utterance`]) still shows at once and replaces
+//! whatever is up; the queue resumes after it. The queue is state in the same
+//! machine, pure and clock-injected; the render-side snapshot is untouched.
+//! Every text is clipped to [`BUDDY_SAY_MAX_CHARS`] at a word boundary
+//! ([`clip_bubble_text`]) before it shows, so a long answer shows instead of
+//! vanishing.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +46,7 @@ use crate::cohost::{
     CohostUtteranceTriggerKind,
 };
 use crate::overlay_layout::{OverlayItem, OverlayRect, OverlaySnap, load_overlay_layout};
+use crate::protocol::CohostReportPostSource;
 use crate::state::AppState;
 
 /// Event every renderer receives when the Buddy's state or bubble changes.
@@ -43,6 +57,12 @@ pub const BUDDY_BUBBLE_MIN: Duration = Duration::from_millis(2500);
 pub const BUDDY_BUBBLE_PER_CHAR: Duration = Duration::from_millis(60);
 /// ... and never longer than this.
 pub const BUDDY_BUBBLE_MAX: Duration = Duration::from_secs(10);
+/// Plan 211 D7: a queued line waits for the current bubble's end plus this.
+pub const BUDDY_BUBBLE_GAP: Duration = Duration::from_millis(500);
+/// At most this many of Buddy's lines wait; a further one is dropped.
+pub const BUDDY_BUBBLE_QUEUE_MAX: usize = 3;
+/// A line that waited this long is dropped: the moment has passed.
+pub const BUDDY_BUBBLE_QUEUE_MAX_WAIT: Duration = Duration::from_secs(20);
 
 /// `max(2.5 s, 0.06 s × characters)`, capped at 10 s (D17).
 pub fn buddy_bubble_duration(text: &str) -> Duration {
@@ -84,14 +104,57 @@ struct BuddyBubbleRecord {
     generation: u64,
 }
 
+/// One of Buddy's own lines waiting for the bubble (plan 211 D7). The text
+/// is already clipped and validated; `source` is who wrote a greeting, for
+/// the report when the line shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedBubble {
+    pub utterance: CohostUtterance,
+    pub source: Option<CohostReportPostSource>,
+    pub queued_at: DateTime<Utc>,
+}
+
+/// What the queue said to an offered line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BubbleOffer {
+    /// Nothing is up and nothing waits: show it now.
+    ShowNow,
+    /// It waits. `arm` is when the pump must run, or `None` when a pump is
+    /// already armed for an earlier line.
+    Queued { arm: Option<DateTime<Utc>> },
+    /// The queue is full: the line is dropped (counted stale). `log` carries
+    /// the one line a session says so.
+    Dropped { log: Option<String> },
+}
+
+/// What one pump pass decided: the line to show now (none while a bubble is
+/// up), when to run again, and the lines that waited too long.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BubblePump {
+    pub show: Option<QueuedBubble>,
+    pub arm: Option<DateTime<Utc>>,
+    pub dropped: Vec<QueuedBubble>,
+    pub log: Option<String>,
+}
+
 /// The state machine. Pure and clock-injected; the runtime below owns the
-/// lock, the event and the expiry timer.
+/// lock, the event and the expiry timer. Since plan 211 D7 it also keeps
+/// the queue of Buddy's own lines waiting for the bubble; the snapshot the
+/// renderers and the compositor read is unchanged by it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuddyOverlayState {
     persona_id: String,
     state: CohostAvatarState,
     bubble: Option<BuddyBubbleRecord>,
     generation: u64,
+    /// Buddy's lines waiting for the bubble, oldest first (plan 211 D7).
+    waiting: VecDeque<QueuedBubble>,
+    /// When the armed pump wakes; `None` while none is armed.
+    pump_due: Option<DateTime<Utc>>,
+    /// Lines dropped this session (full queue, or waited too long), and
+    /// whether that was logged yet (once a session).
+    dropped: u64,
+    drop_logged: bool,
 }
 
 impl BuddyOverlayState {
@@ -101,7 +164,128 @@ impl BuddyOverlayState {
             state: CohostAvatarState::Idle,
             bubble: None,
             generation: 0,
+            waiting: VecDeque::new(),
+            pump_due: None,
+            dropped: 0,
+            drop_logged: false,
         }
+    }
+
+    /// When the bubble that is up ends, or `None` when none is (a bubble
+    /// whose time passed counts as gone, even before its expiry ran).
+    fn busy_until(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.bubble
+            .as_ref()
+            .map(|bubble| bubble.until)
+            .filter(|until| *until > now)
+    }
+
+    /// Lines waiting for the bubble.
+    #[cfg(test)]
+    pub fn waiting(&self) -> usize {
+        self.waiting.len()
+    }
+
+    /// Lines dropped this session.
+    #[cfg(test)]
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    fn drop_log(&mut self, what: &str) -> Option<String> {
+        if self.drop_logged {
+            return None;
+        }
+        self.drop_logged = true;
+        Some(format!(
+            "Buddy dropped a waiting bubble line ({what}). A line waits for the bubble at most {} s and at most {} wait; this is logged once a session.",
+            BUDDY_BUBBLE_QUEUE_MAX_WAIT.as_secs(),
+            BUDDY_BUBBLE_QUEUE_MAX
+        ))
+    }
+
+    /// Offer one of Buddy's own lines (plan 211 D7): shown now when nothing
+    /// is up and nothing waits, else queued behind the current bubble (its
+    /// end plus [`BUDDY_BUBBLE_GAP`]), else dropped when
+    /// [`BUDDY_BUBBLE_QUEUE_MAX`] already wait. `ShowNow` leaves the show to
+    /// the caller, under the same lock, so nothing slips in between.
+    pub fn offer(&mut self, line: QueuedBubble, now: DateTime<Utc>) -> BubbleOffer {
+        let busy_until = self.busy_until(now);
+        if busy_until.is_none() && self.waiting.is_empty() {
+            return BubbleOffer::ShowNow;
+        }
+        if self.waiting.len() >= BUDDY_BUBBLE_QUEUE_MAX {
+            self.dropped = self.dropped.saturating_add(1);
+            let log = self.drop_log("the queue is full");
+            return BubbleOffer::Dropped { log };
+        }
+        self.waiting.push_back(line);
+        let due = busy_until.map_or(now, |until| until + gap());
+        let arm = match self.pump_due {
+            Some(_) => None,
+            None => {
+                self.pump_due = Some(due);
+                Some(due)
+            }
+        };
+        BubbleOffer::Queued { arm }
+    }
+
+    /// The pump woke: drop the lines that waited [`BUDDY_BUBBLE_QUEUE_MAX_WAIT`]
+    /// (the moment has passed), then the oldest line shows when nothing is
+    /// up, or the pump re-arms for the current bubble's end plus the gap (a
+    /// Say line pre-empted it). The caller shows `show` under the same lock
+    /// and then asks [`arm_for_next`](Self::arm_for_next).
+    pub fn pump(&mut self, now: DateTime<Utc>) -> BubblePump {
+        self.pump_due = None;
+        let mut out = BubblePump::default();
+        let max_wait = chrono::Duration::from_std(BUDDY_BUBBLE_QUEUE_MAX_WAIT)
+            .unwrap_or_else(|_| chrono::Duration::seconds(20));
+        while self
+            .waiting
+            .front()
+            .is_some_and(|line| now.signed_duration_since(line.queued_at) >= max_wait)
+        {
+            if let Some(line) = self.waiting.pop_front() {
+                out.dropped.push(line);
+            }
+        }
+        if !out.dropped.is_empty() {
+            self.dropped = self.dropped.saturating_add(out.dropped.len() as u64);
+            out.log = self.drop_log("it waited too long");
+        }
+        if self.waiting.is_empty() {
+            return out;
+        }
+        if let Some(until) = self.busy_until(now) {
+            let due = until + gap();
+            self.pump_due = Some(due);
+            out.arm = Some(due);
+            return out;
+        }
+        out.show = self.waiting.pop_front();
+        out
+    }
+
+    /// After a queued line showed: when the pump must run for the next one,
+    /// or `None` when nothing waits (or a pump is already armed).
+    pub fn arm_for_next(&mut self) -> Option<DateTime<Utc>> {
+        if self.waiting.is_empty() || self.pump_due.is_some() {
+            return None;
+        }
+        let due = self.bubble.as_ref()?.until + gap();
+        self.pump_due = Some(due);
+        Some(due)
+    }
+
+    /// The live-chat session changed (plan 211 D7): the lines waiting were
+    /// for the last one. Returns how many were dropped, uncounted and unsaid.
+    pub fn clear_queue(&mut self) -> usize {
+        let dropped = self.waiting.len();
+        self.waiting.clear();
+        self.dropped = 0;
+        self.drop_logged = false;
+        dropped
     }
 
     #[cfg(test)]
@@ -179,11 +363,13 @@ impl BuddyOverlayState {
     }
 
     /// Back to `idle` at once (a session boundary, a cleared pending answer).
+    /// The lines waiting for the bubble go with it.
     pub fn clear(&mut self) -> bool {
         let changed = self.bubble.is_some() || self.state != CohostAvatarState::Idle;
         self.bubble = None;
         self.state = CohostAvatarState::Idle;
         self.generation = self.generation.wrapping_add(1);
+        self.clear_queue();
         changed
     }
 
@@ -197,6 +383,12 @@ impl BuddyOverlayState {
             }),
         }
     }
+}
+
+/// [`BUDDY_BUBBLE_GAP`] as chrono counts it.
+fn gap() -> chrono::Duration {
+    chrono::Duration::from_std(BUDDY_BUBBLE_GAP)
+        .unwrap_or_else(|_| chrono::Duration::milliseconds(500))
 }
 
 pub type BuddyOverlayStateSlot = Arc<tokio::sync::Mutex<BuddyOverlayState>>;
@@ -231,6 +423,29 @@ pub fn validate_say_text(text: &str) -> Result<String, BuddySayError> {
     Ok(text)
 }
 
+/// Plan 211 D7: text over [`BUDDY_SAY_MAX_CHARS`] is clipped, not dropped:
+/// whitespace collapsed, cut at the last word boundary that leaves room for
+/// "…", and "…" appended. A single word longer than the cap is cut inside
+/// the word. Characters are counted as [`validate_say_text`] counts them, so
+/// the result always passes it.
+pub fn clip_bubble_text(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= BUDDY_SAY_MAX_CHARS {
+        return text;
+    }
+    let head: String = text.chars().take(BUDDY_SAY_MAX_CHARS - 1).collect();
+    let at_word = head
+        .rfind(' ')
+        .map(|index| head[..index].trim_end())
+        .filter(|cut| !cut.is_empty());
+    format!("{}…", at_word.unwrap_or_else(|| head.trim_end()))
+}
+
+/// Every bubble's text: clipped, then validated.
+fn bubble_text(text: &str) -> Result<String, BuddySayError> {
+    validate_say_text(&clip_bubble_text(text))
+}
+
 /// The current state for a renderer that just connected (`cohost.buddy.status`).
 pub async fn status(app: &AppState) -> BuddyOverlaySnapshot {
     app.buddy_overlay_state.lock().await.snapshot()
@@ -244,6 +459,16 @@ pub fn overlay_enabled(app: &AppState) -> bool {
     buddy.show_on_stream || buddy.show_in_recording
 }
 
+/// Whether anyone can see Buddy right now (plan 211 D9): today, whether it
+/// is on an output ([`overlay_enabled`]). In Bubble mode the lane greets,
+/// answers and asks for banter only while this holds, so no AI call is spent
+/// on a line nobody sees. Plan 202 Phase A adds the takeover rule here
+/// ("hidden by a takeover"); keep that rule in this one place. Reads the
+/// overlay layout from the database: call it before taking the engine lock.
+pub fn buddy_visible(app: &AppState) -> bool {
+    overlay_enabled(app)
+}
+
 /// Whether an utterance's words belong in the bubble: a line that reached
 /// chat (`sent`), one that was never meant for chat (`bubble-only`), or the
 /// streamer's own line from the Say box, which bubbles the moment it is
@@ -255,9 +480,11 @@ pub fn utterance_bubbles(utterance: &CohostUtterance) -> bool {
     ) || utterance.trigger.kind == CohostUtteranceTriggerKind::Manual
 }
 
-/// Phase D's utterances meet Phase C's bubble here (plan 164 D7/D18): the
-/// bubble shows when [`utterance_bubbles`] says so and the Buddy is on some
-/// output. Returns the state as shown, or `None` when nothing was shown.
+/// The streamer's own line meets the bubble here (plan 164 D7/D18, plan 211
+/// D7): it shows at once when [`utterance_bubbles`] says so and the Buddy is
+/// on some output, replacing whatever is up; the queue of Buddy's own lines
+/// resumes after it. Returns the state as shown, or `None` when nothing was
+/// shown. Buddy's own lines take [`queue_for_utterance`] instead.
 pub async fn show_for_utterance(
     app: &AppState,
     utterance: &CohostUtterance,
@@ -266,7 +493,10 @@ pub async fn show_for_utterance(
         return None;
     }
     match show_bubble(app, &utterance.text, utterance.state).await {
-        Ok(snapshot) => Some(snapshot),
+        Ok(snapshot) => {
+            crate::cohost::note_bubble_shown(app, utterance, None).await;
+            Some(snapshot)
+        }
         Err(error) => {
             app.emit_log(
                 "warn",
@@ -280,39 +510,237 @@ pub async fn show_for_utterance(
     }
 }
 
-/// Show a bubble: THE entry point for every utterance. Validates the text,
-/// stamps the current persona, runs the state machine, tells every window and
-/// schedules the bubble's end. Returns the state as shown.
+/// What became of one of Buddy's own lines at the queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueOutcome {
+    /// Nothing was up: it shows now.
+    Shown(BuddyOverlaySnapshot),
+    /// It waits for the bubble that is up.
+    Waiting,
+    /// The queue was full: dropped, counted stale.
+    Dropped,
+    /// Not a line that bubbles, or the Buddy is on no output.
+    Skipped,
+}
+
+/// Buddy's own lines meet the bubble here (plan 211 D7): a greeting, an
+/// answer, banter or a Suggest card that landed. The line is clipped and
+/// validated, then offered to the queue: shown now when nothing is up,
+/// queued behind the current bubble, or dropped when three already wait.
+/// `source` is who wrote a greeting, for the report when the line shows.
+/// Nothing is shown with the Buddy on no output.
+pub async fn queue_for_utterance(
+    app: &AppState,
+    utterance: &CohostUtterance,
+    source: Option<CohostReportPostSource>,
+) -> QueueOutcome {
+    if !utterance_bubbles(utterance) || !overlay_enabled(app) {
+        return QueueOutcome::Skipped;
+    }
+    let text = match bubble_text(&utterance.text) {
+        Ok(text) => text,
+        Err(error) => {
+            app.emit_log(
+                "warn",
+                format!(
+                    "Buddy bubble skipped for utterance {}: {error}",
+                    utterance.id
+                ),
+            );
+            return QueueOutcome::Skipped;
+        }
+    };
+    let persona_id = crate::cohost::get_cohost_settings(app).await.persona.id;
+    let now = Utc::now();
+    let line = QueuedBubble {
+        utterance: CohostUtterance {
+            text,
+            ..utterance.clone()
+        },
+        source,
+        queued_at: now,
+    };
+    let offered = {
+        let mut buddy = app.buddy_overlay_state.lock().await;
+        match buddy.offer(line.clone(), now) {
+            BubbleOffer::ShowNow => {
+                buddy.set_persona(persona_id);
+                Offered::Shown(present(
+                    &mut buddy,
+                    line.utterance.text.clone(),
+                    line.utterance.state,
+                    now,
+                ))
+            }
+            BubbleOffer::Queued { arm } => Offered::Queued(arm),
+            BubbleOffer::Dropped { log } => Offered::Dropped(log),
+        }
+    };
+    match offered {
+        Offered::Shown(shown) => {
+            publish_shown(app, &shown);
+            crate::cohost::note_bubble_shown(app, &line.utterance, line.source).await;
+            QueueOutcome::Shown(shown.snapshot)
+        }
+        Offered::Queued(arm) => {
+            if let Some(due) = arm {
+                arm_pump(app, due);
+            }
+            QueueOutcome::Waiting
+        }
+        Offered::Dropped(log) => {
+            if let Some(log) = log {
+                app.emit_log("info", log);
+            }
+            crate::cohost::note_bubble_dropped(app, &line.utterance).await;
+            QueueOutcome::Dropped
+        }
+    }
+}
+
+/// The queue's answer with the show already run under the lock.
+enum Offered {
+    Shown(Shown),
+    Queued(Option<DateTime<Utc>>),
+    Dropped(Option<String>),
+}
+
+/// Lines waiting for the bubble (the queue's length).
+#[cfg(test)]
+pub async fn waiting_lines(app: &AppState) -> usize {
+    app.buddy_overlay_state.lock().await.waiting()
+}
+
+/// The live-chat session changed (plan 211 D7): the lines waiting for the
+/// bubble were for the last one.
+pub async fn clear_queue(app: &AppState) {
+    let dropped = app.buddy_overlay_state.lock().await.clear_queue();
+    if dropped > 0 {
+        app.emit_log(
+            "info",
+            format!("Buddy dropped {dropped} waiting line(s): the chat session changed."),
+        );
+    }
+}
+
+/// Wake the pump at `due` (one task per arming; the state hands out at most
+/// one arming per wait).
+fn arm_pump(app: &AppState, due: DateTime<Utc>) {
+    let app = app.clone();
+    tokio::spawn(async move {
+        let wait = due
+            .signed_duration_since(Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tokio::time::sleep(wait).await;
+        pump_queue(&app).await;
+    });
+}
+
+/// The pump: show the oldest waiting line when nothing is up, else re-arm
+/// for the current bubble's end plus the gap. Lines that waited too long
+/// are dropped and counted.
+async fn pump_queue(app: &AppState) {
+    let persona_id = crate::cohost::get_cohost_settings(app).await.persona.id;
+    let now = Utc::now();
+    let (pump, shown) = {
+        let mut buddy = app.buddy_overlay_state.lock().await;
+        let mut pump = buddy.pump(now);
+        let shown = pump.show.as_ref().map(|line| {
+            buddy.set_persona(persona_id.clone());
+            present(
+                &mut buddy,
+                line.utterance.text.clone(),
+                line.utterance.state,
+                now,
+            )
+        });
+        if shown.is_some() {
+            pump.arm = buddy.arm_for_next();
+        }
+        (pump, shown)
+    };
+    if let Some(log) = pump.log {
+        app.emit_log("info", log);
+    }
+    for line in &pump.dropped {
+        crate::cohost::note_bubble_dropped(app, &line.utterance).await;
+    }
+    if let (Some(line), Some(shown)) = (pump.show, shown) {
+        publish_shown(app, &shown);
+        crate::cohost::note_bubble_shown(app, &line.utterance, line.source).await;
+    }
+    if let Some(due) = pump.arm {
+        arm_pump(app, due);
+    }
+}
+
+/// A bubble as it was just put up, for [`publish_shown`].
+struct Shown {
+    snapshot: BuddyOverlaySnapshot,
+    generation: u64,
+    duration: Duration,
+    chars: usize,
+    state: CohostUtteranceState,
+}
+
+/// Run the state machine for one validated text, under the caller's lock.
+fn present(
+    buddy: &mut BuddyOverlayState,
+    text: String,
+    state: CohostUtteranceState,
+    now: DateTime<Utc>,
+) -> Shown {
+    let duration = buddy_bubble_duration(&text);
+    let chars = text.chars().count();
+    let generation = buddy.show_bubble(text, state, duration, now);
+    Shown {
+        snapshot: buddy.snapshot(),
+        generation,
+        duration,
+        chars,
+        state,
+    }
+}
+
+/// Tell every window and schedule the bubble's end.
+fn publish_shown(app: &AppState, shown: &Shown) {
+    publish_state(
+        app,
+        shown.snapshot.clone(),
+        Some(BuddyAnimatorEvent::UtteranceStart {
+            state: shown.state,
+            chars: shown.chars,
+            bubble_seconds: shown.duration.as_secs_f64(),
+        }),
+    );
+    let app = app.clone();
+    let (duration, generation) = (shown.duration, shown.generation);
+    tokio::spawn(async move {
+        tokio::time::sleep(duration).await;
+        expire_bubble(&app, generation).await;
+    });
+}
+
+/// Show a bubble at once: the entry point for the streamer's own line and
+/// for the queue when a line's turn comes. Clips and validates the text,
+/// stamps the current persona, runs the state machine, tells every window
+/// and schedules the bubble's end. Replaces whatever is up. Returns the
+/// state as shown.
 pub async fn show_bubble(
     app: &AppState,
     text: &str,
     state: CohostUtteranceState,
 ) -> Result<BuddyOverlaySnapshot, BuddySayError> {
-    let text = validate_say_text(text)?;
+    let text = bubble_text(text)?;
     let persona_id = crate::cohost::get_cohost_settings(app).await.persona.id;
-    let duration = buddy_bubble_duration(&text);
-    let chars = text.chars().count();
-    let (snapshot, generation) = {
+    let shown = {
         let mut buddy = app.buddy_overlay_state.lock().await;
         buddy.set_persona(persona_id);
-        let generation = buddy.show_bubble(text, state, duration, Utc::now());
-        (buddy.snapshot(), generation)
+        present(&mut buddy, text, state, Utc::now())
     };
-    publish_state(
-        app,
-        snapshot.clone(),
-        Some(BuddyAnimatorEvent::UtteranceStart {
-            state,
-            chars,
-            bubble_seconds: duration.as_secs_f64(),
-        }),
-    );
-    let app = app.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(duration).await;
-        expire_bubble(&app, generation).await;
-    });
-    Ok(snapshot)
+    publish_shown(app, &shown);
+    Ok(shown.snapshot)
 }
 
 /// Tell every window, and the pet on stream: the state and the event that
@@ -876,5 +1304,326 @@ mod tests {
             rx.recv().await.unwrap().payload["bubble"]["text"],
             "It is a Keychron."
         );
+    }
+
+    // --- Plan 211 D7: the bubble queue and clipping ---------------------------------
+
+    fn queued(text: &str, queued_at: DateTime<Utc>) -> QueuedBubble {
+        QueuedBubble {
+            utterance: utterance(
+                CohostUtteranceTriggerKind::Greeting,
+                CohostUtteranceStatus::BubbleOnly,
+                text,
+            ),
+            source: None,
+            queued_at,
+        }
+    }
+
+    /// A 10 s bubble is not replaced by a line that arrives 5 s in: the line
+    /// waits for the bubble's end plus the gap, a second line waits behind
+    /// it without a new arming, and the pump shows them in order.
+    #[test]
+    fn a_line_that_arrives_while_a_bubble_is_up_waits_for_its_end_plus_the_gap() {
+        let mut buddy = BuddyOverlayState::new("default");
+        assert_eq!(
+            buddy.offer(queued("first", at(0)), at(0)),
+            BubbleOffer::ShowNow,
+            "nothing up, nothing waiting"
+        );
+        buddy.show_bubble(
+            "a long answer",
+            CohostUtteranceState::Talk,
+            Duration::from_secs(10),
+            at(0),
+        );
+        assert_eq!(
+            buddy.offer(queued("Welcome, Ada!", at(5)), at(5)),
+            BubbleOffer::Queued {
+                arm: Some(at(10) + gap())
+            }
+        );
+        assert_eq!(
+            buddy.snapshot().bubble.unwrap().text,
+            "a long answer",
+            "not replaced"
+        );
+        assert_eq!(buddy.state(), CohostAvatarState::Talk);
+        assert_eq!(buddy.waiting(), 1);
+        assert_eq!(
+            buddy.offer(queued("Welcome, Bo!", at(6)), at(6)),
+            BubbleOffer::Queued { arm: None },
+            "a pump is already armed"
+        );
+        // Woken early (the bubble is still up): re-armed, nothing shown.
+        let early = buddy.pump(at(9));
+        assert_eq!(early.show, None);
+        assert_eq!(early.arm, Some(at(10) + gap()));
+        assert!(early.dropped.is_empty());
+        // Its time: the oldest line shows, and the next is armed for its
+        // end plus the gap.
+        let due = buddy.pump(at(10) + gap());
+        let line = due.show.expect("Ada shows");
+        assert_eq!(line.utterance.text, "Welcome, Ada!");
+        assert_eq!(due.arm, None, "the caller shows, then arms");
+        buddy.show_bubble(
+            line.utterance.text,
+            line.utterance.state,
+            Duration::from_secs(3),
+            at(10) + gap(),
+        );
+        assert_eq!(buddy.snapshot().bubble.unwrap().text, "Welcome, Ada!");
+        assert_eq!(buddy.arm_for_next(), Some(at(14)));
+        assert_eq!(buddy.arm_for_next(), None, "armed once");
+        assert_eq!(buddy.waiting(), 1);
+        assert_eq!(
+            buddy.pump(at(14)).show.unwrap().utterance.text,
+            "Welcome, Bo!"
+        );
+        assert_eq!(buddy.waiting(), 0);
+        assert_eq!(buddy.dropped(), 0);
+    }
+
+    /// At most three lines wait: a fourth is dropped (logged once), and a
+    /// line that waited 20 s is dropped when the pump wakes. `clear` empties
+    /// the queue and resets the once-a-session log.
+    #[test]
+    fn the_queue_holds_three_and_drops_a_fourth_and_a_line_that_waited_twenty_seconds() {
+        let mut buddy = BuddyOverlayState::new("default");
+        buddy.show_bubble(
+            "up",
+            CohostUtteranceState::Talk,
+            Duration::from_secs(10),
+            at(0),
+        );
+        for second in [1, 2, 3] {
+            assert!(matches!(
+                buddy.offer(queued(&format!("line {second}"), at(second)), at(second)),
+                BubbleOffer::Queued { .. }
+            ));
+            assert_eq!(buddy.waiting(), second as usize);
+        }
+        let fourth = buddy.offer(queued("line 4", at(4)), at(4));
+        assert!(
+            matches!(fourth, BubbleOffer::Dropped { log: Some(_) }),
+            "{fourth:?}"
+        );
+        assert!(
+            matches!(
+                buddy.offer(queued("line 5", at(5)), at(5)),
+                BubbleOffer::Dropped { log: None }
+            ),
+            "logged once a session"
+        );
+        assert_eq!(buddy.waiting(), 3);
+        assert_eq!(buddy.dropped(), 2);
+        // Say lines kept the bubble busy until 22 s: lines 1 and 2 waited
+        // 20 s or more and are dropped; line 3 (19 s) shows.
+        buddy.show_bubble(
+            "say",
+            CohostUtteranceState::Laugh,
+            Duration::from_secs(10),
+            at(12),
+        );
+        let pump = buddy.pump(at(22));
+        assert_eq!(
+            pump.dropped
+                .iter()
+                .map(|line| line.utterance.text.as_str())
+                .collect::<Vec<_>>(),
+            ["line 1", "line 2"]
+        );
+        assert!(pump.log.is_none(), "the once-a-session log was spent");
+        assert_eq!(pump.show.unwrap().utterance.text, "line 3");
+        assert_eq!(buddy.dropped(), 4);
+        assert_eq!(buddy.waiting(), 0);
+        // clear: the queue goes with the bubble, and the log is fresh.
+        buddy.show_bubble(
+            "x",
+            CohostUtteranceState::Talk,
+            Duration::from_secs(3),
+            at(30),
+        );
+        assert!(matches!(
+            buddy.offer(queued("later", at(31)), at(31)),
+            BubbleOffer::Queued { .. }
+        ));
+        assert!(buddy.clear());
+        assert_eq!(buddy.waiting(), 0);
+        assert_eq!(buddy.dropped(), 0);
+        buddy.show_bubble(
+            "y",
+            CohostUtteranceState::Talk,
+            Duration::from_secs(10),
+            at(40),
+        );
+        for second in [41, 42, 43] {
+            buddy.offer(queued("w", at(second)), at(second));
+        }
+        assert!(matches!(
+            buddy.offer(queued("w", at(44)), at(44)),
+            BubbleOffer::Dropped { log: Some(_) }
+        ));
+    }
+
+    /// The streamer's own Say line shows at once and replaces what is up;
+    /// the waiting line is not lost: the pump re-arms for the Say line's
+    /// end and shows it after.
+    #[test]
+    fn a_say_line_pre_empts_and_the_queue_resumes_after_it() {
+        let mut buddy = BuddyOverlayState::new("default");
+        buddy.show_bubble(
+            "greeting",
+            CohostUtteranceState::Talk,
+            Duration::from_secs(3),
+            at(0),
+        );
+        assert_eq!(
+            buddy.offer(queued("answer", at(1)), at(1)),
+            BubbleOffer::Queued {
+                arm: Some(at(3) + gap())
+            }
+        );
+        // The runtime shows a Say line through `show_bubble` directly.
+        buddy.show_bubble(
+            "Hello horde",
+            CohostUtteranceState::Laugh,
+            Duration::from_secs(5),
+            at(2),
+        );
+        assert_eq!(buddy.snapshot().bubble.unwrap().text, "Hello horde");
+        assert_eq!(buddy.waiting(), 1, "the answer still waits");
+        let woke = buddy.pump(at(3) + gap());
+        assert_eq!(woke.show, None);
+        assert_eq!(woke.arm, Some(at(7) + gap()));
+        let resumed = buddy.pump(at(7) + gap());
+        assert_eq!(resumed.show.unwrap().utterance.text, "answer");
+        assert_eq!(resumed.arm, None);
+        assert_eq!(buddy.waiting(), 0);
+    }
+
+    #[test]
+    fn bubble_text_is_clipped_at_a_word_boundary_with_an_ellipsis() {
+        assert_eq!(clip_bubble_text("  short   line "), "short line");
+        let exact = "x".repeat(BUDDY_SAY_MAX_CHARS);
+        assert_eq!(clip_bubble_text(&exact), exact);
+        // 50 words: cut at a word boundary, under the cap, ending with "…".
+        let long = ["word"; 50].join(" ");
+        assert_eq!(long.chars().count(), 249);
+        let clipped = clip_bubble_text(&long);
+        assert!(clipped.ends_with('…'), "{clipped:?}");
+        assert!(clipped.chars().count() <= BUDDY_SAY_MAX_CHARS);
+        let body = clipped.trim_end_matches('…');
+        assert!(!body.ends_with(' '));
+        assert!(
+            body.split(' ').all(|word| word == "word"),
+            "no word cut in half: {body:?}"
+        );
+        assert_eq!(validate_say_text(&clipped).unwrap(), clipped);
+        // One word longer than the cap is cut inside the word.
+        let clipped = clip_bubble_text(&"y".repeat(300));
+        assert_eq!(clipped, format!("{}…", "y".repeat(BUDDY_SAY_MAX_CHARS - 1)));
+        assert_eq!(clipped.chars().count(), BUDDY_SAY_MAX_CHARS);
+        // A long first word with more after it: the boundary rule would
+        // leave nothing, so it cuts inside the word too.
+        let clipped = clip_bubble_text(&format!("{} tail", "z".repeat(250)));
+        assert_eq!(clipped, format!("{}…", "z".repeat(BUDDY_SAY_MAX_CHARS - 1)));
+        // Characters, not bytes.
+        let clipped = clip_bubble_text(&"😀 ".repeat(150));
+        assert!(clipped.ends_with('…'));
+        assert!(clipped.chars().count() <= BUDDY_SAY_MAX_CHARS);
+        assert!(validate_say_text(&clipped).is_ok());
+        assert!(matches!(bubble_text("   "), Err(BuddySayError::Empty)));
+    }
+
+    /// Plan 211 D7 at the runtime: Buddy's own lines queue behind the bubble
+    /// that is up (three at most), nothing replaces it, the pump shows the
+    /// next after it ends plus the gap, and the queue empties with the chat
+    /// session.
+    #[tokio::test]
+    async fn buddy_lines_wait_behind_the_bubble_and_the_pump_shows_the_next() {
+        let (app, mut rx) = test_app();
+        buddy_output_switches(&app, true, false);
+        let line = |n: u32| {
+            utterance(
+                CohostUtteranceTriggerKind::Greeting,
+                CohostUtteranceStatus::BubbleOnly,
+                &format!("Hi {n}"),
+            )
+        };
+        match queue_for_utterance(&app, &line(0), None).await {
+            QueueOutcome::Shown(shown) => assert_eq!(shown.bubble.unwrap().text, "Hi 0"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(rx.recv().await.unwrap().payload["bubble"]["text"], "Hi 0");
+        for n in 1..=3 {
+            assert_eq!(
+                queue_for_utterance(&app, &line(n), None).await,
+                QueueOutcome::Waiting,
+                "line {n}"
+            );
+        }
+        assert_eq!(
+            queue_for_utterance(&app, &line(4), None).await,
+            QueueOutcome::Dropped
+        );
+        assert_eq!(waiting_lines(&app).await, 3);
+        assert_eq!(
+            status(&app).await.bubble.unwrap().text,
+            "Hi 0",
+            "a waiting line never replaces the bubble"
+        );
+        while let Ok(event) = rx.try_recv() {
+            assert_ne!(event.event, BUDDY_STATE_EVENT, "nothing else showed");
+        }
+        // A card is not a bubbling line: skipped, never queued.
+        assert_eq!(
+            queue_for_utterance(
+                &app,
+                &utterance(
+                    CohostUtteranceTriggerKind::Answer,
+                    CohostUtteranceStatus::Proposed,
+                    "card"
+                ),
+                None
+            )
+            .await,
+            QueueOutcome::Skipped
+        );
+        // "Hi 0" stays its 2.5 s minimum, then the gap, then "Hi 1" shows.
+        tokio::time::sleep(Duration::from_millis(3400)).await;
+        assert_eq!(status(&app).await.bubble.unwrap().text, "Hi 1");
+        assert_eq!(waiting_lines(&app).await, 2);
+        // The chat session changed: the rest goes.
+        clear_queue(&app).await;
+        assert_eq!(waiting_lines(&app).await, 0);
+        // The Buddy on no output: skipped before the queue.
+        buddy_output_switches(&app, false, false);
+        assert_eq!(
+            queue_for_utterance(&app, &line(9), None).await,
+            QueueOutcome::Skipped
+        );
+    }
+
+    /// A long answer shows clipped instead of vanishing.
+    #[tokio::test]
+    async fn a_long_line_is_clipped_not_dropped() {
+        let (app, _rx) = test_app();
+        buddy_output_switches(&app, true, false);
+        let long = ["Rust"; 80].join(" ");
+        let shown = show_for_utterance(
+            &app,
+            &utterance(
+                CohostUtteranceTriggerKind::Manual,
+                CohostUtteranceStatus::BubbleOnly,
+                &long,
+            ),
+        )
+        .await
+        .expect("shown, clipped");
+        let text = shown.bubble.unwrap().text;
+        assert!(text.ends_with('…'));
+        assert!(text.chars().count() <= BUDDY_SAY_MAX_CHARS);
+        assert!(text.starts_with("Rust Rust"));
     }
 }

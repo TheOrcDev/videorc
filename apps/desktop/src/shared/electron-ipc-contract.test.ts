@@ -11,6 +11,8 @@ import {
   normalizeCommentHighlightAnchor
 } from './backend'
 import { CHAT_AVATAR_MAX_BYTES } from './chat-avatar-bytes'
+import { CommentsCommandBroker } from '../main/comments-command-broker'
+import { roleCanInvokeChannel } from './renderer-security-policy'
 import {
   MAX_NOTES_TEXT_LENGTH,
   boundedPassthroughElectronEventChannels,
@@ -56,8 +58,33 @@ describe('Electron IPC contract', () => {
     // 132: plan 174 S3.1 adds app:exit (the renderer's answer to a quit or
     // close asked while on air).
     // 131: plan 174 S3.18 adds resource:reveal-support-bundle (Show in Finder).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(133)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(133)
+    // 134: plan 186 adds banners:pick-image (Assets → Banners → Import image…).
+    // 138: plan 186 S7 adds the Stream Manager's banner list (get, push) and
+    // its show or hide relay pair.
+    // 141: plan 189 adds sounds:pick-files and the starter list and files.
+    // 145: plan 189 S9 adds the Stream Manager's soundboard (get, push) and
+    // its pad relay pair.
+    // 148: plan 203 S2 adds the in-place screen request, the grant re-check
+    // and Reopen Videorc (system:request-screen-access,
+    // system:recheck-permission-grants, app:relaunch-for-permission).
+    // 149: plan 203 S5 adds app:workspace-shown (the launch Preview waits
+    // for first-run setup).
+    // 150: plan 209 S7 adds agents:bridge (the agent bridge's path for
+    // Settings → Remote → Agents, and the Linux copy on Connect).
+    // 152: plan 209 S20 adds the Stream Manager's `/buddy` relay pair.
+    // 153: plan 209 S22 adds agents:add-to-app ("Add to …" in Connect).
+    // 155: plan 210 S9 adds foreground window watch and self bundle ids.
+    // 156: plan 210 S5 adds app icons for New scene… (S4 fills main's side).
+    // 157: plan 213 J1 adds comments-window:open-destination ("Use Sign in"
+    // opens the destination in the main window).
+    // 158: plan 215 C1 adds comments-window:set-hidden-from-stream (the
+    // Stream Manager's Hide from stream switch).
+    // 159: plan 214 E adds virtual-camera:action (Videorc Camera's System
+    // Settings, removal and setup).
+    // 160: plan 215 A3 adds comments-window:sign-in-videorc ("Sign in to
+    // Videorc" on a chat row; the main window starts the sign-in).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(160)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(160)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -96,6 +123,54 @@ describe('Electron IPC contract', () => {
     expect(() => validateElectronInvokeArgs('shell:exec', ['calc.exe'])).toThrow(
       'Electron IPC channel is not declared'
     )
+  })
+
+  it('takes only a known app and an agent token for Add to … (plan 209 S22)', () => {
+    const token = `vrc_agent_${'ab12'.repeat(16)}`
+    expect(validateElectronInvokeArgs('agents:add-to-app', ['codex', token])).toEqual([
+      'codex',
+      token
+    ])
+    // Other has no config file, and nothing but a token's shape crosses.
+    expect(() => validateElectronInvokeArgs('agents:add-to-app', ['other', token])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('agents:add-to-app', ['cursor', 'vrc_agent_short'])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('agents:add-to-app', ['cursor', token, '/tmp/evil'])
+    ).toThrow()
+    expect(
+      validateElectronInvokeResult('agents:add-to-app', { added: true, message: 'Added.' })
+    ).toEqual({ added: true, message: 'Added.' })
+    expect(() =>
+      validateElectronInvokeResult('agents:add-to-app', { added: true, message: 'x', path: '/' })
+    ).toThrow()
+  })
+
+  it('takes one named Videorc Camera action and answers ok with an optional sentence (plan 214 E)', () => {
+    for (const action of ['open-approval-settings', 'remove', 'set-up', 'load-module']) {
+      expect(validateElectronInvokeArgs('virtual-camera:action', [action])).toEqual([action])
+    }
+    expect(() => validateElectronInvokeArgs('virtual-camera:action', ['install'])).toThrow()
+    expect(() => validateElectronInvokeArgs('virtual-camera:action', [])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('virtual-camera:action', ['remove', '/Applications'])
+    ).toThrow()
+    expect(validateElectronInvokeResult('virtual-camera:action', { ok: true })).toEqual({
+      ok: true
+    })
+    expect(
+      validateElectronInvokeResult('virtual-camera:action', {
+        ok: false,
+        message: 'Not available on this computer.'
+      })
+    ).toEqual({ ok: false, message: 'Not available on this computer.' })
+    expect(() =>
+      validateElectronInvokeResult('virtual-camera:action', { ok: true, message: '' })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('virtual-camera:action', { ok: true, path: '/tmp' })
+    ).toThrow()
   })
 
   it('validates account authorization URLs and callback identifiers', () => {
@@ -390,6 +465,61 @@ describe('Electron IPC contract', () => {
     ).toThrow()
   })
 
+  it('lets the Stream Manager name one destination to open, nothing else (plan 213 J1)', () => {
+    const command = { requestId: 'open-1', targetId: 'x-manual' }
+    expect(validateElectronInvokeArgs('comments-window:open-destination', [command])).toEqual([
+      command
+    ])
+    for (const forged of [
+      { requestId: 'r', targetId: '' },
+      { requestId: 'r', targetId: 'x'.repeat(129) },
+      { requestId: '', targetId: 'x-manual' },
+      { targetId: 'x-manual' },
+      { requestId: 'r', targetId: 'x-manual', authMode: 'oauth' },
+      'x-manual',
+      null
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:open-destination', [forged])
+      ).toThrow()
+    }
+    expect(validateElectronInvokeResult('comments-window:open-destination', true)).toBe(true)
+    expect(validateElectronEventPayload('livestream:open-destination', { targetId: 'x' })).toEqual({
+      targetId: 'x'
+    })
+    expect(() =>
+      validateElectronEventPayload('livestream:open-destination', { targetId: 'x', view: 'setup' })
+    ).toThrow()
+  })
+
+  it('lets the Stream Manager ask for the Videorc sign-in with nothing but its request id (plan 215 A3)', () => {
+    const command = { requestId: 'sign-in-1' }
+    expect(validateElectronInvokeArgs('comments-window:sign-in-videorc', [command])).toEqual([
+      command
+    ])
+    for (const forged of [
+      { requestId: '' },
+      { requestId: 'r', authorizeUrl: 'https://evil.example/authorize' },
+      { requestId: 'r', targetId: 'x' },
+      {},
+      'sign-in',
+      null
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:sign-in-videorc', [forged])
+      ).toThrow()
+    }
+    expect(validateElectronInvokeResult('comments-window:sign-in-videorc', true)).toBe(true)
+    expect(() =>
+      validateElectronInvokeResult('comments-window:sign-in-videorc', 'started')
+    ).toThrow()
+    // The ask to the main window carries nothing: the shell owns the sign-in.
+    expect(validateElectronEventPayload('account:sign-in-request', undefined)).toBeUndefined()
+    expect(() =>
+      validateElectronEventPayload('account:sign-in-request', { authorizeUrl: 'https://x.y' })
+    ).toThrow()
+  })
+
   it('relays one manual removal or one card answer, never a source (plan 140, S6)', () => {
     const operationId = '6f1c2e9a-3b7d-4c51-9e2f-0a1b2c3d4e5f'
     const remove = {
@@ -592,6 +722,7 @@ describe('Electron IPC contract', () => {
       sideBySideSplit: '50-50',
       sideBySideCameraSide: 'right',
       verticalScreenFraming: 'fill',
+      horizontalScreenFraming: 'fit',
       sourceVisibility: { camera: false, capture: true }
     }
     const compositor = {
@@ -942,6 +1073,23 @@ describe('comments delivery IPC metadata', () => {
     expect(validateElectronInvokeResult('comments-window:get-snapshot', view)).toEqual(view)
     expect(validateElectronEventPayload('comments-window:snapshot', view)).toEqual(view)
   })
+  // Plan 191: the main renderer discards both push results, so main resolves
+  // them to nothing; a view cost a full validation walk and clone per message.
+  it('resolves both chat push channels to nothing (plan 191)', () => {
+    expectTypeOf<ElectronInvokeResult<'comments-window:push-snapshot'>>().toEqualTypeOf<void>()
+    expectTypeOf<ElectronInvokeResult<'comments-window:push-delta'>>().toEqualTypeOf<void>()
+    const mainSource = readFileSync(new URL('../main/index.ts', import.meta.url), 'utf8')
+    const pushChannels = ['comments-window:push-snapshot', 'comments-window:push-delta'] as const
+    for (const channel of pushChannels) {
+      expect(validateElectronInvokeResult(channel, undefined)).toBeUndefined()
+      expect(() => validateElectronInvokeResult(channel, view)).toThrow('result must be undefined')
+      const handler =
+        mainSource.split(`secureIpcHandle('${channel}',`)[1]?.split('secureIpcHandle(')[0] ?? ''
+      expect(handler).toContain('event.sender.id !== mainWindow.webContents.id')
+      // `return undefined` only: no path hands a value back.
+      expect(handler).not.toMatch(/\breturn[ \t]+(?!undefined\b)[^\s;]/)
+    }
+  })
   it.each([
     null,
     { ...delivery, ownerId: '' },
@@ -1037,4 +1185,467 @@ it('preserves and validates queue-loss revisions through delivery IPC mirrors', 
         snapshot: { ...view.snapshot, delivery: { ...view.snapshot.delivery, lossRevision } }
       })
     ).toThrow()
+})
+
+describe('banner image picker IPC (plan 186)', () => {
+  it('takes no arguments and returns null or exactly one input-file capability', () => {
+    expect(isElectronInvokeChannel('banners:pick-image')).toBe(true)
+    expect(electronInvokeApiMethods['banners:pick-image']).toBe('pickBannerImage')
+    expect(boundedPassthroughElectronInvokeChannels).not.toContain('banners:pick-image')
+    expectTypeOf<ElectronInvokeResult<'banners:pick-image'>>().toEqualTypeOf<
+      Awaited<ReturnType<VideorcApi['pickBannerImage']>>
+    >()
+    expect(validateElectronInvokeArgs('banners:pick-image', [])).toEqual([])
+    expect(() => validateElectronInvokeArgs('banners:pick-image', ['/tmp/x.png'])).toThrow()
+
+    const selection = { capabilityId: 'cap-1', kind: 'input-file', displayName: 'sponsor.png' }
+    expect(validateElectronInvokeResult('banners:pick-image', null)).toBeNull()
+    expect(validateElectronInvokeResult('banners:pick-image', selection)).toStrictEqual(selection)
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-image', { ...selection, kind: 'output-directory' })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-image', { ...selection, path: '/tmp/x.png' })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-image', { ...selection, capabilityId: '' })
+    ).toThrow()
+  })
+})
+
+describe('Stream Manager banner IPC (plan 186 S7)', () => {
+  const sponsor = { id: 'sponsor', name: 'Sponsor', shown: false }
+
+  it('pushes a read-only id, name and shown list from Studio, never an image or a path', () => {
+    expect(validateElectronInvokeArgs('comments-window:banners-push', [[sponsor]])).toEqual([
+      [sponsor]
+    ])
+    expect(validateElectronInvokeArgs('comments-window:banners-push', [null])).toEqual([null])
+    expect(validateElectronInvokeResult('comments-window:banners-get', [sponsor])).toEqual([
+      sponsor
+    ])
+    expect(validateElectronEventPayload('comments-window:banners', [sponsor])).toEqual([sponsor])
+    for (const forged of [
+      [{ ...sponsor, imageFile: 'sponsor.png' }],
+      [{ ...sponsor, path: '/Users/me/Banners/sponsor.png' }],
+      [{ id: 'sponsor', name: 'Sponsor' }],
+      { banners: [sponsor] }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:banners-push', [forged])).toThrow()
+      expect(() => validateElectronEventPayload('comments-window:banners', forged)).toThrow()
+      expect(() => validateElectronInvokeResult('comments-window:banners-get', forged)).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('comments-window:banners-get', [true])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banners-push', [[{ ...sponsor, id: '../x' }]])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banners-push', [[{ ...sponsor, name: '' }]])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banners-push', [
+        Array.from({ length: 25 }, () => sponsor)
+      ])
+    ).toThrow()
+  })
+
+  it('accepts one explicit show, hide or hide-all, and answers done or the sentence why not', () => {
+    for (const command of [
+      { requestId: 'r1', action: 'show', id: 'sponsor' },
+      { requestId: 'r2', action: 'hide', id: 'sponsor' },
+      { requestId: 'r3', action: 'hideAll' }
+    ]) {
+      expect(validateElectronInvokeArgs('comments-window:banner', [command])).toEqual([command])
+    }
+    for (const command of [
+      { requestId: 'r1', action: 'toggle', id: 'sponsor' },
+      { requestId: 'r1', action: 'show' },
+      { requestId: 'r1', action: 'hideAll', id: 'sponsor' },
+      { requestId: '', action: 'hideAll' },
+      { requestId: 'r1', action: 'show', id: 'sponsor', path: '/tmp/a.png' },
+      { requestId: 'r1', action: 'show', id: 'a/b' }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:banner', [command])).toThrow()
+    }
+    const refused = {
+      requestId: 'r1',
+      ok: false,
+      error: 'Four banners are showing. Hide one first.'
+    }
+    for (const resolution of [{ requestId: 'r1', ok: true, value: true }, refused]) {
+      expect(
+        validateElectronInvokeArgs('comments-window:banner-result-push', [resolution])
+      ).toEqual([resolution])
+    }
+    for (const resolution of [
+      { requestId: 'r1', ok: true },
+      { requestId: 'r1', ok: false },
+      { requestId: 'r1', ok: false, error: '' },
+      { requestId: 'r1', ok: true, value: true, error: 'x' }
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:banner-result-push', [resolution])
+      ).toThrow()
+    }
+  })
+
+  it('lets the Stream Manager read and ask, and only Studio push and answer', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:banners-get')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:banner')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:banners-push')).toBe(false)
+    expect(roleCanInvokeChannel('comments', 'comments-window:banner-result-push')).toBe(false)
+    expect(roleCanInvokeChannel('main', 'comments-window:banners-push')).toBe(true)
+    expect(roleCanInvokeChannel('main', 'comments-window:banner-result-push')).toBe(true)
+    for (const role of ['notes', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'comments-window:banner')).toBe(false)
+      expect(roleCanInvokeChannel(role, 'comments-window:banners-get')).toBe(false)
+    }
+  })
+
+  it('relays a show or hide to Studio and its answer back, through every validated hop', async () => {
+    const broker = new CommentsCommandBroker(1_000)
+    const studio: unknown[] = []
+    // Stream Manager → main: the invoke's arguments.
+    const ask = (command: unknown): Promise<unknown> => {
+      const [validated] = validateElectronInvokeArgs('comments-window:banner', [command])
+      // main → Studio: the event the main renderer receives.
+      return broker
+        .request<true>(validated.requestId, () => {
+          studio.push(validateElectronEventPayload('comments-window:banner-request', validated))
+          return true
+        })
+        .then((result) => validateElectronInvokeResult('comments-window:banner', result))
+    }
+    // Studio → main: the answer.
+    const answer = (resolution: unknown): boolean => {
+      const [validated] = validateElectronInvokeArgs('comments-window:banner-result-push', [
+        resolution
+      ])
+      return broker.resolve(validated)
+    }
+
+    const shown = ask({ requestId: 'r-show', action: 'show', id: 'sponsor' })
+    expect(studio).toEqual([{ requestId: 'r-show', action: 'show', id: 'sponsor' }])
+    expect(answer({ requestId: 'r-show', ok: true, value: true })).toBe(true)
+    await expect(shown).resolves.toBe(true)
+
+    const refused = ask({ requestId: 'r-all', action: 'hideAll' })
+    expect(studio.at(-1)).toEqual({ requestId: 'r-all', action: 'hideAll' })
+    expect(
+      answer({ requestId: 'r-all', ok: false, error: 'Four banners are showing. Hide one first.' })
+    ).toBe(true)
+    await expect(refused).rejects.toThrow('Four banners are showing. Hide one first.')
+
+    // Nothing but an explicit action by id crosses, either way.
+    for (const forged of [
+      { requestId: 'r-1', action: 'toggle', id: 'sponsor' },
+      { requestId: 'r-1', action: 'show', id: 'sponsor', imageFile: 'sponsor.png' },
+      { requestId: 'r-1', action: 'show' }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:banner', [forged])).toThrow()
+      expect(() => validateElectronEventPayload('comments-window:banner-request', forged)).toThrow()
+    }
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:banner-result-push', [
+        { requestId: 'r-1', ok: true, value: { id: 'sponsor', imageFile: 'sponsor.png' } }
+      ])
+    ).toThrow()
+    expect(() => validateElectronInvokeResult('comments-window:banner', false)).toThrow()
+    expect(broker.pendingCount).toBe(0)
+  })
+})
+
+describe('soundboard file IPC (plan 189)', () => {
+  const selection = { capabilityId: 'cap-1', kind: 'input-file', displayName: 'airhorn.wav' }
+
+  it('picks several sound files as input-file capabilities, none on cancel, never a path', () => {
+    expect(electronInvokeApiMethods['sounds:pick-files']).toBe('pickSoundFiles')
+    expect(boundedPassthroughElectronInvokeChannels).not.toContain('sounds:pick-files')
+    expectTypeOf<ElectronInvokeResult<'sounds:pick-files'>>().toEqualTypeOf<
+      Awaited<ReturnType<VideorcApi['pickSoundFiles']>>
+    >()
+    expect(validateElectronInvokeArgs('sounds:pick-files', [])).toEqual([])
+    expect(() => validateElectronInvokeArgs('sounds:pick-files', ['/tmp/a.wav'])).toThrow()
+    const none = { selections: [], leftOut: [] }
+    expect(validateElectronInvokeResult('sounds:pick-files', none)).toEqual(none)
+    const two = { selections: [selection, selection], leftOut: [] }
+    expect(validateElectronInvokeResult('sounds:pick-files', two)).toEqual(two)
+    // Release test 147, plan 0006: a file main couldn't open comes back by name.
+    const gone = {
+      selections: [selection],
+      leftOut: [{ displayName: 'gone.wav', reason: "Videorc couldn't open this file." }]
+    }
+    expect(validateElectronInvokeResult('sounds:pick-files', gone)).toEqual(gone)
+    for (const forged of [
+      null,
+      [],
+      [selection],
+      { selections: [{ ...selection, path: '/tmp/a.wav' }], leftOut: [] },
+      { selections: [{ ...selection, kind: 'output-directory' }], leftOut: [] },
+      { selections: Array.from({ length: 25 }, () => selection), leftOut: [] },
+      { selections: [], leftOut: [{ displayName: 'a.wav', reason: 'x', path: '/tmp/a.wav' }] },
+      { selections: [], leftOut: [{ displayName: 'a.wav', reason: '' }] },
+      { selections: [], leftOut: [], extra: true }
+    ]) {
+      expect(() => validateElectronInvokeResult('sounds:pick-files', forged)).toThrow()
+    }
+  })
+
+  it('lists the starter sounds by slug, name and key, and hands files only as capabilities', () => {
+    const airhorn = { slug: 'airhorn', name: 'Airhorn', hotkey: '1' }
+    const crickets = { slug: 'crickets', name: 'Crickets' }
+    expect(validateElectronInvokeArgs('sounds:starter-list', [])).toEqual([])
+    expect(validateElectronInvokeResult('sounds:starter-list', [airhorn, crickets])).toEqual([
+      airhorn,
+      crickets
+    ])
+    expect(validateElectronInvokeArgs('sounds:starter-files', [undefined])).toEqual([undefined])
+    expect(
+      validateElectronInvokeArgs('sounds:starter-files', [['airhorn', 'sad-trombone']])
+    ).toEqual([['airhorn', 'sad-trombone']])
+    const file = { ...airhorn, selection }
+    expect(validateElectronInvokeResult('sounds:starter-files', [file])).toEqual([file])
+    for (const forged of [
+      [{ ...airhorn, file: 'airhorn.ogg' }],
+      [{ ...airhorn, path: '/Applications/Videorc.app/airhorn.ogg' }],
+      [{ ...airhorn, hotkey: '0' }],
+      [{ ...airhorn, slug: '../airhorn' }]
+    ]) {
+      expect(() => validateElectronInvokeResult('sounds:starter-list', forged)).toThrow()
+    }
+    for (const forged of [
+      [{ ...airhorn }],
+      [{ ...file, selection: { ...selection, path: '/tmp/airhorn.ogg' } }],
+      [{ ...file, path: '/tmp/airhorn.ogg' }]
+    ]) {
+      expect(() => validateElectronInvokeResult('sounds:starter-files', forged)).toThrow()
+    }
+    for (const forged of [[['../etc']], [['Airhorn']], ['airhorn'], []]) {
+      expect(() => validateElectronInvokeArgs('sounds:starter-files', forged)).toThrow()
+    }
+    for (const channel of [
+      'sounds:pick-files',
+      'sounds:starter-list',
+      'sounds:starter-files'
+    ] as const) {
+      expect(roleCanInvokeChannel('main', channel)).toBe(true)
+      for (const role of ['comments', 'notes', 'captions'] as const) {
+        expect(roleCanInvokeChannel(role, channel)).toBe(false)
+      }
+    }
+  })
+})
+
+describe('Stream Manager soundboard IPC (plan 189 S9)', () => {
+  const board = {
+    sounds: [
+      { id: 'airhorn', name: 'Airhorn', mode: 'oneShot' },
+      { id: 'drumroll', name: 'Drumroll', mode: 'hold' }
+    ],
+    voices: [{ soundId: 'airhorn', startedAtMs: 1_792_746_000_123, durationMs: 1610, loop: false }]
+  }
+
+  it('pushes a read-only board from Studio, never a file, a path or a voice id', () => {
+    expect(validateElectronInvokeArgs('comments-window:sounds-push', [board])).toEqual([board])
+    expect(validateElectronInvokeArgs('comments-window:sounds-push', [null])).toEqual([null])
+    expect(validateElectronInvokeResult('comments-window:sounds-get', board)).toEqual(board)
+    expect(validateElectronEventPayload('comments-window:sounds', board)).toEqual(board)
+    for (const forged of [
+      { ...board, sounds: [{ ...board.sounds[0], file: 'airhorn.wav' }] },
+      { ...board, sounds: [{ ...board.sounds[0], path: '/Users/me/Sounds/airhorn.wav' }] },
+      { ...board, voices: [{ ...board.voices[0], voiceId: 'v-1' }] },
+      { ...board, sounds: [{ ...board.sounds[0], mode: 'one-shot' }] },
+      { ...board, sounds: [{ ...board.sounds[0], id: '../x' }] },
+      { ...board, sounds: [{ ...board.sounds[0], name: '' }] },
+      { sounds: board.sounds },
+      board.sounds
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:sounds-push', [forged])).toThrow()
+      expect(() => validateElectronEventPayload('comments-window:sounds', forged)).toThrow()
+      expect(() => validateElectronInvokeResult('comments-window:sounds-get', forged)).toThrow()
+    }
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:sounds-push', [
+        { ...board, sounds: Array.from({ length: 25 }, () => board.sounds[0]) }
+      ])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:sounds-push', [
+        { ...board, voices: Array.from({ length: 9 }, () => board.voices[0]) }
+      ])
+    ).toThrow()
+  })
+
+  it('accepts one play, stop, press or stop-all by id, and answers done or the sentence why not', () => {
+    for (const command of [
+      { requestId: 'r1', action: 'play', id: 'airhorn' },
+      { requestId: 'r2', action: 'stop', id: 'airhorn' },
+      { requestId: 'r3', action: 'press', id: 'airhorn' },
+      { requestId: 'r4', action: 'stopAll' }
+    ]) {
+      expect(validateElectronInvokeArgs('comments-window:sound', [command])).toEqual([command])
+      expect(validateElectronEventPayload('comments-window:sound-request', command)).toEqual(
+        command
+      )
+    }
+    for (const command of [
+      { requestId: 'r1', action: 'toggle', id: 'airhorn' },
+      { requestId: 'r1', action: 'play' },
+      { requestId: 'r1', action: 'stopAll', id: 'airhorn' },
+      { requestId: '', action: 'stopAll' },
+      { requestId: 'r1', action: 'play', id: 'airhorn', file: 'airhorn.wav' },
+      { requestId: 'r1', action: 'play', id: 'a/b' }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:sound', [command])).toThrow()
+    }
+    const refused = { requestId: 'r1', ok: false, error: "That sound isn't available anymore." }
+    for (const resolution of [{ requestId: 'r1', ok: true, value: true }, refused]) {
+      expect(validateElectronInvokeArgs('comments-window:sound-result-push', [resolution])).toEqual(
+        [resolution]
+      )
+    }
+    for (const resolution of [
+      { requestId: 'r1', ok: true },
+      { requestId: 'r1', ok: false, error: '' },
+      { requestId: 'r1', ok: true, value: true, error: 'x' }
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:sound-result-push', [resolution])
+      ).toThrow()
+    }
+    expect(() => validateElectronInvokeResult('comments-window:sound', false)).toThrow()
+  })
+
+  it('lets the Stream Manager read and ask, and only Studio push and answer', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:sounds-get')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:sound')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:sounds-push')).toBe(false)
+    expect(roleCanInvokeChannel('comments', 'comments-window:sound-result-push')).toBe(false)
+    expect(roleCanInvokeChannel('main', 'comments-window:sounds-push')).toBe(true)
+    expect(roleCanInvokeChannel('main', 'comments-window:sound-result-push')).toBe(true)
+    for (const role of ['notes', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'comments-window:sound')).toBe(false)
+      expect(roleCanInvokeChannel(role, 'comments-window:sounds-get')).toBe(false)
+    }
+  })
+
+  it('relays a pad press to Studio and its answer back, through every validated hop', async () => {
+    const broker = new CommentsCommandBroker(1_000)
+    const studio: unknown[] = []
+    const ask = (command: unknown): Promise<unknown> => {
+      const [validated] = validateElectronInvokeArgs('comments-window:sound', [command])
+      return broker
+        .request<true>(validated.requestId, () => {
+          studio.push(validateElectronEventPayload('comments-window:sound-request', validated))
+          return true
+        })
+        .then((result) => validateElectronInvokeResult('comments-window:sound', result))
+    }
+    const answer = (resolution: unknown): boolean => {
+      const [validated] = validateElectronInvokeArgs('comments-window:sound-result-push', [
+        resolution
+      ])
+      return broker.resolve(validated)
+    }
+
+    const played = ask({ requestId: 'r-play', action: 'play', id: 'airhorn' })
+    expect(studio).toEqual([{ requestId: 'r-play', action: 'play', id: 'airhorn' }])
+    expect(answer({ requestId: 'r-play', ok: true, value: true })).toBe(true)
+    await expect(played).resolves.toBe(true)
+
+    const refused = ask({ requestId: 'r-press', action: 'press', id: 'gone' })
+    expect(
+      answer({ requestId: 'r-press', ok: false, error: "That sound isn't available anymore." })
+    ).toBe(true)
+    await expect(refused).rejects.toThrow("That sound isn't available anymore.")
+    expect(broker.pendingCount).toBe(0)
+  })
+})
+
+describe('Stream Manager clip IPC (plan 199)', () => {
+  const clip = {
+    available: true,
+    seconds: 30,
+    longSeconds: 60,
+    shortcutLabel: '⌥⌘C',
+    longShortcutLabel: '⌥⌘M'
+  }
+  const context = { sessionId: 'session-1', available: true, clip }
+
+  it('pushes both clip lengths and both keys in the marker context', () => {
+    for (const payload of [
+      context,
+      { ...context, clip: { available: false, seconds: 30, longSeconds: 60, off: 'switch' } },
+      null
+    ]) {
+      expect(validateElectronEventPayload('comments-window:marker-context', payload)).toEqual(
+        payload
+      )
+      expect(validateElectronInvokeResult('comments-window:marker-context-get', payload)).toEqual(
+        payload
+      )
+    }
+    const { longSeconds: _longSeconds, ...withoutLong } = clip
+    for (const forged of [
+      { ...context, clip: withoutLong },
+      { ...context, clip: { ...clip, longSeconds: '60' } },
+      { ...context, clip: { ...clip, extra: true } }
+    ]) {
+      expect(() => validateElectronEventPayload('comments-window:marker-context', forged)).toThrow()
+    }
+  })
+
+  it('pushes Hide screen’s state, refusal and key for the Stream Manager (plan 210 S8b)', () => {
+    for (const screen of [
+      { hidden: false, accelerator: 'Control+Alt+H' },
+      { hidden: true },
+      { hidden: false, unavailable: "Hide screen isn't available on this recording." }
+    ]) {
+      const payload = { ...context, screen }
+      expect(validateElectronEventPayload('comments-window:marker-context', payload)).toEqual(
+        payload
+      )
+      expect(validateElectronInvokeResult('comments-window:marker-context-get', payload)).toEqual(
+        payload
+      )
+    }
+    for (const screen of [{}, { hidden: 'yes' }, { hidden: true, reason: 'you' }]) {
+      expect(() =>
+        validateElectronEventPayload('comments-window:marker-context', { ...context, screen })
+      ).toThrow()
+    }
+  })
+
+  it('carries a clip length on the relay command, and none for the 30-second clip', () => {
+    for (const command of [
+      { requestId: 'r-30' },
+      { requestId: 'r-60', seconds: 60 },
+      { requestId: 'r-30n', seconds: 30 }
+    ]) {
+      expect(validateElectronInvokeArgs('comments-window:clip-mark', [command])).toEqual([command])
+      expect(validateElectronEventPayload('comments-window:clip-mark-request', command)).toEqual(
+        command
+      )
+    }
+  })
+})
+
+it('admits saved scene key maps and rejects empty or oversized ids', () => {
+  expect(() =>
+    validateElectronInvokeArgs('global-shortcuts:set', [{ scenes: { figma: 'Control+F13' } }])
+  ).not.toThrow()
+  for (const id of ['', ' '.repeat(2), 'a'.repeat(129)]) {
+    expect(() =>
+      validateElectronInvokeArgs('global-shortcuts:set', [{ scenes: { [id]: 'Control+F13' } }])
+    ).toThrow()
+  }
+})
+
+it('delivers saved-scene actions through the validated global shortcut event', () => {
+  expect(validateElectronEventPayload('global-shortcuts:triggered', 'scene:figma')).toBe(
+    'scene:figma'
+  )
+  for (const value of ['scene:', `scene:${'a'.repeat(129)}`, 'unknown']) {
+    expect(() => validateElectronEventPayload('global-shortcuts:triggered', value)).toThrow()
+  }
 })

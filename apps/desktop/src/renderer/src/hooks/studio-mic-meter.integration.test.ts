@@ -12,6 +12,7 @@ const fixture = vi.hoisted(() => ({
   gainDb: 0,
   permission: 'granted' as MediaAccessStatus | undefined,
   sessionActive: false,
+  audioBusActive: false,
   pending: null as 'microphone' | null,
   checking: false,
   keepWarm: false,
@@ -60,6 +61,7 @@ vi.mock('@/hooks/use-studio', () => ({
     mediaAccess: { microphone: fixture.permission },
     sourceSelectionState: { pending: fixture.pending, checking: fixture.checking },
     isSessionActive: fixture.sessionActive,
+    audioBusActive: fixture.audioBusActive,
     settings: { keepMicrophoneWarm: fixture.keepWarm },
     armWarmMicrophone: fixture.arm,
     disarmWarmMicrophone: fixture.disarm,
@@ -92,7 +94,7 @@ vi.mock('@/lib/backend-audio-levels', async (importOriginal) => {
   }
 })
 
-import { MicrophoneSection } from '@/components/studio/microphone-section'
+import { AudioSection } from '@/components/studio/audio-section'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import { SourcesAudioMixer } from '@/components/sources/sources-audio-mixer'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -126,6 +128,7 @@ describe('production microphone meter demand', () => {
     fixture.gainDb = 0
     fixture.permission = 'granted'
     fixture.sessionActive = false
+    fixture.audioBusActive = false
     fixture.pending = null
     fixture.checking = false
     fixture.keepWarm = false
@@ -139,7 +142,7 @@ describe('production microphone meter demand', () => {
   })
 
   async function render(
-    consumer: typeof MicrophoneSection | typeof SourcesAudioMixer | null,
+    consumer: typeof AudioSection | typeof SourcesAudioMixer | null,
     enabled = true,
     sliver = false
   ) {
@@ -179,7 +182,7 @@ describe('production microphone meter demand', () => {
   }
 
   for (const [label, consumer] of [
-    ['Studio', MicrophoneSection],
+    ['Studio', AudioSection],
     ['Sources', SourcesAudioMixer]
   ] as const) {
     it(`starts and paints ${label}'s idle fallback with warming disabled`, async () => {
@@ -293,12 +296,12 @@ describe('production microphone meter demand', () => {
 
   it('keeps another production visual consumer alive when the meter returns to backend levels', async () => {
     fixture.sessionActive = true
-    await render(MicrophoneSection, true, true)
+    await render(AudioSection, true, true)
     expect(container.querySelector('[data-videorc-session-mic-sliver]')).not.toBeNull()
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
     await publishLevels(-6)
     expect(environment.stopped).not.toHaveBeenCalled()
-    await render(MicrophoneSection)
+    await render(AudioSection)
     expect(environment.stopped).toHaveBeenCalledTimes(1)
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
   })
@@ -335,16 +338,16 @@ describe('production microphone meter demand', () => {
   })
 
   it('releases real meter demand while source selection is pending or checking and when no mic is selected', async () => {
-    await render(MicrophoneSection)
+    await render(AudioSection)
     fixture.pending = 'microphone'
-    await render(MicrophoneSection)
+    await render(AudioSection)
     expect(environment.stopped).toHaveBeenCalledTimes(1)
     fixture.pending = null
     fixture.checking = true
-    await render(MicrophoneSection)
+    await render(AudioSection)
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
     fixture.checking = false
-    await render(MicrophoneSection)
+    await render(AudioSection)
     expect(environment.getUserMedia).toHaveBeenCalledTimes(2)
     fixture.microphoneId = undefined
     await render(SourcesAudioMixer)
@@ -397,6 +400,62 @@ describe('production microphone meter demand', () => {
     expect(container.textContent).not.toContain('Another app is using this microphone')
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
   })
+
+  // Issue 1064: on Windows the analyser (Chromium) showed a healthy room while
+  // DirectShow handed the recording digital silence, and the chip said
+  // "Receiving". A running bus paints only what the backend measures.
+  for (const [label, consumer] of [
+    ['Sources', SourcesAudioMixer],
+    ['Studio', AudioSection]
+  ] as const) {
+    it(`never paints ${label}'s analyser while the bus runs, and says Silent on the watchdog's word`, async () => {
+      fixture.sessionActive = true
+      fixture.audioBusActive = true
+      await render(consumer)
+      await frames()
+      // No demand for the analyser: the meter has nothing honest to paint.
+      expect(environment.getUserMedia).not.toHaveBeenCalled()
+      expect(container.textContent).toContain(
+        'Level unavailable. The meter shows only what your recording and stream hear.'
+      )
+      expect(container.querySelector('[data-videorc-mic-level-reason="session"]')).not.toBeNull()
+      expect(container.querySelector('[data-videorc-mic-monitor-state="idle"]')).not.toBeNull()
+
+      await publishLevels(-6)
+      await publishLevels(-6)
+      await frames()
+      expect(readMeter()).toBeCloseTo(-6, 1)
+      expect(container.querySelector('[data-videorc-mic-level-reason="session"]')).toBeNull()
+      expect(container.querySelector('[data-videorc-mic-monitor-state="live"]')).not.toBeNull()
+
+      // The bus's watchdog: digital silence from the recording's microphone.
+      await publishSilentLevels(true)
+      expect(container.querySelector('[data-videorc-mic-monitor-state="silent"]')).not.toBeNull()
+      expect(container.textContent).toContain('Silent')
+      expect(container.querySelector('[data-videorc-mic-monitor-state="live"]')).toBeNull()
+      if (consumer === SourcesAudioMixer) {
+        expect(container.querySelector('[data-slot="source-status"]')?.textContent).toContain(
+          'Silent'
+        )
+      }
+      // Sound came back: the chip follows the levels, not a toast.
+      await publishSilentLevels(false)
+      expect(container.querySelector('[data-videorc-mic-monitor-state="live"]')).not.toBeNull()
+      expect(container.querySelector('[data-videorc-mic-monitor-state="silent"]')).toBeNull()
+      expect(environment.getUserMedia).not.toHaveBeenCalled()
+    })
+  }
+
+  async function publishSilentLevels(microphoneSilent: boolean) {
+    await act(async () =>
+      backendAudioLevels.publish({
+        sessionId: 'take',
+        microphone: { peakDb: -120, rmsDb: -120 },
+        masterClippedSamples: 0,
+        ...(microphoneSilent ? { microphoneSilent } : {})
+      })
+    )
+  }
 
   it('reports unavailable media APIs without an acquisition loop', async () => {
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: undefined })

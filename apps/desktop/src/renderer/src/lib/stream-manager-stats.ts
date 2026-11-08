@@ -5,52 +5,37 @@ import type {
   LiveChatProviderState,
   PlatformAudience,
   StreamPlatform,
-  StreamTargetRuntime,
-  StreamTargetState,
   ViewerSample,
   SessionChatTotals
 } from '@/lib/backend'
-import { formatCloudCountdown } from '@/lib/cloud-show-view'
 import { NO_VALUE, plural } from '@/lib/format'
 import { formatTimecode } from '@/lib/format-time'
-import { formatBitrate } from '@/lib/format-video'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { chatActivity, type ActivityTotals } from '@/lib/stream-activity'
 import { formatViewerCount, viewerSampleStale } from '@/lib/viewer-count-view'
-import { destinationLabel } from '@/lib/platform-copy'
-import { cloudPhaseLabel, destinationStateLabel } from '@/lib/state-labels'
 
-import type {
-  LiveDashboardCloud,
-  LiveDashboardCloudPhase,
-  LiveDashboardState
-} from '../../../shared/live-dashboard'
+import type { LiveDashboardState } from '../../../shared/live-dashboard'
 
 // The Stream Manager's stats bar (plan 057, D1), as pure item models. A stat
 // exists only when its source exists for this session, and a value is never
 // a zero nobody measured: a platform that cannot report says why on hover.
-// Quiet when fine, specific when not: health shows the bitrate until
-// something needs the streamer, then it names the problem instead.
 
-export type StatId = 'session' | 'viewers' | 'health' | 'followers' | 'supporters' | 'tips' | 'chat'
+export type StatId = 'session' | 'viewers' | 'followers' | 'supporters' | 'tips' | 'chat'
 
 export type StatTone = 'neutral' | 'subtle' | 'good' | 'warning' | 'error'
 export type SessionBadge = 'live' | 'recording' | 'off-air' | 'history'
-export type StatDot = 'good' | 'warn' | 'error' | 'neutral'
 
 /** One row of a stat's hover card. */
 export interface StatDetailRow {
   label: string
   value: string
   platform?: StreamPlatform
-  /** A destination's state, drawn as a status dot. */
-  dot?: StatDot
   note?: string
 }
 
 export interface StatItemModel {
   id: StatId
-  /** The hover card's heading: "Viewers", "Stream health". */
+  /** The hover card's heading: "Viewers", "Followers". */
   label: string
   /** What the bar shows: the number, or the problem when there is one. */
   value: string
@@ -93,7 +78,6 @@ function confirmedTotals(input: StatsInput): SessionChatTotals | null {
 export const DEFAULT_STAT_ORDER: readonly StatId[] = [
   'session',
   'viewers',
-  'health',
   'followers',
   'supporters',
   'tips',
@@ -101,6 +85,7 @@ export const DEFAULT_STAT_ORDER: readonly StatId[] = [
 ]
 
 const TIP_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube'])
+// Facebook joins with its connected Page (plan 206 S10); a key shares none.
 const VIEWER_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube', 'kick', 'x'])
 
 /** The ON AIR clock: the one timecode (plan 174 S1.4). */
@@ -247,154 +232,6 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
   } satisfies StatItemModel
 }
 
-const TARGET_DOTS: Partial<Record<StreamTargetState, StatDot>> = {
-  live: 'good',
-  connecting: 'warn',
-  warning: 'error',
-  reconnecting: 'error',
-  failed: 'error'
-}
-
-const CLOUD_DOTS: Record<LiveDashboardCloudPhase, StatDot> = {
-  connecting: 'warn',
-  live: 'good',
-  hold: 'warn',
-  resuming: 'warn',
-  ending: 'neutral',
-  failed: 'error'
-}
-
-/** The upload to Videorc Cloud: recording.rs `CLOUD_FEED_TARGET_PREFIX`. */
-function isCloudFeed(target: StreamTargetRuntime): boolean {
-  return target.targetId.startsWith('videorc-cloud-')
-}
-
-/**
- * The one health reading the bar shows, most urgent first: Be right back
- * while Videorc Cloud holds the show (plan 184 C7; it outranks the upload's
- * own reconnecting row), a failed destination, one reconnecting, one its
- * platform says isn't receiving the stream (plan 161: viewers there see
- * nothing, so these outrank dropped frames), dropped frames, a sagging
- * bitrate, a destination still connecting. Healthy is just the bitrate,
- * after "Cloud" when the show goes through it.
- */
-function healthReading(
-  targets: readonly StreamTargetRuntime[],
-  droppedLastMinute: number,
-  sagging: boolean,
-  bitrate: string,
-  cloud: LiveDashboardCloud | null
-): { value: string; tone: StatTone; healthy?: true } {
-  if (cloud?.phase === 'hold') {
-    const left = cloud.holdRemainingSeconds
-    return {
-      value:
-        typeof left === 'number'
-          ? `Be right back · ${formatCloudCountdown(left)} left`
-          : 'Be right back',
-      tone: 'warning'
-    }
-  }
-  if (cloud?.phase === 'resuming') return { value: 'Cloud resuming', tone: 'warning' }
-  const failed = targets.filter((target) => target.state === 'failed')
-  if (failed.length === 1) {
-    return { value: `${destinationLabel(failed[0].label)} failed`, tone: 'error' }
-  }
-  if (failed.length > 1) return { value: `${failed.length} failed`, tone: 'error' }
-  const down = targets.filter(
-    (target) => target.state === 'reconnecting' || target.state === 'warning'
-  )
-  if (down.length > 1) return { value: `${down.length} not live`, tone: 'error' }
-  if (down.length === 1) {
-    const [target] = down
-    return {
-      value: `${destinationLabel(target.label)} ${target.state === 'reconnecting' ? 'reconnecting' : 'not receiving'}`,
-      tone: 'error'
-    }
-  }
-  if (droppedLastMinute > 0) return { value: `${droppedLastMinute} dropped/min`, tone: 'warning' }
-  if (sagging) return { value: 'Low bitrate', tone: 'warning' }
-  if (targets.some((target) => target.state === 'connecting')) {
-    return { value: 'Connecting', tone: 'warning' }
-  }
-  const tone = bitrate === NO_VALUE ? 'neutral' : 'good'
-  if (cloud)
-    return { value: bitrate === NO_VALUE ? 'Cloud' : `Cloud · ${bitrate}`, tone, healthy: true }
-  return { value: bitrate, tone, healthy: true }
-}
-
-/** The upload rows fold into one Videorc Cloud row with the show's state. */
-function cloudDetail(
-  cloud: LiveDashboardCloud,
-  feed: StreamTargetRuntime | undefined
-): StatDetailRow {
-  const left = cloud.phase === 'hold' ? cloud.holdRemainingSeconds : undefined
-  const note =
-    typeof left === 'number' ? `Ends the stream in ${formatCloudCountdown(left)}` : feed?.message
-  return {
-    label: 'Videorc Cloud',
-    value: cloudPhaseLabel(cloud.phase),
-    dot: CLOUD_DOTS[cloud.phase],
-    ...(note ? { note } : {})
-  }
-}
-
-function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatItemModel | null {
-  if (dashboard?.session.state !== 'live') return null
-  const health = dashboard.health
-  const latest = health?.latest
-  const points = health?.bitrateHistory ?? []
-  const minuteAgo = points.find((point) => Date.parse(point.at) >= nowMs - 60_000)
-  const droppedLastMinute =
-    typeof latest?.droppedFrames === 'number' && typeof minuteAgo?.droppedFrames === 'number'
-      ? Math.max(0, latest.droppedFrames - minuteAgo.droppedFrames)
-      : 0
-  const recent = points.slice(-150).map((point) => point.kbps)
-  const typical = recent.length
-    ? [...recent].sort((a, b) => a - b)[Math.floor(recent.length / 2)]
-    : 0
-  const cloud = dashboard.cloud ?? null
-  // Through the cloud, the cloud's own measure of the upload when FFmpeg
-  // can't count one (the raw path's tee says `bitrate=N/A`).
-  const kbps = latest?.bitrateKbps ?? cloud?.feedKbps
-  const sagging = typeof kbps === 'number' && typical > 0 && kbps < typical * 0.7
-  // One bitrate spelling (plan 174 S1.4), and a placeholder that says why (H-10).
-  const bitrate = formatBitrate(kbps) || NO_VALUE
-  const bitrateReason = bitrate === NO_VALUE ? 'Not reported yet' : undefined
-  const reading = healthReading(dashboard.targets, droppedLastMinute, sagging, bitrate, cloud)
-  const fps = typeof latest?.fps === 'number' ? `${Math.round(latest.fps)} fps` : null
-  const dropped = droppedLastMinute > 0 ? `${droppedLastMinute} in the last minute` : 'None'
-  const destinations = cloud
-    ? dashboard.targets.filter((target) => !isCloudFeed(target))
-    : dashboard.targets
-  const through = cloud ? 'through Videorc Cloud, ' : ''
-  return {
-    id: 'health',
-    label: 'Stream health',
-    value: reading.value,
-    tone: reading.tone,
-    spark: points.map((point) => point.kbps),
-    details: [
-      { label: 'Bitrate', value: bitrate, ...(bitrateReason ? { note: bitrateReason } : {}) },
-      ...(fps ? [{ label: 'Frame rate', value: fps }] : []),
-      { label: 'Dropped frames', value: dropped },
-      ...(cloud ? [cloudDetail(cloud, dashboard.targets.find(isCloudFeed))] : []),
-      ...destinations.map((target) => ({
-        label: destinationLabel(target.label),
-        value: destinationStateLabel(target.state),
-        platform: target.platform,
-        dot: TARGET_DOTS[target.state] ?? 'neutral',
-        ...(target.message ? { note: target.message } : {})
-      }))
-    ],
-    description: reading.healthy
-      ? bitrateReason
-        ? `Stream health: ${through}bitrate ${bitrateReason.toLowerCase()}`
-        : `Stream health: ${through}${[bitrate, fps, droppedLastMinute > 0 ? `${dropped} dropped` : 'no dropped frames'].filter(Boolean).join(', ')}`
-      : `Stream health: ${reading.value}`
-  }
-}
-
 const METRIC_LABELS: Record<PlatformAudience['metric'], string> = {
   followers: 'followers',
   subscribers: 'subscribers'
@@ -471,6 +308,50 @@ function followersItem(audience: AudienceSnapshot | null): StatItemModel | null 
     tone: 'neutral',
     details,
     description: `${plural(total, 'follower', 'followers')}${delta !== 0 ? `, ${signed(delta)} this stream` : ''}`
+  }
+}
+
+/**
+ * The polled follower totals with the follows Activity has shown since each
+ * platform's last read, so the count moves the moment a follow arrives
+ * instead of on the next poll. A follow counts once per message id, and only
+ * while it is newer than the platform's reading: the next read already
+ * includes it and wins. Kick has no total; its follows already reach the
+ * snapshot as a delta.
+ */
+export function withLiveFollows(
+  audience: AudienceSnapshot | null,
+  messages: readonly LiveChatMessage[]
+): AudienceSnapshot | null {
+  if (!audience) return audience
+  const counted = new Set<string>()
+  const pending = new Map<StreamPlatform, number>()
+  for (const message of messages) {
+    if (message.details?.kind !== 'follow' || message.isDeleted || counted.has(message.id)) continue
+    const entry = audience.platforms.find((candidate) => candidate.platform === message.platform)
+    if (
+      !entry ||
+      entry.metric !== 'followers' ||
+      entry.capability !== 'available' ||
+      entry.total === undefined ||
+      !entry.at
+    ) {
+      continue
+    }
+    const received = Date.parse(message.receivedAt)
+    const read = Date.parse(entry.at)
+    if (!Number.isFinite(received) || !Number.isFinite(read) || received <= read) continue
+    counted.add(message.id)
+    pending.set(message.platform, (pending.get(message.platform) ?? 0) + 1)
+  }
+  if (pending.size === 0) return audience
+  return {
+    ...audience,
+    platforms: audience.platforms.map((entry) => {
+      const follows = pending.get(entry.platform)
+      if (!follows || entry.total === undefined) return entry
+      return { ...entry, total: entry.total + follows, delta: (entry.delta ?? 0) + follows }
+    })
   }
 }
 
@@ -600,9 +481,10 @@ export function statItems(input: StatsInput): StatItemModel[] {
   const items: (StatItemModel | null)[] = [
     sessionItem(input),
     viewersItem(input, livePlatforms),
-    input.history ? null : healthItem(dashboard, input.nowMs),
     followersItem(
-      input.history ? (input.history.stats?.audience ?? null) : (dashboard?.audience ?? null)
+      input.history
+        ? (input.history.stats?.audience ?? null)
+        : withLiveFollows(dashboard?.audience ?? null, input.messages)
     )
   ]
   // Subs and tips exist once their total is measured (plan 174 V-8): until

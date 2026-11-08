@@ -1,15 +1,23 @@
-import { useState, type ReactElement } from 'react'
+import { lazy, Suspense, useRef, useState, type ReactElement } from 'react'
 
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { HIGHLIGHT_ANCHOR_LABELS, HighlightAnchorOptions } from '@/components/comments-header'
 import { providerBadgeTitle } from '@/components/comments-destination-status'
-import { ClipIcon, FrameIcon, MoreIcon, PreviewIcon } from '@/components/icons'
+import {
+  ClipIcon,
+  FrameIcon,
+  HiddenFromStreamIcon,
+  HiddenIcon,
+  MoreIcon,
+  PreviewIcon
+} from '@/components/icons'
 import { PIN_WINDOW_LABEL, PinWindowButton } from '@/components/pin-window-button'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusBarAction } from '@/components/status-bar-action'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -24,12 +32,31 @@ import {
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { STAT_NAMES } from '@/components/stream-manager/stats-bar'
-import type { AudienceSnapshot, CommentHighlightAnchor, LiveChatProviderState } from '@/lib/backend'
+import type {
+  AudienceSnapshot,
+  ClipContext,
+  ClipLength,
+  CommentHighlightAnchor,
+  LiveChatProviderState,
+  StreamManagerHideMethod
+} from '@/lib/backend'
+import { CAPTURE_PROTECTION_UNSUPPORTED_REASON } from '../../../../shared/capture-protection'
+import { clipLastWords, clipLengthLabel } from '../../../../shared/clip-lengths'
+import type { ScreenPrivacyContext } from '../../../../shared/session-markers'
+import { shortcutLabel } from '@/lib/platform'
+import { screenPrivacyActionLabel, screenPrivacyDisabledReason } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
-import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
+import {
+  ABOVE_NARROW,
+  COMPACT_ICON,
+  COMPACT_LABEL,
+  NARROW_ONLY,
+  WIDE_LABEL
+} from '@/lib/stream-manager-layout'
 import { chatStateLabel } from '@/lib/state-labels'
 import { DEFAULT_STAT_ORDER } from '@/lib/stream-manager-stats'
 import {
@@ -40,7 +67,12 @@ import {
 } from '@/lib/stream-manager-stats-layout'
 import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
+import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
+import type { SoundRelayAction, SoundboardSummary } from '../../../../shared/sound-commands'
 import { cn } from '@/lib/utils'
+
+// The Sounds popover's pads (plan 189 S9): audiocn's pad loads with the first open.
+const SoundsPopoverBody = lazy(() => import('@/components/stream-manager/sounds-popover'))
 
 // The Stream Manager's status bar (plan 055, D6): each provider's chat state
 // on the left, the window's quiet controls on the right. The title row keeps
@@ -69,11 +101,12 @@ function providerTone(provider: LiveChatProviderState): StatusDotTone {
  * "read-only", "reconnect to send", "failed". Empty when it reads and sends,
  * so a healthy platform is just its icon and dot. The words are the chat
  * vocabulary every window shares (`chatStateLabel`, plan 174 H-13), set
- * inline after the platform's icon.
+ * inline after the platform's icon. Only the first letter drops its capital,
+ * so "Sign in" keeps the name of the choice ("needs Sign in", plan 213 J1).
  */
 export function providerCapabilityLabel(provider: LiveChatProviderState): string {
   const label = chatStateLabel(provider)
-  return label === 'Connected' ? '' : label.toLowerCase()
+  return label === 'Connected' ? '' : label.charAt(0).toLowerCase() + label.slice(1)
 }
 
 /**
@@ -115,15 +148,168 @@ export function providerCapabilityTitle(
   return lines.filter(Boolean).join('\n')
 }
 
+/**
+ * The Banners menu's items (plan 186 S7), in Assets order: one check per
+ * banner (checked while it shows), then Hide all banners. Each choice asks
+ * Studio, and the check moves when the list comes back, so the menu stays
+ * open for the next one. Before the list loads, and with none, one line says
+ * so.
+ */
+function BannerMenuItems({
+  banners,
+  onBanner
+}: {
+  banners: readonly BannerSummary[] | null
+  onBanner: (action: BannerRelayAction) => void
+}): ReactElement {
+  if (!banners?.length) {
+    return (
+      <DropdownMenuItem disabled>
+        {banners ? 'Import banners in Assets' : 'Loading banners…'}
+      </DropdownMenuItem>
+    )
+  }
+  return (
+    <>
+      <DropdownMenuGroup>
+        {banners.map((banner) => (
+          <DropdownMenuCheckboxItem
+            key={banner.id}
+            checked={banner.shown}
+            onCheckedChange={(checked) =>
+              onBanner({ action: checked === true ? 'show' : 'hide', id: banner.id })
+            }
+          >
+            <span className="truncate">{banner.name}</span>
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuGroup>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem
+        disabled={!banners.some((banner) => banner.shown)}
+        onClick={() => onBanner({ action: 'hideAll' })}
+      >
+        Hide all banners
+      </DropdownMenuItem>
+    </>
+  )
+}
+
+/** A Clip button's hint: what it saves, its key, and the spoken way (plan
+ * 199: one per length). */
+function clipHint(seconds: number, shortcutLabel: string | undefined, spoken: string): string {
+  const key = shortcutLabel ? ` (${shortcutLabel})` : ''
+  return `Save the last ${clipLastWords(seconds)} as a clip${key}, or say “${spoken}”`
+}
+
+/** The two Clip buttons (plan 199 D4, D9): today's 30 s, then the minute. */
+function clipButtons(clip: ClipContext | undefined): Array<{
+  seconds: ClipLength
+  text: string
+  menuText: string
+  label: string
+  hint: string
+  shortcutLabel?: string
+}> {
+  const short = clip?.seconds ?? 30
+  const long = clip?.longSeconds ?? 60
+  return [
+    {
+      seconds: 30,
+      text: `Clip ${clipLengthLabel(short)}`,
+      menuText: `Clip ${clipLengthLabel(short)}`,
+      label: 'Save a 30-second clip',
+      hint: clipHint(short, clip?.shortcutLabel, 'clip that'),
+      shortcutLabel: clip?.shortcutLabel
+    },
+    {
+      seconds: 60,
+      text: clipLengthLabel(long),
+      menuText: `Clip ${clipLengthLabel(long)}`,
+      label: 'Save a 1-minute clip',
+      hint: clipHint(long, clip?.longShortcutLabel, 'clip the last minute'),
+      shortcutLabel: clip?.longShortcutLabel
+    }
+  ]
+}
+
+/**
+ * Hide screen (plan 210 D9): the action by the state Studio pushed, the key
+ * in its hint, and why a hide is refused. Null until Studio has said.
+ */
+function screenPrivacyAction(
+  screen: ScreenPrivacyContext | undefined,
+  onScreenPrivacy: ((hidden: boolean) => unknown) | undefined
+): { label: string; hint: string; disabledReason: string | null; run: () => void } | null {
+  if (!screen || !onScreenPrivacy) return null
+  const key = screen.accelerator ? ` (${shortcutLabel(screen.accelerator)})` : ''
+  return {
+    label: screenPrivacyActionLabel(screen.hidden),
+    hint: screen.hidden
+      ? `Show your screen to viewers again${key}`
+      : `Cover your screen with a frosted picture on the recording and every stream${key}`,
+    disabledReason: screenPrivacyDisabledReason(screen),
+    run: () => void onScreenPrivacy(!screen.hidden)
+  }
+}
+
+/** The control's one name, in the status bar, the ⋯ menu and ⌘K. */
+export const HIDE_FROM_STREAM_LABEL = 'Hide from stream'
+/** What the footer says while the window is out of the capture, as Notes does. */
+export const HIDDEN_FROM_STREAM_FOOTER = 'Hidden from your stream'
+
+/**
+ * Hide from stream (plan 215 D6): the switch beside Keep on top, with the
+ * platform's own promise in its hint. On macOS Videorc's capture filter
+ * leaves the window out and nothing else changes; on Windows content
+ * protection hides it from every capture app and screenshot too, and the
+ * hint says so; Linux can't, so the switch is disabled with the reason.
+ */
+export function hideFromStreamAction(
+  hidden: boolean,
+  method: StreamManagerHideMethod,
+  onToggle: (() => void) | undefined
+): { label: string; hint: string; disabledReason: string | null; run: () => void } | null {
+  if (!onToggle) return null
+  const base = 'Keep this window out of your recordings and streams.'
+  return {
+    label: HIDE_FROM_STREAM_LABEL,
+    hint:
+      method === 'content-protection'
+        ? `${base} Other capture apps and screenshots lose it too.`
+        : `${base} Your own screenshots and other apps still see it.`,
+    disabledReason: method === 'unsupported' ? CAPTURE_PROTECTION_UNSUPPORTED_REASON : null,
+    run: onToggle
+  }
+}
+
+/** The footer line while the window is out of the capture; nothing elsewhere. */
+export function hiddenFromStreamFooter(
+  hidden: boolean,
+  method: StreamManagerHideMethod
+): string | null {
+  return hidden && method !== 'unsupported' ? HIDDEN_FROM_STREAM_FOOTER : null
+}
+
 export function StreamManagerStatusBar({
   providers,
   audience,
   alwaysOnTop,
+  hiddenFromStream = false,
+  hideFromStreamMethod = 'unsupported',
+  onToggleHiddenFromStream,
   highlightAnchor,
   onToggleAlwaysOnTop,
   onHighlightAnchorChange,
   onClear,
   onMarkClip,
+  clip,
+  screen,
+  onScreenPrivacy,
+  banners = null,
+  onBanner,
+  sounds = null,
+  onSound,
   onOpenPreview,
   onSearchChat,
   onFocusComposer,
@@ -134,16 +320,38 @@ export function StreamManagerStatusBar({
   providers: readonly LiveChatProviderState[]
   audience: AudienceSnapshot | null
   alwaysOnTop: boolean
+  /** Hide from stream (plan 215 D6): the switch's state and how this
+   * platform hides the window, from main's window state. The switch
+   * shows only with a relay. */
+  hiddenFromStream?: boolean
+  hideFromStreamMethod?: StreamManagerHideMethod
+  onToggleHiddenFromStream?: () => void
   highlightAnchor?: CommentHighlightAnchor
   onToggleAlwaysOnTop?: () => void
   onHighlightAnchorChange?: (anchor: CommentHighlightAnchor) => void
   onClear?: () => void
-  /** Plan 068 D6: present only while on air. Word and icon: mid-stream there
-   * is no time to hover. */
-  onMarkClip?: () => void
+  /** The one Clip action (plan 068 D6; plan 181 R4): present whenever the
+   * ring holds frames or a session runs. Word and icon: mid-stream there is
+   * no time to hover. Plan 199: two buttons, 30 s and the minute. */
+  onMarkClip?: (seconds: ClipLength) => void
+  /** The two clip lengths and their keys, for the buttons' hints. */
+  clip?: ClipContext
+  /** Plan 210 S8b: Hide screen's state as Studio pushed it, on air or not
+   * (it covers recordings and Clips too). Absent until Studio has said. */
+  screen?: ScreenPrivacyContext
+  /** Hide (true) or show (false) the screen, relayed to Studio. */
+  onScreenPrivacy?: (hidden: boolean) => unknown
+  /** Plan 186 S7: the Banners menu, on air or not (banners matter in
+   * recordings too). `banners` is null until Studio has read the list. */
+  banners?: readonly BannerSummary[] | null
+  onBanner?: (action: BannerRelayAction) => unknown
+  /** Plan 189 S9: the Sounds popover, on air or not (sounds matter in
+   * recordings too). `sounds` is null until Studio has read the board. */
+  sounds?: SoundboardSummary | null
+  onSound?: (action: SoundRelayAction) => unknown
   onOpenPreview?: () => void
   /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each
-   * is still clickable; below 800 px only the key shows, below 640 px they
+   * is still clickable; below 1,040 px only the key shows, below 640 px they
    * sit in the ⋯ menu. */
   onSearchChat?: () => void
   onFocusComposer?: () => void
@@ -161,6 +369,22 @@ export function StreamManagerStatusBar({
   // cannot be undone, so both its homes (the button, the ⋯ menu) ask first.
   const [confirmingClear, setConfirmingClear] = useState(false)
   const requestClear = onClear ? () => setConfirmingClear(true) : undefined
+  // One Sounds popover for both homes: the action above 640 px, the ⋯ menu's
+  // Sounds… below it. It anchors on the controls, which are always on screen.
+  const [soundsOpen, setSoundsOpen] = useState(false)
+  // The ⋯ menu's Sounds… opens the popover once the menu has let the focus
+  // go, so the menu's focus return never dismisses what it opened.
+  const soundsAfterMenu = useRef(false)
+  const privacy = screenPrivacyAction(screen, onScreenPrivacy)
+  const hideFromStream = hideFromStreamAction(
+    hiddenFromStream,
+    hideFromStreamMethod,
+    onToggleHiddenFromStream
+  )
+  const hiddenFooter = hiddenFromStreamFooter(hiddenFromStream, hideFromStreamMethod)
+  const bannerItems = onBanner ? (
+    <BannerMenuItems banners={banners} onBanner={(action) => void onBanner(action)} />
+  ) : null
   const hints = [
     ...(onSearchChat
       ? [
@@ -216,34 +440,38 @@ export function StreamManagerStatusBar({
               // The details open on hover and on focus (plan 174 H-15), and
               // below 640 px a dot that is not green keeps a word beside it.
               return (
-                <HoverCard key={provider.id} closeDelay={80} openDelay={400}>
-                  <HoverCardTrigger asChild>
-                    <button
-                      aria-label={lines[0]}
-                      className="-mx-1 flex min-w-0 shrink items-center gap-1.5 rounded-chip px-1 outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50"
-                      data-slot="chat-state"
-                      type="button"
-                    >
-                      <ChatPlatformIcon decorative platform={provider.platform} />
-                      <StatusDot tone={tone} />
-                      {problem ? (
-                        <span
-                          className={cn('max-w-[32rem] truncate', ABOVE_NARROW)}
-                          data-slot="chat-state-problem"
-                        >
-                          {problem}
-                        </span>
-                      ) : label ? (
-                        <span className={cn('truncate', ABOVE_NARROW, COMPACT_LABEL)}>
-                          {CHAT_PLATFORM_LABELS[provider.platform]} {label}
-                        </span>
-                      ) : null}
-                      {tone !== 'good' && label ? (
-                        <span className={cn('truncate', NARROW_ONLY)} data-slot="chat-state-word">
-                          {label}
-                        </span>
-                      ) : null}
-                    </button>
+                <HoverCard key={provider.id}>
+                  <HoverCardTrigger
+                    closeDelay={80}
+                    delay={400}
+                    render={
+                      <button
+                        aria-label={lines[0]}
+                        className="-mx-1 flex min-w-0 shrink items-center gap-1.5 rounded-chip px-1 outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50"
+                        data-slot="chat-state"
+                        type="button"
+                      />
+                    }
+                  >
+                    <ChatPlatformIcon decorative platform={provider.platform} />
+                    <StatusDot tone={tone} />
+                    {problem ? (
+                      <span
+                        className={cn('max-w-[32rem] truncate', ABOVE_NARROW)}
+                        data-slot="chat-state-problem"
+                      >
+                        {problem}
+                      </span>
+                    ) : label ? (
+                      <span className={cn('truncate', ABOVE_NARROW, COMPACT_LABEL)}>
+                        {CHAT_PLATFORM_LABELS[provider.platform]} {label}
+                      </span>
+                    ) : null}
+                    {tone !== 'good' && label ? (
+                      <span className={cn('truncate', NARROW_ONLY)} data-slot="chat-state-word">
+                        {label}
+                      </span>
+                    ) : null}
                   </HoverCardTrigger>
                   <HoverCardContent align="start" className="w-64 p-2" side="top">
                     <div className="flex flex-col gap-1 text-xs">
@@ -262,182 +490,370 @@ export function StreamManagerStatusBar({
                 </HoverCard>
               )
             })}
+            {/* Out of the capture (plan 215 D6), said where Notes says it:
+                in the footer, quietly, while it holds. */}
+            {hiddenFooter ? (
+              <span
+                className={cn('truncate', ABOVE_NARROW)}
+                data-testid="stream-manager-capture-hidden"
+              >
+                {hiddenFooter}
+              </span>
+            ) : null}
           </span>
         }
       >
-        <div
-          className={cn('items-center gap-0.5 [-webkit-app-region:no-drag]', 'flex', ABOVE_NARROW)}
-          data-slot="stream-manager-actions"
-        >
-          {hints.map((hint) => (
-            <StatusBarHint
-              key={hint.id}
-              accelerator={shortcutAccelerator(hint.id)}
-              label={hint.label}
-              labelClassName={COMPACT_LABEL}
-              onClick={hint.run}
-            />
-          ))}
-          {onToggleAlwaysOnTop ? (
-            <PinWindowButton
-              pinned={alwaysOnTop}
-              variant="status-bar"
-              onPinnedChange={() => onToggleAlwaysOnTop()}
-            />
-          ) : null}
-          {anchorControl ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <StatusBarAction
-                  hint={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[anchorControl.anchor]}`}
-                  icon={<FrameIcon aria-hidden />}
-                  label="Highlight position"
+        <Popover open={soundsOpen} onOpenChange={setSoundsOpen}>
+          <PopoverAnchor
+            render={
+              <div className="flex min-w-0 items-center" data-slot="stream-manager-controls" />
+            }
+          >
+            <div
+              className={cn(
+                'items-center gap-0.5 [-webkit-app-region:no-drag]',
+                'flex',
+                ABOVE_NARROW
+              )}
+              data-slot="stream-manager-actions"
+            >
+              {/* The words at Wide only, like Hide screen's: below it the
+                  bar's every control and the platforms' icons need the room. */}
+              {hints.map((hint) => (
+                <StatusBarHint
+                  key={hint.id}
+                  accelerator={shortcutAccelerator(hint.id)}
+                  label={hint.label}
+                  labelClassName={WIDE_LABEL}
+                  onClick={hint.run}
                 />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" side="top">
-                <HighlightAnchorOptions {...anchorControl} />
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
-          {onMarkClip ? (
-            <StatusBarAction
-              hint="Mark this moment for a clip (or say “clip that”)"
-              icon={<ClipIcon aria-hidden />}
-              label="Mark clip"
-              text="Mark clip"
-              onClick={onMarkClip}
-            />
-          ) : null}
-          {requestClear ? (
-            <StatusBarAction
-              hint="Clear view (keeps Library history)"
-              label="Clear view"
-              text="Clear"
-              onClick={requestClear}
-            />
-          ) : null}
-          {onOpenPreview ? (
-            <StatusBarAction
-              icon={<PreviewIcon aria-hidden />}
-              label={`Open ${WINDOW_NAMES.preview}`}
-              onClick={onOpenPreview}
-            />
-          ) : null}
-        </div>
-        <DropdownMenu>
-          {/* The menu's trigger outside the tooltip's: the menu's open state
-              is the one the button carries. */}
-          <Tooltip>
-            <DropdownMenuTrigger asChild>
-              <TooltipTrigger asChild>
-                <Button
-                  aria-label="More Stream Manager actions"
-                  className={NARROW_ONLY}
-                  size="icon-xs"
-                  type="button"
-                  variant="ghost"
-                >
-                  <MoreIcon data-icon="inline-start" weight="bold" />
-                </Button>
-              </TooltipTrigger>
-            </DropdownMenuTrigger>
-            <TooltipContent side="top">More Stream Manager actions</TooltipContent>
-          </Tooltip>
-          <DropdownMenuContent align="end" className="w-56" side="top">
-            {hints.length > 0 ? (
-              <>
-                <DropdownMenuGroup>
-                  {hints.map((hint) => (
-                    <DropdownMenuItem key={hint.id} onSelect={hint.run}>
-                      {hint.menuLabel}
-                      <DropdownMenuShortcut>
-                        <ShortcutKeys accelerator={shortcutAccelerator(hint.id)} variant="text" />
-                      </DropdownMenuShortcut>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-              </>
-            ) : null}
-            <DropdownMenuGroup>
-              {anchorControl ? (
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>
-                    <FrameIcon />
-                    Highlight position
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent>
-                    <HighlightAnchorOptions {...anchorControl} />
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
+              ))}
+              {/* Icon and word at Wide; below it the word would push the
+                    last control off the bar, so the icon, the tooltip and the
+                    stats bar's Screen hidden chip carry it. Its key is in the
+                    hint. */}
+              {privacy ? (
+                <DisabledReason reason={privacy.disabledReason} side="top">
+                  <StatusBarAction
+                    data-videorc-screen-privacy=""
+                    disabled={privacy.disabledReason !== null}
+                    hint={privacy.disabledReason ? undefined : privacy.hint}
+                    icon={<HiddenIcon aria-hidden />}
+                    label={privacy.label}
+                    text={<span className={WIDE_LABEL}>{privacy.label}</span>}
+                    onClick={privacy.run}
+                  />
+                </DisabledReason>
               ) : null}
               {onToggleAlwaysOnTop ? (
-                <DropdownMenuCheckboxItem
-                  checked={alwaysOnTop}
-                  onCheckedChange={() => onToggleAlwaysOnTop()}
-                >
-                  {PIN_WINDOW_LABEL}
-                </DropdownMenuCheckboxItem>
+                <PinWindowButton
+                  pinned={alwaysOnTop}
+                  variant="status-bar"
+                  onPinnedChange={() => onToggleAlwaysOnTop()}
+                />
               ) : null}
-              {onMarkClip ? (
-                <DropdownMenuItem onSelect={onMarkClip}>
-                  <ClipIcon />
-                  Mark clip
-                </DropdownMenuItem>
+              {/* Next to Keep on top (plan 215 D6): pinned and off the stream
+                  are the two things the window can be at once. */}
+              {hideFromStream ? (
+                <DisabledReason reason={hideFromStream.disabledReason} side="top">
+                  <StatusBarAction
+                    data-testid="hide-from-stream-button"
+                    disabled={hideFromStream.disabledReason !== null}
+                    hint={hideFromStream.disabledReason ? undefined : hideFromStream.hint}
+                    icon={
+                      <HiddenFromStreamIcon
+                        aria-hidden
+                        weight={hiddenFromStream ? 'fill' : 'regular'}
+                      />
+                    }
+                    label={hideFromStream.label}
+                    pressed={hiddenFromStream}
+                    onClick={hideFromStream.run}
+                  />
+                </DisabledReason>
+              ) : null}
+              {anchorControl ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <StatusBarAction
+                        hint={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[anchorControl.anchor]}`}
+                        icon={<FrameIcon aria-hidden />}
+                        label="Highlight position"
+                      />
+                    }
+                  />
+                  <DropdownMenuContent align="end" side="top">
+                    <HighlightAnchorOptions {...anchorControl} />
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+              {onMarkClip
+                ? clipButtons(clip).map((button, index) => (
+                    // Below 800 px "Clip 30 s" names it alone, like Banners
+                    // and Clear: the words need no hover mid-stream.
+                    <StatusBarAction
+                      key={button.seconds}
+                      hint={button.hint}
+                      icon={
+                        index === 0 ? <ClipIcon aria-hidden className={COMPACT_ICON} /> : undefined
+                      }
+                      label={button.label}
+                      text={button.text}
+                      onClick={() => onMarkClip(button.seconds)}
+                    />
+                  ))
+                : null}
+              {bannerItems ? (
+                <DropdownMenu>
+                  {/* The word alone, like Clear: no icon glyph rides into this
+                    window's bundle for it. */}
+                  <DropdownMenuTrigger
+                    render={
+                      <StatusBarAction
+                        hint="Show or hide your banners (or type /banner)"
+                        label="Banners"
+                        text="Banners"
+                      />
+                    }
+                  />
+                  <DropdownMenuContent align="end" className="w-56" side="top">
+                    {bannerItems}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+              {onSound ? (
+                // The word alone, like Banners.
+                <PopoverTrigger
+                  render={
+                    <StatusBarAction
+                      hint="Play a sound (or type /sound)"
+                      label="Sounds"
+                      text="Sounds"
+                    />
+                  }
+                />
+              ) : null}
+              {requestClear ? (
+                <StatusBarAction
+                  hint="Clear view (keeps Library history)"
+                  label="Clear view"
+                  text="Clear"
+                  onClick={requestClear}
+                />
               ) : null}
               {onOpenPreview ? (
-                <DropdownMenuItem onSelect={onOpenPreview}>
-                  <PreviewIcon />
-                  {`Open ${WINDOW_NAMES.preview}`}
-                </DropdownMenuItem>
+                <StatusBarAction
+                  icon={<PreviewIcon aria-hidden />}
+                  label={`Open ${WINDOW_NAMES.preview}`}
+                  onClick={onOpenPreview}
+                />
               ) : null}
-              {statsLayout && onStatsLayoutChange ? (
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>Show or hide stats</DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent>
-                    {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
-                      <DropdownMenuCheckboxItem
-                        key={id}
-                        checked={!statsLayout.hidden.includes(id)}
-                        onCheckedChange={(checked) =>
-                          onStatsLayoutChange(setStatHidden(statsLayout, id, checked !== true))
-                        }
-                        onSelect={(event) => event.preventDefault()}
-                      >
-                        {STAT_NAMES[id]}
-                      </DropdownMenuCheckboxItem>
-                    ))}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      disabled={
-                        statsLayout.hidden.length === 0 &&
-                        statsLayout.order.every(
-                          (id, index) => id === DEFAULT_STATS_LAYOUT.order[index]
-                        )
+            </div>
+            <DropdownMenu>
+              {/* The menu's trigger outside the tooltip's: the menu's open state
+              is the one the button carries. */}
+              <Tooltip>
+                <DropdownMenuTrigger
+                  render={
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          aria-label="More Stream Manager actions"
+                          className={NARROW_ONLY}
+                          size="icon-xs"
+                          type="button"
+                          variant="ghost"
+                        />
                       }
-                      onSelect={() => onStatsLayoutChange(DEFAULT_STATS_LAYOUT)}
+                    />
+                  }
+                >
+                  <MoreIcon data-icon="inline-start" weight="bold" />
+                </DropdownMenuTrigger>
+                <TooltipContent side="top">More Stream Manager actions</TooltipContent>
+              </Tooltip>
+              <DropdownMenuContent
+                align="end"
+                className="w-56"
+                side="top"
+                finalFocus={() => {
+                  if (!soundsAfterMenu.current) return true
+                  soundsAfterMenu.current = false
+                  setSoundsOpen(true)
+                  return false
+                }}
+              >
+                {hints.length > 0 ? (
+                  <>
+                    <DropdownMenuGroup>
+                      {hints.map((hint) => (
+                        <DropdownMenuItem key={hint.id} onClick={hint.run}>
+                          {hint.menuLabel}
+                          <DropdownMenuShortcut>
+                            <ShortcutKeys
+                              accelerator={shortcutAccelerator(hint.id)}
+                              variant="text"
+                            />
+                          </DropdownMenuShortcut>
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuGroup>
+                    <DropdownMenuSeparator />
+                  </>
+                ) : null}
+                <DropdownMenuGroup>
+                  {privacy ? (
+                    <DisabledReason focusable={false} reason={privacy.disabledReason} side="left">
+                      <DropdownMenuItem
+                        disabled={privacy.disabledReason !== null}
+                        onClick={privacy.run}
+                      >
+                        <HiddenIcon />
+                        {privacy.label}
+                        {screen?.accelerator ? (
+                          <DropdownMenuShortcut>
+                            <ShortcutKeys accelerator={screen.accelerator} variant="text" />
+                          </DropdownMenuShortcut>
+                        ) : null}
+                      </DropdownMenuItem>
+                    </DisabledReason>
+                  ) : null}
+                  {anchorControl ? (
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>
+                        <FrameIcon />
+                        Highlight position
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent>
+                        <HighlightAnchorOptions {...anchorControl} />
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  ) : null}
+                  {onToggleAlwaysOnTop ? (
+                    <DropdownMenuCheckboxItem
+                      checked={alwaysOnTop}
+                      closeOnClick
+                      onCheckedChange={() => onToggleAlwaysOnTop()}
                     >
-                      Reset stats
+                      {PIN_WINDOW_LABEL}
+                    </DropdownMenuCheckboxItem>
+                  ) : null}
+                  {hideFromStream ? (
+                    <DisabledReason
+                      focusable={false}
+                      reason={hideFromStream.disabledReason}
+                      side="left"
+                    >
+                      <DropdownMenuCheckboxItem
+                        checked={hiddenFromStream}
+                        closeOnClick
+                        disabled={hideFromStream.disabledReason !== null}
+                        onCheckedChange={() => hideFromStream.run()}
+                      >
+                        {hideFromStream.label}
+                      </DropdownMenuCheckboxItem>
+                    </DisabledReason>
+                  ) : null}
+                  {onMarkClip
+                    ? clipButtons(clip).map((button) => (
+                        <DropdownMenuItem
+                          key={button.seconds}
+                          onClick={() => onMarkClip(button.seconds)}
+                        >
+                          <ClipIcon />
+                          {button.menuText}
+                          {button.shortcutLabel ? (
+                            <DropdownMenuShortcut>{button.shortcutLabel}</DropdownMenuShortcut>
+                          ) : null}
+                        </DropdownMenuItem>
+                      ))
+                    : null}
+                  {bannerItems ? (
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>Banners</DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent className="w-56">
+                        {bannerItems}
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  ) : null}
+                  {onSound ? (
+                    <DropdownMenuItem
+                      onClick={() => {
+                        soundsAfterMenu.current = true
+                      }}
+                    >
+                      Sounds…
                     </DropdownMenuItem>
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-              ) : null}
-            </DropdownMenuGroup>
-            {requestClear ? (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={requestClear}>
-                  <span className="flex flex-col">
-                    <span>Clear view</span>
-                    <span className="text-[11px] text-muted-foreground">
-                      Keeps Library history.
-                    </span>
-                  </span>
-                </DropdownMenuItem>
-              </>
-            ) : null}
-          </DropdownMenuContent>
-        </DropdownMenu>
+                  ) : null}
+                  {onOpenPreview ? (
+                    <DropdownMenuItem onClick={onOpenPreview}>
+                      <PreviewIcon />
+                      {`Open ${WINDOW_NAMES.preview}`}
+                    </DropdownMenuItem>
+                  ) : null}
+                  {statsLayout && onStatsLayoutChange ? (
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>Show or hide stats</DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent>
+                        {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
+                          <DropdownMenuCheckboxItem
+                            key={id}
+                            checked={!statsLayout.hidden.includes(id)}
+                            onCheckedChange={(checked) =>
+                              onStatsLayoutChange(setStatHidden(statsLayout, id, checked !== true))
+                            }
+                          >
+                            {STAT_NAMES[id]}
+                          </DropdownMenuCheckboxItem>
+                        ))}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          disabled={
+                            statsLayout.hidden.length === 0 &&
+                            statsLayout.order.every(
+                              (id, index) => id === DEFAULT_STATS_LAYOUT.order[index]
+                            )
+                          }
+                          onClick={() => onStatsLayoutChange(DEFAULT_STATS_LAYOUT)}
+                        >
+                          Reset stats
+                        </DropdownMenuItem>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  ) : null}
+                </DropdownMenuGroup>
+                {requestClear ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={requestClear}>
+                      <span className="flex flex-col">
+                        <span>Clear view</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          Keeps Library history.
+                        </span>
+                      </span>
+                    </DropdownMenuItem>
+                  </>
+                ) : null}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </PopoverAnchor>
+          {onSound ? (
+            <PopoverContent
+              align="end"
+              className="w-[26rem] max-w-[calc(100vw-1rem)]"
+              data-testid="stream-manager-sounds"
+              side="top"
+            >
+              <Suspense fallback={<p className="text-xs text-muted-foreground">Loading sounds…</p>}>
+                {soundsOpen ? (
+                  <SoundsPopoverBody board={sounds} onSound={(action) => void onSound(action)} />
+                ) : null}
+              </Suspense>
+            </PopoverContent>
+          ) : null}
+        </Popover>
       </StatusBar>
       <ConfirmDialog
         confirmLabel="Clear view"

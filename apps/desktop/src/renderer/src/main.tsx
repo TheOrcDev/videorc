@@ -2,7 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 
 import { App } from './App'
-import { AppErrorBoundary } from './components/error-boundary'
+import { AppErrorBoundary } from './components/app-error-boundary'
 import './styles.css'
 
 // React's dev build logs every component render onto the performance timeline

@@ -1,4 +1,28 @@
+import {
+  cameraIsAvailable,
+  cameraSelectionDiagnostics,
+  cameraPreviewStartAllowed,
+  returningSourceChoices,
+  sourceReturnAction
+} from '@/lib/source-return'
+import {
+  IDLE_CAMERA_FRAME_RATE_WATCH,
+  nextCameraFrameRateWatch,
+  sameCameraLowFrameRate,
+  type CameraLowFrameRate
+} from '@/lib/camera-frame-rate'
+import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
+import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
+import type { ChatOverlayDriver } from '@/lib/chat-overlay'
+import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
+import { isReplacementPermissionClient } from '@/lib/permission-evidence'
+import {
+  mediaAccessStatusForPane,
+  systemAccessRows,
+  type SystemAccessContext
+} from '@/lib/system-access'
 import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover-import'
+import { createBannerImporter, type BannerImportPhase } from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
@@ -7,9 +31,29 @@ import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-l
 import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import { streamOutputCheckFailureMessage } from '@/lib/stream-output-check-message'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
-import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
-import { clipMarkedToast } from '../../../shared/clip-marks'
-import { sessionActivity, sessionIsLive } from '../../../shared/capture-state'
+import { globalShortcutLayout, withoutSceneShortcut } from '../../../shared/global-shortcuts'
+import { screenHideAccelerator } from '@/lib/screen-privacy-view'
+import { nextEligibleScene } from '@/lib/scene-shortcut-walk'
+import {
+  NO_SOURCE_PICTURE_SIZES,
+  sourcePictureSizesFromCapture,
+  sourcePictureSizesFromCompositor,
+  type SourcePictureSizes
+} from '@/lib/scene-source-sizes'
+import { acceleratorLabel } from '@/lib/accelerator'
+import {
+  DEFAULT_CLIP_SECONDS,
+  LONG_CLIP_SECONDS,
+  clipMarkSavedClip,
+  clipMarkedToast
+} from '../../../shared/clip-marks'
+import {
+  idleEndsSessionThatRan,
+  sessionActivity,
+  sessionIsLive,
+  sessionIsReplayOnly,
+  sessionOwnsTransport
+} from '../../../shared/capture-state'
 import {
   END_LIVESTREAM_ARMED_TOAST,
   END_LIVESTREAM_ARMED_TOAST_ID,
@@ -20,26 +64,50 @@ import {
   type SessionStopOrigin
 } from '@/lib/session-stop'
 import type { AppExitKind } from '@/lib/backend'
+import { useTheme } from 'next-themes'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
-import { useScenePresets } from '@/hooks/use-scene-presets'
+import { useScenePresets, type SceneLibraryActions } from '@/hooks/use-scene-presets'
+import { capturePickLeavesScene } from '@/lib/scene-autosave'
 import {
   hydrateWorkingScene,
   WORKING_SCENE_KEY,
   normalizeSceneVisual,
   visualSources,
+  usingVisualSources,
   snapshotBackground,
   resolveSavedBackground,
+  sameSceneAudio,
+  sameSceneBackground,
   sameSceneVisual,
+  sceneAudio,
+  sceneMicrophone,
   sceneSourceProblems,
+  sceneSourcesTurnedOff,
   sourceVisibilityFromScene,
+  withSceneDisplay,
+  type SceneApp,
   type SceneVisual,
   type SavedScene
 } from '@/lib/scene-presets'
+import {
+  withoutSceneApp,
+  SCENE_WINDOW_APPS_KEY,
+  appWindowFailureCopy,
+  rememberedSceneApps,
+  sceneAppState,
+  reconcileWorkingSceneSources,
+  type SceneAppState
+} from '@/lib/scene-window-state'
+import type { SavedSceneApplyOptions, SavedSceneApplyResult } from '@/lib/scene-window-resolution'
+import type * as SavedSceneApply from '@/lib/saved-scene-apply'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
+import { backgroundLibrarySyncDecision, firstRunLookWritesHeld } from '@/lib/first-run'
+import type { FirstRunLook } from '@/lib/first-run-look'
 import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
   restoreLayoutUndo,
+  sourceOverrideOf,
   takeLayoutUndo
 } from '@/lib/freeform-memory'
 import {
@@ -57,6 +125,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentType,
   type Dispatch,
   type ReactElement,
   type ReactNode,
@@ -64,7 +133,18 @@ import {
 } from 'react'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
-import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/start-blocked-copy'
+import {
+  advanceStreamDropActivity,
+  emptyStreamDropActivity,
+  recentStreamDrops,
+  type RecentStreamDrops,
+  type StreamDropActivity
+} from '@/lib/stream-health-attribution'
+import {
+  connectionBlockedReason,
+  sceneSourceOffBlockedReason,
+  START_BLOCKED_COPY
+} from '@/lib/start-blocked-copy'
 import { copyText } from '@/lib/copy-text'
 import { platformLabel } from '@/lib/platform-copy'
 import {
@@ -73,6 +153,12 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
+import {
+  nextPortalShareGrant,
+  replayStartWaitsForGrant,
+  replayStartWaitsForPreview,
+  replayStartWaitsForScreen
+} from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import {
   CLOUD_TOAST_ID,
@@ -96,11 +182,20 @@ import type {
   GlobalShortcutContext,
   GlobalShortcutsRegistrar
 } from '@/lib/global-shortcuts'
+import type { AgentSurfaceInput } from '@/lib/agent-surface'
+import type { AgentStudioLink } from '@/lib/agent-studio-link'
+import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
+import { useScreenPrivacy } from './use-screen-privacy'
+import { useMarkerContextPublisher } from './use-marker-context-publisher'
+import type { MarkerContext } from '../../../shared/session-markers'
+import { VirtualCameraContext, useVirtualCameraController } from './use-virtual-camera'
+import type { FollowFrontAppHost, FollowSceneApply } from './use-follow-front-app'
+import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
 import type {
-  RemoteIntentContext,
-  RemoteSurfacePublisher,
-  RemoteSurfaceValues
-} from '@/lib/remote-surface'
+  GoLiveConfirmOutcome,
+  GoLivePreflightRun,
+  HeadlessGoLiveConfirmation
+} from '@/lib/go-live-headless'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
 import {
   commentsRefreshRevisionIsCurrent,
@@ -110,7 +205,10 @@ import {
   COMMENTS_HIGHLIGHT_TIMING_CONTRACT,
   COMMENTS_SEND_TIMING_CONTRACT
 } from '../../../shared/comments-command-timing'
-import { nativePreviewStatusProvesSceneRevision } from '../../../shared/native-preview-scene-authority'
+import {
+  nativePreviewSceneProofWaitSettled,
+  nativePreviewStatusProvesSceneRevision
+} from '../../../shared/native-preview-scene-authority'
 import { compositorStatusFromFrameReady } from '../../../shared/compositor-frame-ready'
 import { rendererCompositorUpdateWasAccepted } from '../../../shared/native-preview-present-ownership'
 import type {
@@ -118,11 +216,16 @@ import type {
   WindowsLiveAudioSmokeState,
   WindowsLiveAudioSmokeTelemetry
 } from '../../../shared/windows-live-audio-smoke'
+import type {
+  WindowsD3d11PreviewSmokeRequest,
+  WindowsD3d11PreviewSmokeState
+} from '../../../shared/windows-d3d11-preview-smoke'
 import {
   applyStoredManualStreamKeyResult,
   auxiliaryStreamOutputVideoSettings,
   bridgeStreamingToLegacy,
   buildCameraSources,
+  buildCaptureSources,
   areEnabledStreamTargetsStartReady,
   coerceVideoToOrientation,
   defaultSettings,
@@ -144,9 +247,9 @@ import {
   preparedYouTubeCompletionTargets,
   providerStreamOutputPlanOptions,
   readyStreamTargetLabels,
-  reconcileSourceSelection,
   reconcileSourceSelectionForLayoutTransaction,
   resolveProviderStreamOutputPlan,
+  separateSourceRecordingsForSession,
   simulcastArmed,
   simulcastLegLiveRequest,
   smokePreviewCompositorCaptureConfig,
@@ -183,8 +286,7 @@ import {
   isShippedDefaultOutput,
   isUntrustedPerformanceCheckResult,
   performanceCheckCeiling,
-  performanceCheckTooHeavyToast,
-  shouldRunPerformanceCheck
+  performanceCheckTooHeavyToast
 } from '@/lib/performance-check'
 import type * as GoLiveOutput from '@/lib/go-live-output'
 import {
@@ -192,6 +294,7 @@ import {
   decideContinueGoLiveWithReadyDestinations,
   decideGoLivePreflight,
   decidePreparedGoLiveSetup,
+  LIVESTREAM_STILL_SETTLING,
   shouldIgnoreGoLiveAction,
   type GoLivePartialSetup,
   type GoLiveSetupFailure
@@ -215,8 +318,13 @@ import { isRetryableBackgroundSurfaceSyncError } from '@/lib/surface-sync-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
 import { buildStartSessionParams } from '@/lib/session-params'
 import {
+  rebindRememberedWindow,
+  shouldRefreshWindowListBeforeStart
+} from '@/lib/window-source-rebind'
+import {
   applyFinalizationEvent,
   finalizationEventNeedsRefresh,
+  finalizationNoticesForRows,
   finalizingBadgeLabel,
   FinalizationSnapshotJournal
 } from '@/lib/session-finalization'
@@ -237,6 +345,8 @@ import {
   showBrowserApproval,
   showStreamTargetNotice,
   showTakeoverEditRefused,
+  showChatNeedsVideorcSignIn,
+  showVideorcSignInExpired,
   showXBroadcastProblem,
   X_MEDIA_STUDIO_URL,
   sourceSwitchFailedDescription,
@@ -255,6 +365,12 @@ import {
   UserFacingError,
   type UserErrorContext
 } from '@/lib/user-error'
+import { recentUserErrors } from '@/lib/user-error-log'
+import {
+  layoutSwitchTarget,
+  pendingLayoutEvidence,
+  type LayoutSwitchTarget
+} from '@/lib/layout-switch-pending'
 import {
   INITIAL_ACCOUNT_READY_REFRESH_STATE,
   reduceAccountReadyRefresh,
@@ -278,6 +394,7 @@ import {
   layoutTransactionFailureDisposition,
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
+  layoutTransactionSourcesFromScene,
   layoutTransactionUnprovenSeverity,
   NativePreviewPresentationProofError,
   shouldReloadSceneFromCaptureConfig
@@ -285,6 +402,7 @@ import {
 import {
   mergePreviewSurfaceHostStatus,
   nativePreviewFramePollingRequestKey,
+  nativePreviewProofPollingRecording,
   nativePreviewFramePollingResponseCanCommit,
   nativePreviewFramePollingShouldSuppress,
   nativePreviewMainStatusReadGenerationMatches,
@@ -295,6 +413,7 @@ import {
 } from '@/lib/native-preview-surface-lifecycle'
 import type {
   AccountCallbackEnvelope,
+  AccountChangedEvent,
   AiCapabilities,
   AudioLevelsEvent,
   CohostActionCommand,
@@ -327,6 +446,8 @@ import type {
   AudioMeterResult,
   AudioProcessingUpdateResult,
   BackendConnection,
+  Banner,
+  BannerUpdateParams,
   BackendHealth,
   BackendLifecycleEvent,
   BackendLogEvent,
@@ -335,8 +456,12 @@ import type {
   CompositorFrameReady,
   CompositorStatus,
   DiagnosticStats,
+  ClipLength,
   ClipMarkCommand,
   ClipMarkedEvent,
+  ReplaySaveFailedEvent,
+  ReplaySavedEvent,
+  ReplayStateEvent,
   Device,
   DeviceList,
   EntitlementsSnapshot,
@@ -348,7 +473,6 @@ import type {
   GateStatus,
   GoLivePreflight,
   HealthEvent,
-  CameraTransform,
   LayoutPreset,
   LayoutSettings,
   LiveLayoutApplyStatus,
@@ -397,6 +521,7 @@ import type {
   SceneConfigParams,
   SceneEditorDraftAck,
   SceneEditorDraftParams,
+  SceneTransformPatch,
   SessionCommentsPage,
   SessionDeletionOperation,
   SessionDetails,
@@ -405,6 +530,7 @@ import type {
   SessionLogEntry,
   SessionSummary,
   SourceSelection,
+  SourceTransformOverride,
   StartSessionParams,
   StreamMetadataDraft,
   StreamMetadataValidation,
@@ -453,6 +579,7 @@ import {
   offCohostState
 } from '@/lib/backend'
 import { backendAudioLevels } from '@/lib/backend-audio-levels'
+import { soundboard } from '@/lib/soundboard-store'
 import {
   appendCaptionLine,
   captionDwellMs,
@@ -506,6 +633,7 @@ import {
   applyLiveChatProviderStatus,
   applyLiveChatSnapshot,
   chatSetupToastWarnings,
+  chatVideorcSignInWarnings,
   liveChatSendOperationQueryDecision,
   MAX_LIVE_CHAT_VIEW_MESSAGES,
   LiveChatRecoveryOverflowError,
@@ -542,13 +670,26 @@ import {
 } from '@/lib/session-start-failure'
 import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
-import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-assets'
+import {
+  applyLiveBackground as applyLiveBackgroundToRegistry,
+  effectiveSceneBackground,
+  nextLiveBackgroundStatusView,
+  registryForCommittedLiveBackground,
+  removeSlotAsset,
+  type LiveBackgroundStatusView
+} from '@/lib/background-assets'
+import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
+import { useChatNewCount } from '@/hooks/use-chat-new-count'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
+import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
 import {
   confirmedSystemAudioMix,
+  nextSystemAudioJoin,
   systemAudioIssueFromHealthEvent,
-  type SystemAudioIssue
+  systemAudioJoining as isSystemAudioJoining,
+  type SystemAudioIssue,
+  type SystemAudioJoin
 } from '@/lib/system-audio-session'
 import {
   activeAudioProcessingUpdateParams,
@@ -566,7 +707,8 @@ import {
 } from '@/lib/studio-bootstrap'
 import {
   deviceListWithoutProtectedOverlayWindows,
-  protectedOverlayWindowIdsFromOverlayWindows
+  protectedOverlayWindowIdsFromOverlayWindows,
+  streamManagerProtectedOverlayWindow
 } from '@/lib/protected-overlay-windows'
 
 export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
@@ -603,9 +745,6 @@ type PlatformLifecycleSettlement = {
   promise: Promise<PlatformBroadcastCleanupResult>
 }
 
-/** Why a new Go Live waits: the last one is still being ended on its platforms. */
-const LIVESTREAM_STILL_SETTLING =
-  'Videorc is still ending your last livestream on its platforms. Try again in a moment.'
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX = 'prepared-platform:'
 const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
@@ -625,13 +764,49 @@ function loadCommandFailurePolicy() {
   return import('@/lib/command-failure-policy')
 }
 
+// Banner refusal copy (plan 186): read only when a banner call fails.
+function loadBannerRules() {
+  return import('@/lib/banners')
+}
+
 function loadCaptionOverlay() {
   return import('@/lib/caption-overlay')
+}
+
+// Chat on stream (plan 215 G): the box's driver and painter, lazy, loaded the
+// first time a chat switch is on while live.
+async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlayDriver> {
+  const [{ createChatOverlayDriver }, { renderChatOverlayCards }] = await Promise.all([
+    import('@/lib/chat-overlay'),
+    loadCaptionOverlay()
+  ])
+  return createChatOverlayDriver({
+    set: (params) => client.requestTyped('chat.overlay.set', params),
+    clear: () => client.requestTyped('chat.overlay.clear'),
+    canvases: () => client.requestTyped('chat.overlay.canvases'),
+    paint: renderChatOverlayCards
+  })
 }
 
 // The Buddy's bubble rasterizer: lazy, never in the eager shell.
 function loadBuddyOverlay() {
   return import('@/lib/buddy-overlay')
+}
+
+// Plan 210 S10: the follower and the password-manager list it reads load on
+// macOS once the backend is up, never in the eager shell.
+function loadFollowFrontApp() {
+  return import('./use-follow-front-app')
+}
+
+// Plan 210 D5: a saved scene's app-window resolution and strict preflight live
+// in a chunk warmed at connect. Once in it is read synchronously, so no switch
+// pays the import.
+let savedSceneApplyChunk: typeof SavedSceneApply | null = null
+
+async function loadSavedSceneApply(): Promise<typeof SavedSceneApply> {
+  savedSceneApplyChunk ??= await import('@/lib/saved-scene-apply')
+  return savedSceneApplyChunk
 }
 
 // Steady-state telemetry (surface counters, diagnostics stats) commits to
@@ -648,13 +823,14 @@ const BUDDY_LIBRARY_FOCUS_SYNC_MS = 60_000
 // keeps the post-capture replay from racing Main into a second deferral.
 const ACCOUNT_REFRESH_IDLE_REPLAY_DELAY_MS = 1_000
 const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
+// The engine dropped this window's socket but may still be running: how long
+// to wait before each quiet check that it still answers.
+const ENGINE_RECONNECT_DELAY_MS = 2_000
 /// Scene-motion duration: content motion on-air sits just above the UI's
 /// 100-150ms tier; >=500ms reads as a broadcast wipe.
 const SCENE_TRANSITION_MS = 320
 
 const SESSION_LIST_PAGE_LIMIT = 50
-// Long enough for first paint, preview warm-up and the bootstrap burst.
-const PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS = 8_000
 
 function outputChosenByUser(): boolean {
   try {
@@ -983,7 +1159,7 @@ async function waitForNativePreviewSurfaceSceneRevision(
     } catch {
       return lastStatus
     }
-    if (nativePreviewStatusProvesSceneRevision(lastStatus, sceneRevision, platform)) {
+    if (nativePreviewSceneProofWaitSettled(lastStatus, sceneRevision, platform)) {
       return lastStatus
     }
     await sleep(NATIVE_PREVIEW_SCENE_FRAME_WAIT_INTERVAL_MS)
@@ -1052,7 +1228,10 @@ type LayoutTransactionSnapshot = {
   captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
   origin?: 'builtin' | 'saved'
   sources?: SourceSelection
+  sceneApp?: SceneApp
   savedSceneId?: string | null
+  /** Plan 210 D3: putting a saved scene on stream, never an edit that saves into it. */
+  sceneSwitch?: boolean
 }
 
 type LayoutTransactionSceneEvidence = {
@@ -1214,9 +1393,9 @@ export type StudioContextValue = {
   /** Read-only live-chat snapshot for the studio comments panel, driven by liveChat.* events. */
   liveChatSnapshot: LiveChatSnapshot
   /** Clear the local chat view (calls liveChat.clearLocal; not platform messages). */
-  /** Live captions (premium cloud AI): status + transcript lines from captions.* events. */
+  /** Live captions (premium cloud AI): status from captions.* events. The
+   * transcript lines are on their own context (`useStudioCaptions`). */
   captionsStatus: CaptionsStatus
-  captionLines: CaptionsUpdate[]
   captionsCommandPending: boolean
   startCaptions: (language?: string) => Promise<void>
   stopCaptions: () => Promise<void>
@@ -1229,6 +1408,8 @@ export type StudioContextValue = {
   closeCommentsWindow: () => Promise<void>
   toggleCommentsWindow: () => Promise<void>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<void>
+  /** Hide from stream (plan 215 D6), flipped from ⌘K with the window closed too. */
+  setCommentsWindowHiddenFromStream: (hidden: boolean) => Promise<void>
   openSessionCommentsWindow: (sessionId: string, title: string, startedAt: string) => Promise<void>
   highlightedCommentId: string | null
   commentHighlightState: CommentHighlightState
@@ -1246,9 +1427,6 @@ export type StudioContextValue = {
    * (or the Premium prompt) and the diagnostics record. For promises a page
    * starts itself, so no failure is swallowed (plan 174, C-6). */
   reportError: (error: unknown, context?: UserErrorContext) => void
-  /** The Buddy on stream (plan 164 Phase C): which state shows and the bubble
-   * that is up (`cohost.buddy.state`); null until the backend reported. */
-  buddyOverlay: BuddyOverlaySnapshot | null
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
@@ -1298,6 +1476,8 @@ export type StudioContextValue = {
   previewLoading: boolean
   previewLiveStatus: PreviewLiveStatus
   previewCameraStatus: PreviewCameraStatus
+  /** Issue #1066: the camera's rate has stayed under its own; null otherwise. */
+  previewCameraLowFrameRate: CameraLowFrameRate | null
   previewScreenStatus: PreviewScreenStatus
   previewSurfaceStatus: PreviewSurfaceStatus
   nativePreviewSurfaceEnabled: boolean
@@ -1312,6 +1492,8 @@ export type StudioContextValue = {
   closeNotesWindow: () => Promise<void>
   setNotesWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<void>
   scene: Scene | null
+  /** Plan 216 B2: each scene source's picture size, for the stage's box. */
+  sourcePictureSizes: SourcePictureSizes
   sceneEditMode: boolean
   selectedSceneSourceId: string | null
   setSceneEditMode: Dispatch<SetStateAction<boolean>>
@@ -1320,6 +1502,7 @@ export type StudioContextValue = {
   audioMeterLoading: boolean
   /** Real OS camera/mic access status (null before the first read). */
   mediaAccess: MediaAccessSnapshot | null
+  systemAccessContext: SystemAccessContext
   // ai + jobs
   aiConsent: boolean
   /** Persists across launches (durable preference, not a per-launch answer). */
@@ -1355,9 +1538,19 @@ export type StudioContextValue = {
   setCaptureConfig: Dispatch<SetStateAction<CaptureConfig>>
   patchLayout: (patch: Partial<LayoutSettings>) => void
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
+  applyCameraLook: (look: NonNullable<LayoutSettings['cameraLook']>) => void
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
-  applyCameraPreset: (patch: Partial<LayoutSettings>) => void
+  /** `keepScene`: the Scene page's Layout edits the saved scene on stream (plan 210 D3). */
+  applyCameraPreset: (patch: Partial<LayoutSettings>, options?: { keepScene?: boolean }) => void
+  /**
+   * Plan 207 S4: the look chosen in first-run setup, written as state only so
+   * the idle scene reload commits it without opening a device. While a
+   * backend session runs (the Clips ring during a replay of setup) the look
+   * is held here and applied through one transaction when setup closes.
+   */
+  firstRunLookHold: FirstRunLook | null
+  applyFirstRunLook: (look: FirstRunLook) => void
   savedScenes: SavedScene[]
   activeSavedSceneId: string | null
   savedScenePendingId: string | null
@@ -1368,18 +1561,34 @@ export type StudioContextValue = {
   saveScene: (name: string, updateId?: string) => boolean
   renameSavedScene: (id: string, name: string) => boolean
   deleteSavedScene: (id: string) => boolean
+  savedSceneWindowApps: Readonly<Record<string, string>>
+  savedSceneAppStates: Readonly<Record<string, SceneAppState | undefined>>
+  /** Plan 210 S5: New scene…, the scene list's order and its ⋯ edits. */
+  sceneLibraryActions: SceneLibraryActions
+  applySavedSceneResult: (
+    id: string,
+    repaired?: SceneVisual,
+    options?: SavedSceneApplyOptions
+  ) => Promise<SavedSceneApplyResult>
   applySavedScene: (id: string, repaired?: SceneVisual) => Promise<boolean>
   applyBackgroundSlot: (slotId: string | null) => void
   applyWorkingBackgroundStyle: (patch: Partial<Scene['background']>) => void
+  /** Plan 190: put a live background on the scene; null takes it off. */
+  applyLiveBackground: (id: LiveBackgroundId | null) => void
+  /**
+   * Plan 190: how the applied live background is drawn (null with none), for
+   * Assets' still-frame reason. It changes only when that summary does.
+   */
+  liveBackgroundStatus: LiveBackgroundStatusView | null
   /**
    * Change the vertical simulcast leg (scene, screen framing, follow). Saved
    * for the next session and, in a running dual-orientation session, applied
    * to the leg live — the horizontal program is never touched.
    */
   applySimulcastLeg: (patch: SimulcastLegPatch) => void
-  // The layout preset a live switch is currently starting sources for, if any
-  // (drives the "Switching…" pending state; plan slice D2).
-  layoutSwitchPending: LayoutPreset | null
+  // The layout a switch is applying, if any: its preset and whether it lands
+  // in Freeform (drives the one "Switching…" label; plan slice D2, plan 216 A4).
+  layoutSwitchPending: LayoutSwitchTarget | null
   sourceDeviceSwitchPending: LiveSourceDeviceSwitchPending | null
   sourceSelectionState: LiveSourceSelectionState
   sourceSwitchReason: (kind: LiveSourceDeviceSwitchPending) => string | null
@@ -1396,6 +1605,8 @@ export type StudioContextValue = {
   /** Windows raw-path encoder choice; null until the backend answers. */
   encoderPreference: EncoderPreferenceState | null
   setEncoderPreference: (preference: WindowsH264EncoderPreference) => Promise<void>
+  /** Issue #1066: reads or saves a camera's low-light compensation. */
+  requestCameraLowLight: CameraLowLightRequest
   performanceCheckProgress: PerformanceCheckProgress | null
   runPerformanceCheck: () => Promise<void>
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
@@ -1479,7 +1690,7 @@ export type StudioContextValue = {
   ) => Promise<void>
   setSceneSourceTransform: (
     sourceId: string,
-    patch: { x?: number; y?: number; width?: number; height?: number }
+    patch: SceneTransformPatch
   ) => Promise<TransformCommitResult>
   /** Live drag drafts for the Scene canvas (plan 058); refused while a session runs. */
   setSceneEditorDraft: (params: SceneEditorDraftParams) => Promise<SceneEditorDraftAck>
@@ -1512,6 +1723,10 @@ export type StudioContextValue = {
    * start that cannot run says why and resolves false; one that only opened
    * the dialog resolves false too.
    */
+  screenPrivacy: import('@/lib/backend').ScreenPrivacy
+  hideScreen: ReturnType<typeof useScreenPrivacy>['hideScreen']
+  showScreen: ReturnType<typeof useScreenPrivacy>['showScreen']
+  toggleScreenHidden: ReturnType<typeof useScreenPrivacy>['toggleScreenHidden']
   startRecording: () => Promise<boolean>
   startLivestream: () => Promise<boolean>
   stopSession: () => Promise<boolean>
@@ -1536,8 +1751,9 @@ export type StudioContextValue = {
   cancelNoiseCleanup: (jobId: string) => Promise<NoiseCleanupJob>
   sessionStorageTotals: SessionStorageTotals | null
   /** Mark the current moment for a clip (plan 068 D6). The `clip.marked`
-   * event, not the reply, carries the toast so every source reads the same. */
-  markClip: () => Promise<ClipMarkedEvent | null>
+   * event, not the reply, carries the toast so every source reads the same.
+   * Plan 199: `seconds` is 30 or 60; none is today's 30-second clip. */
+  markClip: (seconds?: ClipLength) => Promise<ClipMarkedEvent | null>
   assessRecording: (path: string) => Promise<FileAssessment>
   repairRecording: (path: string) => Promise<GateStatus>
   restoreRecording: (path: string) => Promise<boolean>
@@ -1545,9 +1761,21 @@ export type StudioContextValue = {
   outputEnabled: boolean
   streamReady: boolean
   isSessionActive: boolean
+  /** The running session's word on a scene edit (plan 215 D1), from
+   * `recording.status.acceptsLiveSceneEdits`: true on every compositor
+   * path, false on the legacy FFmpeg graph (a fixed picture), null while it
+   * has not said (nothing runs, a start still pending, an older backend).
+   * Read it only while `isSessionActive`: a replay-only Clips ring reports
+   * its own word, but the page never locks for a ring and the backend
+   * never refuses an idle edit for one. */
+  acceptsLiveSceneEdits: boolean | null
+  /** A recording, livestream or Clips ring has a running audio bus (plan 201). */
+  audioBusActive: boolean
   /** Whether the active session mixes system audio, from `recording.status`
    * `mixSources` (plan 069); null until the backend reports it. */
   systemAudioConfirmed: boolean | null
+  /** The session still opens the System audio it started with (`systemAudioJoining`). */
+  systemAudioJoining: boolean
   /** The newest system-audio health issue for the active session. */
   systemAudioIssue: SystemAudioIssue | null
   startBlockedReason: string | null
@@ -1569,6 +1797,48 @@ export type StudioContextValue = {
   canSampleAudio: boolean
 }
 
+/** What the Output page and the status bar show and do for the clip ring
+ * (plan 181, the owner's redesign). */
+export interface ReplayBufferControls {
+  state: ReplayStateEvent
+  /** The ring is wanted right now. The backend's `state` says what is. */
+  armed: boolean
+  /**
+   * The backend refused the default start on this computer (a software
+   * encoder path): the switch stays off and the Output page says why, until
+   * the user turns it on themselves.
+   */
+  blockedReason: string | null
+  /**
+   * Why the ring is waiting rather than starting (plan 203 S2, plan 207 S2):
+   * a grant macOS has not asked for yet, or a screen the layout shows that
+   * nobody has chosen. The Output page's Clips row says it; never a toast.
+   */
+  waitReason?: string | null
+  /** The one switch (Output → Clips → Keep the last seconds). */
+  setEnabled: (enabled: boolean) => void
+}
+
+const REPLAY_STATE_OFF: ReplayStateEvent = { state: 'off', seconds: 30, bufferedSeconds: 0 }
+
+/** The backend's idle after a buffer-only stop, bounded (the stop's own reply
+ * may still say stopping). */
+async function waitForRecordingIdle(
+  recordingRef: { current: { state: string } },
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (recordingRef.current.state !== 'idle' && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+  }
+}
+/** `session.start`'s code for a default ring start the backend keeps off a
+ * software encoder path (mirrors `replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE`). */
+const REPLAY_SOFTWARE_ENCODER_REFUSAL = 'replay-software-encoder'
+/** `session.start`'s code for a default ring start whose scene camera has no
+ * frame yet (mirrors `replay_buffer::SOURCES_NOT_READY_CODE`). */
+const REPLAY_SOURCES_NOT_READY = 'replay-sources-not-ready'
+
 export type StudioCoreContextValue = Omit<
   StudioContextValue,
   | 'captureRecoveryRetryPending'
@@ -1578,6 +1848,7 @@ export type StudioCoreContextValue = Omit<
   | 'liveChatSnapshot'
   | 'logs'
   | 'previewCameraStatus'
+  | 'previewCameraLowFrameRate'
   | 'previewLiveStatus'
   | 'previewScreenStatus'
   | 'streamHealth'
@@ -1594,14 +1865,14 @@ export type StudioRecordingStateContextValue = {
    * the backend reports both as `recording` (plan 095 S5). `startedAt` feeds
    * the shell's clocks (the status bar, the sidebar's Studio row; plan 174
    * S1.3, D8) and changes only when a session starts. */
-  recording: Pick<RecordingStatus, 'state' | 'sessionId' | 'streamUrl' | 'startedAt'>
+  recording: Pick<RecordingStatus, 'state' | 'sessionId' | 'streamUrl' | 'startedAt' | 'replayOnly'>
 }
 
 export type StudioRecordingContextValue = Pick<StudioContextValue, 'recording'>
 
 export type StudioPreviewContextValue = Pick<
   StudioContextValue,
-  'previewLiveStatus' | 'previewCameraStatus' | 'previewScreenStatus'
+  'previewLiveStatus' | 'previewCameraStatus' | 'previewCameraLowFrameRate' | 'previewScreenStatus'
 >
 
 type RecordLatencyState = {
@@ -1613,6 +1884,12 @@ interface StudioDiagnosticsContextValue {
   captureRecoveryStatus: CaptureRecoveryStatus
   captureRecoveryRetryPending: boolean
   diagnosticStats: DiagnosticStats
+  /**
+   * Which stages dropped frames within the last few seconds (#981), read
+   * from the growth of the diagnostics' session totals. One window for every
+   * surface, so the Studio, Go Live and Health cannot disagree.
+   */
+  recentStreamDrops: RecentStreamDrops
   /** Latest renderer-measured Record/Stop click latency samples. */
   recordLatency: RecordLatencyState
   healthEvents: HealthEvent[]
@@ -1624,6 +1901,8 @@ interface StudioDiagnosticsContextValue {
 
 interface StudioChatContextValue {
   liveChatSnapshot: LiveChatSnapshot
+  /** Chat messages since the Stream Manager last showed (plan 213 B1): the Studio's Chat row. */
+  chatNewCount: number
   /** Latest `cohost.state`; null until the engine reports for the first time. */
   cohostState: CohostState | null
 }
@@ -1634,16 +1913,69 @@ interface StudioAudioContextValue {
   meterLevel: number
 }
 
+/**
+ * Banners (plan 186): the one set, backend-owned. Its own context, so a show,
+ * a hide or a move publishes nothing to core consumers. Assets manages them,
+ * the Scene page places them, and the Stream Manager relay and the remotes
+ * show and hide them through these same actions. A refusal is a warning toast
+ * with the backend's sentence; the actions resolve false (or null) after any
+ * failure, which has already said so.
+ */
+export type StudioBannersContextValue = {
+  /** Assets order, which is also the drawing order: later is on top. */
+  banners: Banner[]
+  /** `banners.list` has answered once: "No banners yet" waits for it. */
+  bannersLoaded: boolean
+  /** Videorc is reconnecting: every banner action waits for it. */
+  bannersOffline: boolean
+  bannerImportPhase: BannerImportPhase
+  /** The banner the Scene page selects (Assets → Place on Scene); null when none, or deleted. */
+  selectedBannerId: string | null
+  selectBanner: (id: string | null) => void
+  /** Assets → Import image…: the picker, then `banners.importImage`, which shows the new banner
+   * (plan 205 D3) unless four already show or a running session can't take one: then it
+   * arrives hidden (with four showing, the Scene list's limit reason says why). */
+  importBanner: () => Promise<void>
+  updateBanner: (id: string, patch: Omit<BannerUpdateParams, 'id'>) => Promise<Banner | null>
+  /** Every banner id in the new Assets order (`bannerOrderAfterMove`). */
+  reorderBanners: (ids: string[]) => Promise<boolean>
+  deleteBanner: (id: string) => Promise<boolean>
+  showBanner: (id: string) => Promise<boolean>
+  /** No id hides every banner. */
+  hideBanner: (id?: string) => Promise<boolean>
+  toggleBanner: (id: string) => Promise<boolean>
+}
+
+/** The live caption lines from `captions.update` (plan 191). */
+export type StudioCaptionsContextValue = {
+  captionLines: CaptionsUpdate[]
+}
+
 /** The takeover list before it loads: one stable empty array. */
 const NO_SCREENS: StreamScreen[] = []
+/** The banner list before it loads: one stable empty array. */
+const NO_BANNERS: Banner[] = []
+/** What a failed takeover Show names, offline or busy (plan 195 S4). */
+const SHOW_TAKEOVER: UserErrorContext = { action: 'show', object: 'the takeover' }
+/** What a failed takeover Take off names, offline or busy (plan 195 S4). */
+const TAKE_OFF_TAKEOVER: UserErrorContext = { action: 'take off', object: 'the takeover' }
 
 const StudioContext = createContext<StudioCoreContextValue | null>(null)
 const StudioRecordingStateContext = createContext<StudioRecordingStateContextValue | null>(null)
+// Plan 181: the ring reports once a second while it is on. Its own context
+// keeps that tick away from the core value and the shell; only the Studio
+// row, the status bar chip and the palette item subscribe.
+const StudioReplayContext = createContext<ReplayBufferControls | null>(null)
 const StudioRecordingContext = createContext<StudioRecordingContextValue | null>(null)
 const StudioPreviewContext = createContext<StudioPreviewContextValue | null>(null)
 const StudioDiagnosticsContext = createContext<StudioDiagnosticsContextValue | null>(null)
 const StudioChatContext = createContext<StudioChatContextValue | null>(null)
 const StudioAudioContext = createContext<StudioAudioContextValue | null>(null)
+const StudioBannersContext = createContext<StudioBannersContextValue | null>(null)
+// Plan 191: a streaming caption partial lands several times a second while
+// anyone speaks. Its own context keeps it out of core and the shell; only the
+// Captions page and its preview subscribe.
+const StudioCaptionsContext = createContext<StudioCaptionsContextValue | null>(null)
 
 /**
  * Videorc Cloud (plan 184): the backend's whole `CloudStatus`, plus the three
@@ -1691,6 +2023,8 @@ interface StudioShellContextValue {
   recordingState: RecordingStatus['state']
   runtimeInfo: RuntimeInfo | null
   entitlementTier: EntitlementsSnapshot['tier'] | null
+  /** Chat or Buddy waits on the Videorc sign-in (plan 215 A5): the sidebar's account dot. */
+  accountNeedsSignIn: boolean
   /** Plan 185 T4: `max` names the account Max; absent for every other plan. */
   entitlementPlan: EntitlementsSnapshot['plan'] | null
   previewWindowOpen: boolean
@@ -1707,6 +2041,9 @@ interface StudioShellContextValue {
   stopConfirmation: SessionStopConfirmation | null
   confirmStopSession: () => void
   cancelStopSession: () => void
+  /** First-run setup replaces the workspace (plan 203 S5): preview and global keys wait. */
+  firstRunSetupOpen: boolean
+  setFirstRunSetupOpen: (open: boolean) => void
 }
 
 const StudioShellContext = createContext<StudioShellContextValue | null>(null)
@@ -2080,6 +2417,8 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   visible: false,
   bounds: null,
   alwaysOnTop: false,
+  hiddenFromStream: false,
+  hideFromStreamMethod: 'unsupported',
   highlightAnchor: DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   autoShowActivity: false,
   protected: false,
@@ -2110,12 +2449,20 @@ const idlePreviewSupervisorState = (): PreviewSupervisorState => ({
 })
 
 async function currentProtectedOverlayWindowIds(): Promise<number[]> {
-  // Only Notes is capture-protected: it is a private teleprompter. Comments
-  // and Captions are part of the show and stay visible in recordings (owner
+  // Notes is capture-protected: it is a private teleprompter. Comments and
+  // Captions are part of the show and stay visible in recordings (owner
   // call, 2026-08-19), so they are neither excluded from capture nor hidden
-  // from the source picker.
-  const latestNotesWindow = await window.videorc?.getNotesWindowState?.().catch(() => null)
-  return protectedOverlayWindowIdsFromOverlayWindows(latestNotesWindow ?? idleNotesWindowState())
+  // from the source picker. The one choice (plan 215 D6): the Stream Manager
+  // joins the list while its Hide from stream switch is on. The backend
+  // applies a changed list to a running capture in place (C2).
+  const [latestNotesWindow, latestCommentsWindow] = await Promise.all([
+    window.videorc?.getNotesWindowState?.().catch(() => null),
+    window.videorc?.getCommentsWindowState?.().catch(() => null)
+  ])
+  return protectedOverlayWindowIdsFromOverlayWindows(
+    latestNotesWindow ?? idleNotesWindowState(),
+    streamManagerProtectedOverlayWindow(latestCommentsWindow ?? idleCommentsWindowState())
+  )
 }
 
 export function useStudioCore(): StudioCoreContextValue {
@@ -2143,6 +2490,15 @@ export function useStudioRecordingState(): StudioRecordingStateContextValue {
   const value = useContext(StudioRecordingStateContext)
   if (!value) {
     throw new Error('useStudioRecordingState must be used within a StudioProvider')
+  }
+  return value
+}
+
+/** The clip ring (plan 181): the backend's state, the Output switch, the guard's reason. */
+export function useStudioReplay(): ReplayBufferControls {
+  const value = useContext(StudioReplayContext)
+  if (!value) {
+    throw new Error('useStudioReplay must be used within a StudioProvider')
   }
   return value
 }
@@ -2179,6 +2535,22 @@ export function useStudioAudio(): StudioAudioContextValue {
   return value
 }
 
+export function useStudioBanners(): StudioBannersContextValue {
+  const value = useContext(StudioBannersContext)
+  if (!value) {
+    throw new Error('useStudioBanners must be used within a StudioProvider')
+  }
+  return value
+}
+
+export function useStudioCaptions(): StudioCaptionsContextValue {
+  const value = useContext(StudioCaptionsContext)
+  if (!value) {
+    throw new Error('useStudioCaptions must be used within a StudioProvider')
+  }
+  return value
+}
+
 /** Compatibility hook for consumers that genuinely span every state domain. */
 export function useStudio(): StudioContextValue {
   const core = useStudioCore()
@@ -2191,6 +2563,30 @@ export function useStudio(): StudioContextValue {
     () => ({ ...core, ...recording, ...preview, ...diagnostics, ...chat, ...audio }),
     [audio, chat, core, diagnostics, preview, recording]
   )
+}
+
+/**
+ * Plan 215 A5, pure: the backend's `account.changed` event, applied. The
+ * snapshot is the backend's current truth, so it lands unless a sign-in or
+ * sign-out this renderer started is still in flight (that call commits its
+ * own answer). A sign-out the server made (`session-expired`) is news the
+ * streamer must hear (D7): until now it was silent, the sidebar read "Sign
+ * in", and chat failed at the next Go Live.
+ */
+export function handleAccountChangedEvent(
+  event: AccountChangedEvent,
+  deps: {
+    coordinator: AccountSnapshotCommitCoordinator
+    setAccount: (account: VideorcAccountSnapshot) => void
+  }
+): void {
+  const token = deps.coordinator.beginRefresh()
+  if (token && deps.coordinator.canCommit(token)) {
+    deps.setAccount(event.account)
+  }
+  if (event.reason === 'session-expired') {
+    showVideorcSignInExpired()
+  }
 }
 
 export function useStudioShell(): StudioShellContextValue {
@@ -2209,9 +2605,23 @@ type StudioContextProvidersProps = {
   diagnostics: StudioDiagnosticsContextValue
   chat: StudioChatContextValue
   audio: StudioAudioContextValue
+  /** Plan 181. Optional so a test that mounts the providers alone keeps a ring that is off. */
+  replay?: ReplayBufferControls
+  /** Plan 191. Optional so a test that mounts the providers alone has no caption lines. */
+  captions?: StudioCaptionsContextValue
   cloud?: StudioCloudContextValue
   children?: ReactNode
 }
+
+const REPLAY_BUFFER_OFF_CONTROLS: ReplayBufferControls = Object.freeze({
+  state: REPLAY_STATE_OFF,
+  armed: false,
+  blockedReason: null,
+  waitReason: null,
+  setEnabled: () => {}
+})
+
+const NO_CAPTION_LINES: StudioCaptionsContextValue = Object.freeze({ captionLines: [] })
 
 /**
  * Keep volatile Studio domains behind their own providers. Besides making the
@@ -2227,6 +2637,8 @@ export function StudioContextProviders({
   diagnostics,
   chat,
   audio,
+  replay = REPLAY_BUFFER_OFF_CONTROLS,
+  captions = NO_CAPTION_LINES,
   cloud,
   children
 }: StudioContextProvidersProps): ReactElement {
@@ -2238,9 +2650,13 @@ export function StudioContextProviders({
             <StudioDiagnosticsContext.Provider value={diagnostics}>
               <StudioChatContext.Provider value={chat}>
                 <StudioAudioContext.Provider value={audio}>
-                  <StudioCloudContext.Provider value={cloud ?? null}>
-                    {children}
-                  </StudioCloudContext.Provider>
+                  <StudioReplayContext.Provider value={replay}>
+                    <StudioCaptionsContext.Provider value={captions}>
+                      <StudioCloudContext.Provider value={cloud ?? null}>
+                        {children}
+                      </StudioCloudContext.Provider>
+                    </StudioCaptionsContext.Provider>
+                  </StudioReplayContext.Provider>
                 </StudioAudioContext.Provider>
               </StudioChatContext.Provider>
             </StudioDiagnosticsContext.Provider>
@@ -2259,12 +2675,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // every change (enable/disable/regenerate/deck connect), so nothing polls.
   const [remoteControlStatus, setRemoteControlStatus] = useState<RemoteControlStatus | null>(null)
   const [remoteLanStatus, setRemoteLanStatus] = useState<RemoteLanStatus | null>(null)
+  // Plan 203 S5: while first-run setup replaces the workspace the Studio is not
+  // mounted and the preview has no slot. Auto-preview capture, the native
+  // source previews, the Preview window and the OS-global shortcuts wait for it
+  // to close; the shell owns the flag.
+  const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
+  // Plan 209 S14: `update_settings` sets the theme through next-themes, like
+  // Settings → General's control.
+  const { theme: appTheme, setTheme: setAppTheme } = useTheme()
+
+  // Plan 207 S4: a look chosen in setup while a session holds the idle
+  // reload back (the Clips ring in a replay); applied once setup closes.
+  const [firstRunLookHold, setFirstRunLookHold] = useState<FirstRunLook | null>(null)
+  const firstRunLookHoldRef = useRef<FirstRunLook | null>(null)
   // Keep the remote-control bridges out of the eager Studio bundle. They are
   // loaded only when their lifecycle starts, while refs preserve their
   // imperative change-detection, debounce, and retry behavior.
   const remoteSurfacePublisherRef = useRef<RemoteSurfacePublisher | null>(null)
   const remoteSurfaceValuesRef = useRef<RemoteSurfaceValues | null>(null)
-  const remoteIntentTailRef = useRef<Promise<void>>(Promise.resolve())
+  // Plan 209 S6: the agents' link (their projection and tool calls), the
+  // same lazy latest-value bridge.
+  const agentLinkRef = useRef<AgentStudioLink | null>(null)
+  const agentSurfaceInputRef = useRef<AgentSurfaceInput | null>(null)
   const globalShortcutsRegistrarRef = useRef<GlobalShortcutsRegistrar | null>(null)
   const accountCallbacksInFlightRef = useRef<Set<string>>(new Set())
   const accountCallbacksCompletedRef = useRef<Set<string>>(new Set())
@@ -2308,7 +2740,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [aiQuota, setAiQuota] = useState<AiQuotaStatus | null>(null)
   const [aiReadinessError, setAiReadinessError] = useState<string | null>(null)
   const [aiReadinessLoading, setAiReadinessLoading] = useState(false)
-  const [deviceList, setDeviceList] = useState<DeviceList>({ devices: [], warnings: [] })
+  const [deviceList, commitDeviceList] = useState<DeviceList>({ devices: [], warnings: [] })
+  // A connection alone is not proof: only its published devices.list counts.
+  const [permissionEvidenceClient, setPermissionEvidenceClient] = useState<BackendClient | null>(
+    null
+  )
+  const setDeviceList = useCallback((nextDevices: DeviceList) => {
+    setPermissionEvidenceClient(clientRef.current)
+    commitDeviceList(nextDevices)
+  }, [])
   const previewDevicesSignature = useMemo(
     () => previewDeviceRefreshSignature(deviceList.devices),
     [deviceList.devices]
@@ -2317,7 +2757,48 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     deviceListRef.current = deviceList
   }, [deviceList])
+  const runPrivacyRelay = useEffectEvent((mode: 'hide' | 'show', caller: 'you') =>
+    privacy.runScreenPrivacy(mode, caller)
+  )
   const [recording, setRecording] = useState<RecordingStatus>({ state: 'idle', message: 'Ready.' })
+  const privacy = useScreenPrivacy(client, recording.state, wsStatus)
+  // Plan 181: the backend's replay ring, and the switch (the user's intent).
+  const [replayState, setReplayState] = useState<ReplayStateEvent>(REPLAY_STATE_OFF)
+  const replayStateRef = useRef<ReplayStateEvent>(REPLAY_STATE_OFF)
+  const [replayArmed, setReplayArmedState] = useState(false)
+  const replayArmedRef = useRef(false)
+  // The backend refused the default start here (a software encoder path).
+  const [replayBlockedReason, setReplayBlockedReasonState] = useState<string | null>(null)
+  const replayBlockedReasonRef = useRef<string | null>(null)
+  const replayStartInFlightRef = useRef(false)
+  // A source picked while the ring's own start was in flight: that start
+  // carried the old sources, so the ring restarts once it answers.
+  const replaySourcesMovedDuringStartRef = useRef<'visual' | 'audio' | null>(null)
+  const restartReplayForSourcesRef = useRef<(visualChanged: boolean) => void>(() => {})
+  // Scene loads for a screen or camera picked while the ring was armed: the
+  // ring waits for them, or its start would carry the old scene.
+  const replaySceneReloadsRef = useRef(0)
+  const replayFailedStartsRef = useRef(0)
+  // The backend refused the default ring because the scene's camera has no
+  // frame yet; it starts again once the camera preview goes live.
+  const replayWaitingForCameraRef = useRef(false)
+  const replayReconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const replayGaveUpToastedRef = useRef(false)
+  const replayLaunchArmedRef = useRef(false)
+  const setReplayArmedRef = useRef<(armed: boolean) => void>(() => {})
+  const stopReplayBufferRef = useRef<() => Promise<void>>(async () => {})
+  const scheduleReplayReconcileRef = useRef<(delayMs?: number) => void>(() => {})
+  const rearmReplayAfterErrorRef = useRef<() => void>(() => {})
+  // Whether the last session to run was the buffer-only ring: its own end
+  // never re-arms a ring that died (no retry loop on a failing session).
+  const replayLastSessionRingOnlyRef = useRef(false)
+  // Held while a layout transaction stops the default ring to change the
+  // canvas orientation, so the reconcile does not re-arm it in the old
+  // orientation before the new layout lands.
+  const replayReconcileHoldRef = useRef(false)
+  // A performance check needs an idle studio: the Clips ring steps aside
+  // from its request until its completed event.
+  const performanceCheckHoldRef = useRef(false)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
   // Plan 069: the newest system-audio health issue, kept apart from the
@@ -2327,9 +2808,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     issue: SystemAudioIssue
   } | null>(null)
   const [systemAudioRetry, retrySystemAudio] = useState(0)
+  // Which session is still opening the System audio it started with.
+  const [systemAudioJoin, setSystemAudioJoin] = useState<SystemAudioJoin | null>(null)
   const [streamHealth, setStreamHealth] = useState<StreamHealth | null>(null)
   const [streamTargets, setStreamTargets] = useState<StreamTargetRuntime[]>([])
   const [diagnosticStats, setDiagnosticStats] = useState<DiagnosticStats>(idleDiagnosticStats)
+  // The drop window advances once per committed diagnostics sample. Folding
+  // the same sample twice is a no-op (no counter grows), so a repeated memo
+  // under StrictMode cannot flag a stage.
+  const streamDropActivityRef = useRef<StreamDropActivity>(emptyStreamDropActivity())
+  const recentDrops = useMemo(() => {
+    const nowMs = Date.now()
+    streamDropActivityRef.current = advanceStreamDropActivity(
+      streamDropActivityRef.current,
+      diagnosticStats,
+      streamHealth,
+      nowMs
+    )
+    return recentStreamDrops(streamDropActivityRef.current, nowMs)
+  }, [diagnosticStats, streamHealth])
   const [captureRecoveryStatus, setCaptureRecoveryStatus] =
     useState<CaptureRecoveryStatus>(idleCaptureRecoveryStatus)
   const [captureRecoveryRetryPending, setCaptureRecoveryRetryPending] = useState(false)
@@ -2366,24 +2863,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     // Restore progress after relaunch; settle a notice whose terminal event
     // was missed while disconnected using the authoritative database row.
-    for (const session of sessions) {
-      if (session.finalizationState === 'finalizing') {
-        activeFinalizationNoticesRef.current.add(session.id)
-        showMp4Finalizing(session.id, finalizingBadgeLabel(session))
-      } else if (activeFinalizationNoticesRef.current.delete(session.id)) {
-        if (
-          session.finalizationState === 'finalized' &&
-          !announcedFinalizationsRef.current.has(session.id)
-        ) {
-          announcedFinalizationsRef.current.add(session.id)
-          showMp4Ready(session.id)
-        } else if (session.finalizationState === 'failed') {
-          showMp4ExportFailed(
-            session.id,
-            () => void remuxSessionRef.current?.(session.id),
-            session.finalizationError
-          )
-        }
+    for (const notice of finalizationNoticesForRows(
+      sessions,
+      activeFinalizationNoticesRef.current,
+      announcedFinalizationsRef.current
+    )) {
+      if (notice.kind === 'finalizing') {
+        showMp4Finalizing(notice.sessionId, notice.label)
+      } else if (notice.kind === 'ready') {
+        showMp4Ready(notice.sessionId)
+      } else {
+        showMp4ExportFailed(
+          notice.sessionId,
+          () => void remuxSessionRef.current?.(notice.sessionId),
+          notice.error
+        )
       }
     }
   }, [sessions])
@@ -2402,6 +2896,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const sessionDetailLiveEntriesRef = useRef(
     new Map<string, { healthEvents: HealthEvent[]; sessionLogs: SessionLogEntry[] }>()
   )
+  // Plan 0007 (release test 146): the latest finalization-driven totals read
+  // wins, so an older answer never replaces a newer total.
+  const sessionStorageTotalsReadRef = useRef(0)
   const [sessionStorageTotals, setSessionStorageTotals] = useState<SessionStorageTotals | null>(
     null
   )
@@ -2411,6 +2908,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const screens = screenList ?? NO_SCREENS
   const screensLoaded = screenList !== null
   const [activeScreen, setActiveScreen] = useState<StreamScreen | null>(null)
+  // Banners (plan 186): null until `banners.list` first answers (J2-8 again).
+  const [bannerList, setBanners] = useState<Banner[] | null>(null)
+  const bannerListRef = useRef(bannerList)
+  bannerListRef.current = bannerList
+  const [selectedBannerId, setSelectedBannerId] = useState<string | null>(null)
+  // The Stream Manager's read-only copy (plan 186 S7): `{id, name, shown}`.
+  useEffect(() => {
+    void window.videorc?.pushCommentsBanners?.(
+      bannerList && bannerList.map(({ id, name, shown }) => ({ id, name, shown }))
+    )
+  }, [bannerList])
+  // Plan 189: the soundboard's monitor, its Stream Manager copy and the
+  // starter seeding run here, in the main window, whatever page is in front.
+  // Their own chunk, loaded at once: the eager bundle carries only the store.
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let disposed = false
+    void import('@/lib/soundboard-host').then(
+      ({ startSoundboardHost }) => {
+        if (!disposed) stop = startSoundboardHost(soundboard)
+      },
+      (error: unknown) => console.warn('[sounds] the soundboard did not start:', error)
+    )
+    return () => {
+      disposed = true
+      stop?.()
+    }
+  }, [])
   const [platformAccounts, setPlatformAccounts] = useState<PlatformAccount[]>([])
   const [platformAccountValidations, setPlatformAccountValidations] = useState<
     PlatformAccountValidation[]
@@ -2606,13 +3131,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const chatSetupWarnedRef = useRef<{ sessionId?: string; warned: Set<string> }>({
     warned: new Set()
   })
-  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
+  const workingAppRef = useRef<SceneApp | undefined>(
+    hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.visual.sources.app
+  )
+  const [settings, setSettings] = useState<SettingsState>(() =>
+    loadJson(STORAGE_KEYS.settings, defaultSettings)
+  )
+  const [storedCaptureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
     const config = loadCaptureConfig()
     const working = hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))
     return working
       ? {
           ...config,
-          sources: { ...config.sources, ...working.visual.sources },
+          sources: withoutSceneApp({ ...config.sources, ...working.visual.sources }),
           layout: working.visual.layout,
           video: coerceVideoToOrientation(
             config.video,
@@ -2621,6 +3152,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       : config
   })
+  const captureConfig = useMemo(
+    () => ({
+      ...storedCaptureConfig,
+      layout: cameraLookLayout(
+        storedCaptureConfig.layout,
+        storedCaptureConfig.sources.cameraId,
+        settings.cameraLooks
+      )
+    }),
+    [storedCaptureConfig, settings.cameraLooks]
+  )
   useEffect(() => {
     const sessionId = liveChatSnapshot.sessionId
     if (!sessionId) {
@@ -2646,6 +3188,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         description: warning.message,
         action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
       })
+    }
+    // Plan 215 A3: a connector parked on the Videorc sign-in is not "isn't
+    // connected", and Livestream would show X healthy. The toast names the
+    // account, once per destination, with Sign in as the fix.
+    for (const warning of chatVideorcSignInWarnings(liveChatSnapshot.providers)) {
+      const key = `videorc-sign-in:${warning.id}`
+      if (chatSetupWarnedRef.current.warned.has(key)) {
+        continue
+      }
+      chatSetupWarnedRef.current.warned.add(key)
+      showChatNeedsVideorcSignIn(CHAT_PLATFORM_LABELS[warning.platform])
     }
   }, [liveChatSnapshot, captureConfig.streamEnabled])
   // Live captions: status + transcript driven by captions.* events; the mic
@@ -2779,7 +3332,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const openCaptionsWindow = useCallback(async () => {
     await window.videorc
       ?.pushCaptionSnapshot?.({
-        lines: captionLines,
+        // Plan 191: the latest lines through the ref, so a caption partial
+        // does not re-create this (and toggleCaptionsWindow, core and the
+        // shell with it). The effect above pushes every change anyway.
+        lines: captionLinesRef.current,
         status: captionsStatus,
         styleId: captureConfig.captions.styleId,
         position: captureConfig.captions.position,
@@ -2787,7 +3343,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
       .catch(() => {})
     await window.videorc?.openCaptionsWindow?.()
-  }, [captionLines, captionsStatus, captureConfig.captions])
+  }, [captionsStatus, captureConfig.captions])
   const closeCaptionsWindow = useCallback(async () => {
     await window.videorc?.closeCaptionsWindow?.()
   }, [])
@@ -2971,6 +3527,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void (async () => {
         if (!client) throw offlineError()
         switch (command.action) {
+          case 'screenHide':
+          case 'screenShow': {
+            const outcome = await runPrivacyRelay(
+              command.action === 'screenHide' ? 'hide' : 'show',
+              'you'
+            )
+            if (!outcome.ok) throw new Error(outcome.message)
+            return { hidden: command.action === 'screenHide' }
+          }
           case 'create':
             return client.requestTyped('session.marker.create', command.params)
           case 'get':
@@ -2998,7 +3563,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (!isActiveRecordingState(recordingRef.current.state)) {
           throw new Error("No session is running, so there's nothing to mark.")
         }
-        return client.request<ClipMarkedEvent>('clip.mark')
+        // Plan 199: main checked the length (30, 60 or none).
+        const { seconds } = command
+        return client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
       })()
         .then(async (event) => {
           await window.videorc?.pushClipMarkResult?.({
@@ -3015,11 +3582,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         })
     })
+    // Banners from the Stream Manager (plan 186 S7): by id, quietly here; a
+    // refusal's sentence goes back to the window that asked.
+    const offBanner = window.videorc?.onBannerRequest?.(({ requestId, ...action }) => {
+      void (async () => {
+        if (!client) throw offlineError()
+        const { runBannerAction } = await loadBannerRules()
+        return runBannerAction(client, action, bannerListRef.current ?? NO_BANNERS)
+      })()
+        .catch((error: unknown) => ({ ok: false, message: ipcErrorMessage(error) }))
+        .then(({ ok, message }) =>
+          window.videorc?.pushBannerResult?.(
+            ok
+              ? { requestId, ok, value: true }
+              : { requestId, ok, error: message || "Couldn't change the banner." }
+          )
+        )
+    })
     return () => {
       cancelled = true
       offState?.()
       offClear?.()
       offClipMark?.()
+      offBanner?.()
       offMarker?.()
       offMarkerCreated?.()
       offMarkerRefused?.()
@@ -3034,26 +3619,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     listening: import('@/lib/backend').CohostListening
   } | null>(null)
   useEffect(() => client?.on('session.marker.voice.status', setMarkerVoice), [client])
-  useEffect(() => {
-    const available = Boolean(
-      client &&
-      recording.sessionId &&
-      (recording.state === 'recording' || recording.state === 'streaming')
-    )
-    void window.videorc?.pushMarkerContext?.({
-      sessionId: recording.sessionId,
-      available,
-      reason: available ? undefined : 'Start a recording or livestream to make a marker.',
-      lastMarker: lastVoiceMarker ?? undefined,
-      voice:
-        markerVoice && markerVoice.sessionId === recording.sessionId
-          ? markerVoice.listening
-          : undefined
-    })
-    return () => {
-      void window.videorc?.pushMarkerContext?.(null)
-    }
-  }, [client, recording.sessionId, recording.state, markerVoice, lastVoiceMarker])
   // Backend-authoritative comment highlight. The renderer owns only the
   // temporary rasterization phase; `On stream` comes from the backend state.
   const [commentHighlightState, setCommentHighlightState] = useState<CommentHighlightState>({
@@ -3441,6 +4006,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const setCommentsWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     await window.videorc?.setCommentsWindowAlwaysOnTop?.(alwaysOnTop)
   }, [])
+  const setCommentsWindowHiddenFromStream = useCallback(async (hidden: boolean) => {
+    await window.videorc?.setCommentsWindowHiddenFromStream?.(hidden)
+  }, [])
   const openSessionCommentsWindowRef = useRef<
     ((sessionId: string, title: string, startedAt: string) => Promise<void>) | null
   >(null)
@@ -3537,10 +4105,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   const [goLivePreflight, setGoLivePreflight] = useState<GoLivePreflight | null>(null)
   const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
+  // Plan 209 review fix 10: an agent's Go Live reads it when it confirms.
+  const dialogOpenRef = useRef(false)
+  dialogOpenRef.current = goLiveConfirmationOpen
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
+  // Plan 214 E: Videorc Camera's status, switch and actions, in its own context.
+  const virtualCamera = useVirtualCameraController(client, wsStatus, runtimeInfo)
   // Linux can't caption at all (no native microphone path): every session
   // skips captions there, as if "Continue without captions" were chosen.
   const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
@@ -3620,9 +4193,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     useState<PreviewSurfaceStatus>(idlePreviewSurfaceStatus)
   const [previewCameraStatus, setPreviewCameraStatus] =
     useState<PreviewCameraStatus>(idlePreviewCameraStatus)
+  const [previewCameraLowFrameRate, setPreviewCameraLowFrameRate] =
+    useState<CameraLowFrameRate | null>(null)
   const [previewScreenStatus, setPreviewScreenStatus] =
     useState<PreviewScreenStatus>(idlePreviewScreenStatus)
+  // Linux: the portal source whose share this run granted (Clips waits for it).
+  const [portalShareGrantedSourceId, setPortalShareGrantedSourceId] = useState<string | null>(null)
   const [scene, setScene] = useState<Scene | null>(null)
+  // Plan 216 B2: changes only when a source's picture size does (a display
+  // swap, a camera format), never on a status tick.
+  const [sourcePictureSizes, setSourcePictureSizes] =
+    useState<SourcePictureSizes>(NO_SOURCE_PICTURE_SIZES)
   const transformSceneRef = useRef<Scene | null>(null)
   const [sceneEditMode, setSceneEditMode] = useState(false)
   const [selectedSceneSourceId, setSelectedSceneSourceId] = useState<string | null>(null)
@@ -3632,7 +4213,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // A fresh mic grant can defer its backend restart until capture becomes idle.
   // Remember the pre-grant client so proof can run only on the replacement.
   const [pendingMicrophonePermissionProof, setPendingMicrophonePermissionProof] = useState<
-    | (import('@/lib/system-permission-orchestration').MicrophonePermissionProof & {
+    | (MicrophonePermissionProof & {
         retry: number
       })
     | null
@@ -3643,6 +4224,78 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // This distinguishes never-asked from denied on macOS and is the only
   // truthful privacy-toggle signal on Windows.
   const [mediaAccess, setMediaAccess] = useState<MediaAccessSnapshot | null>(null)
+  const mediaAccessRef = useRef<MediaAccessSnapshot | null>(null)
+  const permissionGrantBoundariesRef = useRef<
+    Partial<Record<SystemPermissionPane, MicrophonePermissionProof>>
+  >({})
+  const [pendingPermissionPane, setPendingPermissionPane] = useState<SystemPermissionPane | null>(
+    null
+  )
+  const [permissionProofs, setPermissionProofs] = useState<
+    Partial<Record<SystemPermissionPane, MicrophonePermissionProof>>
+  >({})
+  // Retain inputs for the last chip, never a stored Waiting/Reopen state.
+  const [permissionEvidenceBeforeGrant, setPermissionEvidenceBeforeGrant] = useState<Pick<
+    Parameters<typeof systemAccessRows>[0],
+    'deviceList' | 'audioMeter' | 'platform' | 'mediaAccess' | 'pendingPane'
+  > | null>(null)
+  const lastPermissionStates = useMemo<SystemAccessContext['lastKnownStates']>(
+    () =>
+      permissionEvidenceBeforeGrant
+        ? Object.fromEntries(
+            systemAccessRows(permissionEvidenceBeforeGrant).map((row) => [row.id, row.state])
+          )
+        : {},
+    [permissionEvidenceBeforeGrant]
+  )
+  const notePermissionRestart = useCallback(
+    (pane: SystemPermissionPane, proof: MicrophonePermissionProof) => {
+      permissionGrantBoundariesRef.current[pane] = proof
+      setPermissionProofs((current) => ({ ...current, [pane]: proof }))
+    },
+    []
+  )
+  const screenGrantStale =
+    !permissionEvidenceClient ||
+    Boolean(
+      permissionProofs['screen-recording'] &&
+      !isReplacementPermissionClient(permissionEvidenceClient, permissionProofs['screen-recording'])
+    )
+  const captureRestarting = Object.values(permissionProofs).some(
+    (proof) => !isReplacementPermissionClient(permissionEvidenceClient, proof)
+  )
+  useEffect(() => {
+    if (
+      !Object.values(permissionProofs).some((proof) =>
+        isReplacementPermissionClient(permissionEvidenceClient, proof)
+      )
+    )
+      return
+    setPermissionProofs((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([, proof]) => !isReplacementPermissionClient(permissionEvidenceClient, proof)
+        )
+      )
+    )
+  }, [permissionEvidenceClient, permissionProofs])
+  const systemAccessContext = useMemo<SystemAccessContext>(
+    () => ({
+      pendingPane: pendingPermissionPane,
+      captureRestarting,
+      screenGrantStale,
+      lastKnownStates: lastPermissionStates
+    }),
+    [pendingPermissionPane, captureRestarting, screenGrantStale, lastPermissionStates]
+  )
+  const systemAccessContextRef = useRef(systemAccessContext)
+  systemAccessContextRef.current = systemAccessContext
+  const permissionPlatformRef = useRef(runtimeInfo?.platform)
+  permissionPlatformRef.current = runtimeInfo?.platform
+  const pendingPermissionPaneRef = useRef(pendingPermissionPane)
+  pendingPermissionPaneRef.current = pendingPermissionPane
+  const permissionEvidenceClientRef = useRef(permissionEvidenceClient)
+  permissionEvidenceClientRef.current = permissionEvidenceClient
   const refreshMediaAccess = useCallback(async (): Promise<MediaAccessSnapshot | null> => {
     const bridge = window.videorc?.getMediaAccessStatus
     if (!bridge) {
@@ -3650,6 +4303,63 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     try {
       const snapshot = await bridge()
+      const previous = mediaAccessRef.current
+      if (previous && permissionPlatformRef.current === 'darwin') {
+        const newlyGranted = (['screen-recording', 'camera', 'microphone'] as const).filter(
+          (pane) =>
+            ['not-determined', 'denied', 'restricted'].includes(
+              mediaAccessStatusForPane(previous, pane) ?? ''
+            ) && mediaAccessStatusForPane(snapshot, pane) === 'granted'
+        )
+        if (newlyGranted.length > 0) {
+          // An action may have begun before this grant. Its decision after
+          // the await must see the new restart boundary in the same turn.
+          systemAccessContextRef.current = {
+            ...systemAccessContextRef.current,
+            captureRestarting: true,
+            screenGrantStale:
+              newlyGranted.includes('screen-recording') ||
+              systemAccessContextRef.current.screenGrantStale
+          }
+          setPermissionEvidenceBeforeGrant({
+            deviceList: deviceListRef.current,
+            audioMeter: audioMeterRef.current,
+            platform: permissionPlatformRef.current,
+            mediaAccess: previous,
+            pendingPane: pendingPermissionPaneRef.current
+          })
+          setPermissionProofs((current) => {
+            const next = { ...current }
+            for (const pane of newlyGranted)
+              next[pane] ??= permissionGrantBoundariesRef.current[pane] ?? {
+                previousClient: permissionEvidenceClientRef.current
+              }
+            return next
+          })
+        }
+      }
+      setPermissionProofs((current) => {
+        const revoked = Object.keys(current).filter(
+          (pane) => mediaAccessStatusForPane(snapshot, pane as SystemPermissionPane) !== 'granted'
+        )
+        if (revoked.length === 0) return current
+        const next = { ...current }
+        for (const pane of revoked) delete next[pane as SystemPermissionPane]
+        return next
+      })
+      for (const pane of ['screen-recording', 'camera', 'microphone'] as const) {
+        if (mediaAccessStatusForPane(snapshot, pane) !== 'granted') {
+          const previousClient = clientRef.current
+          permissionGrantBoundariesRef.current[pane] = {
+            previousClient,
+            ...(previousClient ? { staleBackend: previousClient.connection } : {})
+          }
+        }
+      }
+      mediaAccessRef.current = snapshot
+      setPendingPermissionPane((pane) =>
+        pane && mediaAccessStatusForPane(snapshot, pane) === 'granted' ? null : pane
+      )
       setMediaAccess(snapshot)
       return snapshot
     } catch {
@@ -3679,17 +4389,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const screenImporter = useRef(createTakeoverImporter())
   const screenListEventRevision = useRef(0)
   const activeScreenEventRevision = useRef(0)
+  const [bannerImportPhase, setBannerImportPhase] = useState<BannerImportPhase>('idle')
+  const bannerImporter = useRef(createBannerImporter())
+  // Bumped by every `banners.changed`: the reliable full list wins over a
+  // late reply, the way the takeover list does.
+  const bannerListEventRevision = useRef(0)
   useEffect(() => {
     screenImporter.current.reset()
     setScreenImportPhase('idle')
+    bannerImporter.current.reset()
+    setBannerImportPhase('idle')
     const importer = screenImporter.current
-    return () => importer.reset()
+    const bannerImport = bannerImporter.current
+    return () => {
+      importer.reset()
+      bannerImport.reset()
+    }
   }, [client, wsStatus])
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
-  const [settings, setSettings] = useState<SettingsState>(() =>
-    loadJson(STORAGE_KEYS.settings, defaultSettings)
-  )
+
   const settingsRef = useRef(settings)
   settingsRef.current = settings
   // Stable handle for callbacks that only need to READ the config (labels,
@@ -3726,7 +4445,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLiveAudioProcessingApplied((current) =>
         current?.sessionId === next.sessionId &&
         current.microphoneGainDb === next.microphoneGainDb &&
-        current.microphoneMuted === next.microphoneMuted
+        current.microphoneMuted === next.microphoneMuted &&
+        current.microphoneNoiseSuppression === next.microphoneNoiseSuppression
           ? current
           : next
       )
@@ -3776,6 +4496,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     lastSettled: null
   })
   const layoutShortcutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const sceneShortcutRequestedRef = useRef<string | null>(null)
   useEffect(
     () => () => {
       if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
@@ -3866,6 +4587,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sourceId?: string
       ) => { id: string; kind: 'screen' | 'window' } | null
     }
+    // Plan 181: the record-latency and replay smokes arm the ring the way
+    // the Studio switch does.
+    ;(
+      smokeWindow as Window & {
+        __videorcSmokeSetReplayBuffer?: (armed: boolean, seconds?: number) => boolean
+      }
+    ).__videorcSmokeSetReplayBuffer = (armed, seconds) => {
+      // The Output switch's own path (explicit, so the software encoder
+      // guard never applies to a smoke), with a shorter ring when given
+      // (plan 199: the product's ring is always the minute).
+      const patch = {
+        enabled: armed,
+        explicit: true,
+        ...(typeof seconds === 'number' ? { smokeRingSeconds: seconds } : {})
+      }
+      setCaptureConfig((current) => ({
+        ...current,
+        replayBuffer: { ...current.replayBuffer, ...patch }
+      }))
+      captureConfigRef.current = {
+        ...captureConfigRef.current,
+        replayBuffer: { ...captureConfigRef.current.replayBuffer, ...patch }
+      }
+      setReplayArmedRef.current(armed)
+      return true
+    }
     smokeWindow.__videorcSmokeSelectFirstCamera = (): string | null => {
       const camera = deviceList.devices.find(
         (device) => device.kind === 'camera' && device.status === 'available'
@@ -3897,6 +4644,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ...current.sources,
           screenId: source.kind === 'screen' ? source.id : undefined,
           screenName: source.kind === 'screen' ? source.name : undefined,
+          screenUuid: source.kind === 'screen' ? source.displayUuid : undefined,
           windowId: source.kind === 'window' ? source.id : undefined,
           windowName: source.kind === 'window' ? source.name : undefined,
           testPattern: false
@@ -3913,6 +4661,83 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [lastError, setLastError] = useState<string | null>(null)
   const lastErrorRef = useRef(lastError)
   lastErrorRef.current = lastError
+  // The Stream Manager's marker and clip facts (plan 068, plan 181 R4): sits
+  // after the settings and runtime state it reads.
+  const screenHidden = privacy.screenPrivacy.hidden
+  const screenHideRefusal = privacy.screenPrivacy.unavailable
+  const screenHideKey = screenHideAccelerator(settings.globalShortcuts?.screenHideToggle)
+  const markerContextForWindow = useMemo<MarkerContext>(() => {
+    // A buffer-only session (plan 181) has no Library row to hold a marker,
+    // so the voice marker waits for a recording or a livestream.
+    const available = Boolean(
+      client &&
+      recording.sessionId &&
+      (recording.state === 'recording' || recording.state === 'streaming') &&
+      recording.replayOnly !== true
+    )
+    // The Clip action (R4): the last seconds whenever the ring holds frames,
+    // a mark while a session runs; the window shows the button on either.
+    const clipAvailable = replayState.state === 'on' || isActiveRecordingState(recording.state)
+    const clipShortcut = settings.globalShortcuts?.clipMark
+    const longClipShortcut = settings.globalShortcuts?.clipMarkLong
+    const clipOff = clipAvailable
+      ? undefined
+      : replayBlockedReason
+        ? ('blocked' as const)
+        : !captureConfig.replayBuffer.enabled
+          ? ('switch' as const)
+          : replayState.state === 'starting'
+            ? ('starting' as const)
+            : ('idle' as const)
+    return {
+      sessionId: recording.sessionId,
+      available,
+      reason: available ? undefined : 'Start a recording or livestream to make a marker.',
+      lastMarker: lastVoiceMarker ?? undefined,
+      voice:
+        markerVoice && markerVoice.sessionId === recording.sessionId
+          ? markerVoice.listening
+          : undefined,
+      clip: {
+        available: clipAvailable,
+        // Plan 199: the two clip lengths, never the ring's (the minute).
+        seconds: DEFAULT_CLIP_SECONDS,
+        longSeconds: LONG_CLIP_SECONDS,
+        ...(clipShortcut
+          ? { shortcutLabel: acceleratorLabel(clipShortcut, runtimeInfo?.platform) }
+          : {}),
+        ...(longClipShortcut
+          ? { longShortcutLabel: acceleratorLabel(longClipShortcut, runtimeInfo?.platform) }
+          : {}),
+        ...(clipOff ? { off: clipOff } : {})
+      },
+      // Plan 210 S8b: the Stream Manager's Hide screen action and stats chip.
+      screen: {
+        hidden: screenHidden,
+        ...(screenHideRefusal ? { unavailable: screenHideRefusal } : {}),
+        ...(screenHideKey ? { accelerator: screenHideKey } : {})
+      }
+    }
+  }, [
+    captureConfig.replayBuffer.enabled,
+    client,
+    recording.sessionId,
+    recording.state,
+    recording.replayOnly,
+    replayBlockedReason,
+    replayState.state,
+    runtimeInfo?.platform,
+    settings.globalShortcuts?.clipMark,
+    settings.globalShortcuts?.clipMarkLong,
+    markerVoice,
+    lastVoiceMarker,
+    screenHidden,
+    screenHideRefusal,
+    screenHideKey
+  ])
+  // One push per change, never a null between two contexts: the window's
+  // composer mounts on the context and keeps Buddy's answer in that mount.
+  useMarkerContextPublisher(markerContextForWindow, window.videorc?.pushMarkerContext)
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)
   const previewSurfaceStatusRef = useRef<PreviewSurfaceStatus>(idlePreviewSurfaceStatus())
@@ -3933,6 +4758,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     computedAtMs: number
   } | null>(null)
   const previewCameraStatusRef = useRef<PreviewCameraStatus>(idlePreviewCameraStatus())
+  // Issue #1066: watched here, so Sources knows the moment it opens.
+  const cameraFrameRateWatchRef = useRef(IDLE_CAMERA_FRAME_RATE_WATCH)
   const previewScreenStatusRef = useRef<PreviewScreenStatus>(idlePreviewScreenStatus())
   const sourceStatusUnknownRef = useRef(true)
   const [sourceStatusKnown, setSourceStatusKnown] = useState(false)
@@ -3951,7 +4778,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     rpc: SessionStartRpc
     promise: Promise<boolean>
   } | null>(null)
-  const confirmGoLiveInFlightPromiseRef = useRef<Promise<void> | null>(null)
+  const confirmGoLiveInFlightPromiseRef = useRef<Promise<GoLiveConfirmOutcome> | null>(null)
   const stopSessionInFlightPromiseRef = useRef<Promise<boolean> | null>(null)
   const sessionStartAuthoritativeStatusesRef = useRef<Map<string, RecordingStatus>>(new Map())
   // Late-bound mirror so applyRecordingStatus (declared earlier) can trigger the
@@ -4053,7 +4880,37 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const { registry: backgroundRegistry, setRegistry: setBackgroundRegistry } = useBackgroundAssets()
   const sceneLibrary = useScenePresets()
-  const { save: saveSceneEntry, remove: removeSceneEntry } = sceneLibrary
+  const rememberedAppsRef = useRef(
+    rememberedSceneApps(loadJson(SCENE_WINDOW_APPS_KEY, {}), sceneLibrary.scenes)
+  )
+  const [resolvedAppStates, setResolvedAppStates] = useState<Record<string, SceneAppState>>({})
+  useEffect(() => {
+    setResolvedAppStates({})
+  }, [deviceList.devices])
+  const savedSceneAppStates = useMemo(
+    () =>
+      Object.fromEntries(
+        sceneLibrary.scenes.map((scene) => [
+          scene.id,
+          sceneAppState(scene.visual, deviceList.devices, resolvedAppStates[scene.id])
+        ])
+      ),
+    [sceneLibrary.scenes, deviceList.devices, resolvedAppStates]
+  )
+  useEffect(() => {
+    rememberedAppsRef.current = rememberedSceneApps(rememberedAppsRef.current, sceneLibrary.scenes)
+    try {
+      localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
+    } catch {
+      /* Device memory is best effort. */
+    }
+  }, [sceneLibrary.scenes])
+  const {
+    save: saveSceneEntry,
+    remove: removeSceneEntry,
+    autosave: autosaveSavedScene,
+    refreshDisplay: refreshSavedSceneDisplay
+  } = sceneLibrary
   const [activeSavedSceneId, setActiveSavedSceneId] = useState<string | null>(
     () => hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.sceneId ?? null
   )
@@ -4062,6 +4919,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.origin ??
       (activeSavedSceneId ? 'saved' : 'builtin')
   )
+  // Plan 210 S5: the scene list says "Unsaved scene" for a saved scene's look
+  // that left it, so the origin is state too.
+  const [workingOrigin, setWorkingOriginState] = useState(workingOriginRef.current)
+  const setWorkingOrigin = useCallback((origin: 'builtin' | 'saved') => {
+    workingOriginRef.current = origin
+    setWorkingOriginState(origin)
+  }, [])
+  // The saved scene and look last persisted, so a commit that only repeats
+  // them (an updater run twice) is not mistaken for an edit. Launch starts
+  // with none: the scene coming back on stream is not an edit of it, so a
+  // working look that drifted before this build (Modified, never Updated)
+  // is never written into the scene without the streamer's action.
+  const persistedWorkingRef = useRef<{ sceneId: string | null; key: string }>({
+    sceneId: null,
+    key: ''
+  })
   const [visualTransactionPending, setVisualTransactionPending] = useState(false)
   const [sceneGesturePending, setSceneGesturePending] = useState(false)
   const [sceneTransformPending, setSceneTransformPending] = useState(false)
@@ -4075,10 +4948,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       : effectiveSceneBackground(backgroundRegistry)
   })
   const workingBackgroundRef = useRef(workingBackground)
+  // Plan 190: how the applied live background is drawn, from compositor status.
+  const [liveBackgroundStatus, setLiveBackgroundStatus] = useState<LiveBackgroundStatusView | null>(
+    null
+  )
   const confirmedVisualRef = useRef<SceneVisual>(
     normalizeSceneVisual({
       layout: captureConfig.layout,
-      sources: visualSources(captureConfig.sources),
+      sources: visualSources({ ...captureConfig.sources, app: workingAppRef.current }),
       background: snapshotBackground(workingBackground)
     })
   )
@@ -4105,10 +4982,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ) => {
       const visual = normalizeSceneVisual({
         layout,
-        sources: visualSources(sources),
+        sources: visualSources({ ...sources, app: workingAppRef.current }),
         background: snapshotBackground(background)
       })
       confirmedVisualRef.current = visual
+      // Plan 210 D3: every confirmed edit made while a saved scene is on
+      // saves its look into it (never its sources or audio). Out of band,
+      // because some callers run inside a state updater.
+      const key = JSON.stringify(visual)
+      const persisted = persistedWorkingRef.current
+      if (persisted.sceneId !== savedSceneId || persisted.key !== key) {
+        persistedWorkingRef.current = { sceneId: savedSceneId, key }
+        queueMicrotask(() => autosaveSavedScene(persisted.sceneId, savedSceneId, visual))
+      }
       try {
         localStorage.setItem(
           WORKING_SCENE_KEY,
@@ -4126,16 +5012,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
       }
     },
-    []
+    [autosaveSavedScene]
   )
 
-  const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutPreset | null>(null)
+  const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutSwitchTarget | null>(null)
   const [sourceSelectionState, setSourceSelectionState] = useState<LiveSourceSelectionState>({
     snapshot: null,
     pending: null,
     checking: false,
     error: null
   })
+  // The controller's latest state the moment it publishes, for an agent's
+  // switch that must say how it ended before React renders (plan 209 S11).
+  const sourceSelectionStateRef = useRef(sourceSelectionState)
   const [sourceSelectionController] = useState(
     () =>
       new LazyLiveSourceSelectionController({
@@ -4148,7 +5037,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (!clientRef.current) throw offlineError()
           return clientRef.current.requestTyped('session.source.switch', request)
         },
-        changed: setSourceSelectionState,
+        changed: (next) => {
+          sourceSelectionStateRef.current = next
+          setSourceSelectionState(next)
+        },
         failed: (requestId, message, source) =>
           toast.error(sourceSwitchFailedTitle(source, deviceListRef.current.devices), {
             id: `source-switch-${requestId}`,
@@ -4188,7 +5080,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   useEffect(() => () => sourceSelectionController.dispose(), [sourceSelectionController])
   const allowCaptureNone =
-    !['recording', 'streaming'].includes(recording.state) ||
+    !sessionOwnsTransport(recording) ||
     sourceSelectionState.snapshot?.capabilities.some(
       (capability) => capability.kind === 'capture' && capability.allowsNone === true
     ) === true
@@ -4202,7 +5094,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // An idle microphone is not part of the scene, so a scene change cannot race it.
       if (
         layoutSwitchPending &&
-        (kind !== 'microphone' || isActiveRecordingState(recordingRef.current.state))
+        (kind !== 'microphone' || sessionOwnsTransport(recordingRef.current))
       )
         return 'The scene is changing.'
       if (sessionStartInFlightRef.current || sessionStartLifecycleActiveRef.current)
@@ -4449,6 +5341,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // talks to the web.
   const [cohostState, setCohostState] = useState<CohostState | null>(null)
   const [cohostSettings, setCohostSettings] = useState<CohostSettings | null>(null)
+  // The Buddy on stream (`cohost.buddy.state`, plan 164 Phase C): the state
+  // and the bubble that is up; null until the backend reported. Plan 191: only
+  // the overlay push and the Comments-window relay below read it, so it stays
+  // out of core and a bubble's show or expiry re-renders no Studio view.
   const [buddyOverlay, setBuddyOverlay] = useState<BuddyOverlaySnapshot | null>(null)
   const cohostSettingsRef = useRef(cohostSettings)
   cohostSettingsRef.current = cohostSettings
@@ -4500,6 +5396,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
 
   const cohostGate = useMemo(() => liveCohostGate(entitlements), [entitlements])
+  // Plan 209 S20: `/buddy` reads the consent and Buddy's Premium gate when
+  // asked (a render-body mirror, like the refs above; no effect).
+  const buddyActGateRef = useRef({ consent: aiConsent, entitled: cohostGate.allowed })
+  buddyActGateRef.current = { consent: aiConsent, entitled: cohostGate.allowed }
   const cohostEnabled = cohostSettings?.enabled === true
   const cohostListen = cohostSettings?.listen === true
   const cohostLiveSessionId = liveChatSnapshot.sessionId ?? null
@@ -4942,6 +5842,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Presence is unconditional: before the engine reports (or when it is off)
   // the relay carries the off shape, never null.
   const buddyShowOnStream = overlayLayout.buddy.showOnStream
+  const buddyShowInRecording = overlayLayout.buddy.showInRecording
+  const chatOnStream = overlayLayout.chat.showOnStream
   const cohostAutoChat = cohostSettings?.autoChat
   const cohostWindowState = useMemo<CohostWindowState>(
     () => ({
@@ -4968,14 +5870,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               },
               state: buddyOverlay?.state ?? 'idle',
               bubble: buddyOverlay?.bubble?.text ?? null,
-              showOnStream: buddyShowOnStream
+              showOnStream: buddyShowOnStream,
+              showInRecording: buddyShowInRecording
             }
           }
         : {}),
-      ...(cohostAutoChat ? { autoChat: cohostAutoChat } : {})
+      ...(cohostAutoChat ? { autoChat: cohostAutoChat } : {}),
+      // Plan 215 G: the chat pane's Chat on stream switch.
+      chatOnStream
     }),
     [
       aiConsent,
+      chatOnStream,
       cohostAutoChat,
       cohostEnabled,
       cohostGate,
@@ -4983,7 +5889,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostState,
       buddyOverlay,
       buddyPersona,
-      buddyShowOnStream
+      buddyShowOnStream,
+      buddyShowInRecording
     ]
   )
 
@@ -5071,6 +5978,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             await setOverlayLayout({
               ...current,
               buddy: { ...current.buddy, showOnStream: command.showOnStream }
+            })
+          }
+          return cohostStateRef.current ?? offCohostState()
+        }
+        // Plan 215 G (D5): Chat on stream, the same overlay write.
+        if (command.kind === 'chat-show-on-stream') {
+          const current = overlayLayoutRef.current
+          if (current.chat.showOnStream !== command.showOnStream) {
+            await setOverlayLayout({
+              ...current,
+              chat: { ...current.chat, showOnStream: command.showOnStream }
             })
           }
           return cohostStateRef.current ?? offCohostState()
@@ -5386,8 +6304,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const applyRecordingStatus = useCallback(
     (status: RecordingStatus) => {
-      if (status.state === 'recording' || status.state === 'streaming') {
-        // Go Live reports `recording` with a stream URL (plan 174 B-6).
+      if (
+        (status.state === 'recording' || status.state === 'streaming') &&
+        !sessionIsReplayOnly(status)
+      ) {
+        // Go Live reports `recording` with a stream URL (plan 174 B-6). A
+        // buffer-only session (plan 181) saves nothing, so it never becomes
+        // the activity a finished session is announced as.
         lastSessionActivityRef.current = sessionActivity(status)
       }
       recordingRef.current = status
@@ -5406,7 +6329,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       sourceStatusUnknownRef.current = false
       setSourceStatusKnown(true)
-      sourceSelectionController.setSession(status.sessionId, status.state)
+      sourceSelectionController.setSession(
+        status.sessionId,
+        status.state,
+        sessionIsReplayOnly(status)
+      )
       void sourceSelectionController.refresh()
       setRecording(status)
       syncFramePollingSuppressionRef.current?.()
@@ -5836,11 +6763,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const applyPreviewCameraStatus = useCallback((status: PreviewCameraStatus) => {
     previewCameraStatusRef.current = status
     setPreviewCameraStatus(status)
+    const watch = nextCameraFrameRateWatch(cameraFrameRateWatchRef.current, status, Date.now())
+    if (!sameCameraLowFrameRate(watch.low, cameraFrameRateWatchRef.current.low)) {
+      setPreviewCameraLowFrameRate(watch.low)
+    }
+    cameraFrameRateWatchRef.current = watch
+    setSourcePictureSizes((current) => sourcePictureSizesFromCapture(current, 'camera', status))
   }, [])
 
   const applyPreviewScreenStatus = useCallback((status: PreviewScreenStatus) => {
     previewScreenStatusRef.current = status
     setPreviewScreenStatus(status)
+    setSourcePictureSizes((current) => sourcePictureSizesFromCapture(current, 'screen', status))
+    setPortalShareGrantedSourceId((current) => nextPortalShareGrant(current, status))
   }, [])
 
   const applyScene = useCallback((nextScene: Scene) => {
@@ -6394,6 +7329,51 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Live records too, and the backend calls that `recording` (plan 095 S5).
   const xProducerReminderShownRef = useRef(false)
   const recordingLive = sessionIsLive(recording)
+
+  // Chat on stream (plan 215 G, D5): while a livestream is on air and one of
+  // the chat box's switches is on, the box follows chat (repainted at most
+  // twice a second); it clears when chat empties, both switches go off or the
+  // livestream ends. Nothing loads until the box is first switched on.
+  const chatOverlayLayout = overlayLayout.chat
+  const chatOverlayOn =
+    recordingLive && (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
+  const chatOverlayDriverRef = useRef<{
+    client: BackendClient
+    driver: Promise<ChatOverlayDriver | null>
+  } | null>(null)
+  useEffect(() => {
+    const held = chatOverlayDriverRef.current
+    if (held && held.client !== client) {
+      void held.driver.then((driver) => driver?.dispose())
+      chatOverlayDriverRef.current = null
+    }
+    if (!client || (!chatOverlayDriverRef.current && !chatOverlayOn)) return
+    chatOverlayDriverRef.current ??= {
+      client,
+      driver: loadChatOverlayDriver(client).catch(() => null)
+    }
+    const streamVideo = streamOutputVideoSettings(
+      captureConfig.video,
+      captureConfig.streamEnabled ? captureConfig.streaming : undefined
+    )
+    const input = {
+      on: chatOverlayOn,
+      sessionId: liveChatSnapshot.sessionId,
+      messages: liveChatSnapshot.messages,
+      layout: chatOverlayLayout,
+      canvas: { width: streamVideo.width, height: streamVideo.height }
+    }
+    void chatOverlayDriverRef.current.driver.then((driver) => driver?.update(input))
+  }, [
+    captureConfig.streamEnabled,
+    captureConfig.streaming,
+    captureConfig.video,
+    chatOverlayLayout,
+    chatOverlayOn,
+    client,
+    liveChatSnapshot.messages,
+    liveChatSnapshot.sessionId
+  ])
   useEffect(() => {
     if (!recordingLive) {
       if (recording.state === 'idle' || recording.state === 'failed') {
@@ -6519,21 +7499,59 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sourceStatusUnknownRef.current ||
       isActiveRecordingState(recordingRef.current.state) ||
       sessionStartInFlightRef.current ||
-      sessionStartLifecycleActiveRef.current
+      sessionStartLifecycleActiveRef.current ||
+      layoutIntentAwaitingProofRef.current !== null
     )
       return
-    setCaptureConfig((current) => {
-      const nextSources = reconcileSourceSelection(current.sources, deviceList.devices)
-
-      if (JSON.stringify(nextSources) === JSON.stringify(current.sources)) {
-        return current
+    const before = captureConfigRef.current.sources
+    const appBefore = workingAppRef.current
+    let disposed = false
+    void reconcileWorkingSceneSources(
+      { ...before, app: appBefore },
+      deviceList.devices,
+      (params) => {
+        if (!clientRef.current) throw offlineError()
+        return clientRef.current.requestTyped('sources.resolve_app_window', params)
+      },
+      {
+        disconnectedCameraId:
+          previewCameraStatusRef.current.state === 'disconnected'
+            ? previewCameraStatusRef.current.cameraId
+            : undefined
       }
-
-      recordAutomaticSourceFallbacks(current.sources, nextSources)
-      return { ...current, sources: nextSources }
-    })
-    // recording.state re-runs this when a session ends: a device that vanished
-    // mid-session was skipped above and must fall back once the session is idle.
+    )
+      .then(({ sources: nextSources, appState }) => {
+        if (
+          disposed ||
+          isActiveRecordingState(recordingRef.current.state) ||
+          sessionStartInFlightRef.current ||
+          sessionStartLifecycleActiveRef.current ||
+          layoutIntentAwaitingProofRef.current !== null
+        )
+          return
+        // Plan 210 D1: the scene list and the start reason say what the
+        // resolver found ("Figma's window is minimized"), not the device
+        // list's guess.
+        const activeId = activeSavedSceneIdRef.current
+        if (appState && activeId && workingAppRef.current === appBefore)
+          setResolvedAppStates((states) =>
+            states[activeId] === appState ? states : { ...states, [activeId]: appState }
+          )
+        setCaptureConfig((current) => {
+          if (
+            current.sources !== before ||
+            workingAppRef.current !== appBefore ||
+            JSON.stringify(withoutSceneApp(nextSources)) === JSON.stringify(before)
+          )
+            return current
+          recordAutomaticSourceFallbacks(before, nextSources)
+          return { ...current, sources: withoutSceneApp(nextSources) }
+        })
+      })
+      .catch((error) => console.warn('[scenes] working window resolution failed', error))
+    return () => {
+      disposed = true
+    }
   }, [deviceList, sourceStatusKnown, recording.state, recordAutomaticSourceFallbacks])
 
   useEffect(() => {
@@ -6602,6 +7620,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     const nextClient = new BackendClient(connection)
     const platformBootstrapClient = new BackendClient(connection)
+    let engineReconnectTimer: number | null = null
+    // The engine closes a socket whose replies sat unread too long (a renderer
+    // stalled by a busy machine) and keeps running. Main only pushes a
+    // connection when the engine (re)starts, so nothing else would bring this
+    // window back. While Main still reports this engine, ping it quietly on a
+    // fresh socket; once it answers, a fresh connection object re-runs this
+    // effect as a restart would. An engine stopping for a restart fails the
+    // ping, and its successor arrives through onBackendConnection.
+    const reconnectAfterEngineDrop = (): void => {
+      if (disposed || engineReconnectTimer !== null) return
+      engineReconnectTimer = window.setTimeout(() => {
+        engineReconnectTimer = null
+        void (async () => {
+          const current = await window.videorc.getBackendConnection()
+          if (
+            disposed ||
+            !current ||
+            current.host !== connection.host ||
+            current.port !== connection.port ||
+            current.token !== connection.token
+          ) {
+            return
+          }
+          const probe = new BackendClient(current)
+          try {
+            await probe.connect()
+            await probe.request<BackendHealth>('health.ping')
+          } finally {
+            probe.close()
+          }
+          if (!disposed) setConnection({ ...current })
+        })().catch(() => reconnectAfterEngineDrop())
+      }, ENGINE_RECONNECT_DELAY_MS)
+    }
     const bootstrapRequest = <TPayload,>(method: string, params?: unknown): Promise<TPayload> =>
       nextClient.request<TPayload>(method, params, { signal: bootstrapAbort.signal })
     const bootstrapGuard = new StudioBootstrapGuard()
@@ -6650,15 +7702,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // Manager is closed. Events that arrive first wait for it.
     let moderation: typeof chatModerationRef.current = null
     let stopCohostCommandRelay: (() => void) | null = null
+    let stopBuddyActRelay: (() => void) | null = null
     const moderationBacklog: ModerationOperation[] = []
     void import('@/lib/chat-moderation-relay')
-      .then(({ startChatModerationRelay, startCohostCommandRelay }) => {
+      .then(({ startChatModerationRelay, startCohostCommandRelay, startBuddyActRelay }) => {
         if (!generationIsCurrent()) return
         // Plan 140, S6 part B: the Stream Manager's answers to Buddy's cards.
         stopCohostCommandRelay = startCohostCommandRelay({
           client: nextClient,
           sessionId: () => liveChatSnapshotRef.current.sessionId,
           commit: commitCohostState
+        })
+        // Plan 209 S20: `/buddy <words>` from the Stream Manager.
+        stopBuddyActRelay = startBuddyActRelay({
+          client: nextClient,
+          consent: () => buddyActGateRef.current.consent,
+          entitled: () => buddyActGateRef.current.entitled
         })
         moderation = startChatModerationRelay({
           client: nextClient,
@@ -6896,6 +7955,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
     let remoteSurfaceConnected = false
     let remoteSurfacePublisher: RemoteSurfacePublisher | null = null
+    void loadSavedSceneApply().catch((error: unknown) =>
+      console.warn('[scenes] scene switch chunk failed to load', error)
+    )
     void import('@/lib/remote-surface')
       .then(({ RemoteSurfacePublisher }) => {
         if (disposed) return
@@ -6905,6 +7967,45 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const values = remoteSurfaceValuesRef.current
         if (values) remoteSurfacePublisher.syncValues(values)
         if (remoteSurfaceConnected) remoteSurfacePublisher.markConnected()
+      })
+      .catch((error: unknown) => {
+        if (!disposed) reportError(error)
+      })
+    const remoteIntents = createRemoteIntentQueue({
+      run: async (payload) => {
+        if (!disposed) await handleRemoteIntent(payload)
+      },
+      // Plan 209 S5/S6: an agent's tool call, on its own lane.
+      runAgent: (intent) => handleAgentIntent(intent, disposed),
+      refuseStale: async (payload) => {
+        const intentId = (payload as { intentId?: unknown } | null)?.intentId
+        if (disposed || typeof intentId !== 'string') return
+        await nextClient
+          .request('remote.intent.ack', {
+            intentId,
+            ok: false,
+            message: REMOTE_SOUND_STALE_MESSAGE
+          })
+          .catch(() => undefined)
+      }
+    })
+    // Plan 209 S6: the agents' link (lib/agent-studio-link.ts): their
+    // projection, published only while Agents is on, and their tool calls.
+    let agentLink: AgentStudioLink | null = null
+    void import('@/lib/agent-studio-link')
+      .then(({ AgentStudioLink }) => {
+        if (disposed) return
+        agentLink = new AgentStudioLink(nextClient, {
+          run: (intent) => remoteIntents.enqueueAgent(intent),
+          recordingRenamed: () => void refreshSessions(nextClient),
+          reportError: (error) => {
+            if (!disposed) reportError(error)
+          }
+        })
+        agentLinkRef.current = agentLink
+        const input = agentSurfaceInputRef.current
+        if (input) agentLink.sync(input)
+        if (remoteSurfaceConnected) agentLink.markConnected()
       })
       .catch((error: unknown) => {
         if (!disposed) reportError(error)
@@ -6919,6 +8020,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // The backend's remote surface slate is blank on (re)connect.
         remoteSurfaceConnected = true
         remoteSurfacePublisher?.markConnected()
+        agentLink?.markConnected()
         // Seed the pushed remote-control status; every later change arrives
         // as a remote.control.status event.
         void nextClient
@@ -6931,17 +8033,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           .catch(reportError)
       }),
       // Remote-control intents (Stream Deck et al) arrive as events relayed
-      // by the backend. Preserve arrival order across asynchronous handlers:
-      // each executor samples authoritative session truth only when its turn
-      // begins, and a failed predecessor cannot poison the tail.
+      // by the backend and run in arrival order (lib/remote-intent-queue.ts);
+      // sound presses on a lane of their own, so a slow scene switch never
+      // holds an airhorn back (release test 147, plan 0003).
       nextClient.on('remote.intent', (payload) => {
-        const result = remoteIntentTailRef.current
-          .catch(() => undefined)
-          .then(() => (disposed ? undefined : handleRemoteIntent(payload)))
-        remoteIntentTailRef.current = result.then(
-          () => undefined,
-          () => undefined
-        )
+        remoteIntents.enqueue(payload).catch((error: unknown) => {
+          if (!disposed) reportError(error)
+        })
       }),
       nextClient.on('remote.control.status', (payload) => {
         setRemoteControlStatus(payload as RemoteControlStatus)
@@ -6965,6 +8063,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('entitlements.updated', (payload) => {
         commitEntitlementsSnapshot(payload)
       }),
+      // Plan 215 A5: the backend says when the account changes, so a sign-out
+      // the server made is news (D7), not a "Sign in" button nobody noticed.
+      nextClient.on('account.changed', (payload) => {
+        handleAccountChangedEvent(payload, {
+          coordinator: accountSnapshotCoordinatorRef.current,
+          setAccount
+        })
+      }),
       nextClient.on('recording.finalization', (payload) => {
         // Background MP4 export (instant-record P2): patch the Library row in
         // place; refetch only when a finalized row is not loaded yet.
@@ -6985,6 +8091,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         if (finalizationEventNeedsRefresh(sessionsRef.current, event)) {
           void refreshSessions(nextClient)
+        } else if (event.state === 'finalized' || event.state === 'failed') {
+          // Plan 0007 (release test 146): the event patches the row's size,
+          // but "N recordings · X MB" only moved on a full refresh, so a take
+          // that finished while Library was loaded kept the old total.
+          const read = ++sessionStorageTotalsReadRef.current
+          void nextClient.request<SessionStorageTotals>('sessions.storage').then(
+            (totals) => {
+              if (
+                clientRef.current === nextClient &&
+                sessionStorageTotalsReadRef.current === read
+              ) {
+                setSessionStorageTotals(totals)
+              }
+            },
+            () => undefined
+          )
         }
         if (
           event.state === 'finalized' &&
@@ -7032,6 +8154,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const incomingStatus = payload as RecordingStatus
         const previousState = recordingRef.current.state ?? lastRecordingStateRef.current
         const previouslyLive = sessionIsLive(recordingRef.current)
+        const previouslyReplayOnly = sessionIsReplayOnly(recordingRef.current)
         const previousSessionId =
           recordingRef.current.sessionId ?? lastRecordingSessionIdRef.current
         const exactTerminalSessionId =
@@ -7114,11 +8237,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // A terminal session moves a persistent degradation notice to past
         // tense. A saved recording also gets its two natural next steps: watch
         // it, or find it in the Library. Stream-only sessions have no local
-        // artifact, so they must not claim that a recording was saved.
-        if (
-          status.state === 'idle' &&
-          ['recording', 'streaming', 'stopping'].includes(previousState ?? '')
-        ) {
+        // artifact, so they must not claim that a recording was saved; nor
+        // does a buffer-only session (plan 181) ending for the switch or the
+        // handover into a real session.
+        const ranToIdle = idleEndsSessionThatRan(previousState, status.state)
+        if (ranToIdle && !previouslyReplayOnly) {
           const finishedActivity = lastSessionActivityRef.current
           const finishedSessionId =
             status.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
@@ -7149,9 +8272,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Treat the backend's terminal state as authoritative even when it
         // races the initial snapshot. Dedupe in publishRecordingFailure keeps
         // repeated status events to one persistent notice.
-        if (status.state === 'failed') {
+        // A buffer-only Clips ring that died is not a recording: the
+        // replay.state error says "Clips stopped" instead.
+        if (status.state === 'failed' && !sessionIsReplayOnly(status)) {
           void publishRecordingFailure(status)
         }
+        // Plan 181: a session ended or began; the switch decides what the
+        // ring does next (re-arm after a recording, stop after the switch).
+        // A session that ran and ended is proof a start can work: the
+        // failed-start count begins again. A refused start's Idle is not
+        // (plan 198), or the give-up limit never trips. A ring that died
+        // with its own session comes back after the next recording or livestream.
+        if (isActiveRecordingState(status.state))
+          replayLastSessionRingOnlyRef.current = status.replayOnly === true
+        if (ranToIdle) replayFailedStartsRef.current = 0
+        if (
+          (status.state === 'idle' || status.state === 'failed') &&
+          !replayLastSessionRingOnlyRef.current
+        )
+          rearmReplayAfterErrorRef.current()
+        scheduleReplayReconcile()
       }),
       // Viewer rider V2: relay the latest concurrent-viewer sample to the
       // Comments window (main-process cache + push, same shape as highlight).
@@ -7191,13 +8331,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             appendBoundedSessionDetailEntry(liveEntries.healthEvents, event)
             sessionDetailLiveEntriesRef.current.set(event.sessionId, liveEntries)
           }
-          setSessions((current) =>
-            current.map((session) =>
+          setSessions((current) => {
+            // Plan 191: a session the Library has not loaded keeps the same
+            // array, so core and the Library rows don't re-render for it
+            // (setSessionDetails below guards the same way).
+            if (!current.some((session) => session.id === event.sessionId)) return current
+            return current.map((session) =>
               session.id === event.sessionId
                 ? { ...session, healthEventCount: session.healthEventCount + 1 }
                 : session
             )
-          )
+          })
           setSessionDetails((current) => {
             const details = current[event.sessionId!]
             return details
@@ -7215,8 +8359,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           void refreshSessions(nextClient)
         }
         // isSessionAudioLossCode lives in the lazy recovery chunk; this stays
-        // byte-cheap for the eager renderer budget.
-        if (/^(microphone-(input|timeline)|system-audio)-lost$/.test(event.code)) {
+        // byte-cheap for the eager renderer budget. Issue 1064: a microphone
+        // the bus reads as digital silence takes the same notice.
+        if (
+          /^(?:(?:microphone-(?:input|timeline)|system-audio)-lost|microphone-silent)$/.test(
+            event.code
+          )
+        ) {
           void publishMicrophoneInputLost(event)
         } else {
           // Plan 076: a timeline loss that recovered clears its notice.
@@ -7248,7 +8397,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               return
             const shownKey = runtime.showSessionHealthEvent(
               event,
-              qualityToastSessionsRef.current.has(qualityDedupeKey)
+              qualityToastSessionsRef.current.has(qualityDedupeKey),
+              recordingRef.current
             )
             if (shownKey) qualityToastSessionsRef.current.add(shownKey)
           })
@@ -7265,13 +8415,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           appendBoundedSessionDetailEntry(liveEntries.sessionLogs, entry)
           sessionDetailLiveEntriesRef.current.set(entry.sessionId, liveEntries)
         }
-        setSessions((current) =>
-          current.map((session) =>
+        setSessions((current) => {
+          // Plan 191: same as health.event above, an unloaded session keeps the array.
+          if (!current.some((session) => session.id === entry.sessionId)) return current
+          return current.map((session) =>
             session.id === entry.sessionId
               ? { ...session, sessionLogCount: session.sessionLogCount + 1 }
               : session
           )
-        )
+        })
         setSessionDetails((current) => {
           const details = current[entry.sessionId]
           return details
@@ -7346,6 +8498,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('compositor.status', (payload) => {
         bootstrapGuard.mark('compositor')
         const status = payload as CompositorStatus
+        setLiveBackgroundStatus((current) =>
+          nextLiveBackgroundStatusView(current, status.liveBackground)
+        )
+        // Plan 216 B2: the sizes the compositor fits each scene source at.
+        setSourcePictureSizes((current) =>
+          sourcePictureSizesFromCompositor(current, status.sceneSources ?? [])
+        )
         // Backend-authored commits (live source switches) arrive only as this
         // event; advance committed truth so a later resync never re-presents
         // an older revision. Layout transactions record their own proven commit.
@@ -7439,6 +8598,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bootstrapGuard.mark('activeScreen')
         commitActiveScreen(payload as StreamScreen | null)
       }),
+      // Plan 186: every banner change carries the full list to every window.
+      nextClient.on('banners.changed', (payload) => {
+        bannerListEventRevision.current += 1
+        setBanners(payload)
+      }),
+      // Plan 189: the soundboard lives outside React (lib/soundboard-store).
+      nextClient.on('sounds.changed', (payload) => soundboard.acceptBoard(payload)),
+      nextClient.on('sounds.playback', (payload) => soundboard.acceptPlayback(payload)),
       nextClient.on('platformAccounts.changed', (payload) => {
         // The authorization link toast is persistent; retire it as soon
         // as the connection resolves.
@@ -7548,10 +8715,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Clip that (plan 068 D6): one toast per mark, whether it came from a
       // spoken phrase, a shortcut, a deck key, or the Stream Manager.
       nextClient.on('clip.marked', (payload) => {
+        const event = payload as ClipMarkedEvent
+        // The ring's save says "Clip saved" itself (replay.saved below); a
+        // press that also marked the recording needs no second toast.
+        if (clipMarkSavedClip(event)) return
         // A recording that never went live has no stream report to point at.
-        const copy = clipMarkedToast(payload as ClipMarkedEvent, {
-          streaming: sessionIsLive(recordingRef.current)
-        })
+        const copy = clipMarkedToast(event, { streaming: sessionIsLive(recordingRef.current) })
         ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
           id: 'clip-marked',
           description: copy.description,
@@ -7559,6 +8728,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             ? { action: { label: 'Open Output', onClick: () => openWorkspaceTab('recording') } }
             : {})
         })
+      }),
+      // Plan 181: the clip ring's state, and every save's outcome.
+      nextClient.on('replay.state', (payload) => {
+        const next = payload as ReplayStateEvent
+        applyReplayState(next)
+        if (next.state === 'error') {
+          // The ring died with its session: it stays off and says why; the
+          // next session's end re-arms it (the switch is still on).
+          replayArmedRef.current = false
+          setReplayArmedState(false)
+          void import('@/lib/replay-buffer').then((replay) => replay.showClipsStopped(next.reason))
+        }
+        scheduleReplayReconcile()
+      }),
+      nextClient.on('replay.saved', (payload) => {
+        const event = payload as ReplaySavedEvent
+        void refreshSessions(nextClient)
+        void import('@/lib/replay-buffer').then((replay) => replay.showClipSaved(event))
+      }),
+      nextClient.on('replay.saveFailed', (payload) => {
+        void import('@/lib/replay-buffer').then((replay) =>
+          replay.showClipSaveFailed(payload as ReplaySaveFailedEvent)
+        )
       }),
       nextClient.on('comments.highlight.status', (payload) => {
         commentHighlightRevision += 1
@@ -7614,6 +8806,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             runtime.showYouTubeThumbnailFailure(nextClient, failure)
         })
       }),
+      // Plan 187: a go-live post that failed is news wherever the streamer
+      // is (D13). Success stays quiet; Livestream shows "Last post".
+      nextClient.on('discord.announce.changed', (snapshot) => {
+        if (!snapshot.webhooks.some((webhook) => webhook.lastError)) return
+        void loadSessionRuntimeRecovery().then((runtime) => {
+          if (generationIsCurrent()) runtime.showDiscordAnnounceFailure(snapshot)
+        })
+      }),
       nextClient.on('youtube.quota', (payload) => {
         const status = payload as YouTubeQuotaStatus
         const previous = youtubeQuotaRef.current
@@ -7661,7 +8861,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : {
                   state: 'warning' as const,
                   message:
-                    'X never produced playback for this broadcast. Viewers saw a loading spinner. Your local recording is unaffected.',
+                    'X ended your broadcast while Videorc was still streaming (usually no video reached X). Your local recording is unaffected.',
                   redactedUrl: event.shareUrl
                 }
         setCaptureConfig((current) => {
@@ -7701,7 +8901,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           duration: TOAST_WITH_DESCRIPTION_MS
         })
       }),
-      nextClient.on('connection.closed', () => setWsStatus('closed'))
+      nextClient.on('connection.closed', () => {
+        soundboard.disconnect(nextClient)
+        setWsStatus('closed')
+        reconnectAfterEngineDrop()
+      })
     ]
 
     nextClient
@@ -7711,6 +8915,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
         setWsStatus('connected')
+        // Plan 189: the soundboard reads its board on this connection,
+        // outside the batch: nothing on startup waits for it.
+        soundboard.connect(nextClient)
         // Seed the Stream Manager's GIF mode relay outside the bootstrap
         // batch: nothing on startup waits for it, and a failure costs only
         // the default (Animated) until the next liveChat.emotes event.
@@ -7726,11 +8933,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const accountBootstrapToken = accountSnapshotCoordinator.beginRefresh()
         const commentHighlightRevisionAtBootstrapStart = commentHighlightRevision
         const captionsStatusRevisionAtBootstrapStart = captionsStatusRevisionRef.current
-        // The takeover commit also releases the microphone mute a takeover
-        // owns, so it must not wait on the rest of the batch: one unrelated
-        // failed request used to skip it and strand a muted microphone with
-        // no takeover selected. A failed read stays unknown and commits
-        // nothing; it still fails the batch below so the error surfaces.
         // Session authority must settle even if device discovery or another
         // bootstrap query fails. Idle fallback remains blocked until this read.
         // A failed read retries: otherwise every picker stays on "Checking the
@@ -7755,17 +8957,62 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return read
         }
         const recordingStatusBootstrap = readRecordingStatus(1)
-        const activeScreenBootstrap = bootstrapRequest<StreamScreen | null>('screens.active')
-        void activeScreenBootstrap.then(
-          (nextActiveScreen) => {
-            if (
-              generationIsCurrent() &&
-              bootstrapGuard.isCurrent(bootstrapSnapshot, 'activeScreen')
-            ) {
-              commitActiveScreen(nextActiveScreen)
+        // Plan 181 (redesign R2): the ring's state, then the switch once per
+        // launch: on by default, the ring runs whenever Videorc is open.
+        void bootstrapRequest<ReplayStateEvent>('replay.status').then(
+          (state) => {
+            if (!generationIsCurrent()) return
+            applyReplayState(state)
+            if (!replayLaunchArmedRef.current) {
+              replayLaunchArmedRef.current = true
+              setReplayArmed(captureConfigRef.current.replayBuffer.enabled)
+            } else {
+              scheduleReplayReconcile()
             }
           },
           () => undefined
+        )
+        // The takeover commit also releases the microphone mute a takeover
+        // owns, so it must not wait on the rest of the batch: one unrelated
+        // failed request used to skip it and strand a muted microphone with
+        // no takeover selected. Plan 195 S4: it stays out of the batch too.
+        // `screens.active` rides the liveControl lane, which a slow Record
+        // start or a long poster can hold past its queue age, and its expiry
+        // used to fail the whole launch with "Videorc hit a problem". A failed
+        // read stays unknown, commits nothing, never toasts, and retries until
+        // the lane frees or a `screens.active.changed` says the truth.
+        const readActiveScreen = (attempt: number): void => {
+          const snapshot = bootstrapGuard.snapshot()
+          void bootstrapRequest<StreamScreen | null>('screens.active').then(
+            (nextActiveScreen) => {
+              if (generationIsCurrent() && bootstrapGuard.isCurrent(snapshot, 'activeScreen')) {
+                commitActiveScreen(nextActiveScreen)
+              }
+            },
+            (error: unknown) => {
+              if (!generationIsCurrent()) return
+              console.warn('[takeover] reading the active takeover failed:', error)
+              if (attempt < 4 && bootstrapGuard.isCurrent(bootstrapSnapshot, 'activeScreen')) {
+                setTimeout(
+                  () => generationIsCurrent() && readActiveScreen(attempt + 1),
+                  1000 * attempt
+                )
+              }
+            }
+          )
+        }
+        readActiveScreen(1)
+        // Banners (plan 186) load outside the batch: nothing on startup waits
+        // for them, and a failed read must never fail the batch. Until a list
+        // arrives (this read or the next `banners.changed`), Assets says
+        // "Loading banners…", never "No banners yet".
+        const bannerListRevision = bannerListEventRevision.current
+        void bootstrapRequest<Banner[]>('banners.list').then(
+          (nextBanners) => {
+            if (generationIsCurrent() && bannerListEventRevision.current === bannerListRevision)
+              setBanners(nextBanners)
+          },
+          (error: unknown) => console.warn('[banners] list read failed:', error)
         )
         const [
           nextHealth,
@@ -7784,7 +9031,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           nextPreviewScreen,
           nextScene,
           nextScreens,
-          ,
           nextStreamMetadataDraft,
           nextSessions,
           nextSessionStorage,
@@ -7806,7 +9052,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           bootstrapRequest<PreviewScreenStatus>('preview.screen.status'),
           bootstrapRequest<Scene>('scene.get'),
           bootstrapRequest<StreamScreen[]>('screens.list'),
-          activeScreenBootstrap,
           bootstrapRequest<StreamMetadataDraft>('streamTargets.metadata.get'),
           bootstrapRequest<SessionListPage>('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
           bootstrapRequest<SessionStorageTotals>('sessions.storage'),
@@ -8099,11 +9344,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       dashboardBacklog.length = 0
       moderation?.dispose()
       stopCohostCommandRelay?.()
+      stopBuddyActRelay?.()
       if (chatModerationRef.current === moderation) chatModerationRef.current = null
       moderationBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {
         window.clearTimeout(liveChatRecoveryRetryTimer)
         liveChatRecoveryRetryTimer = null
+      }
+      if (engineReconnectTimer !== null) {
+        window.clearTimeout(engineReconnectTimer)
+        engineReconnectTimer = null
       }
       platformBootstrapClient.close()
       nativePreviewCompositorPendingRef.current = null
@@ -8119,6 +9369,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (nativePreviewCompositorPumpTimerRef.current) {
         clearTimeout(nativePreviewCompositorPumpTimerRef.current)
         nativePreviewCompositorPumpTimerRef.current = null
+      }
+      if (replayReconcileTimerRef.current) {
+        clearTimeout(replayReconcileTimerRef.current)
+        replayReconcileTimerRef.current = null
       }
       nativePreviewSurfaceCreatedRef.current = false
       nativePreviewSurfaceLastSyncedBoundsRef.current = null
@@ -8139,7 +9393,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (remoteSurfacePublisherRef.current === remoteSurfacePublisher) {
         remoteSurfacePublisherRef.current = null
       }
+      agentLink?.detach()
+      if (agentLinkRef.current === agentLink) {
+        agentLinkRef.current = null
+      }
       setRemoteControlStatus(null)
+      soundboard.disconnect(nextClient)
       nextClient.close()
       setClient(null)
       if (captureRecoveryConnectionGenerationRef.current === generation) {
@@ -8251,14 +9510,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const syncSourceTransformsToLayout = useCallback(
     (nextScene: Scene, changedSourceId?: string) => {
       if (captureConfigRef.current.layout.arrangementMode === 'freeform') {
-        const sourceTransformOverrides: Record<string, CameraTransform> = {}
+        const sourceTransformOverrides: Record<string, SourceTransformOverride> = {}
         for (const source of nextScene.sources) {
-          sourceTransformOverrides[source.id] = {
-            x: source.transform.x,
-            y: source.transform.y,
-            width: source.transform.width,
-            height: source.transform.height
-          }
+          sourceTransformOverrides[source.id] = sourceOverrideOf(source)
         }
         const layout = { ...captureConfigRef.current.layout, sourceTransformOverrides }
         patchLayout({ sourceTransformOverrides })
@@ -8300,6 +9554,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     (options?: { fresh?: boolean }): Promise<void> =>
       focusRefreshCoordinatorRef.current[options?.fresh ? 'runFresh' : 'run'](
         async (generationIsCurrent) => {
+          await window.videorc?.recheckPermissionGrants?.()
           await refreshMediaAccess()
           const activeClient = clientRef.current
           // Multiple focus listeners intentionally share this one coordinator.
@@ -8321,6 +9576,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const deviceRead = ++deviceListReadsRef.current.issued
           const screenListRevision = screenListEventRevision.current
           const activeScreenRevision = activeScreenEventRevision.current
+          // Plan 195 S4: the takeover read rides the liveControl lane, which a
+          // slow Record start or a long poster can hold past its queue age. It
+          // is background work: it commits on its own and a failure never
+          // fails this refresh or toasts ("Videorc hit a problem").
+          const activeScreenRead = activeClient.request<StreamScreen | null>('screens.active').then(
+            (nextActiveScreen) => {
+              if (refreshIsCurrent() && activeScreenEventRevision.current === activeScreenRevision)
+                commitActiveScreen(nextActiveScreen)
+            },
+            (error: unknown) => {
+              if (refreshIsCurrent())
+                console.warn('[takeover] reading the active takeover failed:', error)
+            }
+          )
           try {
             setLastError(null)
             const [
@@ -8331,7 +9600,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               nextSessionStorage,
               nextDiagnostics,
               nextScreens,
-              nextActiveScreen,
               nextPlatformAccounts,
               nextOauthProviderCredentials,
               nextPlatformAccountValidations,
@@ -8345,7 +9613,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               activeClient.request<SessionStorageTotals>('sessions.storage'),
               activeClient.request<DiagnosticStats>('diagnostics.stats'),
               activeClient.request<StreamScreen[]>('screens.list'),
-              activeClient.request<StreamScreen | null>('screens.active'),
               activeClient.request<PlatformAccount[]>('platformAccounts.list'),
               activeClient.request<OAuthProviderCredentialStatus[]>(
                 'platformAccounts.oauth.providerCredentials'
@@ -8399,8 +9666,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
             setDiagnosticStats(nextDiagnostics)
             if (screenListEventRevision.current === screenListRevision) setScreens(nextScreens)
-            if (activeScreenEventRevision.current === activeScreenRevision)
-              commitActiveScreen(nextActiveScreen)
             setPlatformAccounts(nextPlatformAccounts)
             setOauthProviderCredentials(nextOauthProviderCredentials)
             setPlatformAccountValidations(nextPlatformAccountValidations)
@@ -8419,6 +9684,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           } finally {
             sessionListRefreshRequests.finish('first-page', sessionListRequestToken)
           }
+          await activeScreenRead
         }
       ),
     [
@@ -8427,6 +9693,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshAiReadinessForClient,
       refreshEntitlementsForClient,
       refreshMediaAccess,
+      setDeviceList,
       reportError
     ]
   )
@@ -8458,7 +9725,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         }
       }),
-    [refreshMediaAccess, reportError]
+    [refreshMediaAccess, reportError, setDeviceList]
   )
 
   // Purchases and token expiry must not remain stale. App ready (first connect)
@@ -8581,16 +9848,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // regains focus, since grants flip in the OS Settings while we're backgrounded.
   useEffect(() => {
     const refresh = (): void => {
-      void refreshMediaAccess()
+      void (async () => {
+        await window.videorc?.recheckPermissionGrants?.()
+        await refreshMediaAccess()
+      })()
     }
-    refresh()
+    void refreshMediaAccess()
     window.addEventListener('focus', refresh)
     return () => {
       window.removeEventListener('focus', refresh)
     }
   }, [refreshMediaAccess])
 
+  // Plan 212: a performance check's sessions never reach `recording`, and the
+  // backend refuses an idle reload while one runs. The hold covers the run
+  // request; the completed event clears both and re-arms the held reload.
+  const performanceCheckRunning = performanceCheck?.running === true
   useEffect(() => {
+    const checkRunning = (): boolean => performanceCheckHoldRef.current || performanceCheckRunning
     if (
       !client ||
       !shouldReloadSceneFromCaptureConfig({
@@ -8598,7 +9873,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sceneEditMode,
         recordingState: recording.state,
         startRequestPending,
-        stopRequestPending
+        stopRequestPending,
+        performanceCheckRunning: checkRunning()
       })
     ) {
       return
@@ -8615,7 +9891,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sceneEditMode,
           recordingState: recordingRef.current.state,
           startRequestPending,
-          stopRequestPending
+          stopRequestPending,
+          performanceCheckRunning: checkRunning()
         })
       ) {
         return
@@ -8627,7 +9904,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneEditMode,
             recordingState: recordingRef.current.state,
             startRequestPending,
-            stopRequestPending
+            stopRequestPending,
+            performanceCheckRunning: checkRunning()
           })
         ) {
           reportError(error)
@@ -8638,6 +9916,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => window.clearTimeout(timer)
   }, [
     client,
+    performanceCheckRunning,
     recording.state,
     reloadSceneFromCaptureConfig,
     reportError,
@@ -8706,10 +9985,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // visible until React has applied this exact commit. BackendClient rejects
   // disconnects/timeouts; failures must never masquerade as acknowledgement.
   const setSceneSourceTransform = useCallback(
-    async (
-      sourceId: string,
-      patch: { x?: number; y?: number; width?: number; height?: number }
-    ): Promise<TransformCommitResult> => {
+    async (sourceId: string, patch: SceneTransformPatch): Promise<TransformCommitResult> => {
       const requestedScene = transformSceneRef.current
       const requestedLayoutIntentId = layoutIntentIdRef.current
       const identity = transformSourceIdentity(requestedScene)
@@ -8940,24 +10216,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       workingBackgroundRef.current = background
       setWorkingBackground(background)
       const registry = backgroundRegistryRef.current
-      const activeSlotId = background
-        ? (registry.slots.find(
-            (slot) =>
-              slot.assetId === background.assetId &&
-              slot.status === 'ready' &&
-              JSON.stringify(
-                snapshotBackground(effectiveSceneBackground({ ...registry, activeSlotId: slot.id }))
-              ) === JSON.stringify(snapshotBackground(background))
-          )?.id ?? null)
-        : null
-      if (registry.activeSlotId !== activeSlotId) {
-        const nextRegistry = { ...registry, activeSlotId }
+      const activeSlotId =
+        background && !background.live
+          ? (registry.slots.find(
+              (slot) =>
+                slot.assetId === background.assetId &&
+                slot.status === 'ready' &&
+                // The backend's scene writes its keys in another order.
+                sameSceneBackground(
+                  effectiveSceneBackground({ ...registry, activeSlotId: slot.id }),
+                  background
+                )
+            )?.id ?? null)
+          : null
+      // Plan 190: a committed live background is the registry's truth; a
+      // picture or none takes the live one off.
+      const nextRegistry = background?.live
+        ? registryForCommittedLiveBackground(registry, background)
+        : registry.activeSlotId === activeSlotId && !registry.live.activeId
+          ? registry
+          : { ...registry, activeSlotId, live: { ...registry.live, activeId: null } }
+      if (nextRegistry !== registry) {
         libraryBackgroundFingerprintRef.current = JSON.stringify(
           snapshotBackground(effectiveSceneBackground(nextRegistry))
         )
         setBackgroundRegistry(nextRegistry)
       }
-      workingOriginRef.current = snapshot.origin ?? 'builtin'
+      setWorkingOrigin(snapshot.origin ?? 'builtin')
+      // A scene going on stream is not an edit of it (D3): its commit saves
+      // nothing, even when it was already on (a repaired apply).
+      if (snapshot.sceneSwitch) persistedWorkingRef.current = { sceneId: null, key: '' }
       const savedId = snapshot.savedSceneId ?? null
       activeSavedSceneIdRef.current = savedId
       setActiveSavedSceneId(savedId)
@@ -8993,12 +10281,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               ? current.layoutFramingMemory
               : rememberLayoutFraming(current.layoutFramingMemory, snapshot.layout)
         }
+        workingAppRef.current = snapshot.sceneApp
         captureConfigRef.current = next
         persistWorkingVisual(next.layout, next.sources, background, savedId)
         return next
       })
     },
-    [applyScene, persistWorkingVisual, setBackgroundRegistry]
+    [applyScene, persistWorkingVisual, setBackgroundRegistry, setWorkingOrigin]
   )
 
   const readLayoutTransactionBackendTruth = useCallback(async () => {
@@ -9024,43 +10313,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     }
 
-    const sources = { ...captureConfigRef.current.sources }
-    for (const source of sceneAfter.sources) {
-      if (source.kind === 'camera') {
-        sources.cameraName =
-          sources.cameraId === source.deviceId ? (sources.cameraName ?? source.name) : source.name
-        sources.cameraId = source.deviceId
-      }
-      if (source.kind === 'screen') {
-        sources.screenName =
-          sources.screenId === source.deviceId ? (sources.screenName ?? source.name) : source.name
-        sources.screenId = source.deviceId
-        sources.windowId = undefined
-        sources.windowName = undefined
-        sources.testPattern = false
-      }
-      if (source.kind === 'window') {
-        sources.windowName =
-          sources.windowId === source.deviceId ? (sources.windowName ?? source.name) : source.name
-        sources.windowId = source.deviceId
-        sources.screenId = undefined
-        sources.screenName = undefined
-        sources.testPattern = false
-      }
-      if (source.kind === 'test-pattern') {
-        sources.screenId = undefined
-        sources.windowId = undefined
-        sources.testPattern = true
-      }
-    }
+    // Plan 212 S2: the packaged app never adopts a test-pattern source.
+    const sources = layoutTransactionSourcesFromScene(
+      captureConfigRef.current.sources,
+      sceneAfter.sources,
+      { packaged: !import.meta.env.DEV }
+    )
     const visual = normalizeSceneVisual({
       layout: compositorStatus.sceneLayout,
-      sources: visualSources(sources),
+      sources: visualSources({ ...sources, app: workingAppRef.current }),
       background: snapshotBackground(sceneAfter.background)
     })
     const matchesWorking = sameSceneVisual(visual, confirmedVisualRef.current)
     return {
       sources,
+      sceneApp: matchesWorking ? workingAppRef.current : undefined,
       savedSceneId: matchesWorking ? activeSavedSceneIdRef.current : null,
       origin: matchesWorking ? workingOriginRef.current : ('saved' as const),
       sceneRevision: compositorStatus.sceneRevision,
@@ -9138,21 +10405,37 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       layout: LayoutSettings,
       options?: {
         pendingIndicator?: boolean
+        cameraLookOnly?: boolean
         videoOverride?: VideoSettings
         captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
+        sceneApp?: SceneApp
         sourcesOverride?: SourceSelection
         backgroundOverride?: Scene['background'] | null
         strictSources?: boolean
         savedSceneId?: string | null
         origin?: 'builtin' | 'saved'
+        sceneSwitch?: boolean
       }
     ): Promise<boolean> => {
-      const sessionActive = isActiveRecordingState(recordingRef.current.state)
-      if (
-        sessionActive &&
+      const crossesOrientation =
         layoutPresetOrientation(layout.layoutPreset) !==
-          layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
-      ) {
+        layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
+      if (crossesOrientation && sessionIsReplayOnly(recordingRef.current)) {
+        // Plan 181: the default ring is no reason to keep the canvas. It
+        // stops here, the transaction runs as idle, and the reconcile re-arms
+        // it in the new orientation once the layout has landed.
+        replayReconcileHoldRef.current = true
+        return stopReplayBufferRef
+          .current()
+          .then(() => waitForRecordingIdle(recordingRef, 5_000))
+          .then(() => requestLayoutTransactionRef.current(layout, options))
+          .finally(() => {
+            replayReconcileHoldRef.current = false
+            scheduleReplayReconcileRef.current()
+          })
+      }
+      const sessionActive = isActiveRecordingState(recordingRef.current.state)
+      if (sessionActive && crossesOrientation) {
         toast.warning('Stop the recording or stream before switching orientation', {
           id: 'scene-orientation-lock'
         })
@@ -9166,7 +10449,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return Promise.resolve(false)
       }
 
-      if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
+      if (layoutShortcutTimerRef.current) {
+        clearTimeout(layoutShortcutTimerRef.current)
+        layoutShortcutTimerRef.current = null
+        sceneShortcutRequestedRef.current = null
+      }
       latestRequestedLayoutRef.current = layout.layoutPreset
       const intentId = Math.max(layoutIntentIdRef.current + 1, Date.now())
       layoutIntentIdRef.current = intentId
@@ -9176,7 +10463,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Background-only commits keep the same preset; flashing the layout
       // controls into "Switching…" for them reads as an unrelated change.
       if (options?.pendingIndicator !== false) {
-        setLayoutSwitchPending(layout.layoutPreset)
+        setLayoutSwitchPending(layoutSwitchTarget(layout))
       }
 
       let commitReceiptSettled = false
@@ -9195,37 +10482,61 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         let sceneRevisionBeforeRequest: number | undefined
         let sceneRequestDispatched = false
         try {
-          const protectedOverlayWindowIds = await currentProtectedOverlayWindowIds()
           const requestedConfig = captureConfigRef.current
           const requestedSources =
             options?.sourcesOverride ??
             reconcileSourceSelectionForLayoutTransaction(
               requestedConfig.sources,
-              deviceListRef.current.devices
+              deviceListRef.current.devices,
+              // Plan 213 D6: a stand-in never gives way mid-session without a
+              // click, not even on a scene switch.
+              {
+                holdStandIns: sessionOwnsTransport(recordingRef.current),
+                disconnectedCameraId:
+                  previewCameraStatusRef.current.state === 'disconnected'
+                    ? previewCameraStatusRef.current.cameraId
+                    : undefined
+              }
             )
+          layout = cameraLookLayout(
+            layout,
+            requestedSources.cameraId,
+            settingsRef.current.cameraLooks
+          )
           const requestedBackground =
             options && 'backgroundOverride' in options
               ? (options.backgroundOverride ?? undefined)
               : (workingBackgroundRef.current ?? undefined)
-          if (options?.strictSources) {
-            const freshDevices = await client.request<DeviceList>('devices.list')
-            const issues = sceneSourceProblems(
-              {
-                layout,
-                sources: visualSources(requestedSources),
-                background: snapshotBackground(requestedBackground)
-              },
-              freshDevices.devices
-            )
-            if (issues.length) throw new Error(issues.join(' '))
-            if (
-              requestedBackground &&
-              !(await window.videorc?.backgroundAssetExists?.(requestedBackground.assetId))
-            )
-              throw new Error(
-                'Saved background unavailable. Resolve it or apply without background.'
-              )
-          }
+          // Plan 210 S3: the strict check judges the device list the Studio
+          // holds (one fresh list only for a source missing from it) and runs
+          // beside the other round trips a switch needs; a fresh enumeration
+          // per switch cost most of the click-to-picture budget.
+          const strictPreflight = options?.strictSources
+            ? (savedSceneApplyChunk ?? (await loadSavedSceneApply())).runSavedScenePreflight({
+                visual: {
+                  layout,
+                  sources: { ...usingVisualSources(requestedSources), app: undefined },
+                  background: snapshotBackground(requestedBackground)
+                },
+                sceneApp: options.sceneApp,
+                devices: deviceListRef.current.devices,
+                listDevices: () =>
+                  client.request<DeviceList>('devices.list').then((list) => list.devices),
+                backgroundExists: requestedBackground
+                  ? () =>
+                      Promise.resolve(
+                        window.videorc?.backgroundAssetExists?.(requestedBackground.assetId)
+                      ).then((exists) => exists === true)
+                  : null
+              })
+            : null
+          const [protectedOverlayWindowIds, baselineCompositorStatus, preflight] =
+            await Promise.all([
+              currentProtectedOverlayWindowIds(),
+              client.requestTyped('compositor.status').catch(() => null),
+              strictPreflight
+            ])
+          if (preflight?.issues.length) throw new Error(preflight.issues.join(' '))
           if (
             !options?.strictSources &&
             JSON.stringify(requestedSources) !== JSON.stringify(requestedConfig.sources)
@@ -9237,7 +10548,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 : current
             )
           }
-          const method = sessionActive ? 'scene.layout.apply_live' : 'scene.layout.apply_preview'
+          const method =
+            sessionActive || options?.cameraLookOnly
+              ? 'scene.layout.apply_live'
+              : 'scene.layout.apply_preview'
           const requestedTransaction = {
             intentId,
             sources: requestedSources,
@@ -9251,14 +10565,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             // Scene motion (opt-in): the committed layout glides into place
             // (320ms ease) in preview, stream, and recording alike. Absent =
             // instant cut.
-            ...(settingsRef.current.animateSceneChanges === true
+            ...(settingsRef.current.animateSceneChanges === true && !options?.cameraLookOnly
               ? { transitionMs: SCENE_TRANSITION_MS }
               : {})
           }
           requestedSceneEvidence = requestedLayoutTransactionScene(requestedTransaction)
-          const baselineCompositorStatus = await client
-            .requestTyped('compositor.status')
-            .catch(() => null)
           sceneRevisionBeforeRequest =
             typeof baselineCompositorStatus?.sceneRevision === 'number'
               ? baselineCompositorStatus.sceneRevision
@@ -9275,11 +10586,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             compositorStatus: status.compositorStatus,
             captureConfigPatch: options?.captureConfigPatch,
             sources: requestedSources,
+            sceneApp: options && 'sceneApp' in options ? options.sceneApp : workingAppRef.current,
             savedSceneId:
               options && 'savedSceneId' in options
                 ? options.savedSceneId
                 : activeSavedSceneIdRef.current,
-            origin: options?.origin ?? workingOriginRef.current
+            origin: options?.origin ?? workingOriginRef.current,
+            sceneSwitch: options?.sceneSwitch
           }
           // This is the remote-control acknowledgement edge: the backend has
           // returned an authoritative commit. Presentation proof and React
@@ -9400,11 +10713,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                     ...backendTruth,
                     captureConfigPatch: options?.captureConfigPatch,
                     sources: options?.sourcesOverride ?? captureConfigRef.current.sources,
+                    sceneApp:
+                      options && 'sceneApp' in options ? options.sceneApp : workingAppRef.current,
                     savedSceneId:
                       options && 'savedSceneId' in options
                         ? options.savedSceneId
                         : activeSavedSceneIdRef.current,
-                    origin: options?.origin ?? workingOriginRef.current
+                    origin: options?.origin ?? workingOriginRef.current,
+                    sceneSwitch: options?.sceneSwitch
                   }
                 : backendTruth
             const reconciliation = layoutTransactionFailureReconciliation({
@@ -9455,28 +10771,69 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       wsStatus
     ]
   )
+  const requestLayoutTransactionRef = useRef(requestLayoutTransaction)
+  requestLayoutTransactionRef.current = requestLayoutTransaction
 
   // Library edits request a new working background. Only the committed target
   // drives preview/session parameters; applying a saved snapshot never edits the library.
+  // Plan 207 S4: held while first-run setup is open (the transaction starts
+  // the scene's devices), and run once when the workspace shows. Setup's own
+  // background choice goes through the idle reload and keeps the applied
+  // fingerprint in step, so the held sync usually finds nothing to do.
   useEffect(() => {
     const fingerprint = JSON.stringify(snapshotBackground(desiredLibraryBackground))
-    if (fingerprint === libraryBackgroundFingerprintRef.current) return
+    if (
+      backgroundLibrarySyncDecision({
+        setupOpen: firstRunSetupOpen,
+        fingerprint,
+        applied: libraryBackgroundFingerprintRef.current
+      }) !== 'apply'
+    )
+      return
     libraryBackgroundFingerprintRef.current = fingerprint
     void requestLayoutTransaction(captureConfigRef.current.layout, {
       pendingIndicator: false,
       backgroundOverride: desiredLibraryBackground
     })
-  }, [desiredLibraryBackground, requestLayoutTransaction])
+  }, [desiredLibraryBackground, firstRunSetupOpen, requestLayoutTransaction])
 
+  // Resolves whether the layout committed (an agent's `set_scene_item` reads
+  // it, plan 209 S11b); the inspector ignores it.
   const applyLayoutPatch = useCallback(
-    (patch: Partial<LayoutSettings>) => {
-      void requestLayoutTransaction({
+    (patch: Partial<LayoutSettings>): Promise<boolean> =>
+      requestLayoutTransaction({
         ...captureConfigRef.current.layout,
         ...patch
-      })
-    },
+      }),
     [requestLayoutTransaction]
   )
+
+  const cameraLookThrottleRef = useRef<ReturnType<typeof createCameraLookThrottle> | null>(null)
+  useEffect(() => () => cameraLookThrottleRef.current?.dispose(), [])
+  const applyCameraLook = useCallback((value: NonNullable<LayoutSettings['cameraLook']>): void => {
+    const cameraId = captureConfigRef.current.sources.cameraId
+    if (!cameraId) return
+    const cameraLooks = { ...settingsRef.current.cameraLooks }
+    const look = normalizeCameraLook(value)
+    if (look) cameraLooks[cameraId] = look
+    else delete cameraLooks[cameraId]
+    settingsRef.current = { ...settingsRef.current, cameraLooks }
+    // The live transaction updates the existing source. Suppress the idle
+    // reload so dragging never tears down and reopens the camera.
+    skipNextConfigSceneReloadRef.current = true
+    captureConfigRef.current = {
+      ...captureConfigRef.current,
+      layout: cameraLookLayout(captureConfigRef.current.layout, cameraId, cameraLooks)
+    }
+    setSettings((current) => ({ ...current, cameraLooks }))
+    cameraLookThrottleRef.current ??= createCameraLookThrottle(() => {
+      void requestLayoutTransactionRef.current(captureConfigRef.current.layout, {
+        pendingIndicator: false,
+        cameraLookOnly: true
+      })
+    })
+    cameraLookThrottleRef.current.schedule()
+  }, [])
 
   // Single-level undo of the last committed layout change (plan 174 S3.9,
   // D15): the remembered layout goes back through the same transaction, with
@@ -9487,10 +10844,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const entry = takeLayoutUndo()
     if (!entry) return false
     const current = captureConfigRef.current
-    const sessionActive = isActiveRecordingState(recordingRef.current.state)
     const crossesOrientation =
       layoutPresetOrientation(entry.layout.layoutPreset) !==
       layoutPresetOrientation(current.layout.layoutPreset)
+    if (crossesOrientation && sessionIsReplayOnly(recordingRef.current)) {
+      // Plan 181: the default ring steps aside for the undo, as for a preset.
+      replayReconcileHoldRef.current = true
+      try {
+        await stopReplayBufferRef.current()
+        await waitForRecordingIdle(recordingRef, 5_000)
+      } finally {
+        replayReconcileHoldRef.current = false
+        scheduleReplayReconcileRef.current()
+      }
+    }
+    const sessionActive = isActiveRecordingState(recordingRef.current.state)
     if (sessionActive && crossesOrientation) {
       // The canvas is fixed mid-session; the transaction's own refusal would
       // say so, but the entry must stay for after the session.
@@ -9533,14 +10901,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [requestLayoutTransaction])
 
   const requestCameraPresetTransaction = useCallback(
-    (patch: Partial<LayoutSettings>) => {
+    (
+      patch: Partial<LayoutSettings>,
+      options?: { backgroundOverride?: Scene['background'] | null; keepScene?: boolean }
+    ) => {
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
       if (patch.layoutPreset !== undefined) {
         const issues = sceneSourceProblems(
           {
             layout: { ...current.layout, layoutPreset: nextPreset, arrangementMode: 'preset' },
-            sources: visualSources(current.sources),
+            sources: usingVisualSources(current.sources),
             background: null
           },
           deviceListRef.current.devices
@@ -9603,8 +10974,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         {
           videoOverride,
           captureConfigPatch,
-          ...(patch.layoutPreset !== undefined
+          ...(patch.layoutPreset !== undefined && !options?.keepScene
             ? { savedSceneId: null, origin: 'builtin' as const }
+            : {}),
+          ...(options && 'backgroundOverride' in options
+            ? { backgroundOverride: options.backgroundOverride }
             : {})
         }
       )
@@ -9619,6 +10993,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ? effectiveSceneBackground({ ...registry, activeSlotId: slotId })
         : null
       void requestLayoutTransaction(captureConfigRef.current.layout, {
+        pendingIndicator: false,
+        backgroundOverride: background
+      })
+    },
+    [requestLayoutTransaction]
+  )
+
+  // Plan 190: put a live background on the scene (null takes it off). Its
+  // look, motion and style come from the registry; changing them edits the
+  // registry, and the library sync below applies the edit.
+  // Resolves whether the scene committed (an agent's `set_background` reads
+  // it, plan 209 S11); the tile ignores it.
+  const applyLiveBackground = useCallback(
+    (id: LiveBackgroundId | null): Promise<boolean> => {
+      const registry = backgroundRegistryRef.current
+      const background = id
+        ? effectiveSceneBackground(applyLiveBackgroundToRegistry(registry, id))
+        : null
+      return requestLayoutTransaction(captureConfigRef.current.layout, {
         pendingIndicator: false,
         backgroundOverride: background
       })
@@ -9643,15 +11036,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     () =>
       normalizeSceneVisual({
         layout: captureConfig.layout,
-        sources: visualSources(captureConfig.sources),
+        sources: visualSources({ ...captureConfig.sources, app: workingAppRef.current }),
         background: snapshotBackground(workingBackground)
       }),
     [captureConfig.layout, captureConfig.sources, workingBackground]
   )
+  const workingAudio = useMemo(
+    () => sceneAudio(captureConfig.sources, captureConfig.audio),
+    [captureConfig.sources, captureConfig.audio]
+  )
   const savedSceneModified = Boolean(
     activeSavedSceneId &&
     sceneLibrary.scenes.some(
-      (entry) => entry.id === activeSavedSceneId && !sameSceneVisual(entry.visual, workingVisual)
+      (entry) =>
+        entry.id === activeSavedSceneId &&
+        (!sameSceneVisual(entry.visual, workingVisual) ||
+          !sameSceneAudio(entry.audio, workingAudio))
     )
   )
   const canSaveScene =
@@ -9669,10 +11069,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const saveScene = useCallback(
     (name: string, updateId?: string): boolean => {
       if (!canSaveScene || layoutIntentAwaitingProofRef.current !== null) return false
-      const id = saveSceneEntry(name, workingVisual, updateId)
+      const id = saveSceneEntry(name, workingVisual, workingAudio, updateId)
       if (!id) return false
       activeSavedSceneIdRef.current = id
-      workingOriginRef.current = 'saved'
+      setWorkingOrigin('saved')
       setActiveSavedSceneId(id)
       persistWorkingVisual(
         captureConfigRef.current.layout,
@@ -9682,11 +11082,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
       return true
     },
-    [canSaveScene, saveSceneEntry, workingVisual, persistWorkingVisual]
+    [
+      canSaveScene,
+      saveSceneEntry,
+      workingVisual,
+      workingAudio,
+      persistWorkingVisual,
+      setWorkingOrigin
+    ]
   )
   const deleteSavedScene = useCallback(
     (id: string): boolean => {
       if (!removeSceneEntry(id)) return false
+      setSettings((current) => ({
+        ...current,
+        globalShortcuts: withoutSceneShortcut(current.globalShortcuts, id)
+      }))
       if (activeSavedSceneIdRef.current === id) {
         activeSavedSceneIdRef.current = null
         setActiveSavedSceneId(null)
@@ -9699,48 +11110,374 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       return true
     },
-    [removeSceneEntry, persistWorkingVisual]
+    [removeSceneEntry, persistWorkingVisual, setSettings]
   )
-  const applySavedScene = useCallback(
-    async (id: string, repaired?: SceneVisual): Promise<boolean> => {
+  // A shortcut or remote request is sent even when it repeats the last one:
+  // the retry after a failed start or a lost update.
+  const setSystemAudioEnabled = useCallback((systemAudioEnabled: boolean): void => {
+    if (liveAudioProcessingSyncRef.current)
+      liveAudioProcessingSyncRef.current.systemAudioSent = null
+    retrySystemAudio((count) => count + 1)
+    setCaptureConfig((current) => ({
+      ...current,
+      audio: { ...current.audio, systemAudioEnabled }
+    }))
+  }, [])
+  const savedSceneResolveGenerationRef = useRef(0)
+  // Plan 210 S10: the follower hears every apply that is not its own, so a
+  // scene the streamer picks (click, key, remote, agent) holds until the next
+  // app change.
+  const manualSceneApplyListenersRef = useRef(new Set<(sceneId: string) => void>())
+  const subscribeManualSceneApply = useCallback((listener: (sceneId: string) => void) => {
+    manualSceneApplyListenersRef.current.add(listener)
+    return () => {
+      manualSceneApplyListenersRef.current.delete(listener)
+    }
+  }, [])
+  const applySavedSceneResult = useCallback(
+    async (
+      id: string,
+      repaired?: SceneVisual,
+      options?: SavedSceneApplyOptions
+    ): Promise<SavedSceneApplyResult> => {
       const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
-      if (!saved) return false
-      const visual = normalizeSceneVisual(repaired ?? saved.visual)
-      const current = captureConfigRef.current
-      const coupling = !isActiveRecordingState(recordingRef.current.state)
-        ? verticalOrientationVideoPatch(
-            current.layout.layoutPreset,
-            visual.layout.layoutPreset,
-            current.video,
-            current.verticalRestoreVideo
+      if (!saved) return { ok: false }
+      if (options?.origin !== 'follow')
+        for (const listener of manualSceneApplyListenersRef.current) listener(id)
+      const generation = ++savedSceneResolveGenerationRef.current
+      let layoutIntentBefore = layoutIntentIdRef.current
+      let sceneApply: typeof SavedSceneApply
+      try {
+        sceneApply = savedSceneApplyChunk ?? (await loadSavedSceneApply())
+      } catch (error) {
+        reportError(error, { action: 'switch', object: 'the scene' })
+        return { ok: false }
+      }
+      let visual = normalizeSceneVisual(repaired ?? saved.visual)
+      let current = captureConfigRef.current
+      let microphone: ReturnType<typeof sceneMicrophone> | null = null
+      let live = false
+      let applied = false
+      // Plan 210 D5: an app scene's window is answered from the held device
+      // list when it can be (no resolver round trip). A refused switch gets
+      // one more try, resolved over the backend, while the pick is still
+      // the latest: the held window may have gone since the list was read,
+      // or a capture restart (the Clips ring, recovery) may have superseded
+      // this switch's own start.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        // Plan 213 F1: the scene's display as listed now, found by its UUID first.
+        visual = withSceneDisplay(
+          normalizeSceneVisual(repaired ?? saved.visual),
+          deviceListRef.current.devices
+        )
+        try {
+          const resolved = await sceneApply.resolveSceneWindowForApply(
+            visual,
+            deviceListRef.current.devices,
+            (params) => {
+              if (!clientRef.current) throw offlineError()
+              return clientRef.current.requestTyped('sources.resolve_app_window', params)
+            },
+            rememberedAppsRef.current[id],
+            options?.preferWindowId,
+            { forceResolve: attempt > 0 }
           )
-        : null
-      return requestLayoutTransaction(visual.layout, {
-        sourcesOverride: { ...current.sources, ...visual.sources },
-        backgroundOverride: resolveSavedBackground(visual.background),
-        savedSceneId: id,
-        origin: 'saved',
-        strictSources: true,
-        ...(coupling
-          ? {
-              videoOverride: coupling.video,
-              captureConfigPatch: {
-                video: coupling.video,
-                verticalRestoreVideo: coupling.verticalRestoreVideo
+          if (
+            generation !== savedSceneResolveGenerationRef.current ||
+            layoutIntentBefore !== layoutIntentIdRef.current
+          )
+            return { ok: false }
+          if (resolved.kind === 'blocked') {
+            setResolvedAppStates((current) => ({
+              ...current,
+              [id]: resolved.reason.slice(4) as SceneAppState
+            }))
+            const refusal = sceneApply.sceneWindowRefusal(visual, resolved.reason)
+            if (!refusal.ok) toast.warning(refusal.message, { id: 'scene-app-unavailable' })
+            return refusal
+          }
+          if (resolved.kind === 'ready') {
+            visual = { ...visual, sources: resolved.sources }
+            if (visual.sources.app)
+              setResolvedAppStates((current) => ({ ...current, [id]: 'ready' }))
+          }
+        } catch (error) {
+          reportError(error, { action: 'switch', object: 'the scene' })
+          return { ok: false }
+        }
+        current = captureConfigRef.current
+        // Idle, the scene's microphone rides in its sources and the commit makes
+        // it the pick. A recording or livestream switches to it after the
+        // commit, and only the session's confirmation changes the pick.
+        microphone = saved.audio
+          ? sceneMicrophone(saved.audio, deviceListRef.current.devices)
+          : null
+        live = sessionOwnsTransport(recordingRef.current)
+        const coupling = !isActiveRecordingState(recordingRef.current.state)
+          ? verticalOrientationVideoPatch(
+              current.layout.layoutPreset,
+              visual.layout.layoutPreset,
+              current.video,
+              current.verticalRestoreVideo
+            )
+          : null
+        const transaction = requestLayoutTransaction(visual.layout, {
+          sceneApp: visual.sources.app,
+          sourcesOverride: withoutSceneApp({
+            ...current.sources,
+            ...visual.sources,
+            ...(live ? null : microphone)
+          }),
+          backgroundOverride: resolveSavedBackground(visual.background),
+          savedSceneId: id,
+          origin: 'saved',
+          sceneSwitch: true,
+          strictSources: true,
+          ...(coupling
+            ? {
+                videoOverride: coupling.video,
+                captureConfigPatch: {
+                  video: coupling.video,
+                  verticalRestoreVideo: coupling.verticalRestoreVideo
+                }
               }
+            : {})
+        })
+        // The intent this switch minted, read before anything newer can.
+        const intent = layoutIntentIdRef.current
+        applied = await transaction
+        if (applied) break
+        if (
+          !sceneApply.savedSceneApplyRetryAllowed({
+            attempt,
+            generation,
+            latestGeneration: savedSceneResolveGenerationRef.current,
+            intent,
+            latestIntent: layoutIntentIdRef.current
+          }) ||
+          // A source turned off on purpose refuses the same way twice.
+          sceneApply.judgeSceneSources(visual, deviceListRef.current.devices, visual.sources.app)
+            .kind === 'refused'
+        )
+          break
+        layoutIntentBefore = intent
+      }
+      if (applied) {
+        if (!repaired) refreshSavedSceneDisplay(id, deviceListRef.current.devices)
+        rememberedAppsRef.current = sceneApply.rememberSceneWindowApp(
+          rememberedAppsRef.current,
+          id,
+          visual.sources,
+          deviceListRef.current.devices,
+          sceneLibrary.scenes
+        )
+        try {
+          localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
+        } catch {
+          /* Best effort. */
+        }
+      }
+      if (!applied || !saved.audio) return { ok: applied }
+      if (saved.audio.systemAudioEnabled !== captureConfigRef.current.audio.systemAudioEnabled)
+        setSystemAudioEnabled(saved.audio.systemAudioEnabled)
+      if (!microphone) {
+        if (saved.audio.microphoneId)
+          toast.warning(
+            `${saved.audio.microphoneName ?? "The scene's microphone"} isn't available`,
+            {
+              id: 'saved-scene-microphone',
+              description:
+                'The scene kept your current microphone. Connect it, then choose the scene again.'
             }
-          : {})
-      })
+          )
+        return { ok: applied }
+      }
+      if (
+        live &&
+        sessionOwnsTransport(recordingRef.current) &&
+        microphone.microphoneId !== current.sources.microphoneId
+      ) {
+        // The commit moved the session's sources on, and a read already in
+        // flight may predate it: a switch carrying that would be refused.
+        await sourceSelectionController.refresh()
+        await sourceSelectionController.refresh()
+        const blocked = sourceSelectionController.reason('microphone')
+        if (blocked) {
+          toast.warning(blocked, {
+            id: 'source-switch-blocked',
+            description: 'The scene kept your current microphone.'
+          })
+          return { ok: applied }
+        }
+        // Plan 0027: the session confirms only the device; None is renderer intent.
+        if (microphone.microphoneOff)
+          setCaptureConfig((latest) =>
+            latest.sources.microphoneOff
+              ? latest
+              : { ...latest, sources: { ...latest.sources, microphoneOff: true } }
+          )
+        try {
+          await sourceSelectionController.select(
+            'microphone',
+            microphone.microphoneId ?? null,
+            currentProtectedOverlayWindowIds(),
+            microphone.microphoneName
+          )
+        } catch (error) {
+          reportError(error, { action: 'switch', object: 'the microphone' })
+        }
+      }
+      return { ok: applied }
     },
-    [sceneLibrary.scenes, requestLayoutTransaction]
+    [
+      sceneLibrary.scenes,
+      refreshSavedSceneDisplay,
+      requestLayoutTransaction,
+      setSystemAudioEnabled,
+      sourceSelectionController,
+      reportError
+    ]
   )
 
+  const applySavedScene = useCallback(
+    async (id: string, repaired?: SceneVisual): Promise<boolean> =>
+      (await applySavedSceneResult(id, repaired)).ok,
+    [applySavedSceneResult]
+  )
+
+  // Plan 210 S10 (D10, D11): the stream follows the app in front, macOS only.
+  const followSceneApply = useCallback<FollowSceneApply>(
+    (sceneId, preferWindowId) =>
+      applySavedSceneResult(sceneId, undefined, { preferWindowId, origin: 'follow' }),
+    [applySavedSceneResult]
+  )
+  const followFrontAppEnabled = runtimeInfo?.platform === 'darwin'
+  const followFrontAppWanted = followFrontAppEnabled && wsStatus === 'connected'
+  const [FollowFrontApp, setFollowFrontApp] = useState<ComponentType<FollowFrontAppHost> | null>(
+    null
+  )
+  useEffect(() => {
+    if (!followFrontAppWanted || FollowFrontApp) return
+    void loadFollowFrontApp()
+      .then(({ FollowFrontAppController }) => setFollowFrontApp(() => FollowFrontAppController))
+      .catch((error: unknown) => console.warn('[follow-front-app] load failed', error))
+  }, [followFrontAppWanted, FollowFrontApp])
+  const followFrontAppHost: FollowFrontAppHost = {
+    enabled: followFrontAppEnabled,
+    scenes: sceneLibrary.scenes,
+    activeSceneId: activeSavedSceneId,
+    sources: captureConfig.sources,
+    sessionState: recording.state,
+    orientation: layoutPresetOrientation(captureConfig.layout.layoutPreset),
+    screenPrivacy: privacy.screenPrivacy,
+    hideScreen: privacy.hideScreen,
+    showScreen: privacy.showScreen,
+    applyScene: followSceneApply,
+    subscribeManualApply: subscribeManualSceneApply
+  }
+
   const applyCameraPreset = useCallback(
-    (patch: Partial<LayoutSettings>) => {
-      void requestCameraPresetTransaction(patch)
+    (patch: Partial<LayoutSettings>, options?: { keepScene?: boolean }) => {
+      sceneShortcutRequestedRef.current = null
+      void requestCameraPresetTransaction(
+        patch,
+        options?.keepScene ? { keepScene: true } : undefined
+      )
     },
     [requestCameraPresetTransaction]
   )
+  const sceneLibraryActions = useMemo<SceneLibraryActions>(
+    () => ({
+      readOnly: sceneLibrary.readOnly,
+      workingOrigin,
+      workingVisual,
+      workingAudio,
+      insert: sceneLibrary.insert,
+      move: sceneLibrary.move,
+      replace: sceneLibrary.replace,
+      listAppPreviews: async (params) => {
+        if (!clientRef.current) throw offlineError()
+        return clientRef.current.requestTyped('sources.app_previews', params)
+      }
+    }),
+    [
+      sceneLibrary.readOnly,
+      sceneLibrary.insert,
+      sceneLibrary.move,
+      sceneLibrary.replace,
+      workingOrigin,
+      workingVisual,
+      workingAudio
+    ]
+  )
+
+  // Plan 207 S4: "Your look" writes state only. The scene reload commits it
+  // idle (`scene.load_from_capture_config` starts nothing and carries the
+  // background), so no device opens while setup is open. The library sync
+  // above sees the fingerprint already applied. Setup's changes start the
+  // Studio with no undo history and no saved-scene origin (a built-in look).
+  // The setup chunk has already loaded the look's helpers when this runs.
+  const applyFirstRunLook = useCallback(
+    (look: FirstRunLook): void => {
+      if (firstRunLookWritesHeld(recordingRef.current)) {
+        firstRunLookHoldRef.current = look
+        setFirstRunLookHold(look)
+        return
+      }
+      // The session that held an earlier look has ended: this write wins.
+      if (firstRunLookHoldRef.current) {
+        firstRunLookHoldRef.current = null
+        setFirstRunLookHold(null)
+      }
+      void import('@/lib/first-run-look').then(
+        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+          const current = captureConfigRef.current
+          if (current.layout.arrangementMode === 'freeform') {
+            noteLayoutLeavingFreeform(current.layout)
+          }
+          const next = firstRunLookPatch(current, look)
+          latestRequestedLayoutRef.current = next.layout.layoutPreset
+          setWorkingOrigin('builtin')
+          activeSavedSceneIdRef.current = null
+          setActiveSavedSceneId(null)
+          setCaptureConfig((latest) => firstRunLookPatch(latest, look))
+          const registry = backgroundRegistryRef.current
+          const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
+          const background = effectiveSceneBackground(nextRegistry)
+          libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
+          workingBackgroundRef.current = background
+          setWorkingBackground(background)
+          if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+        }
+      )
+    },
+    [setBackgroundRegistry, setWorkingOrigin]
+  )
+  // A look held behind a running session lands when setup closes, through
+  // the Studio's own transaction: one commit with the preset, the shape and
+  // the background. It may open the layout's devices, as a Studio change does.
+  useEffect(() => {
+    if (firstRunSetupOpen) return
+    const held = firstRunLookHoldRef.current
+    if (!held) return
+    firstRunLookHoldRef.current = null
+    setFirstRunLookHold(null)
+    void import('@/lib/first-run-look').then(
+      ({ cameraShapeLayoutPatch, firstRunBackgroundChoice, firstRunLookPreset }) => {
+        const registry = firstRunBackgroundChoice(
+          backgroundRegistryRef.current,
+          held.liveBackgroundId
+        )
+        void requestCameraPresetTransaction(
+          {
+            layoutPreset: firstRunLookPreset(captureConfigRef.current, held),
+            ...cameraShapeLayoutPatch(held.cameraShape)
+          },
+          { backgroundOverride: effectiveSceneBackground(registry) }
+        )
+      }
+    )
+  }, [firstRunSetupOpen, requestCameraPresetTransaction])
 
   const switchSourceDeviceLive = useCallback(
     async (sourceKind: LiveSourceDeviceSwitchPending, sources: SourceSelection) => {
@@ -9753,13 +11490,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         return
       }
-      if (!isActiveRecordingState(recordingRef.current.state)) {
+      if (sourceKind === 'capture') {
+        // Plan 210 D3: another screen or window leaves the saved scene on
+        // stream instead of rewriting it; the list then says "Unsaved scene".
+        const leaves =
+          activeSavedSceneIdRef.current !== null &&
+          capturePickLeavesScene(
+            { ...captureConfigRef.current.sources, app: workingAppRef.current },
+            sources
+          )
+        workingAppRef.current = undefined
+        if (leaves) {
+          activeSavedSceneIdRef.current = null
+          setActiveSavedSceneId(null)
+          persistWorkingVisual(
+            captureConfigRef.current.layout,
+            captureConfigRef.current.sources,
+            workingBackgroundRef.current,
+            null
+          )
+        }
+      }
+      if (!sessionOwnsTransport(recordingRef.current)) {
         // Pickers build `sources` from a render-time snapshot; merge only the
         // picked kind so a concurrent confirmation or reconcile is not undone.
-        setCaptureConfig((current) => ({
-          ...current,
-          sources: mergeSourceKind(current.sources, sources, sourceKind)
-        }))
+        // A buffer-only Clips session is idle here: persist, then the source
+        // effect stops the ring and reconcile re-arms it with the new pick.
+        setCaptureConfig((current) => {
+          const next = {
+            ...current,
+            sources: mergeSourceKind(current.sources, sources, sourceKind)
+          }
+          captureConfigRef.current = next
+          return next
+        })
         if (sceneEditMode && sourceKind !== 'microphone') {
           await loadScene({
             sources: mergeSourceKind(captureConfigRef.current.sources, sources, sourceKind),
@@ -9779,10 +11543,45 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Plan 080 S4: the backend confirms only the device; the Off intent
         // is renderer state, so it must be recorded here to outlive the
         // session's end (reconcile would otherwise fill in the first camera).
+        // Plan 213 E1: a pick ends the wish a stand-in was holding, the same way.
         setCaptureConfig((current) =>
-          current.sources.cameraOff === sources.cameraOff
+          current.sources.cameraOff === sources.cameraOff &&
+          current.sources.wantedCameraId === sources.wantedCameraId &&
+          current.sources.wantedCameraName === sources.wantedCameraName
             ? current
-            : { ...current, sources: { ...current.sources, cameraOff: sources.cameraOff } }
+            : {
+                ...current,
+                sources: {
+                  ...current.sources,
+                  cameraOff: sources.cameraOff,
+                  wantedCameraId: sources.wantedCameraId,
+                  wantedCameraName: sources.wantedCameraName
+                }
+              }
+        )
+      }
+      if (sourceKind === 'capture') {
+        // Plan 0002 (release test 146): the same for a screen set to None.
+        setCaptureConfig((current) =>
+          current.sources.captureOff === sources.captureOff &&
+          current.sources.wantedScreenId === sources.wantedScreenId &&
+          current.sources.wantedScreenName === sources.wantedScreenName &&
+          current.sources.wantedScreenUuid === sources.wantedScreenUuid &&
+          current.sources.wantedWindowId === sources.wantedWindowId &&
+          current.sources.wantedWindowName === sources.wantedWindowName
+            ? current
+            : {
+                ...current,
+                sources: {
+                  ...current.sources,
+                  captureOff: sources.captureOff,
+                  wantedScreenId: sources.wantedScreenId,
+                  wantedScreenName: sources.wantedScreenName,
+                  wantedScreenUuid: sources.wantedScreenUuid,
+                  wantedWindowId: sources.wantedWindowId,
+                  wantedWindowName: sources.wantedWindowName
+                }
+              }
         )
       }
       if (sourceKind === 'microphone') {
@@ -9808,15 +11607,92 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error, { action: 'switch', object: 'the source' })
       }
     },
-    [sourceSelectionController, sourceSwitchReason, loadScene, reportError, sceneEditMode]
+    [
+      sourceSelectionController,
+      sourceSwitchReason,
+      loadScene,
+      reportError,
+      sceneEditMode,
+      persistWorkingVisual
+    ]
   )
+
+  const announcedSourceReturnsRef = useRef(new Set<string>())
+  useEffect(() => {
+    const sources = captureConfigRef.current.sources
+    // A missing camera may be retried only after discovery finds it again.
+    if (!cameraIsAvailable(sources.cameraId, deviceList.devices)) {
+      nativePreviewCameraKeyRef.current = null
+    }
+    const returns =
+      sourceStatusKnown &&
+      !startRequestPending &&
+      !stopRequestPending &&
+      isActiveRecordingState(recording.state)
+        ? returningSourceChoices(sources, deviceList.devices)
+        : []
+    const keys = new Set(returns.map(({ kind, device }) => `${kind}:${device.id}`))
+    for (const old of announcedSourceReturnsRef.current) {
+      if (!keys.has(old)) toast.dismiss(`source-return:${old}`)
+    }
+    for (const { kind, device } of returns) {
+      const key = `${kind}:${device.id}`
+      if (announcedSourceReturnsRef.current.has(key)) continue
+      const applyDevice = () => {
+        const current = captureConfigRef.current.sources
+        if (
+          !returningSourceChoices(current, deviceListRef.current.devices).some(
+            (choice) => choice.kind === kind && choice.device.id === device.id
+          )
+        )
+          return
+        const next =
+          kind === 'camera'
+            ? buildCameraSources(current, deviceListRef.current.devices, device.id)
+            : buildCaptureSources(current, deviceListRef.current.devices, device.id)
+        void switchSourceDeviceLive(kind, next).catch((error) => toastUserError(error))
+      }
+      const action = sourceReturnAction(
+        { state: recording.state, replayOnly: recording.replayOnly },
+        Boolean(sourceSwitchReason(kind))
+      )
+      if (action === 'wait') {
+        keys.delete(key)
+        continue
+      }
+      if (action === 'restore') {
+        applyDevice()
+        continue
+      }
+      toast(`${device.name} is back`, {
+        id: `source-return:${key}`,
+        duration: Infinity,
+        action: { label: 'Use it', onClick: applyDevice }
+      })
+    }
+    announcedSourceReturnsRef.current = keys
+  }, [
+    captureConfig.sources,
+    deviceList,
+    recording.state,
+    recording.replayOnly,
+    sourceStatusKnown,
+    startRequestPending,
+    stopRequestPending,
+    sourceSwitchReason,
+    switchSourceDeviceLive
+  ])
 
   const ensureNativePreviewCamera = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
       return previewCameraStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
+    if (
+      firstRunSetupOpen ||
+      runtimeInfo?.disableAutoPreview ||
+      runtimeInfo?.disableAutoSourcePreview
+    ) {
       return previewCameraStatusRef.current
     }
 
@@ -9851,20 +11727,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     const current = previewCameraStatusRef.current
     if (
-      nativePreviewCameraKeyRef.current === key &&
-      current.cameraId === cameraId &&
-      (current.state === 'starting' || current.state === 'live')
-    ) {
+      !cameraPreviewStartAllowed(
+        cameraId,
+        deviceListRef.current.devices,
+        key,
+        nativePreviewCameraKeyRef.current,
+        current.state,
+        current.cameraId
+      )
+    )
       return current
-    }
 
     const status = await client.request<PreviewCameraStatus>('preview.camera.start', {
       sources: captureConfig.sources,
       layout: captureConfig.layout,
       video: captureConfig.video
     })
-    nativePreviewCameraKeyRef.current =
-      status.state === 'failed' || status.state === 'device-missing' ? null : key
+    nativePreviewCameraKeyRef.current = key
     applyPreviewCameraStatus(status)
     if (status.state === 'permission-needed') {
       const permissionReport = window.videorc?.reportPreviewPermissionRequired?.(
@@ -9883,6 +11762,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.sources,
     captureConfig.video,
     client,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
@@ -9894,7 +11774,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return previewScreenStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
+    if (
+      firstRunSetupOpen ||
+      runtimeInfo?.disableAutoPreview ||
+      runtimeInfo?.disableAutoSourcePreview
+    ) {
       return previewScreenStatusRef.current
     }
 
@@ -9989,6 +11873,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.layout.layoutPreset,
     captureConfig.video,
     client,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
@@ -10322,17 +12207,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       generation,
       status: previewSurfaceStatusRef.current
     })
+    // The polling profile ignores a Clips-only session; suppression above
+    // still reads it as recording (macOS keeps its native presenter alone).
+    const profileRecording = nativePreviewProofPollingRecording(
+      recordingActive,
+      recordingRef.current.replayOnly
+    )
     const requestKey = nativePreviewFramePollingRequestKey({
       generation,
       suppress,
-      recordingActive
+      recordingActive: profileRecording
     })
     if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
       return
     }
     nativePreviewFramePollingRequestKeyRef.current = requestKey
     void window.videorc
-      .setNativePreviewSurfaceFramePollingSuppressed(suppress, generation, recordingActive)
+      .setNativePreviewSurfaceFramePollingSuppressed(suppress, generation, profileRecording)
       .then((status) => {
         if (
           nativePreviewFramePollingResponseCanCommit({
@@ -10451,6 +12342,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [])
 
+  // Plan 203 S5: no Preview window beside first-run setup. Main restores the
+  // window at launch before the renderer decides, so setup closes it through
+  // the same call as the Preview hint and opens it again when setup leaves, only if it
+  // closed it.
+  const reopenPreviewAfterSetupRef = useRef(false)
+  useEffect(() => {
+    if (firstRunSetupOpen) {
+      if (!previewWindow.open) return
+      reopenPreviewAfterSetupRef.current = true
+      void closePreviewWindow()
+      return
+    }
+    if (!reopenPreviewAfterSetupRef.current) return
+    reopenPreviewAfterSetupRef.current = false
+    void openPreviewWindow()
+  }, [closePreviewWindow, firstRunSetupOpen, openPreviewWindow, previewWindow.open])
+
   const setPreviewWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     const next = await window.videorc?.setPreviewWindowAlwaysOnTop?.(alwaysOnTop)
     if (next) {
@@ -10500,12 +12408,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await window.videorc?.setNotesWindowAlwaysOnTop?.(alwaysOnTop)
   }, [])
 
-  const notesProtectedOverlayKey = useMemo(
+  // The exclusion list's identity: Notes while open, and the Stream Manager
+  // while open and hidden from stream (plan 215 C2). A change re-sends the
+  // screen start, which the backend applies to the running capture in place.
+  const protectedOverlayKey = useMemo(
     () =>
-      notesWindow.open && typeof notesWindow.windowId === 'number'
-        ? String(notesWindow.windowId)
-        : '',
-    [notesWindow.open, notesWindow.windowId]
+      protectedOverlayWindowIdsFromOverlayWindows(
+        notesWindow,
+        streamManagerProtectedOverlayWindow(commentsWindow)
+      ).join(','),
+    [notesWindow, commentsWindow]
   )
 
   useEffect(() => {
@@ -10524,10 +12436,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
   }, [notesWindow.open, recording.state, runtimeInfo?.notesWindowRecordingOverlayAllowed])
 
+  // Plan 215 D6: with Hide from stream on, the window is out of the capture
+  // (macOS: our filter; Windows: content protection, which `protected`
+  // already says), so it stays open through the recording.
+  const commentsWindowHiddenFromStream =
+    commentsWindow.hiddenFromStream && commentsWindow.hideFromStreamMethod !== 'unsupported'
   useEffect(() => {
     if (
       !commentsWindow.open ||
       commentsWindow.protected ||
+      commentsWindowHiddenFromStream ||
       !isActiveRecordingState(recording.state) ||
       runtimeInfo?.commentsWindowRecordingOverlayAllowed
     ) {
@@ -10549,6 +12467,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [
     commentsWindow.open,
     commentsWindow.protected,
+    commentsWindowHiddenFromStream,
     recording.state,
     runtimeInfo?.commentsWindowRecordingOverlayAllowed
   ])
@@ -10560,7 +12479,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     nativePreviewScreenKeyRef.current = null
     void ensureNativePreviewScreen()
-  }, [ensureNativePreviewScreen, notesProtectedOverlayKey])
+  }, [ensureNativePreviewScreen, protectedOverlayKey])
 
   // The preview window is locked to the OUTPUT aspect ratio — the user can never
   // squeeze or stretch what they will record/stream.
@@ -10691,6 +12610,165 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
   }, [client, reportError, wsStatus])
 
+  // Banners (plan 186). A refusal ("Four banners are showing. Hide one
+  // first.") is a warning with the backend's sentence; anything else is the
+  // usual failure. Show, hide and a place never toast success: the picture
+  // is the confirmation.
+  const reportBannerError = useCallback(
+    (error: unknown, context: UserErrorContext) => {
+      void loadBannerRules().then(
+        ({ bannerRefusalError }) => {
+          const refusal = bannerRefusalError(error)
+          if (refusal) toastUserError(refusal, context, { id: 'banner-refusal' })
+          else reportError(error, context)
+        },
+        () => reportError(error, context)
+      )
+    },
+    [reportError]
+  )
+
+  /**
+   * One banner call on the live connection. Its reply commits unless a
+   * `banners.changed` overtook it; null after a failure, which has said so.
+   */
+  const runBannerCommand = useCallback(
+    async <T,>(
+      context: UserErrorContext,
+      command: (active: BackendClient) => Promise<T>,
+      commit: (result: T) => void
+    ): Promise<T | null> => {
+      if (!client || wsStatus !== 'connected') {
+        toastOffline(context)
+        return null
+      }
+      const revision = bannerListEventRevision.current
+      try {
+        setLastError(null)
+        const result = await command(client)
+        if (clientRef.current === client && bannerListEventRevision.current === revision)
+          commit(result)
+        return result
+      } catch (error) {
+        if (clientRef.current === client) reportBannerError(error, context)
+        return null
+      }
+    },
+    [client, reportBannerError, wsStatus]
+  )
+
+  const commitBanner = useCallback(
+    (banner: Banner) =>
+      setBanners((current) =>
+        [...(current ?? []).filter((item) => item.id !== banner.id), banner].sort(
+          (a, b) => a.sortOrder - b.sortOrder
+        )
+      ),
+    []
+  )
+
+  const importBanner = useCallback(async () => {
+    const context = { action: 'import', object: 'the image' }
+    if (!client || wsStatus !== 'connected') {
+      toastOffline(context)
+      return
+    }
+    if (!window.videorc?.pickBannerImage) {
+      console.warn('[banners] no image picker in this renderer')
+      return
+    }
+    const revision = bannerListEventRevision.current
+    await bannerImporter.current.run({
+      pick: () => window.videorc.pickBannerImage(),
+      importImage: (selection) => {
+        setLastError(null)
+        return client.requestTyped('banners.importImage', {
+          sourceCapability: selection.capabilityId
+        })
+      },
+      isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
+      onPhase: setBannerImportPhase,
+      // The new tile is the confirmation. The backend shows the new banner
+      // unless it can't (plan 205 D3); the answer says which, as `shown`.
+      onImported: (banner) => {
+        if (bannerListEventRevision.current === revision) commitBanner(banner)
+      },
+      onError: (error) => reportBannerError(error, context)
+    })
+  }, [client, commitBanner, reportBannerError, wsStatus])
+
+  const updateBanner = useCallback(
+    (id: string, patch: Omit<BannerUpdateParams, 'id'>) =>
+      runBannerCommand(
+        {
+          action:
+            patch.name !== undefined
+              ? 'rename'
+              : patch.horizontal || patch.vertical
+                ? 'move'
+                : 'change',
+          object: 'the banner'
+        },
+        (active) => active.requestTyped('banners.update', { ...patch, id }),
+        commitBanner
+      ),
+    [commitBanner, runBannerCommand]
+  )
+
+  const reorderBanners = useCallback(
+    async (ids: string[]) =>
+      (await runBannerCommand(
+        { action: 'move', object: 'the banner' },
+        (active) => active.requestTyped('banners.reorder', { ids }),
+        setBanners
+      )) !== null,
+    [runBannerCommand]
+  )
+
+  const deleteBanner = useCallback(
+    async (id: string) => {
+      const name = bannerListRef.current?.find((banner) => banner.id === id)?.name ?? 'banner'
+      const remaining = await runBannerCommand(
+        { action: 'delete', object: 'the banner' },
+        (active) => active.requestTyped('banners.delete', { id }),
+        setBanners
+      )
+      if (remaining === null) return false
+      // A confirmed delete may say so, and names what went (plan 174 C-1).
+      toast.success(`Deleted “${name}”`)
+      return true
+    },
+    [runBannerCommand]
+  )
+
+  const showBanner = useCallback(
+    async (id: string) =>
+      (await runBannerCommand(
+        { action: 'show', object: 'the banner' },
+        (active) => active.requestTyped('banners.show', { id }),
+        commitBanner
+      )) !== null,
+    [commitBanner, runBannerCommand]
+  )
+
+  const hideBanner = useCallback(
+    async (id?: string) =>
+      (await runBannerCommand(
+        { action: 'hide', object: id === undefined ? 'the banners' : 'the banner' },
+        (active) => active.requestTyped('banners.hide', id === undefined ? {} : { id }),
+        setBanners
+      )) !== null,
+    [runBannerCommand]
+  )
+
+  const toggleBanner = useCallback(
+    (id: string) =>
+      bannerListRef.current?.find((banner) => banner.id === id)?.shown
+        ? hideBanner(id)
+        : showBanner(id),
+    [hideBanner, showBanner]
+  )
+
   const openSystemPermissionSettings = useCallback(
     async (pane: SystemPermissionPane) => {
       if (!window.videorc?.openSystemPermissions) {
@@ -10733,7 +12811,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
 
     try {
-      setLastError(null)
+      // Plan 216 A5: the last error stays; the bundle is meant to explain it.
       setSupportBundleExportPending(true)
       // Re-read runtime info at export time: backend crash records are
       // appended by main while the app runs, and the startup snapshot would
@@ -10746,9 +12824,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // identifies the shipped build. Absent → backend degrades to crate.
         appVersion: freshRuntimeInfo?.version,
         rendererDiagnostics: {
+          cameraSelection: cameraSelectionDiagnostics(
+            captureConfigRef.current.sources,
+            previewCameraStatusRef.current
+          ),
           automaticSourceFallbacks: automaticSourceFallbacks.current,
           nativePreviewSurfaceStatus: previewSurfaceStatus,
-          runtimeInfo: freshRuntimeInfo ?? undefined
+          runtimeInfo: freshRuntimeInfo ?? undefined,
+          // Plan 214 E3: the camera's state, never its words.
+          virtualCamera: (await import('@/lib/virtual-camera-view')).virtualCameraBundleLine(
+            virtualCamera.status
+          ),
+          // Plan 216 A5: the toasts this session showed, raw text included;
+          // the backend redacts them with the rest of the bundle.
+          recentUserErrors: recentUserErrors()
         }
       }
       const result = await client.request<SupportBundleExportResult>(
@@ -10780,7 +12869,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
+  }, [
+    client,
+    previewSurfaceStatus,
+    reportError,
+    runtimeInfo,
+    supportBundleExportPending,
+    virtualCamera.status
+  ])
   // Plan 174 A-20: a toast whose raw details were withheld offers this export
   // (latest-value hand-off, like the ref mirrors above; idempotent per render).
   registerSupportBundleExport(() => void exportSupportBundle())
@@ -10879,8 +12975,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const streamReady =
     !captureConfig.streamEnabled || areEnabledStreamTargetsStartReady(captureConfig.streaming)
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
+  // Plan 181 (redesign R2): the ring runs by default, so a buffer-only
+  // session is never "a session" to the pages that lock while one runs
+  // (Scene positions, Output quality, orientation, Library, Clean cut, the
+  // updater): those lock for a recording or a livestream only, and a
+  // setting that shapes the ring restarts it instead (below).
   const isSessionActive =
-    isActiveRecordingState(recording.state) || startRequestPending || stopRequestPending
+    sessionOwnsTransport(recording) || startRequestPending || stopRequestPending
+  const transportSessionActive = isSessionActive
+  // Plan 215 D1: the Scene page unlocks a source's position and size only
+  // once the session says a commit reaches its picture.
+  const acceptsLiveSceneEdits = recording.acceptsLiveSceneEdits ?? null
   const mixingSessionActive =
     ['recording', 'streaming'].includes(recording.state) && Boolean(recording.sessionId)
   const systemAudioConfirmed = mixingSessionActive
@@ -10892,26 +12997,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     systemAudioIssueEvent.sessionId === recording.sessionId
       ? systemAudioIssueEvent.issue
       : null
+  // A starting session (the Clips ring at launch, a recording) mixes the
+  // microphone alone until its capture opens; that is not the switch going
+  // Off. The latch outlives renders; the first mix, an issue or a toggle
+  // settles it.
+  const nextJoin = nextSystemAudioJoin(systemAudioJoin, {
+    sessionId: mixingSessionActive ? (recording.sessionId ?? null) : null,
+    requested: captureConfig.audio.systemAudioEnabled,
+    confirmed: systemAudioConfirmed,
+    issue: systemAudioIssue !== null
+  })
+  if (nextJoin !== systemAudioJoin) setSystemAudioJoin(nextJoin)
+  const systemAudioJoining = isSystemAudioJoining(
+    nextJoin,
+    captureConfig.audio.systemAudioEnabled,
+    systemAudioConfirmed
+  )
   // Plan 069 S6: what the shortcut and the remotes act on — the device status
   // and the state the switch shows (the confirmed mix, else the request).
   const systemAudioStatus = deviceList.devices.find(
     (device) => device.kind === 'system-audio'
   )?.status
-  // With an issue the switch stays as the user set it, so a toggle turns it
-  // Off (PR #477 review).
+  // With an issue, or while the session joins, the switch stays as the user
+  // set it, so a toggle turns it Off (PR #477 review).
   const systemAudioShown =
-    (systemAudioIssue ? null : systemAudioConfirmed) ?? captureConfig.audio.systemAudioEnabled
-  // A shortcut or remote request is sent even when it repeats the last one:
-  // the retry after a failed start or a lost update.
-  const setSystemAudioEnabled = (systemAudioEnabled: boolean): void => {
-    if (liveAudioProcessingSyncRef.current)
-      liveAudioProcessingSyncRef.current.systemAudioSent = null
-    retrySystemAudio((count) => count + 1)
-    setCaptureConfig((current) => ({
-      ...current,
-      audio: { ...current.audio, systemAudioEnabled }
-    }))
-  }
+    (systemAudioIssue || systemAudioJoining ? null : systemAudioConfirmed) ??
+    captureConfig.audio.systemAudioEnabled
   // Plan 076: Resume after the echo guard paused System audio, from its
   // toast or a mixer row (lazy chunks), re-sends On like a shortcut does.
   const resumeSystemAudio = useEffectEvent(() => setSystemAudioEnabled(true))
@@ -11049,12 +13160,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // holds. The logic lives in a chunk loaded on the first Go Live, so the
   // startup bundle does not carry it.
   const settleStreamOutputTopology = useCallback(
-    async (streaming: StreamingSettings): Promise<GoLiveOutput.GoLiveSessionOutput> => {
+    async (
+      streaming: StreamingSettings,
+      // A Go Live without the dialog says whether it skips captions (plan
+      // 209 S10); every other caller reads the session's choice.
+      suppressCaptions: boolean = suppressCaptionsForSession
+    ): Promise<GoLiveOutput.GoLiveSessionOutput> => {
       const { settleGoLiveSessionOutput } = await loadGoLiveOutput()
       return settleGoLiveSessionOutput({
         captureConfig,
         streaming,
-        suppressCaptionsForSession,
+        suppressCaptionsForSession: suppressCaptions,
         performanceCheck,
         rejectedSplitKeys: () => rejectedStreamOutputSplitKeysRef.current,
         noteRejectedSplit: (requestKey) => {
@@ -11165,6 +13281,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const params = activeAudioProcessingUpdateParams(
       { state: recording.state, sessionId: recording.sessionId },
       {
+        microphoneNoiseSuppression: captureConfig.audio.microphoneNoiseSuppression ?? 'off',
         microphoneGainDb: captureConfig.audio.microphoneGainDb,
         microphoneMuted: captureConfig.audio.microphoneMuted
       }
@@ -11243,6 +13360,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : undefined
           if (validResult?.applied) {
             latest.lastApplied = {
+              microphoneNoiseSuppression:
+                validResult.microphoneNoiseSuppression ??
+                latest.lastApplied.microphoneNoiseSuppression ??
+                'off',
               microphoneGainDb: validResult.microphoneGainDb,
               microphoneMuted: validResult.microphoneMuted
             }
@@ -11367,7 +13488,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (sync.disabled) {
       if (
         params.microphoneGainDb !== sync.lastApplied.microphoneGainDb ||
-        params.microphoneMuted !== sync.lastApplied.microphoneMuted
+        params.microphoneMuted !== sync.lastApplied.microphoneMuted ||
+        params.microphoneNoiseSuppression !== sync.lastApplied.microphoneNoiseSuppression
       ) {
         const rollback = sync.lastApplied
         setCaptureConfig((current) => ({
@@ -11388,7 +13510,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const systemAudioChanged = Object.keys(systemAudioDelta).length > 0
     const desiredMatchesLastApplied =
       params.microphoneGainDb === sync.lastApplied.microphoneGainDb &&
-      params.microphoneMuted === sync.lastApplied.microphoneMuted
+      params.microphoneMuted === sync.lastApplied.microphoneMuted &&
+      params.microphoneNoiseSuppression === sync.lastApplied.microphoneNoiseSuppression
     if (
       !enqueueDesiredForNewSync &&
       !sync.queue.hasOutstandingWork &&
@@ -11408,6 +13531,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     recording.state,
     captureConfig.audio.microphoneGainDb,
     captureConfig.audio.microphoneMuted,
+    captureConfig.audio.microphoneNoiseSuppression,
     captureConfig.audio.systemAudioEnabled,
     captureConfig.audio.systemAudioGainDb,
     captureConfig.audio.systemAudioEchoGuard,
@@ -11732,6 +13856,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       textSize: captureConfig.captions.textSize,
       position: captureConfig.captions.position
     })
+    // Keep the existing narrow deps; adding captureConfig would re-push on every config edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     client,
     captionLines,
@@ -11858,7 +13984,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const activateScreen = useCallback(
     async (screenId: string): Promise<boolean> => {
       if (!client) {
-        toastOffline()
+        toastOffline(SHOW_TAKEOVER)
         return false
       }
 
@@ -11870,7 +13996,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       } catch (error) {
         const failurePolicy = await loadCommandFailurePolicy()
         if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') {
-          reportError(error, { action: 'show', object: 'the takeover' })
+          reportError(error, SHOW_TAKEOVER)
           return false
         }
         const authoritative = await client
@@ -11882,7 +14008,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (failurePolicy.screenActivateFailureCanReconcile(error, screenId, authoritative)) {
           return true
         }
-        reportError(error, { action: 'show', object: 'the takeover' })
+        reportError(error, SHOW_TAKEOVER)
         return false
       }
     },
@@ -11891,7 +14017,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const clearActiveScreen = useCallback(async (): Promise<boolean> => {
     if (!client) {
-      toastOffline()
+      toastOffline(TAKE_OFF_TAKEOVER)
       return false
     }
 
@@ -11903,7 +14029,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } catch (error) {
       const failurePolicy = await loadCommandFailurePolicy()
       if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') {
-        reportError(error, { action: 'take off', object: 'the takeover' })
+        reportError(error, TAKE_OFF_TAKEOVER)
         return false
       }
       const authoritative = await client
@@ -11915,7 +14041,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (failurePolicy.screenClearFailureCanReconcile(error, authoritative)) {
         return true
       }
-      reportError(error, { action: 'take off', object: 'the takeover' })
+      reportError(error, TAKE_OFF_TAKEOVER)
       return false
     }
   }, [client, commitActiveScreen, reportError])
@@ -12396,7 +14522,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, reportError, streamMetadataDraft, wsStatus])
 
   useEffect(() => {
-    if (runtimeInfo?.disableAutoPreview) {
+    if (firstRunSetupOpen || runtimeInfo?.disableAutoPreview) {
       return
     }
     if (
@@ -12421,6 +14547,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     previewDevicesSignature,
     previewRefreshNonce,
     refreshPreview,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     wsStatus
   ])
@@ -12437,13 +14564,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (disconnected) {
         return disconnected
       }
-      if (isSessionActive) {
+      if (transportSessionActive) {
         return START_BLOCKED_COPY.sessionRunning
       }
       if (!intent.record && !intent.stream) {
         return START_BLOCKED_COPY.noOutput
       }
       const config = captureConfigForIntent(captureConfig, intent)
+      const turnedOff = sceneSourcesTurnedOff(
+        { layout: config.layout, sources: usingVisualSources(config.sources), background: null },
+        deviceList.devices
+      )
+      // Plan 210 D1: a scene made for an app whose window isn't there holds
+      // Screen None until it is. The start says why in S2's words, never
+      // "Screen is set to None".
+      const activeApp = activeSavedSceneId
+        ? sceneLibrary.scenes.find((scene) => scene.id === activeSavedSceneId)?.visual.sources.app
+        : undefined
+      if (turnedOff.screen && activeApp) {
+        const state = savedSceneAppStates[activeSavedSceneId!]
+        return appWindowFailureCopy(
+          activeApp.name,
+          `app-${state && state !== 'ready' ? state : 'not-running'}`
+        )
+      }
+      const sourceOff = sceneSourceOffBlockedReason(turnedOff)
+      if (sourceOff) {
+        return sourceOff
+      }
       const recordingProfileGate = intent.record
         ? videoProfileEntitlementGate({ entitlements, kind: 'recording', video: config.video })
         : { allowed: true as const }
@@ -12456,7 +14604,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!streamingProfileGate.allowed) {
         return streamingProfileGate.reason
       }
-      const compatibility = videoProfileCompatibility(config)
+      const compatibility = videoProfileCompatibility(config, runtimeInfo?.platform)
       if (compatibility.blockingReason) {
         return compatibility.blockingReason
       }
@@ -12499,12 +14647,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     },
     [
+      activeSavedSceneId,
       captureConfig,
       currentStreamOutputTopologyRequestKey,
+      deviceList.devices,
       entitlements,
       health,
-      isSessionActive,
+      transportSessionActive,
       livestreamingEntitlementReason,
+      runtimeInfo?.platform,
+      savedSceneAppStates,
+      sceneLibrary.scenes,
       streamOutputTopologyPreflight,
       wsStatus
     ]
@@ -12720,8 +14873,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : client.request<XPublishResult>('streamTargets.x.publish', {
                 accountId: target.accountId,
                 sourceId,
-                region,
-                isLowLatency: true,
                 sessionId
               })
           const publishedStreamingPromise = publishRequest.then((result) =>
@@ -12731,11 +14882,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               platformStreamId: result.mediaKey,
               status: {
                 state: 'live',
-                message: result.tweetError
-                  ? `X broadcast is live, but the announcement post failed: ${result.tweetError}`
-                  : `X broadcast is live: ${result.shareUrl}`,
-                redactedUrl: result.shareUrl,
-                ...(result.tweetError ? { lastError: result.tweetError } : {})
+                message: `X broadcast is live: ${result.shareUrl}`,
+                redactedUrl: result.shareUrl
               }
             })
           )
@@ -12766,11 +14914,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           xEndedBroadcastResultsRef.current.delete(publishedBroadcastEndKey)
           const publishedStatus: StreamTargetStatus = {
             state: 'live',
-            message: result.tweetError
-              ? `X broadcast is live, but the announcement post failed: ${result.tweetError}`
-              : `X broadcast is live: ${result.shareUrl}`,
-            redactedUrl: result.shareUrl,
-            ...(result.tweetError ? { lastError: result.tweetError } : {})
+            message: `X broadcast is live: ${result.shareUrl}`,
+            redactedUrl: result.shareUrl
           }
           if (sessionId && platformLifecycleOwnerRef.current?.sessionId === sessionId) {
             platformLifecycleOwnerRef.current = {
@@ -13357,6 +15502,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         streamingOverride?: StreamingSettings,
         preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null,
         intent?: SessionStartIntent,
+        suppressCaptions?: boolean,
         rpc?: SessionStartRpc
       ) => Promise<boolean>)
     | null
@@ -13368,11 +15514,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Plan 174 S3.1: what this start asks for; the saved mode only for the
       // smokes' hook, never for a transport button.
       intent: SessionStartIntent = savedModeIntent(captureConfig),
+      // A Go Live without the dialog says whether it skips captions (plan
+      // 209 S10); every other start reads the session's choice.
+      suppressCaptionsOverride?: boolean,
       // Plan 184 C5b: a cloud resume is the same start bound to the live show.
       // Its destinations are the runner's, so no account is checked and no
       // broadcast is activated here.
       rpc: SessionStartRpc = 'session.start'
     ) => {
+      const suppressCaptions = suppressCaptionsOverride ?? suppressCaptionsForSession
       const resumingCloudShow = rpc === 'cloud.show.resume'
       recordLatencyTrackerRef.current.markClick('start', performance.now(), 'session-call')
       const requestSnapshot = {
@@ -13381,7 +15531,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sceneEditMode,
         settings,
         streamingOverride,
-        suppressCaptionsForSession,
+        suppressCaptionsForSession: suppressCaptions,
         intent,
         rpc
       }
@@ -13517,12 +15667,54 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               'The recordings folder you chose isn’t available. Choose it again in Output → Where recordings go.'
             )
           }
+          // Plan 219 S3: a picked window that is not already live may have
+          // been closed and reopened under a new id. One window-list read,
+          // only then; no match leaves the pick alone (never a display or
+          // another window), and the backend names the refusal.
+          if (
+            shouldRefreshWindowListBeforeStart(
+              sessionCaptureConfig.sources,
+              previewScreenStatusRef.current
+            )
+          ) {
+            try {
+              const deviceRead = ++deviceListReadsRef.current.issued
+              const freshDevices = await client.request<DeviceList>('devices.list')
+              const rebound = rebindRememberedWindow(
+                sessionCaptureConfig.sources,
+                freshDevices.devices
+              )
+              if (rebound) {
+                sessionCaptureConfig = { ...sessionCaptureConfig, sources: rebound }
+                const patch = { windowId: rebound.windowId, windowName: rebound.windowName }
+                setCaptureConfig((current) => ({
+                  ...current,
+                  sources: { ...current.sources, ...patch }
+                }))
+                captureConfigRef.current = {
+                  ...captureConfigRef.current,
+                  sources: { ...captureConfigRef.current.sources, ...patch }
+                }
+                if (deviceRead > deviceListReadsRef.current.committed) {
+                  deviceListReadsRef.current.committed = deviceRead
+                  setDeviceList(freshDevices)
+                }
+              }
+            } catch (error) {
+              // The start goes on with the saved id; S2's copy says what
+              // happened to the window if it is gone.
+              console.warn('[session-start] window list read before start failed', error)
+            }
+          }
           const sessionParams = buildStartSessionParams({
             captureConfig: sessionCaptureConfig,
             scene: sceneWithBackground,
             sceneEditMode,
             settings,
-            suppressCaptionsForSession
+            suppressCaptionsForSession: suppressCaptions,
+            // Plan 181 S7: the ring rides every session while the switch is on.
+            replayArmed: replayArmedRef.current,
+            platform: runtimeInfo?.platform
           })
           const authorizedOutput = {
             ...sessionParams.output,
@@ -13541,6 +15733,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               }
           const startAudioSnapshot = nextSessionParams.audio
             ? {
+                microphoneNoiseSuppression:
+                  nextSessionParams.audio.microphoneNoiseSuppression ?? 'off',
                 microphoneGainDb: nextSessionParams.audio.microphoneGainDb,
                 microphoneMuted: nextSessionParams.audio.microphoneMuted,
                 systemAudio: {
@@ -13711,7 +15905,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           reportSessionStartFailure(
             error,
             () => {
-              void runStartSessionRef.current?.(streamingOverride, preparedOutput, intent, rpc)
+              void runStartSessionRef.current?.(
+                streamingOverride,
+                preparedOutput,
+                intent,
+                suppressCaptionsOverride,
+                rpc
+              )
             },
             resumingCloudShow ? 'resume' : streamingOverride ? 'live' : 'record'
           )
@@ -13753,6 +15953,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshSessions,
       reportError,
       reportSessionStartFailure,
+      runtimeInfo?.platform,
       sceneEditMode,
       sceneWithBackground,
       settings,
@@ -14114,6 +16315,83 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const openGoLiveConfirmationRef = useRef<((intent: SessionStartIntent) => Promise<void>) | null>(
     null
   )
+  // The Go Live dialog's preflight (plan 174 B-7), shared with an agent's
+  // `go_live` (plan 209 S10, D13): the previous livestream settled, the start
+  // gate, the output check, the draft saved and validated, the destinations
+  // checked and the captions' readiness asked. The dialog opens on the
+  // answer; a Go Live without the dialog decides on the same answer.
+  // `streaming` is what this attempt sends and `draft` the details it goes
+  // out with. Throws what the dialog reports as a refused Go Live.
+  const runGoLivePreflight = useCallback(
+    async (
+      intent: SessionStartIntent,
+      streaming: StreamingSettings,
+      draft: StreamMetadataDraft | null
+    ): Promise<GoLivePreflightRun> => {
+      if (!client) return { kind: 'offline' }
+      if (!isSessionActive && !(await settlePreviousPlatformLifecycle())) {
+        return { kind: 'settling' }
+      }
+      const blockedReason = startBlockedReasonFor(intent)
+      if (blockedReason) return { kind: 'refused', reason: blockedReason }
+      setLastError(null)
+      setGoLivePartialSetup(null)
+      setSuppressCaptionsForSession(false)
+      // Settle the output check before anything is prepared on a platform.
+      const topology = await settleStreamOutputTopology(streaming)
+      if (topology.reason) {
+        throw new Error(topology.reason)
+      }
+      let savedDraft = draft
+      if (draft) {
+        const saved = await client.request<StreamMetadataDraft>(
+          'streamTargets.metadata.update',
+          draft
+        )
+        savedDraft = saved
+        setStreamMetadataDraft(saved)
+        const validation = await client.request<StreamMetadataValidation>(
+          'streamTargets.metadata.validate',
+          saved
+        )
+        setStreamMetadataValidation(validation)
+      }
+      let capabilities: AiCapabilities | null = null
+      const [preflight] = await Promise.all([
+        client.request<GoLivePreflight>('streamTargets.confirmation.validate', {
+          scheduledEventIds: Object.fromEntries(
+            streaming.targets
+              .filter((t) => t.enabled && t.scheduledEventId)
+              .map((t) => [t.id, t.scheduledEventId])
+          ),
+          streaming
+        }),
+        captureConfig.captions.enabled
+          ? client
+              .request<AiCapabilities>('ai.capabilities.get')
+              .then((next) => {
+                capabilities = next
+                setAiCapabilities(next)
+                setAiReadinessError(null)
+              })
+              .catch((error: unknown) => {
+                setAiCapabilities(null)
+                setAiReadinessError(error instanceof Error ? error.message : String(error))
+              })
+          : Promise.resolve()
+      ])
+      setGoLivePreflight(preflight)
+      return { kind: 'ready', preflight, draft: savedDraft, capabilities }
+    },
+    [
+      captureConfig.captions.enabled,
+      client,
+      isSessionActive,
+      settlePreviousPlatformLifecycle,
+      settleStreamOutputTopology,
+      startBlockedReasonFor
+    ]
+  )
   const openGoLiveConfirmation = useCallback(
     (intent: SessionStartIntent): Promise<void> => {
       // One preflight at a time (B-7): a second click joins the first.
@@ -14128,59 +16406,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         try {
           // "Checking…" from the first click (B-7), before the first await.
           setGoLiveConfirmationPending(true)
-          if (!isSessionActive && !(await settlePreviousPlatformLifecycle())) {
-            return
-          }
-          const blockedReason = startBlockedReasonFor(intent)
-          if (blockedReason) {
+          const run = await runGoLivePreflight(intent, captureConfig.streaming, streamMetadataDraft)
+          if (run.kind === 'refused') {
             if (!isSessionActive) {
-              refuseStart(blockedReason, intent)
+              refuseStart(run.reason, intent)
             }
             return
           }
-          setLastError(null)
-          setGoLivePartialSetup(null)
-          setSuppressCaptionsForSession(false)
-          // Settle the output check before anything is prepared on a platform.
-          const topology = await settleStreamOutputTopology(captureConfig.streaming)
-          if (topology.reason) {
-            throw new Error(topology.reason)
+          if (run.kind !== 'ready') {
+            return
           }
-          if (streamMetadataDraft) {
-            const saved = await client.request<StreamMetadataDraft>(
-              'streamTargets.metadata.update',
-              streamMetadataDraft
-            )
-            setStreamMetadataDraft(saved)
-            const validation = await client.request<StreamMetadataValidation>(
-              'streamTargets.metadata.validate',
-              saved
-            )
-            setStreamMetadataValidation(validation)
-          }
-          const [preflight] = await Promise.all([
-            client.request<GoLivePreflight>('streamTargets.confirmation.validate', {
-              scheduledEventIds: Object.fromEntries(
-                captureConfig.streaming.targets
-                  .filter((t) => t.enabled && t.scheduledEventId)
-                  .map((t) => [t.id, t.scheduledEventId])
-              ),
-              streaming: captureConfig.streaming
-            }),
-            captureConfig.captions.enabled
-              ? client
-                  .request<AiCapabilities>('ai.capabilities.get')
-                  .then((capabilities) => {
-                    setAiCapabilities(capabilities)
-                    setAiReadinessError(null)
-                  })
-                  .catch((error: unknown) => {
-                    setAiCapabilities(null)
-                    setAiReadinessError(error instanceof Error ? error.message : String(error))
-                  })
-              : Promise.resolve()
-          ])
-          setGoLivePreflight(preflight)
+          dialogOpenRef.current = true
           setGoLiveConfirmationOpen(true)
         } catch (error) {
           // A preflight that fails is a refused Go Live (B-7): the same
@@ -14207,15 +16443,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return preflightRun
     },
     [
-      captureConfig.captions.enabled,
       captureConfig.streaming,
       client,
       isSessionActive,
       refuseStart,
       reportSessionStartFailure,
-      settlePreviousPlatformLifecycle,
-      settleStreamOutputTopology,
-      startBlockedReasonFor,
+      runGoLivePreflight,
       streamMetadataDraft
     ]
   )
@@ -14303,7 +16536,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refuseStart(blockedReason, intent)
       return false
     }
-    return runStartSession(captureConfig.streaming, undefined, intent, 'cloud.show.resume')
+    return runStartSession(
+      captureConfig.streaming,
+      undefined,
+      intent,
+      undefined,
+      'cloud.show.resume'
+    )
   }, [
     captureConfig.recordEnabled,
     captureConfig.streaming,
@@ -14358,190 +16597,239 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   ])
 
   const confirmGoLiveRef = useRef<(() => Promise<void>) | null>(null)
-  const confirmGoLive = useCallback(() => {
-    const pendingConfirmation = confirmGoLiveInFlightPromiseRef.current
-    if (pendingConfirmation) {
-      return pendingConfirmation
-    }
-    if (!client || goLiveConfirmationPending || startRequestPending) {
-      return Promise.resolve()
-    }
-    if (goLiveCaptionsReadiness.blocksStart) {
-      toast.warning("Live captions aren't ready", {
-        description: goLiveCaptionsReadiness.description
-      })
-      return Promise.resolve()
-    }
+  // The Go Live dialog's confirm (plan 174 S3.4), shared with an agent's
+  // `go_live` (plan 209 S10, D13). The dialog calls it bare; a Go Live
+  // without the dialog passes `headless` with what it decided (the
+  // destinations left out, the draft, the preflight, captions), and reads
+  // the outcome instead of the dialog's toasts, upsell and partial card.
+  const runGoLiveConfirmation = useCallback(
+    (headless?: HeadlessGoLiveConfirmation): Promise<GoLiveConfirmOutcome> => {
+      const pendingConfirmation = confirmGoLiveInFlightPromiseRef.current
+      if (pendingConfirmation) {
+        return pendingConfirmation
+      }
+      if (!client || goLiveConfirmationPending || startRequestPending) {
+        return Promise.resolve({ kind: 'ignored' })
+      }
+      const captionsReadiness = headless?.captionsReadiness ?? goLiveCaptionsReadiness
+      if (captionsReadiness.blocksStart) {
+        if (!headless) {
+          toast.warning("Live captions aren't ready", {
+            description: captionsReadiness.description
+          })
+        }
+        return Promise.resolve({ kind: 'captions', description: captionsReadiness.description })
+      }
+      const draft = headless ? headless.draft : streamMetadataDraft
+      const previousPreflight = headless ? headless.preflight : goLivePreflight
 
-    const confirmationPromise = (async (): Promise<void> => {
-      // What this attempt sends: the saved destinations minus the ones left
-      // out of this livestream (plan 174 S3.4, B-8). Never written back.
-      const excludedTargetIds = goLiveExcludedTargetIdsRef.current
-      const goLiveStreaming = streamingWithoutTargets(captureConfig.streaming, excludedTargetIds)
+      const confirmationPromise = (async (): Promise<GoLiveConfirmOutcome> => {
+        // What this attempt sends: the saved destinations minus the ones left
+        // out of this livestream (plan 174 S3.4, B-8). Never written back.
+        const excludedTargetIds = headless
+          ? headless.excludedTargetIds
+          : goLiveExcludedTargetIdsRef.current
+        const goLiveStreaming = streamingWithoutTargets(captureConfig.streaming, excludedTargetIds)
+        try {
+          setLastError(null)
+          setGoLiveConfirmationPending(true)
+          setGoLivePhase({ kind: 'checking' })
+          if (draft) {
+            const saved = await client.request<StreamMetadataDraft>(
+              'streamTargets.metadata.update',
+              draft
+            )
+            setStreamMetadataDraft(saved)
+            const validation = await client.request<StreamMetadataValidation>(
+              'streamTargets.metadata.validate',
+              saved
+            )
+            setStreamMetadataValidation(validation)
+          }
+          const preflight = await client.request<GoLivePreflight>(
+            'streamTargets.confirmation.validate',
+            {
+              scheduledEventIds: Object.fromEntries(
+                goLiveStreaming.targets
+                  .filter((t) => t.enabled && t.scheduledEventId)
+                  .map((t) => [t.id, t.scheduledEventId])
+              ),
+              streaming: goLiveStreaming
+            }
+          )
+          const changedScheduledEvent = preflight.destinations.some(
+            (destination) =>
+              destination.scheduled &&
+              previousPreflight?.destinations.find(
+                (previous) => previous.targetId === destination.targetId
+              )?.scheduled?.fingerprint !== destination.scheduled.fingerprint
+          )
+          if (changedScheduledEvent) {
+            setGoLivePreflight(preflight)
+            if (!headless) {
+              toast.warning('The scheduled event changed', {
+                description: 'Review its updated visibility and details, then confirm again.'
+              })
+            }
+            return { kind: 'scheduled-changed', preflight }
+          }
+          setGoLivePreflight(preflight)
+          const preflightDecision = decideGoLivePreflight(preflight)
+          if (preflightDecision.kind === 'blocked') {
+            const premiumIssue = premiumRequiredIssueMessage(preflight)
+            // The dialog stays open on the fresh preflight, which says what to
+            // fix; a toast repeating it was noise (plan 174 S3.4, B-18).
+            if (premiumIssue && !headless) {
+              void loadSessionRuntimeRecovery().then((runtime) =>
+                runtime.showPremiumUpgrade(
+                  'This Go Live setup is part of Videorc Premium',
+                  premiumIssue
+                )
+              )
+            }
+            return { kind: 'blocked', preflight }
+          }
+          // Settled before anything is created on a platform, so a refused
+          // start leaves no broadcast behind and a prepared one advertises the
+          // profile this session will send.
+          const sessionOutput = await settleStreamOutputTopology(
+            goLiveStreaming,
+            headless?.suppressCaptions
+          )
+          if (sessionOutput.reason) {
+            throw new Error(sessionOutput.reason)
+          }
+          preparedGoLiveOutputRef.current = sessionOutput
+          const setup = await prepareOauthTargetsForGoLive(
+            preflight,
+            sessionOutput,
+            excludedTargetIds
+          )
+          const setupDecision = decidePreparedGoLiveSetup(setup)
+          if (setupDecision.kind === 'no-ready-destinations') {
+            throw new Error('No livestream destinations are ready after platform setup.')
+          }
+          if (setupDecision.kind === 'partial') {
+            // The dialog lists what failed and offers the ready ones (B-18).
+            if (!headless) setGoLivePartialSetup(setupDecision.setup)
+            return { kind: 'partial', setup: setupDecision.setup }
+          }
+          // Plan 209 review fix 1: Stop agents during an agent's platform
+          // setup ends it here; the caller cleans up what was prepared.
+          if (headless?.cancelled?.()) {
+            return { kind: 'cancelled', streaming: setupDecision.streaming }
+          }
+          setGoLivePhase({ kind: 'starting' })
+          setGoLiveConfirmationOpen(false)
+          const started = await runStartSession(
+            setupDecision.streaming,
+            sessionOutput,
+            livestreamIntent(captureConfigRef.current.recordEnabled),
+            headless?.suppressCaptions
+          )
+          return { kind: 'started', started, streaming: setupDecision.streaming }
+        } catch (error) {
+          // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
+          // setup) is just as silent as a refused start: same persistent surface.
+          // The dialog stays open, so Retry re-runs the confirmation. A Go Live
+          // without the dialog answers its caller instead.
+          if (!headless) {
+            reportSessionStartFailure(
+              error,
+              () => {
+                void confirmGoLiveRef.current?.()
+              },
+              'live'
+            )
+          }
+          return { kind: 'failed', error }
+        } finally {
+          setGoLiveConfirmationPending(false)
+          setGoLivePhase(null)
+        }
+      })()
+      confirmGoLiveInFlightPromiseRef.current = confirmationPromise
+      const clearConfirmationPromise = () => {
+        if (confirmGoLiveInFlightPromiseRef.current === confirmationPromise) {
+          confirmGoLiveInFlightPromiseRef.current = null
+        }
+      }
+      void confirmationPromise.then(clearConfirmationPromise, clearConfirmationPromise)
+      return confirmationPromise
+    },
+    [
+      captureConfig.streaming,
+      client,
+      goLiveConfirmationPending,
+      goLivePreflight,
+      goLiveCaptionsReadiness,
+      prepareOauthTargetsForGoLive,
+      reportSessionStartFailure,
+      runStartSession,
+      settleStreamOutputTopology,
+      startRequestPending,
+      streamMetadataDraft
+    ]
+  )
+  const confirmGoLive = useCallback(async (): Promise<void> => {
+    await runGoLiveConfirmation()
+  }, [runGoLiveConfirmation])
+  confirmGoLiveRef.current = confirmGoLive
+
+  // "Go live on {ready}" (B-18). A Go Live without the dialog passes the
+  // setup its confirm returned (plan 209 S10, `allowPartial`); the dialog
+  // reads the one it shows. Resolves whether the livestream started.
+  const startOnReadyDestinations = useCallback(
+    async (headless?: {
+      setup: GoLivePartialSetup
+      suppressCaptions: boolean
+    }): Promise<boolean> => {
+      // A Go Live without the dialog decided on captions before its confirm.
+      if (!headless && goLiveCaptionsReadiness.blocksStart) {
+        toast.warning("Live captions aren't ready", {
+          description: goLiveCaptionsReadiness.description
+        })
+        return false
+      }
+      const decision = decideContinueGoLiveWithReadyDestinations({
+        goLiveConfirmationPending,
+        startRequestPending,
+        partialSetup: headless?.setup ?? goLivePartialSetup
+      })
+      if (decision.kind === 'ignore') {
+        return false
+      }
+
       try {
         setLastError(null)
         setGoLiveConfirmationPending(true)
-        setGoLivePhase({ kind: 'checking' })
-        if (streamMetadataDraft) {
-          const saved = await client.request<StreamMetadataDraft>(
-            'streamTargets.metadata.update',
-            streamMetadataDraft
-          )
-          setStreamMetadataDraft(saved)
-          const validation = await client.request<StreamMetadataValidation>(
-            'streamTargets.metadata.validate',
-            saved
-          )
-          setStreamMetadataValidation(validation)
-        }
-        const preflight = await client.request<GoLivePreflight>(
-          'streamTargets.confirmation.validate',
-          {
-            scheduledEventIds: Object.fromEntries(
-              goLiveStreaming.targets
-                .filter((t) => t.enabled && t.scheduledEventId)
-                .map((t) => [t.id, t.scheduledEventId])
-            ),
-            streaming: goLiveStreaming
-          }
-        )
-        const changedScheduledEvent = preflight.destinations.some(
-          (destination) =>
-            destination.scheduled &&
-            goLivePreflight?.destinations.find(
-              (previous) => previous.targetId === destination.targetId
-            )?.scheduled?.fingerprint !== destination.scheduled.fingerprint
-        )
-        if (changedScheduledEvent) {
-          setGoLivePreflight(preflight)
-          toast.warning('The scheduled event changed', {
-            description: 'Review its updated visibility and details, then confirm again.'
-          })
-          return
-        }
-        setGoLivePreflight(preflight)
-        const preflightDecision = decideGoLivePreflight(preflight)
-        if (preflightDecision.kind === 'blocked') {
-          const premiumIssue = premiumRequiredIssueMessage(preflight)
-          // The dialog stays open on the fresh preflight, which says what to
-          // fix; a toast repeating it was noise (plan 174 S3.4, B-18).
-          if (premiumIssue) {
-            void loadSessionRuntimeRecovery().then((runtime) =>
-              runtime.showPremiumUpgrade(
-                'This Go Live setup is part of Videorc Premium',
-                premiumIssue
-              )
-            )
-          }
-          return
-        }
-        // Settled before anything is created on a platform, so a refused
-        // start leaves no broadcast behind and a prepared one advertises the
-        // profile this session will send.
-        const sessionOutput = await settleStreamOutputTopology(goLiveStreaming)
-        if (sessionOutput.reason) {
-          throw new Error(sessionOutput.reason)
-        }
-        preparedGoLiveOutputRef.current = sessionOutput
-        const setup = await prepareOauthTargetsForGoLive(
-          preflight,
-          sessionOutput,
-          excludedTargetIds
-        )
-        const setupDecision = decidePreparedGoLiveSetup(setup)
-        if (setupDecision.kind === 'no-ready-destinations') {
-          throw new Error('No livestream destinations are ready after platform setup.')
-        }
-        if (setupDecision.kind === 'partial') {
-          // The dialog lists what failed and offers the ready ones (B-18).
-          setGoLivePartialSetup(setupDecision.setup)
-          return
-        }
-        setGoLivePhase({ kind: 'starting' })
+        setGoLivePartialSetup(null)
         setGoLiveConfirmationOpen(false)
-        await runStartSession(
-          setupDecision.streaming,
-          sessionOutput,
-          livestreamIntent(captureConfigRef.current.recordEnabled)
+        return await runStartSession(
+          decision.streaming,
+          preparedGoLiveOutputRef.current,
+          livestreamIntent(captureConfigRef.current.recordEnabled),
+          headless?.suppressCaptions
         )
       } catch (error) {
-        // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
-        // setup) is just as silent as a refused start: same persistent surface.
-        // The dialog stays open, so Retry re-runs the confirmation.
-        reportSessionStartFailure(
-          error,
-          () => {
-            void confirmGoLiveRef.current?.()
-          },
-          'live'
-        )
+        reportError(error)
+        return false
       } finally {
         setGoLiveConfirmationPending(false)
-        setGoLivePhase(null)
       }
-    })()
-    confirmGoLiveInFlightPromiseRef.current = confirmationPromise
-    const clearConfirmationPromise = () => {
-      if (confirmGoLiveInFlightPromiseRef.current === confirmationPromise) {
-        confirmGoLiveInFlightPromiseRef.current = null
-      }
-    }
-    void confirmationPromise.then(clearConfirmationPromise, clearConfirmationPromise)
-    return confirmationPromise
-  }, [
-    captureConfig.streaming,
-    client,
-    goLiveConfirmationPending,
-    goLivePreflight,
-    goLiveCaptionsReadiness,
-    prepareOauthTargetsForGoLive,
-    reportSessionStartFailure,
-    runStartSession,
-    settleStreamOutputTopology,
-    startRequestPending,
-    streamMetadataDraft
-  ])
-  confirmGoLiveRef.current = confirmGoLive
-
-  const continueGoLiveWithReadyDestinations = useCallback(async () => {
-    if (goLiveCaptionsReadiness.blocksStart) {
-      toast.warning("Live captions aren't ready", {
-        description: goLiveCaptionsReadiness.description
-      })
-      return
-    }
-    const decision = decideContinueGoLiveWithReadyDestinations({
+    },
+    [
       goLiveConfirmationPending,
-      startRequestPending,
-      partialSetup: goLivePartialSetup
-    })
-    if (decision.kind === 'ignore') {
-      return
-    }
-
-    try {
-      setLastError(null)
-      setGoLiveConfirmationPending(true)
-      setGoLivePartialSetup(null)
-      setGoLiveConfirmationOpen(false)
-      await runStartSession(
-        decision.streaming,
-        preparedGoLiveOutputRef.current,
-        livestreamIntent(captureConfigRef.current.recordEnabled)
-      )
-    } catch (error) {
-      reportError(error)
-    } finally {
-      setGoLiveConfirmationPending(false)
-    }
-  }, [
-    goLiveConfirmationPending,
-    goLiveCaptionsReadiness,
-    goLivePartialSetup,
-    reportError,
-    runStartSession,
-    startRequestPending
-  ])
+      goLiveCaptionsReadiness,
+      goLivePartialSetup,
+      reportError,
+      runStartSession,
+      startRequestPending
+    ]
+  )
+  const continueGoLiveWithReadyDestinations = useCallback(async (): Promise<void> => {
+    await startOnReadyDestinations()
+  }, [startOnReadyDestinations])
 
   const stopSession = useCallback(() => {
     const pendingStop = stopSessionInFlightPromiseRef.current
@@ -14820,6 +17108,53 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [deviceList.devices, runtimeInfo?.windowsLiveAudioSmokeMode, startSession, stopSession])
 
+  useEffect(() => {
+    type WindowsD3d11PreviewSmokeWindow = Window & {
+      __videorcWindowsD3d11PreviewHarness?: (
+        request: WindowsD3d11PreviewSmokeRequest
+      ) => Promise<WindowsD3d11PreviewSmokeState>
+    }
+    const smokeWindow = window as WindowsD3d11PreviewSmokeWindow
+    if (!runtimeInfo?.windowsD3d11PreviewSmokeMode) {
+      delete smokeWindow.__videorcWindowsD3d11PreviewHarness
+      return
+    }
+
+    const harness = async (
+      request: WindowsD3d11PreviewSmokeRequest
+    ): Promise<WindowsD3d11PreviewSmokeState> => {
+      // Smoke-only code: loaded on first use so it never ships in the eager bundle.
+      const smoke = await import('@/lib/windows-d3d11-preview-smoke-harness')
+      if (request.action === 'configure') {
+        const next = smoke.configureWindowsD3d11PreviewSmokeCapture(
+          captureConfigRef.current,
+          deviceList.devices,
+          request
+        )
+        // The default camera scene refused every start before this; those
+        // warnings are not part of the screen-only baseline.
+        lastErrorRef.current = null
+        setLastError(null)
+        captureConfigRef.current = next
+        setCaptureConfig(next)
+        await new Promise<void>((resolveFrame) =>
+          window.requestAnimationFrame(() => resolveFrame())
+        )
+      }
+      return smoke.windowsD3d11PreviewSmokeState({
+        recording: recordingRef.current,
+        lastError: lastErrorRef.current,
+        captureConfig: captureConfigRef.current
+      })
+    }
+    smokeWindow.__videorcWindowsD3d11PreviewHarness = harness
+    return () => {
+      if (smokeWindow.__videorcWindowsD3d11PreviewHarness === harness) {
+        delete smokeWindow.__videorcWindowsD3d11PreviewHarness
+      }
+    }
+  }, [deviceList.devices, runtimeInfo?.windowsD3d11PreviewSmokeMode])
+
   const renameSession = useCallback(
     async (sessionId: string, title: string): Promise<void> => {
       if (!client) {
@@ -14838,7 +17173,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // at the original path can therefore never cross the backend-check/Electron-
   // use boundary and be trashed by mistake.
   const deleteSessions = useCallback(
-    async (targets: SessionSummary[]): Promise<void> => {
+    async (targets: readonly Pick<SessionSummary, 'id'>[]): Promise<void> => {
       if (!client) {
         throw offlineError()
       }
@@ -14962,25 +17297,418 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   remuxSessionRef.current = remuxSession
 
-  const markClip = useCallback(async (): Promise<ClipMarkedEvent | null> => {
-    if (!client) {
-      toastOffline({ action: 'mark', object: 'the clip' })
-      return null
+  // The one clip action (plan 181, the owner's redesign R4): the Stream
+  // Manager's Clip, its key, ⌘K, a deck key, /clip and the spoken "clip
+  // that" all land here. The backend saves the last seconds whenever the
+  // ring holds frames and keeps a mark while a recording runs; with neither,
+  // the toast says which switch to turn on.
+  // Plan 199: `seconds` is 30 or 60; with none the request carries no
+  // params, exactly as before, and saves 30 s.
+  const markClip = useCallback(
+    async (seconds?: ClipLength): Promise<ClipMarkedEvent | null> => {
+      if (!client) {
+        toastOffline({ action: 'save', object: 'the clip' })
+        return null
+      }
+      const ring = replayStateRef.current
+      if (ring.state !== 'on' && !isActiveRecordingState(recordingRef.current.state)) {
+        void import('@/lib/replay-buffer').then((replay) =>
+          replay.showNothingToClip({
+            state: ring.state,
+            enabled: captureConfigRef.current.replayBuffer.enabled,
+            blockedReason: replayBlockedReasonRef.current
+          })
+        )
+        return null
+      }
+      try {
+        return await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
+      } catch (error) {
+        reportError(error, { action: 'save', object: 'the clip' })
+        return null
+      }
+    },
+    [client, reportError]
+  )
+
+  // ── Replay buffer (plan 181) ────────────────────────────────────────
+  // The backend owns the ring and hands over on Record/Go Live; the renderer
+  // owns the switch and keeps the two in step with one pure decision
+  // (lib/replay-buffer-reconcile) after every status event.
+  const applyReplayState = useCallback((next: ReplayStateEvent) => {
+    replayStateRef.current = next
+    setReplayState(next)
+  }, [])
+
+  const scheduleReplayReconcile = useCallback((delayMs = 150): void => {
+    if (replayReconcileTimerRef.current) clearTimeout(replayReconcileTimerRef.current)
+    replayReconcileTimerRef.current = setTimeout(() => {
+      replayReconcileTimerRef.current = null
+      reconcileReplayBufferRef.current()
+    }, delayMs)
+  }, [])
+  scheduleReplayReconcileRef.current = scheduleReplayReconcile
+
+  // Plan 203 S2: a buffer-only session opens the scene's devices like a
+  // recording does; on a never-asked Mac that was a cold OS prompt at launch.
+  // First-run setup holds the preview back, so a start would find no frames
+  // and say Clips couldn't start over setup: the ring waits for it too.
+  // Plan 207 S2: a layout that shows a screen nobody has chosen (a fresh
+  // profile without Screen Recording) waits the same way; the Clips row says
+  // what Sources says. A chosen screen without frames still fails as today.
+  // On Linux the portal placeholder is not a choice: the ring waits for this
+  // run's share to be granted, and never opens the share dialog itself.
+  // Closing setup starts the preview half a second later: the ring waits
+  // until the screen preview names its source (REPLAY_WAITS_FOR_PREVIEW).
+  const replayAutoPreviewStarts =
+    nativePreviewSurfaceEnabled &&
+    !runtimeInfo?.previewSmokeMode &&
+    !runtimeInfo?.disableAutoPreview &&
+    !runtimeInfo?.disableAutoSourcePreview
+  const replayGrantWait =
+    firstRunSetupOpen ||
+    replayStartWaitsForGrant({
+      mediaAccess,
+      sources: captureConfig.sources,
+      layoutPreset: captureConfig.layout.layoutPreset
+    }) ||
+    replayStartWaitsForScreen({
+      sources: captureConfig.sources,
+      layout: captureConfig.layout,
+      portalShareGrantedSourceId,
+      previewScreen: previewScreenStatus,
+      previewStarts: replayAutoPreviewStarts
+    }) ||
+    // The previews the Studio opens itself (refreshPreview) must have a
+    // frame first: a start before them is refused and, through the command
+    // lane's fence, holds them back for its two-second wait. The backend
+    // refuses the camera case early; the screen is the renderer's to wait for.
+    replayStartWaitsForPreview({
+      autoPreview: replayAutoPreviewStarts,
+      sources: captureConfig.sources,
+      layoutPreset: captureConfig.layout.layoutPreset,
+      previewCamera: previewCameraStatus,
+      previewScreen: previewScreenStatus
+    })
+  const startReplayBuffer = useCallback(async (): Promise<void> => {
+    if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
+    if (recordBlockedReason || replayGrantWait) {
+      // Not yet: a source or a permission is missing. The switch stays on
+      // and the ring starts once the reason clears (the effect below), so a
+      // launch before Sources settle never turns clips off.
+      return
     }
-    if (!isActiveRecordingState(recordingRef.current.state)) {
-      toast.info('Nothing to mark yet', {
-        id: 'clip-marked',
-        description: 'Start recording or go live, then mark the moments you want clipped.'
-      })
-      return null
-    }
+    replayStartInFlightRef.current = true
+    replaySourcesMovedDuringStartRef.current = null
+    let started = false
     try {
-      return await client.request<ClipMarkedEvent>('clip.mark')
+      const replay = await import('@/lib/replay-buffer')
+      const status = await replay.startBufferOnlySession({
+        client,
+        captureConfig: captureConfigRef.current,
+        scene: sceneWithBackground,
+        sceneEditMode,
+        settings: settingsRef.current
+      })
+      replayFailedStartsRef.current = 0
+      replayBlockedReasonRef.current = null
+      setReplayBlockedReasonState(null)
+      applyRecordingStatus(status)
+      started = true
     } catch (error) {
-      reportError(error, { action: 'mark', object: 'the clip' })
-      return null
+      const message = error instanceof Error ? error.message : String(error)
+      if ((error as { code?: unknown } | null)?.code === REPLAY_SOFTWARE_ENCODER_REFUSAL) {
+        // The default start on a software encoder path (the guard): no
+        // retry, no toast; the Output page shows the switch off and why.
+        replayArmedRef.current = false
+        setReplayArmedState(false)
+        replayBlockedReasonRef.current = message
+        setReplayBlockedReasonState(message)
+        return
+      }
+      if ((error as { code?: unknown } | null)?.code === REPLAY_SOURCES_NOT_READY) {
+        // Not a failure: at launch the ring is asked for before the camera
+        // preview starts. No strike and no toast; the camera's live edge
+        // starts it (below). A camera that went live meanwhile retries now.
+        const camera = previewCameraStatusRef.current
+        if (camera.state === 'live') {
+          scheduleReplayReconcile()
+          return
+        }
+        if (
+          camera.state === 'starting' ||
+          !camera.cameraId ||
+          camera.cameraId !== captureConfigRef.current.sources.cameraId
+        ) {
+          replayWaitingForCameraRef.current = true
+          return
+        }
+        // A camera that reported failed, missing or denied brings no live
+        // edge: the start counts as failed, and says so like any other.
+      }
+      replayFailedStartsRef.current += 1
+      console.warn('[replay-buffer] start failed', error)
+      const { REPLAY_START_RETRY_LIMIT, replayStartRetryDelayMs } =
+        await import('@/lib/replay-buffer-reconcile')
+      if (replayFailedStartsRef.current >= REPLAY_START_RETRY_LIMIT) {
+        // Three failures in a row: stop trying for now (the switch stays
+        // on; a source change or the next session's end tries again) and
+        // say so once per launch.
+        if (!replayGaveUpToastedRef.current) {
+          replayGaveUpToastedRef.current = true
+          void import('@/lib/replay-buffer').then((replay) =>
+            replay.showClipsCouldNotStart(message)
+          )
+        }
+      } else {
+        scheduleReplayReconcile(replayStartRetryDelayMs(replayFailedStartsRef.current))
+      }
+    } finally {
+      replayStartInFlightRef.current = false
+      const moved = replaySourcesMovedDuringStartRef.current
+      replaySourcesMovedDuringStartRef.current = null
+      if (started && moved !== null) restartReplayForSourcesRef.current(moved === 'visual')
     }
-  }, [client, reportError])
+  }, [
+    applyRecordingStatus,
+    client,
+    recordBlockedReason,
+    replayGrantWait,
+    sceneEditMode,
+    sceneWithBackground,
+    scheduleReplayReconcile
+  ])
+
+  const stopReplayBuffer = useCallback(async (): Promise<void> => {
+    if (!client || !sessionIsReplayOnly(recordingRef.current)) return
+    replayStartInFlightRef.current = true
+    try {
+      const status = await client.requestTyped('session.stop', {})
+      applyRecordingStatus(status)
+    } catch (error) {
+      reportError(error, { action: 'turn off', object: 'clips' })
+    } finally {
+      replayStartInFlightRef.current = false
+    }
+  }, [applyRecordingStatus, client, reportError])
+  stopReplayBufferRef.current = stopReplayBuffer
+
+  // The decision is a lazy chunk (the eager provider keeps the refs and the
+  // events); every input is a ref, read after the import resolves.
+  const reconcileReplayBuffer = useCallback(() => {
+    void import('@/lib/replay-buffer-reconcile').then(({ replayBufferReconcileAction }) => {
+      const action = replayBufferReconcileAction({
+        armed: replayArmedRef.current,
+        replayState: replayStateRef.current.state,
+        replayOnlyBuffer: replayStateRef.current.replayOnly === true,
+        recordingState: recordingRef.current.state,
+        recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
+        startPending:
+          sessionStartInFlightRef.current !== null || sessionStartLifecycleActiveRef.current,
+        stopPending: stopSessionInFlightPromiseRef.current !== null,
+        replayStartInFlight:
+          replayStartInFlightRef.current ||
+          replayReconcileHoldRef.current ||
+          replaySceneReloadsRef.current > 0 ||
+          performanceCheckHoldRef.current,
+        failedStarts: replayFailedStartsRef.current,
+        waitingForCamera: replayWaitingForCameraRef.current
+      })
+      if (action === 'start') void startReplayBuffer()
+      else if (action === 'stop') void stopReplayBuffer()
+      // 'give-up': three failed starts in a row; nothing until a source
+      // change or a session's end resets the count (below).
+    })
+  }, [startReplayBuffer, stopReplayBuffer])
+  const reconcileReplayBufferRef = useRef(reconcileReplayBuffer)
+  reconcileReplayBufferRef.current = reconcileReplayBuffer
+  // The ring waits for Sources (a blocked start keeps the switch on): once
+  // the record block clears, it tries again from a clean count.
+  useEffect(() => {
+    replayFailedStartsRef.current = 0
+    replayWaitingForCameraRef.current = false
+    rearmReplayAfterErrorRef.current()
+    scheduleReplayReconcile()
+  }, [recordBlockedReason, replayGrantWait, scheduleReplayReconcile])
+  // A source change while only the buffer-only session runs is an idle
+  // change: stop the ring (it restarts empty) and re-arm with the new
+  // sources, including the microphone Linux cannot swap mid-session.
+  const replayVisualSources = [
+    captureConfig.sources.screenId,
+    captureConfig.sources.windowId,
+    captureConfig.sources.cameraId,
+    captureConfig.sources.cameraOff === true ? 'camera-off' : '',
+    captureConfig.sources.captureOff === true ? 'capture-off' : ''
+  ].join('|')
+  const replaySources = [
+    replayVisualSources,
+    captureConfig.sources.microphoneId,
+    captureConfig.sources.microphoneOff === true ? 'microphone-off' : ''
+  ].join('|')
+  const replaySourcesRef = useRef(replaySources)
+  const replayVisualSourcesRef = useRef(replayVisualSources)
+  const reloadSceneFromCaptureConfigRef = useRef(reloadSceneFromCaptureConfig)
+  reloadSceneFromCaptureConfigRef.current = reloadSceneFromCaptureConfig
+  // The ring held the session, so the idle scene reload skipped a screen or
+  // camera change, and the re-armed ring (150 ms) would overtake that reload
+  // (250 ms) and start on the old scene: the look never confirms and Save
+  // stays off. Stop the ring and load the scene first; the ring waits for
+  // the load. Between two sessions (stopRing false) there is no ring to stop,
+  // but its pending re-arm would overtake the reload the same way, and its
+  // session would cancel it.
+  const restartReplayForSources = useCallback(
+    (visualChanged: boolean, stopRing = true): void => {
+      if (visualChanged) replaySceneReloadsRef.current += 1
+      void (stopRing ? stopReplayBuffer() : Promise.resolve())
+        .then(async () => {
+          if (!visualChanged || isActiveRecordingState(recordingRef.current.state)) return
+          await reloadSceneFromCaptureConfigRef.current()
+        })
+        .catch((error) => {
+          if (!isActiveRecordingState(recordingRef.current.state)) reportError(error)
+        })
+        .finally(() => {
+          if (visualChanged) replaySceneReloadsRef.current -= 1
+          scheduleReplayReconcile()
+        })
+    },
+    [reportError, scheduleReplayReconcile, stopReplayBuffer]
+  )
+  restartReplayForSourcesRef.current = restartReplayForSources
+  useEffect(() => {
+    if (replaySourcesRef.current === replaySources) return
+    replaySourcesRef.current = replaySources
+    const visualChanged = replayVisualSourcesRef.current !== replayVisualSources
+    replayVisualSourcesRef.current = replayVisualSources
+    replayFailedStartsRef.current = 0
+    replayWaitingForCameraRef.current = false
+    rearmReplayAfterErrorRef.current()
+    void import('@/lib/replay-buffer-reconcile').then(({ replayBufferShouldRestartForSources }) => {
+      if (
+        replayBufferShouldRestartForSources({
+          recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
+          recordingState: recordingRef.current.state
+        })
+      ) {
+        restartReplayForSources(visualChanged)
+        return
+      }
+      if (replayStartInFlightRef.current) {
+        // The ring's own start is in flight with the old sources (and its
+        // idle reload skips the ring it starts): restart when it answers.
+        replaySourcesMovedDuringStartRef.current =
+          visualChanged || replaySourcesMovedDuringStartRef.current === 'visual'
+            ? 'visual'
+            : 'audio'
+      } else if (
+        visualChanged &&
+        replayArmedRef.current &&
+        !isActiveRecordingState(recordingRef.current.state)
+      ) {
+        restartReplayForSources(true, false)
+        return
+      }
+      scheduleReplayReconcile()
+    })
+  }, [replaySources, replayVisualSources, restartReplayForSources, scheduleReplayReconcile])
+  // Settings that shape the session restart a buffer-only ring: the Output
+  // quality, the canvas orientation and a smoke's shorter ring (plan 199:
+  // otherwise the ring is always the minute). A recording or livestream
+  // keeps its shape (those pages lock meanwhile); the re-armed ring picks
+  // the new one up.
+  const replayShape = [
+    captureConfig.video.width,
+    captureConfig.video.height,
+    captureConfig.video.fps,
+    captureConfig.video.bitrateKbps,
+    layoutPresetOrientation(captureConfig.layout.layoutPreset),
+    captureConfig.replayBuffer.smokeRingSeconds
+  ].join('|')
+  const replayShapeRef = useRef(replayShape)
+  useEffect(() => {
+    if (replayShapeRef.current === replayShape) return
+    replayShapeRef.current = replayShape
+    if (sessionIsReplayOnly(recordingRef.current)) void stopReplayBuffer()
+  }, [replayShape, stopReplayBuffer])
+
+  // A layout without the camera it waited for (screen-only) can start now.
+  const replayLayoutPreset = captureConfig.layout.layoutPreset
+  useEffect(() => {
+    if (!replayWaitingForCameraRef.current) return
+    replayWaitingForCameraRef.current = false
+    scheduleReplayReconcile()
+  }, [replayLayoutPreset, scheduleReplayReconcile])
+
+  // A ring that waits for the camera starts on its live edge.
+  const previewCameraState = previewCameraStatus.state
+  useEffect(() => {
+    if (!replayWaitingForCameraRef.current || previewCameraState !== 'live') return
+    replayWaitingForCameraRef.current = false
+    scheduleReplayReconcile()
+  }, [previewCameraState, scheduleReplayReconcile])
+
+  const setReplayArmed = useCallback(
+    (armed: boolean): void => {
+      replayArmedRef.current = armed
+      replayFailedStartsRef.current = 0
+      replayWaitingForCameraRef.current = false
+      setReplayArmedState(armed)
+      scheduleReplayReconcile(0)
+    },
+    [scheduleReplayReconcile]
+  )
+  setReplayArmedRef.current = setReplayArmed
+
+  // A ring that died with its session stays off (the switch still on) until
+  // the user's next move: a session that ends, a source change, the switch.
+  const rearmReplayAfterError = useCallback((): void => {
+    void import('@/lib/replay-buffer-reconcile').then(({ replayShouldRearmAfterError }) => {
+      if (
+        !replayShouldRearmAfterError({
+          armed: replayArmedRef.current,
+          replayState: replayStateRef.current.state,
+          switchOn: captureConfigRef.current.replayBuffer.enabled,
+          blocked: replayBlockedReasonRef.current !== null
+        })
+      )
+        return
+      replayArmedRef.current = true
+      setReplayArmedState(true)
+      scheduleReplayReconcile()
+    })
+  }, [scheduleReplayReconcile])
+  rearmReplayAfterErrorRef.current = rearmReplayAfterError
+
+  // The one switch (Output → Clips → Keep the last seconds): persisted as
+  // the user's explicit choice, so a default the backend refused (the
+  // software encoder guard) is overridden on purpose and never silently.
+  const setReplayEnabled = useCallback(
+    (enabled: boolean): void => {
+      setCaptureConfig((current) => ({
+        ...current,
+        replayBuffer: { ...current.replayBuffer, enabled, explicit: true }
+      }))
+      captureConfigRef.current = {
+        ...captureConfigRef.current,
+        replayBuffer: { ...captureConfigRef.current.replayBuffer, enabled, explicit: true }
+      }
+      replayBlockedReasonRef.current = null
+      setReplayBlockedReasonState(null)
+      setReplayArmed(enabled)
+    },
+    [setCaptureConfig, setReplayArmed]
+  )
+
+  const replayBufferControls = useMemo<ReplayBufferControls>(
+    () => ({
+      state: replayState,
+      armed: replayArmed,
+      blockedReason: replayBlockedReason,
+      waitReason: typeof replayGrantWait === 'string' ? replayGrantWait : null,
+      setEnabled: setReplayEnabled
+    }),
+    [replayArmed, replayBlockedReason, replayGrantWait, replayState, setReplayEnabled]
+  )
 
   const assessRecording = useCallback(
     async (sessionId: string): Promise<FileAssessment> => {
@@ -15070,7 +17798,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const [performanceCheckProgress, setPerformanceCheckProgress] =
     useState<PerformanceCheckProgress | null>(null)
-  const performanceCheckAutoRunRef = useRef(false)
 
   const commitPerformanceCheck = useCallback((next: PerformanceCheckState) => {
     setPerformanceCheck(next)
@@ -15108,21 +17835,55 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
   }, [])
 
-  const runPerformanceCheck = useCallback(async () => {
-    if (!client) {
+  const releasePerformanceCheckHold = useCallback(() => {
+    performanceCheckHoldRef.current = false
+    scheduleReplayReconcile()
+  }, [scheduleReplayReconcile])
+
+  // The only way a check starts (plan 212 D1): first-run setup as it opens,
+  // or "Check this computer" in Recording → Output, both through
+  // `runPerformanceCheck`. Nothing starts one at launch or after an update;
+  // a verdict is stale only when the machine or the measuring pipeline
+  // changed (`stored_result_is_stale` in performance_check.rs).
+  const requestPerformanceCheck = useCallback(async () => {
+    if (!client || performanceCheckHoldRef.current) {
       return
     }
     const display = {
       width: window.screen.width * window.devicePixelRatio,
       height: window.screen.height * window.devicePixelRatio
     }
-    setPerformanceCheck(
-      await client.requestTyped(
-        'performance.check.run',
-        performanceCheckCeiling(captureConfigRef.current.video, display)
+    // Plan 200 D4: the check counts the separate files' encoders when the
+    // next take would write them.
+    const separateFiles =
+      separateSourceRecordingsForSession(captureConfigRef.current, runtimeInfo?.platform) !==
+      undefined
+    performanceCheckHoldRef.current = true
+    try {
+      if (sessionIsReplayOnly(recordingRef.current)) {
+        await stopReplayBuffer()
+        await waitForRecordingIdle(recordingRef, 5_000)
+      }
+      setPerformanceCheck(
+        await client.requestTyped(
+          'performance.check.run',
+          performanceCheckCeiling(captureConfigRef.current.video, display, separateFiles)
+        )
       )
-    )
-  }, [client])
+    } catch (error) {
+      releasePerformanceCheckHold()
+      throw error
+    }
+  }, [client, releasePerformanceCheckHold, runtimeInfo?.platform, stopReplayBuffer])
+
+  // "Check this computer": a refusal is said, never an unhandled rejection.
+  const runPerformanceCheck = useCallback(
+    () =>
+      requestPerformanceCheck().catch((error: unknown) =>
+        reportError(error, { action: 'check', object: 'this computer' })
+      ),
+    [reportError, requestPerformanceCheck]
+  )
 
   useEffect(() => {
     if (!client || wsStatus !== 'connected') {
@@ -15132,6 +17893,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client.on('performance.check.progress', setPerformanceCheckProgress),
       client.on('performance.check.completed', (next) => {
         commitPerformanceCheck(next)
+        if (performanceCheckHoldRef.current) releasePerformanceCheckHold()
         // News the interface does not already show: a chosen output this
         // computer measurably cannot hold. Said once per finished check.
         const chosen = captureConfigRef.current.video
@@ -15157,8 +17919,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .requestTyped('encoder.preference.get')
       .then(setEncoderPreferenceState)
       .catch(() => undefined)
-    return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
-  }, [client, commitPerformanceCheck, wsStatus])
+    return () => {
+      unsubscribers.forEach((unsubscribe) => unsubscribe())
+      // A lost connection never sends the completed event.
+      if (performanceCheckHoldRef.current) releasePerformanceCheckHold()
+    }
+  }, [client, commitPerformanceCheck, releasePerformanceCheckHold, wsStatus])
+
+  /**
+   * Issue #1066: reads (no `compensation`) or saves a camera's low-light
+   * compensation. The state and its retries live with the Sources camera row
+   * (`use-camera-low-light.ts`, in the lazy Sources chunk).
+   */
+  const requestCameraLowLight = useCallback<CameraLowLightRequest>(
+    ({ cameraId, compensation }) => {
+      if (!client) return Promise.reject(offlineError())
+      return compensation === undefined
+        ? client.requestTyped('camera.lowLight.get', { cameraId })
+        : client.requestTyped('camera.lowLight.set', { cameraId, compensation })
+    },
+    [client]
+  )
 
   // Plan 090 C5: which encoder the Windows fallback path may use. A change
   // invalidates both things measured under the old choice: the output check
@@ -15180,24 +17961,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client, commitPerformanceCheck, refreshStreamOutputTopology]
   )
 
-  // Measure once per machine, after the app has settled. Packaged builds only:
-  // dev sessions and smokes start captures immediately and use the button.
-  useEffect(() => {
-    if (
-      performanceCheckAutoRunRef.current ||
-      !runtimeInfo?.isPackaged ||
-      recording.state !== 'idle' ||
-      !shouldRunPerformanceCheck(performanceCheck)
-    ) {
-      return
-    }
-    const timer = window.setTimeout(() => {
-      performanceCheckAutoRunRef.current = true
-      void runPerformanceCheck().catch(() => undefined)
-    }, PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS)
-    return () => window.clearTimeout(timer)
-  }, [performanceCheck, recording.state, runPerformanceCheck, runtimeInfo?.isPackaged])
-
   const patchStreamingTarget = useCallback(
     (targetId: string, patch: Partial<StreamTargetSettings>) => {
       setCaptureConfig((current) =>
@@ -15214,9 +17977,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // destinations (with an optional patch) minus the ones left out of this
   // attempt. The dialog shows the answer without reopening.
   const revalidateGoLive = useCallback(
-    async (streaming: StreamingSettings, excludedTargetIds: readonly string[]) => {
+    async (
+      streaming: StreamingSettings,
+      excludedTargetIds: readonly string[]
+    ): Promise<GoLivePreflight | null> => {
       if (!client) {
-        return
+        return null
       }
       const sent = streamingWithoutTargets(streaming, excludedTargetIds)
       try {
@@ -15232,8 +17998,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         )
         setGoLivePreflight(preflight)
+        return preflight
       } catch (error) {
         reportError(error)
+        return null
       }
     },
     [client, reportError]
@@ -15268,10 +18036,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [commitGoLiveExclusions, patchStreamingTarget, revalidateGoLive]
   )
 
-  const recheckGoLive = useCallback(
-    () => revalidateGoLive(captureConfigRef.current.streaming, goLiveExcludedTargetIdsRef.current),
-    [revalidateGoLive]
-  )
+  const recheckGoLive = useCallback(async (): Promise<void> => {
+    await revalidateGoLive(captureConfigRef.current.streaming, goLiveExcludedTargetIdsRef.current)
+  }, [revalidateGoLive])
 
   const patchManualStreamKeyResult = useCallback(
     (targetId: string, result: StoreManualStreamKeyResult) => {
@@ -15417,9 +18184,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     !isActiveRecordingState(recording.state) && !startRequestPending && !stopRequestPending
       ? (recordBlockedReason ?? liveStreamBlockedReason)
       : null
+  // The window picker never offers Notes, nor the Stream Manager while it is
+  // hidden from stream (plan 215 C2).
   const visibleDeviceList = useMemo(
-    () => deviceListWithoutProtectedOverlayWindows(deviceList, notesWindow),
-    [deviceList, notesWindow]
+    () =>
+      deviceListWithoutProtectedOverlayWindows(
+        deviceList,
+        notesWindow,
+        streamManagerProtectedOverlayWindow(commentsWindow)
+      ),
+    [deviceList, notesWindow, commentsWindow]
   )
   const selectedCaptureDevice = findDevice(
     visibleDeviceList.devices,
@@ -15485,7 +18259,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelled = true
       if (retryTimer !== undefined) window.clearTimeout(retryTimer)
     }
-  }, [canSampleAudio, client, pendingMicrophonePermissionProof, reportError, wsStatus])
+  }, [
+    canSampleAudio,
+    client,
+    pendingMicrophonePermissionProof,
+    reportError,
+    setDeviceList,
+    wsStatus
+  ])
 
   const handleSystemPermission = useCallback(
     async (pane: SystemPermissionPane): Promise<void> => {
@@ -15493,6 +18274,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const { runSystemPermissionAction } = await import('@/lib/system-permission-orchestration')
         await runSystemPermissionAction({
           pane,
+          getAccessContext: () => systemAccessContextRef.current,
+          setPendingPane: setPendingPermissionPane,
+          onGrantRestart: notePermissionRestart,
           platform: runtimeInfo?.platform,
           refreshMediaAccess,
           getDeviceList: () => deviceListRef.current,
@@ -15516,7 +18300,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error)
       }
     },
-    [openSystemPermissionSettings, refreshMediaAccess, reportError, runtimeInfo?.platform]
+    [
+      notePermissionRestart,
+      openSystemPermissionSettings,
+      refreshMediaAccess,
+      setDeviceList,
+      reportError,
+      runtimeInfo?.platform
+    ]
   )
 
   // Space lives on the Studio page (plan 174 S0.1, D1): StudioTab owns it, so
@@ -15661,100 +18452,133 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // ── Remote control (issue #143) ──────────────────────────────────────
   // Intents execute through the SAME handlers as the on-screen buttons —
   // no second session-start path, no validation bypass. Every intent is
-  // acked so deck keys can show failure reasons. An effect event: stable
-  // identity for the one-time client subscription, latest closure inside.
-  const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
-    if (!client) return
-    const knownLayoutPresets = [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS]
-    const context: RemoteIntentContext = {
+  // acked so deck keys can show failure reasons. The executors live in
+  // lib/studio-actions (plan 209 S5); per intent the Studio hands over its
+  // latest render's handlers, state and refs, and studio-context.ts builds
+  // the one context a deck key and (S6) an agent's tool call run against.
+  const studioActionSource = (): StudioActionSource | null =>
+    client && {
+      runScreenPrivacy: privacy.runScreenPrivacy,
       client,
-      sessionActive: isActiveRecordingState(recordingRef.current.state),
+      recordingRef,
+      replayStateRef,
       recordBlockedReason,
       liveStreamBlockedReason,
       startRecording,
       startLivestream,
-      // A remote intent is a deliberate device action (plan 174 S0.1, D2):
-      // it stops at once, through the one door every stop takes.
-      stopSession: () => requestStopSession('remote-control'),
-      setMicrophoneMuted: requestRemoteMicrophoneMute,
-      systemAudio: [systemAudioStatus, systemAudioShown],
+      requestStopSession,
+      requestRemoteMicrophoneMute,
+      systemAudioStatus,
+      systemAudioShown,
       setSystemAudioEnabled,
-      knownLayoutPresets,
-      applyLayoutPreset: (layoutPreset) => requestCameraPresetTransaction({ layoutPreset }),
-      hasTakeover: (assetId) => screens.some((screen) => screen.id === assetId),
-      activateTakeover: activateScreen,
-      clearTakeover: clearActiveScreen,
-      openWindow: async (name) => {
-        if (name === 'notes') await openNotesWindow()
-        else if (name === 'comments') await openCommentsWindow()
-        else if (name === 'preview') await openPreviewWindow()
-        else return false
-        return true
-      },
-      showCommentHighlight: async (messageId) => {
-        const message = liveChatSnapshot.messages.find((candidate) => candidate.id === messageId)
-        if (!message || message.isDeleted) {
-          return { ok: false, message: 'That comment is no longer available.' }
-        }
-        const highlightIntent = ++commentHighlightIntentRef.current
-        setCommentHighlightFailure(null)
-        try {
-          const state = await applyCommentHighlight(message, undefined, highlightIntent, {
-            alwaysSet: true
-          })
-          if (!state) return { ok: false, message: 'A newer comment replaced this one.' }
-          publishCommentHighlightState(state)
-          return state.phase === 'live'
-            ? { ok: true }
-            : { ok: false, message: state.reason ?? "The comment didn't reach the stream." }
-        } catch (error) {
-          // The backend's eligibility reason ("not live", ...) verbatim.
-          return {
-            ok: false,
-            message: error instanceof Error ? error.message : 'Highlight failed.'
-          }
-        }
-      },
-      clearCommentHighlight: async () => {
-        ++commentHighlightIntentRef.current
-        try {
-          const state = await client.request<CommentHighlightState>('comments.highlight.clear')
-          publishCommentHighlightState(state)
-          return { ok: true }
-        } catch (error) {
-          return {
-            ok: false,
-            message: error instanceof Error ? error.message : "Couldn't clear the comment."
-          }
-        }
-      },
-      markClip: async () => {
-        try {
-          const event = await client.request<ClipMarkedEvent>('clip.mark')
-          return event.saved ? { ok: true } : { ok: false, message: clipMarkedToast(event).title }
-        } catch (error) {
-          return {
-            ok: false,
-            message: error instanceof Error ? error.message : "Couldn't mark the clip."
-          }
-        }
-      }
+      requestCameraPresetTransaction,
+      screens,
+      activateScreen,
+      clearActiveScreen,
+      openNotesWindow,
+      openCommentsWindow,
+      openPreviewWindow,
+      liveChatMessages: liveChatSnapshot.messages,
+      commentHighlightIntentRef,
+      setCommentHighlightFailure,
+      applyCommentHighlight,
+      publishCommentHighlightState,
+      bannerListRef,
+      savedScenes: sceneLibrary.scenes,
+      applySavedScene,
+      applySavedSceneResult,
+      // Plan 209 S10 (D13): the Go Live dialog's own preflight, gate and
+      // confirm, for an agent's `go_live` (lib/go-live-headless).
+      dialogOpenRef,
+      goLiveConfirmationPending,
+      startRequestPending,
+      openGoLiveConfirmationInFlightRef,
+      confirmGoLiveInFlightPromiseRef,
+      sessionStartInFlightRef,
+      goLiveCaptionOutputReadiness,
+      setGoLiveConfirmationPending,
+      setSuppressCaptionsForSession,
+      runGoLivePreflight,
+      revalidateGoLive,
+      runGoLiveConfirmation,
+      settlePreparedPlatformLifecycle,
+      startOnReadyDestinations,
+      captureConfigRef,
+      deviceListRef,
+      sourceSwitchReason,
+      switchSourceDeviceLive,
+      sourceSelectionStateRef,
+      setCaptureConfig,
+      captionsCommandPending,
+      entitlements,
+      captionsPlatformUnavailable,
+      background: activeSceneBackground,
+      applyLiveBackground,
+      transformSceneRef,
+      overlayLayoutRef,
+      platform: runtimeInfo?.platform,
+      wsStatusRef,
+      layoutSwitchPending,
+      savedScenePendingId,
+      setOverlayLayout,
+      updateBanner,
+      applyLayoutPatch,
+      setSceneSourceTransform,
+      setSceneSourceVisible,
+      cohostSettingsRef,
+      cohostGate,
+      aiConsent,
+      setCohostSettings,
+      streamMetadataDraft,
+      setStreamMetadataDraft,
+      setStreamMetadataValidation,
+      platformAccounts,
+      goLivePartialSetup,
+      patchStreamingTarget,
+      settings,
+      theme: appTheme,
+      setTheme: setAppTheme,
+      patchVideo,
+      setSettings,
+      setReplayEnabled,
+      virtualCamera,
+      sessions,
+      deleteSessions,
+      refreshSessions,
+      refreshNoiseCleanupJobs,
+      noteRecordClick
     }
+
+  // An effect event: stable identity for the one-time client subscription,
+  // latest closure inside.
+  const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
+    const source = studioActionSource()
+    if (!source) return
     const intentKind = (payload as { kind?: unknown } | null)?.kind
     if (intentKind === 'recordStart' || intentKind === 'streamStart') {
       noteRecordClick('start')
     } else if (intentKind === 'recordStop' || intentKind === 'streamStop') {
       noteRecordClick('stop')
     } else if (intentKind === 'recordToggle') {
-      noteRecordClick(context.sessionActive ? 'stop' : 'start')
+      noteRecordClick(sessionOwnsTransport(recordingRef.current) ? 'stop' : 'start')
     }
     try {
-      const { executeRemoteIntent } = await import('@/lib/remote-surface')
-      await executeRemoteIntent(payload, context)
+      const actions = await import('@/lib/studio-actions')
+      await actions.executeRemoteIntent(payload, actions.studioActionContext(source))
     } catch (error) {
       reportError(error)
     }
   })
+
+  // Plan 209 S6: an agent's Studio tool call, through the same context as a
+  // deck key. Resolves to the body of its `agent.intent.ack`.
+  const handleAgentIntent = useEffectEvent(
+    async (intent: AgentIntent, gone: boolean): Promise<AgentIntentOutcome> => {
+      const source = gone ? undefined : studioActionSource()
+      const actions = await import('@/lib/studio-actions')
+      return actions.executeStudioAgentIntent(intent, source)
+    }
+  )
 
   // The state projection deck keys render (types in lib/remote-surface.ts).
   // Minimal by design and the ONLY payload remote sockets receive — never
@@ -15789,13 +18613,54 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS],
     screens.map((screen) => ({ id: screen.id, name: screen.name })),
     systemAudioStatus,
-    systemAudioShown
+    systemAudioShown,
+    bannerList ?? NO_BANNERS,
+    sceneLibrary.scenes,
+    activeSavedSceneId,
+    privacy.screenPrivacy.hidden
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on
   // reconnect, and retries failures on its own timeline — no effect.
   remoteSurfaceValuesRef.current = remoteSurfaceValues
   remoteSurfacePublisherRef.current?.syncValues(remoteSurfaceValues)
+
+  // Plan 209 S6: the agents' projection (lib/agent-surface.ts), handed over
+  // the same way. Only references here: the publisher builds the allowlisted
+  // surface after the commit, and only while Agents is on.
+  const agentSurfaceInput: AgentSurfaceInput = {
+    recordBlockedReason,
+    liveStreamBlockedReason,
+    layoutPreset: captureConfig.layout.layoutPreset,
+    layoutPresets: remoteSurfaceValues[10],
+    activeSavedSceneId,
+    savedSceneModified,
+    savedScenes: sceneLibrary.scenes,
+    microphoneMuted: remoteSurfaceMicrophoneMuted,
+    sources: captureConfig.sources,
+    devices: deviceList.devices,
+    systemAudioStatus,
+    systemAudioShown,
+    activeTakeoverId: activeScreen?.id ?? null,
+    takeovers: screens,
+    background: activeSceneBackground,
+    captionsEnabled: captureConfig.captions.enabled,
+    captionsStatus,
+    cohostSettings,
+    cohostState,
+    streaming: captureConfig.streaming,
+    streamMetadataDraft,
+    windows: {
+      notes: notesWindow.open,
+      streamManager: commentsWindow.open,
+      preview: previewWindow.open
+    },
+    cloudAiConsent: aiConsent,
+    // Plan 209 S19: Buddy's planner reads it too while Buddy may act.
+    buddyCanAct: cohostGate.allowed
+  }
+  agentSurfaceInputRef.current = agentSurfaceInput
+  agentLinkRef.current?.sync(agentSurfaceInput)
 
   const remoteControlRequest = useCallback(
     async (method: string): Promise<RemoteControlStatus | null> => {
@@ -15897,7 +18762,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [reportError])
   globalShortcutsRegistrarRef.current?.sync(settings.globalShortcuts ?? {})
   const handleGlobalShortcut = useEffectEvent((action: GlobalShortcutAction) => {
+    // Plan 203 S5: no global key records, goes live or switches a scene while
+    // first-run setup is open.
+    if (firstRunSetupOpen) return
     const context: GlobalShortcutContext = {
+      toggleScreenHidden: privacy.toggleScreenHidden,
       switchLayout: (layoutAction) => {
         const current = captureConfigRef.current
         const direct = globalShortcutLayout(layoutAction)
@@ -15909,41 +18778,70 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneSourceProblems(
               {
                 layout: { ...current.layout, layoutPreset: id, arrangementMode: 'preset' },
-                sources: visualSources(current.sources),
+                sources: usingVisualSources(current.sources),
                 background: null
               },
               deviceListRef.current.devices
             ).length === 0
         )
         const step = layoutAction === 'layout-previous' ? -1 : 1
-        const target =
-          direct ??
-          nextEligibleLayout(
-            from,
-            step,
-            eligible.map(({ id }) => id)
-          )
-        if (!target) {
+        const next = layoutAction.startsWith('scene:')
+          ? layoutAction
+          : direct
+            ? `layout:${direct}`
+            : nextEligibleScene({
+                current:
+                  sceneShortcutRequestedRef.current ??
+                  (activeSavedSceneIdRef.current
+                    ? `scene:${activeSavedSceneIdRef.current}`
+                    : `layout:${from}`),
+                direction: step,
+                scenes: sceneLibrary.scenes,
+                unavailableSceneIds: sceneLibrary.scenes
+                  .filter(
+                    (scene) =>
+                      sceneSourceProblems(scene.visual, deviceListRef.current.devices).length > 0
+                  )
+                  .map((scene) => scene.id),
+                orientation,
+                sessionActive: sessionOwnsTransport(recordingRef.current),
+                appStates: savedSceneAppStates,
+                layouts: eligible.map(({ id }) => id)
+              })
+        if (!next) {
           toast.info('No other scene to switch to', { id: 'layout-shortcut-empty' })
           return
         }
+        const target = globalShortcutLayout(next as GlobalShortcutAction)
         if (
+          target &&
           layoutIntentAwaitingProofRef.current !== null &&
           latestRequestedLayoutRef.current === target
         )
           return
-        latestRequestedLayoutRef.current = target
+        sceneShortcutRequestedRef.current = next
+        if (target) latestRequestedLayoutRef.current = target
         if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
-        // Coalesce repeat bursts while retaining their latest requested index.
+        // Coalesce repeat bursts across the entire scene list.
         layoutShortcutTimerRef.current = setTimeout(() => {
           layoutShortcutTimerRef.current = null
-          void requestCameraPresetTransaction({ layoutPreset: target }).then((accepted) => {
-            if (!accepted && latestRequestedLayoutRef.current === target)
+          const apply = target
+            ? requestCameraPresetTransaction({ layoutPreset: target })
+            : applySavedSceneResult(next.slice(6)).then((result) => {
+                if (!result.ok)
+                  toast.info(result.message ?? "That scene couldn't be applied", {
+                    id: 'scene-shortcut-refused'
+                  })
+                return result.ok
+              })
+          void apply.then((accepted) => {
+            if (sceneShortcutRequestedRef.current === next) sceneShortcutRequestedRef.current = null
+            if (!accepted && target && latestRequestedLayoutRef.current === target)
               latestRequestedLayoutRef.current = captureConfigRef.current.layout.layoutPreset
           })
         }, 70)
       },
-      sessionActive: isActiveRecordingState(recordingRef.current.state),
+      sessionActive: sessionOwnsTransport(recordingRef.current),
       startRecording,
       startLivestream,
       // A global hotkey may fire with Videorc in the background: while live it
@@ -15958,8 +18856,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         }))
       },
-      markClip: () => {
-        void markClip()
+      markClip: (seconds) => {
+        void markClip(seconds)
       },
       systemAudio: [systemAudioStatus, systemAudioShown],
       setSystemAudioEnabled
@@ -15970,6 +18868,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .catch(reportError)
   })
 
+  // Plan 215 A5 (D7): chat or Buddy waits on the Videorc sign-in. One
+  // boolean, so the shell re-renders when it flips and never per message.
+  const accountNeedsSignIn = useMemo(
+    () =>
+      account?.status !== 'signed-in' &&
+      (liveChatSnapshot.providers.some((provider) => provider.read === 'needs-videorc-sign-in') ||
+        cohostState?.reason === 'signed-out' ||
+        cohostState?.reason === 'session-expired'),
+    [account?.status, cohostState?.reason, liveChatSnapshot.providers]
+  )
   const shellValue = useMemo<StudioShellContextValue>(
     () => ({
       wsStatus,
@@ -15977,6 +18885,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recordingState: recording.state,
       runtimeInfo,
       entitlementTier: entitlements?.tier ?? null,
+      accountNeedsSignIn,
       entitlementPlan: entitlements?.plan ?? null,
       previewWindowOpen: previewWindow.open,
       togglePreviewWindow,
@@ -15997,10 +18906,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? stopConfirmation
           : null,
       confirmStopSession,
-      cancelStopSession
+      cancelStopSession,
+      firstRunSetupOpen,
+      setFirstRunSetupOpen
     }),
     [
+      accountNeedsSignIn,
       cancelStopSession,
+      firstRunSetupOpen,
       closeCommentsWindow,
       closeNotesWindow,
       commentsWindow.open,
@@ -16031,6 +18944,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       healthEvents,
       logs,
       previewSurfaceStatus,
+      recentStreamDrops: recentDrops,
       recordLatency,
       retryCaptureRecovery,
       streamHealth
@@ -16042,34 +18956,89 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       healthEvents,
       logs,
       previewSurfaceStatus,
+      recentDrops,
       recordLatency,
       retryCaptureRecovery,
       streamHealth
     ]
   )
+  const chatNewCount = useChatNewCount(
+    liveChatSnapshot,
+    commentsWindow.open && commentsWindow.visible
+  )
   const chatValue = useMemo<StudioChatContextValue>(
-    () => ({ cohostState, liveChatSnapshot }),
-    [cohostState, liveChatSnapshot]
+    () => ({ chatNewCount, cohostState, liveChatSnapshot }),
+    [chatNewCount, cohostState, liveChatSnapshot]
   )
   const audioValue = useMemo<StudioAudioContextValue>(
     () => ({ audioMeter, audioMeterLoading, meterLevel }),
     [audioMeter, audioMeterLoading, meterLevel]
   )
+  const captionsValue = useMemo<StudioCaptionsContextValue>(
+    () => ({ captionLines }),
+    [captionLines]
+  )
+  const bannersValue = useMemo<StudioBannersContextValue>(() => {
+    const banners = bannerList ?? NO_BANNERS
+    return {
+      banners,
+      bannersLoaded: bannerList !== null,
+      bannersOffline: wsStatus !== 'connected',
+      bannerImportPhase,
+      // A deleted banner is never the selected one.
+      selectedBannerId: banners.some((banner) => banner.id === selectedBannerId)
+        ? selectedBannerId
+        : null,
+      selectBanner: setSelectedBannerId,
+      importBanner,
+      updateBanner,
+      reorderBanners,
+      deleteBanner,
+      showBanner,
+      hideBanner,
+      toggleBanner
+    }
+  }, [
+    bannerImportPhase,
+    bannerList,
+    deleteBanner,
+    hideBanner,
+    importBanner,
+    reorderBanners,
+    selectedBannerId,
+    showBanner,
+    toggleBanner,
+    updateBanner,
+    wsStatus
+  ])
   const recordingStateValue = useMemo<StudioRecordingStateContextValue>(
     () => ({
       recording: {
         state: recording.state,
         sessionId: recording.sessionId,
         streamUrl: recording.streamUrl,
-        startedAt: recording.startedAt
+        startedAt: recording.startedAt,
+        // Plan 181: the shell keeps Record and Go Live on a buffer-only session.
+        ...(recording.replayOnly ? { replayOnly: true } : {})
       }
     }),
-    [recording.sessionId, recording.startedAt, recording.state, recording.streamUrl]
+    [
+      recording.replayOnly,
+      recording.sessionId,
+      recording.startedAt,
+      recording.state,
+      recording.streamUrl
+    ]
   )
   const recordingValue = useMemo<StudioRecordingContextValue>(() => ({ recording }), [recording])
   const previewValue = useMemo<StudioPreviewContextValue>(
-    () => ({ previewLiveStatus, previewCameraStatus, previewScreenStatus }),
-    [previewCameraStatus, previewLiveStatus, previewScreenStatus]
+    () => ({
+      previewLiveStatus,
+      previewCameraStatus,
+      previewCameraLowFrameRate,
+      previewScreenStatus
+    }),
+    [previewCameraLowFrameRate, previewCameraStatus, previewLiveStatus, previewScreenStatus]
   )
 
   // Development smoke harness: delegates to the same public actions as the UI.
@@ -16083,7 +19052,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         scenes: value.savedScenes,
         activeId: value.activeSavedSceneId,
         pendingId: value.savedScenePendingId,
-        pendingLayout: value.layoutSwitchPending,
+        pendingLayout: pendingLayoutEvidence(value.layoutSwitchPending),
         modified: value.savedSceneModified,
         visual: workingVisual,
         diagnostics: {
@@ -16134,6 +19103,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         value.setCaptureConfig((current) => ({ ...current, ...patch })),
       start: value.startSession,
       stop: value.stopSession,
+      // Plan 212 S1: "Check this computer" the way the Output panel runs it
+      // (Clips stopped first, re-armed after), so a smoke can read the
+      // Preview while a real check runs. Errors reach the smoke.
+      checkComputer: requestPerformanceCheck,
       confirmGoLive: value.confirmGoLive,
       cancelGoLive: value.cancelGoLiveConfirmation,
       setSettings: value.setSettings,
@@ -16156,6 +19129,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const value = useMemo<StudioCoreContextValue>(
     () => ({
+      ...privacy,
       connection,
       wsStatus,
       health,
@@ -16195,7 +19169,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       xNativeCapabilityLoading,
       youtubeQuota,
       captionsStatus,
-      captionLines,
       captionsCommandPending,
       startCaptions,
       stopCaptions,
@@ -16208,6 +19181,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeCommentsWindow,
       toggleCommentsWindow,
       setCommentsWindowAlwaysOnTop,
+      setCommentsWindowHiddenFromStream,
       openSessionCommentsWindow,
       highlightedCommentId,
       commentHighlightState,
@@ -16218,7 +19192,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       overlayLayout,
       setOverlayLayout,
       reportError,
-      buddyOverlay,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
@@ -16251,11 +19224,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeNotesWindow,
       setNotesWindowAlwaysOnTop,
       scene,
+      sourcePictureSizes,
       sceneEditMode,
       selectedSceneSourceId,
       setSceneEditMode,
       setSelectedSceneSourceId,
       mediaAccess,
+      systemAccessContext,
       aiConsent,
       setAiConsent,
       startRequestPending,
@@ -16271,12 +19246,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCaptureConfig,
       patchLayout,
       applyLayoutPatch,
+      applyCameraLook,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
+      requestCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,
@@ -16322,7 +19299,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditorDraft,
       clearSceneEditorDraft,
       applyCameraPreset,
+      firstRunLookHold,
+      applyFirstRunLook,
       savedScenes: sceneLibrary.scenes,
+      savedSceneWindowApps: rememberedAppsRef.current,
+      savedSceneAppStates,
+      sceneLibraryActions,
       activeSavedSceneId,
       savedScenePendingId,
       savedSceneModified,
@@ -16333,8 +19315,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       renameSavedScene: sceneLibrary.rename,
       deleteSavedScene,
       applySavedScene,
+      applySavedSceneResult,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
+      applyLiveBackground,
+      liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
@@ -16376,7 +19361,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      acceptsLiveSceneEdits,
+      audioBusActive: mixingSessionActive,
       systemAudioConfirmed,
+      systemAudioJoining,
       systemAudioIssue,
       startBlockedReason,
       canStart,
@@ -16392,6 +19380,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       canSampleAudio
     }),
     [
+      privacy,
       connection,
       wsStatus,
       health,
@@ -16431,7 +19420,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       xNativeCapabilityLoading,
       youtubeQuota,
       captionsStatus,
-      captionLines,
       captionsCommandPending,
       startCaptions,
       stopCaptions,
@@ -16444,6 +19432,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeCommentsWindow,
       toggleCommentsWindow,
       setCommentsWindowAlwaysOnTop,
+      setCommentsWindowHiddenFromStream,
       openSessionCommentsWindow,
       highlightedCommentId,
       commentHighlightState,
@@ -16454,7 +19443,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       overlayLayout,
       setOverlayLayout,
       reportError,
-      buddyOverlay,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
@@ -16487,11 +19475,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeNotesWindow,
       setNotesWindowAlwaysOnTop,
       scene,
+      sourcePictureSizes,
       sceneEditMode,
       selectedSceneSourceId,
       setSceneEditMode,
       setSelectedSceneSourceId,
       mediaAccess,
+      systemAccessContext,
       aiConsent,
       setAiConsent,
       startRequestPending,
@@ -16507,12 +19497,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCaptureConfig,
       patchLayout,
       applyLayoutPatch,
+      applyCameraLook,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
+      requestCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,
@@ -16558,7 +19550,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditorDraft,
       clearSceneEditorDraft,
       applyCameraPreset,
+      firstRunLookHold,
+      applyFirstRunLook,
       sceneLibrary.scenes,
+      savedSceneAppStates,
+      sceneLibraryActions,
       sceneLibrary.error,
       sceneLibrary.rename,
       activeSavedSceneId,
@@ -16568,8 +19564,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       saveScene,
       deleteSavedScene,
       applySavedScene,
+      applySavedSceneResult,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
+      applyLiveBackground,
+      liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
@@ -16611,7 +19610,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      acceptsLiveSceneEdits,
+      mixingSessionActive,
       systemAudioConfirmed,
+      systemAudioJoining,
       systemAudioIssue,
       startBlockedReason,
       canStart,
@@ -16630,18 +19632,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   return (
     <StudioShellContext.Provider value={shellValue}>
-      <StudioContextProviders
-        audio={audioValue}
-        chat={chatValue}
-        cloud={cloudValue}
-        core={value}
-        diagnostics={diagnosticsValue}
-        preview={previewValue}
-        recording={recordingValue}
-        recordingState={recordingStateValue}
-      >
-        {children}
-      </StudioContextProviders>
+      <StudioBannersContext.Provider value={bannersValue}>
+        <VirtualCameraContext.Provider value={virtualCamera}>
+          <StudioContextProviders
+            audio={audioValue}
+            captions={captionsValue}
+            chat={chatValue}
+            cloud={cloudValue}
+            core={value}
+            diagnostics={diagnosticsValue}
+            preview={previewValue}
+            recording={recordingValue}
+            recordingState={recordingStateValue}
+            replay={replayBufferControls}
+          >
+            {children}
+            {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
+          </StudioContextProviders>
+        </VirtualCameraContext.Provider>
+      </StudioBannersContext.Provider>
     </StudioShellContext.Provider>
   )
 }

@@ -34,6 +34,19 @@ describe('notifyOnce (plan 094, S3)', () => {
     expect(notifyOnceId('other', 1_000, state)).not.toBe(first)
   })
 
+  it('forgets keys whose window has passed when a new key arrives', () => {
+    const state = new Map()
+    notifyOnceId('take:1', 1_000, state)
+    notifyOnceId('take:2', 2_000, state)
+    expect(state.size).toBe(2)
+    // take:1 is past its window, take:2 is not.
+    notifyOnceId('take:3', 2_000 + NOTIFY_ONCE_WINDOW_MS - 1, state)
+    expect([...state.keys()]).toEqual(['take:2', 'take:3'])
+    // A repeat inside the window never prunes: it only refreshes its own entry.
+    notifyOnceId('take:3', 2_000 + NOTIFY_ONCE_WINDOW_MS, state)
+    expect(state.size).toBe(2)
+  })
+
   it('shows the toast with the keyed id so repeats update in place', () => {
     const id = notifyOnce('stream:twitch', 'error', 'Streaming to Twitch stopped', {
       description: 'Reconnecting.'

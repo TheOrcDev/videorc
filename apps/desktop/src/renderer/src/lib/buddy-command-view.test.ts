@@ -70,6 +70,40 @@ describe('commandStripView (plan 140, S6 part B)', () => {
     ).toMatchObject({ quiet: true, message: "Buddy didn't catch that: 'blorp'" })
   })
 
+  it('reads a banner command (plan 186 S11) like any finished command', () => {
+    const shown = command({
+      heard: 'buddy show the sponsor banner',
+      kind: 'show-banner',
+      message: 'Showed the Sponsor banner.',
+      target: undefined
+    })
+    expect(commandStripView(shown, NOW)).toEqual({
+      commandId: 'cmd-1',
+      heard: 'Heard: “buddy show the sponsor banner”',
+      message: 'Showed the Sponsor banner.',
+      quiet: false,
+      fading: false
+    })
+    const refused = command({
+      heard: 'buddy show the logo banner',
+      kind: 'show-banner',
+      status: 'refused',
+      message: 'Four banners are showing. Hide one first.',
+      target: undefined
+    })
+    expect(commandStripView(refused, NOW)).toMatchObject({
+      quiet: true,
+      message: 'Four banners are showing. Hide one first.'
+    })
+    // No chooser and no confirm card: a banner command never waits.
+    for (const kind of ['show-banner', 'hide-banner', 'hide-banners'] as const) {
+      const done = command({ kind, status: 'done', message: 'Hid all banners.', target: undefined })
+      expect(commandChooserView(done, NOW)).toBeNull()
+      expect(commandConfirmView(done, NOW)).toBeNull()
+      expect(openCommandCardId(done, NOW)).toBeNull()
+    }
+  })
+
   it('fades a finished command after a few seconds, and keeps an open one', () => {
     const finished = command({ at: '2026-10-04T12:00:05Z' })
     expect(commandStripView(finished, NOW)?.fading).toBe(true)
@@ -131,6 +165,7 @@ describe('commandConfirmView', () => {
   it('asks before showing a comment Buddy flagged', () => {
     expect(commandConfirmView(flagged, NOW)).toEqual({
       commandId: 'cmd-1',
+      kind: 'highlight',
       title: 'Buddy flagged this (harassment). Show it anyway?',
       target: { ...target, platformLabel: 'Twitch' },
       timer: 'Expires in 18s',
@@ -152,6 +187,37 @@ describe('commandConfirmView', () => {
     expect(openCommandCardId(removal, NOW)).toBeNull()
     expect(commandConfirmView({ ...flagged, expiresAt: undefined }, NOW)?.busy).toBe(true)
     expect(openCommandCardId(flagged, NOW)).toBe('cmd-1')
+  })
+})
+
+describe('Buddy asks before a planned call (plan 209 D14)', () => {
+  const asking = command({
+    kind: 'act',
+    heard: 'buddy end the stream',
+    status: 'confirm',
+    message: 'End the livestream? Say "Buddy, yes".',
+    target: undefined,
+    expiresAt: '2026-10-04T12:00:28Z'
+  })
+
+  it('shows the question as a card that waits for a yes', () => {
+    expect(commandConfirmView(asking, NOW)).toEqual({
+      commandId: 'cmd-1',
+      kind: 'act',
+      title: 'End the livestream? Say "Buddy, yes".',
+      target: null,
+      timer: 'Expires in 18s',
+      busy: false
+    })
+    expect(openCommandCardId(asking, NOW)).toBe('cmd-1')
+    // Said yes: the calls run; the card waits without buttons.
+    expect(commandConfirmView({ ...asking, expiresAt: undefined }, NOW)?.busy).toBe(true)
+  })
+
+  it('fades like any finished command once the calls ran', () => {
+    const done = { ...asking, status: 'done' as const, message: 'The livestream ended.' }
+    expect(commandConfirmView(done, NOW)).toBeNull()
+    expect(commandStripView(done, NOW)?.message).toBe('The livestream ended.')
   })
 })
 

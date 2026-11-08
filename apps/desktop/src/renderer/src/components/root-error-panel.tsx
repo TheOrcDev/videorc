@@ -1,19 +1,12 @@
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 
-import type { CaughtError } from '@/components/error-boundary'
+import { errorDetails, type CaughtError } from '@/components/error-boundary'
 import { Button } from '@/components/ui/button'
 
 // The root panel (plan 174 S3.21, A-7), loaded only once the root boundary
 // caught something. Every window shares it, so it depends on nothing the
 // main window alone loads (use-studio, copy-text, Empty): that would split
 // those out of the main entry chunk into chunks of their own.
-
-/** What "Copy details" puts on the clipboard: the error and where it rendered. */
-export function errorDetails(error: Error, componentStack?: string | null): string {
-  const lines = [error.stack || `${error.name}: ${error.message}`]
-  if (componentStack?.trim()) lines.push('Rendered by:', componentStack.trim())
-  return lines.join('\n')
-}
 
 /** copyText's "Copied" moment, without its toast: there may be no Toaster left. */
 export function CopyDetailsButton({ details }: { details: string }): ReactElement {

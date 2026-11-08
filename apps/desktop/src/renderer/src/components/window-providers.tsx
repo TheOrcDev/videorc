@@ -39,8 +39,8 @@ export function windowToasterOffset(window: VideorcWindow): { bottom: number; ri
 
 /**
  * Every window entry wraps its tree in this: tooltips (600 ms, the desktop
- * delay) and the window's toast host. Toasts are never tinted (owner call,
- * 2026-09-29): the type colours the icon only, so there is no `richColors`.
+ * delay) and the window's toast host. Toasts are never tinted (owner call, 2026-09-29): the
+ * type colours the icon only, so there is no `richColors`.
  */
 export function WindowProviders({
   window,

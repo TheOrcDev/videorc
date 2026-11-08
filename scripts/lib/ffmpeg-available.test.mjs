@@ -15,6 +15,23 @@ test('the vendored LGPL Linux ffmpeg (OpenH264, no libx264) still builds fixture
   assert.deepEqual(fixtureH264EncoderArgsFor(output), ['-c:v', 'libopenh264', '-b:v', '4M'])
 })
 
+test('the vendored LGPL Windows ffmpeg (Media Foundation only) still builds fixtures', () => {
+  const output = ['Encoders:', line('h264_mf'), line('h264_qsv')].join('\n')
+  assert.deepEqual(fixtureH264EncoderArgsFor(output), [
+    '-c:v',
+    'h264_mf',
+    '-rate_control',
+    'quality',
+    '-quality',
+    '90'
+  ])
+})
+
+test('a software or platform encoder wins over Media Foundation when both exist', () => {
+  const output = ['Encoders:', line('h264_mf'), line('libopenh264')].join('\n')
+  assert.deepEqual(fixtureH264EncoderArgsFor(output), ['-c:v', 'libopenh264', '-b:v', '4M'])
+})
+
 test('no known H.264 encoder means no fixture args', () => {
   assert.equal(fixtureH264EncoderArgsFor(['Encoders:', line('h264_vaapi')].join('\n')), null)
   assert.equal(fixtureH264EncoderArgsFor(''), null)

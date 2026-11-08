@@ -75,7 +75,7 @@ pnpm release:record -- --request <id>
 
 Production verification uses the canonical public updater, signed-in download, exact release page and configured mirror routes. Set the authenticated website cookie as required by the verifier; it is never forwarded to storage or written to receipts. The local operator needs no Windows/public writer credential. Primary live with mirrors pending is reported separately.
 
-Announcement defaults to a preview; sending requires its explicit authorization flag and webhook environment. Only the exact published changelog entry is used. A confirmed Discord message is idempotent; an unknown response requires reconciling the actual message ID before another send. Blog mode creates a reviewable exact-release draft; publishing the external blog is a separately tracked action. The old Discord entry point refuses uncontrolled sends after cutover.
+Announcement defaults to a preview; sending requires its explicit authorization flag and webhook environment. Only the exact published changelog entry is used. Announce Windows only after public promotion. Announce Linux only after a public Linux download exists; the controller still refuses Linux public publication until it has a finalizer. Never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`. A confirmed Discord message is idempotent; an unknown response requires reconciling the actual message ID before another send. Blog mode creates a reviewable exact-release draft; publishing the external blog is a separately tracked action. The old Discord entry point refuses uncontrolled sends after cutover.
 
 ## Verification evidence in this PR
 

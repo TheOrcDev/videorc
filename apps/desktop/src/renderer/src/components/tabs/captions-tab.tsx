@@ -2,14 +2,15 @@ import type { ReactElement } from 'react'
 
 import { CaptionPreview } from '@/components/captions/caption-preview'
 import { CaptionsControls } from '@/components/captions/captions-controls'
+import { CAPTIONS_GRID, PAGE_LEAD_COLUMN, PAGE_TRAIL_COLUMN } from '@/lib/page-layout'
 
 export function CaptionsTab(): ReactElement {
   return (
-    <div className="grid lg:grid-cols-[minmax(0,1.2fr)_minmax(380px,0.8fr)]">
-      <div className="min-w-0">
+    <div className={CAPTIONS_GRID}>
+      <div className={PAGE_LEAD_COLUMN}>
         <CaptionPreview />
       </div>
-      <div className="min-w-0 border-t lg:border-t-0 lg:border-l">
+      <div className={PAGE_TRAIL_COLUMN}>
         <CaptionsControls />
       </div>
     </div>

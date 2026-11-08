@@ -74,6 +74,14 @@ describe('cloud copy (plan 184)', () => {
     expect(cloudFallbackMessage('cloud-show-limit')).toBe(
       "You've started this hour's Videorc Cloud shows. You're streaming directly from this computer for now."
     )
+    // Plan 222 D5 and D6: a quality the first nodes don't carry, and a
+    // remembered show the web could not be asked about.
+    expect(cloudFallbackMessage('cloud-quality')).toBe(
+      "Videorc Cloud carries up to 1080p60 for now. You're streaming directly from this computer."
+    )
+    expect(cloudFallbackMessage('cloud-unchecked')).toBe(
+      "Videorc couldn't check your last cloud show. You're streaming directly from this computer."
+    )
   })
 
   it('warns once when the cloud loses a show this computer fed', () => {

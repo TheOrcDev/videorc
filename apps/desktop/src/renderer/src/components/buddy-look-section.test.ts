@@ -64,6 +64,7 @@ function settings(persona: Partial<CohostSettings['persona']> = {}): CohostSetti
       ...persona
     },
     autoChat: {
+      talk: 'off',
       mode: 'off',
       greetings: { enabled: false, templates: [] },
       answers: { enabled: false, cooldownSeconds: 20 },

@@ -2,11 +2,17 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DOCK_SLOT_MIN_VISIBLE_FRACTION,
+  aspectFitRect,
   composeDockedScreenRect,
   decideDockVisibility,
+  inWindowDockedRect,
+  initialPreviewWindowMode,
   parseDockSlot,
   parseDockSlotReport,
   parsePreviewWindowMode,
+  previewWindowClosePrefs,
+  previewWindowExternalResizePolicy,
+  usableDockSlotSize,
   type DockSlotReport,
   type DockVisibilityInput
 } from './preview-dock'
@@ -32,7 +38,7 @@ const visibleInput: DockVisibilityInput = {
 }
 
 describe('parsePreviewWindowMode', () => {
-  it('defaults legacy prefs without a mode to floating', () => {
+  it('reads an unknown IPC value as floating', () => {
     expect(parsePreviewWindowMode(undefined)).toBe('floating')
     expect(parsePreviewWindowMode(null)).toBe('floating')
     expect(parsePreviewWindowMode('attached')).toBe('floating')
@@ -40,6 +46,109 @@ describe('parsePreviewWindowMode', () => {
 
   it('accepts docked', () => {
     expect(parsePreviewWindowMode('docked')).toBe('docked')
+  })
+})
+
+describe('initialPreviewWindowMode (plan 213 D5)', () => {
+  const fresh = { scripted: false, existingInstall: false }
+  const existing = { scripted: false, existingInstall: true }
+
+  it('starts a fresh install stuck to the app', () => {
+    expect(initialPreviewWindowMode(undefined, fresh)).toBe('docked')
+  })
+
+  it('keeps an existing install that never chose floating, as it was before the update', () => {
+    expect(initialPreviewWindowMode(undefined, existing)).toBe('floating')
+  })
+
+  it('keeps a saved floating choice', () => {
+    expect(initialPreviewWindowMode('floating', fresh)).toBe('floating')
+  })
+
+  it('keeps a saved docked choice, on an existing install too', () => {
+    expect(initialPreviewWindowMode('docked', fresh)).toBe('docked')
+    expect(initialPreviewWindowMode('docked', existing)).toBe('docked')
+  })
+
+  it('starts a scripted (smoke or probe) run floating unless a mode is saved', () => {
+    expect(initialPreviewWindowMode(undefined, { scripted: true, existingInstall: false })).toBe(
+      'floating'
+    )
+    expect(initialPreviewWindowMode('docked', { scripted: true, existingInstall: false })).toBe(
+      'docked'
+    )
+  })
+
+  it('treats an unknown saved value as no choice', () => {
+    expect(initialPreviewWindowMode('attached', fresh)).toBe('docked')
+    expect(initialPreviewWindowMode('attached', existing)).toBe('floating')
+  })
+})
+
+describe('previewWindowExternalResizePolicy (plan 213 D4)', () => {
+  it('keeps a window manager size on macOS and conforms the window elsewhere', () => {
+    expect(previewWindowExternalResizePolicy('darwin')).toBe('fit-inside')
+    expect(previewWindowExternalResizePolicy('win32')).toBe('conform-window')
+    expect(previewWindowExternalResizePolicy('linux')).toBe('conform-window')
+  })
+})
+
+describe('aspectFitRect', () => {
+  it('letterboxes a wide region, centred', () => {
+    // A 720x272 video region (a 720x300 tile under a 28 pt strip) at 16:9.
+    expect(aspectFitRect({ x: 0, y: 28, width: 720, height: 272 }, 16 / 9)).toEqual({
+      x: 118,
+      y: 28,
+      width: 484,
+      height: 272
+    })
+  })
+
+  it('pillarboxes a tall region, centred', () => {
+    expect(aspectFitRect({ x: 10, y: 20, width: 400, height: 600 }, 16 / 9)).toEqual({
+      x: 10,
+      y: 208,
+      width: 400,
+      height: 225
+    })
+  })
+
+  it('fills a region already on the ratio', () => {
+    expect(aspectFitRect({ x: 0, y: 0, width: 960, height: 540 }, 16 / 9)).toEqual({
+      x: 0,
+      y: 0,
+      width: 960,
+      height: 540
+    })
+  })
+
+  it('never returns an empty rect and falls back to 16:9 for a bad ratio', () => {
+    expect(aspectFitRect({ x: 0, y: 0, width: 0, height: 0 }, 0)).toEqual({
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1
+    })
+  })
+})
+
+describe('previewWindowClosePrefs', () => {
+  const frame = { x: 276, y: 143, width: 960, height: 568 }
+
+  it('remembers that the streamer closed the Preview', () => {
+    expect(previewWindowClosePrefs(frame, false)).toEqual({ frame, open: false })
+  })
+
+  it('keeps the open state when quitting closes the window (E2E 2026-11-01)', () => {
+    // Quit with the Preview open wrote `open: false`, so the next launch
+    // never restored it although `restorePreviewWindowOnLaunch` opens a
+    // Preview whose prefs are not `open: false`.
+    expect(previewWindowClosePrefs(frame, true)).toEqual({ frame })
+  })
+
+  it('saves no frame it does not know', () => {
+    expect(previewWindowClosePrefs(null, false)).toEqual({ open: false })
+    expect(previewWindowClosePrefs(null, true)).toEqual({})
   })
 })
 
@@ -115,6 +224,52 @@ describe('composeDockedScreenRect', () => {
   })
 })
 
+describe('inWindowDockedRect', () => {
+  const content = { x: 0, y: 29, width: 1896, height: 1001 }
+
+  it('places the surface at a slot that has a rect', () => {
+    expect(inWindowDockedRect(slot, content, { width: 640, height: 360 })).toEqual(
+      composeDockedScreenRect(slot, content)
+    )
+  })
+
+  // The backend sizes the idle program from these bounds: off Studio a 1x1
+  // rect made the program (and get_picture) a single pixel.
+  it('keeps the remembered size when the slot unmounts or never reported', () => {
+    const unmounted = { ...slot, x: 0, y: 0, width: 0, height: 0, mounted: false }
+    const remembered = { width: 800, height: 450 }
+    expect(inWindowDockedRect(unmounted, content, remembered)).toEqual({
+      x: 0,
+      y: 29,
+      width: 800,
+      height: 450
+    })
+    expect(inWindowDockedRect(null, content, remembered)).toEqual({
+      x: 0,
+      y: 29,
+      width: 800,
+      height: 450
+    })
+  })
+
+  it('falls to 1x1 only when no size is known at all', () => {
+    expect(inWindowDockedRect(null, content, null)).toEqual({ x: 0, y: 29, width: 1, height: 1 })
+  })
+})
+
+describe('usableDockSlotSize', () => {
+  it('reads the size of a mounted slot with a rect', () => {
+    expect(usableDockSlotSize(slot)).toEqual({ width: 800, height: 450 })
+  })
+
+  it('has none for no report, an unmounted slot or a collapsed rect', () => {
+    expect(usableDockSlotSize(null)).toBeNull()
+    expect(usableDockSlotSize({ ...slot, mounted: false })).toBeNull()
+    expect(usableDockSlotSize({ ...slot, width: 0 })).toBeNull()
+    expect(usableDockSlotSize({ ...slot, height: 0.4 })).toBeNull()
+  })
+})
+
 describe('decideDockVisibility', () => {
   it('shows a mounted, fully visible slot with a current epoch', () => {
     expect(decideDockVisibility(visibleInput)).toEqual({ visible: true, hiddenReason: null })
@@ -176,9 +331,28 @@ describe('decideDockVisibility', () => {
     )
   })
 
-  it('hides in fullscreen with its own reason', () => {
+  it('hides in fullscreen with its own reason when the surface is a child window', () => {
     expect(decideDockVisibility({ ...visibleInput, mainWindowFullScreen: true }).hiddenReason).toBe(
       'main-window-fullscreen'
     )
+  })
+
+  it('keeps showing in fullscreen when the surface is drawn inside the main window', () => {
+    // Plan 213 D3: the layer is part of the window, so fullscreen takes it along.
+    expect(
+      decideDockVisibility({
+        ...visibleInput,
+        mainWindowFullScreen: true,
+        surfaceInsideMainWindow: true
+      })
+    ).toEqual({ visible: true, hiddenReason: null })
+    expect(
+      decideDockVisibility({
+        ...visibleInput,
+        mainWindowFullScreen: true,
+        surfaceInsideMainWindow: true,
+        overlayOpen: true
+      }).hiddenReason
+    ).toBe('overlay-open')
   })
 })

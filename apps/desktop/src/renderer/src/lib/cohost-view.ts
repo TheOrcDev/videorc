@@ -22,7 +22,7 @@ import { shortcutLabel } from './platform'
 import { shortcutAccelerator } from './shortcuts'
 import { formatRelativeTime } from './format-time'
 import { plural } from './format'
-import { buddyDisplayName } from './buddy-auto-chat-view'
+import { BUDDY_POSTS_PROMISE, buddyDisplayName } from './buddy-auto-chat-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 
 export {
@@ -66,9 +66,8 @@ export const COHOST_LISTEN_DISCLOSURE = `${MIC_TO_TEXT.charAt(0).toUpperCase()}$
  * Buddy acts only when asked (plan 140). The full sentence is the Buddy tab's
  * and the pane hint's tooltip; the pane's action bar shows its first half.
  */
-export const COHOST_ACTS_ON_ASK_COPY =
-  'Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
-export const COHOST_ACTS_ON_ASK_HINT = 'Posts only in the modes you turn on.'
+export const COHOST_ACTS_ON_ASK_COPY = `${BUDDY_POSTS_PROMISE} It removes a comment only when you tell it to.`
+export const COHOST_ACTS_ON_ASK_HINT = 'Never posts on its own.'
 
 /** The flag row's "Remove from chat" key (plan 140, S6): ⌫ alone dismisses. */
 export const COHOST_REMOVE_FLAGGED_KEY = 'Shift+Backspace'
@@ -149,6 +148,16 @@ const REASON_LABELS: Record<CohostReason, string> = {
 
 export function cohostReasonLabel(reason: CohostReason | null): string | null {
   return reason ? REASON_LABELS[reason] : null
+}
+
+/**
+ * Why a tick failed, as the words after "Retrying:" while the next attempt is
+ * scheduled (`retryAt`). A gateway answer that never came is said as such, not
+ * as an "error": Buddy is still there, trying again.
+ */
+export function cohostRetryReasonLabel(reason: CohostReason | null): string | null {
+  if (reason === 'gateway-error') return "Videorc AI didn't answer"
+  return cohostReasonLabel(reason)
 }
 
 // --- Pane mode -------------------------------------------------------------

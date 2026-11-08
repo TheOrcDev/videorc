@@ -15,14 +15,14 @@ describe('Settings → General → Privacy → Share anonymous usage stats', () 
   it('waits for the backend with the switch disabled', () => {
     const markup = render(null)
     expect(markup).toContain('Share anonymous usage stats')
-    expect(markup).toMatch(/<button[^>]*disabled=""/)
+    expect(markup).toMatch(/<span(?=[^>]*role="switch")[^>]*aria-disabled="true"/)
     expect(markup).not.toContain('data-testid="usage-stats-error"')
   })
 
   it('shows the saved choice, enabled', () => {
     const on = render({ enabled: true, envDisabled: false })
     expect(on).toContain('aria-checked="true"')
-    expect(on).not.toMatch(/<button[^>]*disabled=""/)
+    expect(on).not.toMatch(/<span(?=[^>]*role="switch")[^>]*aria-disabled="true"/)
     expect(render({ enabled: false, envDisabled: false })).toContain('aria-checked="false"')
   })
 
@@ -35,7 +35,7 @@ describe('Settings → General → Privacy → Share anonymous usage stats', () 
   it('locks the switch off, with the reason, when the launch turned sharing off', () => {
     const markup = render({ enabled: false, envDisabled: true })
     expect(markup).toContain('aria-checked="false"')
-    expect(markup).toMatch(/<button[^>]*disabled=""/)
+    expect(markup).toMatch(/<span(?=[^>]*role="switch")[^>]*aria-disabled="true"/)
     expect(markup).toContain('Turned off when Videorc started. Reopen Videorc to change it.')
   })
 

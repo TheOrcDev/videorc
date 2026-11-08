@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://videorc.com"><img src="assets/social/videorc-x-cover.png" alt="Videorc — AI-native recording & streaming studio" /></a>
+  <a href="https://videorc.com"><img src="assets/social/videorc-og.png" alt="Videorc: Go live everywhere. Free. One open-source desktop studio streams to YouTube, Twitch, Kick, X, TikTok, Instagram, and any RTMP server." /></a>
 </p>
 
 <p align="center">
@@ -110,6 +110,8 @@ pnpm package:desktop
 
 See [docs/distribution.md](docs/distribution.md) for signing, notarization,
 and FFmpeg distribution details.
+
+For live microphone noise suppression, see [RNNoise setup and behavior](docs/rnnoise.md).
 
 ## Development & verification
 

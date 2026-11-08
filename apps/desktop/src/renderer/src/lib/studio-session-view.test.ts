@@ -48,6 +48,27 @@ describe('streamingSummary', () => {
   })
 })
 
+describe('a buffer-only session (plan 181)', () => {
+  const bufferOnly = { state: 'recording', sessionId: 's', replayOnly: true }
+
+  it('reads Ready, never Recording, and never pulses', () => {
+    expect(sessionStatusLabel(bufferOnly, 'connected')).toBe('Ready')
+    expect(sessionStatusTone(bufferOnly, 'connected')).toBe('good')
+    expect(sessionStatusLabel(bufferOnly, 'connected', { startBlocked: true })).toBe('Not ready')
+    expect(sessionStatusPulses(bufferOnly, 'connected')).toBe(false)
+    expect(sessionStatusGlyph(bufferOnly, 'connected')).toBeNull()
+    // A dropped socket still wins over the ring.
+    expect(sessionStatusLabel(bufferOnly, 'reconnecting')).toBe('Videorc is reconnecting…')
+  })
+
+  it('leaves Record and Go Live on the transport', () => {
+    expect(isSessionTransportActive('recording', true)).toBe(false)
+    expect(isSessionTransportActive('starting', true)).toBe(false)
+    expect(isSessionTransportActive('recording')).toBe(true)
+    expect(isSessionTransportActive('recording', false)).toBe(true)
+  })
+})
+
 describe('STOP_FINALIZE_OVERRUN_ALERT (plan 174 S3.1, B-16)', () => {
   it('explains Force stop in the streamer’s words, with the backend code it answers', () => {
     expect(RECORDING_STOP_FINALIZE_OVERRUN_CODE).toBe('recording-stop-finalize-overrun')

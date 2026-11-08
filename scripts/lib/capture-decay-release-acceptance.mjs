@@ -70,6 +70,7 @@ const CAPTURE_DECAY_D3_SENSITIVE_EXACT_PATHS = new Set([
   'apps/desktop/package.json',
   'apps/desktop/scripts/release-upload.mjs',
   'apps/desktop/build-resources/entitlements.mac.plist',
+  'apps/desktop/build-resources/entitlements.mac.inherit.plist',
   'apps/desktop/electron-builder.yml',
   'apps/desktop/electron.vite.config.ts',
   'apps/desktop/tsconfig.json',
@@ -84,6 +85,8 @@ const CAPTURE_DECAY_D3_SENSITIVE_EXACT_PATHS = new Set([
 ])
 const CAPTURE_DECAY_D3_SENSITIVE_PREFIXES = Object.freeze([
   'crates/videorc-native-preview-addon/',
+  // Plan 214: the Videorc Camera extension ships inside the signed macOS bundle.
+  'apps/desktop/camera-extension/',
   'patches/'
 ])
 const CAPTURE_DECAY_D3_PRODUCTION_PREFIXES = Object.freeze([
@@ -113,6 +116,8 @@ export const CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS = Object.freeze([
   'apps/desktop/scripts/staple-dmg.mjs',
   'scripts/check-real-source-evidence.mjs',
   'scripts/build-native-preview-addon.mjs',
+  'scripts/build-camera-extension.mjs',
+  'scripts/electron-builder-after-pack-macos.cjs',
   'scripts/generate-macos-beta-manifest.mjs',
   'scripts/preflight-macos-package.mjs',
   'scripts/ffmpeg-capture-clock.mjs',
@@ -125,10 +130,17 @@ export const CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS = Object.freeze([
   'scripts/smoke-recording-session.mjs',
   'scripts/upload-macos-beta-release.mjs',
   'scripts/validate-macos-release-artifact.mjs',
+  'scripts/wait-until-not-live.mjs',
   'scripts/lib/acceptance-gate.mjs',
   'scripts/lib/app-launcher.mjs',
+  'scripts/lib/host-lock.mjs',
+  'scripts/lib/process-group.mjs',
+  'scripts/lib/smoke-env.mjs',
   'scripts/lib/av-sync-stimulus.mjs',
   'scripts/lib/beta-release-manifest.mjs',
+  'scripts/lib/camera-extension-identifiers.mjs',
+  'scripts/lib/camera-extension-packaging.mjs',
+  'scripts/lib/camera-look-ffmpeg-filters.mjs',
   'scripts/lib/changelog.mjs',
   'scripts/lib/clean-cut-ffmpeg-filters.mjs',
   'scripts/lib/ffmpeg-sibling-paths.mjs',

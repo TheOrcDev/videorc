@@ -1,6 +1,9 @@
+'use client'
+
 import type { ReactElement } from 'react'
 
-import { kebabMenuGroups, type KebabMenuItem } from '@/components/kebab-menu'
+import { kebabMenuGroups } from '@/components/kebab-menu'
+import type { KebabMenuItem } from '@/components/kebab-menu'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -12,34 +15,12 @@ import {
 } from '@/components/ui/context-menu'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 
-/**
- * The right-click twin of a row's ⋯ menu (plan 174 S3.11, E-16): built from
- * the same `KebabMenuItem` list, so the two menus can never disagree. Groups,
- * keys, disabled reasons and the destructive item last, exactly as in
- * `KebabMenu`. The child is the row itself (the trigger, `asChild`).
- * Apart from kebab-menu.tsx so the ⋯ menu's other hosts don't load Radix's
- * context menu.
- */
-export function KebabContextMenu({
-  items,
-  children,
-  onOpenChange
-}: {
+interface KebabContextMenuProps {
+  /** The same list the row's ⋯ menu takes. */
   items: KebabMenuItem[]
+  /** The row itself: it becomes the trigger and keeps its own element. */
   children: ReactElement
   onOpenChange?: (open: boolean) => void
-}): ReactElement {
-  const groups = kebabMenuGroups(items)
-  return (
-    <ContextMenu onOpenChange={onOpenChange}>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent>
-        {groups.map((group, index) => (
-          <KebabContextMenuGroup key={group[0]?.id ?? index} items={group} separated={index > 0} />
-        ))}
-      </ContextMenuContent>
-    </ContextMenu>
-  )
 }
 
 function KebabContextMenuGroup({
@@ -55,15 +36,15 @@ function KebabContextMenuGroup({
       <ContextMenuGroup>
         {items.map((item) => (
           <DisabledReason
-            key={item.id}
             focusable={false}
+            key={item.id}
             reason={item.disabled ? item.disabledReason : null}
             side="right"
           >
             <ContextMenuItem
               disabled={item.disabled}
+              onClick={() => item.onSelect()}
               variant={item.destructive ? 'destructive' : 'default'}
-              onSelect={() => item.onSelect()}
             >
               {item.icon ? <item.icon data-icon="inline-start" /> : null}
               {item.label}
@@ -75,3 +56,26 @@ function KebabContextMenuGroup({
     </>
   )
 }
+
+/**
+ * The right-click twin of a row's ⋯ menu: built from the same `KebabMenuItem`
+ * list, so the two menus can never disagree. Groups, keys, disabled reasons
+ * and the destructive item last, exactly as in `KebabMenu`. Apart from
+ * kebab-menu.tsx so the ⋯ menu's other hosts don't load the context menu.
+ */
+function KebabContextMenu({ items, children, onOpenChange }: KebabContextMenuProps): ReactElement {
+  const groups = kebabMenuGroups(items)
+  return (
+    <ContextMenu onOpenChange={onOpenChange}>
+      <ContextMenuTrigger render={children} />
+      <ContextMenuContent>
+        {groups.map((group, index) => (
+          <KebabContextMenuGroup items={group} key={group[0]?.id ?? index} separated={index > 0} />
+        ))}
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
+export { KebabContextMenu }
+export type { KebabContextMenuProps }

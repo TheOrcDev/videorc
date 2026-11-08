@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -16,11 +17,13 @@ import type {
 } from '@/lib/backend'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
 import {
-  systemAccessAction,
-  systemAccessRows,
   type SystemAccessAction,
-  type SystemAccessRow
+  type SystemAccessRow,
+  mediaAccessStatusForPane,
+  systemAccessAction
 } from '@/lib/system-access'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
+import { previewHoldLabel } from '@/lib/performance-check'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
 import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
@@ -67,16 +70,12 @@ export function PreviewStage({
     setPreviewWindowAlwaysOnTop,
     setPreviewWindowMode,
     captureConfig,
-    deviceList,
     mediaAccess,
-    runtimeInfo
+    runtimeInfo,
+    performanceCheck,
+    performanceCheckProgress
   } = useStudioCore()
-  const accessRows = systemAccessRows({
-    deviceList,
-    audioMeter: null,
-    platform: runtimeInfo?.platform,
-    mediaAccess
-  })
+  const accessRows = useSystemAccessRows()
   const permissionPane = previewPermissionPane(previewWindow.supervisor)
   const permissionRow = accessRows.find((candidate) => candidate.id === permissionPane)
   const permissionAccess: PreviewPermissionAccess | null = permissionPane
@@ -84,12 +83,10 @@ export function PreviewStage({
         row: permissionRow,
         action: systemAccessAction({
           pane: permissionPane,
+          checking: permissionRow?.checking,
           state: permissionRow?.state,
           platform: runtimeInfo?.platform,
-          mediaAccessStatus:
-            permissionPane === 'camera' || permissionPane === 'microphone'
-              ? mediaAccess?.[permissionPane]
-              : undefined
+          mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, permissionPane)
         })
       }
     : null
@@ -107,6 +104,7 @@ export function PreviewStage({
           width: captureConfig.video.width,
           height: captureConfig.video.height
         }}
+        checkingLabel={previewHoldLabel(performanceCheck, performanceCheckProgress)}
         className={className}
         previewSurfaceStatus={previewSurfaceStatus}
         previewWindow={previewWindow}
@@ -199,9 +197,11 @@ function previewSlotRatio(aspect: { width: number; height: number }): string {
   return aspect.width > 0 && aspect.height > 0 ? `${aspect.width} / ${aspect.height}` : '16 / 9'
 }
 
-// Docked ("stick") mode: the native preview surface floats glued over the slot
-// below, so this frame is what shows through when the surface is hidden — it
-// must always state WHY (dockHiddenReason / supervisor copy), never sit blank.
+// Docked ("stick") mode: the native preview surface sits over the slot below
+// (on macOS a CAMetalLayer inside this very window, plan 213 D3; elsewhere a
+// child window glued to the slot), so this frame is what shows through when
+// the surface is hidden — it must always state WHY (dockHiddenReason /
+// supervisor copy), never sit blank.
 function DockedPreviewFrame({
   previewWindow,
   previewSurfaceStatus,
@@ -212,12 +212,15 @@ function DockedPreviewFrame({
   permissionAccess,
   onOpenPermissions,
   platform,
+  checkingLabel,
   className
 }: {
   previewWindow: PreviewWindowState
   previewSurfaceStatus?: PreviewSurfaceStatus
   aspect: { width: number; height: number }
   slotRef: (element: HTMLElement | null) => void
+  /** Plan 212: the Preview holds its last picture while a check runs; this says why. */
+  checkingLabel?: string | null
   onPopOut: () => void
   onClose: () => void
   permissionAccess: PreviewPermissionAccess | null
@@ -229,15 +232,23 @@ function DockedPreviewFrame({
   const hidden = dockHiddenDisplay(previewWindow.dockHiddenReason)
   const status =
     hidden ??
-    previewSupervisorDisplay(true, supervisor, previewSurfaceStatus, undefined, permissionAccess)
+    previewSupervisorDisplay(
+      true,
+      supervisor,
+      previewSurfaceStatus,
+      undefined,
+      permissionAccess,
+      platform
+    )
   const permissionPane = previewPermissionPane(supervisor)
   const footprintRatio = previewFootprintRatio(aspect)
   const slotRatio = previewSlotRatio(aspect)
 
   return (
-    // No border here. The native surface is a separate window glued over the
-    // slot; it clips itself to the panel radius, so the strip below rounds to
-    // the same radius. A square strip leaves a corner wedge behind the video.
+    // No border here. The native surface (a layer in this window on macOS, a
+    // window glued over the slot elsewhere) clips itself to the panel radius,
+    // so the strip below rounds to the same radius. A square strip leaves a
+    // corner wedge behind the video.
     <div
       className={cn('flex w-full flex-col overflow-hidden', className)}
       data-videorc-preview-card
@@ -277,6 +288,16 @@ function DockedPreviewFrame({
           panel around it): session status left, dock controls right, flush
           with the video edges. */}
       <div className="flex items-center justify-end gap-1.5 pt-2">
+        {checkingLabel ? (
+          <span
+            className="mr-auto flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+            data-videorc-preview-checking
+            role="status"
+          >
+            <Spinner aria-hidden className="size-3.5 shrink-0" />
+            <span className="truncate">{checkingLabel}</span>
+          </span>
+        ) : null}
         {permissionPane && permissionAccess?.action && onOpenPermissions ? (
           <Button variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
             {permissionActionLabel(permissionAccess, platform)}
@@ -304,8 +325,8 @@ export function dockHiddenDisplay(
       return { title: 'Placing preview…', detail: '' }
     case 'overlay-open':
       return {
-        title: 'Preview paused behind dialog',
-        detail: 'It returns as soon as the dialog closes.'
+        title: 'Preview hidden under this window',
+        detail: 'It returns as soon as it closes. Recording and streaming keep going.'
       }
     case 'scrolled-away':
       return {
@@ -528,6 +549,15 @@ export function previewSupervisorDisplay(
         tone: 'normal'
       }
     case 'surface-fallback':
+      // Linux has no native surface, so its CPU path is the preview, not a
+      // fallback (previewFallbackLabel). A broken surface arrives as 'failed'.
+      if (platform === 'linux') {
+        return {
+          title: 'Preview is open in its own window',
+          detail: 'Drag, resize or close it anytime.',
+          tone: 'normal'
+        }
+      }
       // AGENTS.md: a fallback is never silent. The reason stays on the card.
       return {
         title: PREVIEW_FALLBACK_LABEL,

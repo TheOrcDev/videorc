@@ -13,6 +13,20 @@ import { RemoteSettings, pairedPhonesClause } from './remote-settings'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+// Agents has its own tests (agents-section.test.ts); here it is off and empty.
+vi.mock('@/hooks/use-agents', () => ({
+  useAgents: () => ({
+    status: null,
+    activity: [],
+    activityAgentId: null,
+    activityLoaded: false,
+    bridge: null,
+    connectOpen: false,
+    connectRequest: 0,
+    offline: false
+  }),
+  useAgentsActions: () => ({})
+}))
 
 const remoteStatus: RemoteControlStatus = {
   enabled: true,
@@ -86,7 +100,7 @@ async function openPhoneMenu(name: string): Promise<void> {
     `[aria-label="More actions for ${name}"]`
   )!
   await act(async () => {
-    trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+    trigger.click()
   })
 }
 const menuItem = (text: string): HTMLElement => {

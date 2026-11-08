@@ -7,7 +7,10 @@ import {
   globalShortcutLabel,
   GlobalShortcutsRegistrar
 } from './global-shortcuts'
-import { withGlobalShortcut } from '../../../shared/global-shortcut-bindings'
+import {
+  isGlobalShortcutConfigKey,
+  withGlobalShortcut
+} from '../../../shared/global-shortcut-bindings'
 import {
   GLOBAL_SHORTCUT_ACTIONS,
   globalShortcutEntries,
@@ -24,6 +27,7 @@ describe('global layout shortcuts', () => {
       stopSession: vi.fn(),
       toggleMicrophoneMute: vi.fn(),
       markClip: vi.fn(),
+      saveReplay: vi.fn(),
       switchLayout: vi.fn()
     }
     for (const action of GLOBAL_SHORTCUT_ACTIONS.filter((action) => action.startsWith('layout')))
@@ -32,7 +36,17 @@ describe('global layout shortcuts', () => {
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
     executeGlobalShortcut('clip-mark', context)
     expect(context.markClip).toHaveBeenCalledOnce()
+    // Plan 199: the existing key stays the 30-second clip (no length).
+    expect(context.markClip).toHaveBeenLastCalledWith()
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
+    // Plan 199 D5: the second key saves the minute.
+    executeGlobalShortcut('clip-mark-long', context)
+    expect(context.markClip).toHaveBeenCalledTimes(2)
+    expect(context.markClip).toHaveBeenLastCalledWith(60)
+    // Plan 181 (redesign R4): one clip action; a replay-save key never registers.
+    executeGlobalShortcut('replay-save' as GlobalShortcutAction, context)
+    expect(context.markClip).toHaveBeenCalledTimes(2)
+    expect(globalShortcutEntries({}).some(([id]) => (id as string) === 'replay-save')).toBe(false)
     executeGlobalShortcut('invalid' as GlobalShortcutAction, context)
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
     expect(context.switchLayout).toHaveBeenCalledTimes(12)
@@ -72,10 +86,24 @@ describe('global layout shortcuts', () => {
     expect(active.startLivestream).toHaveBeenCalledOnce()
   })
   it('keeps stable IDs, unassigned defaults and validates unknown actions', () => {
-    expect(globalShortcutEntries({})).toHaveLength(17)
-    // Plan 068 D6: Mark clip ships unbound.
+    expect(globalShortcutEntries({})).toHaveLength(19)
+    // Plan 068 D6 / plan 181 R4: Save a clip ships unbound.
     expect(globalShortcutEntries({}).find(([id]) => id === 'clip-mark')?.[1]).toBeUndefined()
     expect(withGlobalShortcut({}, 'clip-mark', 'Cmd+Shift+K').clipMark).toBe('Cmd+Shift+K')
+    // Plan 199 D5: the 1-minute clip ships unbound too, with its own key.
+    expect(globalShortcutEntries({}).find(([id]) => id === 'clip-mark-long')?.[1]).toBeUndefined()
+    expect(withGlobalShortcut({}, 'clip-mark-long', 'Cmd+Shift+M').clipMarkLong).toBe('Cmd+Shift+M')
+    expect(
+      globalShortcutEntries({ clipMark: 'Alt+C', clipMarkLong: 'Alt+M' }).filter(([id]) =>
+        id.startsWith('clip-mark')
+      )
+    ).toEqual([
+      ['clip-mark', 'Alt+C'],
+      ['clip-mark-long', 'Alt+M']
+    ])
+    expect(isGlobalShortcutConfigKey('clipMarkLong')).toBe(true)
+    expect(globalShortcutLabel('clip-mark')).toBe('Save a 30-second clip')
+    expect(globalShortcutLabel('clip-mark-long')).toBe('Save a 1-minute clip')
     // Plan 069 S6: System audio ships unbound too.
     expect(
       globalShortcutEntries({}).find(([id]) => id === 'system-audio-toggle')?.[1]
@@ -211,4 +239,43 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('says why set keys do nothing where the session cannot hold them, never "another app"', async () => {
+    const unavailable = "Global shortcuts can't work in this Wayland session."
+    const setGlobalShortcuts = vi.fn(async () => ({ registered: {}, unavailable }))
+    vi.stubGlobal('window', Object.assign(new EventTarget(), { videorc: { setGlobalShortcuts } }))
+    vi.mocked(toast.error).mockClear()
+    vi.mocked(toast.warning).mockClear()
+    try {
+      const registrar = new GlobalShortcutsRegistrar()
+      // Only the default Hide screen key: nothing the person set, no toast.
+      registrar.sync({ recordToggle: '' })
+      await vi.waitFor(() => expect(setGlobalShortcuts).toHaveBeenCalledTimes(1))
+      await Promise.resolve()
+      expect(toast.warning).not.toHaveBeenCalled()
+
+      registrar.sync({ recordToggle: 'Control+Shift+R' })
+      await vi.waitFor(() => expect(toast.warning).toHaveBeenCalledTimes(1))
+      const [title, options] = vi.mocked(toast.warning).mock.calls[0] ?? []
+      expect(title).toBe("Global shortcuts don't work here")
+      expect(options?.description).toBe(unavailable)
+      expect((options?.action as { label: string }).label).toBe('Open Shortcuts')
+      expect(toast.error).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+it('dispatches saved-scene keys through the scene handler', () => {
+  const switchLayout = vi.fn()
+  executeGlobalShortcut('scene:figma', {
+    sessionActive: false,
+    startRecording: vi.fn(),
+    startLivestream: vi.fn(),
+    stopSession: vi.fn(),
+    toggleMicrophoneMute: vi.fn(),
+    switchLayout
+  })
+  expect(switchLayout).toHaveBeenCalledWith('scene:figma')
 })

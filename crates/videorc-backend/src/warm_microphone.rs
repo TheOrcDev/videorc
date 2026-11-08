@@ -299,6 +299,7 @@ pub async fn arm_warm_microphone(
         return refused("disabled-for-smoke", None);
     }
     let settings = AudioProcessingSettings {
+        noise_suppression: Default::default(),
         gain_db: params.microphone_gain_db,
         muted: params.microphone_muted,
     };
@@ -396,8 +397,10 @@ fn standby_levels_event(stats: &AudioCaptureStats, gain_db: f32) -> AudioLevelsE
         session_id: None,
         microphone: Some(AudioLevelReading::from_window(peak * gain, rms * rms)),
         system_audio: None,
+        sounds: None,
         master: None,
         master_clipped_samples: 0,
+        microphone_silent: false,
     }
 }
 
@@ -418,6 +421,7 @@ mod tests {
 
     fn settings(gain_db: f32) -> AudioProcessingSettings {
         AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db,
             muted: false,
         }

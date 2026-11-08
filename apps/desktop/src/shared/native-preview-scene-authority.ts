@@ -45,12 +45,36 @@ export function nativePreviewStatusProvesSceneRevision(
   )
 }
 
+// The renderer's wait for a commit's presented revision ends here. A proof
+// surface (Linux's preview, and the fallback elsewhere) draws each source's
+// own frames and reads back no presented revision, so none of its statuses
+// ever proves one; polling it would spend the whole proof budget on every
+// scene commit before the controls show it.
+export function nativePreviewSceneProofWaitSettled(
+  status: PreviewSurfaceStatus,
+  sceneRevision: number,
+  platform = 'darwin'
+): boolean {
+  return (
+    status.nativePreviewHostKind === 'proof-surface' ||
+    nativePreviewStatusProvesSceneRevision(status, sceneRevision, platform)
+  )
+}
+
+// Banners (plan 186) and the Buddy's layer (plan 205 S9) are program overlays
+// main places, snapshot-level like the takeover's live image, not scene
+// content: showing, moving or hiding one never bumps the scene revision, so
+// an overlay change at the same revision is never a conflicting scene.
+const PROGRAM_OVERLAY_LAYER_KINDS: ReadonlySet<string> = new Set(['banner', 'buddy'])
+
 function sceneFingerprint(scene: PreviewSurfaceSceneState): string {
-  const { updatedAt: _updatedAt, sources, ...content } = scene
+  const { updatedAt: _updatedAt, bannerCanvas: _bannerCanvas, sources, ...content } = scene
   return JSON.stringify(
     canonicalValue({
       ...content,
-      sources: sources.map(({ frameUrl: _frameUrl, ...source }) => source)
+      sources: sources
+        .filter((source) => !PROGRAM_OVERLAY_LAYER_KINDS.has(source.kind))
+        .map(({ frameUrl: _frameUrl, ...source }) => source)
     })
   )
 }

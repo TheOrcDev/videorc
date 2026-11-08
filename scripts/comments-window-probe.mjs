@@ -19,6 +19,10 @@ import {
   COMMENTS_SEND_TIMING_CONTRACT
 } from '../apps/desktop/src/shared/comments-command-timing.ts'
 import { probeCommentsArrivals } from './lib/comments-arrival-probe.mjs'
+import {
+  commentsWindowContentWidth,
+  commentsWindowFrameWidthFor
+} from './lib/comments-window-bounds.mjs'
 import { probeCommentsTotals } from './lib/comments-totals-probe.mjs'
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
 
@@ -240,9 +244,11 @@ async function main() {
     JSON.stringify(authority.invokeResults)
   )
 
-  // Chat chrome: renamed title, the corner picker, and real glass (plan 050):
-  // the shared window frame, and on macOS the OS material following the app
+  // Chat chrome: renamed title, the corner picker, and the window material:
+  // the shared window frame on the chrome ground (plan 208), following the app
   // theme like the main window (only the Preview is pinned dark).
+  // VIDEORC_GLASS=clear is the one-release A/B: real vibrancy on macOS (plan
+  // 050), Mica or the solid palette elsewhere.
   const chrome = await smokeCommand('comments-window-reader-state')
   assertProbe(
     chrome.headerTitle === 'Stream Manager',
@@ -250,11 +256,16 @@ async function main() {
     chrome.headerTitle
   )
   assertProbe(chrome.windowFrame === true, 'chrome: the shared glass window frame is mounted')
+  const clearGlass = process.env.VIDEORC_GLASS?.trim().toLowerCase() === 'clear'
   assertProbe(
-    process.platform === 'darwin'
-      ? chrome.glass?.mode?.kind === 'material' && chrome.glass?.appearance === 'follows-app'
-      : ['solid', 'mica'].includes(chrome.glass?.mode?.kind),
-    'chrome: Chat sits on real vibrancy that follows the app theme (Mica or the solid palette off macOS)',
+    clearGlass
+      ? process.platform === 'darwin'
+        ? chrome.glass?.mode?.kind === 'material' && chrome.glass?.appearance === 'follows-app'
+        : ['solid', 'mica'].includes(chrome.glass?.mode?.kind)
+      : chrome.glass?.mode?.kind === 'solid' && chrome.glass?.appearance === 'follows-app',
+    clearGlass
+      ? 'chrome: Chat sits on real vibrancy that follows the app theme (Mica or the solid palette off macOS)'
+      : 'chrome: Chat sits on the solid palette and follows the app theme',
     JSON.stringify(chrome.glass)
   )
   assertProbe(
@@ -836,7 +847,6 @@ async function probeNarrowWidths() {
       // a reset, and closes cleanly.
       assertProbe(
         [
-          'Stream health',
           'Followers',
           'Subs and members',
           'Tips',
@@ -940,12 +950,15 @@ async function layoutAt(width, options = {}) {
   // A single setBounds from a much smaller frame can land 2px wide on Linux
   // without a window manager (420 → 1280 measured 1282). Ask again; a second
   // setBounds at the same size is what later passes already do.
+  // Size the client, not the frame: Windows' outer bounds include the resize
+  // border (1280 requested measured 1266 inside). macOS asks for `width`.
+  const frameWidth = commentsWindowFrameWidthFor(width, await smokeCommand('comments-window-state'))
   let laidOut = { ok: false, last: null }
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    await smokeCommand('comments-window-set-bounds', { width, height: 640 })
+    await smokeCommand('comments-window-set-bounds', { width: frameWidth, height: 640 })
     await waitFor(
       () => smokeCommand('comments-window-state'),
-      (s) => s.bounds && Math.abs(s.bounds.width - width) <= 1,
+      (s) => s.bounds && Math.abs(commentsWindowContentWidth(s) - width) <= 1,
       5000
     )
     laidOut = await waitFor(
@@ -983,7 +996,7 @@ function assertHeaderFits(metrics, tag) {
   )
 }
 
-// Plan 057: one thin bar at every width. The clock, viewers and health lead
+// Plan 057: one thin bar at every width. The clock, viewers and followers lead
 // it, whole and side by side; any other stat is either whole or wrapped out
 // of sight, never cut at the edge.
 function assertStatsBar(metrics, tag) {
@@ -1000,10 +1013,10 @@ function assertStatsBar(metrics, tag) {
   const main = (metrics.stats ?? []).filter((stat) => stat.group === 'main')
   const gaps = main.slice(1).map((stat, index) => stat.left - main[index].right)
   assertProbe(
-    main.map((stat) => stat.id).join(',') === 'session,viewers,health' &&
+    main.map((stat) => stat.id).join(',') === 'session,viewers,followers' &&
       main.every((stat) => stat.shown) &&
       gaps.every((gap) => gap <= STATS_MAIN_MAX_GAP),
-    `${tag}: the clock, viewers and health lead the bar, whole and together`,
+    `${tag}: the clock, viewers and followers lead the bar, whole and together`,
     JSON.stringify({ main, gaps })
   )
   const cut = (metrics.stats ?? []).filter((stat) => stat.straddles)

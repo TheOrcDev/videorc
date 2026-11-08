@@ -514,6 +514,13 @@ function assertBackgroundSceneExercise(result) {
       `Native preview background scene rendered ${result.layerCount ?? 0} layer(s), expected at least 3.`
     )
   }
+  // Plan 190 zero cost: a picture background never creates a canvas (only a
+  // live background does, and only while it moves).
+  if ((result.canvasCount ?? 0) !== 0) {
+    throw new Error(
+      `Native preview picture background created ${result.canvasCount} canvas element(s), expected none: ${JSON.stringify(result)}`
+    )
+  }
 }
 
 function assertSceneReattach(result) {

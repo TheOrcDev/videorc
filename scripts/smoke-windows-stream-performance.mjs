@@ -62,6 +62,13 @@ import {
   windowsStreamCaptureProtectionPlacement
 } from './lib/windows-stream-performance.mjs'
 
+class BlockedRunError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'BlockedRunError'
+  }
+}
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 // Incident diagnostics have their own authority, identity and verdict contract.
@@ -868,6 +875,16 @@ async function runScenario({
         {
           timeoutMs: timeoutMs()
         }
+      )
+      // Plan 215 C3: the Stream Manager is on stream by default (owner call,
+      // 2026-08-19); its marker is absent only while Hide from stream is on,
+      // which turns content protection on for it on Windows. The placement
+      // check refuses a run where the switch did not take.
+      await runtime.requestSmokeCommand(
+        smoke,
+        'comments-window-set-hidden-from-stream',
+        { hidden: true },
+        { timeoutMs: timeoutMs() }
       )
       await runtime.requestSmokeCommand(
         smoke,
@@ -1728,6 +1745,9 @@ async function runScenario({
   ])
   await writeFile(artifacts.framemd5, framemd5.stdout)
 
+  // `comments` is protected here because the placement step turned its Hide
+  // from stream switch on (plan 215 C3); off, the Stream Manager is part of
+  // the show and its marker would rightly be in the stream.
   const protectedRoles = [
     'main',
     'comments',
@@ -3880,11 +3900,4 @@ function redactedRunError(error, secrets) {
   const redacted = new Error(redactedMessage)
   redacted.name = error?.name ?? 'Error'
   return redacted
-}
-
-class BlockedRunError extends Error {
-  constructor(message) {
-    super(message)
-    this.name = 'BlockedRunError'
-  }
 }

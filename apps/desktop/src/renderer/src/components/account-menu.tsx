@@ -43,6 +43,7 @@ export function AccountMenu({
   statusLabel,
   statusPulse,
   live,
+  needsSignIn = false,
   onOpenHealth,
   onOpenSettings
 }: {
@@ -53,6 +54,9 @@ export function AccountMenu({
   statusLabel: string
   statusPulse: boolean
   live: boolean
+  /** Chat or Buddy waits on the Videorc sign-in (plan 215 A5, D7): a dot on
+   * the trigger, because "Sign in" alone was easy to miss while live. */
+  needsSignIn?: boolean
   onOpenHealth: () => void
   onOpenSettings: () => void
 }): ReactElement {
@@ -64,7 +68,7 @@ export function AccountMenu({
   const [open, setOpen] = useState(false)
 
   // FX5: workspace navigation arrives via main-process IPC (⌘1–9) or the
-  // custom navigate event — neither is a DOM interaction Radix can see, so
+  // custom navigate event — neither is a DOM interaction the menu can see, so
   // the uncontrolled menu floated over the next tab. Close on any navigation
   // signal, and on Escape regardless of where focus sits.
   useEffect(() => {
@@ -92,22 +96,32 @@ export function AccountMenu({
       {/* Named by what it shows, "Sign in" or the account's name (plan 174
           S0.5, A-21): an aria-label hid the words a voice user would say, and
           the trigger already announces its menu. */}
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="flex h-7 min-w-0 items-center gap-1.5 rounded-row px-1.5 text-sm transition-colors hover:bg-sidebar-accent/60"
-        >
-          {/* The web account's avatar (uploaded on videorc.com or the Google
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            className="flex h-7 min-w-0 items-center gap-1.5 rounded-row px-1.5 text-sm transition-colors hover:bg-sidebar-accent/60"
+          />
+        }
+      >
+        {/* The web account's avatar (uploaded on videorc.com or the Google
               photo) through main's allowlisted cache; a signed-in account
               without one gets initials — a face beats a generic glyph. 20 px,
               so the initials keep the 11 px floor (A-21). */}
-          {account.status === 'signed-in' ? (
-            <AvatarCircle avatarUrl={account.avatarUrl} className="size-5" name={displayName} />
-          ) : (
-            <AccountIcon className="size-4 shrink-0 text-muted-foreground" weight="regular" />
-          )}
-          <span className="truncate text-xs font-medium">{displayName}</span>
-        </button>
+        {account.status === 'signed-in' ? (
+          <AvatarCircle avatarUrl={account.avatarUrl} className="size-5" name={displayName} />
+        ) : (
+          <AccountIcon className="size-4 shrink-0 text-muted-foreground" weight="regular" />
+        )}
+        <span className="truncate text-xs font-medium">{displayName}</span>
+        {/* Plan 215 A5 (D7): a dot while chat or Buddy waits on the sign-in.
+            Bare, so the trigger's name stays the words it shows; the Go Live
+            check, the toast and the chat row carry the sentence. */}
+        {needsSignIn ? (
+          <span data-slot="account-needs-sign-in">
+            <StatusDot tone="warn" />
+          </span>
+        ) : null}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" className="w-56">
         <DropdownMenuLabel className="flex items-center justify-between gap-2 py-1.5">
@@ -125,31 +139,31 @@ export function AccountMenu({
         <DropdownMenuSeparator />
 
         {signedIn ? (
-          <DropdownMenuItem onSelect={openAccount}>
+          <DropdownMenuItem onClick={openAccount}>
             <AccountIcon />
             Account
           </DropdownMenuItem>
         ) : (
-          <DropdownMenuItem onSelect={signIn}>
+          <DropdownMenuItem onClick={signIn}>
             <SignInIcon />
             Sign in
           </DropdownMenuItem>
         )}
-        <DropdownMenuItem onSelect={() => openVideorcWebLink(VIDEORC_WEB_LINKS.premium)}>
+        <DropdownMenuItem onClick={() => openVideorcWebLink(VIDEORC_WEB_LINKS.premium)}>
           <SparkleIcon />
           View Premium
         </DropdownMenuItem>
 
         <DropdownMenuSeparator />
 
-        <DropdownMenuItem onSelect={onOpenHealth}>
+        <DropdownMenuItem onClick={onOpenHealth}>
           <HealthIcon />
           Health
           <span className="ml-auto">
             <StatusDot tone={statusTone} label={statusLabel} pulse={statusPulse} />
           </span>
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onOpenSettings}>
+        <DropdownMenuItem onClick={onOpenSettings}>
           <SettingsIcon />
           Settings
         </DropdownMenuItem>
@@ -157,7 +171,7 @@ export function AccountMenu({
         {signedIn ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem disabled={signOutLocked} variant="destructive" onSelect={signOut}>
+            <DropdownMenuItem disabled={signOutLocked} variant="destructive" onClick={signOut}>
               <SignOutIcon />
               Sign out
             </DropdownMenuItem>

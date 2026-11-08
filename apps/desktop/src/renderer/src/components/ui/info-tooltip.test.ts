@@ -32,7 +32,7 @@ async function render(props: Partial<Parameters<typeof InfoTooltip>[0]>): Promis
   await act(async () =>
     root.render(
       createElement(TooltipProvider, {
-        delayDuration: 0,
+        delay: 0,
         children: createElement(InfoTooltip, {
           content: null,
           children: createElement(Badge, { variant: 'destructive' }, 'MP4 failed'),

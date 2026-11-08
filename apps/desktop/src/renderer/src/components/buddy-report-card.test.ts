@@ -165,9 +165,10 @@ async function render({
   sessionId = null as string | null,
   report = { payload: payload(), loading: false, error: null } as Record<string, unknown>,
   sessions = SESSIONS,
-  buddyOn = true
+  buddyOn = true,
+  name = 'Golmar'
 } = {}): Promise<void> {
-  mocked.core = { sessions, cohostSettings: { enabled: buddyOn } }
+  mocked.core = { sessions, cohostSettings: { enabled: buddyOn, persona: { name } } }
   mocked.report = { reload, ...report }
   await act(async () => root.render(createElement(BuddyReportCard, { sessionId, onSessionChange })))
 }
@@ -377,6 +378,146 @@ describe('BuddyReportCard: the Commands row (plan 140, S6)', () => {
   it('leaves the row out when no command was counted', async () => {
     await render()
     expect(document.querySelector('[data-slot="buddy-report-commands"]')).toBeNull()
+  })
+})
+
+describe('BuddyReportCard: greetings Buddy wrote and skipped (plan 192)', () => {
+  it('tags a greeting AI or Line, only when the report says', async () => {
+    await render({
+      report: {
+        payload: payload({
+          report: {
+            ...REPORT,
+            posts: [
+              {
+                id: 'u1',
+                at: REPORT.startedAt,
+                trigger: 'greeting',
+                text: 'Hi Ana, welcome to the stream!',
+                destinations: ['twitch'],
+                result: 'sent',
+                source: 'ai'
+              },
+              {
+                id: 'u2',
+                at: REPORT.startedAt,
+                trigger: 'greeting',
+                text: 'Welcome back, Bo!',
+                destinations: ['twitch'],
+                result: 'sent',
+                source: 'line'
+              },
+              {
+                id: 'u3',
+                at: REPORT.startedAt,
+                trigger: 'manual',
+                text: 'hello',
+                destinations: ['twitch'],
+                result: 'sent'
+              }
+            ]
+          }
+        }),
+        loading: false,
+        error: null
+      }
+    })
+    const tags = rows('posts').map(
+      (row) => row.querySelector('[data-testid="buddy-report-post-source"]')?.textContent ?? null
+    )
+    expect(tags).toEqual(['AI', 'Line', null])
+    // A small neutral tag: the outline badge, never a status tone.
+    expect(
+      rows('posts')[0]!
+        .querySelector('[data-testid="buddy-report-post-source"]')
+        ?.getAttribute('data-variant')
+    ).toBe('outline')
+  })
+
+  it('says why greetings were skipped, and nothing when every one went out', async () => {
+    await render({
+      report: {
+        payload: payload({
+          report: {
+            ...REPORT,
+            greetings: { ...REPORT.greetings, skipped: { noLine: 3, held: 2 } }
+          }
+        }),
+        loading: false,
+        error: null
+      }
+    })
+    expect(document.querySelector('[data-slot="buddy-report-greeting-skips"]')?.textContent).toBe(
+      'Greetings skipped: 3 had no line. 2 greetings waited their turn.'
+    )
+    await render()
+    expect(document.querySelector('[data-slot="buddy-report-greeting-skips"]')).toBeNull()
+  })
+})
+
+describe('BuddyReportCard: what Buddy said on stream (plan 211 D11)', () => {
+  const said: NonNullable<CohostSessionReport['said']> = [
+    {
+      id: 'b1',
+      at: '2026-08-22T10:01:30Z',
+      trigger: 'greeting',
+      text: 'Welcome, Ada!',
+      source: 'line'
+    },
+    { id: 'b2', at: '2026-08-22T10:04:05Z', trigger: 'answer', text: '@Ada It’s Rust today!' },
+    { id: 'b3', at: '2026-08-22T10:09:00Z', trigger: 'manual', text: 'Be right back' }
+  ]
+  const withSaid = (sessionId: string | null, extra: Partial<CohostSessionReport> = {}) =>
+    render({
+      sessionId,
+      report: {
+        payload: payload({ report: { ...REPORT, said, ...extra } }),
+        loading: false,
+        error: null
+      }
+    })
+
+  it('lists every bubble line in the posts’ row: when, why, the words and who wrote a greeting', async () => {
+    await withSaid(null)
+    const block = document.querySelector('[data-slot="buddy-report-said"]')
+    expect(block?.textContent).toContain('Said on stream')
+    expect(block?.textContent).toContain('· 3')
+    const shown = rows('said')
+    expect(
+      shown.map((row) => row.querySelector('[data-slot="list-row-title"]')?.textContent)
+    ).toEqual(['Greeting', 'Answer', 'Say'])
+    expect(shown[0]!.textContent).toContain('Welcome, Ada!')
+    expect(shown[0]!.textContent).toContain('1:30')
+    expect(shown[1]!.textContent).toContain('@Ada It’s Rust today!')
+    const tags = shown.map(
+      (row) => row.querySelector('[data-testid="buddy-report-said-source"]')?.textContent ?? null
+    )
+    expect(tags).toEqual(['Line', null, null])
+    // Nothing went to chat: no platform marks and no "Posted".
+    expect(block?.querySelector('[role="img"]')).toBeNull()
+    expect(block?.textContent).not.toContain('Posted')
+    // Posts stay chat-only, and none were made here.
+    expect(document.querySelector('[data-slot="buddy-report-posts"]')).toBeNull()
+  })
+
+  it('shows the same block for the Library’s one session', async () => {
+    await withSaid('stream-1')
+    expect(mocked.asked.at(-1)).toBe('stream-1')
+    expect(rows('said')).toHaveLength(3)
+  })
+
+  it('leaves the block out for a report without it (older, or nothing said)', async () => {
+    await render()
+    expect(document.querySelector('[data-slot="buddy-report-said"]')).toBeNull()
+  })
+
+  it("says how many greetings came while the Buddy wasn't on stream, in its name", async () => {
+    await withSaid(null, {
+      greetings: { ...REPORT.greetings, skipped: { noBubble: 46, held: 1 } }
+    })
+    expect(document.querySelector('[data-slot="buddy-report-greeting-skips"]')?.textContent).toBe(
+      "Greetings skipped: 46 came while Golmar wasn't on stream. 1 greeting waited its turn."
+    )
   })
 })
 

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import { listRustSourceTests } from './rust-source-tests.mjs'
 import {
   WINDOWS_D3D11_AGGREGATE_SCHEMA,
   WINDOWS_D3D11_HOST_SCHEMA,
@@ -279,6 +280,47 @@ describe('Windows D3D11 Rust discovery', () => {
           allowUnimplementedStages: true
         }),
       /unexpected/
+    )
+  })
+
+  it('lets a lower stage pass the full discovery listing', () => {
+    // `cargo test windows_d3d11 -- --list` lists every stage's tests.
+    const everyStage = WINDOWS_D3D11_MEDIA_STAGES.flatMap(
+      (name) => WINDOWS_D3D11_REQUIRED_RUST_TESTS[name]
+    )
+    assert.deepEqual(assertWindowsD3d11RustDiscovery(everyStage, { stage: 'capture' }), everyStage)
+    assert.throws(
+      () =>
+        assertWindowsD3d11RustDiscovery(
+          everyStage.filter((name) => !WINDOWS_D3D11_REQUIRED_RUST_TESTS.capture.includes(name)),
+          { stage: 'capture' }
+        ),
+      /missing/
+    )
+  })
+
+  it('names exactly the windows_d3d11 tests the backend sources compile on Windows', () => {
+    // Issue #1073: a module move or a cfg gate used to surface only after a
+    // 20-minute Windows build. The source listing catches both here.
+    const sourceTests = listRustSourceTests(
+      fileURLToPath(new URL('../../crates/videorc-backend/src/main.rs', import.meta.url))
+    ).filter((test) => test.name.includes('windows_d3d11'))
+    const onWindows = new Set(sourceTests.filter((test) => test.enabled).map((test) => test.name))
+    const compiledOut = new Set(
+      sourceTests.filter((test) => !test.enabled).map((test) => test.name)
+    )
+    const manifest = WINDOWS_D3D11_MEDIA_STAGES.flatMap(
+      (name) => WINDOWS_D3D11_REQUIRED_RUST_TESTS[name]
+    )
+    const unresolved = manifest
+      .filter((name) => !onWindows.has(name))
+      .map((name) => (compiledOut.has(name) ? `${name} (cfg excludes Windows)` : name))
+    assert.deepEqual(unresolved, [], 'required tests the Windows test binary cannot contain')
+    const manifestSet = new Set(manifest)
+    assert.deepEqual(
+      [...onWindows].filter((name) => !manifestSet.has(name)),
+      [],
+      'Windows windows_d3d11 tests no stage names (discovery rejects them as unexpected)'
     )
   })
 

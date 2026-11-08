@@ -364,6 +364,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            first_in_session: false,
             author_affiliation: None,
             author_verified: None,
         }

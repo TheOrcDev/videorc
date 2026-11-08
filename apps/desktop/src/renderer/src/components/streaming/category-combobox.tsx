@@ -95,28 +95,30 @@ export function CategoryCombobox({
 
   return (
     <Popover open={open} onOpenChange={setOpenState}>
-      <PopoverTrigger asChild>
-        <button
-          aria-controls={`${id}-popup`}
-          aria-expanded={open}
-          aria-haspopup="dialog"
-          className={cn(selectTriggerClassName, 'w-full min-w-0')}
-          data-placeholder={value ? undefined : ''}
-          data-size="default"
-          disabled={disabled}
-          id={id}
-          role="combobox"
-          type="button"
-        >
-          <span className="min-w-0 flex-1 truncate text-left">
-            {value ? value.name : 'Choose a category…'}
-          </span>
-          <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" />
-        </button>
+      <PopoverTrigger
+        render={
+          <button
+            aria-controls={`${id}-popup`}
+            aria-expanded={open}
+            aria-haspopup="dialog"
+            className={cn(selectTriggerClassName, 'w-full min-w-0')}
+            data-placeholder={value ? undefined : ''}
+            data-size="default"
+            disabled={disabled}
+            id={id}
+            role="combobox"
+            type="button"
+          />
+        }
+      >
+        <span className="min-w-0 flex-1 truncate text-left">
+          {value ? value.name : 'Choose a category…'}
+        </span>
+        <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" />
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="w-(--radix-popover-trigger-width) min-w-64 gap-0 p-0"
+        className="w-(--anchor-width) min-w-64 gap-0 p-0"
         id={`${id}-popup`}
       >
         <Command shouldFilter={false}>

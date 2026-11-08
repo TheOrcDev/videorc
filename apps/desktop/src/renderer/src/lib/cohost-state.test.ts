@@ -4,13 +4,15 @@ import type { CohostAutoChat } from './backend'
 import {
   buddyLiveSettingsPatch,
   cohostEnableRelayPatch,
-  DEFAULT_COHOST_AUTO_CHAT
+  DEFAULT_COHOST_AUTO_CHAT,
+  mergeAutoChatRelayPatch
 } from './cohost-state'
 
 const on = { enabled: true }
 const off = { enabled: false }
 const autoChat: CohostAutoChat = {
   ...DEFAULT_COHOST_AUTO_CHAT,
+  talk: 'suggest',
   mode: 'suggest',
   greetings: { enabled: true, templates: [] }
 }
@@ -86,5 +88,57 @@ describe('cohostEnableRelayPatch (plan 174 S0.2, S3.14a)', () => {
       enabled: true,
       listen: true
     })
+  })
+})
+
+describe('the automatic chat defaults (plan 192, plan 211)', () => {
+  it("matches Rust's defaults: Bubble, Greetings with AI and both welcomes, Answers on", () => {
+    expect(DEFAULT_COHOST_AUTO_CHAT).toStrictEqual({
+      talk: 'bubble',
+      mode: 'off',
+      greetings: {
+        enabled: true,
+        templates: [],
+        ai: true,
+        welcomes: { firstTime: { enabled: true }, returning: { enabled: true } }
+      },
+      answers: { enabled: true, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    })
+  })
+
+  it("keeps the AI switch, the welcomes and the lines when the Stream Manager's patch lands", () => {
+    const stored: CohostAutoChat = {
+      talk: 'suggest',
+      mode: 'suggest',
+      greetings: {
+        enabled: true,
+        templates: [{ id: 't', kind: 'follow', text: 'Hi {name}', state: 'talk', enabled: true }],
+        ai: false,
+        welcomes: {
+          firstTime: { enabled: true, text: 'Yo {name}!', state: 'laugh' },
+          returning: { enabled: false }
+        }
+      },
+      answers: { enabled: false, cooldownSeconds: 45 },
+      banter: { enabled: true, cooldownSeconds: 300 }
+    }
+    // Plan 211 D3: the patch carries `talk`; the legacy `mode` rides along
+    // as stored (the backend re-projects it), and is never written here.
+    expect(mergeAutoChatRelayPatch(stored, { talk: 'bubble', greetings: false })).toStrictEqual({
+      ...stored,
+      talk: 'bubble',
+      greetings: { ...stored.greetings, enabled: false }
+    })
+    expect(mergeAutoChatRelayPatch(stored, { answers: true })).toStrictEqual({
+      ...stored,
+      answers: { ...stored.answers, enabled: true }
+    })
+    // Nothing stored yet: the patch lands on the defaults.
+    expect(mergeAutoChatRelayPatch(null, { talk: 'suggest' })).toStrictEqual({
+      ...DEFAULT_COHOST_AUTO_CHAT,
+      talk: 'suggest'
+    })
+    expect(mergeAutoChatRelayPatch(null, { greetings: false }).talk).toBe('bubble')
   })
 })

@@ -36,15 +36,23 @@ import { cn } from '@/lib/utils'
 
 /**
  * The one "in use" look for a picture on Assets (plan 174 C-25): a rim and a
- * neutral chip, the same for the background on the scene and the takeover on
- * the output. Never a colour: in use is not a status.
+ * neutral chip, the same for the background on the scene, the takeover on
+ * the output and a banner on the picture ("Showing", plan 186). Never a
+ * colour: in use is not a status.
  */
 export const IN_USE_RING = 'ring-2 ring-foreground/60'
 
-export function InUseChip({ className }: { className?: string }): ReactElement {
+export function InUseChip({
+  className,
+  label = 'In use'
+}: {
+  className?: string
+  /** The word for this kind of picture's use: "In use", or "Showing" for a banner. */
+  label?: string
+}): ReactElement {
   return (
     <Badge className={className} data-videorc-in-use="">
-      In use
+      {label}
     </Badge>
   )
 }

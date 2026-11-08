@@ -16,7 +16,7 @@ its owner wants to find again. It identifies where that subject starts.
 _Avoid_: Chapter, clip, chat message
 
 **Clip mark**:
-A hint from the owner that the moment leading up to a point in a recording is worth clipping.
+A hint from the owner that the moment leading up to a point in a recording is worth clipping. A Clip press while recording keeps one beside the saved clip.
 _Avoid_: Marker, exported clip
 
 **Moment**:
@@ -57,6 +57,34 @@ _Avoid_: broadcast (except a platform's own object, like an X broadcast), live s
 What Videorc writes to a file, and each item in Library.
 _Avoid_: session (in copy), take, capture
 
+**Program**:
+What goes out: every layer at least one running output carries, and while
+nothing runs, every layer with a switch on. The Preview shows the program;
+Clips keeps what a recording would (each item's Show in recording).
+
+**Clips**:
+The Output section and its one switch, "Keep the last seconds" (plan 181,
+the owner's redesign): whenever Videorc is open it keeps the last minute
+ready (plan 199), using each item's Show in recording switch and writing
+nothing permanent. The status bar
+reads "Clip · 1:00"; the ring is never "Recording" or "On air".
+_Avoid_: Replay buffer, instant replay, replay cache, buffer (alone)
+
+**Clip** (the action):
+The one action that saves the last seconds as a clip, at one of two lengths
+(plan 199): the last 30 seconds (the Stream Manager's "Clip 30 s", the Save
+a 30-second clip key, ⌘K "Save a 30-second clip", a deck key, `/clip`, the
+spoken "clip that") or the last minute ("1 min", the Save a 1-minute clip
+key, ⌘K "Save a 1-minute clip", `/clip 60`, the spoken "clip the last
+minute" or "long clip"). While a recording runs the moment is also kept as a
+mark in the recording and its report, spanning the length asked for.
+_Avoid_: Mark clip, Save replay, Capture replay
+
+**Clip** (the file):
+The saved video ("Clip 2026-10-12 18-30-05.mp4" in the Clips folder, a row
+in Library titled Clip).
+_Avoid_: replay, highlight (for the file)
+
 **On stream**:
 Shown in what viewers see: a chat message, a takeover, Buddy. The actions
 are "Show on stream" and "Take off stream".
@@ -84,6 +112,35 @@ _Avoid_: scene (for the arrangement), composition
 A quality preset only: resolution, frame rate and bitrate together.
 _Avoid_: preset for a scene or a layout ("Layout preset")
 
+**Scene for an app**:
+A saved scene New scene… makes from an app you show (plan 210): it shows the
+app's front window, whichever window that is, and keeps working after the app
+quits and comes back. Its row reads "Figma · front window".
+_Avoid_: app scene (in copy), window scene, app capture
+
+**Follow the app in front**:
+When the streamer brings an app to the front, the stream switches to that
+app's scene. Each scene for an app follows; its ⋯ menu's "Stop following"
+turns that off, and its row says "Follows" while it does. macOS only.
+_Avoid_: auto-switch, smart switching
+
+**Swap in place**:
+How a scene switch changes the screen or window on stream (plan 210 D5): the
+one running capture changes its target instead of stopping and starting, and
+the program keeps the outgoing picture (the **held frame**) until the new
+window's first frame, then cuts. No black frame, no frame of the new window
+under the old scene's layout. Budget: 150 ms p95 from the click.
+_Avoid_: crossfade (there is none), warm capture, restart
+
+**Hide screen**:
+Covers the screen on every output (the recording, every stream, Clips and the
+Screen file) with a frosted still of it, while the camera and microphone stay
+on; "Show screen" brings it back. While it holds, the Studio and the Stream
+Manager say "Screen hidden". Its key is Control-Option-H (Ctrl+Alt+H on
+Windows and Linux) until changed in Settings → Shortcuts, and on macOS a
+password manager in front hides the screen too. Plan 210.
+_Avoid_: blur (it isn't live), privacy mode, BRB (that's a takeover), censor
+
 **Source**:
 A capture input: a screen or window, a camera, a microphone, system audio.
 _Avoid_: input, feed
@@ -93,6 +150,42 @@ A full-frame image the streamer puts on stream over everything else.
 Assets → Takeovers manages them; Studio's Takeover section puts one on
 stream.
 _Avoid_: screen, takeover screen
+
+**Banner**:
+An image the streamer places anywhere on the picture: a sponsor, their
+socials, a logo, a frame. Assets → Banners imports and manages them; the
+Scene page places them and shows or hides them ("Show", "Hide"). A banner
+stays over a takeover and under captions, Buddy and the highlight card.
+_Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
+name)
+
+**Live background**:
+An animated background behind the screen and camera: Silk, Side Rays, Plasma
+Wave, Liquid Chrome or Line Waves, from React Bits (plan 190). Assets →
+Backgrounds → Live puts one on the scene, and a click on its tile takes it
+off. A scene has one background, live or an image. Where it can't move, it
+shows a still frame of its look, and its Adjust style says why.
+_Avoid_: animated background, shader, video background, motion background
+
+**Look**:
+One of a live background's three curated color sets ("Silk · Satin"), chosen
+in its Adjust style. Each live background remembers its own look, Motion
+(Calm or Normal), Visibility and Dim.
+_Avoid_: preset (a preset is quality only), theme, variant, style
+
+**Sound**:
+A short audio file (up to 30 seconds) the streamer plays into the recording
+and every stream from the Soundboard: an airhorn, applause, a laugh.
+Assets → Sounds imports and manages them; Sources → Sounds sets their level
+and whether the streamer hears them.
+_Avoid_: clip (a clip is a stretch of a recording), sample, SFX, sound effect
+(as the feature's name), jingle
+
+**Soundboard**:
+Studio's grid of pads, one per sound, under Scenes. A click or the sound's
+key (1–9) plays it; the Stream Manager, `/sound`, ⌘K, the Stream Deck and
+the phone play the same sounds.
+_Avoid_: sound pad (in copy; it is the component's name), sampler
 
 **Off**:
 A source or a feature the streamer turned off ("Camera: Off"). When there
@@ -115,6 +208,14 @@ _Avoid_: mic
 **Camera**:
 The camera, spelled out.
 _Avoid_: cam, webcam
+
+**Videorc Camera**:
+The camera other apps see: Videorc's program, as the Preview shows it, offered
+as a camera that Meet, Zoom, Teams, Discord or FaceTime can choose. No sound.
+Output → Camera for other apps is its one home (a switch, off by default);
+⌘K and agents mirror it, and Health removes it on macOS. Windows adds
+" Windows Virtual Camera" to the name on its own. Plan 214.
+_Avoid_: virtual cam, vcam, webcam, virtual camera (in copy)
 
 ### Destinations and accounts
 
@@ -157,14 +258,40 @@ What a destination or a chat needs after its connection dropped, and the
 action that fixes it ("Twitch: reconnect to send").
 _Avoid_: re-auth, re-authorize
 
+**Discord announcement**:
+The one message Videorc posts to each of the streamer's Discord channels when
+they go live, through the webhooks they pasted in Livestream → Setup → Discord
+(one per server). It links each live destination and becomes "Was live" at
+the stop (plan 187).
+_Avoid_: notification, alert, ping (a ping is only the @here or @everyone it
+carries)
+
+**Webhook**:
+The Discord URL that lets Videorc post to one channel. It is a secret:
+Videorc shows only its last four characters.
+_Avoid_: hook, integration, bot
+
 ### Windows and pages
+
+**First-run setup**:
+The welcome steps shown once on a fresh install: Permissions ("Welcome to
+Videorc"), What are you making?, Your look, Sound check, and Where you
+stream. Where you stream shows only for Livestreams or Both; Recordings
+has four steps. Liquid Chrome fills the main window behind one card; Your
+look's scene picture plays the chosen live background inside it. Settings
+→ General → Setup and ⌘K offer "Run setup again…"; replaying returns to the
+page it opened from and preserves the first-run record. Existing installs
+skip setup on update.
+_Avoid_: onboarding (in copy), Setup alone (also a sidebar group and a
+Livestream tab)
 
 **Stream Manager**:
 The live dashboard window: chat, activity, Buddy and the stats bar.
 _Avoid_: Chat window, Comments window, comments (for chat)
 
 **Chat**:
-The viewers' messages in Stream Manager.
+The viewers' messages, in Stream Manager and, while on air with Chat in
+Studio on, in the Studio's Chat section (plan 204).
 _Avoid_: comments
 
 **Captions reader**:
@@ -174,6 +301,21 @@ _Avoid_: Captions window, caption viewer
 **Preview**, **Notes**:
 The two other windows, by these names.
 _Avoid_: Teleprompter, Preview window (as a title)
+
+**Chrome ground**:
+The still of Liquid Chrome that plan 208 put under every Videorc window. The
+owner removed it on 2026-10-29: windows are now the plain solid (chrome
+black in dark, porcelain in light), and only the phone remote still shows
+the still.
+_Avoid_: wallpaper, background (a scene has one), live background (it never
+moves), glass
+
+**Chrome controls**:
+The polished controls you touch: the chrome primary button (Go Live…,
+Continue, Save), the beads on switches and sliders, the plate on what is
+selected, and the red Record LED that lights while a recording or
+livestream runs. Panels, menus, dialogs and text stay flat.
+_Avoid_: metallic, shiny, glass buttons
 
 **Keep on top**:
 The pin that keeps a window over other apps, the same name in every window.
@@ -191,6 +333,20 @@ _Avoid_: diagnostics, logs (as the thing to send)
 Bringing a local file into Videorc: an image, a recording, an OBS setup.
 _Avoid_: Upload (for a local file), Add file
 
+### Agents
+
+**Agents**:
+AI apps on this computer (Claude, Cursor, Codex, VS Code and others) that
+run Videorc through Videorc MCP: Settings → Remote → Agents, "Let AI agents
+control Videorc". Each connected app is "an agent" with the name the
+streamer gave it ("Claude Desktop"); Stop disconnects every agent. Plan 209.
+_Avoid_: bots, AI assistants, integrations, MCP clients (in copy)
+
+**Videorc MCP**:
+What docs and the website call the way agents connect. In agent apps the
+server is named `videorc`.
+_Avoid_: Videorc API, MCP server (in the app's own copy)
+
 ### Buddy and Premium
 
 **Buddy**:
@@ -204,10 +360,13 @@ _Avoid_: the Buddy, co-host, Orcle, pet, sidekick
 The switch that lets Buddy join a livestream.
 _Avoid_: Joins my streams, chat mode (for the on switch)
 
-**Chat posting**:
-What Buddy may post to your chats as you: Off, Suggest or Auto. It never
-turns Buddy on or off; Buddy Live does.
-_Avoid_: chat mode, auto chat
+**{name} talks**:
+How Buddy talks on its own, named after the streamer's Buddy ("Golmar
+talks", else "Buddy talks"): Off, Bubble (in its bubble on stream, never in
+chat) or Suggest (a card; one click posts it to chat as you). Buddy never
+posts in your chat on its own. It never turns Buddy on or off; Buddy Live
+does. Plan 211.
+_Avoid_: Chat posting, chat mode, auto chat, Auto (gone since plan 211)
 
 **Profile**:
 The Buddy page's first tab: Buddy Live and its status, My Buddies, the look,

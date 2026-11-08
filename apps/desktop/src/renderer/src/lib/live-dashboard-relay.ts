@@ -8,6 +8,7 @@ import type {
   SessionChatTotals
 } from '@/lib/backend'
 import type { BackendClient } from '@/backendClient'
+import { sessionIsReplayOnly } from '../../../shared/capture-state'
 import { sessionChatTotalsSchema } from '../../../shared/session-chat-totals'
 
 import {
@@ -57,6 +58,16 @@ export interface LiveDashboardRelay {
  * backend events into one `LiveDashboardState` and pushes it to main at most
  * once a second. Nothing here renders; React state is never touched.
  */
+/**
+ * The session the window manages: a recording or a livestream, never a
+ * buffer-only session (plan 181), which has no viewers, chat or targets.
+ */
+function sessionRunsForTheWindow(status: RecordingStatus): boolean {
+  return (
+    (status.state === 'recording' || status.state === 'streaming') && !sessionIsReplayOnly(status)
+  )
+}
+
 export function createLiveDashboardRelay(
   push: (state: LiveDashboardState) => void,
   now: () => string = () => new Date().toISOString()
@@ -79,8 +90,8 @@ export function createLiveDashboardRelay(
         status.sessionId !== confirmedSessionId
       )
         return
-      if (status.sessionId && (status.state === 'recording' || status.state === 'streaming'))
-        confirmedSessionId = status.sessionId
+      // A buffer-only session (plan 181) is never the one the window manages.
+      if (status.sessionId && sessionRunsForTheWindow(status)) confirmedSessionId = status.sessionId
       apply(reduceDashboardRecording(state, status, now()))
       if (pendingTotals?.sessionId === confirmedSessionId)
         apply(reduceDashboardChatTotals(state, pendingTotals, now()))
@@ -193,7 +204,7 @@ export async function startLiveDashboardRelay({
       case 'recording.status': {
         const status = payload as RecordingStatus
         relay.recording(status)
-        if (status.sessionId && (status.state === 'recording' || status.state === 'streaming')) {
+        if (status.sessionId && sessionRunsForTheWindow(status)) {
           hydrate(status.sessionId)
         }
         return

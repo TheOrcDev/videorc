@@ -8,22 +8,15 @@ const PHOSPHOR_RESTRICTION = {
     'Import icons from @/components/icons instead. Add a new semantic slot there only if no existing slot already means the same thing.'
 }
 
-// Base UI is audiocn's primitive layer (plan 092). Videorc's own UI is Radix
-// (components.json: radix-rhea), so only files installed from the @audiocn
-// registry may import it. docs/audiocn.md lists them.
-const BASE_UI_RESTRICTION = {
-  group: ['@base-ui/react', '@base-ui/react/*'],
+// Videorc's UI is on Base UI, the primitive layer of the registries it
+// installs from: @videorc (videorc-ui, apps/desktop/ui-registry.json,
+// pnpm ui:sync) and @audiocn (docs/audiocn.md). Radix is gone (videorc-ui
+// plan 001, Phase 7), and nothing may bring it back.
+const RADIX_RESTRICTION = {
+  group: ['radix-ui', '@radix-ui/*'],
   message:
-    "Base UI is audiocn's primitive layer; Videorc UI uses Radix. Only files installed from @audiocn may import it (docs/audiocn.md)."
+    "Videorc's UI is on Base UI, from the @videorc registry: use the synced component (pnpm ui:sync), or add what is missing to videorc-ui."
 }
-
-const AUDIOCN_BASE_UI_FILES = [
-  'channel-strip',
-  'channel-toggle',
-  'clip-indicator',
-  'fader',
-  'parameter-slider'
-].map((name) => `apps/desktop/src/renderer/src/components/ui/${name}.tsx`)
 
 export default tseslint.config(
   {
@@ -60,7 +53,8 @@ export default tseslint.config(
         }
       ],
       'react-hooks/exhaustive-deps': 'warn',
-      'react-hooks/rules-of-hooks': 'error'
+      'react-hooks/rules-of-hooks': 'error',
+      'no-restricted-imports': ['error', { patterns: [RADIX_RESTRICTION] }]
     }
   },
   {
@@ -76,18 +70,11 @@ export default tseslint.config(
       'apps/desktop/src/renderer/src/components/stream-manager/activity-icons.tsx'
     ],
     rules: {
+      // Flat config does not merge rule options: the Radix ban again.
       'no-restricted-imports': [
         'error',
-        { paths: [PHOSPHOR_RESTRICTION], patterns: [BASE_UI_RESTRICTION] }
+        { paths: [PHOSPHOR_RESTRICTION], patterns: [RADIX_RESTRICTION] }
       ]
-    }
-  },
-  {
-    // audiocn files may build on Base UI (plan 092). Flat config does not merge
-    // rule options, so this block re-declares the rule with the icon ban only.
-    files: AUDIOCN_BASE_UI_FILES,
-    rules: {
-      'no-restricted-imports': ['error', { paths: [PHOSPHOR_RESTRICTION] }]
     }
   }
 )

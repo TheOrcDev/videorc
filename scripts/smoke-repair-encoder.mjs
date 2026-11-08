@@ -18,8 +18,9 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
-  REPAIR_ENCODER_ARGS,
+  REPAIR_ENCODER_PREFERENCE,
   parseEncoderNames,
+  repairEncoderArgs,
   selectRepairEncoder
 } from './lib/repair-encoder-capabilities.mjs'
 
@@ -30,19 +31,17 @@ function fail(message) {
   process.exit(1)
 }
 
-const bundledDir =
-  process.platform === 'win32'
-    ? join(repoRoot, 'vendor', 'ffmpeg', 'windows-x64', 'bin')
-    : join(repoRoot, 'vendor', 'ffmpeg', 'current', 'bin')
+const bundle = {
+  win32: { dir: 'windows-x64', provision: 'pnpm ffmpeg:fetch:windows' },
+  linux: { dir: 'linux-x64', provision: 'pnpm ffmpeg:fetch:linux' }
+}[process.platform] ?? { dir: 'current', provision: 'pnpm ffmpeg:build:macos' }
+const bundledDir = join(repoRoot, 'vendor', 'ffmpeg', bundle.dir, 'bin')
 const exe = process.platform === 'win32' ? '.exe' : ''
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG ?? join(bundledDir, `ffmpeg${exe}`)
 const ffprobePath = join(dirname(ffmpegPath), `ffprobe${exe}`)
 
 if (!existsSync(ffmpegPath)) {
-  fail(
-    `bundled ffmpeg not found at ${ffmpegPath} — build it with: ` +
-      (process.platform === 'win32' ? 'pnpm ffmpeg:fetch:windows' : 'pnpm ffmpeg:build:macos')
-  )
+  fail(`bundled ffmpeg not found at ${ffmpegPath} — provision it with: ${bundle.provision}`)
 }
 if (!existsSync(ffprobePath)) {
   fail(`bundled ffprobe not found next to ffmpeg at ${ffprobePath}`)
@@ -56,8 +55,8 @@ const encoders = parseEncoderNames(run(ffmpegPath, ['-hide_banner', '-encoders']
 const encoder = selectRepairEncoder(encoders)
 if (!encoder) {
   fail(
-    'this ffmpeg has NO usable H.264 repair encoder (checked libx264, ' +
-      'h264_videotoolbox, h264_mf) — transcode repairs would be dead in this bundle'
+    `this ffmpeg has NO usable H.264 repair encoder (checked ${REPAIR_ENCODER_PREFERENCE.join(', ')}) ` +
+      '— transcode repairs would be dead in this bundle'
   )
 }
 console.log(`smoke-repair-encoder: bundled ffmpeg repair encoder = ${encoder}`)
@@ -76,7 +75,7 @@ try {
     'lavfi',
     '-i',
     'testsrc=duration=2:size=320x240:rate=15',
-    ...REPAIR_ENCODER_ARGS[encoder],
+    ...repairEncoderArgs(encoder),
     '-pix_fmt',
     'yuv420p',
     fixture
@@ -97,7 +96,7 @@ try {
       fixture,
       '-vf',
       'fps=30',
-      ...REPAIR_ENCODER_ARGS[encoder],
+      ...repairEncoderArgs(encoder),
       '-pix_fmt',
       'yuv420p',
       repaired
@@ -115,8 +114,9 @@ try {
       'error',
       '-select_streams',
       'v:0',
+      '-count_frames',
       '-show_entries',
-      'stream=codec_name,avg_frame_rate',
+      'stream=codec_name,avg_frame_rate,nb_read_frames',
       '-of',
       'json',
       repaired
@@ -130,6 +130,12 @@ try {
   const fps = den > 0 ? num / den : 0
   if (Math.abs(fps - 30) > 1) {
     fail(`repaired output is not ~30 fps (got ${fps.toFixed(2)})`)
+  }
+  // 2 s at 30 fps: an encoder that skips frames (OpenH264 without
+  // -allow_skip_frames 0) would undo the repair.
+  const frames = Number(stream.nb_read_frames)
+  if (!(Math.abs(frames - 60) <= 1)) {
+    fail(`repaired output has ${stream.nb_read_frames} frames, expected 60`)
   }
 } finally {
   rmSync(workDir, { recursive: true, force: true })

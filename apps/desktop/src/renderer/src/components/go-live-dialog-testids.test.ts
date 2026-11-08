@@ -24,6 +24,7 @@ const streaming = defaultStreamingSettings()
 const youtube = streaming.targets.find((target) => target.id === 'youtube') as StreamTargetSettings
 
 vi.mock('@/hooks/use-studio', () => ({
+  useStudioBanners: () => ({ banners: [] }),
   useStudioCore: () => ({
     captureConfig: {
       ...defaultCaptureConfig,

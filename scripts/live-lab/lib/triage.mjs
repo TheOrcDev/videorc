@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { access, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
 
 import { SENSITIVE_PATTERNS } from './card-state.mjs'
@@ -722,7 +722,7 @@ export async function triageRun({
   const exec = deps.exec ?? execFileAsync
   const redactor = deps.redactor ?? (await loadRedactor())
   const log = deps.log ?? (() => {})
-  const runId = runDir.split('/').filter(Boolean).pop()
+  const runId = basename(runDir)
   const startedAt = now().toISOString()
   const record = {
     schema: TRIAGE_SCHEMA,

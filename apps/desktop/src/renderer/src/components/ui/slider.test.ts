@@ -6,9 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Field, FieldLabel } from './field'
 import { Slider } from './slider'
 
-// Plan 174 S0.5 (E-3): the name sat on Radix's root span, so every thumb (the
-// element with role="slider") was read without one, and the player's
-// scrubber announced raw milliseconds.
+// Plan 174 S0.5 (E-3): the name sat on the slider's root, so every thumb (the
+// element with role="slider", Base UI's range input inside the thumb) was
+// read without one, and the player's scrubber announced raw milliseconds.
 
 let root: Root
 let container: HTMLDivElement
@@ -30,8 +30,9 @@ async function render(element: ReactElement): Promise<void> {
   await act(async () => root.render(element))
 }
 
-function thumbs(): HTMLElement[] {
-  return [...container.querySelectorAll<HTMLElement>('[role="slider"]')]
+/** Base UI's thumbs: a range input (role slider) inside each thumb. */
+function thumbs(): HTMLInputElement[] {
+  return [...container.querySelectorAll<HTMLInputElement>('input[type="range"]')]
 }
 
 describe('Slider names its thumbs (plan 174 S0.5)', () => {
@@ -41,7 +42,7 @@ describe('Slider names its thumbs (plan 174 S0.5)', () => {
         'aria-label': 'Playhead',
         'aria-valuetext': '2:05 of 41:10',
         max: 2_470_000,
-        value: [125_000]
+        value: 125_000
       })
     )
     const [thumb] = thumbs()
@@ -53,7 +54,7 @@ describe('Slider names its thumbs (plan 174 S0.5)', () => {
   })
 
   it('forwards aria-labelledby to the thumb', async () => {
-    await render(h(Slider, { 'aria-labelledby': 'gain-label', value: [3] }))
+    await render(h(Slider, { 'aria-labelledby': 'gain-label', value: 3 }))
     expect(thumbs()[0]?.getAttribute('aria-labelledby')).toBe('gain-label')
     expect(container.querySelector('[data-slot="slider"]')!.hasAttribute('aria-labelledby')).toBe(
       false
@@ -62,12 +63,7 @@ describe('Slider names its thumbs (plan 174 S0.5)', () => {
 
   it("takes its Field's label when it names nothing, and keeps its own when it does", async () => {
     await render(
-      h(
-        Field,
-        null,
-        h(FieldLabel, null, 'Motion'),
-        h(Slider, { max: 1, step: 0.05, value: [0.45] })
-      )
+      h(Field, null, h(FieldLabel, null, 'Motion'), h(Slider, { max: 1, step: 0.05, value: 0.45 }))
     )
     const label = container.querySelector<HTMLLabelElement>('[data-slot="field-label"]')!
     expect(thumbs()[0]?.getAttribute('aria-labelledby')).toBe(label.id)
@@ -80,18 +76,17 @@ describe('Slider names its thumbs (plan 174 S0.5)', () => {
         Field,
         null,
         h(FieldLabel, null, 'Answers'),
-        h(Slider, { 'aria-label': 'Answers cooldown', value: [20] })
+        h(Slider, { 'aria-label': 'Answers cooldown', value: 20 })
       )
     )
     expect(thumbs()[0]?.getAttribute('aria-label')).toBe('Answers cooldown')
     expect(thumbs()[0]?.hasAttribute('aria-labelledby')).toBe(false)
   })
 
-  it("keeps Radix's own names on a range's two thumbs", async () => {
-    await render(h(Slider, { value: [2, 8] }))
-    expect(thumbs().map((thumb) => thumb.getAttribute('aria-label'))).toEqual([
-      'Minimum',
-      'Maximum'
-    ])
+  it('draws one thumb for a scalar and one per value for a range', async () => {
+    await render(h(Slider, { 'aria-label': 'Gain', value: 40 }))
+    expect(thumbs().map((thumb) => thumb.value)).toEqual(['40'])
+    await render(h(Slider, { 'aria-label': 'Bitrate range', value: [2, 8] }))
+    expect(thumbs().map((thumb) => thumb.value)).toEqual(['2', '8'])
   })
 })

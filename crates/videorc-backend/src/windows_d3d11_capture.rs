@@ -1243,30 +1243,16 @@ mod runtime {
                 "selected DXGI output is not attached to the desktop",
             ));
         }
-        let width = output_descriptor
-            .DesktopCoordinates
-            .right
-            .checked_sub(output_descriptor.DesktopCoordinates.left)
-            .and_then(|value| u32::try_from(value).ok())
-            .filter(|value| *value > 0)
-            .ok_or_else(|| {
-                WindowsD3d11CaptureError::new(
-                    WindowsD3d11CaptureFallbackReason::OutputUnavailable,
-                    "selected DXGI output has invalid desktop bounds",
-                )
-            })?;
-        let height = output_descriptor
-            .DesktopCoordinates
-            .bottom
-            .checked_sub(output_descriptor.DesktopCoordinates.top)
-            .and_then(|value| u32::try_from(value).ok())
-            .filter(|value| *value > 0)
-            .ok_or_else(|| {
-                WindowsD3d11CaptureError::new(
-                    WindowsD3d11CaptureFallbackReason::OutputUnavailable,
-                    "selected DXGI output has invalid desktop bounds",
-                )
-            })?;
+        // Native pixels, matching the WGC item and duplication textures; the
+        // DPI-unaware desktop rectangle is logical on a scaled display.
+        let (Some(width), Some(height)) =
+            crate::screen_capture::windows_dxgi_output_native_dimensions(&output_descriptor)
+        else {
+            return Err(WindowsD3d11CaptureError::new(
+                WindowsD3d11CaptureFallbackReason::OutputUnavailable,
+                "selected DXGI output has invalid desktop bounds",
+            ));
+        };
         let rotation = if output_descriptor.Rotation == DXGI_MODE_ROTATION_IDENTITY {
             WindowsD3d11OutputRotation::Identity
         } else if output_descriptor.Rotation == DXGI_MODE_ROTATION_ROTATE90 {

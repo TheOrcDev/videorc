@@ -91,6 +91,10 @@ pub struct YouTubeBroadcastTransitionResult {
     pub requested_status: YouTubeBroadcastTransitionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_status: Option<String>,
+    /// The broadcast's privacy as YouTube reports it (`part=status`, no
+    /// extra quota). The Discord announcement (plan 187) only links public ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_status: Option<StreamPrivacy>,
     pub message: String,
 }
 
@@ -431,6 +435,8 @@ struct YouTubeLiveBroadcastListResponse {
 #[serde(rename_all = "camelCase")]
 struct YouTubeBroadcastStatus {
     life_cycle_status: Option<String>,
+    #[serde(default)]
+    privacy_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -956,7 +962,7 @@ pub async fn transition_youtube_broadcast(
         let status_code = response.status();
         let body = response.text().await.unwrap_or_default();
         if body.contains("redundantTransition") {
-            let lifecycle_status = get_youtube_broadcast_lifecycle_status(
+            let current = get_youtube_broadcast_status(
                 state,
                 client,
                 &base_url,
@@ -964,6 +970,10 @@ pub async fn transition_youtube_broadcast(
                 &request.broadcast_id,
             )
             .await?;
+            let privacy_status = current
+                .as_ref()
+                .and_then(|status| parse_youtube_privacy(status.privacy_status.as_deref()));
+            let lifecycle_status = current.and_then(|status| status.life_cycle_status);
             let lifecycle_status = confirm_youtube_lifecycle_status(
                 state,
                 client,
@@ -980,6 +990,7 @@ pub async fn transition_youtube_broadcast(
                 broadcast_id: request.broadcast_id,
                 requested_status: request.status,
                 lifecycle_status: Some(lifecycle_status),
+                privacy_status,
                 message: format!("YouTube broadcast is already {status}."),
             });
         }
@@ -997,6 +1008,10 @@ pub async fn transition_youtube_broadcast(
         .json()
         .await
         .context("Could not parse YouTube broadcast transition response.")?;
+    let privacy_status = response
+        .status
+        .as_ref()
+        .and_then(|status| parse_youtube_privacy(status.privacy_status.as_deref()));
     let lifecycle_status = confirm_youtube_lifecycle_status(
         state,
         client,
@@ -1014,6 +1029,7 @@ pub async fn transition_youtube_broadcast(
         broadcast_id: response.id,
         requested_status: request.status,
         lifecycle_status: Some(lifecycle_status),
+        privacy_status,
         message: format!("YouTube broadcast transition requested: {status}."),
     })
 }
@@ -1025,6 +1041,20 @@ async fn get_youtube_broadcast_lifecycle_status(
     access_token: &str,
     broadcast_id: &str,
 ) -> Result<Option<String>> {
+    Ok(
+        get_youtube_broadcast_status(state, client, base_url, access_token, broadcast_id)
+            .await?
+            .and_then(|status| status.life_cycle_status),
+    )
+}
+
+async fn get_youtube_broadcast_status(
+    state: &crate::state::AppState,
+    client: &reqwest::Client,
+    base_url: &str,
+    access_token: &str,
+    broadcast_id: &str,
+) -> Result<Option<YouTubeBroadcastStatus>> {
     let response = crate::youtube_quota::send_attempt(
         state,
         crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsList,
@@ -1052,7 +1082,7 @@ async fn get_youtube_broadcast_lifecycle_status(
         .into_iter()
         .next()
         .context("YouTube broadcast was not found.")?;
-    Ok(broadcast.status.and_then(|status| status.life_cycle_status))
+    Ok(broadcast.status)
 }
 
 async fn confirm_youtube_lifecycle_status(
@@ -1282,6 +1312,16 @@ fn youtube_privacy(privacy: StreamPrivacy) -> &'static str {
         StreamPrivacy::Public => "public",
         StreamPrivacy::Unlisted => "unlisted",
         StreamPrivacy::Private => "private",
+    }
+}
+
+/// YouTube's `status.privacyStatus`; anything unknown is `None`.
+fn parse_youtube_privacy(value: Option<&str>) -> Option<StreamPrivacy> {
+    match value? {
+        "public" => Some(StreamPrivacy::Public),
+        "unlisted" => Some(StreamPrivacy::Unlisted),
+        "private" => Some(StreamPrivacy::Private),
+        _ => None,
     }
 }
 
@@ -1723,9 +1763,13 @@ mod tests {
     #[test]
     fn portrait_profiles_are_named_by_their_short_side() {
         // 1080x1920 is a 1080p broadcast, not the 2160p its height selects.
-        assert_eq!(youtube_resolution(1920_u32.min(1080)), "1080p");
-        assert_eq!(youtube_resolution(1080_u32.min(1920)), "1080p");
-        assert_eq!(youtube_resolution(1280_u32.min(720)), "720p");
+        for (width, height, expected) in [
+            (1920_u32, 1080_u32, "1080p"),
+            (1080, 1920, "1080p"),
+            (1280, 720, "720p"),
+        ] {
+            assert_eq!(youtube_resolution(width.min(height)), expected);
+        }
     }
 
     #[tokio::test]
@@ -1888,11 +1932,10 @@ mod tests {
             assert_eq!(prepared.title, "YouTube title");
             assert_eq!(prepared.description, "YouTube description");
             assert_eq!(prepared.privacy, StreamPrivacy::Unlisted);
-            assert_eq!(
-                serde_json::to_string(&prepared)
+            assert!(
+                !serde_json::to_string(&prepared)
                     .unwrap()
-                    .contains("secret-stream-name"),
-                false
+                    .contains("secret-stream-name")
             );
             assert_eq!(
                 stored,

@@ -44,6 +44,21 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
+describe('the window background', () => {
+  it.each(WINDOWS)(
+    'paints no image under the %s window: the chrome ground is gone',
+    async (window) => {
+      await act(async () =>
+        root.render(
+          createElement(WindowProviders, { window, children: createElement('p', null, 'x') })
+        )
+      )
+      expect(document.querySelector('[data-chrome-ground]')).toBeNull()
+      expect(document.querySelector('img')).toBeNull()
+    }
+  )
+})
+
 describe('windowToasterOffset', () => {
   it('lifts toasts 12 px above each status bar, or 16 px from the corner without one', () => {
     expect(windowToasterOffset('main')).toEqual({ bottom: 38, right: 16 })

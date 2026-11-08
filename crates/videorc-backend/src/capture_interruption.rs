@@ -99,6 +99,17 @@ impl CaptureInterruptionCoordinator {
         matches!(inner.state, CaptureAdmissionState::Idle)
     }
 
+    /// A committed capture has not published its terminal status yet: true
+    /// from a session's commit until `capture_finished`. With the recording
+    /// slot already empty it means a finished capture is still finalizing.
+    pub fn capture_is_finalizing(&self) -> bool {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        matches!(inner.state, CaptureAdmissionState::CaptureActive)
+    }
+
     pub fn try_begin_session_start(
         self: &Arc<Self>,
     ) -> Result<SessionStartAdmission, CaptureAdmissionBlocker> {
@@ -504,6 +515,24 @@ mod tests {
             )
             .unwrap();
         drop(admission);
+    }
+
+    #[test]
+    fn finalizing_is_only_the_committed_capture_before_its_terminal_edge() {
+        let coordinator = Arc::new(CaptureInterruptionCoordinator::default());
+        assert!(!coordinator.capture_is_finalizing());
+        let admission = coordinator.try_begin_session_start().unwrap();
+        // Starting is not finalizing: a concurrent start still refuses at once.
+        assert!(!coordinator.capture_is_finalizing());
+        admission.commit();
+        assert!(coordinator.capture_is_finalizing());
+        coordinator.capture_finished();
+        assert!(!coordinator.capture_is_finalizing());
+        let lease = coordinator
+            .try_acquire_interruption("main/action-1", "update-install")
+            .unwrap();
+        assert!(!coordinator.capture_is_finalizing());
+        drop(lease);
     }
 
     #[test]

@@ -38,6 +38,7 @@ import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { OfflineAlert } from '@/components/lock-alert'
 import { PageHeader } from '@/components/page'
 import { PANE_OWNS_SCROLL, PaneStrip } from '@/components/pane'
+import { SessionPoster } from '@/components/session-poster'
 import { StatusDot } from '@/components/status-dot'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -78,15 +79,18 @@ import type {
 import {
   finalizationFailed,
   finalizingBadgeLabel,
-  isFinalizingSession
+  interruptedTakeBadge,
+  isFinalizingSession,
+  mayBeStartFailed,
+  startFailedBadge
 } from '@/lib/session-finalization'
 import {
-  dayLabel,
-  durationMsLabel,
-  formatBytes,
-  isActiveRecordingState,
-  plural
-} from '@/lib/format'
+  recordingRoleLabel,
+  recordingRoleRowNote,
+  SEPARATE_FILE_NOTHING_TO_EXPORT,
+  separateFileStopped
+} from '@/lib/separate-source-recordings-view'
+import { dayLabel, durationMsLabel, formatBytes, plural } from '@/lib/format'
 import { openCleanCut } from '@/lib/clean-cut-events'
 import {
   cleanCutModeLabel,
@@ -123,14 +127,15 @@ import {
   pruneLibrarySelection,
   revealsFinishedCleanup,
   sessionFormatLabel,
-  sessionPosterUrl,
   sortLibrarySessions,
   toggleAllLibrarySelection,
   toggleLibrarySelection,
   type LibraryFilter,
   type LibraryPickModifier,
   type LibrarySelection,
-  type LibrarySort
+  type LibrarySort,
+  CAPTURE_HOLD_REASON,
+  canExportMp4 as sessionCanExportMp4
 } from '@/lib/library-view'
 import {
   activeNoiseCleanupSourceIds,
@@ -144,7 +149,7 @@ import {
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
-import { sessionIsLive } from '../../../../shared/capture-state'
+import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-state'
 
 const SessionMarkersDialog = lazy(async () => ({
   default: (await import('@/components/session-markers-dialog')).SessionMarkersDialog
@@ -153,9 +158,6 @@ const SessionMarkersDialog = lazy(async () => ({
 /** The table's columns: select, name, scene, duration, size, file, actions. */
 const LIBRARY_COLUMNS =
   'grid grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_8rem] items-center gap-2 px-gutter min-[1280px]:grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_13rem]'
-
-/** Why file actions wait while a recording or a livestream runs. */
-const CAPTURE_HOLD_REASON = 'Available when you stop recording or end the livestream.'
 
 /** A click that lands on one of the row's own controls is that control's, not the row's. */
 function fromRowControl(event: MouseEvent<HTMLElement>): boolean {
@@ -200,7 +202,8 @@ export function LibraryTab({
     wsStatus
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
-  const captureProtected = isActiveRecordingState(recording.state)
+  // Plan 181: the default ring writes no file, so it protects nothing here.
+  const captureProtected = sessionOwnsTransport(recording)
   const online = wsStatus === 'connected'
   const [filter, setFilter] = useState<LibraryFilter>('all')
   const [sort, setSort] = useState<LibrarySort>('newest')
@@ -498,8 +501,11 @@ export function LibraryTab({
       {/* Filter bar: filter · sort · search. */}
       <PaneStrip className="flex flex-wrap items-center gap-2">
         <Select
+          items={LIBRARY_FILTERS}
           value={filter}
-          onValueChange={(value) => changeView({ filter: value as LibraryFilter })}
+          onValueChange={(value) => {
+            if (value !== null) changeView({ filter: value })
+          }}
         >
           <SelectTrigger aria-label="Filter" className="w-40">
             <SelectValue />
@@ -514,7 +520,13 @@ export function LibraryTab({
             </SelectGroup>
           </SelectContent>
         </Select>
-        <Select value={sort} onValueChange={(value) => setSort(value as LibrarySort)}>
+        <Select
+          items={LIBRARY_SORTS}
+          value={sort}
+          onValueChange={(value) => {
+            if (value !== null) setSort(value)
+          }}
+        >
           <SelectTrigger aria-label="Sort" className="w-36">
             <SelectValue />
           </SelectTrigger>
@@ -637,7 +649,8 @@ export function LibraryTab({
                   <div role="columnheader">
                     <Checkbox
                       aria-label="Select all recordings in view"
-                      checked={selectAllState}
+                      checked={selectAllState === true}
+                      indeterminate={selectAllState === 'indeterminate'}
                       disabled={selectableIds.length === 0}
                       onCheckedChange={() =>
                         setSelection((current) => ({
@@ -870,7 +883,19 @@ function LibraryRow({
   onDelete: () => void
 }): ReactElement {
   const { recording } = useStudioRecordingState()
-  const filePath = session.mp4Path ?? session.outputPath ?? null
+  const { sessionDetails, loadSessionDetails } = useStudioCore()
+  // A Record press the backend refused leaves a failed row whose file never
+  // existed; its logs say so. They load once, only for rows of that shape.
+  const startFailedCandidate = mayBeStartFailed(session)
+  const sessionLogs = sessionDetails[session.id]?.sessionLogs
+  const startFailedLogsRequested = useRef(false)
+  useEffect(() => {
+    if (!startFailedCandidate || sessionLogs || startFailedLogsRequested.current) return
+    startFailedLogsRequested.current = true
+    void loadSessionDetails(session.id)
+  }, [startFailedCandidate, sessionLogs, loadSessionDetails, session.id])
+  const startFailed = startFailedBadge(session, sessionLogs)
+  const filePath = startFailed ? null : (session.mp4Path ?? session.outputPath ?? null)
   const format = sessionFormatLabel(session)
   const title = libraryTitle(session)
   // A live row shows the capture's ticking elapsed time; the session row only
@@ -880,6 +905,11 @@ function LibraryRow({
   // still runs; the row says so instead of claiming an MKV.
   const finalizing = isFinalizingSession(session)
   const exportFailed = finalizationFailed(session)
+  // A take that ended early (a crash, or a recording that failed mid-take),
+  // recovered as MP4.
+  const recovered = interruptedTakeBadge(session)
+  // Plan 198: a Screen or Camera file that stopped during the take.
+  const fileStopped = separateFileStopped(session)
   // A Clean cut copy (plan 119 S14): `cleanCutOfSessionId` names its source.
   const cleanCutMode = (session as CleanCutSession).cleanCutOfSessionId
     ? ((session as CleanCutSession).cleanCutMode ?? 'clean')
@@ -954,19 +984,17 @@ function LibraryRow({
               <p className="truncate text-sm font-medium">{title}</p>
               {cleanCutJob && cleanCutChip ? (
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge data-library-clean-cut={cleanCutJob.state} variant="outline">
-                      {cleanCutChip.working ? (
-                        <Spinner aria-hidden data-icon="inline-start" />
-                      ) : null}
-                      {cleanCutChip.label}
-                    </Badge>
+                  <TooltipTrigger
+                    render={<Badge data-library-clean-cut={cleanCutJob.state} variant="outline" />}
+                  >
+                    {cleanCutChip.working ? <Spinner aria-hidden data-icon="inline-start" /> : null}
+                    {cleanCutChip.label}
                   </TooltipTrigger>
                   <TooltipContent>
                     Clean cut:{' '}
                     {
                       cleanCutStatusView(cleanCutJob, {
-                        captureActive: isActiveRecordingState(recording.state),
+                        captureActive: sessionOwnsTransport(recording),
                         streaming: sessionIsLive(recording)
                       }).label
                     }
@@ -975,10 +1003,8 @@ function LibraryRow({
               ) : null}
               {quality ? (
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge data-library-quality="" variant="warning">
-                      {quality.label}
-                    </Badge>
+                  <TooltipTrigger render={<Badge data-library-quality="" variant="warning" />}>
+                    {quality.label}
                   </TooltipTrigger>
                   <TooltipContent>{quality.detail}</TooltipContent>
                 </Tooltip>
@@ -991,11 +1017,18 @@ function LibraryRow({
                 ? ` · cleaned from ${session.sourceTitle}`
                 : ''}
               {cleanCutMode && session.sourceTitle ? ` · cut from ${session.sourceTitle}` : ''}
+              {session.recordingRole ? ` · ${recordingRoleRowNote(session.recordingRole)}` : ''}
             </p>
           </div>
         </div>
         <div className="min-w-0" role="gridcell">
-          {session.processingKind === 'noise-cleanup' ? (
+          {session.recordingRole ? (
+            // Plan 157: a take's Screen or Camera file says its role where a
+            // Combined file says its scene.
+            <Badge data-recording-role={session.recordingRole} variant="outline">
+              {recordingRoleLabel(session.recordingRole)}
+            </Badge>
+          ) : session.processingKind === 'noise-cleanup' ? (
             <Badge variant="outline">Noise cleaned</Badge>
           ) : cleanCutMode ? (
             <Badge data-clean-cut={cleanCutMode} variant="outline">
@@ -1033,10 +1066,30 @@ function LibraryRow({
               <Spinner data-icon="inline-start" />
               {finalizingBadgeLabel(session)}
             </Badge>
+          ) : fileStopped ? (
+            // The file stopped during the take; its MP4 never ran (plan 198).
+            <InfoTooltip content={fileStopped.detail} tabIndex={active ? 0 : -1}>
+              <Badge data-separate-file-stopped="" variant="destructive">
+                {fileStopped.label}
+              </Badge>
+            </InfoTooltip>
           ) : exportFailed ? (
             // Why the export failed, on hover and on focus (plan 174 S1.10, E-23).
             <InfoTooltip content={session.finalizationError} tabIndex={active ? 0 : -1}>
               <Badge variant="destructive">MP4 failed</Badge>
+            </InfoTooltip>
+          ) : startFailed ? (
+            // Record was refused before anything was written: no MKV to tag.
+            <InfoTooltip content={startFailed.detail} tabIndex={active ? 0 : -1}>
+              <Badge data-session-start-failed="" variant="destructive">
+                {startFailed.label}
+              </Badge>
+            </InfoTooltip>
+          ) : recovered ? (
+            <InfoTooltip content={recovered.detail} tabIndex={active ? 0 : -1}>
+              <Badge data-interrupted-take-recovered="" variant="outline">
+                {recovered.label}
+              </Badge>
             </InfoTooltip>
           ) : format ? (
             // The container is a fact, not a status: a tag (E-21).
@@ -1058,54 +1111,6 @@ function LiveSessionDuration(): ReactElement {
   return (
     <span className="text-meta text-muted-foreground tabular-nums">
       {durationMsLabel(elapsedMs)}
-    </span>
-  )
-}
-
-/** Poster with one lazy backfill attempt: older sessions have no poster yet;
- * a 404 triggers a single sessions.poster round-trip (idle-aware backend).
- * Running sessions never request the poster — extraction waits for capture
- * idle, so the request is guaranteed to 404. */
-export function SessionPoster({
-  session
-}: {
-  session: Pick<SessionSummary, 'id' | 'durationMs' | 'status' | 'finalizationState'>
-}): ReactElement {
-  const { connection, ensureSessionPoster } = useStudioCore()
-  const { recording } = useStudioRecordingState()
-  const [attempt, setAttempt] = useState(0)
-  const [failed, setFailed] = useState(false)
-  // Posters are extracted after finalization; while the MP4 is still exporting
-  // the request would 404, so treat a finalizing row like a running one.
-  const running = session.status === 'running' || isFinalizingSession(session)
-  const url = running ? null : sessionPosterUrl(connection, session)
-  const source = url && attempt > 0 ? `${url}&attempt=${attempt}` : url
-  return (
-    <span className="grid h-10 w-[4.5rem] shrink-0 place-items-center overflow-hidden rounded-row border bg-muted/30">
-      {isLiveSession(session, recording) ? (
-        <StatusDot pulse={sessionStatusPulses(recording)} tone={sessionStatusTone(recording)} />
-      ) : source && !failed ? (
-        <img
-          alt=""
-          className="size-full object-cover"
-          src={source}
-          onError={() => {
-            if (attempt === 0) {
-              void ensureSessionPoster(session.id).then((available) => {
-                if (available) {
-                  setAttempt(1)
-                } else {
-                  setFailed(true)
-                }
-              })
-            } else {
-              setFailed(true)
-            }
-          }}
-        />
-      ) : (
-        <VideoFileIcon className="size-4 text-muted-foreground" weight="duotone" />
-      )}
     </span>
   )
 }
@@ -1145,16 +1150,18 @@ function RowActions({
         </DisabledReason>
       ) : (
         <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              aria-label="Play recording"
-              size="icon"
-              tabIndex={tabIndex}
-              variant="ghost"
-              onClick={() => void actions.play()}
-            >
-              <PlayIcon weight="fill" />
-            </Button>
+          <TooltipTrigger
+            render={
+              <Button
+                aria-label="Play recording"
+                size="icon"
+                tabIndex={tabIndex}
+                variant="ghost"
+                onClick={() => void actions.play()}
+              />
+            }
+          >
+            <PlayIcon weight="fill" />
           </TooltipTrigger>
           <TooltipContent>Play in the default player</TooltipContent>
         </Tooltip>
@@ -1237,7 +1244,7 @@ function useSessionMenu({
 
   const busy = phase === 'checking' || phase === 'repairing'
   const disconnected = wsStatus !== 'connected'
-  const captureProtected = isActiveRecordingState(recording.state)
+  const captureProtected = sessionOwnsTransport(recording)
   // The live row's file is still being written: playing or duplicating a
   // partial container yields garbage, so those wait for finalize.
   const live = isLiveSession(session, recording)
@@ -1246,10 +1253,10 @@ function useSessionMenu({
   // Background finalization (instant-record P2): the file is still being
   // produced, so play/duplicate/export wait; a failed export gets a retry.
   const finalizing = isFinalizingSession(session)
-  const canExportMp4 =
-    Boolean(
-      session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
-    ) && !finalizing
+  // Plan 198: a stopped Screen or Camera file exports what it recorded, and
+  // nothing when it recorded nothing.
+  const fileStopped = separateFileStopped(session)
+  const canExportMp4 = sessionCanExportMp4(session)
   const canOpenComments = session.commentCount > 0
   const cleanupJob = latestNoiseCleanupJobForSession(noiseCleanupJobs, session.id)
   const cleanupView = withNoiseCleanupConnectionState(
@@ -1494,9 +1501,13 @@ function useSessionMenu({
       id: 'export-mp4',
       group: 'open',
       icon: VideoFileIcon,
-      label: finalizationFailed(session) ? 'Retry MP4 export' : 'Export MP4',
+      label: finalizationFailed(session) && !fileStopped ? 'Retry MP4 export' : 'Export MP4',
       disabled: !canExportMp4 || fileActionsBusy,
-      disabledReason: canExportMp4 ? holdReason : null,
+      disabledReason: canExportMp4
+        ? holdReason
+        : fileStopped && !fileStopped.exportable
+          ? SEPARATE_FILE_NOTHING_TO_EXPORT
+          : null,
       onSelect: () => void remuxSession(session.id)
     },
     {
@@ -1655,7 +1666,7 @@ export function NoiseCleanupDirectAction({
     return (
       <>
         <Tooltip>
-          <TooltipTrigger asChild>{button}</TooltipTrigger>
+          <TooltipTrigger render={button} />
           <TooltipContent>{help}</TooltipContent>
         </Tooltip>
         <span hidden id={descriptionId}>

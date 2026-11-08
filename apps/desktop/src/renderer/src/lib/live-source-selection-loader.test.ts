@@ -122,4 +122,19 @@ describe('lazy live source controller admission', () => {
     expect(controller.reason('microphone')).toBeNull()
     controller.dispose()
   })
+
+  it('treats a buffer-only session as idle so pickers stay unlocked', async () => {
+    const callbacks = options()
+    const controller = new LazyLiveSourceSelectionController(
+      callbacks,
+      async () => controllerModule
+    )
+    controller.setSession('session-a', 'recording', true)
+    await controller.refresh()
+    expect(callbacks.get).not.toHaveBeenCalled()
+    expect(controller.reason('capture')).toBeNull()
+    expect(controller.reason('camera')).toBeNull()
+    expect(controller.reason('microphone')).toBeNull()
+    controller.dispose()
+  })
 })

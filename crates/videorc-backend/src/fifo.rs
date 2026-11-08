@@ -45,6 +45,30 @@ pub fn create_audio(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Creates an endpoint only if no owner has reserved this path. ISO startup
+/// uses this instead of the legacy recreation contract.
+pub(crate) fn create_new(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        create_with_capacity_policy(path, PIPE_OUT_BUFFER_BYTES, false)
+    }
+    #[cfg(not(windows))]
+    {
+        create(path)
+    }
+}
+
+pub(crate) fn create_audio_new(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        create_with_capacity_policy(path, AUDIO_PIPE_BUFFER_BYTES, false)
+    }
+    #[cfg(not(windows))]
+    {
+        create(path)
+    }
+}
+
 pub fn open_audio_writer(
     path: &Path,
     stop: &AtomicBool,
@@ -145,7 +169,76 @@ pub fn open_writer(
         std::thread::sleep(retry);
     }
 
+    release_unattached_reader(&c_path, path);
     Err(io::Error::new(io::ErrorKind::Interrupted, stopped_message))
+}
+
+/// Ends a reader's wait on a FIFO whose writer stopped before it attached.
+/// FFmpeg opens its inputs in order and blocks in `open()` until each FIFO
+/// has a writer; SIGTERM does not end that wait (FFmpeg's handler returns and
+/// the open restarts). A Stop that landed after FFmpeg opened the video FIFO
+/// but before it opened the audio one left it there until the stop ladder's
+/// SIGKILL six seconds later, with an unfinalized file.
+///
+/// Opening the FIFO read-write never blocks (Linux defines it; the encoder
+/// bridge's bootstrap reader relies on it on macOS) and counts as a writer,
+/// so a reader blocked in `open()` wakes up attached. An empty file then
+/// takes the FIFO's path, so a reader that opens later reads EOF at once.
+/// Closing the read-write end leaves the attached reader without a writer:
+/// it reads EOF too. FFmpeg ends that input as an empty one and finishes the
+/// take normally instead of failing on a missing input.
+#[cfg(unix)]
+fn release_unattached_reader(c_path: &std::ffi::CStr, path: &Path) {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        // Teardown already removed it: no reader can open it any more.
+        return;
+    }
+    let held = unsafe { File::from_raw_fd(fd) };
+    let Ok(fifo) = held.metadata() else {
+        return;
+    };
+    if !fifo.file_type().is_fifo() {
+        return;
+    }
+    let mut placeholder = path.as_os_str().to_owned();
+    placeholder.push(".released");
+    let placeholder = PathBuf::from(placeholder);
+    let swapped = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&placeholder)
+        .and_then(|_| {
+            // Only replace the FIFO this writer was given; a path teardown
+            // removed (or a new session recreated) stays as it is.
+            match std::fs::symlink_metadata(path) {
+                Ok(current) if current.dev() == fifo.dev() && current.ino() == fifo.ino() => {
+                    std::fs::rename(&placeholder, path)
+                }
+                _ => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "the FIFO left its path before it was released",
+                )),
+            }
+        });
+    if let Err(error) = swapped {
+        let _ = std::fs::remove_file(&placeholder);
+        tracing::debug!(
+            "FIFO {} was released without an empty stand-in: {error}",
+            path.display()
+        );
+    }
+    drop(held);
 }
 
 /// Named-pipe server instances created by `create`, waiting for `open_writer`
@@ -191,6 +284,15 @@ pub fn create(path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn create_with_capacity(path: &Path, output_buffer_bytes: u32) -> io::Result<()> {
+    create_with_capacity_policy(path, output_buffer_bytes, true)
+}
+
+#[cfg(windows)]
+fn create_with_capacity_policy(
+    path: &Path,
+    output_buffer_bytes: u32,
+    replace_stale: bool,
+) -> io::Result<()> {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_OUTBOUND,
@@ -210,14 +312,19 @@ fn create_with_capacity(path: &Path, output_buffer_bytes: u32) -> io::Result<()>
         ));
     }
 
-    {
-        let mut registry = pipe_registry()
-            .lock()
-            .map_err(|_| io::Error::other("named-pipe registry lock poisoned"))?;
-        // The stale server handle must be closed before CreateNamedPipeW runs:
-        // FILE_FLAG_FIRST_PIPE_INSTANCE checks existing OS pipe instances, so
-        // replacing the map entry after creation still leaves the old handle
-        // busy long enough for Windows to reject the replacement.
+    let mut registry = pipe_registry()
+        .lock()
+        .map_err(|_| io::Error::other("named-pipe registry lock poisoned"))?;
+    if !replace_stale && registry.contains_key(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "FIFO endpoint already has an owner",
+        ));
+    }
+    // Legacy callers explicitly recreate stale parked servers. ISO callers
+    // retain the existing handle on collision. Keep the reservation lock until
+    // the OS handle is inserted so another creator cannot cross this boundary.
+    if replace_stale {
         drop(registry.remove(path));
     }
 
@@ -240,9 +347,6 @@ fn create_with_capacity(path: &Path, output_buffer_bytes: u32) -> io::Result<()>
     }
     let owned = unsafe { OwnedHandle::from_raw_handle(handle.0 as _) };
 
-    let mut registry = pipe_registry()
-        .lock()
-        .map_err(|_| io::Error::other("named-pipe registry lock poisoned"))?;
     registry.insert(path.to_path_buf(), owned);
     Ok(())
 }
@@ -373,7 +477,7 @@ mod transport_path_tests {
     fn audio_pipe_capacity_is_separate_from_video_and_bounded_in_pcm_time() {
         assert_eq!(PIPE_OUT_BUFFER_BYTES, 16 * 1024 * 1024);
         assert!(u64::from(AUDIO_PIPE_BUFFER_BYTES) * 1000 / (48_000 * 2 * 4) <= 22);
-        assert!(AUDIO_PIPE_BUFFER_BYTES < PIPE_OUT_BUFFER_BYTES);
+        const { assert!(AUDIO_PIPE_BUFFER_BYTES < PIPE_OUT_BUFFER_BYTES) };
     }
 
     #[test]
@@ -458,6 +562,7 @@ mod tests {
     #[test]
     fn open_writer_returns_interrupted_when_stopped() {
         let path = temp_fifo_path("stopped");
+        let _ = std::fs::remove_file(&path);
         let stop = AtomicBool::new(true);
 
         let error = open_writer(
@@ -471,6 +576,125 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(error.to_string(), "writer stopped before FIFO opened");
+        assert!(
+            std::fs::symlink_metadata(&path).is_err(),
+            "a stopped writer must not create a missing endpoint"
+        );
+    }
+
+    /// Linux only: waits (bounded) until the thread sits in the kernel's FIFO
+    /// open wait, so the release is proven against a reader that is already
+    /// blocked. Where that cannot be observed the test still covers a reader
+    /// that opens after the release.
+    fn wait_until_blocked_in_fifo_open(tid: libc::c_long) {
+        #[cfg(target_os = "linux")]
+        {
+            let wchan = format!("/proc/self/task/{tid}/wchan");
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if std::fs::read_to_string(&wchan)
+                    .is_ok_and(|channel| channel.trim() == "wait_for_partner")
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = tid;
+    }
+
+    #[test]
+    fn a_stopped_writer_releases_a_reader_waiting_in_open() {
+        // A Stop between FFmpeg opening the video FIFO and the audio one left
+        // FFmpeg blocked in the audio open, deaf to SIGTERM, until SIGKILL.
+        let path = temp_fifo_path("release-waiting");
+        let _ = std::fs::remove_file(&path);
+        create(&path).expect("create fifo");
+
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader_path = path.clone();
+        std::thread::spawn(move || {
+            #[cfg(target_os = "linux")]
+            let _ = tid_tx.send(unsafe { libc::syscall(libc::SYS_gettid) });
+            #[cfg(not(target_os = "linux"))]
+            let _ = tid_tx.send(0);
+            let result = std::fs::File::open(reader_path).and_then(|mut file| {
+                let mut contents = Vec::new();
+                file.read_to_end(&mut contents).map(|_| contents)
+            });
+            let _ = done_tx.send(result);
+        });
+        wait_until_blocked_in_fifo_open(tid_rx.recv().expect("reader thread id"));
+
+        let stop = AtomicBool::new(true);
+        let error = open_writer(
+            &path,
+            &stop,
+            Duration::from_millis(1),
+            false,
+            "writer stopped before FIFO opened",
+        )
+        .expect_err("a stopped writer must not open");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+
+        let contents = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the reader stayed blocked in open() after the writer stopped")
+            .expect("the released reader reads to EOF");
+        assert!(contents.is_empty(), "nothing was written");
+
+        cleanup(&path).expect("cleanup removes the stand-in");
+        assert!(std::fs::symlink_metadata(&path).is_err());
+    }
+
+    #[test]
+    fn a_stopped_writer_leaves_an_empty_file_for_a_later_reader() {
+        let path = temp_fifo_path("release-later");
+        let _ = std::fs::remove_file(&path);
+        create(&path).expect("create fifo");
+
+        let stop = AtomicBool::new(true);
+        open_writer(
+            &path,
+            &stop,
+            Duration::from_millis(1),
+            false,
+            "writer stopped before FIFO opened",
+        )
+        .expect_err("a stopped writer must not open");
+
+        let metadata = std::fs::symlink_metadata(&path).expect("the path still exists");
+        assert!(
+            metadata.file_type().is_file(),
+            "an empty file stands in for the FIFO"
+        );
+        assert_eq!(metadata.len(), 0);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        let mut placeholder = path.as_os_str().to_owned();
+        placeholder.push(".released");
+        assert!(std::fs::symlink_metadata(PathBuf::from(placeholder)).is_err());
+
+        // A reader that reaches its open after the stop reads EOF at once
+        // instead of waiting for a writer that will never come.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader_path = path.clone();
+        std::thread::spawn(move || {
+            let result = std::fs::File::open(reader_path).and_then(|mut file| {
+                let mut contents = Vec::new();
+                file.read_to_end(&mut contents).map(|_| contents)
+            });
+            let _ = done_tx.send(result);
+        });
+        let contents = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a later reader blocked on the released path")
+            .expect("a later reader reads to EOF");
+        assert!(contents.is_empty());
+
+        cleanup(&path).expect("cleanup removes the stand-in");
+        assert!(std::fs::symlink_metadata(&path).is_err());
     }
 
     #[test]
@@ -683,6 +907,35 @@ mod windows_tests {
         assert_eq!(&reader.join().expect("reader thread"), b"ping");
         stop.store(true, Ordering::Relaxed);
         cleanup(&path).expect("cleanup");
+    }
+
+    #[test]
+    fn source_iso_create_new_preserves_parked_pipe_ownership() {
+        use std::os::windows::io::AsRawHandle;
+        let path = transport_path(&format!("source-iso-collision-{}", uuid::Uuid::new_v4()));
+        create(&path).unwrap();
+        let original = pipe_registry()
+            .lock()
+            .unwrap()
+            .get(&path)
+            .unwrap()
+            .as_raw_handle() as usize;
+        for create_new_endpoint in [create_new as fn(&Path) -> io::Result<()>, create_audio_new] {
+            assert_eq!(
+                create_new_endpoint(&path).unwrap_err().kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(
+                pipe_registry()
+                    .lock()
+                    .unwrap()
+                    .get(&path)
+                    .unwrap()
+                    .as_raw_handle() as usize,
+                original
+            );
+        }
+        cleanup(&path).unwrap();
     }
 
     #[test]

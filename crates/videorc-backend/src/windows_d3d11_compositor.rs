@@ -300,6 +300,8 @@ pub(crate) enum WindowsD3d11SceneSourceKind {
     Image,
     CaptionOverlay,
     CommentHighlight,
+    /// The chat box (plan 215 G): between the caption bar and the Buddy.
+    ChatOverlay,
     /// The Buddy's bubble (plan 168 D16; plan 164 Phase C's avatar raster
     /// before): between the pet and the card.
     BuddyOverlay,
@@ -328,6 +330,7 @@ impl WindowsD3d11SceneSourceKind {
             Self::Image => "image",
             Self::CaptionOverlay => "caption-overlay",
             Self::CommentHighlight => "comment-highlight",
+            Self::ChatOverlay => "chat-overlay",
             Self::BuddyOverlay => "buddy-overlay",
             Self::BuddySprite => "buddy-sprite",
             Self::SolidColor(_) => "solid-color",
@@ -360,6 +363,8 @@ pub(crate) struct WindowsD3d11SpriteTransform {
 pub(crate) struct WindowsD3d11LayerEffects {
     pub(crate) opacity: f32,
     pub(crate) saturation: f32,
+    pub(crate) brightness: f32,
+    pub(crate) contrast: f32,
     pub(crate) dim: f32,
     pub(crate) vignette: f32,
     pub(crate) blur_radius_px: f32,
@@ -373,6 +378,8 @@ impl Default for WindowsD3d11LayerEffects {
         Self {
             opacity: 1.0,
             saturation: 1.0,
+            brightness: 0.0,
+            contrast: 1.0,
             dim: 0.0,
             vignette: 0.0,
             blur_radius_px: 0.0,
@@ -438,20 +445,34 @@ pub(crate) struct WindowsD3d11ScenePlanRequest {
     pub(crate) encoded_outputs: Vec<WindowsD3d11EncodedOutputPlan>,
 }
 
+/// A layer's box in canvas pixels, UNCUT (plan 215 E2, D2): signed, so a box
+/// that starts left of or above the canvas keeps its true origin, and as big
+/// as its transform says. The twin of `scene_geometry::SignedPixelRect`; the
+/// rasterizer clips what hangs off the canvas, and the mask reads the quad's
+/// own uv, so nothing squashes a box onto the canvas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WindowsD3d11PixelRect {
-    pub(crate) x: u32,
-    pub(crate) y: u32,
+    pub(crate) x: i64,
+    pub(crate) y: i64,
     pub(crate) width: u32,
     pub(crate) height: u32,
 }
+
+/// The protocol's bounds for a box, as canvas fractions: the twin of
+/// `scene_geometry::MAX_SOURCE_SIZE_FRACTION` and its position bounds.
+const MAX_SOURCE_SIZE_FRACTION: f32 = 4.0;
+const MIN_SOURCE_POSITION_FRACTION: f32 = -3.0;
+const MAX_SOURCE_POSITION_FRACTION: f32 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WindowsD3d11PlannedLayer {
     pub(crate) source_id: u64,
     pub(crate) source_kind: WindowsD3d11SceneSourceKind,
     pub(crate) source_dimensions: WindowsD3d11OutputDimensions,
+    /// The fitted box, uncut; for the aspect of its mask.
     pub(crate) destination: WindowsD3d11PixelRect,
+    /// The same box as the quad the vertex shader places: normalized to the
+    /// canvas, so it may start below 0 or end past 1.
     pub(crate) destination_normalized: [f32; 4],
     pub(crate) source_uv: [f32; 4],
     pub(crate) mirror_x: bool,
@@ -599,13 +620,13 @@ pub(crate) fn build_windows_d3d11_scene_plan(
 }
 
 /// The Buddy sprite (plan 168 D7): the destination stays the unclamped
-/// normalized square (the rasterizer clips what hangs off the canvas; other
-/// layers are squashed into it by `normalized_rect_to_pixels`), and the
-/// source rect is the atlas cell exactly. `destination` (pixels) is the
-/// on-canvas part, for diagnostics only.
+/// normalized square (the rasterizer clips what hangs off the canvas, as it
+/// does for every layer since plan 215 E2), and the source rect is the atlas
+/// cell exactly. `destination` (pixels) is the same square, for diagnostics
+/// only.
 fn plan_sprite_layer(
     layer: WindowsD3d11SceneLayerInput,
-    on_canvas: WindowsD3d11PixelRect,
+    uncut: WindowsD3d11PixelRect,
 ) -> WindowsD3d11PlannedLayer {
     let crop = layer.crop;
     let clamp = |value: f32| finite_or_zero(value).clamp(0.0, 1.0);
@@ -614,7 +635,7 @@ fn plan_sprite_layer(
         source_id: layer.source_id,
         source_kind: layer.source_kind,
         source_dimensions: layer.source_dimensions,
-        destination: on_canvas,
+        destination: uncut,
         destination_normalized: [
             layer.transform.x,
             layer.transform.y,
@@ -749,6 +770,8 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
     if ![
         effects.opacity,
         effects.saturation,
+        effects.brightness,
+        effects.contrast,
         effects.dim,
         effects.vignette,
         effects.blur_radius_px,
@@ -757,6 +780,8 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
     .all(f32::is_finite)
         || !(0.0..=1.0).contains(&effects.opacity)
         || effects.saturation < 0.0
+        || !(-0.25..=0.25).contains(&effects.brightness)
+        || !(0.5..=1.5).contains(&effects.contrast)
         || !(0.0..=1.0).contains(&effects.dim)
         || !(0.0..=1.0).contains(&effects.vignette)
         || !(0.0..=MAX_BLUR_RADIUS_PX).contains(&effects.blur_radius_px)
@@ -811,16 +836,18 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
     Ok(())
 }
 
+/// The layer's UNCUT box in canvas pixels (plan 215 E2): its true origin,
+/// signed, and its true size, within the protocol's bounds. Before, the
+/// origin was clamped onto the canvas and the size shrunk to what was left,
+/// which squashed a box past the edge instead of cutting it.
 fn normalized_rect_to_pixels(
     transform: WindowsD3d11NormalizedTransform,
     canvas: WindowsD3d11OutputDimensions,
 ) -> Result<WindowsD3d11PixelRect, WindowsD3d11CompositorError> {
-    let x = normalized_to_pixel(transform.x, canvas.width).min(canvas.width.saturating_sub(1));
-    let y = normalized_to_pixel(transform.y, canvas.height).min(canvas.height.saturating_sub(1));
-    let max_width = canvas.width.saturating_sub(x).max(1);
-    let max_height = canvas.height.saturating_sub(y).max(1);
-    let width = normalized_to_span(transform.width, canvas.width).min(max_width);
-    let height = normalized_to_span(transform.height, canvas.height).min(max_height);
+    let x = normalized_to_pixel(transform.x, canvas.width);
+    let y = normalized_to_pixel(transform.y, canvas.height);
+    let width = normalized_to_span(transform.width, canvas.width);
+    let height = normalized_to_span(transform.height, canvas.height);
     if width == 0 || height == 0 {
         return Err(WindowsD3d11CompositorError::invalid(
             "normalized scene transform resolved to an empty rectangle",
@@ -834,12 +861,14 @@ fn normalized_rect_to_pixels(
     })
 }
 
-fn normalized_to_pixel(value: f32, span: u32) -> u32 {
-    (finite_or_zero(value).clamp(0.0, 1.0) * span as f32).round() as u32
+fn normalized_to_pixel(value: f32, span: u32) -> i64 {
+    (finite_or_zero(value).clamp(MIN_SOURCE_POSITION_FRACTION, MAX_SOURCE_POSITION_FRACTION)
+        * span as f32)
+        .round() as i64
 }
 
 fn normalized_to_span(value: f32, span: u32) -> u32 {
-    (finite_or_zero(value).clamp(0.0, 1.0) * span as f32)
+    (finite_or_zero(value).clamp(0.0, MAX_SOURCE_SIZE_FRACTION) * span as f32)
         .round()
         .max(1.0) as u32
 }
@@ -886,8 +915,8 @@ fn source_fit(
             };
             Ok(SourceFit {
                 destination: WindowsD3d11PixelRect {
-                    x: rect.x + (rect.width - width) / 2,
-                    y: rect.y + (rect.height - height) / 2,
+                    x: rect.x + i64::from((rect.width - width) / 2),
+                    y: rect.y + i64::from((rect.height - height) / 2),
                     width,
                     height,
                 },
@@ -1104,6 +1133,7 @@ mod runtime {
         sprite_affine: [f32; 4],
         /// Sprite pivot x, y (normalized output), enabled (1), reserved.
         sprite_pivot: [f32; 4],
+        camera_look: [f32; 4],
     }
 
     pub(crate) struct WindowsD3d11Compositor {
@@ -1997,6 +2027,7 @@ mod runtime {
             sprite_pivot: layer.effects.sprite.map_or([0.0; 4], |sprite| {
                 [sprite.pivot[0], sprite.pivot[1], 1.0, 0.0]
             }),
+            camera_look: [layer.effects.brightness, layer.effects.contrast, 0.0, 0.0],
         }
     }
 
@@ -2893,7 +2924,7 @@ mod runtime {
                     .unwrap_or_else(|error| panic!("{entry_point}: {}", error.detail));
                 assert!(!bytecode.is_empty(), "{entry_point} has bytecode");
             }
-            assert_eq!(std::mem::size_of::<super::DrawConstants>(), 11 * 16);
+            assert_eq!(std::mem::size_of::<super::DrawConstants>(), 12 * 16);
             assert_eq!(
                 std::mem::offset_of!(super::DrawConstants, sprite_affine),
                 9 * 16
@@ -2906,8 +2937,6 @@ mod runtime {
     }
 }
 
-#[cfg(all(test, target_os = "windows"))]
-pub(crate) use runtime::WindowsD3d11ParityReadback;
 #[cfg(target_os = "windows")]
 pub(crate) use runtime::{
     WindowsD3d11BgraUpload, WindowsD3d11ComposedFrame, WindowsD3d11Compositor,
@@ -3028,6 +3057,69 @@ mod tests {
         );
         assert!((vertical.layers[0].source_uv[0] - 0.341_796_88).abs() < 0.000_01);
         assert!((vertical.layers[0].source_uv[2] - 0.316_406_25).abs() < 0.000_01);
+    }
+
+    /// Plan 215 E2 (D2): a box bigger than the canvas plans as its uncut
+    /// self: a signed origin, its true size, the full source, and a quad the
+    /// vertex shader places past the canvas edge (the rasterizer clips it).
+    /// Before, `normalized_rect_to_pixels` squashed it onto the canvas.
+    #[test]
+    fn windows_d3d11_compositor_plans_the_uncut_box_beyond_the_canvas() {
+        let mut screen = layer(3, WindowsD3d11SceneSourceKind::Display, dimensions(64, 36));
+        screen.transform = WindowsD3d11NormalizedTransform {
+            x: -0.25,
+            y: -0.25,
+            width: 1.5,
+            height: 1.5,
+        };
+        let plan = build_windows_d3d11_scene_plan(request(
+            WindowsD3d11CanvasOrientation::Horizontal,
+            dimensions(128, 72),
+            vec![screen],
+        ))
+        .expect("oversized plan");
+        let planned = &plan.layers[0];
+        assert_eq!(
+            planned.destination,
+            WindowsD3d11PixelRect {
+                x: -32,
+                y: -18,
+                width: 192,
+                height: 108,
+            }
+        );
+        assert_eq!(planned.destination_normalized, [-0.25, -0.25, 1.5, 1.5]);
+        assert_eq!(planned.source_uv, [0.0, 0.0, 1.0, 1.0]);
+        // The quad's corners, as `SceneVs` places them: off the canvas on
+        // every side, so the canvas shows the middle two thirds of the box.
+        let corner = |unit: [f32; 2]| {
+            windows_d3d11_scene_vertex(planned.destination_normalized, None, [0.0, 0.0], unit)
+        };
+        assert_eq!(corner([0.0, 0.0]), [-0.25, -0.25]);
+        assert_eq!(corner([1.0, 1.0]), [1.25, 1.25]);
+        // A 400% box, centred, keeps its true size too.
+        let mut huge = layer(4, WindowsD3d11SceneSourceKind::Display, dimensions(64, 36));
+        huge.transform = WindowsD3d11NormalizedTransform {
+            x: -1.5,
+            y: -1.5,
+            width: 4.0,
+            height: 4.0,
+        };
+        let plan = build_windows_d3d11_scene_plan(request(
+            WindowsD3d11CanvasOrientation::Horizontal,
+            dimensions(1920, 1080),
+            vec![huge],
+        ))
+        .expect("400% plan");
+        assert_eq!(
+            plan.layers[0].destination,
+            WindowsD3d11PixelRect {
+                x: -2880,
+                y: -1620,
+                width: 7680,
+                height: 4320,
+            }
+        );
     }
 
     #[test]

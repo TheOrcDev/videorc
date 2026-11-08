@@ -20,6 +20,10 @@
   executing the entire plan and create a PR. Of course don't merge this."
   Every ⚑ below therefore takes its recommended answer (Owner decisions).
   Progress is tracked in Progress.
+- **Ported in plan 222** (2026-11-08): the desktop work was re-applied
+  onto current `origin/main` (0.20.4) on `plan-222-cloud-on-main`, group by
+  group (plan 222 P2 to P8), and lands in #727 through P-land. The Progress
+  table below is the branch's history; plan 222 carries what follows.
 - **PRs**: one draft per repo, and none of them may be merged:
   - this plan and the desktop slices on `plan-184-videorc-cloud`;
   - the web on `videorc-web` `plan-185-max-and-cloud`;

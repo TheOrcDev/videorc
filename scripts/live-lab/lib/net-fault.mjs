@@ -1,6 +1,8 @@
 import { execFile, spawn } from 'node:child_process'
-import { resolve4 } from 'node:dns/promises'
+import { resolve4, resolve6 } from 'node:dns/promises'
 import { promisify } from 'node:util'
+
+import { LINUX, labPlatform } from './platform.mjs'
 
 // Plan 178 U13 (plan 166 S9 step 1). A network fault on the RTMP leg only:
 // 100% loss or a 1 Mbit/s throttle on TCP 443/1935 to YouTube's ingest hosts,
@@ -237,8 +239,12 @@ export async function removeNetFaults({
   registry = defaultRegistry,
   kill = process.kill.bind(process),
   clearTimer = clearTimeout,
-  log = () => {}
+  log = () => {},
+  platform = process.platform
 } = {}) {
+  if (labPlatform(platform) === LINUX) {
+    return removeLinuxNetFaults({ runner, registry, kill, clearTimer, log })
+  }
   for (const timer of registry.timers) clearTimer(timer)
   registry.timers.clear()
   const flushed = await runAllowed(runner, 'pfFlushAnchor')
@@ -312,15 +318,33 @@ export async function applyNetFault({
   kill = process.kill.bind(process),
   resolve = resolve4,
   onWatchdog = () => {},
-  log = () => {}
+  log = () => {},
+  platform = process.platform
 }) {
+  if (labPlatform(platform) === LINUX) {
+    return applyLinuxNetFault({
+      kind,
+      durationMs,
+      kbps,
+      runner,
+      now,
+      registry,
+      spawnWatchdog,
+      setTimer,
+      clearTimer,
+      kill,
+      resolve: resolve === resolve4 ? resolveBoth : resolve,
+      onWatchdog,
+      log
+    })
+  }
   validateRequest({ kind, durationMs, kbps })
   if (registry.active) {
     throw new Error(
       `net-fault: a ${registry.active.kind} fault is already installed (deadline ${new Date(registry.active.deadlineAt).toISOString()}); remove it first`
     )
   }
-  const remove = () => removeNetFaults({ runner, registry, kill, clearTimer, log })
+  const remove = () => removeNetFaults({ runner, registry, kill, clearTimer, log, platform })
   // Clean slate, and the first sudo call tells us at once if sudoers is
   // missing, before anything is half installed.
   await remove()
@@ -372,6 +396,205 @@ export async function applyNetFault({
       watchdogPid,
       rules,
       ingest: { resolved, inTable: table, missing },
+      remove
+    }
+  } catch (error) {
+    try {
+      await remove()
+    } catch (removeError) {
+      error.removeError = removeError
+    }
+    throw error
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plan 179: the Linux twin. pf and dummynet become an nft table that marks
+// the RTMP leg and a tc prio/netem band that drops or throttles marked
+// packets, all inside one root-owned helper with four fixed verbs
+// (config/live-lab/linux/videorc-lab-netfault, installed at
+// LINUX_NETFAULT_HELPER). The harness never writes a rule and never passes an
+// argument but the verb; sudoers lists exactly LINUX_ALLOWED_COMMANDS (a unit
+// test checks config/live-lab/linux/sudoers.live-lab.example both ways). The
+// deadline timer, the detached watchdog and the read-back after removal are
+// the same as on macOS.
+
+export const LINUX_NETFAULT_HELPER = '/usr/local/sbin/videorc-lab-netfault'
+export const LINUX_NFT_TABLE = 'inet videorc_lab'
+export const LINUX_QDISC_HANDLE = `${DN_PIPE}:`
+
+export const LINUX_ALLOWED_COMMANDS = Object.freeze({
+  loss: { command: LINUX_NETFAULT_HELPER, args: ['loss'] },
+  throttle: { command: LINUX_NETFAULT_HELPER, args: ['throttle'] },
+  clear: { command: LINUX_NETFAULT_HELPER, args: ['clear'] },
+  status: { command: LINUX_NETFAULT_HELPER, args: ['status'] }
+})
+
+export function linuxAllowedCommandLines() {
+  return Object.values(LINUX_ALLOWED_COMMANDS).map(commandLine)
+}
+
+export function linuxCleanupCommandLines() {
+  return [`sudo -n ${commandLine(LINUX_ALLOWED_COMMANDS.clear)}`]
+}
+
+export function linuxWatchdogScript(durationMs) {
+  const seconds = Math.ceil(durationMs / 1000) + WATCHDOG_GRACE_S
+  return `sleep ${seconds}; sudo -n ${commandLine(LINUX_ALLOWED_COMMANDS.clear)}; exit 0`
+}
+
+// The helper's `status` lines: `table=present|absent`, one
+// `qdisc=<dev> mode=<loss|throttle|none>` per interface carrying the lab
+// qdisc, and `ingest=<address>` per address in the live table. Pure.
+export function parseLinuxNetFaultStatus(text) {
+  const status = { table: null, qdiscs: [], ingest: [] }
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim()
+    const table = /^table=(present|absent)$/.exec(line)
+    if (table) status.table = table[1] === 'present'
+    const qdisc = /^qdisc=(\S+)(?:\s+mode=(\S+))?$/.exec(line)
+    if (qdisc) status.qdiscs.push({ dev: qdisc[1], mode: qdisc[2] ?? 'none' })
+    const ingest = /^ingest=(\S+)$/.exec(line)
+    if (ingest) status.ingest.push(ingest[1])
+  }
+  return status
+}
+
+// Same shape as netFaultResidue so residueIsClean and the doctor share it.
+export function linuxNetFaultResidue(statusText) {
+  const status = parseLinuxNetFaultStatus(statusText)
+  return {
+    rules: status.table === false ? [] : [`table ${LINUX_NFT_TABLE}`],
+    pipes: status.qdiscs.map((entry) => `qdisc ${LINUX_QDISC_HANDLE} dev ${entry.dev}`)
+  }
+}
+
+async function runLinuxAllowed(runner, name) {
+  const entry = LINUX_ALLOWED_COMMANDS[name]
+  if (!entry) throw new Error(`net-fault: no allowed Linux command named ${name}`)
+  const result = await runner(entry)
+  if (sudoRefused(result)) {
+    const error = new Error(
+      `sudo refused "${commandLine(entry)}": ${describe(result)}. Install config/live-lab/linux/videorc-lab-netfault and config/live-lab/linux/sudoers.live-lab.example (owner step) or set faults.network to false.`
+    )
+    error.code = 'SUDO_REFUSED'
+    throw error
+  }
+  return result
+}
+
+async function resolveBoth(host) {
+  const found = []
+  for (const lookup of [resolve4, resolve6]) {
+    try {
+      found.push(...(await lookup(host)))
+    } catch {
+      // No record of that family here.
+    }
+  }
+  return found
+}
+
+export async function removeLinuxNetFaults({
+  runner = sudoRunner,
+  registry = defaultRegistry,
+  kill = process.kill.bind(process),
+  clearTimer = clearTimeout,
+  log = () => {}
+} = {}) {
+  for (const timer of registry.timers) clearTimer(timer)
+  registry.timers.clear()
+  const cleared = await runLinuxAllowed(runner, 'clear')
+  if (cleared.code !== 0) log(`net-fault: clear ${describe(cleared)}`)
+  const killed = []
+  for (const [pid] of registry.watchdogs) {
+    if (killGroup(kill, pid)) killed.push(pid)
+    registry.watchdogs.delete(pid)
+  }
+  registry.active = null
+  const status = await runLinuxAllowed(runner, 'status')
+  const residue = linuxNetFaultResidue(status.stdout)
+  if (status.code !== 0 || !residueIsClean(residue)) {
+    const error = new Error(
+      `net-fault: residue after removal (${residue.rules.length} table(s), ${residue.pipes.length} qdisc(s)${status.code !== 0 ? `, status ${describe(status)}` : ''}). Run: ${linuxCleanupCommandLines().join(' && ')}`
+    )
+    error.code = 'NET_FAULT_RESIDUE'
+    error.residue = residue
+    throw error
+  }
+  return { residue, killedWatchdogs: killed }
+}
+
+export async function applyLinuxNetFault({
+  kind,
+  durationMs,
+  kbps,
+  runner = sudoRunner,
+  now = Date.now,
+  registry = defaultRegistry,
+  spawnWatchdog = defaultSpawnWatchdog,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  kill = process.kill.bind(process),
+  resolve = resolveBoth,
+  onWatchdog = () => {},
+  log = () => {}
+}) {
+  validateRequest({ kind, durationMs, kbps })
+  if (registry.active) {
+    throw new Error(
+      `net-fault: a ${registry.active.kind} fault is already installed (deadline ${new Date(registry.active.deadlineAt).toISOString()}); remove it first`
+    )
+  }
+  const remove = () => removeLinuxNetFaults({ runner, registry, kill, clearTimer, log })
+  await remove()
+
+  const startedAt = now()
+  const deadlineAt = startedAt + durationMs
+  const watchdogPid = spawnWatchdog(linuxWatchdogScript(durationMs))
+  if (!Number.isInteger(watchdogPid) || watchdogPid <= 1) {
+    throw new Error('net-fault: could not spawn the removal watchdog; fault not installed')
+  }
+  registry.watchdogs.set(watchdogPid, { kind, deadlineAt })
+  onWatchdog({ pid: watchdogPid, label: 'live-lab-net-fault-watchdog', deadlineAt })
+  try {
+    const applied = await runLinuxAllowed(runner, kind)
+    if (applied.code !== 0) throw new Error(`net-fault: ${kind} ${describe(applied)}`)
+    const status = parseLinuxNetFaultStatus((await runLinuxAllowed(runner, 'status')).stdout)
+    if (status.table !== true || status.qdiscs.length === 0) {
+      throw new Error(
+        `net-fault: the helper reported no ${LINUX_NFT_TABLE} table or no ${LINUX_QDISC_HANDLE} qdisc after ${kind} (${status.qdiscs.length} qdisc(s))`
+      )
+    }
+    const wrongMode = status.qdiscs.filter((entry) => entry.mode !== kind)
+    if (wrongMode.length) {
+      throw new Error(
+        `net-fault: ${wrongMode.map((entry) => `${entry.dev} is ${entry.mode}`).join(', ')}, expected ${kind}`
+      )
+    }
+    const resolved = await resolveIngest(resolve)
+    const missing = resolved.filter((address) => !status.ingest.includes(address))
+    if (missing.length) {
+      log(
+        `net-fault: ${missing.length} ingest address(es) resolved here are not in the nft set (${status.ingest.length} in set); the leg may dodge the fault`
+      )
+    }
+    const timer = setTimer(() => {
+      registry.timers.delete(timer)
+      remove().catch((error) => log(`net-fault: deadline removal failed: ${error.message}`))
+    }, durationMs)
+    registry.timers.add(timer)
+    registry.active = { kind, startedAt, deadlineAt, watchdogPid }
+    log(
+      `net-fault: ${kind} installed on ${status.qdiscs.map((entry) => entry.dev).join(', ')} for ${durationMs} ms (watchdog pid ${watchdogPid})`
+    )
+    return {
+      kind,
+      startedAt,
+      deadlineAt,
+      watchdogPid,
+      rules: [`table ${LINUX_NFT_TABLE}`, ...status.qdiscs.map((entry) => `qdisc ${entry.dev}`)],
+      ingest: { resolved, inTable: status.ingest, missing },
       remove
     }
   } catch (error) {

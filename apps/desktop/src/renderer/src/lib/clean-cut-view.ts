@@ -8,6 +8,7 @@ import type {
   SessionSummary
 } from './backend'
 import type { EntitlementUiGate } from './entitlement-ui'
+import { dayLabel, isAutoSessionTitle } from './format'
 import { SESSION_MODES } from './session-modes'
 import { userErrorMessage } from './user-error'
 import { VIDEORC_PREMIUM_URL } from './videorc-web-links'
@@ -105,6 +106,8 @@ export const CONDENSED_TARGET_MINUTES = [10, 15, 20, 30] as const
 export const CONDENSED_DEFAULT_TARGET_MINUTES = 15
 /** Recordings the picker offers, newest first. */
 export const CLEAN_CUT_PICKER_LIMIT = 20
+/** Rows the recordings list shows before "Show all". */
+export const CLEAN_CUT_LIST_CAP = 6
 
 const CLEAN_CUT_SOURCE_MODES: ReadonlySet<string> = new Set([
   SESSION_MODES.record,
@@ -175,6 +178,36 @@ export function recentCleanCutRecordings<
     .slice(0, limit)
 }
 
+/**
+ * The recordings list's search: a recording matches on its title or on when
+ * it ran, as the row shows it ("8 Oct"), case-insensitive. An empty query
+ * keeps them all.
+ */
+export function matchCleanCutRecordings<T extends Pick<SessionSummary, 'title' | 'startedAt'>>(
+  sessions: readonly T[],
+  query: string
+): T[] {
+  const needle = query.trim().toLocaleLowerCase()
+  if (!needle) return [...sessions]
+  return sessions.filter((session) =>
+    `${session.title} ${dayLabel(session.startedAt)}`.toLocaleLowerCase().includes(needle)
+  )
+}
+
+/**
+ * What a recording's row says after its title: its length, then when it ran.
+ * An automatic title ("Session 2026-10-11 16:37") already says when, in the
+ * time zone it was recorded in, so the row adds no second clock that could
+ * disagree with it.
+ */
+export function cleanCutRecordingFacts(
+  session: Pick<SessionSummary, 'title' | 'durationMs' | 'startedAt'>
+): string {
+  const length = typeof session.durationMs === 'number' ? formatCutClock(session.durationMs) : null
+  const when = isAutoSessionTitle(session.title) ? null : dayLabel(session.startedAt)
+  return [length, when].filter(Boolean).join(' · ')
+}
+
 /** Seconds for `cleanCut.start`; the contract allows 120..3600. */
 export function condensedTargetSeconds(minutes: number): number {
   return Math.min(3_600, Math.max(120, Math.round(minutes * 60)))
@@ -213,6 +246,19 @@ export function latestCleanCutJob(
   let latest: CleanCutJob | null = null
   for (const job of jobs) {
     if (job.sourceSessionId !== sessionId || job.mode !== mode) continue
+    if (!latest || job.createdAt.localeCompare(latest.createdAt) > 0) latest = job
+  }
+  return latest
+}
+
+/** The newest job for one recording, in either mode. */
+export function latestCleanCutJobAnyMode(
+  jobs: readonly CleanCutJob[],
+  sessionId: string
+): CleanCutJob | null {
+  let latest: CleanCutJob | null = null
+  for (const job of jobs) {
+    if (job.sourceSessionId !== sessionId) continue
     if (!latest || job.createdAt.localeCompare(latest.createdAt) > 0) latest = job
   }
   return latest
@@ -297,6 +343,30 @@ function percentOf(progress: number): number {
 
 function waitingLabel(capture: CleanCutCaptureContext): string {
   return capture.streaming ? 'Waiting until you stop streaming' : 'Waiting until you stop recording'
+}
+
+export interface CleanCutRowChip {
+  /** "Transcribing 40%", "Cut ready", "Condensed ready", "Cut failed". */
+  label: string
+  tone: 'working' | 'ready' | 'failed'
+}
+
+/**
+ * The chip on a recording in the list, from its newest cut in either mode,
+ * in the same words as the status row once it is opened. Null when there is
+ * nothing to say: an uncut recording stays quiet.
+ */
+export function cleanCutRowChip(
+  job: CleanCutJob | null,
+  capture: CleanCutCaptureContext
+): CleanCutRowChip | null {
+  const status = cleanCutStatusView(job, capture)
+  if (status.busy) return { label: status.label, tone: 'working' }
+  if (status.kind === 'ready') {
+    return { label: job?.mode === 'condensed' ? 'Condensed ready' : 'Cut ready', tone: 'ready' }
+  }
+  if (status.kind === 'failed') return { label: 'Cut failed', tone: 'failed' }
+  return null
 }
 
 /** The card row and the review footer for one job (or none yet). */

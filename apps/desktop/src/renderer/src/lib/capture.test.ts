@@ -12,6 +12,7 @@ import {
   buildMicrophoneSources,
   capturePickerDevices,
   defaultCaptureConfig,
+  findRememberedSource,
   formatMeasuredAudioLag,
   legacyStreamKeyMigrationCandidates,
   mergeSourceKind,
@@ -36,6 +37,7 @@ import {
   layoutPresetOrientation,
   studioModeTogglePreset,
   verticalOrientationVideoPatch,
+  verticalTwinVideo,
   layoutPresetNeedsScreen,
   loadCaptureConfig,
   normalizeLayoutSettings,
@@ -65,6 +67,7 @@ import {
   videoProfileCompatibility,
   videoPresets
 } from './capture'
+import { returningSourceChoices } from './source-return'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -81,6 +84,65 @@ function captureConfigFixture(): CaptureConfig {
 }
 
 describe('reconcileSourceSelection', () => {
+  it('uses native preference order for a fresh profile and preserves an explicit camera', () => {
+    const cameras: Device[] = [
+      { id: 'builtin', name: 'Built-in', kind: 'camera', status: 'available' },
+      { id: 'iphone', name: 'iPhone', kind: 'camera', status: 'available' }
+    ]
+    expect(reconcileSourceSelection({}, cameras).cameraId).toBe('builtin')
+    expect(reconcileSourceSelection({ cameraId: 'iphone' }, cameras).cameraId).toBe('iphone')
+    expect(reconcileSourceSelection({}, [...cameras].reverse()).cameraId).toBe('iphone')
+  })
+
+  describe('screen None (release test 146, plan 0002)', () => {
+    // Linux: the only screen rows are the portal entries, and selecting one
+    // asks the compositor for a share, so None must survive reconcile.
+    const devices = [
+      { id: 'screen:portal:monitor', name: 'Screen (portal)', kind: 'screen', status: 'available' },
+      { id: 'window:portal:window', name: 'Window (portal)', kind: 'window', status: 'available' },
+      { id: 'camera:1', name: 'FaceTime HD Camera', kind: 'camera', status: 'available' }
+    ] as const satisfies Device[]
+
+    it('keeps an explicit None through every device refresh and layout transaction', () => {
+      const none = buildCaptureSources(
+        { screenId: 'screen:portal:monitor', screenName: 'Screen (portal)', cameraId: 'camera:1' },
+        [...devices],
+        undefined
+      )
+      expect(none).toMatchObject({ screenId: undefined, windowId: undefined, captureOff: true })
+      const once = reconcileSourceSelection(none, [...devices])
+      expect(once.screenId).toBeUndefined()
+      expect(once.windowId).toBeUndefined()
+      expect(once.captureOff).toBe(true)
+      expect(reconcileSourceSelection(once, [...devices])).toEqual(once)
+      expect(reconcileSourceSelectionForLayoutTransaction(once, [...devices])).toEqual(once)
+    })
+
+    it('still picks the first screen when none was ever chosen', () => {
+      const next = reconcileSourceSelection({ cameraId: 'camera:1' }, [...devices])
+      expect(next.screenId).toBe('screen:portal:monitor')
+      expect(next.captureOff).toBeUndefined()
+    })
+
+    it('choosing a screen or window clears None, and a stale None never hides a chosen one', () => {
+      const none = buildCaptureSources({ cameraId: 'camera:1' }, [...devices], undefined)
+      expect(buildCaptureSources(none, [...devices], 'window:portal:window')).toMatchObject({
+        windowId: 'window:portal:window',
+        captureOff: undefined
+      })
+      expect(
+        reconcileSourceSelection({ screenId: 'screen:portal:monitor', captureOff: true }, [
+          ...devices
+        ])
+      ).toMatchObject({ screenId: 'screen:portal:monitor', captureOff: undefined })
+    })
+
+    it('leaves the dev test pattern alone', () => {
+      const next = reconcileSourceSelection({ testPattern: true, captureOff: true }, [...devices])
+      expect(next).toMatchObject({ testPattern: true, screenId: undefined, windowId: undefined })
+    })
+  })
+
   describe('camera Off (plan 080 S4)', () => {
     const devices = [
       { id: 'screen:1', name: 'Display 1', kind: 'screen', status: 'available' },
@@ -108,6 +170,339 @@ describe('reconcileSourceSelection', () => {
       expect(
         reconcileSourceSelection({ cameraId: 'camera:gone', cameraOff: true }, [...devices])
       ).toMatchObject({ cameraId: 'camera:1', cameraOff: undefined })
+    })
+  })
+
+  // Plan 213 E1: a streamer's Continuity Camera dropped and Videorc kept the
+  // fallback for good, because the substitute was written back into the saved
+  // sources. The pick ("wanted") persists; a stand-in ("using") lives for the
+  // session only.
+  describe('a missing screen or camera never rewrites the pick (plan 213 E1)', () => {
+    const display1: Device = {
+      id: 'screen:screencapturekit:1',
+      name: 'Display 1',
+      kind: 'screen',
+      status: 'available'
+    }
+    const display2: Device = {
+      id: 'screen:screencapturekit:2',
+      name: 'Display 2',
+      kind: 'screen',
+      status: 'available'
+    }
+    const keynote: Device = {
+      id: 'window:screencapturekit:77',
+      name: 'Keynote',
+      kind: 'window',
+      status: 'available'
+    }
+    const facetime: Device = {
+      id: 'camera:1',
+      name: 'FaceTime HD Camera',
+      kind: 'camera',
+      status: 'available'
+    }
+    const iphone: Device = {
+      id: 'camera:iphone',
+      name: 'iPhone',
+      kind: 'camera',
+      status: 'available'
+    }
+
+    function persisted(sources: SourceSelection): SourceSelection {
+      return persistableCaptureConfig({ ...captureConfigFixture(), sources }).sources
+    }
+
+    describe('Continuity Camera names saved by 0.18.0', () => {
+      it.each(['iPhone Camera', "Uroš's iPhone Camera"])(
+        'restores %s by its old label when its id changes',
+        (name) => {
+          const camera = { ...iphone, name }
+          const oldName = `${name} · iPhone camera`
+          const picks: SourceSelection[] = [
+            { cameraId: 'camera:old-iphone', cameraName: oldName },
+            {
+              cameraId: facetime.id,
+              cameraName: facetime.name,
+              wantedCameraId: 'camera:old-iphone',
+              wantedCameraName: oldName
+            }
+          ]
+
+          for (const pick of picks) {
+            const next = reconcileSourceSelection(pick, [facetime, camera])
+            expect(next).toMatchObject({ cameraId: camera.id, cameraName: name })
+            expect(next.wantedCameraId).toBeUndefined()
+            expect(next.wantedCameraName).toBeUndefined()
+            expect(persisted(next)).toMatchObject({ cameraId: camera.id, cameraName: name })
+          }
+        }
+      )
+
+      it('keeps id matching ahead of the legacy name fallback', () => {
+        const next = reconcileSourceSelection(
+          { cameraId: facetime.id, cameraName: `${iphone.name} · iPhone camera` },
+          [iphone, facetime]
+        )
+        expect(next).toMatchObject({ cameraId: facetime.id, cameraName: facetime.name })
+      })
+
+      it('keeps an exact name match ahead of the legacy name fallback', () => {
+        const exact = { ...iphone, id: 'camera:exact', name: `${iphone.name} · iPhone camera` }
+        expect(findRememberedSource('camera:old-iphone', exact.name, [iphone, exact])).toBe(exact)
+      })
+
+      it('does not strip the camera tag when matching another source kind', () => {
+        expect(
+          findRememberedSource(undefined, `${display1.name} · iPhone camera`, [display1])
+        ).toBeUndefined()
+      })
+    })
+
+    it('a missing camera gets a stand-in for the session, and the pick is what persists', () => {
+      const pick: SourceSelection = {
+        screenId: display1.id,
+        screenName: display1.name,
+        cameraId: iphone.id,
+        cameraName: iphone.name
+      }
+      const next = reconcileSourceSelection(pick, [display1, facetime])
+
+      // Red on the base: the fallback was saved as the choice.
+      expect(persisted(next)).toMatchObject({ cameraId: iphone.id, cameraName: iphone.name })
+      expect(persisted(next).wantedCameraId).toBeUndefined()
+      expect(next).toMatchObject({
+        cameraId: facetime.id,
+        cameraName: facetime.name,
+        wantedCameraId: iphone.id,
+        wantedCameraName: iphone.name
+      })
+      // A second refresh with the same devices changes nothing.
+      expect(reconcileSourceSelection(next, [display1, facetime])).toEqual(next)
+    })
+
+    it('the same for a screen, and for a window', () => {
+      const screen = reconcileSourceSelection(
+        { screenId: display2.id, screenName: display2.name },
+        [display1, facetime]
+      )
+      expect(screen).toMatchObject({
+        screenId: display1.id,
+        screenName: display1.name,
+        wantedScreenId: display2.id,
+        wantedScreenName: display2.name
+      })
+      expect(persisted(screen)).toMatchObject({ screenId: display2.id, screenName: display2.name })
+
+      const window = reconcileSourceSelection({ windowId: keynote.id, windowName: keynote.name }, [
+        display1,
+        facetime
+      ])
+      expect(window).toMatchObject({
+        screenId: display1.id,
+        windowId: undefined,
+        wantedWindowId: keynote.id,
+        wantedWindowName: keynote.name
+      })
+      expect(persisted(window)).toMatchObject({
+        windowId: keynote.id,
+        windowName: keynote.name,
+        screenId: undefined
+      })
+      expect(persisted(window).wantedWindowId).toBeUndefined()
+    })
+
+    it('does not mistake a display with the same name for the wanted window', () => {
+      const next = reconcileSourceSelection({ windowId: keynote.id, windowName: display1.name }, [
+        display1
+      ])
+      expect(next.screenId).toBe(display1.id)
+      expect(persisted(next)).toMatchObject({
+        windowId: keynote.id,
+        windowName: display1.name,
+        screenId: undefined
+      })
+      expect(next.wantedWindowId).toBe(keynote.id)
+    })
+
+    it('a pick with no stand-in at all is still the pick', () => {
+      const next = reconcileSourceSelection({ cameraId: iphone.id, cameraName: iphone.name }, [
+        display1
+      ])
+      expect(next.cameraId).toBeUndefined()
+      expect(next.wantedCameraId).toBe(iphone.id)
+      expect(persisted(next)).toMatchObject({ cameraId: iphone.id, cameraName: iphone.name })
+    })
+
+    it('a pick that is back is used again at once, and the stand-in is forgotten (D6, idle)', () => {
+      const standIn = reconcileSourceSelection({ cameraId: iphone.id, cameraName: iphone.name }, [
+        display1,
+        facetime
+      ])
+      const back = reconcileSourceSelection(standIn, [display1, facetime, iphone])
+      expect(back).toMatchObject({ cameraId: iphone.id, cameraName: iphone.name })
+      expect(back.wantedCameraId).toBeUndefined()
+      expect(back.wantedCameraName).toBeUndefined()
+      expect(sourceSelectionChangeEvents(standIn, back)).toEqual([
+        {
+          kind: 'automatic-source-fallback',
+          sourceKind: 'camera',
+          reason: 'wanted-restored',
+          previousId: facetime.id,
+          previousName: facetime.name,
+          nextId: iphone.id,
+          nextName: iphone.name
+        }
+      ])
+    })
+
+    it('during a session the wanted source waits for a click, even if its stand-in vanished', () => {
+      const standIn = reconcileSourceSelection(
+        {
+          windowId: keynote.id,
+          windowName: keynote.name,
+          cameraId: iphone.id,
+          cameraName: iphone.name
+        },
+        [display1, display2, facetime]
+      )
+      const held = reconcileSourceSelection(
+        standIn,
+        [display1, display2, facetime, iphone, keynote],
+        {
+          holdStandIns: true
+        }
+      )
+      expect(held).toEqual(standIn)
+
+      const replaced = reconcileSourceSelection(standIn, [display2, iphone], { holdStandIns: true })
+      expect(replaced).toMatchObject({
+        screenId: undefined,
+        wantedWindowId: keynote.id,
+        cameraId: undefined,
+        wantedCameraId: iphone.id
+      })
+    })
+
+    it('a new pick replaces the wish, through the builders and the merge', () => {
+      const standIn = reconcileSourceSelection({ cameraId: iphone.id, cameraName: iphone.name }, [
+        display1,
+        facetime
+      ])
+      const picked = buildCameraSources(standIn, [facetime], facetime.id)
+      expect(picked.wantedCameraId).toBeUndefined()
+      expect(picked.wantedCameraName).toBeUndefined()
+      expect(mergeSourceKind(standIn, picked, 'camera').wantedCameraId).toBeUndefined()
+
+      const screenStandIn = reconcileSourceSelection(
+        { windowId: keynote.id, windowName: keynote.name },
+        [display1]
+      )
+      const pickedScreen = buildCaptureSources(screenStandIn, [display1], display1.id)
+      expect(pickedScreen.wantedWindowId).toBeUndefined()
+      expect(mergeSourceKind(screenStandIn, pickedScreen, 'capture').wantedWindowId).toBeUndefined()
+    })
+
+    it('an explicit Off or None is a pick too, with nothing wanted behind it', () => {
+      const off = reconcileSourceSelection(
+        buildCameraSources({ cameraId: iphone.id, cameraName: iphone.name }, [facetime], undefined),
+        [display1, facetime]
+      )
+      expect(off).toMatchObject({ cameraId: undefined, cameraOff: true, wantedCameraId: undefined })
+    })
+  })
+
+  // Plan 213 F1: macOS can hand a reconnected display a new id. Its UUID
+  // stays, so the pick follows the display rather than the number.
+  describe('a display is found by its UUID first (plan 213 F1)', () => {
+    const builtIn: Device = {
+      id: 'screen:screencapturekit:1',
+      name: 'Built-in Retina Display · 3024 × 1964',
+      displayUuid: '37D8832A-2D66-02CA-B9F7-8F30A301B230',
+      kind: 'screen',
+      status: 'available'
+    }
+    const lg: Device = {
+      id: 'screen:screencapturekit:5',
+      name: 'LG ULTRAWIDE · 3440 × 1440',
+      displayUuid: 'E2D7A1C4-0B6F-4E3A-9C1D-5F8A2B7C9D10',
+      kind: 'screen',
+      status: 'available'
+    }
+    const lgBack: Device = { ...lg, id: 'screen:screencapturekit:9' }
+    const dellOnLgId: Device = {
+      id: lg.id,
+      name: 'DELL U2720Q · 3840 × 2160',
+      displayUuid: '0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0',
+      kind: 'screen',
+      status: 'available'
+    }
+
+    function persisted(sources: SourceSelection): SourceSelection {
+      return persistableCaptureConfig({ ...captureConfigFixture(), sources }).sources
+    }
+
+    it('a display back under a new id is the pick, and the id is rewritten silently', () => {
+      const pick = buildCaptureSources({}, [builtIn, lg], lg.id)
+      expect(pick).toMatchObject({ screenId: lg.id, screenUuid: lg.displayUuid })
+
+      const next = reconcileSourceSelection(pick, [builtIn, lgBack])
+      expect(next).toMatchObject({
+        screenId: lgBack.id,
+        screenName: lg.name,
+        screenUuid: lg.displayUuid
+      })
+      expect(next.wantedScreenId).toBeUndefined()
+      expect(next.wantedScreenUuid).toBeUndefined()
+      expect(sourceSelectionChangeEvents(pick, next)).toEqual([])
+      expect(persisted(next)).toMatchObject({ screenId: lgBack.id, screenUuid: lg.displayUuid })
+    })
+
+    it('its UUID wins over its old id, now on another display', () => {
+      const pick = buildCaptureSources({}, [builtIn, lg], lg.id)
+      expect(reconcileSourceSelection(pick, [builtIn, dellOnLgId, lgBack]).screenId).toBe(lgBack.id)
+
+      // Gone, with its id on another display: a stand-in, and the pick waits.
+      const standIn = reconcileSourceSelection(pick, [dellOnLgId, builtIn])
+      expect(standIn).toMatchObject({
+        screenId: dellOnLgId.id,
+        screenName: dellOnLgId.name,
+        screenUuid: dellOnLgId.displayUuid,
+        wantedScreenId: lg.id,
+        wantedScreenUuid: lg.displayUuid
+      })
+      expect(persisted(standIn)).toMatchObject({
+        screenId: lg.id,
+        screenName: lg.name,
+        screenUuid: lg.displayUuid
+      })
+      expect(returningSourceChoices(standIn, [dellOnLgId, builtIn])).toEqual([])
+
+      // Back under yet another id: the wish is met by its UUID.
+      expect(returningSourceChoices(standIn, [dellOnLgId, builtIn, lgBack])).toEqual([
+        { kind: 'capture', device: lgBack }
+      ])
+      const back = reconcileSourceSelection(standIn, [dellOnLgId, builtIn, lgBack])
+      expect(back).toMatchObject({ screenId: lgBack.id, screenUuid: lg.displayUuid })
+      expect(back.wantedScreenId).toBeUndefined()
+      expect(back.wantedScreenUuid).toBeUndefined()
+    })
+
+    it('a pick saved before UUIDs is found by id, learns its UUID and new name, and is not a fallback', () => {
+      const legacy: SourceSelection = { screenId: lg.id, screenName: 'Display 2' }
+      const next = reconcileSourceSelection(legacy, [builtIn, lg])
+      expect(next).toMatchObject({
+        screenId: lg.id,
+        screenName: lg.name,
+        screenUuid: lg.displayUuid
+      })
+      expect(sourceSelectionChangeEvents(legacy, next)).toEqual([])
+    })
+
+    it('a UUID left without its display picks nothing', () => {
+      const orphan = reconcileSourceSelection({ screenUuid: lg.displayUuid }, [builtIn, lgBack])
+      expect(orphan.screenId).toBe(builtIn.id)
+      expect(orphan.screenUuid).toBe(builtIn.displayUuid)
     })
   })
 
@@ -778,6 +1173,7 @@ describe('smokePreviewCompositorCaptureConfig', () => {
       sideBySideSplit: '70-30',
       sideBySideCameraSide: 'right',
       verticalScreenFraming: 'fill',
+      horizontalScreenFraming: 'fit',
       arrangementMode: 'preset',
       sourceTransformOverrides: {}
     },
@@ -866,6 +1262,7 @@ describe('smokePreviewCompositorCaptureConfig', () => {
         sideBySideSplit: '70-30',
         sideBySideCameraSide: 'right',
         verticalScreenFraming: 'fill',
+        horizontalScreenFraming: 'fit',
         arrangementMode: 'preset',
         sourceTransformOverrides: {}
       },
@@ -1035,6 +1432,7 @@ describe('system audio settings (plan 069)', () => {
       microphoneSyncOffsetMs: 0
     })
     expect(legacy).toStrictEqual({
+      microphoneNoiseSuppression: 'off',
       microphoneGainDb: 4,
       microphoneMuted: true,
       microphoneSyncOffsetMs: 0,
@@ -2075,6 +2473,40 @@ describe('freeform arrangement (plan phase 4)', () => {
     })
   })
 
+  it("keeps a screen's crop on its box and clamps it like the backend (plan 213 G2)", () => {
+    const layout = normalizeLayoutSettings({
+      arrangementMode: 'freeform',
+      sourceTransformOverrides: {
+        'source:base': {
+          x: 0.1,
+          y: 0.1,
+          width: 0.5,
+          height: 0.5,
+          cropLeft: 0.25,
+          cropTop: 0,
+          cropRight: 1.5,
+          cropBottom: 'lots'
+        }
+      }
+    } as unknown as Partial<CaptureConfig['layout']>)
+
+    expect(layout.sourceTransformOverrides).toEqual({
+      'source:base': { x: 0.1, y: 0.1, width: 0.5, height: 0.5, cropLeft: 0.25, cropRight: 0.95 }
+    })
+  })
+
+  it('reads the landscape screen framing, Fit unless Fill was chosen (plan 213 G3)', () => {
+    expect(normalizeLayoutSettings({}).horizontalScreenFraming).toBe('fit')
+    expect(
+      normalizeLayoutSettings({ horizontalScreenFraming: 'fill' }).horizontalScreenFraming
+    ).toBe('fill')
+    expect(
+      normalizeLayoutSettings({ horizontalScreenFraming: 'stretch' } as unknown as Partial<
+        CaptureConfig['layout']
+      >).horizontalScreenFraming
+    ).toBe('fit')
+  })
+
   it('rejects junk arrangement modes back to preset', () => {
     expect(
       normalizeLayoutSettings({ arrangementMode: 'chaotic' } as unknown as Partial<
@@ -2153,18 +2585,83 @@ describe('camera shape and aspect (2026-07-06)', () => {
   })
 })
 
+describe('verticalTwinVideo', () => {
+  it('maps 1080p30 to the named vertical profile', () => {
+    expect(verticalTwinVideo(videoPresets['tutorial-1080p30'])).toBe(
+      videoPresets['vertical-1080x1920']
+    )
+    expect(verticalTwinVideo(videoPresets['stream-safe-1080p30'])).toBe(
+      videoPresets['vertical-1080x1920']
+    )
+  })
+
+  it('keeps every other chosen size and fps, turned on its side', () => {
+    const twin = (preset: keyof typeof videoPresets) => {
+      const { width, height, fps, bitrateKbps } = verticalTwinVideo(videoPresets[preset])
+      return { width, height, fps, bitrateKbps }
+    }
+    expect(twin('tutorial-540p30')).toEqual({ width: 540, height: 960, fps: 30, bitrateKbps: 2500 })
+    expect(twin('tutorial-720p30')).toEqual({
+      width: 720,
+      height: 1280,
+      fps: 30,
+      bitrateKbps: 4000
+    })
+    expect(twin('tutorial-1440p30')).toEqual({
+      width: 1440,
+      height: 2560,
+      fps: 30,
+      bitrateKbps: 8000
+    })
+    expect(twin('record-4k30')).toEqual({ width: 2160, height: 3840, fps: 30, bitrateKbps: 30000 })
+    expect(twin('stream-safe-1080p60')).toEqual({
+      width: 1080,
+      height: 1920,
+      fps: 60,
+      bitrateKbps: 6000
+    })
+    const floor = { ...videoPresets.custom, width: 640, height: 360, fps: 24 }
+    expect(verticalTwinVideo(floor)).toEqual({ ...floor, width: 360, height: 640 })
+    expect(verticalTwinVideo(videoPresets['tutorial-720p30']).preset).toBe('custom')
+  })
+})
+
 describe('vertical orientation video coupling', () => {
   const landscape = videoPresets['record-4k30']
   const vertical = videoPresets['vertical-1080x1920']
 
-  it('entering vertical mode applies the portrait profile and remembers the landscape canvas', () => {
+  it('entering vertical mode applies the portrait twin and remembers the landscape canvas', () => {
     const patch = verticalOrientationVideoPatch(
       'screen-camera',
       'vertical-camera-top',
       landscape,
       null
     )
-    expect(patch).toEqual({ video: vertical, verticalRestoreVideo: landscape })
+    expect(patch).toEqual({
+      video: { ...landscape, preset: 'custom', width: 2160, height: 3840 },
+      verticalRestoreVideo: landscape
+    })
+  })
+
+  it('720p30 enters vertical mode at 720x1280 and comes back at 1280x720 (retest 152)', () => {
+    const chosen = videoPresets['tutorial-720p30']
+    const entered = verticalOrientationVideoPatch(
+      'screen-camera',
+      'vertical-camera-top',
+      chosen,
+      null
+    )
+    expect(entered).toEqual({
+      video: { ...chosen, preset: 'custom', width: 720, height: 1280 },
+      verticalRestoreVideo: chosen
+    })
+    const left = verticalOrientationVideoPatch(
+      'vertical-camera-top',
+      'screen-camera',
+      entered!.video,
+      entered!.verticalRestoreVideo
+    )
+    expect(left).toEqual({ video: chosen, verticalRestoreVideo: null })
   })
 
   it('entering vertical mode keeps a canvas the user already made portrait', () => {
@@ -2306,5 +2803,61 @@ describe('canvas orientation lock (the Studio mode owns the orientation)', () =>
       width: 1920,
       height: 1080
     })
+  })
+})
+
+describe('microphone noise suppression settings', () => {
+  it('keeps old and invalid settings Off and preserves explicit RNNoise', () => {
+    for (const value of [
+      undefined,
+      null,
+      {},
+      { microphoneNoiseSuppression: true },
+      { microphoneNoiseSuppression: 'other' }
+    ]) {
+      expect(normalizeAudioSettings(value).microphoneNoiseSuppression).toBe('off')
+    }
+    expect(
+      normalizeAudioSettings({ microphoneNoiseSuppression: 'rnnoise' }).microphoneNoiseSuppression
+    ).toBe('rnnoise')
+  })
+})
+
+describe('videoProfileCompatibility on Windows (issue #1062)', () => {
+  it("blocks an output outside the encoder bridge envelope, in the backend's words", () => {
+    const config = captureConfigFixture()
+    config.video = videoPresets['record-4k60-experimental']
+    config.recordEnabled = true
+    config.streamEnabled = false
+    expect(videoProfileCompatibility(config, 'win32')).toEqual({
+      blockingReason:
+        "4K at 60 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 60 fps.",
+      warning: null
+    })
+    expect(videoProfileCompatibility(config, 'darwin')).toEqual({
+      blockingReason: null,
+      warning: null
+    })
+    expect(videoProfileCompatibility(config)).toEqual({ blockingReason: null, warning: null })
+  })
+
+  it('leaves a livestream to the Go Live sheet, and the 4K freeze warning as it was', () => {
+    const config = captureConfigFixture()
+    config.video = videoPresets['record-4k60-experimental']
+    config.recordEnabled = true
+    config.streamEnabled = true
+    config.streaming = {
+      ...config.streaming,
+      enabled: true,
+      defaultOutputPreset: 'stream-safe-1080p60',
+      defaultBitrateKbps: 6000,
+      targets: config.streaming.targets.map((target, index) => ({
+        ...target,
+        enabled: index === 0
+      }))
+    }
+    const result = videoProfileCompatibility(config, 'win32')
+    expect(result.blockingReason).toBeNull()
+    expect(result.warning).toMatch(/4K local recording while livestreaming/)
   })
 })

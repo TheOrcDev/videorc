@@ -9,6 +9,7 @@ import { copyText } from '@/lib/copy-text'
 import type { SourceSwitchTarget } from '@/lib/live-source-selection'
 import type { StreamTargetNotice } from '@/lib/stream-target-notices'
 import { toast } from '@/lib/toast'
+import { beginVideorcSignIn } from '@/lib/videorc-web-links'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { toastOffline, userErrorMessage } from '@/lib/user-error'
 
@@ -34,9 +35,16 @@ export function sourceSwitchFailedTitle(
   return `Couldn't switch the ${SOURCE_NOUNS[source.kind]}`
 }
 
+/** Internal adapter text: never shown. Same fix as the Linux mid-session
+ * refusals (stop, change the source, start again). */
+const SOURCE_SWITCH_UNSUPPORTED =
+  'This source cannot change until you stop, pick a new one, then start again.'
+
 /** The switch's reason as a sentence, then the one fix. */
 export function sourceSwitchFailedDescription(reason: string): string {
-  const trimmed = reason.trim()
+  const trimmed = /session source transactions/i.test(reason)
+    ? SOURCE_SWITCH_UNSUPPORTED
+    : reason.trim()
   const sentence = !trimmed || /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
   return `${sentence ? `${sentence} ` : ''}Choose it again in Sources.`
 }
@@ -155,6 +163,33 @@ export function showTakeoverEditRefused(sessionActive: boolean): void {
   }
   // A refusal is "can't now", so a warning (plan 174 S2.4, J2-9).
   toast.warning("Takeovers are locked while you're recording or live", { id: 'takeovers-locked' })
+}
+
+/**
+ * A chat connector waits on the Videorc sign-in (plan 215 A3). The toast
+ * names the account, never X: X is fine, and "Open Livestream" would show it
+ * healthy. Sign in is the fix, and it attaches chat without a restart (A4).
+ * One id per platform, so X and Kick each say it once and a repeat replaces.
+ */
+export function showChatNeedsVideorcSignIn(platformLabel: string): void {
+  toast.warning(`${platformLabel} chat needs your Videorc sign-in`, {
+    id: `chat-videorc-sign-in:${platformLabel}`,
+    description: 'Your stream is fine. Sign in to read chat.',
+    action: { label: 'Sign in', onClick: beginVideorcSignIn }
+  })
+}
+
+/**
+ * The server refused the stored session and the desktop signed itself out
+ * (plan 215 A5, D7). Until now that was silent: the sidebar read "Sign in"
+ * and chat failed at the next Go Live.
+ */
+export function showVideorcSignInExpired(): void {
+  toast.warning('Your Videorc sign-in expired', {
+    id: 'account-session-expired',
+    description: 'Sign in again.',
+    action: { label: 'Sign in', onClick: beginVideorcSignIn }
+  })
 }
 
 /** Where an X broadcast is started and ended by hand. */

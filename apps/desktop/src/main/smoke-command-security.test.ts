@@ -16,7 +16,8 @@ import {
   smokeRequestAuthorized,
   validateSmokeBackendRpcRequest,
   validateSmokeCommandPayload,
-  validateSmokeResourceAuthorization
+  validateSmokeResourceAuthorization,
+  validateSmokeProofSurfaceInputEvents
 } from './smoke-command-security'
 
 describe('smoke command security', () => {
@@ -315,6 +316,16 @@ describe('smoke command security', () => {
     ).not.toBeNull()
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('inspect-packaged-bundled-background')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('windows-live-audio-harness')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('windows-d3d11-preview-harness')).toBe(true)
+    expect(
+      validateSmokeCommandPayload({
+        command: 'windows-d3d11-preview-harness',
+        params: { action: 'configure', screenId: 'screen:dxgi:0000000000000001:1' }
+      })
+    ).not.toBeNull()
+    // The renderer's dev-only selectors stay out of packaged builds.
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('select-screen-device')).toBe(false)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('select-layout-preset')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-open')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-save-document')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('comments-window-open')).toBe(true)
@@ -351,5 +362,44 @@ describe('smoke command security', () => {
       server.close()
       await once(server, 'close')
     }
+  })
+})
+
+describe('proof-surface input events (plan 216 C)', () => {
+  it('accepts a surface-local press, drag with the button held, and release', () => {
+    expect(
+      validateSmokeProofSurfaceInputEvents([
+        { type: 'mouseMove', x: 10.4, y: 20.6 },
+        { type: 'mouseDown', x: 10, y: 21, button: 'left', clickCount: 1 },
+        { type: 'mouseMove', x: 26, y: 30, modifiers: ['leftbuttondown'] },
+        { type: 'mouseUp', x: 26, y: 30, button: 'left', clickCount: 1 }
+      ])
+    ).toEqual([
+      { type: 'mouseMove', x: 10, y: 21 },
+      { type: 'mouseDown', x: 10, y: 21, button: 'left', clickCount: 1 },
+      { type: 'mouseMove', x: 26, y: 30, modifiers: ['leftbuttondown'] },
+      { type: 'mouseUp', x: 26, y: 30, button: 'left', clickCount: 1 }
+    ])
+  })
+
+  it('refuses keys, wheel, unknown modifiers, bad points, and an empty or long list', () => {
+    const point = { x: 1, y: 2 }
+    expect(validateSmokeProofSurfaceInputEvents([{ type: 'keyDown', ...point }])).toBeNull()
+    expect(validateSmokeProofSurfaceInputEvents([{ type: 'mouseWheel', ...point }])).toBeNull()
+    expect(
+      validateSmokeProofSurfaceInputEvents([{ type: 'mouseMove', ...point, modifiers: ['fn'] }])
+    ).toBeNull()
+    expect(validateSmokeProofSurfaceInputEvents([{ type: 'mouseMove', x: 1 }])).toBeNull()
+    expect(validateSmokeProofSurfaceInputEvents([{ type: 'mouseMove', x: 1, y: NaN }])).toBeNull()
+    expect(
+      validateSmokeProofSurfaceInputEvents([{ type: 'mouseDown', ...point, button: 'back' }])
+    ).toBeNull()
+    expect(validateSmokeProofSurfaceInputEvents([])).toBeNull()
+    expect(
+      validateSmokeProofSurfaceInputEvents(
+        Array.from({ length: 65 }, () => ({ type: 'mouseMove', ...point }))
+      )
+    ).toBeNull()
+    expect(validateSmokeProofSurfaceInputEvents('mouseMove')).toBeNull()
   })
 })

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { acquireHostSmokeLock, waitForHostMemory } from './lib/host-lock.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -110,6 +111,8 @@ if (printOnly) {
 }
 
 try {
+  await acquireHostSmokeLock()
+  await waitForHostMemory()
   if (stimulusKind === 'motion') {
     stimulus = await launchScreenMotionStimulus()
     console.log(`\nMotion stimulus launched: ${stimulus.htmlPath}`)
@@ -125,6 +128,10 @@ try {
   if (launchVideorc) {
     children.push(
       spawn('pnpm', ['--filter', '@videorc/desktop', 'dev'], {
+        env: {
+          ...process.env,
+          VIDEORC_SMOKE_SKIP_FIRST_RUN: process.env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1'
+        },
         detached: true,
         stdio: 'inherit'
       })

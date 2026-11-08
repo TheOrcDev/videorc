@@ -17,6 +17,11 @@ export function confirmedSourceSelection(
     id
       ? (devices.find((device) => device.id === id)?.name ?? (id === oldId ? oldName : undefined))
       : undefined
+  // Plan 213 F1: a display's UUID stays with the id it was confirmed under.
+  const screenUuid = selected.screenId
+    ? (devices.find((device) => device.id === selected.screenId)?.displayUuid ??
+      (selected.screenId === current.screenId ? current.screenUuid : undefined))
+    : undefined
   return {
     ...current,
     screenId: selected.screenId,
@@ -24,10 +29,27 @@ export function confirmedSourceSelection(
     cameraId: selected.cameraId,
     microphoneId: selected.microphoneId,
     screenName: name(selected.screenId, current.screenId, current.screenName),
+    screenUuid,
     windowName: name(selected.windowId, current.windowId, current.windowName),
+    // Plan 0002 (release test 146): a confirmed capture ends an earlier None;
+    // a confirmed empty slot keeps it, like the camera below.
+    captureOff: selected.screenId || selected.windowId ? undefined : current.captureOff,
     cameraName: name(selected.cameraId, current.cameraId, current.cameraName),
     // A confirmed camera ends an earlier Off; a confirmed empty slot keeps it.
     cameraOff: selected.cameraId ? undefined : current.cameraOff,
+    // Plan 213 E1: the pick behind a stand-in, confirmed, is no longer a wish.
+    // F1: unless another display now has the pick's old id.
+    ...(selected.screenId &&
+    selected.screenId === current.wantedScreenId &&
+    (!current.wantedScreenUuid || !screenUuid || screenUuid === current.wantedScreenUuid)
+      ? { wantedScreenId: undefined, wantedScreenName: undefined, wantedScreenUuid: undefined }
+      : {}),
+    ...(selected.windowId && selected.windowId === current.wantedWindowId
+      ? { wantedWindowId: undefined, wantedWindowName: undefined }
+      : {}),
+    ...(selected.cameraId && selected.cameraId === current.wantedCameraId
+      ? { wantedCameraId: undefined, wantedCameraName: undefined }
+      : {}),
     microphoneName: name(selected.microphoneId, current.microphoneId, current.microphoneName),
     microphoneOff: selected.microphoneId ? undefined : current.microphoneOff,
     testPattern: selected.testPattern

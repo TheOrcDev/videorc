@@ -1,4 +1,5 @@
 import type {
+  AudioSettings,
   Device,
   EffectiveSceneBackground,
   LayoutSettings,
@@ -7,27 +8,34 @@ import type {
 } from './backend'
 import {
   defaultCaptureConfig,
+  findRememberedSource,
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen,
   normalizeLayoutSettings,
-  normalizeSourceVisibility
+  normalizeSourceVisibility,
+  wantedSourceSelection
 } from './capture'
 import { BUILTIN_LAYOUTS } from './layout-framing-memory'
+import { canonicalJson } from './scene-visibility-identity'
 import { BUNDLED_BACKGROUND_MANIFEST } from '../../../shared/background-import'
+import { parseLivePosterAssetId } from '../../../shared/live-background-ids'
 
 export const SCENE_LIBRARY_KEY = 'videorc.scene-presets.v1'
 export const WORKING_SCENE_KEY = 'videorc.working-scene.v1'
+export type SceneApp = { bundleId: string; name: string; follows: boolean }
 export type VisualSources = Pick<
   SourceSelection,
   | 'cameraId'
   | 'cameraName'
   | 'cameraOff'
+  | 'captureOff'
   | 'screenId'
   | 'screenName'
+  | 'screenUuid'
   | 'windowId'
   | 'windowName'
   | 'testPattern'
->
+> & { app?: SceneApp }
 export type SavedSceneBackground = Omit<EffectiveSceneBackground, 'managedAssetPath'> & {
   fileName?: string
 }
@@ -36,12 +44,27 @@ export type SceneVisual = {
   sources: VisualSources
   background: SavedSceneBackground | null
 }
+/**
+ * What a saved scene hears (owner, 2026-10-27): its microphone, None
+ * included, and System audio On or Off. Levels and mute stay with the mixer,
+ * like recording and streaming settings.
+ */
+export type SceneAudio = Pick<SourceSelection, 'microphoneId' | 'microphoneName'> & {
+  microphoneOff: boolean
+  systemAudioEnabled: boolean
+}
+export type SceneMicrophone = Pick<
+  SourceSelection,
+  'microphoneId' | 'microphoneName' | 'microphoneOff'
+>
 export type SavedScene = {
   id: string
   name: string
   createdAt: string
   updatedAt: string
   visual: SceneVisual
+  /** Absent on a scene saved before scenes kept audio: applying it leaves audio as it is. */
+  audio?: SceneAudio
 }
 export type ScenePresetLibrary = { version: 1; scenes: SavedScene[] }
 export type WorkingScene = {
@@ -51,7 +74,29 @@ export type WorkingScene = {
   visual: SceneVisual
 }
 
-export function visualSources(sources: VisualSources): VisualSources {
+/** Invalid optional fields never discard a scene or opt it into following. */
+export function normalizeSceneApp(raw: unknown): SceneApp | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const data = raw as Record<string, unknown>
+  if (
+    typeof data.bundleId !== 'string' ||
+    !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(data.bundleId)
+  )
+    return undefined
+  return {
+    bundleId: data.bundleId,
+    name: typeof data.name === 'string' && data.name.trim() ? data.name.trim() : data.bundleId,
+    follows: data.follows === true
+  }
+}
+
+export function visualSources(sources: VisualSources & SourceSelection): VisualSources {
+  return usingVisualSources({ ...wantedSourceSelection(sources), app: sources.app })
+}
+
+/** Availability checks judge the sources in use, while saved scenes keep the choice. */
+export function usingVisualSources(sources: VisualSources): VisualSources {
+  const app = normalizeSceneApp(sources.app)
   return {
     cameraId: sources.cameraId,
     cameraName: sources.cameraName,
@@ -59,11 +104,91 @@ export function visualSources(sources: VisualSources): VisualSources {
     // Legacy absent flags remain automatic selection, never inferred Off.
     // Always project a boolean so apply/checkpoint restore clears prior Off.
     cameraOff: sources.cameraOff === true && !sources.cameraId,
+    // Plan 0002 (release test 146): the same projection for a screen set to None.
+    captureOff: sources.captureOff === true && !sources.screenId && !sources.windowId,
     screenId: sources.screenId,
     screenName: sources.screenName,
+    // Plan 213 F1: a malformed UUID is dropped, never the scene; one left
+    // over without its display is no pick.
+    screenUuid:
+      typeof sources.screenUuid === 'string' &&
+      sources.screenUuid &&
+      (sources.screenId || sources.screenName)
+        ? sources.screenUuid
+        : undefined,
     windowId: sources.windowId,
     windowName: sources.windowName,
+    ...(app ? { app } : {}),
     testPattern: sources.testPattern === true
+  }
+}
+export function sceneAudio(
+  sources: SceneMicrophone,
+  audio: Pick<AudioSettings, 'systemAudioEnabled'>
+): SceneAudio {
+  return {
+    microphoneId: sources.microphoneId,
+    microphoneName: sources.microphoneName,
+    // Like cameraOff: a chosen microphone wins over a stale None.
+    microphoneOff: sources.microphoneOff === true && !sources.microphoneId,
+    systemAudioEnabled: audio.systemAudioEnabled === true
+  }
+}
+export function normalizeSceneAudio(raw: unknown): SceneAudio | undefined {
+  if (raw === undefined) return undefined
+  if (!raw || typeof raw !== 'object') throw new Error('Invalid scene audio')
+  const data = raw as SceneAudio
+  if (
+    data.microphoneId !== undefined &&
+    (typeof data.microphoneId !== 'string' || data.microphoneId.length === 0)
+  )
+    throw new Error('Invalid microphone identity')
+  if (data.microphoneName !== undefined && typeof data.microphoneName !== 'string')
+    throw new Error('Invalid microphone label')
+  if (typeof data.microphoneOff !== 'boolean' || typeof data.systemAudioEnabled !== 'boolean')
+    throw new Error('Invalid scene audio')
+  return sceneAudio(data, data)
+}
+/**
+ * Whether the working audio is what the saved scene keeps. A scene saved
+ * before scenes kept audio, or with no microphone ever chosen, holds no
+ * opinion on that part.
+ */
+export function sameSceneAudio(saved: SceneAudio | undefined, working: SceneAudio): boolean {
+  if (!saved) return true
+  const microphoneChosen = Boolean(saved.microphoneId) || saved.microphoneOff
+  return (
+    saved.systemAudioEnabled === working.systemAudioEnabled &&
+    (!microphoneChosen ||
+      (saved.microphoneId === working.microphoneId &&
+        saved.microphoneOff === working.microphoneOff))
+  )
+}
+/**
+ * The microphone a saved scene switches to: None, or its microphone while
+ * it is listed as available. Null keeps the current one: nothing was chosen,
+ * or the chosen one is gone (it can come back).
+ */
+export function sceneMicrophone(
+  audio: SceneAudio,
+  devices: readonly Device[]
+): SceneMicrophone | null {
+  if (audio.microphoneOff)
+    return { microphoneId: undefined, microphoneName: undefined, microphoneOff: true }
+  if (
+    !audio.microphoneId ||
+    !devices.some(
+      (device) =>
+        device.id === audio.microphoneId &&
+        device.kind === 'microphone' &&
+        device.status === 'available'
+    )
+  )
+    return null
+  return {
+    microphoneId: audio.microphoneId,
+    microphoneName: audio.microphoneName,
+    microphoneOff: false
   }
 }
 export function snapshotBackground(
@@ -71,7 +196,9 @@ export function snapshotBackground(
 ): SavedSceneBackground | null {
   if (!background) return null
   const { managedAssetPath, ...style } = background
-  const bundled = BUNDLED_BACKGROUND_MANIFEST.some((entry) => entry.id === style.assetId)
+  const bundled =
+    BUNDLED_BACKGROUND_MANIFEST.some((entry) => entry.id === style.assetId) ||
+    parseLivePosterAssetId(style.assetId) !== null
   return {
     ...style,
     ...(!bundled
@@ -79,13 +206,30 @@ export function snapshotBackground(
       : {})
   }
 }
+/**
+ * Whether two backgrounds are one picture in one style. Key order is not
+ * content: the backend's scene replies write a background's keys
+ * alphabetically and the registry writes them in declaration order, so a
+ * plain JSON.stringify comparison never matched a committed picture to its
+ * slot (ogre 2026-11-06: the applied tile stayed "Apply", and a second
+ * click applied it again instead of taking it off).
+ */
+export function sameSceneBackground(
+  a: EffectiveSceneBackground | null | undefined,
+  b: EffectiveSceneBackground | null | undefined
+): boolean {
+  return canonicalJson(snapshotBackground(a)) === canonicalJson(snapshotBackground(b))
+}
 export function normalizeSavedBackground(raw: unknown): SavedSceneBackground | null {
   if (raw === null) return null
   if (!raw || typeof raw !== 'object') throw new Error('Invalid saved background')
   const data = raw as SavedSceneBackground
   if (typeof data.assetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(data.assetId))
     throw new Error('Invalid background identity')
-  const builtin = BUNDLED_BACKGROUND_MANIFEST.some((entry) => entry.id === data.assetId)
+  // Plan 190: a live background's poster is bundled; its shader rides along.
+  const livePoster = parseLivePosterAssetId(data.assetId)
+  const builtin =
+    BUNDLED_BACKGROUND_MANIFEST.some((entry) => entry.id === data.assetId) || livePoster !== null
   if (
     !builtin &&
     (typeof data.fileName !== 'string' ||
@@ -107,7 +251,11 @@ export function normalizeSavedBackground(raw: unknown): SavedSceneBackground | n
     dimPercent: clamp(data.dimPercent, 0, 0, 80),
     saturationPercent: clamp(data.saturationPercent, 100, 0, 150),
     vignettePercent: clamp(data.vignettePercent, 0, 0, 100),
-    visibilityPercent: clamp(data.visibilityPercent, 20, 0, 40)
+    visibilityPercent: clamp(data.visibilityPercent, 20, 0, 40),
+    // The poster names the background and look; a stored spec adds the motion.
+    ...(livePoster && {
+      live: { ...livePoster, motion: data.live?.motion === 'normal' ? 'normal' : 'calm' }
+    })
   }
 }
 export function resolveSavedBackground(
@@ -115,8 +263,10 @@ export function resolveSavedBackground(
 ): EffectiveSceneBackground | null {
   if (!background) return null
   const { fileName, ...style } = normalizeSavedBackground(background)!
+  const livePoster = parseLivePosterAssetId(style.assetId)
   const name =
-    BUNDLED_BACKGROUND_MANIFEST.find((entry) => entry.id === style.assetId)?.fileName ?? fileName!
+    BUNDLED_BACKGROUND_MANIFEST.find((entry) => entry.id === style.assetId)?.fileName ??
+    (livePoster ? `${style.assetId}.webp` : fileName!)
   // The existing managed-asset protocol and backend capability registry resolve
   // this filename inside app-owned roots. Persisted arbitrary paths never survive.
   return { ...style, managedAssetPath: `videorc-asset://background/${encodeURIComponent(name)}` }
@@ -144,6 +294,8 @@ export function normalizeSceneVisual(raw: unknown): SceneVisual {
     throw new Error('Invalid source visibility')
   if (data.sources.cameraOff !== undefined && typeof data.sources.cameraOff !== 'boolean')
     throw new Error('Invalid camera Off intent')
+  if (data.sources.captureOff !== undefined && typeof data.sources.captureOff !== 'boolean')
+    throw new Error('Invalid screen None intent')
   for (const key of ['cameraId', 'screenId', 'windowId'] as const) {
     if (
       data.sources[key] !== undefined &&
@@ -213,12 +365,14 @@ export function hydrateSceneLibrary(raw: unknown): {
         typeof entry.updatedAt !== 'string'
       )
         continue
+      const audio = normalizeSceneAudio(entry.audio)
       scenes.push({
         id: entry.id,
         name: entry.name.trim(),
         createdAt: entry.createdAt,
         updatedAt: entry.updatedAt,
-        visual: normalizeSceneVisual(entry.visual)
+        visual: normalizeSceneVisual(entry.visual),
+        ...(audio ? { audio } : {})
       })
     } catch {
       /* Reject only the malformed entry. */
@@ -249,7 +403,77 @@ export function hydrateWorkingScene(raw: unknown): WorkingScene | null {
   }
 }
 export function sameSceneVisual(a: SceneVisual, b: SceneVisual): boolean {
-  return JSON.stringify(normalizeSceneVisual(a)) === JSON.stringify(normalizeSceneVisual(b))
+  const left = normalizeSceneVisual(a)
+  const right = normalizeSceneVisual(b)
+  // Plan 213 F1: a display's name (its size included) and UUID describe the
+  // display a scene names; the same UUID is the same display under any id,
+  // and another UUID is another display under the same one.
+  const [leftUuid, rightUuid] = [left.sources.screenUuid, right.sources.screenUuid]
+  if (leftUuid && rightUuid && leftUuid !== rightUuid) return false
+  const sameDisplay = Boolean(leftUuid) && leftUuid === rightUuid
+  const comparable = ({ sources, ...visual }: SceneVisual) => {
+    if (!sources.screenId) return { ...visual, sources }
+    const { screenName: _name, screenUuid: _uuid, screenId, ...rest } = sources
+    return { ...visual, sources: { ...rest, screenId: sameDisplay ? undefined : screenId } }
+  }
+  return JSON.stringify(comparable(left)) === JSON.stringify(comparable(right))
+}
+
+/**
+ * The display a scene shows, listed now (plan 213 F1): by its UUID first, as
+ * macOS can give a reconnected display a new id, then by id, then by name.
+ */
+export function sceneDisplay(
+  sources: VisualSources,
+  devices: readonly Device[]
+): Device | undefined {
+  if (sources.windowId || sources.app) return undefined
+  return findRememberedSource(
+    sources.screenId,
+    sources.screenName,
+    devices.filter((device) => device.kind === 'screen' && device.status === 'available'),
+    sources.screenUuid
+  )
+}
+
+/** The scene's sources with its display as listed now, when that is another id. */
+export function withSceneDisplay(visual: SceneVisual, devices: readonly Device[]): SceneVisual {
+  const display = sceneDisplay(visual.sources, devices)
+  if (!display || display.id === visual.sources.screenId) return visual
+  return {
+    ...visual,
+    sources: {
+      ...visual.sources,
+      screenId: display.id,
+      screenName: display.name,
+      screenUuid: display.displayUuid
+    }
+  }
+}
+
+/**
+ * What a saved scene keeps of its display once it is found (plan 213 F1): the
+ * id, name and UUID it is listed under now, when it is the same display (its
+ * UUID, or its id when the scene kept no UUID). `null` when nothing changed
+ * or the display was found only by id or name against the scene's UUID.
+ */
+export function sceneDisplayRefresh(
+  sources: VisualSources,
+  devices: readonly Device[]
+): Pick<VisualSources, 'screenId' | 'screenName' | 'screenUuid'> | null {
+  const display = sceneDisplay(sources, devices)
+  if (!display) return null
+  const same = sources.screenUuid
+    ? display.displayUuid === sources.screenUuid
+    : display.id === sources.screenId
+  if (
+    !same ||
+    (display.id === sources.screenId &&
+      display.name === sources.screenName &&
+      display.displayUuid === sources.screenUuid)
+  )
+    return null
+  return { screenId: display.id, screenName: display.name, screenUuid: display.displayUuid }
 }
 /** A source a scene needs that isn't usable now: turned off, or chosen but gone. */
 export type SceneSourceGap = {
@@ -291,17 +515,78 @@ export function sceneSourceGaps(visual: SceneVisual, devices: readonly Device[])
       layoutPresetNeedsScreen(visual.layout.layoutPreset)) &&
     (!visual.sources.testPattern || baseId)
   ) {
-    check(baseId, visual.sources.windowId ? 'window' : 'screen', 'screen')
+    // App identities require resolution, not a stale-window-id refusal.
+    if (visual.sources.app) return gaps
+    if (visual.sources.windowId) check(baseId, 'window', 'screen')
+    // Plan 213 F1: found by its UUID first; its old id on another display is not it.
+    else if (!sceneDisplay(visual.sources, devices))
+      gaps.push({ source: 'screen', state: baseId ? 'unavailable' : 'off' })
   }
   return gaps
 }
 
-export function sceneSourceProblems(visual: SceneVisual, devices: readonly Device[]): string[] {
-  return sceneSourceGaps(visual, devices).map(({ source }) =>
-    source === 'camera'
-      ? 'Camera unavailable. Choose a replacement in Sources.'
-      : 'Screen or window unavailable. Choose a replacement in Sources.'
+/**
+ * Which sources the scene shows that the streamer turned off on purpose
+ * (Screen None, Camera Off). A start would wait for frames that never come
+ * (retest 150): the backend refused it with "preview source(s) produced no
+ * frames". A chosen-but-missing source is not this: it can come back.
+ */
+export function sceneSourcesTurnedOff(
+  visual: SceneVisual,
+  devices: readonly Device[]
+): { screen: boolean; camera: boolean } {
+  const gaps = sceneSourceGaps(visual, devices)
+  const off = (source: SceneSourceGap['source']) =>
+    gaps.some((gap) => gap.source === source && gap.state === 'off')
+  return {
+    screen: visual.sources.captureOff === true && off('screen'),
+    camera: visual.sources.cameraOff === true && off('camera')
+  }
+}
+
+/**
+ * Whether a Studio gallery card is the scene on air: its preset, with no saved
+ * scene applied and the layout not in Freeform (Freeform keeps the last
+ * preset's name underneath, but arranges sources its own way; the Scene page
+ * already shows Freeform as the choice).
+ */
+export function galleryPresetIsActive(
+  layout: Pick<SceneVisual['layout'], 'layoutPreset' | 'arrangementMode'>,
+  presetId: string,
+  activeSavedSceneId: string | null | undefined
+): boolean {
+  return (
+    !activeSavedSceneId && layout.arrangementMode !== 'freeform' && layout.layoutPreset === presetId
   )
+}
+
+export function sceneSourceProblems(visual: SceneVisual, devices: readonly Device[]): string[] {
+  // A source turned off on purpose (Screen None, Camera Off) is not
+  // "unavailable", and there is nothing to replace (retest 150).
+  return sceneSourceGaps(visual, devices).map(({ source, state }) =>
+    source === 'camera'
+      ? state === 'off'
+        ? 'Camera is off. Turn it on in Sources to use this scene.'
+        : 'Camera unavailable. Choose a replacement in Sources.'
+      : state === 'off'
+        ? 'No screen is chosen. Choose one in Sources to use this scene.'
+        : 'Screen or window unavailable. Choose a replacement in Sources.'
+  )
+}
+
+/**
+ * Where a Studio orientation switch lands (retest 150): the scene last used in
+ * that orientation when the current sources can show it, otherwise the first
+ * of that orientation's scenes they can (Screen None lands on Camera only),
+ * otherwise the remembered one, whose refusal then says what is missing.
+ */
+export function orientationSwitchPreset<P extends string>(
+  remembered: P,
+  candidates: readonly P[],
+  usable: (preset: P) => boolean
+): P {
+  if (usable(remembered)) return remembered
+  return candidates.find(usable) ?? remembered
 }
 
 const SCENE_LIST = new Intl.ListFormat('en-US', { style: 'long', type: 'conjunction' })
@@ -350,3 +635,5 @@ export function sourceVisibilityFromScene(
   }
   return visibility
 }
+
+export type SceneOrientation = 'horizontal' | 'vertical'

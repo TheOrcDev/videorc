@@ -3,7 +3,9 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { toastUserError } from '@/lib/user-error'
 import { WorkspaceNavContext } from '@/components/workspace-nav'
+import { FIRST_RUN_SETUP_OPEN_EVENT } from '@/lib/workspace-navigation'
 
 import { CommandPalette } from './command-palette'
 
@@ -16,17 +18,42 @@ import { CommandPalette } from './command-palette'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
+  banners: {} as Record<string, unknown>,
+  soundboard: {} as Record<string, unknown>,
   recording: { state: 'idle' } as Record<string, unknown>,
+  replay: {
+    state: { state: 'off', seconds: 30, bufferedSeconds: 0 },
+    armed: false,
+    setArmed: vi.fn(),
+    save: vi.fn(async () => undefined)
+  } as Record<string, unknown>,
   theme: 'dark' as string | undefined,
-  setTheme: vi.fn()
+  setTheme: vi.fn(),
+  agents: { status: null } as Record<string, unknown>,
+  agentsActions: {
+    stop: vi.fn(async () => undefined),
+    openConnect: vi.fn()
+  },
+  camera: {} as Record<string, unknown>
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
-  useStudioRecordingState: () => ({ recording: mocked.recording })
+  useStudioBanners: () => mocked.banners,
+  useStudioRecordingState: () => ({ recording: mocked.recording }),
+  useStudioReplay: () => mocked.replay
 }))
+vi.mock('@/hooks/use-soundboard', () => ({ useSoundboard: () => mocked.soundboard }))
+vi.mock('@/hooks/use-virtual-camera', () => ({ useVirtualCamera: () => mocked.camera }))
+vi.mock('@/hooks/use-agents', () => ({
+  useAgents: () => mocked.agents,
+  useAgentsActions: () => mocked.agentsActions
+}))
+vi.mock('@/lib/user-error', () => ({ toastUserError: vi.fn() }))
 vi.mock('next-themes', () => ({
   useTheme: () => ({ theme: mocked.theme, setTheme: mocked.setTheme })
 }))
+const editScene = vi.hoisted(() => vi.fn())
+vi.mock('@/hooks/use-edit-scene', () => ({ useEditScene: () => editScene }))
 
 let root: Root
 let container: HTMLDivElement
@@ -44,9 +71,23 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   mocked.recording = { state: 'idle' }
+  mocked.banners = {
+    banners: [],
+    showBanner: vi.fn(async () => true),
+    hideBanner: vi.fn(async () => true)
+  }
+  mocked.soundboard = {
+    sounds: [],
+    voices: [],
+    play: vi.fn(async () => true),
+    stopAll: vi.fn(async () => true)
+  }
   mocked.core = {
     runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false, captionsWindowEnabled: false },
+    screenPrivacy: { hidden: false },
+    toggleScreenHidden: vi.fn(async () => true),
     savedScenes: [],
+    applySavedSceneResult: vi.fn(async () => ({ ok: true })),
     applySavedScene: vi.fn(async () => true),
     captureConfig: { audio: { microphoneMuted: false } },
     setCaptureConfig: vi.fn(),
@@ -68,6 +109,17 @@ beforeEach(() => {
     toggleCaptionsWindow: vi.fn(async () => undefined)
   }
   for (const fn of Object.values(nav)) fn.mockClear()
+  mocked.agents = { status: null }
+  // Videorc Camera unknown (no status yet): the palette leaves it out.
+  mocked.camera = {
+    status: null,
+    connected: true,
+    platform: 'darwin',
+    osRelease: '25.5.0',
+    setOn: vi.fn(async () => ({ ok: true }))
+  }
+  mocked.agentsActions.stop.mockClear()
+  mocked.agentsActions.openConnect.mockClear()
 })
 
 afterEach(async () => {
@@ -195,13 +247,32 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
     expect(values()).not.toContain('Mute microphone')
   })
 
-  it('offers Mark clip only while recording or live', async () => {
+  it('offers both clip lengths while recording or live (plan 181 R4, plan 199)', async () => {
     await render()
-    expect(values()).not.toContain('Mark clip')
+    expect(values()).not.toContain('Save a 30-second clip')
+    expect(values()).not.toContain('Save a 1-minute clip')
     mocked.recording = { state: 'recording', sessionId: 'rec' }
     await render()
-    await act(async () => item('Mark clip').click())
-    expect(mocked.core.markClip).toHaveBeenCalledOnce()
+    expect(values()).toContain('Save a 1-minute clip')
+    await act(async () => item('Save a 30-second clip').click())
+    // No length is today's 30-second clip.
+    expect(mocked.core.markClip).toHaveBeenCalledExactlyOnceWith()
+  })
+
+  it('offers both clip lengths while the ring holds frames with nothing recording (plan 181, plan 199)', async () => {
+    await render()
+    expect(values()).not.toContain('Save a 30-second clip')
+    expect(values()).not.toContain('Save replay')
+    mocked.replay = {
+      ...mocked.replay,
+      state: { state: 'on', seconds: 60, bufferedSeconds: 12, sessionId: 'ring' }
+    }
+    await render()
+    expect(values()).toContain('Save a 30-second clip')
+    await act(async () => item('Save a 1-minute clip').click())
+    expect(mocked.core.markClip).toHaveBeenCalledExactlyOnceWith(60)
+    expect(values()).not.toContain('Save replay')
+    mocked.replay = { ...mocked.replay, state: { state: 'off', seconds: 60, bufferedSeconds: 0 } }
   })
 })
 
@@ -230,6 +301,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Open Buddy',
       'Open Sources',
       'Open Scene',
+      'Edit scene',
       'Open Assets',
       'Open Livestream',
       'Open Captions',
@@ -262,6 +334,20 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     expect(values()).not.toContain('Open Library')
   })
 
+  // Plan 215 D4 (B3): Edit scene after Open Scene, found by what people want
+  // to do on the canvas.
+  it('edits the scene from ⌘K, found by "move camera"', async () => {
+    editScene.mockClear()
+    await render()
+    await search('move camera')
+    expect(values()).toContain('Edit scene')
+    await act(async () => item('Edit scene').click())
+    expect(editScene).toHaveBeenCalledOnce()
+    await render()
+    await search('scene editor')
+    expect(values()).toContain('Open Scene')
+  })
+
   it('names the selected action in the footer, with the Return chip', async () => {
     await render()
     const footer = document.querySelector<HTMLElement>('[data-slot="command-footer"]')
@@ -272,11 +358,34 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
 
   it('checks the look in use', async () => {
     await render()
-    expect(groupValues('Appearance')).toEqual(['Light theme', 'Dark theme', 'System theme'])
+    expect(groupValues('Appearance')).toEqual([
+      'Light theme',
+      'Dark theme',
+      'System theme',
+      'Chat in Studio'
+    ])
     expect(item('Dark theme').dataset.checked).toBe('true')
     expect(item('Light theme').dataset.checked).toBe('false')
     await act(async () => item('Light theme').click())
     expect(mocked.setTheme).toHaveBeenCalledWith('light')
+  })
+
+  // Plan 204 (D4): a mirror of Settings → General → Chat in Studio.
+  it('checks Chat in Studio while it is on, and turns it on and off', async () => {
+    mocked.core.setSettings = vi.fn()
+    await render()
+    expect(item('Chat in Studio').dataset.checked).toBe('false')
+    await act(async () => item('Chat in Studio').click())
+    const setSettings = mocked.core.setSettings as ReturnType<typeof vi.fn>
+    const update = setSettings.mock.calls.at(-1)?.[0] as (current: object) => object
+    expect(update({})).toEqual({ studioChat: true })
+    expect(update({ studioChat: true })).toEqual({ studioChat: false })
+  })
+
+  it('finds Chat in Studio by "chat" and "comments"', async () => {
+    await render()
+    await search('comments')
+    expect(values()).toContain('Chat in Studio')
   })
 })
 
@@ -289,16 +398,58 @@ describe('CommandPalette windows (plan 174 S2.3a, A-11)', () => {
     }
     mocked.core.captionsWindow = { open: false, enabled: true }
     mocked.core.notesWindow = { open: true }
+    mocked.core.commentsWindow = {
+      open: false,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'capture-filter'
+    }
     await render()
     expect(groupValues('Windows')).toEqual([
       'Open Preview',
       'Close Notes',
       'Open Stream Manager',
+      'Hide Stream Manager from stream',
       'Open Captions reader'
     ])
     await act(async () => item('Close Notes').click())
     expect(mocked.core.closeNotesWindow).toHaveBeenCalledOnce()
     expect(mocked.core.openNotesWindow).not.toHaveBeenCalled()
+  })
+
+  // Plan 215 D6: Hide from stream, reachable with the window closed; on a
+  // platform that cannot hide a window the row stays, disabled, with the
+  // reason.
+  it('flips Hide from stream for the Stream Manager, and says why Linux cannot', async () => {
+    mocked.core.runtimeInfo = { platform: 'darwin', commentsWindowEnabled: true }
+    mocked.core.setCommentsWindowHiddenFromStream = vi.fn(async () => undefined)
+    mocked.core.commentsWindow = {
+      open: false,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'capture-filter'
+    }
+    await render()
+    await act(async () => item('Hide Stream Manager from stream').click())
+    expect(mocked.core.setCommentsWindowHiddenFromStream).toHaveBeenCalledWith(true)
+
+    mocked.core.commentsWindow = {
+      open: true,
+      hiddenFromStream: true,
+      hideFromStreamMethod: 'content-protection'
+    }
+    await render()
+    await act(async () => item('Show Stream Manager on stream').click())
+    expect(mocked.core.setCommentsWindowHiddenFromStream).toHaveBeenLastCalledWith(false)
+
+    mocked.core.runtimeInfo = { platform: 'linux', commentsWindowEnabled: true }
+    mocked.core.commentsWindow = {
+      open: true,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'unsupported'
+    }
+    await render()
+    const row = item('Hide Stream Manager from stream')
+    expect(row.getAttribute('aria-disabled')).toBe('true')
+    expect(row.textContent).toContain('This system cannot hide a window from screen capture.')
   })
 })
 
@@ -309,4 +460,209 @@ describe('CommandPalette Health door (plan 174 D9)', () => {
     expect(values()).toContain('Open Health')
     expect(values()).not.toContain('Open Library')
   })
+})
+
+describe('CommandPalette banners (plan 186 S7)', () => {
+  it('names each banner by what selecting it does, then Hide all banners while any shows', async () => {
+    mocked.banners.banners = [
+      { id: 'sponsor', name: 'Sponsor', shown: false },
+      { id: 'logo', name: 'Logo', shown: true }
+    ]
+    mocked.core.savedScenes = [{ id: 's1', name: 'Talking head' }]
+    await render()
+    expect(headings()).toEqual([
+      'Session',
+      'Pages',
+      'Windows',
+      'Scenes',
+      'Banners',
+      'Buddy',
+      'Settings',
+      'Appearance'
+    ])
+    expect(groupValues('Banners')).toEqual([
+      'Show banner: Sponsor',
+      'Hide banner: Logo',
+      'Hide all banners'
+    ])
+    await act(async () => item('Show banner: Sponsor').click())
+    expect(mocked.banners.showBanner).toHaveBeenCalledExactlyOnceWith('sponsor')
+    await render()
+    await act(async () => item('Hide banner: Logo').click())
+    expect(mocked.banners.hideBanner).toHaveBeenCalledExactlyOnceWith('logo')
+    await render()
+    await act(async () => item('Hide all banners').click())
+    expect(mocked.banners.hideBanner).toHaveBeenLastCalledWith()
+  })
+
+  it('finds banners by the word, and leaves the group out with none, or none showing', async () => {
+    mocked.banners.banners = [{ id: 'sponsor', name: 'Sponsor', shown: false }]
+    await render()
+    expect(groupValues('Banners')).toEqual(['Show banner: Sponsor'])
+    await search('banner')
+    expect(values()).toContain('Show banner: Sponsor')
+    mocked.banners.banners = []
+    await render()
+    expect(headings()).not.toContain('Banners')
+  })
+})
+
+describe('CommandPalette sounds (plan 189 S10)', () => {
+  it('plays each sound by name with its Studio key, then Stop all sounds while any plays', async () => {
+    mocked.soundboard.sounds = [
+      { id: 'airhorn', name: 'Airhorn', hotkey: '1' },
+      { id: 'gong', name: 'Gong' }
+    ]
+    mocked.soundboard.voices = [{ soundId: 'gong' }]
+    await render()
+    expect(headings()).toContain('Sounds')
+    expect(groupValues('Sounds')).toEqual([
+      'Play sound: Airhorn',
+      'Play sound: Gong',
+      'Stop all sounds'
+    ])
+    expect(item('Play sound: Airhorn').querySelector('kbd')?.textContent).toBe('1')
+    await act(async () => item('Play sound: Airhorn').click())
+    expect(mocked.soundboard.play).toHaveBeenCalledExactlyOnceWith('airhorn')
+    await render()
+    await act(async () => item('Stop all sounds').click())
+    expect(mocked.soundboard.stopAll).toHaveBeenCalledOnce()
+  })
+
+  it('finds sounds by the word, and leaves Stop all out while nothing plays', async () => {
+    mocked.soundboard.sounds = [{ id: 'airhorn', name: 'Airhorn' }]
+    await render()
+    expect(groupValues('Sounds')).toEqual(['Play sound: Airhorn'])
+    await search('soundboard')
+    expect(values()).toContain('Play sound: Airhorn')
+    mocked.soundboard.sounds = []
+    await render()
+    expect(headings()).not.toContain('Sounds')
+  })
+
+  it('runs setup again and comes back to the page it was opened from (plan 203 S6)', async () => {
+    await render()
+    const requests: unknown[] = []
+    const listen = (event: Event): void => void requests.push((event as CustomEvent).detail)
+    window.addEventListener(FIRST_RUN_SETUP_OPEN_EVENT, listen)
+    await act(async () => item('Run setup again…').click())
+    window.removeEventListener(FIRST_RUN_SETUP_OPEN_EVENT, listen)
+    expect(requests).toEqual([{ returnTo: 'library' }])
+  })
+
+  it('hides Run setup again… while a recording or livestream runs, not for the Clips ring', async () => {
+    for (const state of ['starting', 'recording', 'streaming', 'stopping']) {
+      mocked.recording = { state }
+      await render()
+      expect(values(), state).not.toContain('Run setup again…')
+    }
+    mocked.recording = { state: 'recording', replayOnly: true }
+    await render()
+    expect(values()).toContain('Run setup again…')
+  })
+})
+
+describe('CommandPalette agents (plan 209 S7, D12)', () => {
+  const status = (enabled: boolean) => ({
+    enabled,
+    agents: [],
+    connectedCount: 0,
+    studioOpen: true
+  })
+
+  it('offers Stop agents in Session only while Agents is on, and stops them', async () => {
+    mocked.agents = { status: status(false) }
+    await render()
+    expect(values()).not.toContain('Stop agents')
+
+    mocked.agents = { status: status(true) }
+    await render()
+    expect(groupValues('Session')).toContain('Stop agents')
+    await act(async () => item('Stop agents').click())
+    expect(mocked.agentsActions.stop).toHaveBeenCalledOnce()
+  })
+
+  it('opens Settings → Remote with Connect an agent… open, Agents on or off', async () => {
+    await render()
+    expect(groupValues('Settings')).toContain('Connect an agent…')
+    await act(async () => item('Connect an agent…').click())
+    expect(nav.openSettings).toHaveBeenCalledExactlyOnceWith('remote')
+    expect(mocked.agentsActions.openConnect).toHaveBeenCalledOnce()
+  })
+
+  it('finds both by what people call agents', async () => {
+    mocked.agents = { status: status(true) }
+    await render()
+    await search('claude')
+    expect(values()).toEqual(expect.arrayContaining(['Stop agents', 'Connect an agent…']))
+  })
+})
+
+describe('CommandPalette Videorc Camera (plan 214 E2)', () => {
+  it('turns Videorc Camera on and off from Session, a mirror of Output', async () => {
+    mocked.camera.status = { on: false, available: true, state: 'off' }
+    await render()
+    expect(groupValues('Session')).toContain('Turn Videorc Camera on')
+    expect(item('Turn Videorc Camera on').textContent).toContain('Output')
+    await act(async () => item('Turn Videorc Camera on').click())
+    expect(mocked.camera.setOn).toHaveBeenCalledExactlyOnceWith(true, { toastFailure: true })
+
+    mocked.camera.status = { on: true, available: true, state: 'streaming', viewers: 1 }
+    await render()
+    expect(values()).not.toContain('Turn Videorc Camera on')
+    await act(async () => item('Turn Videorc Camera off').click())
+    expect(mocked.camera.setOn).toHaveBeenLastCalledWith(false, { toastFailure: true })
+  })
+
+  it("stays listed but off while the camera can't run, or Videorc reconnects", async () => {
+    mocked.camera.status = { on: false, available: false, state: 'unavailable' }
+    await render()
+    expect(item('Turn Videorc Camera on').getAttribute('aria-disabled')).toBe('true')
+    mocked.camera.status = { on: false, available: true, state: 'off' }
+    mocked.camera.connected = false
+    await render()
+    expect(item('Turn Videorc Camera on').getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('leaves it out where the camera is hidden, and before its status arrives', async () => {
+    await render()
+    expect(values().some((value) => value.includes('Videorc Camera'))).toBe(false)
+    for (const platform of ['win32', 'linux']) {
+      mocked.camera.platform = platform
+      mocked.camera.status = {
+        on: false,
+        available: false,
+        state: 'unavailable',
+        platformStep: 'unsupported'
+      }
+      await render()
+      expect(
+        values().some((value) => value.includes('Videorc Camera')),
+        platform
+      ).toBe(false)
+    }
+  })
+
+  it('finds it by what people call a camera for meetings', async () => {
+    mocked.camera.status = { on: false, available: true, state: 'off' }
+    for (const word of ['zoom', 'meet', 'webcam']) {
+      await render()
+      await search(word)
+      expect(values(), word).toContain('Turn Videorc Camera on')
+    }
+  })
+})
+
+it.each([
+  ['app-not-running', "Figma isn't open"],
+  ['app-no-window', 'Figma has no window open'],
+  ['app-minimized', "Figma's window is minimized"]
+])('keeps the shared scene action in charge of the %s refusal copy', async (reason, message) => {
+  mocked.core.savedScenes = [{ id: 'figma', name: 'Figma' }]
+  mocked.core.applySavedSceneResult = vi.fn(async () => ({ ok: false, reason, message }))
+  vi.mocked(toastUserError).mockClear()
+  await render()
+  await act(async () => item('Switch to Figma').click())
+  expect(mocked.core.applySavedSceneResult).toHaveBeenCalledExactlyOnceWith('figma')
+  expect(toastUserError).not.toHaveBeenCalled()
 })

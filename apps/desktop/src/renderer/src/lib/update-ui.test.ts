@@ -42,6 +42,14 @@ describe('updateChip', () => {
       action: 'settings',
       tone: 'neutral'
     })
+    // Linux: a release on videorc.com; the chip opens Settings → About.
+    expect(updateChip({ phase: 'download-available', version: '0.15.0-alpha.1' }, false)).toEqual({
+      label: 'Update available',
+      detail: 'Videorc 0.15.0-alpha.1 is available on videorc.com',
+      action: 'settings',
+      tone: 'neutral'
+    })
+    expect(updateChip({ phase: 'unsupported', reason: 'linux-version-unknown' }, false)).toBeNull()
     expect(updateChip({ phase: 'downloading', percent: 41.6 }, false)).toEqual({
       label: 'Downloading… 42%',
       detail: 'Downloading update… 42%',

@@ -126,6 +126,9 @@ export function commandChooserView(
 
 export interface CommandConfirmView {
   commandId: string
+  /** A flagged comment to show, or (plan 209 D14) a planned call Buddy asks
+   * about out loud first: 'End the livestream? Say "Buddy, yes".' */
+  kind: 'highlight' | 'act'
   /** "Buddy flagged this (harassment). Show it anyway?" */
   title: string
   target: (CohostCommandTarget & { platformLabel: string }) | null
@@ -144,13 +147,15 @@ export function commandConfirmView(
   nowMs: number,
   answering = false
 ): CommandConfirmView | null {
-  if (!command || command.status !== 'confirm' || command.kind !== 'highlight') return null
+  if (!command || command.status !== 'confirm') return null
+  if (command.kind !== 'highlight' && command.kind !== 'act') return null
   if (command.operationId) return null
   const target = command.target
     ? { ...command.target, platformLabel: CHAT_PLATFORM_LABELS[command.target.platform] }
     : null
   return {
     commandId: command.id,
+    kind: command.kind,
     title: command.message.trim(),
     target,
     timer: timerLabel(command.expiresAt, nowMs),

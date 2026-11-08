@@ -1,18 +1,25 @@
-import { app, Notification } from 'electron'
+import { app, net, Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import electronUpdater from 'electron-updater'
 import type { ProgressInfo, UpdateInfo } from 'electron-updater'
 
 import type { UpdateStatus } from '../shared/backend'
 import type { AcquireBackendInterruption } from './interruption-actions'
+import {
+  checkLinuxUpdateNotice,
+  linuxUpdateNoticeSource,
+  linuxUpdateNoticeStatus
+} from './linux-update-notice'
 import { safeConsole } from './safe-console'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
+import { createAppUpdateConfigGate } from './updater-config-file'
 import { installUpdateWithInterruptionLease } from './updater-install'
 import { shouldRetryUpdateOnMirror, UPDATE_FEED_URLS } from './updater-mirror'
 import type { UpdateFeedRoute } from './updater-mirror'
 import {
   BACKGROUND_RECHECK_INTERVAL_MS,
   isMissingUpdateFeedError,
+  settleStatusAfterCheck,
   shouldAutoDownload,
   shouldBackgroundRecheck,
   updateReadyNotification,
@@ -59,6 +66,18 @@ let pilotFeedActive = false
 let accountPilotActive = false
 let probingAccountPilot = false
 let requestAccountPilotGrant: (() => Promise<unknown>) | null = null
+// Linux never runs electron-updater: it only learns from videorc.com that a
+// newer release exists (linux-update-notice.ts). Null when the check must not
+// run (a dev build without a local endpoint).
+const linuxNoticeSource =
+  process.platform === 'linux' ? linuxUpdateNoticeSource(process.env, app.isPackaged) : null
+let linuxNoticeInFlight: Promise<UpdateStatus> | null = null
+// A dev or --dir package has no app-update.yml, so only a pinned feed can be
+// checked there (updater-config-file.ts).
+const allowsUpdateCheck = createAppUpdateConfigGate({
+  resourcesPath: process.resourcesPath,
+  log: (message) => safeConsole.log(message)
+})
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -244,6 +263,49 @@ async function downloadUpdateWithMirrorFallback(): Promise<void> {
   }
 }
 
+// One Linux check at a time; a manual check during a background one joins it.
+function checkLinuxNotice(): Promise<UpdateStatus> {
+  if (!linuxNoticeSource) {
+    setStatus(updateStatusFromEvent({ type: 'unsupported' }))
+    return Promise.resolve(currentStatus)
+  }
+  const sourceUrl = linuxNoticeSource
+  linuxNoticeInFlight ??= (async () => {
+    setStatus(updateStatusFromEvent({ type: 'checking' }))
+    const runningVersion = app.getVersion()
+    const check = await checkLinuxUpdateNotice({
+      sourceUrl,
+      runningVersion,
+      fetchImpl: (url, init) => net.fetch(url, init)
+    })
+    safeConsole.log(`[auto-update] Linux version check: ${JSON.stringify(check)}`)
+    setStatus(linuxUpdateNoticeStatus(check, runningVersion))
+    return currentStatus
+  })().finally(() => {
+    linuxNoticeInFlight = null
+  })
+  return linuxNoticeInFlight
+}
+
+// Launch check plus the same interval re-check as the other platforms.
+// VIDEORC_DISABLE_AUTO_UPDATE=1 turns off the background checks here too.
+function initLinuxUpdateNotice(): void {
+  if (!linuxNoticeSource) {
+    return
+  }
+  if (process.env.VIDEORC_DISABLE_AUTO_UPDATE === '1') {
+    setStatus(updateStatusFromEvent({ type: 'unsupported', reason: 'linux-version-unknown' }))
+    return
+  }
+  void checkLinuxNotice()
+  const recheckTimer = setInterval(() => {
+    if (shouldBackgroundRecheck(currentStatus)) {
+      void checkLinuxNotice()
+    }
+  }, BACKGROUND_RECHECK_INTERVAL_MS)
+  recheckTimer.unref?.()
+}
+
 // Attach the autoUpdater event → UpdateStatus mapping exactly once. Safe to call
 // from both initAutoUpdater (background) and registerUpdaterIpc (manual).
 function attachUpdaterListeners(): void {
@@ -308,6 +370,11 @@ function attachUpdaterListeners(): void {
 export function initAutoUpdater(
   options: { requestWindowsPilotUpdateGrant?: () => Promise<unknown> } = {}
 ): void {
+  if (process.platform === 'linux') {
+    delete process.env.VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN
+    initLinuxUpdateNotice()
+    return
+  }
   if (!app.isPackaged) {
     delete process.env.VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN
     return
@@ -338,6 +405,18 @@ export function initAutoUpdater(
   // install may follow it (manual checks included).
   if (process.platform === 'win32' && !pilotFeedActive) {
     requestAccountPilotGrant = options.requestWindowsPilotUpdateGrant ?? null
+  }
+
+  // An inactive updater (an AppImage without APPIMAGE, a snap) never checks,
+  // so Settings must not promise background updates.
+  if (!autoUpdater.isUpdaterActive()) {
+    setStatus(updateStatusFromEvent({ type: 'unsupported' }))
+    return
+  }
+
+  if (!allowsUpdateCheck(pilotFeedActive)) {
+    setStatus(updateStatusFromEvent({ type: 'unsupported' }))
+    return
   }
 
   // The opt-out suppresses only silent checks. Pilot feed routing and bearer
@@ -391,6 +470,10 @@ export function registerUpdaterIpc(
 ): void {
   getMainWindow = mainWindowGetter
   captureActive = captureInstallBlocked
+  if (process.platform === 'linux') {
+    registerLinuxUpdaterIpc()
+    return
+  }
   if (!updaterConfigurationBlocked) {
     attachUpdaterListeners()
   }
@@ -398,13 +481,14 @@ export function registerUpdaterIpc(
   secureIpcHandle('updates:get-status', () => currentStatus)
 
   secureIpcHandle('updates:check', async (): Promise<UpdateStatus> => {
-    if (!app.isPackaged || updaterConfigurationBlocked) {
+    if (!app.isPackaged || updaterConfigurationBlocked || !allowsUpdateCheck(pilotFeedActive)) {
       setStatus(updateStatusFromEvent({ type: 'unsupported' }))
       return currentStatus
     }
     try {
       setStatus(updateStatusFromEvent({ type: 'checking' }))
       await checkForUpdatesOnAllFeeds()
+      setStatus(settleStatusAfterCheck(currentStatus))
       // The events above have set the truth by the time checkForUpdates resolves.
       // If an update is available, start downloading immediately for a one-click
       // feel; progress + downloaded states flow through the listeners.
@@ -423,7 +507,7 @@ export function registerUpdaterIpc(
   })
 
   secureIpcHandle('updates:download', async (): Promise<UpdateStatus> => {
-    if (!app.isPackaged || updaterConfigurationBlocked) {
+    if (!app.isPackaged || updaterConfigurationBlocked || !allowsUpdateCheck(pilotFeedActive)) {
       setStatus(updateStatusFromEvent({ type: 'unsupported' }))
       return currentStatus
     }
@@ -459,4 +543,13 @@ export function registerUpdaterIpc(
       safeConsole.warn(`[auto-update] install admission failed: ${errorMessage(error)}`)
     }
   })
+}
+
+// Linux: Check for updates asks videorc.com; there is nothing to download or
+// install in the app, so those two never touch electron-updater.
+function registerLinuxUpdaterIpc(): void {
+  secureIpcHandle('updates:get-status', () => currentStatus)
+  secureIpcHandle('updates:check', () => checkLinuxNotice())
+  secureIpcHandle('updates:download', () => currentStatus)
+  secureIpcHandle('updates:install', () => undefined)
 }

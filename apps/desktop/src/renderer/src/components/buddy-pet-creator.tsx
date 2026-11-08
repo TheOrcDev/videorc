@@ -105,6 +105,12 @@ const REFERENCE_SOURCE_OPTIONS: SegmentedControlOption<ReferenceSource>[] = [
   { value: 'upload', label: 'Upload' }
 ]
 
+/** Which side of the Buddy an asymmetric feature is on, in its own terms. */
+const FEATURE_SIDE_ITEMS = [
+  { value: 'left', label: 'Its left' },
+  { value: 'right', label: 'Its right' }
+] as const
+
 interface PrimaryAction {
   label: string
   disabled: boolean
@@ -957,23 +963,28 @@ function NotesEditor({
               />
               <Select
                 disabled={disabled}
+                items={FEATURE_SIDE_ITEMS}
                 value={item.side}
-                onValueChange={(side) =>
+                onValueChange={(side) => {
+                  if (side === null) return
                   onChange({
                     ...draft,
                     asymmetric: draft.asymmetric.map((other, at) =>
-                      at === index ? { ...other, side: side as 'left' | 'right' } : other
+                      at === index ? { ...other, side } : other
                     )
                   })
-                }
+                }}
               >
                 <SelectTrigger aria-label={`Side of feature ${index + 1}`} className="w-28">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
-                    <SelectItem value="left">Its left</SelectItem>
-                    <SelectItem value="right">Its right</SelectItem>
+                    {FEATURE_SIDE_ITEMS.map((side) => (
+                      <SelectItem key={side.value} value={side.value}>
+                        {side.label}
+                      </SelectItem>
+                    ))}
                   </SelectGroup>
                 </SelectContent>
               </Select>

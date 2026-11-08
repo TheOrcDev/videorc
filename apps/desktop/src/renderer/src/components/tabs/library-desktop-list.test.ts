@@ -65,6 +65,8 @@ beforeEach(() => {
     sessions: SESSIONS,
     sessionsNextCursor: null,
     sessionsLoadingMore: false,
+    sessionDetails: {},
+    loadSessionDetails: vi.fn(async () => undefined),
     loadMoreSessions: vi.fn(async () => undefined),
     sessionStorageTotals: { count: SESSIONS.length, totalBytes: 0 },
     settings: {},
@@ -266,9 +268,7 @@ describe('Library as a desktop list (E-16, J1-21)', () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     )
     await act(async () =>
-      row('bravo')
-        .querySelector('button[aria-label="Session actions"]')!
-        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      row('bravo').querySelector<HTMLButtonElement>('button[aria-label="Session actions"]')!.click()
     )
     expect(labels([...document.querySelectorAll('[role="menuitem"]')])).toEqual(contextItems)
   })
@@ -282,7 +282,7 @@ describe('selection in view (E-18)', () => {
     const header = document.querySelector<HTMLElement>(
       '[aria-label="Select all recordings in view"]'
     )!
-    expect(header.getAttribute('data-state')).toBe('indeterminate')
+    expect(header.hasAttribute('data-indeterminate')).toBe(true)
     const search = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search recordings"]'
     )!
@@ -335,12 +335,10 @@ describe('Clean cut in the Library (E-4)', () => {
     await render()
     expect(row('bravo').querySelector('[data-library-clean-cut]')?.textContent).toBe('Cutting 40%')
     expect(
-      row('bravo').querySelector<HTMLElement>('[role="checkbox"]')?.hasAttribute('disabled')
+      row('bravo').querySelector<HTMLElement>('[role="checkbox"]')?.hasAttribute('data-disabled')
     ).toBe(true)
     await act(async () =>
-      row('bravo')
-        .querySelector('button[aria-label="Session actions"]')!
-        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      row('bravo').querySelector<HTMLButtonElement>('button[aria-label="Session actions"]')!.click()
     )
     const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
     const remove = items.find((item) => item.textContent?.startsWith('Delete'))!
@@ -367,8 +365,8 @@ describe('Clean cut in the Library (E-4)', () => {
       expect(row('bravo').querySelector('[data-library-clean-cut]')).toBeNull()
       await act(async () =>
         row('bravo')
-          .querySelector('button[aria-label="Session actions"]')!
-          .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+          .querySelector<HTMLButtonElement>('button[aria-label="Session actions"]')!
+          .click()
       )
       const review = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
         (item) => item.textContent === 'Review clean cut'
@@ -458,5 +456,55 @@ describe('a finished noise cleanup keeps the search (E-19)', () => {
     ]
     await render()
     expect(search.value).toBe('bra')
+  })
+})
+
+describe('a Record start the backend refused', () => {
+  it('says "Didn\'t start" where the MKV tag was, and offers no Play', async () => {
+    const refused = session('refused', {
+      startedAt: '2026-10-10T10:00:00Z',
+      status: 'failed',
+      mp4Path: undefined,
+      outputPath: '/videos/videorc-session-refused.mkv',
+      container: 'mkv',
+      durationMs: undefined,
+      finalizationState: undefined,
+      sessionLogCount: 1
+    })
+    mocked.core.sessions = [refused, ...SESSIONS]
+    await render()
+    // The row asks for its logs once; until they land it is an ordinary row.
+    expect(mocked.core.loadSessionDetails).toHaveBeenCalledWith('refused')
+    expect(mocked.core.loadSessionDetails).toHaveBeenCalledTimes(1)
+    mocked.core.sessionDetails = {
+      refused: {
+        healthEvents: [],
+        sessionLogs: [
+          {
+            id: 'l-1',
+            sessionId: 'refused',
+            level: 'error',
+            code: 'session-start-failed',
+            message:
+              'Session start did not reach a running pipeline; the session was marked failed: Cannot start: the camera preview source(s) produced no frames.',
+            createdAt: '2026-10-10T10:00:01Z'
+          }
+        ]
+      }
+    }
+    await render()
+    const badge = row('refused').querySelector('[data-session-start-failed]')
+    expect(badge?.textContent).toBe("Didn't start")
+    expect(row('refused').textContent).not.toContain('MKV')
+    expect(row('refused').textContent).toContain('no local file')
+    const play = row('refused').querySelector<HTMLButtonElement>(
+      'button[aria-label="Play recording"]'
+    )
+    expect(play?.disabled).toBe(true)
+    await act(async () =>
+      row('refused').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    )
+    expect(openSession).not.toHaveBeenCalled()
+    expect(row('alpha').querySelector('[data-session-start-failed]')).toBeNull()
   })
 })

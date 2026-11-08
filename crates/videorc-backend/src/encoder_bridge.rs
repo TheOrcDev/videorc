@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Write as StdWrite};
 use std::path::{Path, PathBuf};
+#[cfg(any(test, debug_assertions))]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -10,32 +11,46 @@ use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+#[cfg(any(test, debug_assertions))]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(any(test, debug_assertions))]
 use tokio::process::Command;
-use tokio::sync::{Mutex, oneshot, watch};
+#[cfg(any(test, debug_assertions))]
+use tokio::sync::Mutex;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle as TokioJoinHandle;
-use tokio::time::{Duration, MissedTickBehavior};
+use tokio::time::Duration;
+#[cfg(any(test, debug_assertions))]
+use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 #[cfg(target_os = "windows")]
 use crate::compositor::render_camera_overlay_bgra;
-use crate::compositor::{CompositorFrameExportHandle, CompositorFrameStore, CompositorPixelFormat};
+use crate::compositor::source_iso_batch::{self, SourceIsoBatchStore, SourceIsoLeasedFrame};
+use crate::compositor::{
+    CompositorFrameExportHandle, CompositorFrameStore, CompositorPixelFormat,
+    CompositorSourceIsoFrameStores,
+};
 use crate::compositor_synthetic::{SyntheticCompositorFrame, SyntheticMovingSource};
 use crate::diagnostics::{
     EncoderBridgeDiagnosticSnapshot, apply_encoder_bridge_stats,
     apply_runtime_diagnostics_snapshot, starting_diagnostics,
 };
+#[cfg(any(test, debug_assertions))]
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::FrameHandle;
 use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 #[cfg(target_os = "windows")]
 use crate::preview_camera::PreviewCameraFrameSource;
 use crate::preview_screen::PreviewScreenD3D11FrameSource;
+#[cfg(any(test, debug_assertions))]
 use crate::process_job::spawn_owned_tokio;
 use crate::protocol::{
     DiagnosticStats, EncoderBridgeRoleDiagnosticStats, EncoderBridgeRoleOutputPressureStats,
-    EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult, HealthLevel,
+    HealthLevel,
 };
+#[cfg(any(test, debug_assertions))]
+use crate::protocol::{EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult};
 #[cfg(target_os = "windows")]
 use crate::scene_geometry::{PixelRect, SceneCrop, SceneMask};
 use crate::state::AppState;
@@ -62,6 +77,8 @@ const ENCODER_BRIDGE_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 pub struct DirectD3D11CameraOverlay {
     pub source: PreviewCameraFrameSource,
+    pub compositor: crate::compositor::CompositorSlot,
+    pub camera_look: crate::protocol::CameraLook,
     pub destination: PixelRect,
     pub crop: SceneCrop,
     pub contain: bool,
@@ -79,6 +96,13 @@ const VIDEOTOOLBOX_FRESH_FRAME_HEADROOM: Duration = Duration::from_millis(4);
 // generic 240-frame (eight-second at 30fps) hidden backlog.
 const RECORDING_OUTPUT_QUEUE_MAX_FRAMES: usize = 16;
 const RECORDING_OUTPUT_QUEUE_MAX_AGE: Duration = Duration::from_millis(250);
+// Linux raw-YUV recording: FFmpeg stamps each frame when it reads it
+// (`-use_wallclock_as_timestamps`), so every frame waiting here is stamped
+// that much late while the microphone keeps its capture clock. Three frames
+// (~100 ms at 30 fps) bound that skew; a deeper queue only turned a slow
+// encoder into picture-behind-sound, longer files and a silent mic tail
+// (retest 151: ~0.5 s with the 16-frame ceiling on a 1080p30 VAAPI take).
+const ARRIVAL_STAMPED_RAW_RECORDING_QUEUE_MAX_FRAMES: usize = 3;
 const STREAM_OUTPUT_QUEUE_COALESCE_FRAMES: usize = 4;
 const STREAM_OUTPUT_QUEUE_COALESCE_AGE: Duration = Duration::from_millis(100);
 const STREAM_OUTPUT_QUEUE_MAX_FRAMES: usize = 8;
@@ -90,7 +114,8 @@ const STREAM_OUTPUT_QUEUE_MAX_AGE: Duration = Duration::from_millis(150);
 /// 087). Waiting loses nothing: a skipped tick never reaches the encoder and
 /// every encoded access unit is kept and written in order, so viewers see a
 /// freeze and the file keeps a truthful gap.
-const OUTPUT_WEDGED_TIMEOUT: Duration = Duration::from_secs(30);
+/// The session audio writer waits as long (`session_audio.rs`).
+pub(crate) const OUTPUT_WEDGED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Recording output pressure is recoverable while either VideoToolbox or the
 /// FIFO writer is still advancing. Queue depth/age are pressure signals, not a
 /// liveness verdict; only a complete lack of pipeline progress for this window
@@ -112,7 +137,7 @@ const STREAM_OUTPUT_STALL_NOTICE_THRESHOLD: Duration = Duration::from_secs(2);
 // same integrity contract as encoded output: preserve admitted frames in order
 // inside the role's bounded queue, then stop on bounded no-progress instead of
 // silently replacing content.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long one encoded access unit may wait on a FIFO that accepts no bytes
 /// before the output counts as wedged. Both roles wait out a starved FFmpeg:
@@ -133,11 +158,18 @@ const VIDEORC_TEST_VT_FIFO_PAUSE_REPEAT_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_
 // timing it out truncates a plane, kills FFmpeg, strands the recovery MKV, and
 // loses the remainder of the user's recording. Keep a bounded shutdown escape
 // hatch, but give a progressing Windows recording enough time to recover.
-#[cfg(target_os = "windows")]
+//
+// Linux has the same raw pipe with a slower reader: FFmpeg encoding through
+// VAAPI on a throttled iGPU falls below realtime and pauses its reads for 4-6 s
+// (ogre, 2026-11-06). The two-second budget cut the recording's frame partway,
+// FFmpeg read a short last packet ("packet size 65536 < expected frame_size")
+// and exited, and the take ended at the first such pause
+// (`smoke:multistream-endurance` session B).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "windows")]
 const MEDIA_FOUNDATION_FIFO_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
 // The raw writer's NO-PROGRESS tolerance is a PLATFORM contract, decoupled
 // from the output queue's age budget. Issue #149 (real Windows device): the
@@ -147,10 +179,11 @@ const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = FIFO_FRAME_WRITE_HARD_
 // waited in the output queue was dead before its first byte) and as the sliding
 // no-progress window — making the 30s Windows hard timeout unreachable and
 // killing healthy recordings ~1s in. Late is fine for a file; only a truly
-// wedged pipe (no bytes for this long) is fatal.
-#[cfg(target_os = "windows")]
+// wedged pipe (no bytes for this long) is fatal. Linux's VAAPI pauses need the
+// same window.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE: Duration = Duration::from_secs(10);
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
 const RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT: Duration = Duration::from_millis(2500);
 #[cfg(target_os = "windows")]
@@ -178,7 +211,9 @@ const fn windows_d3d11_primary_sequence_is_newer(
 }
 const FIFO_WRITE_PROGRESS_YIELD_BUDGET: u32 = 64;
 const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const VIDEOTOOLBOX_PROBE_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEOTOOLBOX_PROBE";
 
 type CompositorFrameHandle = FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>;
@@ -1124,6 +1159,70 @@ fn encoder_bridge_output_queue_policy(
     }
 }
 
+impl EncoderBridgeOutputQueuePolicy {
+    /// Caps the recording ceiling where FFmpeg stamps raw frames on arrival
+    /// (Linux raw YUV). Waiting adds no smoothing there: a backlog read in a
+    /// burst is stamped together and thinned by the CFR filter exactly like
+    /// skipped ticks, so the depth only shifts the picture behind the sound.
+    /// The stream mailbox already keeps only the latest frame.
+    fn for_arrival_stamped_raw_input(mut self, video_output: EncoderBridgeVideoOutput) -> Self {
+        if cfg!(target_os = "linux")
+            && video_output == EncoderBridgeVideoOutput::RawYuv420p
+            && matches!(
+                self.role,
+                EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared
+            )
+        {
+            self.max_frames = self
+                .max_frames
+                .min(ARRIVAL_STAMPED_RAW_RECORDING_QUEUE_MAX_FRAMES);
+        }
+        self
+    }
+
+    fn with_iso_audio_advance(mut self, fps: u32, advance_ms: u32) -> Self {
+        if matches!(
+            self.role,
+            EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared
+        ) {
+            // A negative residual audio offset requires future audio samples.
+            // FFmpeg therefore consumes video about this far behind capture.
+            // Retain the corresponding encoded access units, plus the normal
+            // pressure allowance. This does not retain raw/Metal frames or
+            // change stream coalescing and no-progress failure deadlines.
+            let lookahead_frames =
+                (u64::from(fps) * u64::from(advance_ms.min(1000))).div_ceil(1000);
+            self.max_frames += lookahead_frames as usize;
+        }
+        self
+    }
+
+    /// Plan 218 S3b: the stream's twin of `with_iso_audio_advance`. FFmpeg's
+    /// scheduler keeps every output stream within 100 ms of the slowest, and
+    /// the session audio reaches it a playout delay late (plus the split
+    /// stream's audio advance and any negative microphone offset), so it
+    /// deliberately holds each stream frame for that long before reading
+    /// it. Shift the stream's coalesce and hard limits by that wait, so they
+    /// measure our backlog instead of FFmpeg's interleave hold. The wedge
+    /// bound is unchanged: an output that stops making progress still fails
+    /// through `encoder_bridge_over_budget_escalation`.
+    fn with_stream_interleave_allowance(mut self, fps: u32, allowance_ms: u32) -> Self {
+        if self.role != EncoderBridgeOutputRole::Stream || allowance_ms == 0 {
+            return self;
+        }
+        let allowance = Duration::from_millis(u64::from(allowance_ms.min(1000)));
+        let allowance_frames =
+            (u64::from(fps) * u64::from(allowance_ms.min(1000))).div_ceil(1000) as usize;
+        self.coalesce_at_frames = self
+            .coalesce_at_frames
+            .map(|depth| depth + allowance_frames);
+        self.coalesce_at_age = self.coalesce_at_age.map(|age| age + allowance);
+        self.max_frames += allowance_frames;
+        self.max_age += allowance;
+        self
+    }
+}
+
 fn encoder_bridge_pre_encode_admission(
     policy: EncoderBridgeOutputQueuePolicy,
     queue_depth: u64,
@@ -1343,6 +1442,7 @@ impl Default for EncoderBridgeDiagnosticsContext {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EncoderBridgeSettings {
     ffmpeg_path: String,
@@ -1354,6 +1454,7 @@ struct EncoderBridgeSettings {
     bitrate_kbps: u32,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Default, Clone)]
 struct EncoderBridgeProgress {
     encoded_fps: Option<f64>,
@@ -1448,6 +1549,264 @@ struct EncoderBridgeRuntimeStats {
     deadline_lag_max_ms: Option<f64>,
     late_deadline_ticks: u64,
     schedule_skipped_ms: u64,
+    /// Plan 218 S2: the encoded bytes of this diagnostics window as a bitrate.
+    encoded_output_window_kbps: Option<f64>,
+    /// Plan 218 S2: p95 age of the queue's oldest frame, sampled every tick.
+    output_queue_age_p95_ms: Option<f64>,
+    /// Plan 218 S2: stream coalesce trips, by the limit that tripped.
+    output_queue_depth_trips: u64,
+    output_queue_age_trips: u64,
+    output_queue_last_trip: Option<StreamQueueTrip>,
+    /// Plan 218 S3a: the stream encoder's bitrate right now and as chosen;
+    /// `None` for a writer without an adaptive stream encoder.
+    stream_bitrate_kbps: Option<u32>,
+    stream_bitrate_chosen_kbps: Option<u32>,
+    /// Plan 218 S3a: fifo overflows FFmpeg reported on this session's legs.
+    stream_uplink_overflows: u64,
+}
+
+/// Which stream limit a coalesced tick hit (plan 218 S2). Depth wins when
+/// both hold, as in `encoder_bridge_pre_encode_admission`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamQueueTrip {
+    Depth,
+    Age,
+}
+
+impl StreamQueueTrip {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Depth => "depth",
+            Self::Age => "age",
+        }
+    }
+}
+
+fn stream_queue_trip(
+    policy: EncoderBridgeOutputQueuePolicy,
+    queue_depth: u64,
+    oldest_frame_age: Option<Duration>,
+) -> Option<StreamQueueTrip> {
+    if policy.role != EncoderBridgeOutputRole::Stream {
+        return None;
+    }
+    if policy
+        .coalesce_at_frames
+        .is_some_and(|depth| queue_depth >= depth as u64)
+    {
+        return Some(StreamQueueTrip::Depth);
+    }
+    if policy
+        .coalesce_at_age
+        .is_some_and(|limit| oldest_frame_age.is_some_and(|age| age >= limit))
+    {
+        return Some(StreamQueueTrip::Age);
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Plan 218 S3a: adaptive stream bitrate.
+//
+// One stream encode feeds every destination (owner decision D1), so the
+// slowest connection sets the bitrate for all of them. The signal is FFmpeg's
+// own word that a leg's fifo overflowed (the connection could not carry the
+// stream; viewers there lost seconds of video), or sustained pressure in the
+// bridge's stream queue. Each step lowers the encoder's AverageBitRate by
+// 20 % of the chosen bitrate, down to a floor of 50 % (D2), where it holds
+// and warns. Every clean 30 s gives 10 % back. The recording encoder is
+// never touched.
+// ---------------------------------------------------------------------------
+
+/// A step down or up is this share of the chosen bitrate.
+const STREAM_BITRATE_STEP_DOWN_SHARE: f64 = 0.20;
+const STREAM_BITRATE_STEP_UP_SHARE: f64 = 0.10;
+const STREAM_BITRATE_FLOOR_SHARE: f64 = 0.50;
+/// After a step down, let the new rate show before stepping again: the leg's
+/// fifo flushes on overflow, so the next overflow needs a fresh backlog.
+const STREAM_BITRATE_STEP_DOWN_HOLD: Duration = Duration::from_secs(10);
+/// A clean stretch this long earns a step back up.
+const STREAM_BITRATE_RECOVER_AFTER: Duration = Duration::from_secs(30);
+/// A rate that overflowed is a ceiling: recovery climbs to one step under
+/// it and no further, or the stream saws between a rate the uplink carries
+/// and one it does not (each tooth costs viewers seconds of video). After
+/// this long without an overflow the ceiling lifts by one step, so a
+/// congestion that passed does not pin the stream low for the session.
+const STREAM_BITRATE_CEILING_RELAX_AFTER: Duration = Duration::from_secs(5 * 60);
+/// The controller judges once per check interval, from session totals.
+const STREAM_BITRATE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// Bridge pressure counts as a signal when at least this share of the
+/// interval's frames were coalesced (a start-up blip of two frames is not).
+const STREAM_BITRATE_PRESSURE_SHARE: f64 = 0.10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamBitrateAction {
+    Hold,
+    StepDown(u32),
+    StepUp(u32),
+    /// A signal arrived while already at the floor.
+    AtFloor,
+}
+
+#[derive(Debug)]
+struct StreamBitrateController {
+    chosen_kbps: u32,
+    floor_kbps: u32,
+    current_kbps: u32,
+    fps: u32,
+    last_overflows: u64,
+    last_dropped: u64,
+    last_check_at: Instant,
+    last_step_down_at: Option<Instant>,
+    last_step_up_at: Option<Instant>,
+    clean_since: Instant,
+    /// The lowest rate a leg overflowed at, and when the overflow signal
+    /// last arrived; `None` once nothing overflowed or the ceiling relaxed
+    /// up to the chosen rate.
+    ceiling_kbps: Option<u32>,
+    last_overflow_signal_at: Option<Instant>,
+}
+
+impl StreamBitrateController {
+    /// Only a VideoToolbox stream encoder adapts today, so off macOS the
+    /// controller is built by the tests alone.
+    #[cfg(any(target_os = "macos", test))]
+    fn new(chosen_kbps: u32, fps: u32, now: Instant) -> Self {
+        Self {
+            chosen_kbps,
+            floor_kbps: ((f64::from(chosen_kbps) * STREAM_BITRATE_FLOOR_SHARE).round() as u32)
+                .max(1),
+            current_kbps: chosen_kbps,
+            fps: fps.max(1),
+            last_overflows: 0,
+            last_dropped: 0,
+            last_check_at: now,
+            last_step_down_at: None,
+            last_step_up_at: None,
+            clean_since: now,
+            ceiling_kbps: None,
+            last_overflow_signal_at: None,
+        }
+    }
+
+    fn step_up_kbps(&self) -> u32 {
+        (f64::from(self.chosen_kbps) * STREAM_BITRATE_STEP_UP_SHARE).round() as u32
+    }
+
+    fn current_kbps(&self) -> u32 {
+        self.current_kbps
+    }
+
+    fn at_floor(&self) -> bool {
+        self.current_kbps <= self.floor_kbps
+    }
+
+    /// Feed the session totals of leg overflows and coalesced stream frames.
+    fn observe(&mut self, now: Instant, overflows: u64, dropped: u64) -> StreamBitrateAction {
+        let elapsed = now.saturating_duration_since(self.last_check_at);
+        if elapsed < STREAM_BITRATE_CHECK_INTERVAL {
+            return StreamBitrateAction::Hold;
+        }
+        let overflowed = overflows > self.last_overflows;
+        let dropped_now = dropped.saturating_sub(self.last_dropped);
+        let expected = f64::from(self.fps) * elapsed.as_secs_f64();
+        let pressured =
+            dropped_now >= 2 && dropped_now as f64 >= expected * STREAM_BITRATE_PRESSURE_SHARE;
+        self.last_overflows = overflows;
+        self.last_dropped = dropped;
+        self.last_check_at = now;
+        if overflowed || pressured {
+            self.clean_since = now;
+            if overflowed {
+                self.last_overflow_signal_at = Some(now);
+            }
+            if self
+                .last_step_down_at
+                .is_some_and(|at| now.saturating_duration_since(at) < STREAM_BITRATE_STEP_DOWN_HOLD)
+            {
+                return StreamBitrateAction::Hold;
+            }
+            if overflowed {
+                // The fifo was flushed at the last step, so an overflow now
+                // is this rate's own: the uplink does not carry it.
+                self.ceiling_kbps = Some(
+                    self.ceiling_kbps
+                        .map_or(self.current_kbps, |ceiling| ceiling.min(self.current_kbps)),
+                );
+            }
+            if self.at_floor() {
+                return StreamBitrateAction::AtFloor;
+            }
+            let step =
+                (f64::from(self.chosen_kbps) * STREAM_BITRATE_STEP_DOWN_SHARE).round() as u32;
+            self.current_kbps = self.current_kbps.saturating_sub(step).max(self.floor_kbps);
+            self.last_step_down_at = Some(now);
+            return StreamBitrateAction::StepDown(self.current_kbps);
+        }
+        if let (Some(ceiling), Some(at)) = (self.ceiling_kbps, self.last_overflow_signal_at)
+            && now.saturating_duration_since(at) >= STREAM_BITRATE_CEILING_RELAX_AFTER
+        {
+            let lifted = ceiling.saturating_add(self.step_up_kbps());
+            self.ceiling_kbps = (lifted < self.chosen_kbps).then_some(lifted);
+            self.last_overflow_signal_at = Some(now);
+        }
+        if self.current_kbps < self.chosen_kbps
+            && now.saturating_duration_since(self.clean_since) >= STREAM_BITRATE_RECOVER_AFTER
+            && self
+                .last_step_up_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= STREAM_BITRATE_RECOVER_AFTER)
+        {
+            let next = self
+                .current_kbps
+                .saturating_add(self.step_up_kbps())
+                .min(self.chosen_kbps);
+            if self.ceiling_kbps.is_some_and(|ceiling| next >= ceiling) {
+                return StreamBitrateAction::Hold;
+            }
+            self.current_kbps = next;
+            self.last_step_up_at = Some(now);
+            return StreamBitrateAction::StepUp(self.current_kbps);
+        }
+        StreamBitrateAction::Hold
+    }
+}
+
+/// The session's leg-overflow count, shared between the FFmpeg stderr
+/// monitor (which counts) and the stream writer (which reads it every
+/// tick). Keyed by session: a new session starts a new counter.
+static STREAM_UPLINK_OVERFLOWS: StdMutex<Option<(String, Arc<AtomicU64>)>> = StdMutex::new(None);
+
+pub(crate) fn stream_uplink_overflow_counter(session_id: &str) -> Arc<AtomicU64> {
+    let mut guard = STREAM_UPLINK_OVERFLOWS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.as_ref() {
+        Some((owner, counter)) if owner == session_id => counter.clone(),
+        _ => {
+            let counter = Arc::new(AtomicU64::new(0));
+            *guard = Some((session_id.to_string(), counter.clone()));
+            counter
+        }
+    }
+}
+
+/// Counts one fifo overflow on the session and returns the new total.
+pub(crate) fn record_stream_uplink_overflow(session_id: &str) -> u64 {
+    stream_uplink_overflow_counter(session_id).fetch_add(1, Ordering::AcqRel) + 1
+}
+
+/// The bytes written since the window opened, as kbps; `None` until the
+/// window is long enough to mean anything.
+fn encoded_window_kbps(
+    total_bytes: u64,
+    window_started_bytes: u64,
+    window_started_at: Instant,
+) -> Option<f64> {
+    let elapsed = window_started_at.elapsed().as_secs_f64();
+    if elapsed < 0.25 {
+        return None;
+    }
+    Some(total_bytes.saturating_sub(window_started_bytes) as f64 * 8.0 / 1000.0 / elapsed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1984,9 +2343,40 @@ fn merge_encoder_bridge_role_process_diagnostics(
     }
 }
 
+#[cfg(test)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceIsoSelectionTiming {
+    index: u64,
+    compositor_sequence: u64,
+    pts_seconds: f64,
+    captured_ms: f64,
+    presented_ms: Option<f64>,
+    epoch_ms: Option<f64>,
+    selected_ms: f64,
+    content_clock_met: Option<bool>,
+    content_target_ms: Option<f64>,
+}
+
+// A common monotonic origin lets maintained runtime artifacts correlate the
+// controlled capture callbacks with actual bridge selections. Never compiled
+// into production and never written from a hot capture/encoding callback.
+#[cfg(test)]
+pub(crate) fn test_source_iso_trace_ms(at: Instant) -> f64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    let origin = *ORIGIN.get_or_init(Instant::now);
+    if at >= origin {
+        at.duration_since(origin).as_secs_f64() * 1000.0
+    } else {
+        -origin.duration_since(at).as_secs_f64() * 1000.0
+    }
+}
+
 /// A compositor frame fed into the encoder FIFO on one tick.
 #[derive(Clone)]
 struct FedCompositorFrame {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    iso_lease: Option<Arc<SourceIsoLeasedFrame>>,
     /// Retains the compositor's immutable allocation through FIFO delivery. Raw
     /// output writes these bytes directly instead of copying them into a second
     /// full-frame bridge buffer.
@@ -1998,6 +2388,188 @@ struct FedCompositorFrame {
     has_metal_export_handle: bool,
     #[cfg(target_os = "macos")]
     metal_target: Option<Arc<crate::metal_compositor::MetalCompositorTargetPixelBuffer>>,
+}
+
+#[derive(Debug)]
+struct IsoVideoStopBoundary {
+    local: StdMutex<Option<IsoLocalVideoStop>>,
+    global: Arc<OnceLock<Instant>>,
+}
+
+#[derive(Debug)]
+struct IsoLocalVideoStop {
+    at: Instant,
+    retained: Option<Arc<SourceIsoLeasedFrame>>,
+}
+
+impl IsoVideoStopBoundary {
+    fn boundary(&self) -> Option<Instant> {
+        let local = self.local.lock().unwrap_or_else(|p| p.into_inner());
+        local
+            .as_ref()
+            .map(|local| local.at)
+            .into_iter()
+            .chain(self.global.get().copied())
+            .min()
+    }
+
+    fn request(&self, boundary: Instant, member: Option<&IsoBatchMember>) {
+        let mut local = self.local.lock().unwrap_or_else(|p| p.into_inner());
+        if local.as_ref().is_some_and(|local| local.at <= boundary) {
+            return;
+        }
+        let retained = if self.global.get().is_none_or(|global| boundary < *global) {
+            member.and_then(|member| member.store.retire(member.role, Some(boundary)))
+        } else {
+            None
+        };
+        *local = Some(IsoLocalVideoStop {
+            at: boundary,
+            retained,
+        });
+    }
+
+    fn retained(&self) -> Option<FedCompositorFrame> {
+        self.local
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(|local| local.retained.clone())
+            .map(fed_iso_frame)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct IsoBatchMember {
+    store: Arc<SourceIsoBatchStore>,
+    role: usize,
+}
+impl IsoBatchMember {
+    fn active(&self) -> bool {
+        self.store.membership().active[self.role]
+    }
+    fn retire(&self) {
+        self.store.retire(self.role, None);
+    }
+    /// Plan 200 D1: frames this member's file keeps after the separate files
+    /// were shed, or `None` while it records.
+    fn shed_frames(&self) -> Option<u64> {
+        self.store.shed_frames(self.role)
+    }
+}
+
+/// Plan 200 D1: a bridge lag above this, held for `ISO_SHED_LAG_HOLD`, sheds
+/// the separate files so Combined gets the encoder back. The measured case:
+/// three 4K30 hardware encodes ran at ~21 fps each and the bridge lag reached
+/// 877 ms (plan 158).
+const ISO_SHED_LAG: Duration = Duration::from_millis(250);
+/// One host hiccup that the schedule absorbs is not encoder pressure.
+const ISO_SHED_LAG_HOLD: Duration = Duration::from_millis(500);
+
+/// Watches one writer's schedule lag for the shed trigger.
+#[derive(Debug, Default)]
+struct IsoShedLagWatch {
+    over_since: Option<Instant>,
+}
+
+impl IsoShedLagWatch {
+    /// True once the lag stayed above `ISO_SHED_LAG` for `ISO_SHED_LAG_HOLD`.
+    fn observe(&mut self, lag: Duration, now: Instant) -> bool {
+        if lag <= ISO_SHED_LAG {
+            self.over_since = None;
+            return false;
+        }
+        let since = *self.over_since.get_or_insert(now);
+        now.saturating_duration_since(since) >= ISO_SHED_LAG_HOLD
+    }
+}
+
+/// Plan 200 D1: a shed separate file ends at its own last latched tick,
+/// through the same terminal drain as a local source removal. True when the
+/// boundary is installed (the member was shed and the take has an epoch).
+fn install_iso_shed_boundary(
+    member: Option<&IsoBatchMember>,
+    stop_at: Option<&IsoVideoStopBoundary>,
+    epoch: Option<Instant>,
+    fps: u32,
+) -> bool {
+    let (Some(member), Some(stop_at), Some(epoch)) = (member, stop_at, epoch) else {
+        return false;
+    };
+    let Some(frames) = member.shed_frames() else {
+        return false;
+    };
+    stop_at.request(
+        source_iso_batch::source_iso_frame_boundary(epoch, fps, frames),
+        None,
+    );
+    true
+}
+struct IsoBatchWriterGuard(Option<IsoBatchMember>);
+impl Drop for IsoBatchWriterGuard {
+    fn drop(&mut self) {
+        if let Some(member) = self.0.as_ref() {
+            member.retire();
+        }
+    }
+}
+
+// Match the existing audio Stop drain ceiling (150ms playout +100ms margin).
+// This is part of the current Stop budget, never an extra teardown grace.
+const ISO_TERMINAL_VIDEO_DRAIN: Duration = Duration::from_millis(250);
+
+#[derive(Debug, PartialEq, Eq)]
+enum IsoTerminalVideoTick {
+    Continue,
+    Complete,
+    TimedOut,
+    MissingFinalFrame,
+}
+
+fn iso_terminal_video_tick(
+    boundary: Instant,
+    epoch: Instant,
+    fps: u32,
+    attempted: u64,
+    submitted: u64,
+    now: Instant,
+) -> IsoTerminalVideoTick {
+    let frames = (boundary.saturating_duration_since(epoch).as_nanos() * u128::from(fps.max(1)))
+        .div_ceil(1_000_000_000);
+    if u128::from(submitted) >= frames {
+        IsoTerminalVideoTick::Complete
+    } else if u128::from(attempted) >= frames {
+        IsoTerminalVideoTick::MissingFinalFrame
+    } else if now >= boundary + ISO_TERMINAL_VIDEO_DRAIN {
+        IsoTerminalVideoTick::TimedOut
+    } else {
+        IsoTerminalVideoTick::Continue
+    }
+}
+
+struct HeldIsoCompositorFrame {
+    frame: FedCompositorFrame,
+    #[cfg(target_os = "macos")]
+    _native_lease: Option<crate::metal_compositor::MetalTargetInFlightGuard>,
+}
+
+impl HeldIsoCompositorFrame {
+    fn new(frame: FedCompositorFrame) -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            _native_lease: frame
+                .iso_lease
+                .is_none()
+                .then(|| {
+                    frame
+                        .metal_target
+                        .as_ref()
+                        .map(|target| target.begin_in_flight())
+                })
+                .flatten(),
+            frame,
+        }
+    }
 }
 
 /// How one encoder-bridge tick consumed a compositor frame.
@@ -2138,6 +2710,7 @@ impl EncoderBridgeDrainState {
         downstream_closed
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn pending_timeout_is_terminal(
         &self,
         pending_video_toolbox_frames: u64,
@@ -2168,6 +2741,7 @@ impl EncoderBridgeDrainState {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_video_toolbox_loop_error(
         &mut self,
         terminal_failure: &Arc<StdMutex<Option<String>>>,
@@ -2203,8 +2777,11 @@ fn signal_encoder_bridge_startup(
 #[derive(Debug)]
 pub struct EncoderBridgeRecordingSession {
     stop: Arc<AtomicBool>,
+    graceful_stop_at: Option<Arc<IsoVideoStopBoundary>>,
+    iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready: Option<oneshot::Receiver<std::result::Result<(), String>>>,
+    bootstrap_reader: StdMutex<Option<std::fs::File>>,
     fifo_path: PathBuf,
     writer: Option<thread::JoinHandle<()>>,
     diagnostics_task: Option<TokioJoinHandle<()>>,
@@ -2215,9 +2792,48 @@ pub struct EncoderBridgeRecordingSession {
 
 impl EncoderBridgeRecordingSession {
     pub fn stop(&self) {
+        self.bootstrap_reader
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(member) = self.iso_member.as_ref() {
+            member.retire();
+        }
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.stop_signalled();
+        }
+    }
+
+    /// Plan 200 D1: frames this separate file keeps after the separate files
+    /// were shed so Combined keeps up, or `None` while it records.
+    pub(crate) fn source_iso_shed_frames(&self) -> Option<u64> {
+        self.iso_member
+            .as_ref()
+            .and_then(IsoBatchMember::shed_frames)
+    }
+
+    /// Plan 200 D1: true for exactly one caller per take after a shed.
+    pub(crate) fn claim_source_iso_shed_report(&self) -> bool {
+        self.iso_member
+            .as_ref()
+            .is_some_and(|member| member.store.claim_shed_report())
+    }
+
+    /// ISO local output closes on the shared content-clock boundary. Abort and
+    /// Drop still use stop(), which immediately cancels this bounded drain.
+    pub(crate) fn stop_at(&self, boundary: Instant) {
+        if let Some(stop_at) = self.graceful_stop_at.as_ref() {
+            self.bootstrap_reader
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            stop_at.request(boundary, self.iso_member.as_ref());
+            if let Some(lifecycle) = self.lifecycle.as_ref() {
+                lifecycle.stop_signalled();
+            }
+        } else {
+            self.stop();
         }
     }
 
@@ -2231,7 +2847,13 @@ impl EncoderBridgeRecordingSession {
 
     pub fn stop_and_reap_until(mut self, deadline_at: Instant) -> EncoderBridgeShutdownReport {
         let started_at = Instant::now();
-        self.stop();
+        if self
+            .graceful_stop_at
+            .as_ref()
+            .is_none_or(|at| at.boundary().is_none())
+        {
+            self.stop();
+        }
         let outer_reaped = self.reap_writer_until(deadline_at);
         if let Some(task) = self.diagnostics_task.take() {
             task.abort();
@@ -2269,6 +2891,7 @@ impl EncoderBridgeRecordingSession {
                 // Dropping the JoinHandle detaches the thread. The lifecycle
                 // registry retains ownership until the actual outer/FIFO
                 // guards leave, so the next recording still fails admission.
+                self.stop();
                 drop(writer);
                 if let Some(lifecycle) = self.lifecycle.as_ref() {
                     lifecycle.mark_detached();
@@ -2294,6 +2917,11 @@ impl EncoderBridgeRecordingSession {
     /// FFmpeg can exit successfully after the bridge closes its FIFO at a
     /// complete raw-video frame boundary. Recording finalization must inspect
     /// this signal so that a shortened file is not published as successful.
+    #[cfg(test)]
+    pub(crate) fn test_terminal_failure(&self, message: &str) {
+        record_encoder_bridge_terminal_failure(&self.terminal_failure, message);
+    }
+
     pub fn terminal_failure(&self) -> Option<String> {
         read_encoder_bridge_terminal_failure(&self.terminal_failure)
     }
@@ -2333,8 +2961,11 @@ impl EncoderBridgeRecordingSession {
         (
             Self {
                 stop: stop.clone(),
+                graceful_stop_at: None,
+                iso_member: None,
                 terminal_failure: Arc::new(StdMutex::new(None)),
                 startup_ready: None,
+                bootstrap_reader: StdMutex::new(None),
                 fifo_path: PathBuf::from("/nonexistent-test-fifo"),
                 writer: Some(writer),
                 diagnostics_task: None,
@@ -2520,6 +3151,7 @@ impl EncoderBridgeShutdownBatch {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn run_synthetic_encoder_bridge(
     state: AppState,
     params: EncoderBridgeSyntheticParams,
@@ -2701,6 +3333,153 @@ pub async fn run_synthetic_encoder_bridge(
     })
 }
 
+/// ISO-enabled encoders rendezvous after preparation, before consuming their
+/// first retained compositor frame. FIFO bootstrap readers break FFmpeg's
+/// audio-first probing dependency without starting an audio epoch early.
+pub struct RecordingStartBarrier {
+    participants: usize,
+    origin_store: Option<CompositorFrameStore>,
+    fps: u32,
+    audio_advance_ms: u32,
+    stop_at: Arc<OnceLock<Instant>>,
+    iso_stores: Option<CompositorSourceIsoFrameStores>,
+    state: StdMutex<RecordingStartBarrierState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct RecordingStartBarrierState {
+    stores: Vec<Option<CompositorFrameStore>>,
+    frames: Vec<Option<FedCompositorFrame>>,
+    released_at: Option<Instant>,
+}
+
+impl RecordingStartBarrier {
+    pub fn new(
+        participants: usize,
+        origin_store: Option<CompositorFrameStore>,
+        fps: u32,
+        track_shift_ms: i32,
+        iso_stores: Option<CompositorSourceIsoFrameStores>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            participants,
+            origin_store,
+            fps,
+            audio_advance_ms: track_shift_ms.saturating_neg().clamp(0, 1000) as u32,
+            stop_at: Arc::new(OnceLock::new()),
+            iso_stores,
+            state: StdMutex::new(Default::default()),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn member_for(&self, store: Option<&CompositorFrameStore>) -> Option<IsoBatchMember> {
+        let store = store?;
+        let iso = self.iso_stores.as_ref()?;
+        let role = if self
+            .origin_store
+            .as_ref()
+            .is_some_and(|origin| Arc::ptr_eq(origin, store))
+        {
+            source_iso_batch::COMBINED
+        } else if Arc::ptr_eq(store, &iso.screen) {
+            source_iso_batch::SCREEN
+        } else if Arc::ptr_eq(store, &iso.camera) {
+            source_iso_batch::CAMERA
+        } else {
+            return None;
+        }; // Dedicated stream encoder is not a local ISO member.
+        Some(IsoBatchMember {
+            store: iso.batches.clone(),
+            role,
+        })
+    }
+
+    pub(crate) fn stop_boundary(&self) -> Arc<OnceLock<Instant>> {
+        self.stop_at.clone()
+    }
+
+    fn prepared(
+        &self,
+        store: Option<CompositorFrameStore>,
+        epoch: &OnceLock<Instant>,
+        stop: &AtomicBool,
+    ) -> Result<(Instant, Option<FedCompositorFrame>)> {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let index = state.stores.len();
+        state.stores.push(store);
+        if state.stores.len() == self.participants {
+            state.frames = state
+                .stores
+                .iter()
+                .map(|store| {
+                    if let Some(member) = self.member_for(store.as_ref()) {
+                        member
+                            .store
+                            .select(0, member.role, |_| true)
+                            .ok()
+                            .flatten()
+                            .map(fed_iso_frame)
+                    } else {
+                        latest_compositor_frame(store.as_ref())
+                    }
+                })
+                .collect();
+            anyhow::ensure!(
+                state.frames.iter().all(Option::is_some),
+                "A separate recording encoder has no initial compositor frame"
+            );
+            let released_at = Instant::now();
+            // Retained content comes from the most recent compositor tick.
+            // Every leg uses this same audio origin, even a delayed muxer.
+            let primary = self
+                .origin_store
+                .as_ref()
+                .and_then(|origin| {
+                    state.stores.iter().position(|store| {
+                        store
+                            .as_ref()
+                            .is_some_and(|store| Arc::ptr_eq(store, origin))
+                    })
+                })
+                .and_then(|index| state.frames[index].as_ref());
+            let origin = primary.map_or(released_at, |frame| {
+                recording_epoch(
+                    frame.captured_at,
+                    frame
+                        .frame
+                        .metadata
+                        .presentation_at()
+                        .unwrap_or(released_at),
+                    Duration::from_secs_f64(1.0 / f64::from(self.fps.max(1))),
+                )
+            });
+            let _ = epoch.set(origin);
+            state.released_at = Some(released_at);
+            self.changed.notify_all();
+        }
+        loop {
+            if let Some(at) = state.released_at {
+                return Ok((at, state.frames[index].take()));
+            }
+            anyhow::ensure!(
+                !stop.load(Ordering::Acquire),
+                "Recording start barrier was cancelled"
+            );
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "Recording encoder preparation barrier timed out"
+            );
+            (state, _) = self
+                .changed
+                .wait_timeout(state, Duration::from_millis(20))
+                .unwrap_or_else(|p| p.into_inner());
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn start_synthetic_recording_bridge(
     state: AppState,
@@ -2726,14 +3505,49 @@ pub fn start_synthetic_recording_bridge(
     // Set once at the bridge's first delivered frame: the shared session epoch the
     // audio FIFO writer aligns to (Studio Shell And Live Control Plan, slice A2).
     video_epoch: Arc<OnceLock<Instant>>,
+    start_barrier: Option<Arc<RecordingStartBarrier>>,
+    // Plan 218 S3b: how long FFmpeg deliberately holds each stream frame to
+    // interleave it with the later audio (`stream_queue_allowance_ms` in
+    // recording.rs). Applied only when this writer runs the stream policy.
+    stream_queue_allowance_ms: u32,
 ) -> Result<EncoderBridgeRecordingSession> {
     let byte_len = raw_yuv420p_len(width, height)?;
+    #[cfg(unix)]
+    let bootstrap_reader = if start_barrier.is_some() {
+        use std::os::unix::fs::OpenOptionsExt;
+        Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo_path)?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let bootstrap_reader: Option<std::fs::File> = None;
     let lifecycle = EncoderBridgeWriterLifecycle::register(
         state.clone(),
         session_id.clone(),
         effective_encoder_bridge_output_role(diagnostics_context),
     );
     let stop = Arc::new(AtomicBool::new(false));
+    let graceful_stop_at = (start_barrier.is_some()
+        && video_output.uses_video_toolbox()
+        && effective_encoder_bridge_output_role(diagnostics_context)
+            != EncoderBridgeOutputRole::Stream)
+        .then(|| {
+            Arc::new(IsoVideoStopBoundary {
+                local: StdMutex::new(None),
+                global: start_barrier.as_ref().unwrap().stop_boundary(),
+            })
+        });
+    let writer_graceful_stop_at = graceful_stop_at.clone();
+    let iso_member = start_barrier
+        .as_ref()
+        .and_then(|barrier| barrier.member_for(frame_store.as_ref()));
+    let writer_iso_member = iso_member.clone();
     let terminal_failure = Arc::new(StdMutex::new(None));
     let (startup_ready_tx, startup_ready_rx) = oneshot::channel();
     let writer_stop = stop.clone();
@@ -2784,10 +3598,14 @@ pub fn start_synthetic_recording_bridge(
                 low_latency,
                 diagnostics_context,
                 stop: writer_stop,
+                graceful_stop_at: writer_graceful_stop_at,
+                iso_member: writer_iso_member,
                 terminal_failure: writer_terminal_failure,
                 startup_ready_tx: Some(startup_ready_tx),
                 diagnostics_tx,
                 video_epoch,
+                start_barrier,
+                stream_queue_allowance_ms,
                 lifecycle: writer_lifecycle,
             };
             write_synthetic_recording_frames(params);
@@ -2802,7 +3620,10 @@ pub fn start_synthetic_recording_bridge(
 
     Ok(EncoderBridgeRecordingSession {
         stop,
+        graceful_stop_at,
+        iso_member,
         terminal_failure,
+        bootstrap_reader: StdMutex::new(bootstrap_reader),
         startup_ready: Some(startup_ready_rx),
         fifo_path,
         writer: Some(writer),
@@ -2813,6 +3634,7 @@ pub fn start_synthetic_recording_bridge(
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 impl EncoderBridgeSettings {
     fn from_params(params: EncoderBridgeSyntheticParams) -> Result<Self> {
         let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
@@ -2852,6 +3674,7 @@ impl EncoderBridgeSettings {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn encoder_bridge_ffmpeg_args(settings: &EncoderBridgeSettings) -> Vec<String> {
     vec![
         "-y".to_string(),
@@ -2884,10 +3707,11 @@ fn encoder_bridge_ffmpeg_args(settings: &EncoderBridgeSettings) -> Vec<String> {
         format!("{}k", settings.bitrate_kbps),
         "-movflags".to_string(),
         "+faststart".to_string(),
-        settings.output_path.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(&settings.output_path),
     ]
 }
 
+#[cfg(any(test, debug_assertions))]
 fn render_synthetic_rgba_frame(frame: &SyntheticCompositorFrame, bytes: &mut [u8]) {
     let width = frame.width as usize;
     let height = frame.height as usize;
@@ -2954,6 +3778,7 @@ fn render_synthetic_yuv420p_frame(frame: &SyntheticCompositorFrame, bytes: &mut 
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn raw_rgba_len(width: u32, height: u32) -> Result<usize> {
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
@@ -2983,6 +3808,8 @@ struct SyntheticRecordingWriterParams {
     height: u32,
     byte_len: usize,
     stop: Arc<AtomicBool>,
+    graceful_stop_at: Option<Arc<IsoVideoStopBoundary>>,
+    iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
     fifo_path: PathBuf,
@@ -3001,6 +3828,10 @@ struct SyntheticRecordingWriterParams {
     diagnostics_tx: watch::Sender<Option<EncoderBridgeWriterEvent>>,
     diagnostics_context: EncoderBridgeDiagnosticsContext,
     video_epoch: Arc<OnceLock<Instant>>,
+    start_barrier: Option<Arc<RecordingStartBarrier>>,
+    /// Plan 218 S3b: FFmpeg's deliberate interleave hold on this stream's
+    /// frames; zero for a recording.
+    stream_queue_allowance_ms: u32,
     lifecycle: EncoderBridgeWriterLifecycle,
 }
 
@@ -3021,6 +3852,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         height,
         byte_len,
         stop,
+        graceful_stop_at,
+        iso_member,
         terminal_failure,
         mut startup_ready_tx,
         fifo_path,
@@ -3043,8 +3876,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         diagnostics_tx,
         diagnostics_context,
         video_epoch,
+        start_barrier,
+        stream_queue_allowance_ms,
         lifecycle,
     } = params;
+    let _iso_membership_guard = IsoBatchWriterGuard(iso_member.clone());
     // Declared after destructuring and before every writer-owned resource so
     // the registry cannot release admission until the outer thread has
     // dropped its encoder/FIFO state.
@@ -3055,7 +3891,26 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let direct_d3d11_enabled = direct_d3d11_source.is_some();
     #[cfg(not(target_os = "windows"))]
     let direct_d3d11_enabled = false;
-    let output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context);
+    let mut output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context)
+        .for_arrival_stamped_raw_input(video_output);
+    if video_output.uses_video_toolbox()
+        && let Some(barrier) = start_barrier.as_ref()
+    {
+        output_queue_policy =
+            output_queue_policy.with_iso_audio_advance(target_fps, barrier.audio_advance_ms);
+    }
+    output_queue_policy =
+        output_queue_policy.with_stream_interleave_allowance(target_fps, stream_queue_allowance_ms);
+    if output_queue_policy.role == EncoderBridgeOutputRole::Stream {
+        tracing::info!(
+            allowance_ms = stream_queue_allowance_ms,
+            coalesce_frames = ?output_queue_policy.coalesce_at_frames,
+            coalesce_age_ms = ?output_queue_policy.coalesce_at_age.map(|age| age.as_millis()),
+            max_frames = output_queue_policy.max_frames,
+            max_age_ms = output_queue_policy.max_age.as_millis(),
+            "stream output queue policy"
+        );
+    }
     // Only the recording leg (or the shared leg) feeds the session's frame
     // accounting; a dedicated stream writer must not double-count it.
     let accounts_session_frames = output_queue_policy.role != EncoderBridgeOutputRole::Stream;
@@ -3233,6 +4088,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut frames_in_window = 0_u64;
     let mut raw_frames_delivered_in_window = 0_u64;
     let mut queue_depth = 0_u64;
+    // Plan 218 S2: the queue's oldest-frame age, sampled every tick.
+    let mut output_queue_age_times_ms = Vec::with_capacity(128);
     let mut repeated_fed_frames = 0_u64;
     let mut repeated_frame_bursts = 0_u64;
     let mut max_repeated_frame_run = 0_u64;
@@ -3246,13 +4103,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut metal_target_copied_frames = 0_u64;
     let mut metal_target_handle_frames = 0_u64;
     let mut zero_copy_frames = 0_u64;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut video_toolbox_probe_frames = 0_u64;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut video_toolbox_probe_bytes = 0_u64;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut video_toolbox_probe_errors = 0_u64;
     let mut video_toolbox_output_frames = 0_u64;
     let mut video_toolbox_output_bytes = 0_u64;
     let mut max_video_toolbox_output_encode_ms: Option<u64> = None;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut pending_video_toolbox_output_frames = 0_u64;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut pending_video_toolbox_fifo_frames = 0_u64;
     let mut pending_raw_fifo_frames = 0_u64;
     let mut pending_raw_fifo_started_at = VecDeque::<Instant>::new();
@@ -3263,6 +4125,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut direct_camera_overlay_bytes = Vec::new();
     #[cfg(target_os = "windows")]
     let mut direct_camera_overlay_sequence = None::<u64>;
+    #[cfg(target_os = "windows")]
+    let mut direct_camera_overlay_look = None::<crate::protocol::CameraLook>;
+    #[cfg(target_os = "windows")]
+    let mut direct_camera_overlay_revision = 0_u64;
     #[cfg(target_os = "macos")]
     let mut pending_video_toolbox_output_started_at = HashMap::<u64, Instant>::new();
     #[cfg(target_os = "macos")]
@@ -3325,6 +4191,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     output_queue_oldest_frame_age_high_water_ms
                         .map_or(age_ms, |current| current.max(age_ms)),
                 );
+                output_queue_age_times_ms.push(age_ms as f64);
             }
         }};
     }
@@ -3339,6 +4206,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut video_toolbox_fifo_write_times_ms = Vec::with_capacity(128);
     let mut raw_video_fifo_write_times_ms = Vec::with_capacity(128);
     let mut video_toolbox_fifo_enqueue_times_ms = Vec::with_capacity(128);
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut max_video_toolbox_fifo_enqueue_ms: Option<f64> = None;
     let mut writer_loop_times_ms = Vec::with_capacity(128);
     let mut writer_sleep_times_ms = Vec::with_capacity(128);
@@ -3347,6 +4215,13 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut max_deadline_lag_ms: Option<f64> = None;
     let mut late_deadline_ticks = 0_u64;
     let mut schedule_skipped_ms = 0_u64;
+    // Plan 218 S2: the window's encoded bytes and which limit tripped, so
+    // the stream writer's own figures reach the diagnostics (the queue age
+    // samples are declared with the queue above).
+    let mut window_started_bytes = 0_u64;
+    let mut output_queue_depth_trips = 0_u64;
+    let mut output_queue_age_trips = 0_u64;
+    let mut output_queue_last_trip = None::<StreamQueueTrip>;
     #[cfg(target_os = "macos")]
     let mut video_toolbox_probe = EncoderBridgeVideoToolboxProbe::new(
         video_output.uses_video_toolbox() || encoder_bridge_video_toolbox_probe_enabled(),
@@ -3356,6 +4231,19 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         bitrate_kbps,
         low_latency,
     );
+    // Plan 218 S3a: only a dedicated stream encoder adapts its bitrate. A
+    // shared record+stream encoder would move the recording's too.
+    #[cfg(target_os = "macos")]
+    let mut stream_bitrate = (output_queue_policy.role == EncoderBridgeOutputRole::Stream
+        && video_output.uses_video_toolbox())
+    .then(|| {
+        bitrate_kbps.map(|kbps| StreamBitrateController::new(kbps, target_fps, Instant::now()))
+    })
+    .flatten();
+    #[cfg(not(target_os = "macos"))]
+    let mut stream_bitrate: Option<StreamBitrateController> = None;
+    let stream_uplink_overflows = (output_queue_policy.role == EncoderBridgeOutputRole::Stream)
+        .then(|| stream_uplink_overflow_counter(&session_id));
     #[cfg(target_os = "macos")]
     if video_output.uses_video_toolbox()
         && let Err(error) = video_toolbox_probe.prepare_session()
@@ -3385,12 +4273,56 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // the absolute CFR clock only after that one-time setup; otherwise the
     // first loop tries to catch up the setup delay by immediately re-feeding
     // one compositor frame, creating a visible startup freeze.
-    let mut window_started_at = Instant::now();
-    let mut next_frame_at = Instant::now();
+    #[cfg(test)]
+    if start_barrier.is_some()
+        && {
+            let role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE")
+                .unwrap_or_else(|_| "camera".into());
+            let path = fifo_path.to_string_lossy();
+            match role.as_str() {
+                "screen" => path.contains("iso-screen-"),
+                "combined" => !path.contains("iso-"),
+                _ => path.contains("iso-camera-"),
+            }
+        }
+        && let Ok(delay) = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS")
+    {
+        // Deliberate fault injection, not a readiness handshake.
+        if let Ok(delay) = delay.parse::<u64>() {
+            thread::sleep(Duration::from_millis(delay.min(1000)));
+        }
+    }
+    let (clock_start, mut initial_frame) = if let Some(barrier) = start_barrier.as_ref() {
+        match barrier.prepared(frame_store.clone(), &video_epoch, &stop) {
+            Ok(start) => start,
+            Err(error) => {
+                let error =
+                    record_encoder_bridge_terminal_failure(&terminal_failure, error.to_string());
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error));
+                return;
+            }
+        }
+    } else {
+        (Instant::now(), None)
+    };
+    let mut window_started_at = clock_start;
+    let mut next_frame_at = clock_start;
     let mut last_fed_sequence: Option<u64> = None;
+    let mut last_iso_frame: Option<HeldIsoCompositorFrame> = None;
+    #[allow(unused_mut)]
+    let mut last_submitted_video_end = 0_u64;
+    let mut iso_shed_lag = IsoShedLagWatch::default();
     let mut first_frame_wait_sequence =
         initial_bridge_wait_sequence(video_output, frame_store.as_ref());
     let mut consecutive_repeated_frames = 0_u64;
+    let mut iso_content_clock_missed_ticks = 0_u64;
+    #[cfg(test)]
+    let trace_directory = start_barrier
+        .as_ref()
+        .and_then(|_| std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_DIR"))
+        .map(PathBuf::from);
+    #[cfg(test)]
+    let mut selection_trace = Vec::with_capacity(if trace_directory.is_some() { 512 } else { 0 });
     let mut terminal_writer_error = None;
     let mut drain_state = EncoderBridgeDrainState::default();
 
@@ -3459,8 +4391,45 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 deadline_lag_max_ms: max_deadline_lag_ms,
                 late_deadline_ticks,
                 schedule_skipped_ms,
+                encoded_output_window_kbps: encoded_window_kbps(
+                    video_toolbox_output_bytes,
+                    window_started_bytes,
+                    window_started_at,
+                ),
+                output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                output_queue_depth_trips,
+                output_queue_age_trips,
+                output_queue_last_trip,
+                stream_bitrate_kbps: stream_bitrate
+                    .as_ref()
+                    .map(StreamBitrateController::current_kbps),
+                stream_bitrate_chosen_kbps: stream_bitrate
+                    .as_ref()
+                    .map(|controller| controller.chosen_kbps),
+                stream_uplink_overflows: stream_uplink_overflows
+                    .as_ref()
+                    .map_or(0, |counter| counter.load(Ordering::Acquire)),
             }
         };
+    }
+
+    // Plan 191: both window resets share this list; deadline lag was the one sample never reset.
+    macro_rules! clear_window_samples {
+        () => {{
+            window_started_bytes = video_toolbox_output_bytes;
+            output_queue_age_times_ms.clear();
+            compositor_wait_times_ms.clear();
+            video_toolbox_submit_times_ms.clear();
+            video_toolbox_fifo_write_times_ms.clear();
+            raw_video_fifo_write_times_ms.clear();
+            video_toolbox_fifo_enqueue_times_ms.clear();
+            writer_loop_times_ms.clear();
+            writer_sleep_times_ms.clear();
+            writer_active_times_ms.clear();
+            deadline_lag_times_ms.clear();
+            source_to_encode_age_times_ms.clear();
+            repeated_frame_age_times_ms.clear();
+        }};
     }
 
     if matches!(video_output, EncoderBridgeVideoOutput::RawYuv420p) {
@@ -3595,30 +4564,81 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         sequence = 1;
         frames_in_window = 1;
         window_started_at = Instant::now();
+        window_started_bytes = video_toolbox_output_bytes;
         next_frame_at = window_started_at + frame_interval;
         first_frame_wait_sequence = None;
         signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
-    } else if !matches!(
-        video_output,
-        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
-    ) {
+    } else if !video_output.uses_encoded_h264() {
         signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
     }
     // VideoToolbox outputs signal readiness at their FIRST FED FRAME below
     // (instant-record P4): `Recording` then means "the first frame is in the
-    // encoder", not merely "the writer thread exists".
+    // encoder", not merely "the writer thread exists". Media Foundation
+    // signals once its first access unit is in the FIFO (#1068), the same
+    // proof the D3D11 writer gives, so its software first frame is paid
+    // before `Recording` and FFmpeg's progress report can be a watchdog.
 
     while !stop.load(Ordering::Relaxed) {
+        // Plan 200 D1: a shed separate file drains to its own last tick, even
+        // while output pressure keeps it from selecting another frame.
+        install_iso_shed_boundary(
+            iso_member.as_ref(),
+            graceful_stop_at.as_deref(),
+            video_epoch.get().copied(),
+            target_fps,
+        );
+        if let Some(boundary) = graceful_stop_at.as_ref().and_then(|at| at.boundary())
+            && let Some(epoch) = video_epoch.get().copied()
+        {
+            match iso_terminal_video_tick(
+                boundary,
+                epoch,
+                target_fps,
+                sequence,
+                last_submitted_video_end,
+                Instant::now(),
+            ) {
+                IsoTerminalVideoTick::Complete => break,
+                IsoTerminalVideoTick::Continue => {}
+                IsoTerminalVideoTick::TimedOut | IsoTerminalVideoTick::MissingFinalFrame => {
+                    let error = record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        "ISO video did not reach the committed source-clock Stop boundary within its drain deadline",
+                    );
+                    terminal_writer_error.get_or_insert(error);
+                    break;
+                }
+            }
+        }
         let loop_started_at = Instant::now();
         let now = Instant::now();
-        let tick_lag = now.saturating_duration_since(next_frame_at);
+        let tick_lag = if initial_frame.is_some() {
+            Duration::ZERO
+        } else {
+            now.saturating_duration_since(next_frame_at)
+        };
         if now > next_frame_at && tick_lag >= ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD {
             let lag_ms = tick_lag.as_secs_f64() * 1000.0;
             deadline_lag_times_ms.push(lag_ms);
             max_deadline_lag_ms =
                 Some(max_deadline_lag_ms.map_or(lag_ms, |current| current.max(lag_ms)));
             late_deadline_ticks = late_deadline_ticks.saturating_add(1);
+        }
+        // Plan 200 D1: any batch member falling behind real time sheds the
+        // separate files (never after Stop, which owns its own drain).
+        if let Some(member) = iso_member.as_ref()
+            && graceful_stop_at
+                .as_ref()
+                .and_then(|at| at.boundary())
+                .is_none()
+            && iso_shed_lag.observe(tick_lag, now)
+            && member.store.shed_separate_files()
+        {
+            tracing::warn!(
+                role = member.role,
+                lag_ms = tick_lag.as_millis() as u64,
+                "separate source files shed so the Combined recording keeps up"
+            );
         }
         let tick_plan = plan_bridge_tick(tick_lag, frame_interval);
         if tick_plan.reanchor_skipped_intervals > 0 {
@@ -3733,6 +4753,34 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         #[cfg(not(target_os = "macos"))]
         let mut pipeline_error = raw_fifo_drain_error;
 
+        // Plan 218 S3a: a leg that overflowed or a pressured stream queue
+        // lowers the stream encoder's bitrate; a clean stretch raises it.
+        if let Some(controller) = stream_bitrate.as_mut() {
+            let overflows = stream_uplink_overflows
+                .as_ref()
+                .map_or(0, |counter| counter.load(Ordering::Acquire));
+            match controller.observe(Instant::now(), overflows, output_queue_dropped_frames) {
+                StreamBitrateAction::Hold | StreamBitrateAction::AtFloor => {}
+                StreamBitrateAction::StepDown(kbps) | StreamBitrateAction::StepUp(kbps) => {
+                    #[cfg(target_os = "macos")]
+                    match video_toolbox_probe.set_stream_bit_rate(kbps) {
+                        Ok(()) => tracing::info!(
+                            bitrate_kbps = kbps,
+                            chosen_kbps = controller.chosen_kbps,
+                            overflows,
+                            "stream encoder bitrate retuned"
+                        ),
+                        Err(error) => tracing::warn!(
+                            bitrate_kbps = kbps,
+                            "stream encoder bitrate change refused: {error:#}"
+                        ),
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = kbps;
+                }
+            }
+        }
+
         queue_depth = if video_output.uses_media_foundation() {
             #[cfg(target_os = "windows")]
             {
@@ -3826,6 +4874,22 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                         output_pre_encode_skipped_frames.saturating_add(1);
                 } else {
                     output_queue_dropped_frames = output_queue_dropped_frames.saturating_add(1);
+                    if let Some(trip) = stream_queue_trip(
+                        output_queue_policy,
+                        queue_depth,
+                        oldest_output_queue_age!(),
+                    ) {
+                        match trip {
+                            StreamQueueTrip::Depth => {
+                                output_queue_depth_trips =
+                                    output_queue_depth_trips.saturating_add(1)
+                            }
+                            StreamQueueTrip::Age => {
+                                output_queue_age_trips = output_queue_age_trips.saturating_add(1)
+                            }
+                        }
+                        output_queue_last_trip = Some(trip);
+                    }
                 }
                 writer_active_times_ms.push(active_started_at.elapsed().as_secs_f64() * 1000.0);
                 writer_loop_times_ms.push(loop_started_at.elapsed().as_secs_f64() * 1000.0);
@@ -3841,16 +4905,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     window_started_at = Instant::now();
                     frames_in_window = 0;
                     raw_frames_delivered_in_window = 0;
-                    compositor_wait_times_ms.clear();
-                    video_toolbox_submit_times_ms.clear();
-                    video_toolbox_fifo_write_times_ms.clear();
-                    raw_video_fifo_write_times_ms.clear();
-                    video_toolbox_fifo_enqueue_times_ms.clear();
-                    writer_loop_times_ms.clear();
-                    writer_sleep_times_ms.clear();
-                    writer_active_times_ms.clear();
-                    source_to_encode_age_times_ms.clear();
-                    repeated_frame_age_times_ms.clear();
+                    clear_window_samples!();
                 }
                 // `last_fed_sequence` intentionally does not advance. The next
                 // admitted tick asks the latest-wins compositor store for the
@@ -3892,6 +4947,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             compositor_frame_wait_budget(video_output, consecutive_repeated_frames, frame_interval)
         };
         let previous_sequence = last_fed_sequence.or(startup_wait_sequence);
+        let iso_content_clock = start_barrier.as_ref().and_then(|_| {
+            video_epoch.get().map(|epoch| {
+                IsoCompositorContentClock::for_tick(
+                    *epoch,
+                    sequence,
+                    target_fps,
+                    next_frame_at,
+                    tick_plan.skip_fresh_wait,
+                    Instant::now(),
+                )
+            })
+        });
         let compositor_wait_started_at = Instant::now();
         #[cfg(target_os = "windows")]
         let direct_d3d11_frame = direct_d3d11_source
@@ -3902,7 +4969,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             .as_ref()
             .and_then(|overlay| overlay.source.latest_frame_blocking())
             .map(|(frame, _layout)| frame);
-        let fed = if direct_d3d11_enabled {
+        let mut fed = if initial_frame.is_some() {
+            initial_frame.take()
+        } else if direct_d3d11_enabled {
             None
         } else {
             match video_output {
@@ -3915,10 +4984,150 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
                 | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
                 | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
-                    next_compositor_frame(frame_store.as_ref(), previous_sequence, wait_budget)
+                    if let Some(clock) = iso_content_clock {
+                        let selected = if let Some(member) = iso_member.as_ref() {
+                            match poll_iso_completed_batch(
+                                member,
+                                sequence.saturating_sub(1),
+                                clock,
+                                &stop,
+                                |wait| {
+                                    if !wait.is_zero() {
+                                        thread::sleep(wait);
+                                    }
+                                    Instant::now()
+                                },
+                            ) {
+                                Ok(frame) => frame,
+                                Err(_) if stop.load(Ordering::Acquire) => break,
+                                Err(_)
+                                    if !member.active()
+                                        && (install_iso_shed_boundary(
+                                            Some(member),
+                                            graceful_stop_at.as_deref(),
+                                            video_epoch.get().copied(),
+                                            target_fps,
+                                        ) || graceful_stop_at
+                                            .as_ref()
+                                            .and_then(|at| at.boundary())
+                                            .is_some()) =>
+                                {
+                                    graceful_stop_at
+                                        .as_ref()
+                                        .and_then(|at| at.retained())
+                                        .or_else(|| {
+                                            last_iso_frame.as_ref().map(|held| held.frame.clone())
+                                        })
+                                }
+                                Err(error) => {
+                                    let error = record_encoder_bridge_terminal_failure(
+                                        &terminal_failure,
+                                        error,
+                                    );
+                                    terminal_writer_error.get_or_insert(error);
+                                    break;
+                                }
+                            }
+                        } else {
+                            poll_iso_compositor_frame(clock, &stop, |wait| {
+                                if !wait.is_zero() {
+                                    thread::sleep(wait);
+                                }
+                                (
+                                    Instant::now(),
+                                    latest_compositor_frame(frame_store.as_ref()),
+                                )
+                            })
+                        };
+                        if !selected.as_ref().is_some_and(|frame| clock.accepts(frame)) {
+                            iso_content_clock_missed_ticks =
+                                iso_content_clock_missed_ticks.saturating_add(1);
+                        }
+                        selected
+                    } else {
+                        next_compositor_frame(frame_store.as_ref(), previous_sequence, wait_budget)
+                    }
                 }
             }
         };
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        if graceful_stop_at.is_some() {
+            let boundary = graceful_stop_at.as_ref().and_then(|at| at.boundary());
+            if let (Some(boundary), Some(epoch)) = (boundary, video_epoch.get().copied()) {
+                // Stop can arrive while this tick sleeps or waits for a frame.
+                // Do not encode a new tick after successful terminal coverage.
+                match iso_terminal_video_tick(
+                    boundary,
+                    epoch,
+                    target_fps,
+                    sequence.saturating_sub(1),
+                    last_submitted_video_end,
+                    Instant::now(),
+                ) {
+                    IsoTerminalVideoTick::Complete => break,
+                    IsoTerminalVideoTick::Continue => {}
+                    IsoTerminalVideoTick::TimedOut | IsoTerminalVideoTick::MissingFinalFrame => {
+                        let error = record_encoder_bridge_terminal_failure(
+                            &terminal_failure,
+                            "ISO video did not reach the committed source-clock Stop boundary within its drain deadline",
+                        );
+                        terminal_writer_error.get_or_insert(error);
+                        break;
+                    }
+                }
+            }
+            if fed
+                .as_ref()
+                .is_some_and(|frame| boundary.is_none_or(|at| frame.captured_at <= at))
+            {
+                last_iso_frame = fed.clone().map(HeldIsoCompositorFrame::new);
+            } else if boundary.is_some() {
+                // No future capture may enter the terminal interval. Retain an
+                // explicitly held pre-Stop frame, including its native lease.
+                fed = graceful_stop_at
+                    .as_ref()
+                    .and_then(|at| at.retained())
+                    .filter(|frame| boundary.is_some_and(|at| frame.captured_at <= at))
+                    .or_else(|| {
+                        last_iso_frame
+                            .as_ref()
+                            .filter(|held| boundary.is_some_and(|at| held.frame.captured_at <= at))
+                            .map(|held| held.frame.clone())
+                    });
+                if fed.is_none() {
+                    let error = record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        "ISO terminal video has no retained pre-Stop frame",
+                    );
+                    terminal_writer_error.get_or_insert(error);
+                    break;
+                }
+            }
+        }
+        #[cfg(test)]
+        if trace_directory.is_some()
+            && selection_trace.len() < 4096
+            && let Some(frame) = fed.as_ref()
+        {
+            selection_trace.push(SourceIsoSelectionTiming {
+                index: sequence.saturating_sub(1),
+                compositor_sequence: frame.sequence,
+                pts_seconds: sequence.saturating_sub(1) as f64 / f64::from(target_fps.max(1)),
+                captured_ms: test_source_iso_trace_ms(frame.captured_at),
+                presented_ms: frame
+                    .frame
+                    .metadata
+                    .presentation_at()
+                    .map(test_source_iso_trace_ms),
+                epoch_ms: video_epoch.get().copied().map(test_source_iso_trace_ms),
+                selected_ms: test_source_iso_trace_ms(Instant::now()),
+                content_clock_met: iso_content_clock.map(|clock| clock.accepts(frame)),
+                content_target_ms: iso_content_clock
+                    .map(|clock| test_source_iso_trace_ms(clock.content_at)),
+            });
+        }
         compositor_wait_times_ms.push(compositor_wait_started_at.elapsed().as_secs_f64() * 1000.0);
         #[cfg(target_os = "windows")]
         let direct_sequence = direct_d3d11_frame.as_ref().map(|frame| frame.sequence);
@@ -3994,6 +5203,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                             deadline_lag_max_ms: max_deadline_lag_ms,
                             late_deadline_ticks,
                             schedule_skipped_ms,
+                            encoded_output_window_kbps: encoded_window_kbps(
+                                video_toolbox_output_bytes,
+                                window_started_bytes,
+                                window_started_at,
+                            ),
+                            output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                            output_queue_depth_trips,
+                            output_queue_age_trips,
+                            output_queue_last_trip,
+                            stream_bitrate_kbps: stream_bitrate
+                                .as_ref()
+                                .map(StreamBitrateController::current_kbps),
+                            stream_bitrate_chosen_kbps: stream_bitrate
+                                .as_ref()
+                                .map(|controller| controller.chosen_kbps),
+                            stream_uplink_overflows: stream_uplink_overflows
+                                .as_ref()
+                                .map_or(0, |counter| counter.load(Ordering::Acquire)),
                         },
                         diagnostics_context,
                         Some(
@@ -4049,8 +5276,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                         "Recording audio epoch established from first video presentation"
                     );
                 }
-                // No-op for outputs that already signalled at startup.
-                signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+                // No-op for outputs that already signalled at startup. Media
+                // Foundation waits for its first access unit in the FIFO.
+                if !video_output.uses_media_foundation() {
+                    signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+                }
             }
             last_fed_sequence = Some(frame_sequence);
             max_source_to_encode_age_ms =
@@ -4166,6 +5396,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                     .submit_output_frame(frame, sequence.saturating_sub(1))
                                 {
                                     VideoToolboxProbeOutcome::Submitted => {
+                                        last_submitted_video_end = sequence;
                                         let encode_ms =
                                             encode_started_at.elapsed().as_millis() as u64;
                                         video_toolbox_submit_times_ms.push(
@@ -4234,8 +5465,22 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                     .as_ref()
                                     .zip(direct_camera_frame.as_ref())
                                     .map(|(config, camera_frame)| {
+                                        let look = config
+                                            .compositor
+                                            .try_lock()
+                                            .ok()
+                                            .and_then(|runtime| {
+                                                runtime
+                                                    .status
+                                                    .scene_layout
+                                                    .as_ref()
+                                                    .map(|layout| layout.camera_look)
+                                            })
+                                            .or(direct_camera_overlay_look)
+                                            .unwrap_or(config.camera_look);
                                         if direct_camera_overlay_sequence
                                             != Some(camera_frame.sequence)
+                                            || direct_camera_overlay_look != Some(look)
                                         {
                                             if !render_camera_overlay_bgra(
                                                 &camera_frame.bytes,
@@ -4247,6 +5492,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                                 config.contain,
                                                 config.mirror_x,
                                                 config.mask,
+                                                look,
                                                 &mut direct_camera_overlay_bytes,
                                             ) {
                                                 return Err(io::Error::other(
@@ -4255,12 +5501,15 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                             }
                                             direct_camera_overlay_sequence =
                                                 Some(camera_frame.sequence);
+                                            direct_camera_overlay_look = Some(look);
+                                            direct_camera_overlay_revision =
+                                                direct_camera_overlay_revision.wrapping_add(1);
                                         }
                                         Ok(D3D11BgraOverlay {
                                             bytes: &direct_camera_overlay_bytes,
                                             width: config.destination.width,
                                             height: config.destination.height,
-                                            sequence: camera_frame.sequence,
+                                            sequence: direct_camera_overlay_revision,
                                             destination: config.destination,
                                         })
                                     })
@@ -4358,6 +5607,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         };
         if write_result.is_ok() && video_toolbox_output_frames > output_frames_before_write {
             last_output_progress_at = Instant::now();
+            if video_output.uses_media_foundation() {
+                // #1068: the first access unit reached FFmpeg's FIFO. Later
+                // writes find the sender already taken.
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+            }
         }
         if let Err(error) = write_result {
             // A closed downstream (EPIPE/EOF: FFmpeg exited or was stopped)
@@ -4372,6 +5626,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 &error,
             );
             terminal_writer_error = Some(error.clone());
+            // Before the first access unit, a waiting session start gets
+            // this error instead of a generic "stopped before ready".
+            signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
             emit_encoder_bridge_diagnostics_from_thread(
                 &diagnostics_tx,
                 session_id.clone(),
@@ -4426,6 +5683,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     deadline_lag_max_ms: max_deadline_lag_ms,
                     late_deadline_ticks,
                     schedule_skipped_ms,
+                    encoded_output_window_kbps: encoded_window_kbps(
+                        video_toolbox_output_bytes,
+                        window_started_bytes,
+                        window_started_at,
+                    ),
+                    output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                    output_queue_depth_trips,
+                    output_queue_age_trips,
+                    output_queue_last_trip,
+                    stream_bitrate_kbps: stream_bitrate
+                        .as_ref()
+                        .map(StreamBitrateController::current_kbps),
+                    stream_bitrate_chosen_kbps: stream_bitrate
+                        .as_ref()
+                        .map(|controller| controller.chosen_kbps),
+                    stream_uplink_overflows: stream_uplink_overflows
+                        .as_ref()
+                        .map_or(0, |counter| counter.load(Ordering::Acquire)),
                 },
                 diagnostics_context,
                 Some(error),
@@ -4533,6 +5808,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     deadline_lag_max_ms: max_deadline_lag_ms,
                     late_deadline_ticks,
                     schedule_skipped_ms,
+                    encoded_output_window_kbps: encoded_window_kbps(
+                        video_toolbox_output_bytes,
+                        window_started_bytes,
+                        window_started_at,
+                    ),
+                    output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                    output_queue_depth_trips,
+                    output_queue_age_trips,
+                    output_queue_last_trip,
+                    stream_bitrate_kbps: stream_bitrate
+                        .as_ref()
+                        .map(StreamBitrateController::current_kbps),
+                    stream_bitrate_chosen_kbps: stream_bitrate
+                        .as_ref()
+                        .map(|controller| controller.chosen_kbps),
+                    stream_uplink_overflows: stream_uplink_overflows
+                        .as_ref()
+                        .map_or(0, |counter| counter.load(Ordering::Acquire)),
                 },
                 diagnostics_context,
                 Some(error),
@@ -4553,13 +5846,20 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 &mut metal_target_handle_frames,
                 &mut raw_video_fifo_write_times_ms,
             ) {
-                let error = record_encoder_bridge_terminal_failure(
-                    &terminal_failure,
+                let error = if io_error_is_downstream_closed(&error) {
                     format!(
-                        "{} raw-video encoder output stopped: {error}",
+                        "{} raw-video encoder output ended: downstream closed ({error})",
                         encoder_bridge_output_role_label(output_queue_policy.role)
-                    ),
-                );
+                    )
+                } else {
+                    record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        format!(
+                            "{} raw-video encoder output stopped: {error}",
+                            encoder_bridge_output_role_label(output_queue_policy.role)
+                        ),
+                    )
+                };
                 terminal_writer_error = Some(error.clone());
                 emit_encoder_bridge_diagnostics_from_thread(
                     &diagnostics_tx,
@@ -4658,6 +5958,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     deadline_lag_max_ms: max_deadline_lag_ms,
                     late_deadline_ticks,
                     schedule_skipped_ms,
+                    encoded_output_window_kbps: encoded_window_kbps(
+                        video_toolbox_output_bytes,
+                        window_started_bytes,
+                        window_started_at,
+                    ),
+                    output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                    output_queue_depth_trips,
+                    output_queue_age_trips,
+                    output_queue_last_trip,
+                    stream_bitrate_kbps: stream_bitrate
+                        .as_ref()
+                        .map(StreamBitrateController::current_kbps),
+                    stream_bitrate_chosen_kbps: stream_bitrate
+                        .as_ref()
+                        .map(|controller| controller.chosen_kbps),
+                    stream_uplink_overflows: stream_uplink_overflows
+                        .as_ref()
+                        .map_or(0, |counter| counter.load(Ordering::Acquire)),
                 },
                 diagnostics_context,
                 None,
@@ -4665,17 +5983,27 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             window_started_at = Instant::now();
             frames_in_window = 0;
             raw_frames_delivered_in_window = 0;
-            compositor_wait_times_ms.clear();
-            video_toolbox_submit_times_ms.clear();
-            video_toolbox_fifo_write_times_ms.clear();
-            raw_video_fifo_write_times_ms.clear();
-            video_toolbox_fifo_enqueue_times_ms.clear();
-            writer_loop_times_ms.clear();
-            writer_sleep_times_ms.clear();
-            writer_active_times_ms.clear();
-            source_to_encode_age_times_ms.clear();
-            repeated_frame_age_times_ms.clear();
+            clear_window_samples!();
         }
+    }
+
+    #[cfg(test)]
+    if let Some(directory) = trace_directory {
+        let name = fifo_path.file_name().unwrap_or_default().to_string_lossy();
+        if let Err(error) = std::fs::write(
+            directory.join(format!("bridge-timing-{name}.json")),
+            serde_json::to_vec_pretty(&selection_trace).unwrap(),
+        ) {
+            tracing::warn!(%error, "could not persist source ISO runtime timing evidence");
+        }
+    }
+    if iso_content_clock_missed_ticks > 0 {
+        tracing::warn!(
+            session_id,
+            fifo = %fifo_path.display(),
+            missed_ticks = iso_content_clock_missed_ticks,
+            "ISO content clock deadlines used held frames without shifting the output timeline"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -4830,7 +6158,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             &mut metal_target_copied_frames,
             &mut metal_target_handle_frames,
             &mut raw_video_fifo_write_times_ms,
-        ) {
+        ) && !io_error_is_downstream_closed(&error)
+        {
             terminal_writer_error.get_or_insert_with(|| {
                 format!(
                     "{} raw-video encoder output stopped while draining: {error}",
@@ -4902,6 +6231,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             deadline_lag_max_ms: max_deadline_lag_ms,
             late_deadline_ticks,
             schedule_skipped_ms,
+            encoded_output_window_kbps: encoded_window_kbps(
+                video_toolbox_output_bytes,
+                window_started_bytes,
+                window_started_at,
+            ),
+            output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+            output_queue_depth_trips,
+            output_queue_age_trips,
+            output_queue_last_trip,
+            stream_bitrate_kbps: stream_bitrate
+                .as_ref()
+                .map(StreamBitrateController::current_kbps),
+            stream_bitrate_chosen_kbps: stream_bitrate
+                .as_ref()
+                .map(|controller| controller.chosen_kbps),
+            stream_uplink_overflows: stream_uplink_overflows
+                .as_ref()
+                .map_or(0, |counter| counter.load(Ordering::Acquire)),
         }),
         diagnostics_context,
         terminal_writer_error,
@@ -5116,6 +6463,17 @@ impl EncoderBridgeVideoToolboxProbe {
         session.prepare()?;
         self.session = Some(session);
         Ok(())
+    }
+
+    /// Plan 218 S3a: retune the running stream session's target bitrate.
+    /// The config follows so a session prepared later starts at the new rate.
+    fn set_stream_bit_rate(&mut self, bitrate_kbps: u32) -> Result<()> {
+        let bps = i64::from(bitrate_kbps).saturating_mul(1_000);
+        self.config.average_bit_rate_bps = Some(bps);
+        match self.session.as_ref() {
+            Some(session) => session.set_average_bit_rate(bps),
+            None => Ok(()),
+        }
     }
 }
 
@@ -5351,6 +6709,7 @@ enum RawVideoFifoWriterResult {
     Error {
         synthetic_buffer: Option<Vec<u8>>,
         message: String,
+        downstream_closed: bool,
     },
 }
 
@@ -5553,6 +6912,36 @@ impl<W: StdWrite> StdWrite for RawVideoWriteProgressSink<W> {
     }
 }
 
+/// How long one raw frame may wait on FFmpeg before its output fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawVideoFifoWriteBudget {
+    /// No byte accepted for this long ends the output.
+    stall_tolerance: Duration,
+    /// Bounds the whole frame, even while bytes keep trickling in.
+    hard_timeout: Duration,
+}
+
+/// A raw stream frame waits out a starved FFmpeg like every other stream write
+/// (plan 087): only `STREAM_OUTPUT_WEDGED_TIMEOUT` without progress fails the
+/// stream. The two-second raw budget cut frames mid-plane whenever FFmpeg fell
+/// below realtime and paused its reads for 4-6 s (ogre live lab, 2026-11-03);
+/// the short packet ended the stream leg. Recording and shared raw output keep
+/// their platform contract (ten seconds without progress on Windows and Linux).
+fn raw_video_fifo_write_budget(role: EncoderBridgeOutputRole) -> RawVideoFifoWriteBudget {
+    match role {
+        EncoderBridgeOutputRole::Stream => RawVideoFifoWriteBudget {
+            stall_tolerance: STREAM_OUTPUT_WEDGED_TIMEOUT.max(RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE),
+            hard_timeout: STREAM_OUTPUT_WEDGED_TIMEOUT.max(RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT),
+        },
+        EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared => {
+            RawVideoFifoWriteBudget {
+                stall_tolerance: RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+                hard_timeout: RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+            }
+        }
+    }
+}
+
 fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
     sink: W,
     mut receive: F,
@@ -5569,14 +6958,15 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
         inner: sink,
         epoch: write_progress_epoch,
     };
+    let budget = raw_video_fifo_write_budget(role);
     while let Some(frame) = receive() {
         let write_started_at = Instant::now();
         // The deadline anchors at WRITE START, not submit time: an admitted
         // frame that waited out an encoder pause is still valid recording
         // content — a recording tolerates late frames, never dropped ones
-        // (issue #149). Progress is judged by the platform stall tolerance;
+        // (issue #149). Progress is judged by the role's stall tolerance;
         // the hard timeout bounds the whole frame.
-        let deadline = write_started_at + RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE;
+        let deadline = write_started_at + budget.stall_tolerance;
         // Once any raw frame bytes reach FFmpeg, stopping mid-frame would
         // misalign every following YUV plane and can corrupt the final file.
         // Finish the in-flight frame; closing the queue prevents any new work
@@ -5586,8 +6976,8 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
             frame.bytes(),
             &stop,
             deadline,
-            RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
-            RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+            budget.stall_tolerance,
+            budget.hard_timeout,
             false,
         ) {
             Ok(()) => {
@@ -5601,16 +6991,25 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
                 });
             }
             Err(error) => {
-                let message = record_encoder_bridge_terminal_failure(
-                    &terminal_failure,
+                let downstream_closed = io_error_is_downstream_closed(&error);
+                let message = if downstream_closed {
                     format!(
-                        "{} raw-video encoder output stopped: {error}",
+                        "{} raw-video encoder output ended: downstream closed ({error})",
                         encoder_bridge_output_role_label(role)
-                    ),
-                );
+                    )
+                } else {
+                    record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        format!(
+                            "{} raw-video encoder output stopped: {error}",
+                            encoder_bridge_output_role_label(role)
+                        ),
+                    )
+                };
                 let _ = result_tx.send(RawVideoFifoWriterResult::Error {
                     synthetic_buffer: frame.into_synthetic_buffer(),
                     message,
+                    downstream_closed,
                 });
                 return;
             }
@@ -5619,16 +7018,25 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
     if !stop.load(Ordering::Relaxed)
         && let Err(error) = sink.flush()
     {
-        let message = record_encoder_bridge_terminal_failure(
-            &terminal_failure,
+        let downstream_closed = io_error_is_downstream_closed(&error);
+        let message = if downstream_closed {
             format!(
-                "{} raw-video encoder output flush failed: {error}",
+                "{} raw-video encoder output ended: downstream closed ({error})",
                 encoder_bridge_output_role_label(role)
-            ),
-        );
+            )
+        } else {
+            record_encoder_bridge_terminal_failure(
+                &terminal_failure,
+                format!(
+                    "{} raw-video encoder output flush failed: {error}",
+                    encoder_bridge_output_role_label(role)
+                ),
+            )
+        };
         let _ = result_tx.send(RawVideoFifoWriterResult::Error {
             synthetic_buffer: None,
             message,
+            downstream_closed,
         });
     }
 }
@@ -5671,11 +7079,17 @@ fn drain_raw_video_fifo_writer_results(
             RawVideoFifoWriterResult::Error {
                 synthetic_buffer,
                 message,
+                downstream_closed,
             } => {
                 retain_recycled_synthetic_buffer(recycled_synthetic_buffer, synthetic_buffer);
                 *pending_frames = 0;
                 pending_started_at.clear();
-                return Err(io::Error::other(message));
+                let kind = if downstream_closed {
+                    io::ErrorKind::BrokenPipe
+                } else {
+                    io::ErrorKind::Other
+                };
+                return Err(io::Error::new(kind, message));
             }
         }
     }
@@ -5910,6 +7324,7 @@ enum BoundedWriterJoinOutcome {
     Detached,
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn bounded_writer_join<T>(join: std::thread::JoinHandle<T>) -> BoundedWriterJoinOutcome {
     const WRITER_CLOSE_JOIN_GRACE: Duration = Duration::from_secs(3);
     bounded_writer_join_until(join, Instant::now() + WRITER_CLOSE_JOIN_GRACE)
@@ -6025,11 +7440,20 @@ fn run_video_toolbox_fifo_writer_loop<W: StdWrite>(
 
 /// EPIPE/EOF class: the reader (FFmpeg) went away. The writer must stop, but
 /// the SESSION verdict belongs to the process exit status, not this error.
+/// Windows `ERROR_NO_DATA` (232) is the named-pipe equivalent of Unix EPIPE;
+/// some Windows runtimes report it as `Other` rather than `BrokenPipe`.
 fn io_error_is_downstream_closed(error: &io::Error) -> bool {
+    #[cfg(target_os = "windows")]
+    let os_pipe_closing = error.raw_os_error() == Some(232); // ERROR_NO_DATA
+    #[cfg(unix)]
+    let os_pipe_closing = error.raw_os_error() == Some(libc::EPIPE);
+    #[cfg(not(any(target_os = "windows", unix)))]
+    let os_pipe_closing = false;
+
     matches!(
         error.kind(),
         io::ErrorKind::BrokenPipe | io::ErrorKind::WriteZero | io::ErrorKind::UnexpectedEof
-    )
+    ) || os_pipe_closing
 }
 
 #[cfg(target_os = "macos")]
@@ -6127,18 +7551,81 @@ impl VideoToolboxH264PipeWriter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FifoWriteWait {
+    Yield,
+    Sleep(Duration),
+}
+
+trait FifoWriteTiming {
+    fn now(&self) -> Instant;
+    fn wait(&mut self, action: FifoWriteWait);
+}
+
+struct SystemFifoWriteTiming;
+
+impl FifoWriteTiming for SystemFifoWriteTiming {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn wait(&mut self, action: FifoWriteWait) {
+        match action {
+            FifoWriteWait::Yield => thread::yield_now(),
+            FifoWriteWait::Sleep(duration) => thread::sleep(duration),
+        }
+    }
+}
+
+struct FifoWriteBudget {
+    deadline: Instant,
+    progress_timeout: Duration,
+    hard_timeout: Duration,
+    cancel_on_stop: bool,
+}
+
 fn write_all_until<W: StdWrite>(
     sink: &mut W,
-    mut bytes: &[u8],
+    bytes: &[u8],
     stop: &AtomicBool,
-    mut deadline: Instant,
+    deadline: Instant,
     progress_timeout: Duration,
     hard_timeout: Duration,
     cancel_on_stop: bool,
 ) -> io::Result<()> {
-    let hard_deadline = Instant::now()
+    write_all_until_with_timing(
+        sink,
+        bytes,
+        stop,
+        FifoWriteBudget {
+            deadline,
+            progress_timeout,
+            hard_timeout,
+            cancel_on_stop,
+        },
+        &mut SystemFifoWriteTiming,
+    )
+}
+
+// Production and deterministic pressure tests execute the same byte-delivery
+// loop. Only the monotonic clock and OS retry wait are replaceable.
+fn write_all_until_with_timing<W: StdWrite>(
+    sink: &mut W,
+    mut bytes: &[u8],
+    stop: &AtomicBool,
+    budget: FifoWriteBudget,
+    timing: &mut impl FifoWriteTiming,
+) -> io::Result<()> {
+    let FifoWriteBudget {
+        mut deadline,
+        progress_timeout,
+        hard_timeout,
+        cancel_on_stop,
+    } = budget;
+    let hard_deadline = timing
+        .now()
         .checked_add(hard_timeout)
-        .unwrap_or_else(Instant::now);
+        .unwrap_or_else(|| timing.now());
     let mut consecutive_no_progress = 0_u32;
     while !bytes.is_empty() {
         if cancel_on_stop && stop.load(Ordering::Relaxed) {
@@ -6147,7 +7634,7 @@ fn write_all_until<W: StdWrite>(
                 "Encoder FIFO writer stopped during a bounded write",
             ));
         }
-        if Instant::now() >= deadline || Instant::now() >= hard_deadline {
+        if timing.now() >= deadline || timing.now() >= hard_deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Encoder FIFO write exceeded the complete-frame delivery budget",
@@ -6156,7 +7643,11 @@ fn write_all_until<W: StdWrite>(
         match sink.write(bytes) {
             Ok(0) => {
                 consecutive_no_progress = consecutive_no_progress.saturating_add(1);
-                wait_for_fifo_write_progress(consecutive_no_progress, deadline.min(hard_deadline));
+                wait_for_fifo_write_progress(
+                    consecutive_no_progress,
+                    deadline.min(hard_deadline),
+                    timing,
+                );
             }
             Ok(written) => {
                 bytes = &bytes[written..];
@@ -6167,16 +7658,21 @@ fn write_all_until<W: StdWrite>(
                 // byte progress proves the reader is alive, so use a sliding
                 // no-progress deadline until this frame is complete.
                 if !bytes.is_empty() {
-                    deadline = Instant::now()
+                    deadline = timing
+                        .now()
                         .checked_add(progress_timeout)
-                        .unwrap_or_else(Instant::now)
+                        .unwrap_or_else(|| timing.now())
                         .min(hard_deadline);
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 consecutive_no_progress = consecutive_no_progress.saturating_add(1);
-                wait_for_fifo_write_progress(consecutive_no_progress, deadline.min(hard_deadline));
+                wait_for_fifo_write_progress(
+                    consecutive_no_progress,
+                    deadline.min(hard_deadline),
+                    timing,
+                );
             }
             Err(error) => return Err(error),
         }
@@ -6728,7 +8224,11 @@ fn write_media_foundation_frames<W: StdWrite>(
     Ok(())
 }
 
-fn wait_for_fifo_write_progress(consecutive_no_progress: u32, deadline: Instant) {
+fn wait_for_fifo_write_progress(
+    consecutive_no_progress: u32,
+    deadline: Instant,
+    timing: &mut impl FifoWriteTiming,
+) {
     // A 1080p YUV420 frame is 3.11 MiB, while Unix FIFOs commonly accept only
     // a few KiB per nonblocking write. Sleeping milliseconds after every full
     // pipe therefore turns one frame into hundreds of sleeps (~800ms in the
@@ -6736,12 +8236,14 @@ fn wait_for_fifo_write_progress(consecutive_no_progress: u32, deadline: Instant)
     // so it can run and retry immediately. Only back off once repeated attempts
     // show that no progress is being made; the caller's deadlines stay binding.
     if consecutive_no_progress <= FIFO_WRITE_PROGRESS_YIELD_BUDGET {
-        thread::yield_now();
+        timing.wait(FifoWriteWait::Yield);
         return;
     }
-    let remaining = deadline.saturating_duration_since(Instant::now());
+    let remaining = deadline.saturating_duration_since(timing.now());
     if !remaining.is_zero() {
-        thread::sleep(remaining.min(FIFO_WRITE_STALL_BACKOFF));
+        timing.wait(FifoWriteWait::Sleep(
+            remaining.min(FIFO_WRITE_STALL_BACKOFF),
+        ));
     }
 }
 
@@ -6936,10 +8438,12 @@ fn oldest_pending_video_toolbox_frame_age(
         .map(|started_at| started_at.elapsed())
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn encoder_bridge_video_toolbox_probe_enabled() -> bool {
     parse_video_toolbox_probe_enabled(std::env::var(VIDEOTOOLBOX_PROBE_ENV).ok().as_deref())
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn parse_video_toolbox_probe_enabled(value: Option<&str>) -> bool {
     let Some(value) = value else {
         return false;
@@ -6984,9 +8488,21 @@ fn latest_compositor_frame(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .latest()?;
+    Some(fed_compositor_frame(frame, None))
+}
+
+fn fed_iso_frame(lease: Arc<SourceIsoLeasedFrame>) -> FedCompositorFrame {
+    fed_compositor_frame(lease.frame.clone(), Some(lease))
+}
+
+fn fed_compositor_frame(
+    frame: CompositorFrameHandle,
+    iso_lease: Option<Arc<SourceIsoLeasedFrame>>,
+) -> FedCompositorFrame {
     #[cfg(target_os = "macos")]
     let metal_target = frame.metadata.metal_target_pixel_buffer();
-    Some(FedCompositorFrame {
+    FedCompositorFrame {
+        iso_lease,
         frame: frame.clone(),
         sequence: frame.sequence,
         captured_at: frame.captured_at,
@@ -6995,7 +8511,7 @@ fn latest_compositor_frame(
         has_metal_export_handle: frame.metadata.has_metal_iosurface_target(),
         #[cfg(target_os = "macos")]
         metal_target,
-    })
+    }
 }
 
 fn initial_bridge_wait_sequence(
@@ -7029,6 +8545,115 @@ fn next_compositor_frame(
         }
         let remaining = wait_budget.saturating_sub(started_at.elapsed());
         thread::sleep(remaining.min(Duration::from_millis(2)));
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IsoCompositorContentClock {
+    content_at: Instant,
+    frame_interval: Duration,
+    wait_until: Instant,
+}
+
+impl IsoCompositorContentClock {
+    fn for_tick(
+        epoch: Instant,
+        sequence: u64,
+        fps: u32,
+        next_frame_at: Instant,
+        skip_fresh_wait: bool,
+        now: Instant,
+    ) -> Self {
+        Self {
+            // The writer increments sequence before selection; its PTS index
+            // is sequence-1, including explicit pathological-stall gaps.
+            content_at: epoch
+                + Duration::from_secs_f64(
+                    sequence.saturating_sub(1) as f64 / f64::from(fps.max(1)),
+                ),
+            frame_interval: Duration::from_secs_f64(1.0 / f64::from(fps.max(1))),
+            wait_until: if skip_fresh_wait {
+                now
+            } else {
+                next_frame_at
+                    .checked_sub(VIDEOTOOLBOX_FRESH_FRAME_HEADROOM)
+                    .unwrap_or(next_frame_at)
+            },
+        }
+    }
+
+    fn accepts(self, frame: &FedCompositorFrame) -> bool {
+        let presented_at = frame
+            .frame
+            .metadata
+            .presentation_at()
+            .unwrap_or(frame.captured_at);
+        self.accepts_times(frame.captured_at, presented_at)
+    }
+
+    fn accepts_times(self, captured_at: Instant, presented_at: Instant) -> bool {
+        let minimum_content_at = self
+            .content_at
+            .checked_sub(Duration::from_millis(10))
+            .unwrap_or(self.content_at);
+        recording_epoch(captured_at, presented_at, self.frame_interval) >= minimum_content_at
+    }
+}
+
+// A source event can land anywhere within a CFR frame; permit the additional
+// 10ms source-clock granularity without admitting an entire stale tick merely
+// because its sequence advanced. The absolute deadline reserves the existing
+// encoding headroom and never re-anchors the output clock.
+fn poll_iso_compositor_frame(
+    clock: IsoCompositorContentClock,
+    stop: &AtomicBool,
+    mut poll: impl FnMut(Duration) -> (Instant, Option<FedCompositorFrame>),
+) -> Option<FedCompositorFrame> {
+    let mut wait = Duration::ZERO;
+    loop {
+        let (now, frame) = poll(wait);
+        let current = frame.as_ref().is_some_and(|frame| clock.accepts(frame));
+        if current || now >= clock.wait_until || stop.load(Ordering::Acquire) {
+            // A stalled source remains an honest held frame. In particular,
+            // never rejuvenate it using the time of this read.
+            return frame;
+        }
+        wait = clock
+            .wait_until
+            .duration_since(now)
+            .min(Duration::from_millis(2));
+    }
+}
+
+fn poll_iso_completed_batch(
+    member: &IsoBatchMember,
+    index: u64,
+    clock: IsoCompositorContentClock,
+    stop: &AtomicBool,
+    mut wait: impl FnMut(Duration) -> Instant,
+) -> Result<Option<FedCompositorFrame>, &'static str> {
+    let mut pause = Duration::ZERO;
+    loop {
+        let now = wait(pause);
+        if stop.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if let Some(frame) = member.store.select(index, member.role, |timings| {
+            now >= clock.wait_until
+                || timings
+                    .into_iter()
+                    .flatten()
+                    .all(|timing| clock.accepts_times(timing.captured_at, timing.presented_at))
+        })? {
+            return Ok(Some(fed_iso_frame(frame)));
+        }
+        if now >= clock.wait_until {
+            return Err("ISO output has no completed compositor batch");
+        }
+        pause = clock
+            .wait_until
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(2));
     }
 }
 
@@ -7088,6 +8713,7 @@ fn emit_encoder_bridge_diagnostics_from_thread(
     });
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn read_encoder_progress(
     stderr: tokio::process::ChildStderr,
     progress: Arc<Mutex<EncoderBridgeProgress>>,
@@ -7114,6 +8740,7 @@ async fn read_encoder_progress(
     progress.lock().await.clone()
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Default, PartialEq)]
 struct EncoderProgressUpdate {
     encoded_fps: Option<f64>,
@@ -7121,6 +8748,7 @@ struct EncoderProgressUpdate {
     dropped_frames: Option<u64>,
 }
 
+#[cfg(any(test, debug_assertions))]
 fn parse_encoder_progress_line(line: &str) -> Option<EncoderProgressUpdate> {
     let update = EncoderProgressUpdate {
         encoded_fps: parse_stat_f64(line, "fps="),
@@ -7137,6 +8765,7 @@ fn parse_encoder_progress_line(line: &str) -> Option<EncoderProgressUpdate> {
     Some(update)
 }
 
+#[cfg(any(test, debug_assertions))]
 fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
     let value = stat_value(line, label)?
         .trim_end_matches('x')
@@ -7145,10 +8774,12 @@ fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
     (value.is_finite() && value >= 0.0).then_some(value)
 }
 
+#[cfg(any(test, debug_assertions))]
 fn parse_stat_u64(line: &str, label: &str) -> Option<u64> {
     stat_value(line, label)?.parse::<u64>().ok()
 }
 
+#[cfg(any(test, debug_assertions))]
 fn stat_value<'line>(line: &'line str, label: &str) -> Option<&'line str> {
     let start = line.find(label)? + label.len();
     let tail = &line[start..];
@@ -7160,6 +8791,7 @@ fn stat_value<'line>(line: &'line str, label: &str) -> Option<&'line str> {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn is_ffmpeg_error_line(line: &str) -> bool {
     let normalized = line.to_lowercase();
     normalized.contains("error") || normalized.contains("failed") || normalized.contains("invalid")
@@ -7244,11 +8876,233 @@ fn recording_queue_drop_watch_update(
 static RECORDING_QUEUE_DROP_WATCH: std::sync::Mutex<Option<RecordingQueueDropWatch>> =
     std::sync::Mutex::new(None);
 
-// The stream twin: pressure on the STREAM output was previously counted in
-// diagnostics but never surfaced — the 2026-07-15 incident sessions logged 11
-// silent pressure events and then died with no prior warning. Fires once per
-// session so a jittery platform cannot spam the session log.
-static STREAM_QUEUE_PRESSURE_WATCH: std::sync::Mutex<Option<RecordingQueueDropWatch>> =
+// Plan 218 S2: the stream's delivery over a rolling 30 s window. This
+// replaces the once-per-session `stream-output-pressure` notice, which fired
+// 2 s into a session that then ran at 70 % of its frame rate for an hour
+// without another word: a live state is news while it lasts.
+pub(crate) const STREAM_DELIVERY_DEGRADED_CODE: &str = "stream-delivery-degraded";
+pub(crate) const STREAM_DELIVERY_RECOVERED_CODE: &str = "stream-delivery-recovered";
+const STREAM_DELIVERY_WINDOW: Duration = Duration::from_secs(30);
+/// The window judges only once it covers this much; the first verdict comes
+/// about 30 s into a stream.
+const STREAM_DELIVERY_MIN_WINDOW: Duration = Duration::from_secs(28);
+const STREAM_DELIVERY_DEGRADED_PERCENT: f64 = 10.0;
+/// Hysteresis: a degraded stream must come back under this to clear.
+const STREAM_DELIVERY_RECOVERED_PERCENT: f64 = 5.0;
+
+#[derive(Debug, Clone, Copy)]
+struct StreamDeliverySample {
+    at: Instant,
+    dropped: u64,
+    encoded: u64,
+}
+
+#[derive(Debug, Default)]
+struct StreamDeliveryWatch {
+    session_id: String,
+    samples: VecDeque<StreamDeliverySample>,
+    degraded_since: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamDeliveryTransition {
+    Unchanged,
+    Degraded,
+    Recovered,
+}
+
+/// Feed one stream-role diagnostics sample: the session totals of frames
+/// coalesced before encode and frames encoded. Returns the window's state
+/// and whether it just crossed the degraded threshold either way.
+fn stream_delivery_watch_update(
+    watch: &mut StreamDeliveryWatch,
+    session_id: &str,
+    now: Instant,
+    now_rfc3339: &str,
+    target_fps: u32,
+    dropped: u64,
+    encoded: u64,
+) -> (
+    crate::protocol::StreamDeliveryState,
+    StreamDeliveryTransition,
+) {
+    if watch.session_id != session_id {
+        *watch = StreamDeliveryWatch {
+            session_id: session_id.to_string(),
+            ..StreamDeliveryWatch::default()
+        };
+    }
+    watch.samples.push_back(StreamDeliverySample {
+        at: now,
+        dropped,
+        encoded,
+    });
+    // Keep one sample at or before the window's left edge so the deltas
+    // cover the whole window, never less.
+    while watch.samples.len() >= 2
+        && watch.samples[1].at <= now.checked_sub(STREAM_DELIVERY_WINDOW).unwrap_or(now)
+    {
+        watch.samples.pop_front();
+    }
+    let oldest = watch
+        .samples
+        .front()
+        .copied()
+        .unwrap_or(StreamDeliverySample {
+            at: now,
+            dropped,
+            encoded,
+        });
+    let span = now.saturating_duration_since(oldest.at);
+    let dropped_in_window = dropped.saturating_sub(oldest.dropped);
+    let encoded_in_window = encoded.saturating_sub(oldest.encoded);
+    let total = dropped_in_window.saturating_add(encoded_in_window);
+    let drop_percent = if total == 0 {
+        0.0
+    } else {
+        dropped_in_window as f64 * 100.0 / total as f64
+    };
+    let delivered_fps = if span.is_zero() {
+        0.0
+    } else {
+        encoded_in_window as f64 / span.as_secs_f64()
+    };
+    let transition = if span < STREAM_DELIVERY_MIN_WINDOW {
+        StreamDeliveryTransition::Unchanged
+    } else if watch.degraded_since.is_none() && drop_percent > STREAM_DELIVERY_DEGRADED_PERCENT {
+        watch.degraded_since = Some(now_rfc3339.to_string());
+        StreamDeliveryTransition::Degraded
+    } else if watch.degraded_since.is_some() && drop_percent < STREAM_DELIVERY_RECOVERED_PERCENT {
+        watch.degraded_since = None;
+        StreamDeliveryTransition::Recovered
+    } else {
+        StreamDeliveryTransition::Unchanged
+    };
+    (
+        crate::protocol::StreamDeliveryState {
+            target_fps,
+            delivered_fps,
+            drop_percent,
+            window_seconds: span.as_secs_f64(),
+            degraded: watch.degraded_since.is_some(),
+            degraded_since: watch.degraded_since.clone(),
+            bitrate_kbps: None,
+            chosen_bitrate_kbps: None,
+            at_floor: false,
+            uplink_overflows: 0,
+        },
+        transition,
+    )
+}
+
+// Plan 218 S3a: the bitrate steps are news as they happen, and the floor is
+// a warning that repeats (once a minute) while legs keep overflowing there.
+pub(crate) const STREAM_BITRATE_LOWERED_CODE: &str = "stream-bitrate-lowered";
+pub(crate) const STREAM_BITRATE_RESTORED_CODE: &str = "stream-bitrate-restored";
+pub(crate) const STREAM_BITRATE_FLOOR_CODE: &str = "stream-bitrate-floor";
+const STREAM_BITRATE_FLOOR_WARN_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default)]
+struct StreamBitrateWatch {
+    session_id: String,
+    last_kbps: Option<u32>,
+    last_overflows: u64,
+    last_floor_warned_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamBitrateTransition {
+    Unchanged,
+    Lowered {
+        from_kbps: u32,
+        to_kbps: u32,
+    },
+    Restored {
+        to_kbps: u32,
+    },
+    /// Another overflow arrived at the floor and the minute is up.
+    StillOverflowingAtFloor {
+        kbps: u32,
+    },
+}
+
+fn stream_bitrate_watch_update(
+    watch: &mut StreamBitrateWatch,
+    session_id: &str,
+    now: Instant,
+    bitrate_kbps: Option<u32>,
+    chosen_kbps: Option<u32>,
+    at_floor: bool,
+    overflows: u64,
+) -> StreamBitrateTransition {
+    if watch.session_id != session_id {
+        *watch = StreamBitrateWatch {
+            session_id: session_id.to_string(),
+            ..StreamBitrateWatch::default()
+        };
+    }
+    let Some(kbps) = bitrate_kbps else {
+        return StreamBitrateTransition::Unchanged;
+    };
+    let previous = watch.last_kbps.replace(kbps);
+    let overflowed_since = overflows > watch.last_overflows;
+    watch.last_overflows = overflows;
+    match previous {
+        Some(from_kbps) if kbps < from_kbps => {
+            return StreamBitrateTransition::Lowered {
+                from_kbps,
+                to_kbps: kbps,
+            };
+        }
+        Some(from_kbps) if kbps > from_kbps && Some(kbps) == chosen_kbps => {
+            return StreamBitrateTransition::Restored { to_kbps: kbps };
+        }
+        _ => {}
+    }
+    if at_floor
+        && overflowed_since
+        && watch
+            .last_floor_warned_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= STREAM_BITRATE_FLOOR_WARN_WINDOW)
+    {
+        watch.last_floor_warned_at = Some(now);
+        return StreamBitrateTransition::StillOverflowingAtFloor { kbps };
+    }
+    StreamBitrateTransition::Unchanged
+}
+
+/// "6 Mbps", "4.8 Mbps".
+fn format_stream_bitrate_mbps(kbps: u32) -> String {
+    if kbps.is_multiple_of(1000) {
+        format!("{} Mbps", kbps / 1000)
+    } else {
+        format!("{:.1} Mbps", f64::from(kbps) / 1000.0)
+    }
+}
+
+static STREAM_BITRATE_WATCH: std::sync::Mutex<Option<StreamBitrateWatch>> =
+    std::sync::Mutex::new(None);
+
+fn stream_delivery_degraded_message(state: &crate::protocol::StreamDeliveryState) -> String {
+    format!(
+        "Your stream is running at {} of {} fps: {:.0} % of its frames were skipped in the last {:.0} s because they could not be sent in time. Viewers see a stutter; the recording is unaffected.",
+        state.delivered_fps.round() as u64,
+        state.target_fps,
+        state.drop_percent,
+        state.window_seconds
+    )
+}
+
+fn stream_delivery_recovered_message(state: &crate::protocol::StreamDeliveryState) -> String {
+    format!(
+        "Your stream is back at its frame rate: {} of {} fps over the last {:.0} s.",
+        state.delivered_fps.round() as u64,
+        state.target_fps,
+        state.window_seconds
+    )
+}
+
+static STREAM_DELIVERY_WATCH: std::sync::Mutex<Option<StreamDeliveryWatch>> =
     std::sync::Mutex::new(None);
 
 pub(crate) const STREAM_OUTPUT_STALLED_CODE: &str = "stream-output-stalled";
@@ -7351,6 +9205,18 @@ async fn emit_encoder_bridge_diagnostics(
                 &message,
             );
         }
+        // The writer emits one event carrying its error when it gives up.
+        // The handler reads the bridge's own terminal failure, so a writer
+        // that merely saw FFmpeg exit (downstream closed) does not count.
+        // A shared writer carries the stream too (always on Linux, plan 0016).
+        if error.is_some() {
+            crate::recording::handle_recording_output_failure_if_active(
+                state,
+                session_id,
+                effective_encoder_bridge_output_role(diagnostics_context)
+                    == EncoderBridgeOutputRole::Shared,
+            );
+        }
     }
 
     // Plan 087: the session record names an overloaded host while it is
@@ -7366,32 +9232,132 @@ async fn emit_encoder_bridge_diagnostics(
         );
     }
 
-    // Stream pressure must be audible BEFORE any failure: the watchdog now
-    // degrades (drops to latest-wins) instead of dying on one over-age
-    // sample, and this is the user's signal that a platform connection is
-    // struggling while the stream still runs.
+    // Plan 218 S2: the stream's delivery is a live state while the stream
+    // runs, judged over the last 30 s, and it is news when it crosses the
+    // line either way. (The watchdog degrades to latest-wins instead of
+    // dying on one over-age sample, so this is the streamer's signal that
+    // frames are being skipped while the stream still runs.)
+    let mut stream_delivery = None;
     if effective_encoder_bridge_output_role(diagnostics_context) == EncoderBridgeOutputRole::Stream
     {
-        let fire = {
-            let mut guard = STREAM_QUEUE_PRESSURE_WATCH
+        let (mut delivery, transition) = {
+            let mut guard = STREAM_DELIVERY_WATCH
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let watch = guard.get_or_insert_with(RecordingQueueDropWatch::default);
-            recording_queue_drop_watch_update(
+            let watch = guard.get_or_insert_with(StreamDeliveryWatch::default);
+            stream_delivery_watch_update(
                 watch,
                 session_id,
-                runtime.output_queue_capacity_pressure_events,
+                Instant::now(),
+                &chrono::Utc::now().to_rfc3339(),
+                target_fps,
+                runtime.output_queue_dropped_frames,
+                runtime
+                    .video_toolbox_output_frames
+                    .max(runtime.raw_video_copied_frames),
             )
         };
-        if fire {
-            let _ = crate::recording::emit_health_event(
-                state,
-                Some(session_id),
-                crate::protocol::HealthLevel::Warn,
-                "stream-output-pressure",
-                "Stream output is under pressure: the stream is being produced faster than it can be sent, because this computer is busy or a destination is slow. Frames are being dropped from the live stream to keep latency; the recording is unaffected.",
-            );
+        // Plan 218 S3a: the adaptive bitrate rides the same live state.
+        delivery.bitrate_kbps = runtime.stream_bitrate_kbps;
+        delivery.chosen_bitrate_kbps = runtime.stream_bitrate_chosen_kbps;
+        delivery.at_floor = matches!(
+            (runtime.stream_bitrate_kbps, runtime.stream_bitrate_chosen_kbps),
+            (Some(kbps), Some(chosen))
+                if u64::from(kbps) * 100 <= u64::from(chosen) * (STREAM_BITRATE_FLOOR_SHARE * 100.0) as u64
+        );
+        delivery.uplink_overflows = runtime.stream_uplink_overflows;
+        let bitrate_transition = {
+            let mut guard = STREAM_BITRATE_WATCH
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let watch = guard.get_or_insert_with(StreamBitrateWatch::default);
+            stream_bitrate_watch_update(
+                watch,
+                session_id,
+                Instant::now(),
+                runtime.stream_bitrate_kbps,
+                runtime.stream_bitrate_chosen_kbps,
+                delivery.at_floor,
+                runtime.stream_uplink_overflows,
+            )
+        };
+        // The leg(s) FFmpeg attributed, when it could; "a destination" otherwise.
+        let slow_legs = {
+            let diagnostics = state.diagnostics.lock().await;
+            diagnostics
+                .stream_leg_overflows
+                .as_ref()
+                .map(|legs| {
+                    legs.iter()
+                        .map(|leg| leg.label.clone())
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                })
+                .filter(|labels| !labels.is_empty())
+                .unwrap_or_else(|| "a destination".to_string())
+        };
+        match bitrate_transition {
+            StreamBitrateTransition::Unchanged => {}
+            StreamBitrateTransition::Lowered { from_kbps, to_kbps } => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    STREAM_BITRATE_LOWERED_CODE,
+                    &format!(
+                        "Your stream bitrate was lowered to {} (from {}) because {slow_legs} could not keep up with it from this connection. Viewers keep the full frame rate at a softer picture.",
+                        format_stream_bitrate_mbps(to_kbps),
+                        format_stream_bitrate_mbps(from_kbps)
+                    ),
+                );
+            }
+            StreamBitrateTransition::Restored { to_kbps } => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Info,
+                    STREAM_BITRATE_RESTORED_CODE,
+                    &format!(
+                        "Your stream is back at its chosen bitrate of {}.",
+                        format_stream_bitrate_mbps(to_kbps)
+                    ),
+                );
+            }
+            StreamBitrateTransition::StillOverflowingAtFloor { kbps } => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    STREAM_BITRATE_FLOOR_CODE,
+                    &format!(
+                        "Your stream is at its lowest bitrate ({}) and {slow_legs} still cannot keep up with it from this connection; viewers there keep losing seconds of video. Stream to fewer destinations, or pick a lower stream quality before going live.",
+                        format_stream_bitrate_mbps(kbps)
+                    ),
+                );
+            }
         }
+        match transition {
+            StreamDeliveryTransition::Unchanged => {}
+            StreamDeliveryTransition::Degraded => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    STREAM_DELIVERY_DEGRADED_CODE,
+                    &stream_delivery_degraded_message(&delivery),
+                );
+            }
+            StreamDeliveryTransition::Recovered => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Info,
+                    STREAM_DELIVERY_RECOVERED_CODE,
+                    &stream_delivery_recovered_message(&delivery),
+                );
+            }
+        }
+        stream_delivery = Some(delivery);
 
         // Plan 087: a stalled stream is news while it lasts, not at stop.
         let stall = {
@@ -7509,6 +9475,12 @@ async fn emit_encoder_bridge_diagnostics(
         };
         let recording_output = diagnostics_context.recording_output;
         let stream_output = diagnostics_context.stream_output;
+        // Plan 218 S2: this writer's bytes are the stream's when it feeds
+        // the stream: the dedicated stream writer, or the one shared encoder
+        // of a record+stream session. A recording-role writer's are not.
+        let feeds_stream = stream_output.is_some()
+            && effective_encoder_bridge_output_role(diagnostics_context)
+                != EncoderBridgeOutputRole::Recording;
         let role_process_diagnostics =
             merge_encoder_bridge_role_process_diagnostics(&base, runtime, diagnostics_context);
         let recording_artifact_diagnostics = merge_encoder_bridge_recording_artifact_diagnostics(
@@ -7784,6 +9756,24 @@ async fn emit_encoder_bridge_diagnostics(
                 stream_video_toolbox_fifo_enqueue_p95_ms,
                 recording_video_toolbox_fifo_enqueue_max_ms,
                 stream_video_toolbox_fifo_enqueue_max_ms,
+                stream_measured_bitrate_kbps: feeds_stream
+                    .then_some(runtime.encoded_output_window_kbps)
+                    .flatten(),
+                stream_output_total_bytes: feeds_stream
+                    .then_some(runtime.video_toolbox_output_bytes),
+                stream_video_toolbox_fifo_write_p95_ms: feeds_stream
+                    .then_some(runtime.video_toolbox_fifo_write_p95_ms)
+                    .flatten(),
+                stream_queue_age_p95_ms: feeds_stream
+                    .then_some(runtime.output_queue_age_p95_ms)
+                    .flatten(),
+                stream_queue_depth_trips: feeds_stream.then_some(runtime.output_queue_depth_trips),
+                stream_queue_age_trips: feeds_stream.then_some(runtime.output_queue_age_trips),
+                stream_queue_last_trip: feeds_stream
+                    .then_some(runtime.output_queue_last_trip)
+                    .flatten()
+                    .map(|trip| trip.label().to_string()),
+                stream_delivery,
                 error,
             },
             recording_diagnostics_target_fps,
@@ -7828,6 +9818,7 @@ fn p95_ms(values: &[f64]) -> Option<f64> {
     Some(sorted[index])
 }
 
+#[cfg(any(test, debug_assertions))]
 fn frame_count(duration_ms: u64, fps: u32) -> u64 {
     duration_ms
         .saturating_mul(u64::from(fps))
@@ -7839,6 +9830,8 @@ fn frame_count(duration_ms: u64, fps: u32) -> u64 {
 mod tests {
     use super::*;
     use crate::diagnostics::idle_diagnostics;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn store_recording_artifact_diagnostics(
         stats: &mut DiagnosticStats,
@@ -8061,6 +10054,41 @@ mod tests {
         assert!(!drain_state.pending_timeout_is_terminal(3, 2));
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_error_no_data_is_classified_as_a_closed_downstream() {
+        let error = io::Error::from_raw_os_error(232); // ERROR_NO_DATA
+
+        assert!(io_error_is_downstream_closed(&error));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_epipe_is_classified_as_a_closed_downstream() {
+        let error = io::Error::from_raw_os_error(libc::EPIPE);
+
+        assert!(io_error_is_downstream_closed(&error));
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn portable_pipe_kinds_are_classified_as_a_closed_downstream() {
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::WriteZero,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(
+                io_error_is_downstream_closed(&io::Error::new(kind, "closed")),
+                "{kind:?} must classify as a closed downstream"
+            );
+        }
+        assert!(!io_error_is_downstream_closed(&io::Error::new(
+            io::ErrorKind::TimedOut,
+            "still a real writer failure"
+        )));
+    }
+
     fn test_session_with_writer(
         stop: Arc<AtomicBool>,
         writer: thread::JoinHandle<()>,
@@ -8068,8 +10096,11 @@ mod tests {
     ) -> EncoderBridgeRecordingSession {
         EncoderBridgeRecordingSession {
             stop,
+            graceful_stop_at: None,
+            iso_member: None,
             terminal_failure: Arc::new(StdMutex::new(None)),
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
             diagnostics_task: None,
@@ -8228,8 +10259,11 @@ mod tests {
 
         let session = EncoderBridgeRecordingSession {
             stop,
+            graceful_stop_at: None,
+            iso_member: None,
             terminal_failure,
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: None,
             diagnostics_task: None,
@@ -8329,6 +10363,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the std lock also serializes the sync lifecycle tests; this test owns its current-thread runtime, so the guard blocks no other task"
+    )]
     async fn shutdown_batch_signals_both_bridges_and_shares_one_absolute_deadline() {
         let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
@@ -8440,8 +10478,11 @@ mod tests {
         });
         let session = EncoderBridgeRecordingSession {
             stop,
+            graceful_stop_at: None,
+            iso_member: None,
             terminal_failure,
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
             diagnostics_task: None,
@@ -8460,6 +10501,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the std lock also serializes the sync lifecycle tests; this test owns its current-thread runtime, so the guard blocks no other task"
+    )]
     async fn encoder_bridge_lifecycle_start_admission_refuses_live_resource() {
         let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
@@ -8618,6 +10663,312 @@ mod tests {
             encoder_bridge_pre_encode_admission(policy, 2, Some(Duration::from_millis(150))),
             EncoderBridgePreEncodeAdmission::FailOutput
         );
+    }
+
+    // Plan 218 S2: the stream writer names the limit it tripped on.
+    #[test]
+    fn stream_queue_trip_names_the_limit_that_coalesced() {
+        let stream = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Stream,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        assert_eq!(
+            stream_queue_trip(stream, 3, Some(Duration::from_millis(99))),
+            None
+        );
+        assert_eq!(
+            stream_queue_trip(stream, 4, Some(Duration::from_millis(120))),
+            Some(StreamQueueTrip::Depth),
+            "depth wins when both hold, as in admission"
+        );
+        assert_eq!(
+            stream_queue_trip(stream, 2, Some(Duration::from_millis(100))),
+            Some(StreamQueueTrip::Age)
+        );
+        assert_eq!(StreamQueueTrip::Age.label(), "age");
+        let recording = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        assert_eq!(
+            stream_queue_trip(recording, 16, Some(Duration::from_millis(500))),
+            None,
+            "a recording never coalesces"
+        );
+    }
+
+    // Plan 218 S3b: FFmpeg's interleave hold shifts the stream's limits only.
+    #[test]
+    fn stream_interleave_allowance_shifts_only_the_stream_policy() {
+        let stream = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Stream,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        assert_eq!(stream.with_stream_interleave_allowance(30, 0), stream);
+        let shifted = stream.with_stream_interleave_allowance(30, 50);
+        assert_eq!(shifted.coalesce_at_frames, Some(4 + 2));
+        assert_eq!(shifted.coalesce_at_age, Some(Duration::from_millis(150)));
+        assert_eq!(shifted.max_frames, 8 + 2);
+        assert_eq!(shifted.max_age, Duration::from_millis(200));
+        assert_eq!(
+            encoder_bridge_pre_encode_admission(shifted, 4, Some(Duration::from_millis(149))),
+            EncoderBridgePreEncodeAdmission::Submit,
+            "the structural wait no longer coalesces"
+        );
+        assert_eq!(
+            encoder_bridge_pre_encode_admission(shifted, 6, Some(Duration::from_millis(20))),
+            EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame,
+            "a real backlog still does"
+        );
+        let split = stream.with_stream_interleave_allowance(30, 180);
+        assert_eq!(split.coalesce_at_frames, Some(4 + 6));
+        assert_eq!(split.max_age, Duration::from_millis(330));
+        let recording = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        assert_eq!(
+            recording.with_stream_interleave_allowance(30, 180),
+            recording,
+            "the recording policy never moves"
+        );
+    }
+
+    #[test]
+    fn encoded_window_kbps_needs_a_quarter_second() {
+        let started = Instant::now();
+        assert_eq!(encoded_window_kbps(1_000_000, 0, started), None);
+        let old = started - Duration::from_secs(2);
+        let kbps = encoded_window_kbps(1_500_000, 0, old).expect("a window");
+        assert!(
+            (kbps - 6_000.0).abs() < 60.0,
+            "{kbps} kbps for 1.5 MB in 2 s"
+        );
+        assert_eq!(
+            encoded_window_kbps(10, 20, old),
+            Some(0.0),
+            "a counter that moved backwards reads as nothing"
+        );
+    }
+
+    // Plan 218 S2: the live delivery state judges a full 30 s window.
+    #[test]
+    fn stream_delivery_watch_judges_a_full_window_with_hysteresis() {
+        let mut watch = StreamDeliveryWatch::default();
+        let start = Instant::now();
+        let mut feed = |secs: u64, dropped: u64, encoded: u64| {
+            stream_delivery_watch_update(
+                &mut watch,
+                "session",
+                start + Duration::from_secs(secs),
+                "2026-11-05T18:00:00Z",
+                30,
+                dropped,
+                encoded,
+            )
+        };
+        let (state, transition) = feed(0, 0, 0);
+        assert_eq!(transition, StreamDeliveryTransition::Unchanged);
+        assert!(!state.degraded);
+        // 30 % dropped from the start, but the window is not full yet.
+        let (state, transition) = feed(10, 90, 210);
+        assert_eq!(transition, StreamDeliveryTransition::Unchanged);
+        assert!((state.drop_percent - 30.0).abs() < 0.01);
+        assert!(!state.degraded, "no verdict before the window covers 28 s");
+        let (state, transition) = feed(30, 270, 630);
+        assert_eq!(transition, StreamDeliveryTransition::Degraded);
+        assert!(state.degraded);
+        assert_eq!(
+            state.degraded_since.as_deref(),
+            Some("2026-11-05T18:00:00Z")
+        );
+        assert!((state.delivered_fps - 21.0).abs() < 0.01);
+        assert!((state.window_seconds - 30.0).abs() < 0.01);
+        // 7 % over the next 30 s: under the entry line, over the exit line.
+        let (state, transition) = feed(60, 270 + 63, 630 + 837);
+        assert_eq!(transition, StreamDeliveryTransition::Unchanged);
+        assert!(state.degraded, "7 % keeps a degraded stream degraded");
+        // Clean: the window now holds only the clean stretch.
+        let (state, transition) = feed(90, 333, 1467 + 900);
+        assert_eq!(transition, StreamDeliveryTransition::Recovered);
+        assert!(!state.degraded);
+        assert_eq!(state.drop_percent, 0.0);
+        assert!((state.delivered_fps - 30.0).abs() < 0.01);
+        // A new session starts a new window.
+        let (state, _) = stream_delivery_watch_update(
+            &mut watch,
+            "next",
+            start + Duration::from_secs(120),
+            "t",
+            60,
+            0,
+            0,
+        );
+        assert_eq!(state.target_fps, 60);
+        assert_eq!(state.window_seconds, 0.0);
+    }
+
+    // Plan 218 S3a: the bitrate steps down 20 % of the chosen rate per
+    // signal, holds at half, and climbs 10 % per clean 30 s.
+    #[test]
+    fn stream_bitrate_controller_steps_down_holds_at_the_floor_and_recovers() {
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut controller = StreamBitrateController::new(6_000, 30, start);
+        assert_eq!(controller.floor_kbps, 3_000);
+        assert_eq!(
+            controller.observe(at(1), 0, 0),
+            StreamBitrateAction::Hold,
+            "nothing before the check interval"
+        );
+        assert_eq!(controller.observe(at(2), 0, 0), StreamBitrateAction::Hold);
+        // A start-up blip of two coalesced frames is not pressure.
+        assert_eq!(controller.observe(at(4), 0, 2), StreamBitrateAction::Hold);
+        // One leg overflow steps down 20 % of the chosen bitrate.
+        assert_eq!(
+            controller.observe(at(6), 1, 2),
+            StreamBitrateAction::StepDown(4_800)
+        );
+        // Another overflow inside the hold waits.
+        assert_eq!(controller.observe(at(8), 2, 2), StreamBitrateAction::Hold);
+        assert_eq!(
+            controller.observe(at(16), 3, 2),
+            StreamBitrateAction::StepDown(3_600)
+        );
+        // Sustained bridge pressure is a signal too (10 % of the interval's
+        // frames), but inside the hold it waits; then it steps.
+        assert_eq!(
+            controller.observe(at(18), 3, 2 + 30),
+            StreamBitrateAction::Hold
+        );
+        assert_eq!(
+            controller.observe(at(28), 3, 32 + 30),
+            StreamBitrateAction::StepDown(3_000)
+        );
+        assert!(controller.at_floor());
+        assert_eq!(
+            controller.observe(at(40), 4, 62),
+            StreamBitrateAction::AtFloor,
+            "the floor holds and says so"
+        );
+        // The floor overflowed too, so the ceiling sits on it: 30 clean
+        // seconds earn nothing to climb to.
+        assert_eq!(controller.ceiling_kbps, Some(3_000));
+        assert_eq!(controller.observe(at(70), 4, 62), StreamBitrateAction::Hold);
+        assert_eq!(
+            controller.observe(at(100), 4, 62),
+            StreamBitrateAction::Hold
+        );
+        assert_eq!(controller.current_kbps(), 3_000);
+        // Five clean minutes lift the ceiling one step; the climb may go to
+        // one step under it, so the first lift still holds.
+        assert_eq!(
+            controller.observe(at(40 + 300), 4, 62),
+            StreamBitrateAction::Hold
+        );
+        assert_eq!(controller.ceiling_kbps, Some(3_600));
+        assert_eq!(
+            controller.observe(at(40 + 600), 4, 62),
+            StreamBitrateAction::StepUp(3_600)
+        );
+        assert_eq!(controller.ceiling_kbps, Some(4_200));
+        // An overflow during recovery steps straight back down and lowers
+        // the ceiling to the rate that overflowed.
+        assert_eq!(
+            controller.observe(at(642), 5, 62),
+            StreamBitrateAction::StepDown(3_000)
+        );
+        assert_eq!(controller.ceiling_kbps, Some(3_600));
+        assert_eq!(
+            controller.observe(at(680), 5, 62),
+            StreamBitrateAction::Hold
+        );
+        // Pressure without an overflow steps down but sets no ceiling.
+        let mut pressured = StreamBitrateController::new(6_000, 30, start);
+        assert_eq!(
+            pressured.observe(at(2), 0, 30),
+            StreamBitrateAction::StepDown(4_800)
+        );
+        assert_eq!(pressured.ceiling_kbps, None);
+        // Back to the chosen rate, never above it.
+        let mut quiet = StreamBitrateController::new(6_000, 30, start);
+        quiet.current_kbps = 5_700;
+        quiet.clean_since = start;
+        assert_eq!(
+            quiet.observe(at(30), 0, 0),
+            StreamBitrateAction::StepUp(6_000)
+        );
+        assert_eq!(quiet.observe(at(60), 0, 0), StreamBitrateAction::Hold);
+    }
+
+    #[test]
+    fn stream_bitrate_watch_reports_steps_and_the_floor_once_a_minute() {
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut watch = StreamBitrateWatch::default();
+        let feed = |watch: &mut StreamBitrateWatch, secs, kbps, floor, overflows| {
+            stream_bitrate_watch_update(
+                watch,
+                "s",
+                at(secs),
+                Some(kbps),
+                Some(6_000),
+                floor,
+                overflows,
+            )
+        };
+        assert_eq!(
+            feed(&mut watch, 0, 6_000, false, 0),
+            StreamBitrateTransition::Unchanged
+        );
+        assert_eq!(
+            feed(&mut watch, 2, 4_800, false, 1),
+            StreamBitrateTransition::Lowered {
+                from_kbps: 6_000,
+                to_kbps: 4_800
+            }
+        );
+        assert_eq!(
+            feed(&mut watch, 4, 3_000, true, 2),
+            StreamBitrateTransition::Lowered {
+                from_kbps: 4_800,
+                to_kbps: 3_000
+            }
+        );
+        assert_eq!(
+            feed(&mut watch, 6, 3_000, true, 2),
+            StreamBitrateTransition::Unchanged,
+            "no new overflow at the floor"
+        );
+        assert_eq!(
+            feed(&mut watch, 8, 3_000, true, 3),
+            StreamBitrateTransition::StillOverflowingAtFloor { kbps: 3_000 }
+        );
+        assert_eq!(
+            feed(&mut watch, 20, 3_000, true, 4),
+            StreamBitrateTransition::Unchanged,
+            "the floor warning repeats once a minute"
+        );
+        assert_eq!(
+            feed(&mut watch, 70, 3_000, true, 5),
+            StreamBitrateTransition::StillOverflowingAtFloor { kbps: 3_000 }
+        );
+        assert_eq!(
+            feed(&mut watch, 100, 3_600, false, 5),
+            StreamBitrateTransition::Unchanged,
+            "a partial climb is not news"
+        );
+        assert_eq!(
+            feed(&mut watch, 130, 6_000, false, 5),
+            StreamBitrateTransition::Restored { to_kbps: 6_000 }
+        );
+        assert_eq!(
+            stream_bitrate_watch_update(&mut watch, "s", at(131), None, None, false, 5),
+            StreamBitrateTransition::Unchanged,
+            "a writer without an adaptive encoder says nothing"
+        );
+        assert_eq!(format_stream_bitrate_mbps(4_800), "4.8 Mbps");
+        assert_eq!(format_stream_bitrate_mbps(6_000), "6 Mbps");
     }
 
     #[test]
@@ -8848,7 +11199,7 @@ mod tests {
                 RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
             ),
             RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
-            "macOS/Linux raw fallback keeps its existing two-second contract",
+            "macOS raw fallback keeps its existing two-second contract",
         );
         assert_eq!(
             encoder_bridge_recording_no_progress_timeout(
@@ -9065,6 +11416,67 @@ mod tests {
             encoder_bridge_pre_encode_admission(policy, 4, None),
             EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame
         );
+    }
+
+    #[test]
+    fn source_iso_encoded_queue_covers_only_the_configured_audio_lookahead() {
+        for fps in [30, 60] {
+            let base = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                role: EncoderBridgeOutputRole::Recording,
+                ..Default::default()
+            });
+            assert_eq!(base.with_iso_audio_advance(fps, 0), base);
+            let policy = base.with_iso_audio_advance(fps, 1000);
+            assert_eq!(policy.max_frames, 16 + fps as usize);
+            assert_eq!(policy.max_age, base.max_age);
+            let shared = EncoderBridgeOutputQueuePolicy {
+                role: EncoderBridgeOutputRole::Shared,
+                ..base
+            };
+            assert_eq!(
+                shared.with_iso_audio_advance(fps, 1000).max_frames,
+                policy.max_frames
+            );
+            assert_eq!(shared.coalesce_at_frames, None);
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64 - 1,
+                    None,
+                    Duration::ZERO,
+                    Duration::from_secs(2)
+                ),
+                EncoderBridgePreEncodeAdmission::Submit
+            );
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    None,
+                    Duration::ZERO,
+                    Duration::from_secs(2)
+                ),
+                EncoderBridgePreEncodeAdmission::PauseRecordingFrame
+            );
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    None,
+                    Duration::from_secs(2),
+                    Duration::from_secs(2)
+                ),
+                EncoderBridgePreEncodeAdmission::FailOutput
+            );
+            {
+                let role = EncoderBridgeOutputRole::Stream;
+                let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                    role,
+                    ..Default::default()
+                });
+                assert_eq!(policy.with_iso_audio_advance(fps, 1000), policy);
+            }
+        }
     }
 
     #[test]
@@ -9746,6 +12158,59 @@ mod tests {
     }
 
     #[test]
+    fn linux_raw_recording_queue_is_capped_where_ffmpeg_stamps_on_arrival() {
+        let policy = |role| {
+            encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                role,
+                ..EncoderBridgeDiagnosticsContext::default()
+            })
+        };
+        let raw = EncoderBridgeVideoOutput::RawYuv420p;
+        let capped = if cfg!(target_os = "linux") {
+            ARRIVAL_STAMPED_RAW_RECORDING_QUEUE_MAX_FRAMES
+        } else {
+            RECORDING_OUTPUT_QUEUE_MAX_FRAMES
+        };
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            let adjusted = policy(role).for_arrival_stamped_raw_input(raw);
+            assert_eq!(adjusted.max_frames, capped);
+            // Same pause semantics, just earlier: a full queue skips the tick
+            // while FFmpeg still makes progress.
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    adjusted,
+                    capped as u64,
+                    None,
+                    Duration::from_millis(1),
+                    RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+                ),
+                EncoderBridgePreEncodeAdmission::PauseRecordingFrame
+            );
+        }
+        // Encoders that carry their own timestamps keep the calibrated ceiling.
+        for output in [
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ] {
+            assert_eq!(
+                policy(EncoderBridgeOutputRole::Recording)
+                    .for_arrival_stamped_raw_input(output)
+                    .max_frames,
+                RECORDING_OUTPUT_QUEUE_MAX_FRAMES
+            );
+        }
+        // The stream leg keeps its latest-frame mailbox policy.
+        let stream = policy(EncoderBridgeOutputRole::Stream);
+        assert_eq!(
+            stream.for_arrival_stamped_raw_input(raw).max_frames,
+            stream.max_frames
+        );
+    }
+
+    #[test]
     fn recording_raw_fifo_completion_accounting_can_precede_the_next_worker_receive() {
         let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
             role: EncoderBridgeOutputRole::Recording,
@@ -9956,12 +12421,204 @@ mod tests {
     }
 
     #[test]
+    fn source_iso_terminal_video_covers_the_committed_content_boundary() {
+        let epoch = Instant::now();
+        for fps in [30, 60] {
+            let boundary = epoch + Duration::from_millis(4072);
+            let required = (4072_u64 * u64::from(fps)).div_ceil(1000);
+            let before = required - 1;
+            assert_eq!(
+                iso_terminal_video_tick(boundary, epoch, fps, before, before, boundary),
+                IsoTerminalVideoTick::Continue
+            );
+            assert_eq!(
+                iso_terminal_video_tick(boundary, epoch, fps, required, required, boundary),
+                IsoTerminalVideoTick::Complete
+            );
+            // Admission pressure at the final attempted tick cannot pretend
+            // that its unsubmitted PTS reached the muxer's terminal boundary.
+            assert_eq!(
+                iso_terminal_video_tick(boundary, epoch, fps, required, before, boundary),
+                IsoTerminalVideoTick::MissingFinalFrame
+            );
+            assert_eq!(
+                iso_terminal_video_tick(
+                    boundary,
+                    epoch,
+                    fps,
+                    before,
+                    before,
+                    boundary + ISO_TERMINAL_VIDEO_DRAIN
+                ),
+                IsoTerminalVideoTick::TimedOut
+            );
+            let exact = epoch + Duration::from_secs(4);
+            assert_eq!(
+                iso_terminal_video_tick(
+                    exact,
+                    epoch,
+                    fps,
+                    u64::from(fps) * 4,
+                    u64::from(fps) * 4,
+                    exact
+                ),
+                IsoTerminalVideoTick::Complete
+            );
+        }
+    }
+
+    #[test]
+    fn source_iso_stop_boundary_is_shared_and_preserves_earlier_removal() {
+        let global = Arc::new(OnceLock::new());
+        let first = IsoVideoStopBoundary {
+            local: StdMutex::new(None),
+            global: global.clone(),
+        };
+        let second = IsoVideoStopBoundary {
+            local: StdMutex::new(None),
+            global: global.clone(),
+        };
+        let removed = Instant::now();
+        let stopped = removed + Duration::from_millis(9);
+        global.set(stopped).unwrap();
+        assert_eq!(first.boundary(), Some(stopped));
+        assert_eq!(second.boundary(), Some(stopped));
+        first.request(removed, None);
+        assert_eq!(first.boundary(), Some(removed));
+        assert_eq!(second.boundary(), Some(stopped));
+        assert!(global.set(stopped + Duration::from_secs(1)).is_err());
+        assert_eq!(second.boundary(), Some(stopped));
+    }
+
+    #[test]
+    fn source_iso_shed_lag_needs_a_held_lag_not_one_hiccup() {
+        let mut watch = IsoShedLagWatch::default();
+        let start = Instant::now();
+        // One 300 ms hiccup the schedule absorbs never sheds.
+        assert!(!watch.observe(Duration::from_millis(300), start));
+        assert!(!watch.observe(
+            Duration::from_millis(280),
+            start + Duration::from_millis(200)
+        ));
+        assert!(!watch.observe(
+            Duration::from_millis(40),
+            start + Duration::from_millis(400)
+        ));
+        assert!(!watch.observe(
+            Duration::from_millis(300),
+            start + Duration::from_millis(800)
+        ));
+        // Encoder pressure: the lag stays above 250 ms for the hold.
+        assert!(!watch.observe(
+            ISO_SHED_LAG + Duration::from_millis(1),
+            start + Duration::from_millis(1_000)
+        ));
+        assert!(watch.observe(
+            Duration::from_millis(900),
+            start + Duration::from_millis(800) + ISO_SHED_LAG_HOLD
+        ));
+        // Exactly 250 ms is not over the line.
+        let mut edge = IsoShedLagWatch::default();
+        assert!(!edge.observe(ISO_SHED_LAG, start));
+        assert!(!edge.observe(ISO_SHED_LAG, start + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn source_iso_shed_drains_a_separate_file_to_its_own_last_tick() {
+        let store = Arc::new(SourceIsoBatchStore::default());
+        let at = Instant::now();
+        let mut frames = crate::frame_store::FrameStore::new(1);
+        frames.publish_with_metadata(
+            7,
+            2,
+            2,
+            CompositorPixelFormat::yuv420p_cpu_buffer(),
+            CompositorFrameExportHandle::default().with_presentation_time(at),
+            at,
+            vec![0; 6],
+        );
+        let frame = frames.latest();
+        assert!(store.publish(store.membership(), 7, [frame.clone(), frame.clone(), frame]));
+        for role in [
+            source_iso_batch::COMBINED,
+            source_iso_batch::SCREEN,
+            source_iso_batch::CAMERA,
+        ] {
+            store.select(0, role, |_| true).unwrap();
+        }
+        let camera = IsoBatchMember {
+            store: store.clone(),
+            role: source_iso_batch::CAMERA,
+        };
+        let stop_at = IsoVideoStopBoundary {
+            local: StdMutex::new(None),
+            global: Arc::new(OnceLock::new()),
+        };
+        let epoch = at;
+        // Recording: nothing to install.
+        assert!(!install_iso_shed_boundary(
+            Some(&camera),
+            Some(&stop_at),
+            Some(epoch),
+            30
+        ));
+        assert_eq!(stop_at.boundary(), None);
+        assert!(store.shed_separate_files());
+        assert!(!camera.active());
+        // No epoch yet, or no graceful boundary: never a shed install.
+        assert!(!install_iso_shed_boundary(
+            Some(&camera),
+            Some(&stop_at),
+            None,
+            30
+        ));
+        assert!(!install_iso_shed_boundary(
+            Some(&camera),
+            None,
+            Some(epoch),
+            30
+        ));
+        assert!(install_iso_shed_boundary(
+            Some(&camera),
+            Some(&stop_at),
+            Some(epoch),
+            30
+        ));
+        let boundary = stop_at.boundary().expect("shed boundary");
+        // Camera latched index 0, so its file keeps exactly one frame: the
+        // terminal check completes once that frame was submitted.
+        assert_eq!(
+            iso_terminal_video_tick(boundary, epoch, 30, 1, 1, Instant::now()),
+            IsoTerminalVideoTick::Complete
+        );
+        // Combined never installs a shed boundary.
+        let combined = IsoBatchMember {
+            store,
+            role: source_iso_batch::COMBINED,
+        };
+        let combined_stop = IsoVideoStopBoundary {
+            local: StdMutex::new(None),
+            global: Arc::new(OnceLock::new()),
+        };
+        assert!(!install_iso_shed_boundary(
+            Some(&combined),
+            Some(&combined_stop),
+            Some(epoch),
+            30
+        ));
+        assert!(combined.active());
+    }
+
+    #[test]
     fn recording_session_exposes_the_first_terminal_bridge_failure() {
         let terminal_failure = Arc::new(StdMutex::new(None));
         let session = EncoderBridgeRecordingSession {
             stop: Arc::new(AtomicBool::new(false)),
+            graceful_stop_at: None,
+            iso_member: None,
             terminal_failure: terminal_failure.clone(),
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: std::env::temp_dir().join(format!(
                 "videorc-missing-terminal-signal-test-{}",
                 Uuid::new_v4()
@@ -10011,6 +12668,104 @@ mod tests {
             panic!("raw frame must be reported as written")
         };
         assert_eq!(synthetic_buffer, Some(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn raw_fifo_writer_does_not_promote_a_closed_downstream_to_terminal_failure() {
+        struct DownstreamClosedSink;
+
+        impl StdWrite for DownstreamClosedSink {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "The pipe is being closed.",
+                ))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(2);
+        frame_tx
+            .send(QueuedRawVideoFrame::synthetic(vec![1, 2, 3]))
+            .expect("queue raw frame");
+        drop(frame_tx);
+        let terminal_failure = Arc::new(StdMutex::new(None));
+
+        run_raw_video_fifo_writer_loop(
+            DownstreamClosedSink,
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            terminal_failure.clone(),
+            EncoderBridgeOutputRole::Shared,
+        );
+
+        let RawVideoFifoWriterResult::Error {
+            downstream_closed,
+            message,
+            ..
+        } = result_rx.recv().expect("closed downstream result")
+        else {
+            panic!("closed downstream must surface as a writer error")
+        };
+        assert!(downstream_closed);
+        assert!(message.contains("downstream closed"));
+        assert_eq!(
+            read_encoder_bridge_terminal_failure(&terminal_failure),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_fifo_writer_does_not_promote_unix_epipe_to_terminal_failure() {
+        struct EpipeSink;
+
+        impl StdWrite for EpipeSink {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from_raw_os_error(libc::EPIPE))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(2);
+        frame_tx
+            .send(QueuedRawVideoFrame::synthetic(vec![1, 2, 3]))
+            .expect("queue raw frame");
+        drop(frame_tx);
+        let terminal_failure = Arc::new(StdMutex::new(None));
+
+        run_raw_video_fifo_writer_loop(
+            EpipeSink,
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            terminal_failure.clone(),
+            EncoderBridgeOutputRole::Shared,
+        );
+
+        let RawVideoFifoWriterResult::Error {
+            downstream_closed,
+            message,
+            ..
+        } = result_rx.recv().expect("EPIPE result")
+        else {
+            panic!("Unix EPIPE must surface as a writer error")
+        };
+        assert!(downstream_closed);
+        assert!(message.contains("downstream closed"));
+        assert_eq!(
+            read_encoder_bridge_terminal_failure(&terminal_failure),
+            None
+        );
     }
 
     #[test]
@@ -10167,7 +12922,7 @@ mod tests {
         // 250ms recording queue budget that killed real recordings in #149.
         assert!(RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE > RECORDING_OUTPUT_QUEUE_MAX_AGE);
         assert!(RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE <= RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         assert_eq!(
             RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
             Duration::from_secs(10)
@@ -10176,16 +12931,45 @@ mod tests {
 
     #[test]
     fn raw_fifo_writer_uses_a_windows_safe_complete_frame_timeout() {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         assert_eq!(
             RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
             Duration::from_secs(30)
         );
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         assert_eq!(
             RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
             FIFO_FRAME_WRITE_HARD_TIMEOUT
         );
+    }
+
+    /// Ogre, 2026-11-06: FFmpeg encoding through VAAPI on a throttled iGPU
+    /// paused its reads for 4-6 s, and the two-second budget ended the take.
+    /// A recording or shared frame now waits the pause out; only a reader
+    /// silent past the platform tolerance still fails it.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn a_raw_recording_frame_survives_ffmpeg_pausing_its_reads_mid_frame() {
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            let budget = raw_video_fifo_write_budget(role);
+            let (result, written, frame_len) =
+                write_full_hd_frame_through_a_starved_reader(budget, Duration::from_secs(6));
+            result.unwrap_or_else(|error| {
+                panic!("a {role:?} frame must wait for FFmpeg to read again: {error}")
+            });
+            assert_eq!(written, frame_len);
+
+            let (result, written, frame_len) = write_full_hd_frame_through_a_starved_reader(
+                budget,
+                budget.stall_tolerance + Duration::from_secs(1),
+            );
+            let error = result.expect_err("a reader silent past the tolerance still fails");
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert!(written < frame_len);
+        }
     }
 
     #[test]
@@ -10253,6 +13037,25 @@ mod tests {
         ));
     }
 
+    struct VirtualFifoWriteTiming {
+        now: Instant,
+        waits: Vec<FifoWriteWait>,
+    }
+
+    impl FifoWriteTiming for VirtualFifoWriteTiming {
+        fn now(&self) -> Instant {
+            self.now
+        }
+
+        fn wait(&mut self, action: FifoWriteWait) {
+            self.waits.push(action);
+            self.now += match action {
+                FifoWriteWait::Yield => Duration::from_micros(1),
+                FifoWriteWait::Sleep(duration) => duration,
+            };
+        }
+    }
+
     #[test]
     fn intermittent_pipe_pressure_does_not_throttle_a_full_hd_raw_frame() {
         for pressure in [PipePressure::WouldBlock, PipePressure::ZeroWrite] {
@@ -10264,21 +13067,102 @@ mod tests {
             };
             let stop = AtomicBool::new(false);
             let bytes = vec![7; raw_yuv420p_len(1920, 1080).expect("1080p frame size")];
-            let deadline = Instant::now() + Duration::from_millis(500);
+            let mut timing = VirtualFifoWriteTiming {
+                now: Instant::now(),
+                waits: Vec::new(),
+            };
+            let deadline = timing.now() + Duration::from_millis(500);
 
-            write_all_until(
+            write_all_until_with_timing(
                 &mut sink,
                 &bytes,
                 &stop,
-                deadline,
-                Duration::from_millis(500),
-                Duration::from_millis(500),
-                false,
+                FifoWriteBudget {
+                    deadline,
+                    progress_timeout: Duration::from_millis(500),
+                    hard_timeout: Duration::from_millis(500),
+                    cancel_on_stop: false,
+                },
+                &mut timing,
             )
             .expect("active FIFO draining must not pay a millisecond sleep per pipe-sized chunk");
 
             assert_eq!(sink.written, bytes.len());
+            assert_eq!(timing.waits.len(), bytes.len().div_ceil(8 * 1024));
+            assert!(
+                timing
+                    .waits
+                    .iter()
+                    .all(|action| *action == FifoWriteWait::Yield),
+                "each successful partial write must reset backoff; scheduler wall pauses do not model pipe stalls"
+            );
         }
+    }
+
+    #[test]
+    fn fifo_write_virtual_stall_backs_off_and_obeys_hard_deadline() {
+        let began = Instant::now();
+        let mut timing = VirtualFifoWriteTiming {
+            now: began,
+            waits: Vec::new(),
+        };
+        let hard_timeout = Duration::from_millis(10);
+        let error = write_all_until_with_timing(
+            &mut AlwaysWouldBlockSink,
+            &[7],
+            &AtomicBool::new(false),
+            FifoWriteBudget {
+                deadline: began + Duration::from_secs(1),
+                progress_timeout: Duration::from_secs(1),
+                hard_timeout,
+                cancel_on_stop: false,
+            },
+            &mut timing,
+        )
+        .expect_err("persistent pressure must still terminate");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(timing.now.duration_since(began), hard_timeout);
+        assert!(
+            timing.waits[..FIFO_WRITE_PROGRESS_YIELD_BUDGET as usize]
+                .iter()
+                .all(|action| *action == FifoWriteWait::Yield)
+        );
+        assert!(matches!(
+            timing.waits[FIFO_WRITE_PROGRESS_YIELD_BUDGET as usize],
+            FifoWriteWait::Sleep(_)
+        ));
+        assert!(timing.waits.iter().all(|action| match action {
+            FifoWriteWait::Yield => true,
+            FifoWriteWait::Sleep(duration) =>
+                !duration.is_zero() && *duration <= FIFO_WRITE_STALL_BACKOFF,
+        }));
+    }
+
+    #[test]
+    fn fifo_write_virtual_cancellation_prevents_delivery_and_waits() {
+        let began = Instant::now();
+        let mut timing = VirtualFifoWriteTiming {
+            now: began,
+            waits: Vec::new(),
+        };
+        let mut sink = Vec::new();
+        let error = write_all_until_with_timing(
+            &mut sink,
+            &[7],
+            &AtomicBool::new(true),
+            FifoWriteBudget {
+                deadline: began + Duration::from_millis(500),
+                progress_timeout: Duration::from_millis(500),
+                hard_timeout: Duration::from_millis(500),
+                cancel_on_stop: true,
+            },
+            &mut timing,
+        )
+        .expect_err("cancellation stays authoritative");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(sink.is_empty());
+        assert!(timing.waits.is_empty());
+        assert_eq!(timing.now, began);
     }
 
     #[test]
@@ -10342,6 +13226,200 @@ mod tests {
         assert_eq!(
             read_encoder_bridge_terminal_failure(&terminal_failure).as_deref(),
             Some(message.as_str())
+        );
+    }
+
+    #[test]
+    fn raw_stream_writer_waits_out_a_starved_ffmpeg_like_every_stream_write() {
+        // Plan 087: a stream fails only after the wedged timeout without
+        // progress. Recording and shared raw output keep the platform budget.
+        let stream = raw_video_fifo_write_budget(EncoderBridgeOutputRole::Stream);
+        assert_eq!(stream.stall_tolerance, STREAM_OUTPUT_WEDGED_TIMEOUT);
+        assert!(stream.hard_timeout >= stream.stall_tolerance);
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            assert_eq!(
+                raw_video_fifo_write_budget(role),
+                RawVideoFifoWriteBudget {
+                    stall_tolerance: RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+                    hard_timeout: RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+                }
+            );
+        }
+    }
+
+    /// FFmpeg below realtime (ogre live lab, 2026-11-03): it reads part of a
+    /// frame, then nothing until `resume_at`, then drains again.
+    struct StarvedMidFrameSink {
+        clock: Rc<Cell<Instant>>,
+        written: usize,
+        stall_after: usize,
+        resume_at: Instant,
+    }
+
+    impl StdWrite for StarvedMidFrameSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.written >= self.stall_after && self.clock.get() < self.resume_at {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            let written = bytes.len().min(64 * 1024);
+            self.written += written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Virtual time that the sink reads too.
+    struct SharedVirtualFifoWriteTiming(Rc<Cell<Instant>>);
+
+    impl FifoWriteTiming for SharedVirtualFifoWriteTiming {
+        fn now(&self) -> Instant {
+            self.0.get()
+        }
+
+        fn wait(&mut self, action: FifoWriteWait) {
+            self.0.set(
+                self.0.get()
+                    + match action {
+                        FifoWriteWait::Yield => Duration::from_micros(1),
+                        FifoWriteWait::Sleep(duration) => duration,
+                    },
+            );
+        }
+    }
+
+    /// Writes one 1080p frame the way the raw writer loop does, through a
+    /// reader that pauses for `stall` a third of the way in. Returns the
+    /// result, the bytes FFmpeg got and the frame size.
+    fn write_full_hd_frame_through_a_starved_reader(
+        budget: RawVideoFifoWriteBudget,
+        stall: Duration,
+    ) -> (io::Result<()>, usize, usize) {
+        let began = Instant::now();
+        let clock = Rc::new(Cell::new(began));
+        let bytes = vec![7; raw_yuv420p_len(1920, 1080).expect("1080p frame size")];
+        let mut sink = StarvedMidFrameSink {
+            clock: clock.clone(),
+            written: 0,
+            stall_after: bytes.len() / 3,
+            resume_at: began + stall,
+        };
+        let result = write_all_until_with_timing(
+            &mut sink,
+            &bytes,
+            &AtomicBool::new(false),
+            FifoWriteBudget {
+                deadline: began + budget.stall_tolerance,
+                progress_timeout: budget.stall_tolerance,
+                hard_timeout: budget.hard_timeout,
+                cancel_on_stop: false,
+            },
+            &mut SharedVirtualFifoWriteTiming(clock),
+        );
+        (result, sink.written, bytes.len())
+    }
+
+    #[test]
+    fn a_raw_stream_frame_survives_ffmpeg_pausing_its_reads_mid_frame() {
+        // Longer than the raw budget that used to cut the stream (the
+        // recording's), shorter than the stream's wedged timeout. On ogre the
+        // pauses ran 4-6 s against a two-second budget.
+        let recording = raw_video_fifo_write_budget(EncoderBridgeOutputRole::Recording);
+        let stall = recording.stall_tolerance + Duration::from_secs(4);
+        assert!(stall < STREAM_OUTPUT_WEDGED_TIMEOUT);
+
+        let (result, written, frame_len) = write_full_hd_frame_through_a_starved_reader(
+            raw_video_fifo_write_budget(EncoderBridgeOutputRole::Stream),
+            stall,
+        );
+        result.expect("a stream frame must wait for FFmpeg to read again");
+        assert_eq!(written, frame_len);
+
+        // The old budget cut the same frame short: FFmpeg's rawvideo demuxer
+        // then hit EOF mid-packet and the stream leg ended.
+        let (result, written, frame_len) =
+            write_full_hd_frame_through_a_starved_reader(recording, stall);
+        let error = result.expect_err("the recording budget still bounds a stall");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(written < frame_len);
+    }
+
+    /// A reader that takes the first bytes of a frame, then nothing until
+    /// `ready_at`.
+    struct StalledMidFrameThenReadySink {
+        accept_before_stall: usize,
+        accepted: usize,
+        ready_at: Instant,
+        written: SharedCountingSink,
+    }
+
+    impl StdWrite for StalledMidFrameThenReadySink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let len = if self.accepted < self.accept_before_stall {
+                bytes.len().min(self.accept_before_stall - self.accepted)
+            } else if Instant::now() < self.ready_at {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            } else {
+                bytes.len()
+            };
+            self.accepted += len;
+            self.written.write(&bytes[..len])
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The writer loop gives a stream frame the stream budget. A pause just
+    /// past the old two-second raw budget used to end the stream leg.
+    #[test]
+    fn raw_stream_writer_loop_finishes_a_frame_across_a_reader_stall() {
+        let stall = Duration::from_millis(2_400);
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        assert!(
+            stall > raw_video_fifo_write_budget(EncoderBridgeOutputRole::Recording).stall_tolerance
+        );
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(3);
+        let frame = vec![0x44; 64];
+        frame_tx
+            .send(QueuedRawVideoFrame::synthetic(frame.clone()))
+            .expect("queue raw frame");
+        drop(frame_tx);
+        let written = SharedCountingSink::default();
+        let terminal_failure = Arc::new(StdMutex::new(None));
+        let started_at = Instant::now();
+
+        run_raw_video_fifo_writer_loop(
+            StalledMidFrameThenReadySink {
+                accept_before_stall: 16,
+                accepted: 0,
+                ready_at: started_at + stall,
+                written: written.clone(),
+            },
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            terminal_failure.clone(),
+            EncoderBridgeOutputRole::Stream,
+        );
+
+        assert!(started_at.elapsed() >= stall);
+        let result = result_rx.recv().expect("raw writer result");
+        assert!(
+            matches!(result, RawVideoFifoWriterResult::FrameWritten { .. }),
+            "the stream writer must wait out a {stall:?} stall"
+        );
+        assert_eq!(written.bytes(), frame);
+        assert_eq!(
+            read_encoder_bridge_terminal_failure(&terminal_failure),
+            None
         );
     }
 
@@ -10716,6 +13794,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: 1,
             height: 1,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -10724,6 +13803,7 @@ mod tests {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -10776,6 +13856,12 @@ mod tests {
         assert_eq!(fed.frame.bytes, expected);
     }
 
+    // The wait returns the moment the fresh sequence lands, so a passing run
+    // never spends this budget. It only has to outlast a loaded runner that
+    // starves the publisher thread: a full Windows suite once missed 50 ms.
+    // The tests after the wait budget prove the wait stays bounded.
+    const FRESH_SEQUENCE_TEST_WAIT: Duration = Duration::from_secs(10);
+
     #[test]
     fn bridge_waits_for_fresh_compositor_sequence_before_repeating() {
         let width = 8;
@@ -10799,7 +13885,7 @@ mod tests {
         let fed = next_raw_compositor_frame(
             Some(&frame_store),
             Some(11),
-            Duration::from_millis(50),
+            FRESH_SEQUENCE_TEST_WAIT,
             first.len(),
         )
         .expect("fresh compositor frame");
@@ -10862,7 +13948,7 @@ mod tests {
                 );
             })
         };
-        let fed = next_compositor_frame(Some(&frame_store), Some(21), Duration::from_millis(50))
+        let fed = next_compositor_frame(Some(&frame_store), Some(21), FRESH_SEQUENCE_TEST_WAIT)
             .expect("fresh compositor frame");
         publisher.join().expect("publisher");
 
@@ -10895,6 +13981,48 @@ mod tests {
     }
 
     #[test]
+    fn source_iso_barrier_retains_content_and_native_capture_epoch() {
+        let make_store = || Arc::new(StdMutex::new(crate::frame_store::FrameStore::new(2)));
+        let primary = make_store();
+        let camera = make_store();
+        let presented = Instant::now();
+        let captured = presented - Duration::from_millis(72);
+        for store in [&primary, &camera] {
+            store.lock().unwrap().publish_with_metadata(
+                7,
+                4,
+                4,
+                CompositorPixelFormat::yuv420p_cpu_buffer(),
+                crate::compositor::CompositorFrameExportHandle::default()
+                    .with_presentation_time(presented),
+                captured,
+                vec![42; 24],
+            );
+        }
+        let barrier = RecordingStartBarrier::new(2, Some(primary.clone()), 30, 0, None);
+        let epoch = Arc::new(OnceLock::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std_mpsc::channel();
+        let worker_barrier = barrier.clone();
+        let worker_epoch = epoch.clone();
+        let worker_stop = stop.clone();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            worker_barrier.prepared(Some(primary), &worker_epoch, &worker_stop)
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let camera_result = barrier.prepared(Some(camera.clone()), &epoch, &stop);
+        let primary_result = worker.join().unwrap();
+        let (camera_at, camera_frame) = camera_result.unwrap();
+        let (primary_at, primary_frame) = primary_result.unwrap();
+        assert_eq!(camera_at, primary_at);
+        assert_eq!(epoch.get(), Some(&captured));
+        publish_test_compositor_frame(&camera, 8, 4, 4, &[99; 24]);
+        assert_eq!(camera_frame.unwrap().sequence, 7);
+        assert_eq!(primary_frame.unwrap().sequence, 7);
+    }
+
+    #[test]
     fn compositor_presentation_time_survives_encoder_frame_handoff() {
         let store = Arc::new(std::sync::Mutex::new(crate::frame_store::FrameStore::new(
             2,
@@ -10915,6 +14043,176 @@ mod tests {
         assert_eq!(fed.captured_at, content);
         assert!(fed.age_ms >= 30_000);
         assert_eq!(fed.frame.metadata.presentation_at(), Some(presentation));
+    }
+
+    fn iso_clock_test_frame(
+        sequence: u64,
+        captured_at: Instant,
+        presented_at: Instant,
+    ) -> FedCompositorFrame {
+        let store = Arc::new(std::sync::Mutex::new(crate::frame_store::FrameStore::new(
+            2,
+        )));
+        store.lock().unwrap().publish_with_metadata(
+            sequence,
+            4,
+            4,
+            CompositorPixelFormat::yuv420p_cpu_buffer(),
+            crate::compositor::CompositorFrameExportHandle::default()
+                .with_presentation_time(presented_at),
+            captured_at,
+            vec![0; 24],
+        );
+        latest_compositor_frame(Some(&store)).unwrap()
+    }
+
+    #[test]
+    fn source_iso_content_clock_realigns_after_a_newer_but_held_tick() {
+        for fps in [30, 60] {
+            let epoch = Instant::now();
+            let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+            let desired = epoch + Duration::from_secs_f64(3.0 / f64::from(fps));
+            let clock = IsoCompositorContentClock::for_tick(
+                epoch,
+                4,
+                fps,
+                desired + interval,
+                false,
+                desired,
+            );
+            assert_eq!(
+                clock.content_at, desired,
+                "incremented sequence4 represents PTS index3"
+            );
+            assert_eq!(
+                clock.wait_until,
+                desired + interval - VIDEOTOOLBOX_FRESH_FRAME_HEADROOM
+            );
+            // Seq4 is newer than previously encoded seq3, but content is one
+            // tick late. Sequence-only selection would immediately accept it.
+            let stale = iso_clock_test_frame(4, desired - interval, desired - interval);
+            let current = iso_clock_test_frame(5, desired, desired);
+            let mut polls = 0;
+            let selected = poll_iso_compositor_frame(clock, &AtomicBool::new(false), |wait| {
+                assert_eq!(
+                    wait,
+                    if polls == 0 {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_millis(2)
+                    }
+                );
+                polls += 1;
+                (
+                    desired + Duration::from_millis((polls - 1) * 2),
+                    Some(if polls < 3 {
+                        stale.clone()
+                    } else {
+                        current.clone()
+                    }),
+                )
+            })
+            .unwrap();
+            assert_eq!(polls, 3);
+            assert_eq!(selected.sequence, 5);
+            // The next CFR index uses the original origin, not late arrival.
+            let next = IsoCompositorContentClock::for_tick(
+                epoch,
+                5,
+                fps,
+                desired + interval * 2,
+                false,
+                desired + interval,
+            );
+            assert_eq!(
+                next.content_at,
+                epoch + Duration::from_secs_f64(4.0 / f64::from(fps))
+            );
+            let selected = poll_iso_compositor_frame(next, &AtomicBool::new(false), |wait| {
+                assert!(wait.is_zero());
+                (
+                    next.content_at,
+                    Some(iso_clock_test_frame(6, next.content_at, next.content_at)),
+                )
+            })
+            .unwrap();
+            assert_eq!(selected.sequence, 6);
+            let first =
+                IsoCompositorContentClock::for_tick(epoch, 1, fps, epoch + interval, false, epoch);
+            assert_eq!(first.content_at, epoch);
+            let late = IsoCompositorContentClock::for_tick(
+                epoch,
+                4,
+                fps,
+                desired + interval,
+                true,
+                desired,
+            );
+            assert_eq!(
+                late.wait_until, desired,
+                "late ticks keep zero fresh-frame wait"
+            );
+        }
+    }
+
+    #[test]
+    fn source_iso_content_clock_preserves_native_latency_and_held_presentation() {
+        let content = Instant::now();
+        let interval = Duration::from_secs_f64(1.0 / 30.0);
+        let clock = IsoCompositorContentClock {
+            content_at: content,
+            frame_interval: interval,
+            wait_until: content + Duration::from_millis(100),
+        };
+        for frame in [
+            iso_clock_test_frame(1, content, content + Duration::from_millis(72)),
+            iso_clock_test_frame(2, content - Duration::from_secs(30), content + interval / 2),
+        ] {
+            let selected = poll_iso_compositor_frame(clock, &AtomicBool::new(false), |wait| {
+                assert!(
+                    wait.is_zero(),
+                    "calibrated current content needs no extra wait"
+                );
+                (content + Duration::from_millis(72), Some(frame.clone()))
+            })
+            .unwrap();
+            assert_eq!(selected.sequence, frame.sequence);
+        }
+    }
+
+    #[test]
+    fn source_iso_content_clock_bounds_stalls_and_stop_without_rejuvenating_frames() {
+        let now = Instant::now();
+        let clock = IsoCompositorContentClock {
+            content_at: now,
+            frame_interval: Duration::from_secs_f64(1.0 / 60.0),
+            wait_until: now + Duration::from_millis(5),
+        };
+        let held = iso_clock_test_frame(
+            1,
+            now - Duration::from_secs(30),
+            now - Duration::from_secs(1),
+        );
+        let mut elapsed = Duration::ZERO;
+        let mut polls = 0;
+        let selected = poll_iso_compositor_frame(clock, &AtomicBool::new(false), |wait| {
+            elapsed += wait;
+            polls += 1;
+            (now + elapsed, Some(held.clone()))
+        })
+        .unwrap();
+        assert_eq!(elapsed, Duration::from_millis(5));
+        assert_eq!(polls, 4);
+        assert_eq!(selected.captured_at, held.captured_at);
+        for (stop, at) in [(true, now), (false, clock.wait_until)] {
+            let mut polls = 0;
+            poll_iso_compositor_frame(clock, &AtomicBool::new(stop), |wait| {
+                assert!(wait.is_zero());
+                polls += 1;
+                (at, Some(held.clone()))
+            });
+            assert_eq!(polls, 1, "Stop and an overdue tick must never add a wait");
+        }
     }
 
     #[test]
@@ -11771,12 +15069,8 @@ mod tests {
         let y_len = 32 * 24;
         let uv_len = 16 * 12;
         assert_eq!(bytes.len(), y_len + uv_len * 2);
-        assert!(bytes[..y_len].iter().any(|value| *value == 235));
-        assert!(
-            bytes[y_len..y_len + uv_len]
-                .iter()
-                .any(|value| *value == 60)
-        );
+        assert!(bytes[..y_len].contains(&235));
+        assert!(bytes[y_len..y_len + uv_len].contains(&60));
     }
 
     #[test]
@@ -11888,11 +15182,7 @@ mod tests {
         }
 
         let timeline = interval * frames as u32;
-        let drift = if timeline > wall {
-            timeline - wall
-        } else {
-            wall - timeline
-        };
+        let drift = timeline.abs_diff(wall);
         assert!(
             drift <= Duration::from_millis(100),
             "video timeline drifted {}ms from wall clock over 60s (frames {frames})",

@@ -1,0 +1,31 @@
+#!/bin/sh
+# Plan 179: the ScreenCast picker for the Linux lab (xdph
+# `screencopy:custom_picker_binary`, see xdph.conf.example). Install as the
+# lab user:
+#
+#   install -D -m 0755 config/live-lab/linux/videorc-lab-share-picker ~/.local/bin/videorc-lab-share-picker
+#
+# While a live lab session runs, the harness writes the lab output's name to
+# ~/videorc-live-lab/portal-pick (lib/linux-desktop.mjs portalPickPath) and
+# removes it at teardown. With that file present this answers the portal with
+# that output, restore token allowed, so an unattended run never waits on a
+# dialog. Without it (any other app sharing the screen, or no run) it hands
+# over to the normal hyprland-share-picker. It can only ever pick a whole
+# output named in that file; a stale file shares the lab output, never the
+# desktop.
+
+set -u
+PICK="$HOME/videorc-live-lab/portal-pick"
+
+if [ -f "$PICK" ] && [ -O "$PICK" ]; then
+  output=$(head -n 1 "$PICK" | tr -d '\r\n')
+  case "$output" in
+    '' | *[!A-Za-z0-9_.-]*) ;;
+    *)
+      printf '[SELECTION]r/screen:%s\n' "$output"
+      exit 0
+      ;;
+  esac
+fi
+
+exec hyprland-share-picker "$@"

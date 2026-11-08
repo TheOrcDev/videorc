@@ -1,14 +1,22 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
 vi.mock('@/lib/toast', () => ({ toast }))
 
+import { bannerActionContext } from './banners'
+import { soundActionContext } from './sounds'
+import { recentUserErrors, resetUserErrorLogForTests } from './user-error-log'
 import {
   OFFLINE_REASON,
   OFFLINE_TOAST_ID,
+  SECURE_STORAGE_REASON,
   UNKNOWN_REASON,
   UserFacingError,
   couldNotTitle,
+  exportSpaceRefusal,
   offlineError,
   toastOffline,
   toastUserError,
@@ -50,6 +58,57 @@ describe('userErrorMessage', () => {
     expect(copy.raw).toBe("Videorc's engine isn't connected.")
     expect(copy.kind).toBe('offline')
     expect(copy.text).not.toContain('invoking remote method')
+  })
+
+  it('names the missing keyring when protected persistence refuses', () => {
+    const copy = userErrorMessage(
+      new Error(
+        "Error invoking remote method 'system:pick-directory': Error: Protected desktop persistence is unavailable."
+      ),
+      { action: 'use', object: 'that folder' }
+    )
+    expect(copy).toMatchObject({
+      kind: 'known',
+      title: "Couldn't use that folder",
+      description: SECURE_STORAGE_REASON,
+      tone: 'error'
+    })
+  })
+
+  it("keeps an MP4 export's disk-space refusal, which names the sizes and the next step", () => {
+    const EXPORT = { action: 'export', object: 'the MP4' }
+    for (const refusal of [
+      'Not enough disk space to finish the MP4 (needs 541 MB, 148 MB free). Your recording is safe as MKV; free some space and use Export MP4.',
+      'Not enough disk space to finish the MP4 (needs 19.0 GB, 2.1 GB free). Your recording is safe as MKV; free some space and use Export MP4.'
+    ]) {
+      expect(userErrorMessage(backendError('remux-failed', refusal), EXPORT)).toMatchObject({
+        kind: 'known',
+        title: "Couldn't export the MP4",
+        description: refusal,
+        tone: 'error'
+      })
+      expect(exportSpaceRefusal(refusal)).toBe(refusal)
+    }
+    // Only that sentence: another one that starts the same way stays generic.
+    const other = 'Not enough disk space to finish the MP4 at /home/me/take.mkv'
+    expect(userErrorMessage(backendError('remux-failed', other), EXPORT).description).toBe(
+      UNKNOWN_REASON
+    )
+    expect(exportSpaceRefusal(other)).toBeNull()
+    expect(exportSpaceRefusal(undefined)).toBeNull()
+  })
+
+  it("matches the sentence the engine's export check writes", () => {
+    const source = readFileSync(
+      join(__dirname, '../../../../../../crates/videorc-backend/src/disk_space.rs'),
+      'utf8'
+    )
+    const body = source.slice(source.indexOf('pub fn export_space_message('))
+    const template = /format!\(\s*"([^"]+)"/.exec(body)?.[1]
+    expect(template).toBeDefined()
+    const sizes = ['541 MB', '148 MB']
+    const sentence = (template ?? '').replace(/\{\}/g, () => sizes.shift() ?? '')
+    expect(exportSpaceRefusal(sentence)).toBe(sentence)
   })
 
   it('says Videorc is reconnecting for every offline shape, as a warning', () => {
@@ -105,10 +164,54 @@ describe('userErrorMessage', () => {
     ).toBe('known')
   })
 
+  // Plan 216 A3 (D5): a switch that adds a source gave up on its first frame.
+  it('names the source that never sent video when a scene switch gives up', () => {
+    const SWITCH = { action: 'switch', object: 'the scene' }
+    expect(
+      userErrorMessage(
+        backendError(
+          'layout-camera-not-ready',
+          'Live preview layout switch blocked after camera (15s) exceeded its source-start/readiness budget: camera session never delivered a frame.'
+        ),
+        SWITCH
+      )
+    ).toMatchObject({
+      kind: 'known',
+      title: "Couldn't switch the scene",
+      description: "Your camera isn't sending video. Check it in Sources, then try again.",
+      tone: 'error'
+    })
+    expect(
+      userErrorMessage(backendError('layout-screen-not-ready', 'screen never delivered'), SWITCH)
+        .description
+    ).toBe("Your screen isn't sending video. Check it in Sources, then try again.")
+    // The route's own code stays generic: that is the toast the streamer got
+    // on 0.18.0, which named no cause.
+    expect(
+      userErrorMessage(backendError('layout-preview-failed', 'camera budget exceeded'), SWITCH)
+        .description
+    ).toBe(UNKNOWN_REASON)
+  })
+
   it('keeps a renderer-written reason, and an unmapped code stays generic', () => {
     expect(
       userErrorMessage(new UserFacingError('The selected output folder is unavailable.'), IMPORT)
-    ).toMatchObject({ kind: 'known', description: 'The selected output folder is unavailable.' })
+    ).toMatchObject({
+      kind: 'known',
+      tone: 'error',
+      description: 'The selected output folder is unavailable.'
+    })
+    // A refusal the renderer recognized keeps its sentence, as a warning (plan 186).
+    expect(
+      userErrorMessage(
+        new UserFacingError('Hide this banner before you delete it.', 'warning'),
+        IMPORT
+      )
+    ).toMatchObject({
+      kind: 'known',
+      tone: 'warning',
+      description: 'Hide this banner before you delete it.'
+    })
     expect(
       userErrorMessage(backendError('session-duplicate-failed', 'io error: disk full'), IMPORT)
         .description
@@ -122,6 +225,31 @@ describe('userErrorMessage', () => {
     expect(couldNotTitle(undefined)).toBe('Videorc hit a problem')
     expect(couldNotTitle({ action: 'sign out' })).toBe("Couldn't sign out")
     expect(userErrorMessage('a thrown string').raw).toBe('a thrown string')
+  })
+})
+
+// Plan 216 A5: every shown error leaves a record for the support bundle.
+describe('the support bundle ring', () => {
+  beforeEach(() => resetUserErrorLogForTests())
+
+  it('records a toast and an inline line with the raw text, never a cancel', () => {
+    toastUserError(backendError('layout-camera-not-ready', 'camera never sent (0 frames)'), {
+      action: 'switch',
+      object: 'the scene'
+    })
+    inlineUserError(new Error('EACCES /Users/me/x.png'), { action: 'import', object: 'the image' })
+    toastUserError(Object.assign(new Error('gone'), { name: 'AbortError' }), IMPORT)
+    expect(recentUserErrors()).toMatchObject([
+      {
+        action: 'switch',
+        object: 'the scene',
+        code: 'layout-camera-not-ready',
+        kind: 'known',
+        title: "Couldn't switch the scene",
+        raw: 'camera never sent (0 frames)'
+      },
+      { action: 'import', object: 'the image', kind: 'unknown', raw: 'EACCES /Users/me/x.png' }
+    ])
   })
 })
 
@@ -163,5 +291,57 @@ describe('inlineUserError', () => {
     expect(text).toBe(`Couldn't import the image. ${UNKNOWN_REASON}`)
     expect(text).not.toContain('/Users/streamer')
     expect(console.warn).toHaveBeenCalledWith("[buddy-look] Couldn't import the image:", raw)
+  })
+})
+
+// Plan 195 S4: a slow Record start or a long poster holds the liveControl
+// lane, and a command that waits past its queue age is dropped. A live
+// control the streamer pressed names itself; only a caller that passes no
+// action gets "Videorc hit a problem", so background reads never toast.
+describe('a live control a busy lane dropped (plan 195 S4)', () => {
+  const BUSY = "Videorc was busy and didn't do it. Try again in a moment."
+  const BUSY_CODES = ['command-expired-before-dispatch', 'command-lane-full', 'command-not-applied']
+  const busy = (code = 'command-expired-before-dispatch'): Error =>
+    backendError(code, 'The command expired while awaiting its reconciliation fence.')
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  })
+
+  it.each([
+    [bannerActionContext('show'), "Couldn't show the banner"],
+    [bannerActionContext('hide'), "Couldn't hide the banner"],
+    [bannerActionContext('hideAll'), "Couldn't hide the banners"],
+    [soundActionContext('play'), "Couldn't play the sound"],
+    [soundActionContext('press'), "Couldn't play the sound"],
+    [soundActionContext('stop'), "Couldn't stop the sound"],
+    [soundActionContext('stopAll'), "Couldn't stop the sounds"],
+    [{ action: 'start', object: 'live captions' }, "Couldn't start live captions"],
+    [{ action: 'show', object: 'the takeover' }, "Couldn't show the takeover"],
+    [{ action: 'take off', object: 'the takeover' }, "Couldn't take off the takeover"],
+    [{ action: 'restart', object: 'capture' }, "Couldn't restart capture"],
+    [{ action: 'show', object: 'the message on stream' }, "Couldn't show the message on stream"]
+  ])('names %j: "%s"', (context, title) => {
+    for (const code of BUSY_CODES) {
+      expect(userErrorMessage(busy(code), context)).toMatchObject({
+        kind: 'known',
+        title,
+        description: BUSY,
+        text: `${title}. ${BUSY}`,
+        tone: 'warning'
+      })
+    }
+    toastUserError(busy(), context, { id: 'live-control' })
+    expect(toast.warning).toHaveBeenCalledWith(title, { id: 'live-control', description: BUSY })
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('says "Videorc hit a problem" only when the caller names no action', () => {
+    expect(userErrorMessage(busy())).toMatchObject({
+      title: 'Videorc hit a problem',
+      description: BUSY,
+      tone: 'warning'
+    })
   })
 })

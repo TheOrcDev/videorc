@@ -70,12 +70,22 @@ function probeBundledFfmpeg(executable) {
     maxBuffer: 16 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe']
   })
-  const filtersOutput = execFileSync(executable, ['-hide_banner', '-filters'], {
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe']
+  const listing = (flag) =>
+    execFileSync(executable, ['-hide_banner', flag], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+  const filtersOutput = listing('-filters')
+  return assessLinuxFfmpegCapabilities({
+    encodersOutput,
+    filtersOutput,
+    versionOutput,
+    // The replay ring (plan 181): segment muxer, concat demuxer, aac_adtstoasc.
+    muxersOutput: listing('-muxers'),
+    demuxersOutput: listing('-demuxers'),
+    bitstreamFiltersOutput: listing('-bsfs')
   })
-  return assessLinuxFfmpegCapabilities({ encodersOutput, filtersOutput, versionOutput })
 }
 
 function currentCommit() {

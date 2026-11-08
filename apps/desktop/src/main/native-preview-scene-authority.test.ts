@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { PreviewSurfaceSceneState, PreviewSurfaceStatus } from '../shared/backend'
 import {
   compositorSceneConflictsWithCommitted,
+  nativePreviewSceneProofWaitSettled,
   nativePreviewStatusProvesSceneRevision
 } from '../shared/native-preview-scene-authority'
 
@@ -57,6 +58,75 @@ describe('native preview compositor scene authority', () => {
         candidateRunId: 'run-b'
       })
     ).toBe(false)
+  })
+
+  it('never treats a banner change at the same revision as a conflicting scene (plan 186)', () => {
+    const committed = scene(9, 'screen-camera')
+    const bannerLayer = {
+      id: 'banner:sponsor',
+      name: 'Sponsor',
+      kind: 'banner' as const,
+      transform: transform(),
+      visible: true,
+      imageUrl: 'videorc-asset://banner/sponsor.png',
+      fit: 'fill' as const,
+      mirror: false,
+      opacity: 0.5
+    }
+    const withBanner = {
+      ...committed,
+      sources: [...committed.sources, bannerLayer],
+      bannerCanvas: { width: 1280, height: 720 }
+    }
+    const authority = { committedRunId: 'run-a', candidateRunId: 'run-a' }
+
+    expect(compositorSceneConflictsWithCommitted(committed, withBanner, authority)).toBe(false)
+    expect(
+      compositorSceneConflictsWithCommitted(
+        withBanner,
+        { ...withBanner, sources: [...committed.sources, { ...bannerLayer, opacity: 1 }] },
+        authority
+      )
+    ).toBe(false)
+    // Real scene content still conflicts with banners present on both sides.
+    expect(
+      compositorSceneConflictsWithCommitted(
+        withBanner,
+        { ...scene(9, 'side-by-side'), sources: [bannerLayer] },
+        authority
+      )
+    ).toBe(true)
+  })
+
+  it('never treats Buddy appearing, moving or leaving at the same revision as a conflicting scene (plan 205)', () => {
+    const committed = scene(9, 'screen-camera')
+    const buddyLayer = {
+      id: 'overlay:buddy',
+      name: 'Buddy',
+      kind: 'buddy' as const,
+      transform: transform(),
+      visible: true,
+      frameUrl: 'http://127.0.0.1:1/preview/buddy/latest.bmp?canvasWidth=3840&canvasHeight=2160',
+      fit: 'fill' as const,
+      mirror: false
+    }
+    const withBuddy = { ...committed, sources: [...committed.sources, buddyLayer] }
+    const moved = {
+      ...committed,
+      sources: [...committed.sources, { ...buddyLayer, transform: { ...transform(), x: 0.7 } }]
+    }
+    const authority = { committedRunId: 'run-a', candidateRunId: 'run-a' }
+
+    expect(compositorSceneConflictsWithCommitted(committed, withBuddy, authority)).toBe(false)
+    expect(compositorSceneConflictsWithCommitted(withBuddy, moved, authority)).toBe(false)
+    expect(compositorSceneConflictsWithCommitted(withBuddy, committed, authority)).toBe(false)
+    expect(
+      compositorSceneConflictsWithCommitted(
+        withBuddy,
+        { ...scene(9, 'side-by-side'), sources: [buddyLayer] },
+        authority
+      )
+    ).toBe(true)
   })
 
   it('requires an attached in-process present at or beyond the committed revision', () => {
@@ -123,6 +193,42 @@ describe('native preview compositor scene authority', () => {
       )
     ).toBe(false)
   })
+
+  it('ends the presented-revision wait at a proof surface, which never reads one back', () => {
+    // Ogre (Linux), 2026-11-06: every picture tile Apply and Remove waited out
+    // the whole proof budget, 3.2 to 4.3 s, before the tile showed the commit.
+    const proofSurface = {
+      state: 'live',
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      sourcePixelsPresent: true,
+      nativePreviewHostKind: 'proof-surface',
+      nativePreviewHostAttached: false
+    } as PreviewSurfaceStatus
+    const inProcess = {
+      state: 'live',
+      transport: 'native-surface',
+      backing: 'cametal-layer',
+      sourcePixelsPresent: true,
+      nativePreviewHostKind: 'in-process',
+      nativePreviewHostAttached: true,
+      nativePreviewPresentedSceneRevision: 11
+    } as PreviewSurfaceStatus
+
+    expect(nativePreviewStatusProvesSceneRevision(proofSurface, 12, 'linux')).toBe(false)
+    expect(nativePreviewSceneProofWaitSettled(proofSurface, 12, 'linux')).toBe(true)
+    expect(nativePreviewSceneProofWaitSettled({ ...proofSurface, state: 'starting' }, 12)).toBe(
+      true
+    )
+    // A presenter that reads its revision back still waits for the commit.
+    expect(nativePreviewSceneProofWaitSettled(inProcess, 12)).toBe(false)
+    expect(
+      nativePreviewSceneProofWaitSettled(
+        { ...inProcess, nativePreviewPresentedSceneRevision: 12 },
+        12
+      )
+    ).toBe(true)
+  })
 })
 
 function scene(
@@ -155,6 +261,7 @@ function scene(
       sideBySideSplit: '70-30',
       sideBySideCameraSide: 'right',
       verticalScreenFraming: 'fill',
+      horizontalScreenFraming: 'fit',
       arrangementMode: 'preset',
       sourceTransformOverrides: {}
     },

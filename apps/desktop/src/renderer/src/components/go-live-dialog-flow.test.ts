@@ -21,13 +21,19 @@ import { GO_LIVE_EXCLUDED_NOTE, GoLiveConfirmationDialog } from './go-live-dialo
 // primary), ⌘↵ goes live, the pending primary names its phase, and "Go live
 // without …" leaves a destination out of this livestream only.
 
-const mocked = vi.hoisted(() => ({ captureConfig: undefined as unknown }))
+const mocked = vi.hoisted(() => ({
+  captureConfig: undefined as unknown,
+  banners: [] as unknown[],
+  sharedVideo: null as unknown,
+  topology: { state: 'idle' } as unknown
+}))
 vi.mock('@/hooks/use-studio', () => ({
+  useStudioBanners: () => ({ banners: mocked.banners }),
   useStudioCore: () => ({
     captureConfig: mocked.captureConfig,
     performanceCheck: undefined,
-    streamOutputTopologyPreflight: { state: 'idle' },
-    streamSharedEncodeFallbackVideo: null,
+    streamOutputTopologyPreflight: mocked.topology,
+    streamSharedEncodeFallbackVideo: mocked.sharedVideo,
     overlayLayout: DEFAULT_OVERLAY_LAYOUT
   })
 }))
@@ -101,6 +107,9 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   mocked.captureConfig = twitchOn()
+  mocked.banners = []
+  mocked.sharedVideo = null
+  mocked.topology = { state: 'idle' }
 })
 
 afterEach(() => {
@@ -154,13 +163,14 @@ function pressCommandEnter(target: Element = dialog()): void {
   })
 }
 
+// Base UI moves a dialog's first focus on the next animation frame.
 describe('Go Live dialog focus (B-14)', () => {
-  it('starts on the title field when the dialog carries stream details', () => {
+  it('starts on the title field when the dialog carries stream details', async () => {
     render()
-    expect(document.activeElement?.id).toBe('go-live-title')
+    await vi.waitFor(() => expect(document.activeElement?.id).toBe('go-live-title'))
   })
 
-  it('starts on the primary when every destination is a scheduled event', () => {
+  it('starts on the primary when every destination is a scheduled event', async () => {
     mocked.captureConfig = withTargets((target) =>
       target.platform === 'twitch'
         ? { ...target, enabled: true, scheduledEventId: 'event-1', scheduledEventTitle: 'Saved' }
@@ -168,10 +178,10 @@ describe('Go Live dialog focus (B-14)', () => {
     )
     render()
     expect(dialog().querySelector('#go-live-title')).toBeNull()
-    expect(document.activeElement).toBe(primary())
+    await vi.waitFor(() => expect(document.activeElement).toBe(primary()))
   })
 
-  it('never starts on a button that changes a destination', () => {
+  it('never starts on a button that changes a destination', async () => {
     render({
       preflight: {
         valid: false,
@@ -179,7 +189,7 @@ describe('Go Live dialog focus (B-14)', () => {
         destinations: [destination({ ready: false, message: 'Reconnect.' })]
       }
     })
-    expect(document.activeElement?.id).toBe('go-live-title')
+    await vi.waitFor(() => expect(document.activeElement?.id).toBe('go-live-title'))
   })
 })
 
@@ -288,6 +298,88 @@ describe('Go Live dialog destinations (B-8, B-12, D-7)', () => {
     expect(dialog().textContent).not.toContain('Streaming both orientations')
   })
 
+  it('says on the vertical row when this computer cannot encode the vertical leg (#691)', () => {
+    // Linux (ogre, 2026-11-01): "3 of 3 ready", then the engine refused the
+    // start because the raw path has no second encoder for the vertical leg.
+    const vertical = withTargets((target) =>
+      target.id === 'youtube' || target.id === 'youtube-vertical'
+        ? { ...target, enabled: true }
+        : target
+    )
+    mocked.captureConfig = { ...vertical, streamEnabled: true }
+    const preflight: GoLivePreflight = {
+      valid: true,
+      issues: [],
+      destinations: [
+        destination({ targetId: 'youtube', platform: 'youtube', label: 'YouTube' }),
+        destination({
+          targetId: 'youtube-vertical',
+          platform: 'youtube',
+          label: 'YouTube Vertical'
+        })
+      ]
+    }
+    const topology = (effectiveBridgeOutput: string): unknown => ({
+      state: 'ready',
+      requestKey: 'key',
+      result: { outputRoles: ['stream'], effectiveBridgeOutput }
+    })
+
+    mocked.topology = topology('raw-yuv420p')
+    const props = render({ preflight })
+    expect(dialog().textContent).toContain('1 of 2 ready')
+    const row = dialog().querySelector('[data-target-id=youtube-vertical]')!
+    expect(row.getAttribute('data-ready')).toBe('false')
+    expect(row.textContent).toContain("can't encode a separate vertical stream")
+    expect(dialog().textContent).not.toContain('Streaming both orientations')
+    expect(primary().disabled).toBe(true)
+    act(() => button('Go live without YouTube Vertical').click())
+    expect(props.onResolveBlocker).toHaveBeenCalledWith('youtube-vertical', 'exclude')
+
+    // An encoder with a second leg (VideoToolbox, Media Foundation) streams both.
+    mocked.topology = topology('videotoolbox-h264-mpegts')
+    render({ preflight })
+    expect(dialog().textContent).toContain('2 of 2 ready')
+    expect(dialog().textContent).toContain('Streaming both orientations')
+    expect(primary().disabled).toBe(false)
+  })
+
+  it('reminds a Facebook stream-key session to press Go live in Live Producer, in any orientation', () => {
+    // Plan 206: a horizontal-only session never shows the both-orientations
+    // advice, so the reminder can't live there.
+    mocked.captureConfig = {
+      ...withTargets((target) =>
+        target.platform === 'facebook' ? { ...target, enabled: true } : target
+      ),
+      streamEnabled: true
+    }
+    render()
+    expect(dialog().textContent).not.toContain('Streaming both orientations')
+    const reminder = dialog().querySelector('[data-testid=go-live-producer-reminder]')!
+    expect(reminder.textContent).toContain('press “Go live” in Facebook Live Producer')
+    expect(reminder.textContent).not.toContain('Instagram')
+    // Left out of this livestream: nothing to publish there.
+    render({
+      excludedTargets: defaultCaptureConfig.streaming.targets.filter(
+        (target) => target.platform === 'facebook'
+      )
+    })
+    expect(dialog().querySelector('[data-testid=go-live-producer-reminder]')).toBeNull()
+  })
+
+  it('reminds an Instagram session to press Go live in Live Producer without a second orientation', () => {
+    mocked.captureConfig = {
+      ...withTargets((target) =>
+        target.platform === 'instagram' ? { ...target, enabled: true } : target
+      ),
+      streamEnabled: true
+    }
+    render()
+    expect(
+      dialog().querySelector('[data-testid=go-live-producer-reminder]')?.textContent
+    ).toContain('press “Go live” in Instagram Live Producer')
+  })
+
   it('offers Reconnect for a signed-in destination, then Check again', () => {
     const props = render({
       preflight: {
@@ -313,5 +405,40 @@ describe('Go Live dialog phases (B-14)', () => {
     render({ pending: true, phase })
     expect(primary().textContent?.trim()).toBe(label)
     expect(primary().disabled).toBe(true)
+  })
+})
+
+describe('Go Live banner notices (plan 186, D13)', () => {
+  // A showing banner whose two switches differ, on the one shared encode.
+  const banner = (shown: boolean, showOnStream: boolean, showInRecording: boolean) => ({
+    shown,
+    showOnStream,
+    showInRecording
+  })
+  const notices = (): string[] =>
+    [...dialog().querySelectorAll('[data-videorc-go-live-overlay-notice="banners"]')].map(
+      (item) => item.textContent ?? ''
+    )
+
+  it('says the banner sentence once with the other notices, however many banners need it', () => {
+    mocked.sharedVideo = defaultCaptureConfig.video
+    mocked.banners = [
+      banner(true, true, false),
+      banner(true, false, true),
+      banner(false, true, false)
+    ]
+    render()
+    expect(notices()).toStrictEqual([
+      'Banners · Both the stream and the recording will include banners: this computer shares one encode for them.'
+    ])
+    expect(dialog().querySelector('[data-videorc-go-live-overlay-notices]')).not.toBeNull()
+  })
+
+  it('stays quiet while no showing banner splits its switches', () => {
+    mocked.sharedVideo = defaultCaptureConfig.video
+    mocked.banners = [banner(false, true, false), banner(true, true, true)]
+    render()
+    expect(notices()).toStrictEqual([])
+    expect(dialog().querySelector('[data-videorc-go-live-overlay-notices]')).toBeNull()
   })
 })

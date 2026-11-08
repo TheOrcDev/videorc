@@ -198,6 +198,29 @@ try {
   )
   assert.equal(areEnabledStreamTargetsStartReady(kickManual.streaming), true)
 
+  // Facebook (plan 206) is a stream-key card: its default server is Live
+  // Producer's RTMPS ingest, a key alone makes it start-ready, and the legacy
+  // bridge maps it to Custom like TikTok and Instagram.
+  const facebookManual = bridgeStreamingToLegacy({
+    ...defaultCaptureConfig,
+    recordEnabled: false,
+    streaming: {
+      ...defaultCaptureConfig.streaming,
+      enabled: true,
+      mode: 'single',
+      enabledTargetIds: ['facebook'],
+      targets: defaultCaptureConfig.streaming.targets.map((target) =>
+        target.platform === 'facebook'
+          ? { ...target, enabled: true, streamKey: 'FB-smoke-key', streamKeyPresent: true }
+          : target
+      )
+    }
+  })
+  assert.equal(facebookManual.streamEnabled, true)
+  assert.equal(facebookManual.rtmpPreset, 'custom')
+  assert.equal(facebookManual.rtmpServerUrl, 'rtmps://live-api-s.facebook.com:443/rtmp/')
+  assert.equal(areEnabledStreamTargetsStartReady(facebookManual.streaming), true)
+
   const youtubeOauthReady = bridgeStreamingToLegacy({
     ...defaultCaptureConfig,
     recordEnabled: false,

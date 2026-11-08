@@ -28,6 +28,15 @@ export function dayLabel(timestamp: string): string {
 }
 
 /**
+ * The backend names an unnamed session after its start, "Session 2026-10-02
+ * 14:55" (`session_title` in recording.rs), in the time zone it was recorded
+ * in. A list that already shows when it ran should not repeat that clock.
+ */
+export function isAutoSessionTitle(title: string): boolean {
+  return /^Session \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(title.trim())
+}
+
+/**
  * A recording's length as the one timecode (plan 174 S1.4, E-20): "12:34",
  * "1:12:00", never "1 hour and 12 minutes". Unknown is the placeholder.
  */
@@ -92,17 +101,20 @@ export function formatBytes(bytes?: number | null): string {
     return `${Math.round(bytes)} B`
   }
   const units = ['KB', 'MB', 'GB', 'TB']
+  const shown = (value: number): number =>
+    value >= 100 ? Math.round(value) : Math.round(value * 10) / 10
   let value = bytes
   let unit = 'B'
   for (const candidate of units) {
     value /= 1024
     unit = candidate
-    if (value < 1024) {
+    // Pick the unit by the value as it will be shown: 1023.9 KB rounds to
+    // 1024, which belongs in the next unit as 1 MB, never "1024 KB".
+    if (shown(value) < 1024) {
       break
     }
   }
-  const rounded = value >= 100 ? Math.round(value) : Math.round(value * 10) / 10
-  return `${rounded} ${unit}`
+  return `${shown(value)} ${unit}`
 }
 
 /**

@@ -1,5 +1,7 @@
 import { createServer } from 'node:http'
 
+import { capabilitiesDocument } from './fake-transcript-service.mjs'
+
 /**
  * Local, credential-free stand-in for videorc-web's `POST /api/ai/cohost/tick`
  * used by `pnpm smoke:cohost-fake`. It implements the Live Co-host wire contract
@@ -535,6 +537,190 @@ function clampUnit(value) {
  * result is sorted by score, highest first (stable). `null` means no
  * `highlights` key.
  */
+// --- Buddy's planner (plan 209 S17, contract part F) --------------------------
+
+export const BUDDY_ACT_PATH = '/api/ai/buddy/act'
+export const AI_CAPABILITIES_PATH = '/api/ai/capabilities'
+export const BUDDY_ACT_MAX_BODY_BYTES = 128 * 1024
+export const BUDDY_ACT_REQUEST_KEYS = Object.freeze([
+  'clientVersion',
+  'comments',
+  'consentToProcessChat',
+  'names',
+  'sentence',
+  'seq',
+  'sessionClientId',
+  'state',
+  'tools'
+])
+export const BUDDY_ACT_NAME_KINDS = Object.freeze([
+  'banners',
+  'destinations',
+  'scenes',
+  'sounds',
+  'takeovers'
+])
+const BUDDY_ACT_TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/
+const BUDDY_ACT_COMMENT_KEYS = Object.freeze(['id', 'platform', 'viewerName', 'viewerText'])
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function boundedText(value, min, max) {
+  return typeof value === 'string' && value.trim().length >= min && value.length <= max
+}
+
+/**
+ * The route's zod schema as the desktop must meet it (contract part F),
+ * strict at every level. Returns `{ status, code, message }` for the first
+ * violation, or null. Consent is checked first, like the route.
+ */
+export function validateBuddyActRequest(body) {
+  const invalid = (message) => ({ status: 400, code: 'invalid-request', message })
+  if (!isPlainObject(body)) return invalid('The body must be a JSON object.')
+  if (body.consentToProcessChat !== true) {
+    return { status: 403, code: 'consent-required', message: 'Cloud AI consent is required.' }
+  }
+  const unknown = Object.keys(body).filter((key) => !BUDDY_ACT_REQUEST_KEYS.includes(key))
+  if (unknown.length) return invalid(`Unknown keys: ${unknown.join(', ')}.`)
+  if (!boundedText(body.clientVersion, 1, 64)) return invalid('clientVersion is 1-64 characters.')
+  if (!boundedText(body.sessionClientId, 1, 128)) {
+    return invalid('sessionClientId is 1-128 characters.')
+  }
+  if (!Number.isInteger(body.seq) || body.seq < 0) return invalid('seq is a whole number.')
+  if (!boundedText(body.sentence, 1, 500)) return invalid('sentence is 1-500 characters.')
+  if (!Array.isArray(body.tools) || body.tools.length < 1 || body.tools.length > 45) {
+    return invalid('tools holds 1-45 entries.')
+  }
+  const toolNames = new Set()
+  for (const tool of body.tools) {
+    if (!isPlainObject(tool)) return invalid('A tool is an object.')
+    const extra = Object.keys(tool).filter(
+      (key) => !['name', 'description', 'inputSchema'].includes(key)
+    )
+    if (extra.length) return invalid(`Unknown tool keys: ${extra.join(', ')}.`)
+    if (typeof tool.name !== 'string' || !BUDDY_ACT_TOOL_NAME.test(tool.name)) {
+      return invalid('Tool names are snake_case.')
+    }
+    if (toolNames.has(tool.name)) return invalid('Tool names are unique.')
+    toolNames.add(tool.name)
+    if (!boundedText(tool.description, 1, 400)) return invalid('A description is 1-400 characters.')
+    if (!isPlainObject(tool.inputSchema) || JSON.stringify(tool.inputSchema).length > 4096) {
+      return invalid('An inputSchema is an object of at most 4096 characters.')
+    }
+  }
+  if (!isPlainObject(body.names)) return invalid('names is an object.')
+  const nameKeys = Object.keys(body.names).sort()
+  if (JSON.stringify(nameKeys) !== JSON.stringify([...BUDDY_ACT_NAME_KINDS])) {
+    return invalid(`names has exactly ${BUDDY_ACT_NAME_KINDS.join(', ')}.`)
+  }
+  for (const kind of BUDDY_ACT_NAME_KINDS) {
+    const list = body.names[kind]
+    if (
+      !Array.isArray(list) ||
+      list.length > 60 ||
+      !list.every((name) => boundedText(name, 1, 80))
+    ) {
+      return invalid(`names.${kind} is at most 60 names of 1-80 characters.`)
+    }
+  }
+  if (!isPlainObject(body.state) || Object.keys(body.state).length > 24) {
+    return invalid('state is a flat object of at most 24 keys.')
+  }
+  for (const [key, value] of Object.entries(body.state)) {
+    const ok =
+      key.length >= 1 &&
+      key.length <= 40 &&
+      (value === null ||
+        typeof value === 'boolean' ||
+        typeof value === 'number' ||
+        (typeof value === 'string' && value.length <= 120) ||
+        (Array.isArray(value) &&
+          value.length <= 20 &&
+          value.every((item) => typeof item === 'string' && item.length <= 80)))
+    if (!ok) return invalid(`state.${key} is not a flat value.`)
+  }
+  if (body.comments !== undefined) {
+    if (!Array.isArray(body.comments) || body.comments.length > 20) {
+      return invalid('comments holds at most 20 entries.')
+    }
+    const ids = new Set()
+    for (const comment of body.comments) {
+      if (!isPlainObject(comment)) return invalid('A comment is an object.')
+      const keys = Object.keys(comment).sort()
+      if (JSON.stringify(keys) !== JSON.stringify([...BUDDY_ACT_COMMENT_KEYS])) {
+        return invalid(`A comment has exactly ${BUDDY_ACT_COMMENT_KEYS.join(', ')}.`)
+      }
+      if (!boundedText(comment.id, 1, 200) || ids.has(comment.id)) {
+        return invalid('Comment ids are unique, 1-200 characters.')
+      }
+      ids.add(comment.id)
+      if (!PLATFORMS.has(comment.platform)) return invalid('A comment platform is unknown.')
+      if (!boundedText(comment.viewerName, 1, 120) || !boundedText(comment.viewerText, 1, 500)) {
+        return invalid('viewerName is 1-120 and viewerText 1-500 characters.')
+      }
+    }
+  }
+  return null
+}
+
+/** The name in `names[kind]` the sentence mentions (case-insensitive), or null. */
+function mentionedName(sentence, names) {
+  const said = sentence.toLowerCase()
+  return (
+    [...names]
+      .sort((a, b) => b.length - a.length)
+      .find((name) => said.includes(name.toLowerCase())) ?? null
+  )
+}
+
+/**
+ * A deterministic stand-in for the model: "switch to / go to <scene>" and
+ * "play <sound>", in the sentence's order, with the names the request sent
+ * (the desktop maps names to ids), as the real planner is told to. Anything
+ * else is `unknown`. Never `stop` or `go_live` with comments (part F).
+ */
+export function planBuddyAct(body) {
+  const sentence = String(body?.sentence ?? '')
+  const lower = sentence.toLowerCase()
+  const tools = new Set((body?.tools ?? []).map((tool) => tool.name))
+  const calls = []
+  const said = []
+  const scene = /\b(switch|go|change)\b/.test(lower)
+    ? mentionedName(sentence, body?.names?.scenes ?? [])
+    : null
+  if (scene && tools.has('switch_scene')) {
+    calls.push({
+      at: lower.indexOf(scene.toLowerCase()),
+      tool: 'switch_scene',
+      args: { sceneId: scene }
+    })
+    said.push(`switching to ${scene}`)
+  }
+  const sound = /\bplay\b/.test(lower) ? mentionedName(sentence, body?.names?.sounds ?? []) : null
+  if (sound && tools.has('play_sound')) {
+    calls.push({
+      at: lower.indexOf(sound.toLowerCase()),
+      tool: 'play_sound',
+      args: { soundId: sound }
+    })
+    said.push(`playing ${sound}`)
+  }
+  const ending = /\b(end|stop)\b.*\b(stream|recording|livestream)\b/.test(lower)
+  if (ending && tools.has('stop') && !body?.comments?.length) {
+    calls.push({ at: lower.search(/\b(end|stop)\b/), tool: 'stop', args: {} })
+    said.push('stopping')
+  }
+  if (!calls.length) return { calls: [], line: "Buddy didn't catch that.", unknown: true }
+  calls.sort((a, b) => a.at - b.at)
+  const line = `${said.join(' and ')}.`
+  return {
+    calls: calls.slice(0, 3).map(({ tool, args }) => ({ tool, args })),
+    line: line[0].toUpperCase() + line.slice(1)
+  }
+}
+
 export function planTickHighlights(messages, rule, flagMarker = null) {
   if (!rule) return null
   const baseScore = clampUnit(rule.score ?? 0.9)
@@ -680,7 +866,10 @@ export async function startFakeCohostService({
   smokeSessionToken,
   flagMarker = null,
   spotlightMatches = [],
-  tickHighlights = null
+  tickHighlights = null,
+  // Plan 209 S21: `buddy.act` in the capabilities this fake serves (null:
+  // no `buddy` block, as an older server).
+  buddyAct = null
 }) {
   if (typeof smokeSessionToken !== 'string' || smokeSessionToken.length < 8) {
     throw new Error('startFakeCohostService requires a smoke-only session token.')
@@ -695,7 +884,13 @@ export async function startFakeCohostService({
     queuedSpotlightFailures: [],
     tickHighlights,
     nextQuestionNumber: 1,
-    memory: new Map()
+    memory: new Map(),
+    // Plan 209 S21: Buddy's planner.
+    buddyAct: buddyAct === null ? null : buddyAct === true,
+    buddyActOptIn: buddyAct !== null,
+    actRequests: [],
+    queuedActAnswers: [],
+    capabilityRequests: 0
   }
   const mintId = () => `q_${state.nextQuestionNumber++}`
   const responseHolds = { tick: [], spotlight: [] }
@@ -727,6 +922,26 @@ export async function startFakeCohostService({
   const server = createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === COHOST_SPOTLIGHT_PATH) {
       return serveSpotlight(req, res)
+    }
+    if (req.method === 'POST' && req.url === BUDDY_ACT_PATH) {
+      return serveBuddyAct(req, res)
+    }
+    // Only when a smoke opted in (`buddyAct`): every other smoke keeps its
+    // own capabilities fake, and this route stays unknown for them.
+    if (
+      state.buddyActOptIn &&
+      req.method === 'GET' &&
+      req.url?.split('?')[0] === AI_CAPABILITIES_PATH
+    ) {
+      await drain(req)
+      if (req.headers.authorization !== `Bearer ${smokeSessionToken}`) {
+        state.unauthorized += 1
+        return json(res, 401, { error: { code: 'unauthorized', message: 'Smoke auth failed.' } })
+      }
+      state.capabilityRequests += 1
+      const document = capabilitiesDocument({ monthlySecondsLimit: 72_000, remaining: 72_000 })
+      if (state.buddyAct !== null) document.buddy = { act: state.buddyAct ? 1 : 0 }
+      return json(res, 200, document)
     }
     if (req.method !== 'POST' || req.url !== COHOST_TICK_PATH) {
       await drain(req)
@@ -787,6 +1002,52 @@ export async function startFakeCohostService({
     await waitForRelease('tick', record)
     return json(res, 200, planned)
   })
+
+  // Contract part F: the gates in the route's order, then a scripted answer
+  // (`queueActAnswer`) or the deterministic planner. Every body is recorded.
+  async function serveBuddyAct(req, res) {
+    if (req.headers.authorization !== `Bearer ${smokeSessionToken}`) {
+      await drain(req)
+      state.unauthorized += 1
+      return json(res, 401, { error: { code: 'unauthorized', message: 'Smoke auth failed.' } })
+    }
+    let raw
+    let body
+    try {
+      raw = await readRequestBody(req, BUDDY_ACT_MAX_BODY_BYTES * 2)
+      body = JSON.parse(raw)
+    } catch (error) {
+      return json(res, 400, {
+        error: { code: 'invalid-request', message: `Body is not JSON: ${error.message}` }
+      })
+    }
+    const record = { at: Date.now(), body, bytes: Buffer.byteLength(raw), status: 200, code: null }
+    state.actRequests.push(record)
+    if (record.bytes > BUDDY_ACT_MAX_BODY_BYTES) {
+      record.status = 400
+      record.code = 'invalid-request'
+      return json(res, 400, {
+        error: { code: 'invalid-request', message: 'A JSON body of at most 128 KB is required.' }
+      })
+    }
+    const failure = validateBuddyActRequest(body)
+    if (failure) {
+      record.status = failure.status
+      record.code = failure.code
+      return json(res, failure.status, { error: { code: failure.code, message: failure.message } })
+    }
+    const queued = state.queuedActAnswers.shift()
+    if (queued?.status) {
+      record.status = queued.status
+      record.code = queued.code
+      return json(res, queued.status, {
+        error: { code: queued.code, message: queued.message ?? `Scripted ${queued.code}.` }
+      })
+    }
+    const answer = queued?.answer ?? planBuddyAct(body)
+    record.answer = answer
+    return json(res, 200, answer)
+  }
 
   async function serveSpotlight(req, res) {
     if (req.headers.authorization !== `Bearer ${smokeSessionToken}`) {
@@ -927,6 +1188,22 @@ export async function startFakeCohostService({
         throw new Error('setTickHighlights byMarker must map markers to finite scores.')
       }
       state.tickHighlights = rule
+    },
+    /**
+     * Plan 209 S21: the next planner answer, as given (a compromised or
+     * confused planner may name any tool), or a failure `{ status, code }`.
+     */
+    queueActAnswer(next) {
+      if (next?.answer && Array.isArray(next.answer.calls)) {
+        state.queuedActAnswers.push({ answer: next.answer })
+      } else if (Number.isInteger(next?.status) && typeof next.code === 'string') {
+        state.queuedActAnswers.push(next)
+      } else {
+        throw new Error('queueActAnswer requires { answer: { calls, line } } or { status, code }.')
+      }
+    },
+    setBuddyAct(enabled) {
+      state.buddyAct = enabled === null ? null : enabled === true
     },
     setSpotlightMatches(matches) {
       if (!Array.isArray(matches)) {

@@ -85,6 +85,8 @@ type _RegistryIconProps = _AssertIconProps<
     | 'DotsThree'
     | 'DownloadSimple'
     | 'Eye'
+    | 'EyeSlash'
+    | 'FacebookLogo'
     | 'FileVideo'
     | 'FilmReel'
     | 'FilmSlate'
@@ -232,7 +234,14 @@ export {
   Crosshair as CrosshairIcon,
   // A marker: a point on a recording's timeline its owner wants to find
   // again (CONTEXT.md). Never scissors, which mean a cut (plan 174 S3.12).
-  BookmarkSimple as MarkerIcon
+  BookmarkSimple as MarkerIcon,
+  // Hide screen (plan 210): the screen is hidden from viewers. Never the
+  // Preview's eye, which opens a window.
+  EyeSlash as HiddenIcon,
+  // Hide from stream (plan 215 D6): the Stream Manager stays on the
+  // streamer's screen and out of the capture. Its own glyph, so it never
+  // reads as Hide screen.
+  EyeClosed as HiddenFromStreamIcon
 } from '@phosphor-icons/react'
 /**
  * Files, assets and editing.
@@ -286,7 +295,8 @@ export {
 export {
   TwitchLogo as TwitchIcon,
   TiktokLogo as TiktokIcon,
-  InstagramLogo as InstagramIcon
+  InstagramLogo as InstagramIcon,
+  FacebookLogo as FacebookIcon
 } from '@phosphor-icons/react'
 
 export { YOUTUBE_MARK_ASPECT, YOUTUBE_MARK_MIN_PX }
@@ -386,8 +396,19 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
  *
  * It is the one full-colour icon in the registry. `weight` is accepted and
  * ignored, and `currentColor` never tints it: the red iris is the brand.
+ *
+ * `picture` swaps the golem for the streamer's own Buddy (its idle pose, a
+ * managed URL from `buddyPictureUrl`): the slots that stand for *their* Buddy,
+ * the Buddy page's sidebar row and its ⌘K entries, wear it through
+ * `OwnBuddyIcon`. Null or absent keeps the golem.
  */
-export const BuddyIcon: AppIcon = ({ size, weight: _weight, children, ...props }) => (
+export const BuddyIcon: ComponentType<AppIconProps & { picture?: string | null }> = ({
+  size,
+  weight: _weight,
+  picture,
+  children,
+  ...props
+}) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
     viewBox="0 0 256 256"
@@ -397,6 +418,11 @@ export const BuddyIcon: AppIcon = ({ size, weight: _weight, children, ...props }
     {...props}
   >
     {children}
-    <image href={buddyEmblemUrl} width="256" height="256" preserveAspectRatio="xMidYMid meet" />
+    <image
+      href={picture ?? buddyEmblemUrl}
+      width="256"
+      height="256"
+      preserveAspectRatio="xMidYMid meet"
+    />
   </svg>
 )

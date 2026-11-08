@@ -21,18 +21,19 @@ pub const OVERLAY_LAYOUT_KEY: &str = "overlayLayout";
 const OVERLAY_LAYOUT_MIGRATION_KEY: &str = "overlayLayoutMigration";
 /// Smallest side a placed rect may have (canvas units).
 pub const OVERLAY_RECT_MIN_SIZE: f64 = 0.02;
-const RECT_EPSILON: f64 = 1e-6;
+pub(crate) const RECT_EPSILON: f64 = 1e-6;
 
 /// Landscape side margin: 4% of the canvas height, expressed against a 16:9
-/// width (43 px of 1920 at 1080p, the pre-plan-164 corner margin).
-const LANDSCAPE_SIDE_MARGIN: f64 = 0.04 * 9.0 / 16.0;
-const LANDSCAPE_EDGE_MARGIN: f64 = 0.04;
+/// width (43 px of 1920 at 1080p, the pre-plan-164 corner margin). The
+/// margins are shared with the banner default places (plan 186, `banners.rs`).
+pub(crate) const LANDSCAPE_SIDE_MARGIN: f64 = 0.04 * 9.0 / 16.0;
+pub(crate) const LANDSCAPE_EDGE_MARGIN: f64 = 0.04;
 /// Portrait side margin: 4% of the canvas height against a 9:16 width (77 px
 /// of 1080 on a 1080x1920 leg).
-const PORTRAIT_SIDE_MARGIN: f64 = 0.04 * 16.0 / 9.0;
+pub(crate) const PORTRAIT_SIDE_MARGIN: f64 = 0.04 * 16.0 / 9.0;
 /// Portrait platform safe area (plan 077): 8% top, 22% bottom.
-const PORTRAIT_TOP_MARGIN: f64 = 0.08;
-const PORTRAIT_BOTTOM_MARGIN: f64 = 0.22;
+pub(crate) const PORTRAIT_TOP_MARGIN: f64 = 0.08;
+pub(crate) const PORTRAIT_BOTTOM_MARGIN: f64 = 0.22;
 
 /// A normalized rect in canvas units: `x`/`w` over the width, `y`/`h` over the
 /// height.
@@ -98,13 +99,19 @@ pub struct OverlayItemLayout {
     pub show_in_recording: bool,
 }
 
-/// The three placeable overlay items. `buddy` is carried from Phase B on so
-/// the leg plan and the canvas already know it; Phase C adds its slot.
+/// The placeable overlay items. `buddy` is carried from Phase B on so the leg
+/// plan and the canvas already know it; Phase C adds its slot. `chat` (plan
+/// 215 G, D5) is the chat box: it came after the row was first saved, so it
+/// takes its default when a stored layout lacks it. A layout saved before
+/// this field loads with its highlight, captions and Buddy placement intact;
+/// `load_overlay_layout` must never fall back to defaults because of it.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OverlayLayout {
     pub highlight: OverlayItemLayout,
     pub captions: OverlayItemLayout,
     pub buddy: OverlayItemLayout,
+    #[serde(default = "default_chat_layout")]
+    pub chat: OverlayItemLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,13 +120,17 @@ pub enum OverlayItem {
     Highlight,
     Captions,
     Buddy,
+    /// The chat box (plan 215 G): the last few chat messages, off by default
+    /// because it shows viewers' names.
+    Chat,
 }
 
 impl OverlayItem {
-    pub const ALL: [OverlayItem; 3] = [
+    pub const ALL: [OverlayItem; 4] = [
         OverlayItem::Highlight,
         OverlayItem::Captions,
         OverlayItem::Buddy,
+        OverlayItem::Chat,
     ];
 
     /// How the Go Live sheet names the item mid-sentence.
@@ -128,6 +139,7 @@ impl OverlayItem {
             OverlayItem::Highlight => "highlights",
             OverlayItem::Captions => "captions",
             OverlayItem::Buddy => "the Buddy",
+            OverlayItem::Chat => "chat",
         }
     }
 }
@@ -185,7 +197,10 @@ impl From<CommentHighlightAnchor> for OverlaySnap {
 /// Default size `(w, h)` of an item on an orientation, in canvas units. The
 /// highlight and caption widths are the rasterizers' width fractions
 /// (`lib/comment-highlight.ts`, `lib/caption-overlay.ts`); their heights bound
-/// a content-driven bitmap. The Buddy is a square in pixels.
+/// a content-driven bitmap. The Buddy is a square in pixels. The chat box
+/// (plan 215 G) is a column five rows tall: 30% of a landscape width, 80% of
+/// a portrait one, the renderer wrapping each row to the rect's width
+/// (`lib/chat-overlay.ts`).
 pub fn overlay_default_size(item: OverlayItem, orientation: OverlayOrientation) -> (f64, f64) {
     match (item, orientation) {
         (OverlayItem::Highlight, OverlayOrientation::Horizontal) => (0.60, 0.26),
@@ -194,7 +209,22 @@ pub fn overlay_default_size(item: OverlayItem, orientation: OverlayOrientation) 
         (OverlayItem::Captions, OverlayOrientation::Vertical) => (0.76, 0.14),
         (OverlayItem::Buddy, OverlayOrientation::Horizontal) => (0.18, 0.18 * 16.0 / 9.0),
         (OverlayItem::Buddy, OverlayOrientation::Vertical) => (0.32, 0.32 * 9.0 / 16.0),
+        (OverlayItem::Chat, OverlayOrientation::Horizontal) => (0.30, 0.44),
+        (OverlayItem::Chat, OverlayOrientation::Vertical) => (0.80, 0.30),
     }
+}
+
+/// The snap the chat box takes when a push carries no rect and when a stored
+/// layout predates it: the top-left corner, off the highlight's bottom-left,
+/// the captions' bottom bar, the Buddy's bottom-right and the usual top-right
+/// camera bubble.
+pub const CHAT_DEFAULT_SNAP: OverlaySnap = OverlaySnap::TopLeft;
+
+/// `OverlayLayout::default().chat`, and what a stored layout from before
+/// plan 215 G loads with: the box in its corner, off for both outputs (D5:
+/// it shows viewers' names, so the streamer turns it on).
+fn default_chat_layout() -> OverlayItemLayout {
+    snapped_item(OverlayItem::Chat, CHAT_DEFAULT_SNAP, false, false)
 }
 
 /// The rect a snap preset produces for an item on an orientation: the
@@ -232,7 +262,7 @@ pub fn overlay_snap_rect(
     OverlayRect::new(round6(x.max(0.0)), round6(y.max(0.0)), round6(w), round6(h))
 }
 
-fn round6(value: f64) -> f64 {
+pub(crate) fn round6(value: f64) -> f64 {
     (value * 1_000_000.0).round() / 1_000_000.0
 }
 
@@ -254,7 +284,9 @@ impl Default for OverlayLayout {
     /// Highlight: the pre-plan-164 default corner (bottom left), on both
     /// outputs. Captions: the bottom bar; their switches mirror the shipped
     /// `burnTarget` default (`off`), so a fresh install burns nothing until
-    /// the streamer turns captions on. Buddy: bottom right, on both.
+    /// the streamer turns captions on. Buddy: bottom right, off for both
+    /// outputs (opt-in: the streamer turns it on per output). Chat: top left,
+    /// off for both outputs (plan 215 D5).
     fn default() -> Self {
         Self {
             highlight: snapped_item(
@@ -270,6 +302,7 @@ impl Default for OverlayLayout {
                 false,
             ),
             buddy: snapped_item(OverlayItem::Buddy, OverlaySnap::BottomRight, false, false),
+            chat: default_chat_layout(),
         }
     }
 }
@@ -280,6 +313,7 @@ impl OverlayLayout {
             OverlayItem::Highlight => &self.highlight,
             OverlayItem::Captions => &self.captions,
             OverlayItem::Buddy => &self.buddy,
+            OverlayItem::Chat => &self.chat,
         }
     }
 
@@ -500,13 +534,15 @@ pub struct OverlaySessionShape {
 
 /// Per-item plans for the session, with the D13 fallbacks already applied:
 /// an item whose switches disagree on a shared leg burns on that leg
-/// (`highlight`, `buddy`). Captions keep their own path
+/// (`highlight`, `buddy`, `chat`). Captions keep their own path
 /// (`captions::caption_overlay_leg_plan_with_vertical_leg`), so the plan here
-/// is what the compositor flags are built from for the other two items.
+/// is what the compositor flags are built from for the other three items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlaySessionPlans {
     pub highlight: OverlayLegPlan,
     pub buddy: OverlayLegPlan,
+    /// The chat box (plan 215 G): the same leg plan as the highlight card.
+    pub chat: OverlayLegPlan,
 }
 
 impl OverlaySessionPlans {
@@ -515,6 +551,7 @@ impl OverlaySessionPlans {
         match item {
             OverlayItem::Highlight => Some(self.highlight),
             OverlayItem::Buddy => Some(self.buddy),
+            OverlayItem::Chat => Some(self.chat),
             OverlayItem::Captions => None,
         }
     }
@@ -542,6 +579,7 @@ pub fn overlay_session_plans(
     OverlaySessionPlans {
         highlight: resolved_item_plan(shape, &layout.highlight),
         buddy: resolved_item_plan(shape, &layout.buddy),
+        chat: resolved_item_plan(shape, &layout.chat),
     }
 }
 
@@ -562,48 +600,164 @@ pub fn overlay_layout_needs_split(shape: OverlaySessionShape, layout: &OverlayLa
     })
 }
 
+// --- The program (plan 205) ---------------------------------------------------
+
+/// Whether the program carries an item with these switches. The program is
+/// the picture that goes out, and the Preview shows it (plan 205 D1): every
+/// layer at least one running output carries; while nothing runs, every
+/// layer with either switch on. Pure; `overlay_leg_plan` keeps meaning what
+/// each output carries, and this is the union of the running outputs' plans.
+///
+/// | what runs                                | the program carries the item when |
+/// |------------------------------------------|-----------------------------------|
+/// | nothing (`None`, or neither output)      | on_stream OR in_recording         |
+/// | record only                              | in_recording                      |
+/// | stream only                              | on_stream                         |
+/// | record + stream (any aux leg)            | on_stream OR in_recording         |
+///
+/// A buffer-only (Clips) session is planned as `None` by the Preview's
+/// callers: the ring keeps the recording plan (D2), the Preview shows the
+/// program. The shared fixture `protocol-fixtures/preview-program.json`
+/// pins every row for Rust and the TS twin.
+pub fn program_shows(
+    shape: Option<OverlaySessionShape>,
+    show_on_stream: bool,
+    show_in_recording: bool,
+) -> bool {
+    match shape {
+        Some(OverlaySessionShape {
+            record_enabled,
+            stream_enabled,
+            ..
+        }) if record_enabled || stream_enabled => {
+            (record_enabled && show_in_recording) || (stream_enabled && show_on_stream)
+        }
+        _ => show_on_stream || show_in_recording,
+    }
+}
+
+/// What a start notice names: one of the placeable items, or every shown
+/// banner as one item (plan 186 D6, mid-sentence label `banners`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlayNoticeItem {
+    Highlight,
+    Captions,
+    Buddy,
+    Chat,
+    Banners,
+}
+
+impl From<OverlayItem> for OverlayNoticeItem {
+    fn from(item: OverlayItem) -> Self {
+        match item {
+            OverlayItem::Highlight => OverlayNoticeItem::Highlight,
+            OverlayItem::Captions => OverlayNoticeItem::Captions,
+            OverlayItem::Buddy => OverlayNoticeItem::Buddy,
+            OverlayItem::Chat => OverlayNoticeItem::Chat,
+        }
+    }
+}
+
+impl OverlayNoticeItem {
+    /// How the Go Live sheet names the item mid-sentence.
+    pub fn label(self) -> &'static str {
+        match self {
+            OverlayNoticeItem::Highlight => OverlayItem::Highlight.label(),
+            OverlayNoticeItem::Captions => OverlayItem::Captions.label(),
+            OverlayNoticeItem::Buddy => OverlayItem::Buddy.label(),
+            OverlayNoticeItem::Chat => OverlayItem::Chat.label(),
+            OverlayNoticeItem::Banners => "banners",
+        }
+    }
+}
+
+/// The two output switches of one item, as the notices see them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlaySwitches {
+    pub show_on_stream: bool,
+    pub show_in_recording: bool,
+}
+
 /// A D13 fallback the Go Live sheet shows verbatim before the session
 /// starts: the item and one sentence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayStartNotice {
-    pub item: OverlayItem,
+    pub item: OverlayNoticeItem,
     pub notice: String,
+}
+
+/// The one sentence for an item whose switches cannot both be honoured on
+/// this session shape; `None` when they can (or when captions keep the plan
+/// 090 block instead of a notice).
+fn start_notice_sentence(
+    shape: OverlaySessionShape,
+    item: OverlayNoticeItem,
+    switches: OverlaySwitches,
+) -> Option<String> {
+    if !(shape.record_enabled && shape.stream_enabled)
+        || switches.show_on_stream == switches.show_in_recording
+    {
+        return None;
+    }
+    let notice = match shape.aux_leg {
+        OverlayAuxLeg::Stream => return None,
+        OverlayAuxLeg::VerticalSimulcast if switches.show_on_stream => format!(
+            "Recording will include {} while streaming vertical.",
+            item.label()
+        ),
+        OverlayAuxLeg::VerticalSimulcast => format!(
+            "The horizontal stream will include {} while streaming vertical.",
+            item.label()
+        ),
+        OverlayAuxLeg::None if item == OverlayNoticeItem::Captions => return None,
+        OverlayAuxLeg::None => format!(
+            "Both the stream and the recording will include {}: this computer shares one encode for them.",
+            item.label()
+        ),
+    };
+    Some(notice)
 }
 
 /// Every impossible-to-honour switch pair for this session shape (D13),
 /// decided before start and never silent. Captions on a shared encode keep
-/// the plan 090 block instead of a notice, so they never appear here.
+/// the plan 090 block instead of a notice, so they never appear here. The
+/// shown banners (plan 186 D6) act as one item labelled `banners`, after the
+/// three items; each sentence any of them yields appears once.
 pub fn overlay_start_notices(
     shape: OverlaySessionShape,
     layout: &OverlayLayout,
+    banners: &[OverlaySwitches],
 ) -> Vec<OverlayStartNotice> {
     let mut notices = Vec::new();
-    if !(shape.record_enabled && shape.stream_enabled) {
-        return notices;
-    }
     for item in OverlayItem::ALL {
-        let switches = layout.item(item);
-        if switches.show_on_stream == switches.show_in_recording {
+        let layout = layout.item(item);
+        let switches = OverlaySwitches {
+            show_on_stream: layout.show_on_stream,
+            show_in_recording: layout.show_in_recording,
+        };
+        if let Some(notice) = start_notice_sentence(shape, item.into(), switches) {
+            notices.push(OverlayStartNotice {
+                item: item.into(),
+                notice,
+            });
+        }
+    }
+    for switches in banners {
+        let Some(notice) = start_notice_sentence(shape, OverlayNoticeItem::Banners, *switches)
+        else {
+            continue;
+        };
+        if notices.iter().any(|existing| {
+            existing.item == OverlayNoticeItem::Banners && existing.notice == notice
+        }) {
             continue;
         }
-        let notice = match shape.aux_leg {
-            OverlayAuxLeg::Stream => continue,
-            OverlayAuxLeg::VerticalSimulcast if switches.show_on_stream => format!(
-                "Recording will include {} while streaming vertical.",
-                item.label()
-            ),
-            OverlayAuxLeg::VerticalSimulcast => format!(
-                "The horizontal stream will include {} while streaming vertical.",
-                item.label()
-            ),
-            OverlayAuxLeg::None if item == OverlayItem::Captions => continue,
-            OverlayAuxLeg::None => format!(
-                "Both the stream and the recording will include {}: this computer shares one encode for them.",
-                item.label()
-            ),
-        };
-        notices.push(OverlayStartNotice { item, notice });
+        notices.push(OverlayStartNotice {
+            item: OverlayNoticeItem::Banners,
+            notice,
+        });
     }
     notices
 }
@@ -760,11 +914,78 @@ mod tests {
             layout.buddy.vertical.w * 9.0,
             layout.buddy.vertical.h * 16.0,
         );
+        // Chat (plan 215 D5): top left, off for both outputs, a column five
+        // rows tall that clears the portrait safe area.
+        assert_close(layout.chat.horizontal.x, 43.2 / 1920.0);
+        assert_close(layout.chat.horizontal.y, 0.04);
+        assert_close(layout.chat.horizontal.w, 0.30);
+        assert_close(layout.chat.horizontal.h, 0.44);
+        assert_close(layout.chat.vertical.y, 0.08);
+        assert_close(layout.chat.vertical.w, 0.80);
+        assert!(!layout.chat.show_on_stream && !layout.chat.show_in_recording);
         layout.validate().expect("defaults validate");
-        for item in OverlayItem::ALL {
+        for item in [
+            OverlayItem::Highlight,
+            OverlayItem::Captions,
+            OverlayItem::Buddy,
+        ] {
             assert!(layout.item(item).horizontal.bottom_gravity());
             assert!(layout.item(item).vertical.bottom_gravity());
         }
+        assert!(!layout.chat.horizontal.bottom_gravity());
+        assert!(!layout.chat.vertical.bottom_gravity());
+    }
+
+    /// Plan 215 G1: a row saved before the chat box (`57b0c457`, three items)
+    /// loads with its highlight, captions and Buddy placement intact and the
+    /// chat box at its default, both through serde and through the database
+    /// (`load_overlay_layout` falls back to defaults on any parse error, so a
+    /// missing `chat` must parse). A row saved with `chat` round-trips.
+    #[test]
+    fn a_layout_saved_before_the_chat_box_loads_with_its_placement_intact() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/high-risk-contracts.json"
+        ))
+        .unwrap();
+        let mut saved_before = fixture
+            .pointer("/overlayLayout/placed")
+            .expect("shared protocol fixture is missing /overlayLayout/placed")
+            .clone();
+        let with_chat: OverlayLayout = serde_json::from_value(saved_before.clone()).unwrap();
+        saved_before
+            .as_object_mut()
+            .unwrap()
+            .remove("chat")
+            .expect("the placed fixture carries the chat box");
+        assert_eq!(saved_before.as_object().unwrap().len(), 3);
+
+        let loaded: OverlayLayout = serde_json::from_value(saved_before.clone()).unwrap();
+        assert_eq!(loaded.highlight, with_chat.highlight);
+        assert_eq!(loaded.captions, with_chat.captions);
+        assert_eq!(loaded.buddy, with_chat.buddy);
+        assert_eq!(loaded.chat, OverlayLayout::default().chat);
+        assert!(!loaded.chat.show_on_stream && !loaded.chat.show_in_recording);
+        loaded.validate().unwrap();
+
+        let database = Database::open_in_memory_for_tests();
+        database
+            .save_setting(OVERLAY_LAYOUT_KEY, &saved_before)
+            .unwrap();
+        let from_database = load_overlay_layout(&database);
+        assert_eq!(from_database, loaded, "the stored row must not reset");
+        assert_ne!(
+            from_database.highlight,
+            OverlayLayout::default().highlight,
+            "the placed highlight is not the default, so a reset would show"
+        );
+        // Saving it back writes the chat box, and the row round-trips.
+        save_overlay_layout(&database, &from_database).unwrap();
+        let stored: serde_json::Value = database
+            .load_setting(OVERLAY_LAYOUT_KEY)
+            .unwrap()
+            .expect("saved");
+        assert!(stored["chat"]["showOnStream"].is_boolean());
+        assert_eq!(load_overlay_layout(&database), from_database);
     }
 
     #[test]
@@ -936,6 +1157,111 @@ mod tests {
         );
     }
 
+    /// Plan 205: the program across the exhaustive table. With an output
+    /// running it is exactly the resolved leg plan's union (the item burns on
+    /// some leg); with none it is either switch, whatever the aux leg says.
+    #[test]
+    fn program_shows_is_the_union_of_the_running_outputs_plans() {
+        use OverlayAuxLeg::{None, Stream, VerticalSimulcast};
+        let switches = [(false, false), (true, false), (false, true), (true, true)];
+        for (on_stream, in_rec) in switches {
+            assert_eq!(
+                program_shows(Option::None, on_stream, in_rec),
+                on_stream || in_rec,
+                "no session on_stream={on_stream} in_rec={in_rec}"
+            );
+            for record in [false, true] {
+                for stream in [false, true] {
+                    for aux_leg in [None, Stream, VerticalSimulcast] {
+                        let shape = shape(record, stream, aux_leg);
+                        let plan = overlay_leg_plan(record, stream, aux_leg, on_stream, in_rec);
+                        let resolved = if plan.needs_split {
+                            plan.shared_leg_fallback()
+                        } else {
+                            plan
+                        };
+                        let expected = if record || stream {
+                            resolved.burns_anywhere()
+                        } else {
+                            on_stream || in_rec
+                        };
+                        assert_eq!(
+                            program_shows(Some(shape), on_stream, in_rec),
+                            expected,
+                            "{shape:?} on_stream={on_stream} in_rec={in_rec}"
+                        );
+                    }
+                }
+            }
+        }
+        // The rows the owner's reports turn on: a stream-only item is in the
+        // program while nothing runs and while recording + streaming, and
+        // out of it while only recording.
+        assert!(program_shows(Option::None, true, false));
+        assert!(program_shows(Some(shape(true, true, Stream)), true, false));
+        assert!(!program_shows(Some(shape(true, false, None)), true, false));
+        assert!(!program_shows(Some(shape(false, true, None)), false, true));
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ProgramFixtureShape {
+        record_enabled: bool,
+        stream_enabled: bool,
+        aux_leg: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ProgramFixtureCase {
+        name: String,
+        shape: Option<ProgramFixtureShape>,
+        show_on_stream: bool,
+        show_in_recording: bool,
+        expected: bool,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ProgramFixture {
+        schema_version: u32,
+        cases: Vec<ProgramFixtureCase>,
+    }
+
+    /// Plan 205 S1/S2: `program_shows` and the TS `programShows` reproduce
+    /// the one shared table, every row of it (4 session-less rows plus
+    /// 4 outputs x 3 aux legs x 4 switch pairs).
+    #[test]
+    fn preview_program_fixture_is_reproduced_by_program_shows() {
+        let fixture: ProgramFixture = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/preview-program.json"
+        ))
+        .expect("protocol-fixtures/preview-program.json is valid JSON");
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.cases.len(), 4 + 4 * 3 * 4);
+        for case in fixture.cases {
+            let shape = case.shape.map(|shape| OverlaySessionShape {
+                record_enabled: shape.record_enabled,
+                stream_enabled: shape.stream_enabled,
+                aux_leg: match shape.aux_leg.as_str() {
+                    "none" => OverlayAuxLeg::None,
+                    "stream" => OverlayAuxLeg::Stream,
+                    "vertical-simulcast" => OverlayAuxLeg::VerticalSimulcast,
+                    other => panic!(
+                        "fixture case {:?} names an unknown aux leg {other:?}",
+                        case.name
+                    ),
+                },
+            });
+            assert_eq!(
+                program_shows(shape, case.show_on_stream, case.show_in_recording),
+                case.expected,
+                "program_shows drifted from the fixture case {:?}",
+                case.name
+            );
+        }
+    }
+
     #[test]
     fn session_plans_apply_the_shared_leg_fallback_and_flag_split_needs() {
         let mut layout = OverlayLayout::default();
@@ -955,9 +1281,12 @@ mod tests {
             },
             "a highlight that wants the stream only burns the shared leg"
         );
-        assert_eq!(plans.buddy.primary, true);
+        assert!(plans.buddy.primary);
         assert!(overlay_layout_needs_split(shared, &layout));
         assert_eq!(plans.plan(OverlayItem::Captions), None);
+        // The chat box ships off: no leg burns it until a switch is on.
+        assert_eq!(plans.chat, OverlayLegPlan::NONE);
+        assert_eq!(plans.plan(OverlayItem::Chat), Some(OverlayLegPlan::NONE));
 
         let split = shape(true, true, OverlayAuxLeg::Stream);
         let plans = overlay_session_plans(split, &layout);
@@ -972,40 +1301,80 @@ mod tests {
         // Captions count too: stream-only captions on a shared leg need a split.
         layout.captions.show_on_stream = true;
         assert!(overlay_layout_needs_split(shared, &layout));
+        layout.captions.show_on_stream = false;
+        // Plan 215 G: a stream-only chat box takes the same path as the
+        // highlight card: the split when the topology has one, else the
+        // shared leg.
+        layout.chat.show_on_stream = true;
+        assert!(overlay_layout_needs_split(shared, &layout));
+        assert_eq!(
+            overlay_session_plans(shared, &layout).chat,
+            OverlayLegPlan {
+                primary: true,
+                aux: false,
+                needs_split: false
+            }
+        );
+        assert_eq!(
+            (
+                overlay_session_plans(split, &layout).chat.primary,
+                overlay_session_plans(split, &layout).chat.aux
+            ),
+            (false, true)
+        );
+        let vertical = shape(false, true, OverlayAuxLeg::VerticalSimulcast);
+        assert_eq!(
+            (
+                overlay_session_plans(vertical, &layout).chat.primary,
+                overlay_session_plans(vertical, &layout).chat.aux
+            ),
+            (true, true),
+            "a vertical stream gets its own chat card (D5)"
+        );
     }
 
     #[test]
     fn start_notices_name_every_impossible_switch_pair_and_nothing_else() {
         let mut layout = OverlayLayout::default();
-        assert!(overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout).is_empty());
+        assert!(
+            overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout, &[]).is_empty()
+        );
         layout.highlight.show_in_recording = false;
         layout.buddy.show_in_recording = true;
         layout.captions.show_on_stream = true;
         // A split leg honours everything.
         assert!(
-            overlay_start_notices(shape(true, true, OverlayAuxLeg::Stream), &layout).is_empty()
+            overlay_start_notices(shape(true, true, OverlayAuxLeg::Stream), &layout, &[])
+                .is_empty()
         );
         // Stream-only or record-only sessions never need a notice.
-        assert!(overlay_start_notices(shape(false, true, OverlayAuxLeg::None), &layout).is_empty());
-        assert!(overlay_start_notices(shape(true, false, OverlayAuxLeg::None), &layout).is_empty());
+        assert!(
+            overlay_start_notices(shape(false, true, OverlayAuxLeg::None), &layout, &[]).is_empty()
+        );
+        assert!(
+            overlay_start_notices(shape(true, false, OverlayAuxLeg::None), &layout, &[]).is_empty()
+        );
         // Shared encode: highlight and Buddy burn on both; captions keep the block.
-        let shared = overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout);
+        let shared = overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout, &[]);
         assert_eq!(
             shared,
             vec![
                 OverlayStartNotice {
-                    item: OverlayItem::Highlight,
+                    item: OverlayNoticeItem::Highlight,
                     notice: "Both the stream and the recording will include highlights: this computer shares one encode for them.".to_string(),
                 },
                 OverlayStartNotice {
-                    item: OverlayItem::Buddy,
+                    item: OverlayNoticeItem::Buddy,
                     notice: "Both the stream and the recording will include the Buddy: this computer shares one encode for them.".to_string(),
                 },
             ]
         );
         // Vertical simulcast: the recording shares the horizontal pixels.
-        let vertical =
-            overlay_start_notices(shape(true, true, OverlayAuxLeg::VerticalSimulcast), &layout);
+        let vertical = overlay_start_notices(
+            shape(true, true, OverlayAuxLeg::VerticalSimulcast),
+            &layout,
+            &[],
+        );
         assert_eq!(
             vertical
                 .iter()
@@ -1020,6 +1389,87 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&vertical[0]).unwrap()["item"],
             "highlight"
+        );
+        // Plan 215 G: a stream-only chat box on a shared encode gets its own
+        // sentence, after the Buddy's, and serializes as `chat`.
+        layout.chat.show_on_stream = true;
+        let shared = overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout, &[]);
+        assert_eq!(shared.len(), 3);
+        assert_eq!(
+            shared[2],
+            OverlayStartNotice {
+                item: OverlayNoticeItem::Chat,
+                notice: "Both the stream and the recording will include chat: this computer shares one encode for them.".to_string(),
+            }
+        );
+        assert_eq!(serde_json::to_value(&shared[2]).unwrap()["item"], "chat");
+    }
+
+    /// Plan 186 D6: every shown banner is one item, `banners`; each sentence
+    /// any of them yields appears once, after the three items, byte for byte
+    /// the strings the renderer's `lib/overlay-layout.ts` builds.
+    #[test]
+    fn start_notices_name_all_shown_banners_once() {
+        let switches = |show_on_stream, show_in_recording| OverlaySwitches {
+            show_on_stream,
+            show_in_recording,
+        };
+        let layout = OverlayLayout::default();
+        let stream_only = switches(true, false);
+        let recording_only = switches(false, true);
+        let both = switches(true, true);
+        let shared = shape(true, true, OverlayAuxLeg::None);
+        // Honoured switches say nothing.
+        assert!(overlay_start_notices(shared, &layout, &[both, both]).is_empty());
+        // One shared encode: two stream-only banners, one sentence.
+        assert_eq!(
+            overlay_start_notices(shared, &layout, &[stream_only, both, stream_only]),
+            vec![OverlayStartNotice {
+                item: OverlayNoticeItem::Banners,
+                notice: "Both the stream and the recording will include banners: this computer shares one encode for them.".to_string(),
+            }]
+        );
+        // Recording-only on a shared encode is the same sentence.
+        assert_eq!(
+            overlay_start_notices(shared, &layout, &[recording_only])[0].notice,
+            "Both the stream and the recording will include banners: this computer shares one encode for them."
+        );
+        // Vertical simulcast: each direction has its own sentence, once each.
+        let vertical = shape(true, true, OverlayAuxLeg::VerticalSimulcast);
+        assert_eq!(
+            overlay_start_notices(
+                vertical,
+                &layout,
+                &[stream_only, recording_only, stream_only]
+            )
+            .iter()
+            .map(|notice| notice.notice.as_str())
+            .collect::<Vec<_>>(),
+            vec![
+                "Recording will include banners while streaming vertical.",
+                "The horizontal stream will include banners while streaming vertical.",
+            ]
+        );
+        // A split leg, a stream-only or a record-only session: no sentence.
+        for shape in [
+            shape(true, true, OverlayAuxLeg::Stream),
+            shape(false, true, OverlayAuxLeg::None),
+            shape(true, false, OverlayAuxLeg::VerticalSimulcast),
+        ] {
+            assert!(
+                overlay_start_notices(shape, &layout, &[stream_only, recording_only]).is_empty(),
+                "{shape:?}"
+            );
+        }
+        // Banners come after the items, and serialize as `banners`.
+        let mut layout = OverlayLayout::default();
+        layout.highlight.show_in_recording = false;
+        let notices = overlay_start_notices(shared, &layout, &[stream_only]);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].item, OverlayNoticeItem::Highlight);
+        assert_eq!(
+            serde_json::to_value(&notices[1]).unwrap()["item"],
+            "banners"
         );
     }
 
@@ -1177,9 +1627,14 @@ mod tests {
         assert!(highlight["showInRecording"].is_boolean());
         assert!(highlight["horizontal"]["x"].is_number());
         assert_eq!(highlight.as_object().unwrap().len(), 4);
-        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert!(value["chat"]["showOnStream"].is_boolean());
         let round_trip: OverlayLayout = serde_json::from_value(value).unwrap();
         assert_eq!(round_trip, OverlayLayout::default());
+        assert_eq!(
+            serde_json::to_value(OverlayItem::Chat).unwrap(),
+            serde_json::json!("chat")
+        );
     }
 
     #[test]

@@ -1,15 +1,22 @@
-import { sceneGalleryReason, sceneSourceGaps, visualSources } from '@/lib/scene-presets'
+import {
+  galleryPresetIsActive,
+  orientationSwitchPreset,
+  sceneGalleryReason,
+  sceneSourceGaps,
+  usingVisualSources
+} from '@/lib/scene-presets'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { DisplayIcon, MobileIcon } from '@/components/icons'
 import { lazy, Suspense, type ReactElement } from 'react'
 const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
 
 import { PanelSection } from '@/components/panel-section'
+import { SectionLabel } from '@/components/section-label'
 import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
-import { useWorkspaceNav } from '@/components/workspace-nav'
+import { useEditScene } from '@/hooks/use-edit-scene'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
 import {
@@ -17,8 +24,10 @@ import {
   studioModeTogglePreset,
   type LayoutOrientation
 } from '@/lib/capture'
+import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { presetSwitching } from '@/lib/layout-switch-pending'
 
 // Built-in layouts and named visual snapshots share the Scenes surface.
 // The gallery is MODE-SCOPED: horizontal and vertical are two disjoint scene
@@ -77,7 +86,7 @@ export function ScenesGallery(): ReactElement {
     settings,
     runtimeInfo
   } = useStudioCore()
-  const { openStudioPanel } = useWorkspaceNav()
+  const editScene = useEditScene()
   const activePreset = captureConfig.layout.layoutPreset
   const mode = layoutPresetOrientation(activePreset)
   const scenes = mode === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
@@ -90,7 +99,7 @@ export function ScenesGallery(): ReactElement {
     gaps: sceneSourceGaps(
       {
         layout: { ...captureConfig.layout, layoutPreset: preset.id, arrangementMode: 'preset' },
-        sources: visualSources(captureConfig.sources),
+        sources: usingVisualSources(captureConfig.sources),
         background: null
       },
       deviceList.devices
@@ -104,14 +113,32 @@ export function ScenesGallery(): ReactElement {
     if (target === mode) {
       return
     }
-    applyCameraPreset({ layoutPreset: studioModeTogglePreset(target, captureConfig) })
+    const targetScenes = target === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
+    const usable = (layoutPreset: LayoutPreset): boolean =>
+      sceneSourceGaps(
+        {
+          layout: { ...captureConfig.layout, layoutPreset, arrangementMode: 'preset' },
+          sources: usingVisualSources(captureConfig.sources),
+          background: null
+        },
+        deviceList.devices
+      ).length === 0
+    applyCameraPreset({
+      layoutPreset: orientationSwitchPreset(
+        studioModeTogglePreset(target, captureConfig),
+        targetScenes.map((scene) => scene.id),
+        usable
+      )
+    })
   }
 
   return (
     <PanelSection
       title="Scenes"
       description={
-        mode === 'vertical' ? 'Switch the 9:16 program layout.' : 'Switch the program layout.'
+        mode === 'vertical'
+          ? 'Click a scene to put it on the 9:16 stream.'
+          : 'Click a scene to put it on stream.'
       }
       action={
         <div className="flex items-center gap-1.5">
@@ -119,7 +146,7 @@ export function ScenesGallery(): ReactElement {
               canvas is fixed at session start — disabled while live (the
               backend refuses cross-orientation scene switches too). The
               gallery is in the EAGER Studio chunk: SegmentedControl has no
-              Radix, so it costs the initial asset budget nothing. A switch
+              Tabs primitive, so it costs the initial asset budget nothing. A switch
               restarts the canvas, so arrows only move focus (manual). */}
           <DisabledReason
             reason={
@@ -138,22 +165,29 @@ export function ScenesGallery(): ReactElement {
               onValueChange={switchMode}
             />
           </DisabledReason>
-          <Button variant="ghost" onClick={() => openStudioPanel('layouts')}>
-            Edit scene
+          {/* Plan 215 D4: the same Edit scene as the Scene page's and ⌘K's. */}
+          <Button variant="ghost" onClick={editScene}>
+            {EDIT_SCENE_LABEL}
           </Button>
         </div>
       }
     >
+      {/* Plan 210 D6: your saved scenes first, in their order, then the
+          layouts, each under its heading. */}
+      <Suspense fallback={null}>
+        <ScenePresetControls />
+      </Suspense>
+      <SectionLabel className="px-1">Layouts</SectionLabel>
       <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
         {cards.map(({ preset, gaps }) => {
-          const active = !activeSavedSceneId && activePreset === preset.id
+          const active = galleryPresetIsActive(captureConfig.layout, preset.id, activeSavedSceneId)
           const shortcut = settings.globalShortcuts?.layouts?.[preset.id]
           return (
             <SceneCard
               key={preset.id}
               data-scene-preset={preset.id}
               disabled={gaps.length > 0}
-              label={layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
+              label={presetSwitching(layoutSwitchPending, preset.id) ? 'Switching…' : preset.label}
               meta={
                 shortcut ? (
                   <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />
@@ -186,9 +220,6 @@ export function ScenesGallery(): ReactElement {
           onChange={(verticalScreenFraming) => applyCameraPreset({ verticalScreenFraming })}
         />
       ) : null}
-      <Suspense fallback={null}>
-        <ScenePresetControls />
-      </Suspense>
     </PanelSection>
   )
 }
@@ -196,23 +227,35 @@ export function ScenesGallery(): ReactElement {
 /**
  * Fill / Fit for the screen in vertical scenes. Fill is the short-form look
  * (the screen fills its area and is cropped); Fit keeps the whole screen
- * visible. A SegmentedControl, Radix-free like the mode toggle.
+ * visible. A SegmentedControl, with no Tabs primitive, like the mode toggle.
+ * The landscape screen scenes offer the same choice (plan 213 G3), Fit by
+ * default there: a screen of another shape fills the frame with Fill.
  */
 export function ScreenFramingControl({
   value,
+  orientation = 'vertical',
   onChange
 }: {
   value: VerticalScreenFraming
+  orientation?: 'vertical' | 'horizontal'
   onChange: (value: VerticalScreenFraming) => void
 }): ReactElement {
   return (
-    <div className="flex items-center justify-between gap-3" data-slot="screen-framing-control">
+    <div
+      className="flex items-center justify-between gap-3"
+      data-slot="screen-framing-control"
+      data-videorc-screen-framing={orientation}
+    >
       <div className="flex min-w-0 flex-col gap-0.5">
         <span className="text-sm font-medium">Screen</span>
         <span className="text-xs text-muted-foreground">
-          {value === 'fit'
-            ? 'Shows your whole screen. The camera takes the rest.'
-            : 'Fills the area and crops the sides of your screen.'}
+          {orientation === 'horizontal'
+            ? value === 'fit'
+              ? 'Shows your whole screen. A screen of another shape gets bars.'
+              : "Fills the frame and crops the edges of your screen that don't fit."
+            : value === 'fit'
+              ? 'Shows your whole screen. The camera takes the rest.'
+              : 'Fills the area and crops the sides of your screen.'}
         </span>
       </div>
       <SegmentedControl

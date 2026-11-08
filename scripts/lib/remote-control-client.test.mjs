@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
 
-import { remoteRequest, waitForRemoteEvent } from './remote-control-client.mjs'
+import { parseRemoteFrame, remoteRequest, waitForRemoteEvent } from './remote-control-client.mjs'
 
 const DEFAULT_TIMEOUT_MS = 90000
 const failures = [
@@ -202,3 +202,30 @@ function settle(promise) {
     (reason) => ({ status: 'rejected', reason })
   )
 }
+
+test('a frame that is not JSON is ignored instead of crashing the listener', async (t) => {
+  const observed = await withRemote(t, async (fixture) => {
+    const operation = remoteRequest(fixture.ws, 'remote.intent', { kind: 'recordStart' })
+    await fixture.sendReady.promise
+    fixture.ws.emit('message', 'not json {')
+    fixture.ws.emit('message', '"a bare string"')
+    const event = waitForRemoteEvent(fixture.ws, 'remote.ack')
+    fixture.ws.emit('message', Buffer.from('\u0000'))
+    fixture.emit({ event: 'remote.ack', payload: { ok: true } })
+    const response = { id: fixture.sent.id, payload: { accepted: true } }
+    fixture.emit(response)
+    return { result: await operation, event: await event, response, after: fixture.inspect() }
+  })
+
+  assert.deepEqual(observed.result, observed.response)
+  assert.deepEqual(observed.event, { ok: true })
+  assert.equal(observed.after.ownedListeners, 0)
+  assert.deepEqual(observed.after.deadlines, [])
+})
+
+test('parseRemoteFrame returns null for anything that is not a JSON object', () => {
+  assert.equal(parseRemoteFrame('nope'), null)
+  assert.equal(parseRemoteFrame('42'), null)
+  assert.equal(parseRemoteFrame('null'), null)
+  assert.deepEqual(parseRemoteFrame(Buffer.from('{"id":"x"}')), { id: 'x' })
+})

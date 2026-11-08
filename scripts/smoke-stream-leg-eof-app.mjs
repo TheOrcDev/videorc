@@ -47,15 +47,6 @@ const stopBudgetMs = Number(process.env.VIDEORC_SMOKE_STOP_BUDGET_MS ?? 15000)
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 2500)
 const finalizationTimeoutMs = Number(process.env.VIDEORC_SMOKE_FINALIZATION_TIMEOUT_MS ?? 30000)
 
-// The raw path (Linux, weak Windows) runs one encode for the recording and
-// the stream, so it refuses a recording at another quality than the stream's
-// default; there the recording takes the stream's 1080p30 at 6 Mbps. The
-// encoded bridge (macOS) keeps its own 720p recording.
-const RECORDING_VIDEO =
-  process.platform === 'darwin'
-    ? { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
-    : { preset: 'stream-safe-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
-
 const targets = [
   { id: 'youtube', label: 'YouTube', victim: true },
   { id: 'twitch', label: 'Twitch', victim: false }
@@ -353,7 +344,7 @@ function sessionParams(outputDirectoryCapability) {
       recordEnabled: true,
       streamEnabled: true,
       outputDirectoryCapability,
-      video: RECORDING_VIDEO,
+      video: recordingVideo(),
       rtmp: { preset: 'custom', serverUrl: targets[0].serverUrl, streamKey: targets[0].streamKey }
     },
     streaming: {
@@ -377,6 +368,17 @@ function sessionParams(outputDirectoryCapability) {
       enabledTargetIds: targets.map((target) => target.id)
     }
   }
+}
+
+// Linux runs one encode for the recording and the stream, and refuses a
+// recording below the stream's profile (it would send the stream at the
+// recording's quality): record at the stream default there, as the
+// multistream smoke does.
+function recordingVideo() {
+  if (process.platform === 'linux') {
+    return { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
+  }
+  return { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
 }
 
 function spawnListener(target, recvPath) {

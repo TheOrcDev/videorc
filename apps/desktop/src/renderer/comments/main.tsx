@@ -4,7 +4,7 @@ import { toast } from '@/lib/toast'
 import { toastUserError, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
 
 import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
-import { AppErrorBoundary } from '@/components/error-boundary'
+import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { StreamManager } from '@/components/stream-manager/stream-manager'
 import { removeMessagesReconnectStarted } from '@/components/stream-manager/remove-messages-reconnect'
 import { WindowFrame } from '@/components/window-frame'
@@ -23,6 +23,7 @@ import type {
   CommentsViewSnapshot,
   LiveChatMessage,
   ModerationOperation,
+  StreamManagerHideMethod,
   ViewerSample
 } from '@/lib/backend'
 import {
@@ -53,7 +54,8 @@ import {
   MarkerRemovedError
 } from '@/lib/marker-command'
 import type { CreateMarkerParams, MarkerContext } from '../../shared/session-markers'
-import { clipMarkedToast } from '../../shared/clip-marks'
+import { clipMarkSavedClip, clipMarkedToast, type ClipMarkedToast } from '../../shared/clip-marks'
+import { clipSavingToast, type ClipLength } from '../../shared/clip-lengths'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { chatSendFailures, pendingCommentsSendOperation } from '@/lib/chat-send'
 import type { ChatSendFailure } from '@/lib/chat-send'
@@ -71,11 +73,12 @@ import {
 } from '@/lib/chat-removal-view'
 import { holdUndoableAction, type UndoableAction } from '@/lib/undoable-action'
 import { mergeModerationOperations } from '../../shared/chat-moderation'
-import {
-  reconcileBrokerCommentsSnapshot,
-  applyCommentsSnapshotDelta
-} from '../../shared/comments-snapshot-delta'
+import { reconcileBrokerCommentsSnapshot } from '../../shared/comments-snapshot-delta'
+import { CommentsDeltaBatcher, scheduleCommentsDeltaFlush } from '@/lib/comments-delta-batcher'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
+import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
+import type { SoundRelayAction, SoundboardSummary } from '../../shared/sound-commands'
+import { BUDDY_UNREACHABLE, type CohostActAnswer } from '../../shared/buddy-act'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -87,6 +90,8 @@ function buddyActionContext(command: BuddyActionBody): UserErrorContext {
       return { action: command.showOnStream ? 'show' : 'hide', object: 'Buddy on stream' }
     case 'buddy-react':
       return { action: 'play', object: "Buddy's reaction" }
+    case 'chat-show-on-stream':
+      return { action: command.showOnStream ? 'show' : 'hide', object: 'chat on stream' }
   }
 }
 
@@ -116,6 +121,22 @@ function CommentsWindowApp(): ReactElement {
     snapshot: emptyLiveChatSnapshot(new Date().toISOString())
   }))
   const [markerContext, setMarkerContext] = useState<MarkerContext | null>(null)
+  // The one Clip action (plan 181 R4): the status bar's button and /clip
+  // both relay through the main window, which owns the backend socket. The
+  // reply's words are the toast (button) or the composer's notice (/clip).
+  // Plan 199: `seconds` is the length asked for (none is the 30-second
+  // clip), and the toast names that length, never the ring's.
+  const saveClip = (seconds?: ClipLength): Promise<ClipMarkedToast> => {
+    const asked = seconds ?? markerContext?.clip?.seconds
+    return (
+      window.videorc?.markClipFromCommentsWindow?.({
+        requestId: crypto.randomUUID(),
+        ...(seconds ? { seconds } : {})
+      }) ?? Promise.reject(new Error("The Stream Manager can't reach Videorc right now."))
+    ).then((event) =>
+      clipMarkSavedClip(event) ? clipSavingToast(event, asked) : clipMarkedToast(event)
+    )
+  }
   const markerRetry = useRef<CreateMarkerParams | null>(null)
   const [markerRetrySessionId, setMarkerRetrySessionId] = useState<string | null>(null)
   useEffect(() => {
@@ -129,7 +150,113 @@ function CommentsWindowApp(): ReactElement {
       off?.()
     }
   }, [])
+  // Banners (plan 186 S7): the read-only list Studio pushes through main.
+  // A push that lands before the seed answers wins over the seed.
+  const [banners, setBanners] = useState<BannerSummary[] | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onCommentsBanners?.((list) => {
+      pushed = true
+      setBanners(list)
+    })
+    void window.videorc?.getCommentsBanners?.().then((list) => {
+      if (!disposed && !pushed) setBanners(list)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // One show or hide, relayed to Studio. Nothing says so when it works (the
+  // picture and the menu's check are the confirmation); a refusal is a
+  // warning with its own sentence. The banner rules load only then.
+  const runBanner = useCallback(async (action: BannerRelayAction): Promise<boolean> => {
+    try {
+      if (!window.videorc?.bannerFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.bannerFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
+      return true
+    } catch (error) {
+      const options = { id: 'banner-refusal' }
+      await import('@/lib/banners').then(
+        ({ bannerActionContext, bannerActionError }) =>
+          toastUserError(bannerActionError(error), bannerActionContext(action.action), options),
+        () => toastUserError(error, { action: 'change', object: 'the banner' }, options)
+      )
+      return false
+    }
+  }, [])
+  // Sounds (plan 189 S9): the read-only board Studio pushes through main.
+  // A push that lands before the seed answers wins over the seed.
+  const [sounds, setSounds] = useState<SoundboardSummary | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onCommentsSounds?.((board) => {
+      pushed = true
+      setSounds(board)
+    })
+    void window.videorc?.getCommentsSounds?.().then((board) => {
+      if (!disposed && !pushed) setSounds(board)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // One pad, `/sound` or Stop all, relayed to Studio, which plays it. Nothing
+  // says so when it works (the pad's ring is the confirmation); a refusal is
+  // a warning with its own sentence. The sound rules load only then.
+  const runSound = useCallback(async (action: SoundRelayAction): Promise<boolean> => {
+    try {
+      if (!window.videorc?.soundFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.soundFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
+      return true
+    } catch (error) {
+      const options = { id: 'sound-refusal' }
+      await import('@/lib/sounds').then(
+        ({ soundActionContext, soundActionError }) =>
+          toastUserError(soundActionError(error), soundActionContext(action.action), options),
+        () => toastUserError(error, { action: 'play', object: 'the sound' }, options)
+      )
+      return false
+    }
+  }, [])
+  // Hide screen or Show screen (plan 210 S8b), relayed to Studio like `/hide`.
+  // Nothing says so when it works: the stats chip and the Preview do.
+  const runScreenPrivacy = useCallback(async (hidden: boolean): Promise<boolean> => {
+    try {
+      if (!window.videorc?.markerFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.markerFromCommentsWindow({
+        requestId: crypto.randomUUID(),
+        action: hidden ? 'screenHide' : 'screenShow'
+      })
+      return true
+    } catch (error) {
+      toastUserError(
+        error,
+        { action: hidden ? 'hide' : 'show', object: 'your screen' },
+        { id: 'screen-privacy' }
+      )
+      return false
+    }
+  }, [])
+  // `/buddy <words>` (plan 209 S20): relayed to Studio, which owns the
+  // backend socket and the Cloud AI consent. The answer is the composer's
+  // notice, so nothing toasts here.
+  const runBuddy = useCallback(async (sentence: string): Promise<CohostActAnswer> => {
+    if (!window.videorc?.buddyActFromCommentsWindow) throw new Error(BUDDY_UNREACHABLE)
+    return window.videorc.buddyActFromCommentsWindow({ requestId: crypto.randomUUID(), sentence })
+  }, [])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
+  // Hide from stream (plan 215 D6): main owns the value and the platform's
+  // way of hiding; this window renders and flips the switch.
+  const [hiddenFromStream, setHiddenFromStream] = useState(false)
+  const [hideFromStreamMethod, setHideFromStreamMethod] =
+    useState<StreamManagerHideMethod>('unsupported')
   const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
     DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
   )
@@ -225,27 +352,41 @@ function CommentsWindowApp(): ReactElement {
         setSendPending(false)
       }
     }
+    // Plan 191: main relays one delta per chat message. They queue and apply
+    // together at the next frame (or after 16 ms with no frame), so busy chat
+    // renders and reconciles this window once per frame, not once per message.
+    const deltas = new CommentsDeltaBatcher({
+      view: () => viewRef.current,
+      commit: applyView,
+      schedule: scheduleCommentsDeltaFlush
+    })
     void window.videorc
       ?.getCommentsSnapshot?.()
-      .then((initial) => initial && applyView(initial))
+      .then((initial) => {
+        if (!initial) return
+        // Deltas that arrived before the seed still apply before it.
+        deltas.flush()
+        applyView(initial)
+      })
       .catch(() => {})
     void window.videorc
       ?.getCommentsWindowState?.()
       .then((state) => {
         if (!state) return
         setAlwaysOnTop(state.alwaysOnTop)
+        setHiddenFromStream(state.hiddenFromStream === true)
+        setHideFromStreamMethod(state.hideFromStreamMethod)
         setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
         setAutoShowActivity(state.autoShowActivity === true)
       })
       .catch(() => {})
-    const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => applyView(next))
-    const offDelta = window.videorc?.onCommentsDelta?.((delta) => {
-      const current = viewRef.current
-      if (current.mode.kind !== 'live') return
-      const snapshot = applyCommentsSnapshotDelta(current.snapshot, delta)
-      if (snapshot === current.snapshot) return
-      applyView({ ...current, snapshot })
+    const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => {
+      // Main applies each delta to its view before relaying it, so a pushed
+      // snapshot already holds every delta still queued here (plan 191).
+      deltas.supersede()
+      applyView(next)
     })
+    const offDelta = window.videorc?.onCommentsDelta?.((delta) => deltas.push(delta))
     void window.videorc
       ?.getViewerSample?.()
       .then((sample) => setViewerSample(sample ?? null))
@@ -263,6 +404,8 @@ function CommentsWindowApp(): ReactElement {
     const offDashboard = window.videorc?.onDashboard?.((state) => setDashboard(state))
     const offState = window.videorc?.onCommentsWindowState?.((state) => {
       setAlwaysOnTop(state.alwaysOnTop)
+      setHiddenFromStream(state.hiddenFromStream === true)
+      setHideFromStreamMethod(state.hideFromStreamMethod)
       setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
       setAutoShowActivity(state.autoShowActivity === true)
     })
@@ -282,6 +425,7 @@ function CommentsWindowApp(): ReactElement {
       .catch(() => {})
     const offCohost = window.videorc?.onCohostWindowState?.((state) => setCohost(state))
     return () => {
+      deltas.dispose()
       offSnapshot?.()
       offDelta?.()
       offViewers?.()
@@ -497,6 +641,10 @@ function CommentsWindowApp(): ReactElement {
   const setBuddyShowOnStream = (showOnStream: boolean): void => {
     void sendBuddyAction({ kind: 'buddy-show-on-stream', showOnStream })
   }
+  // Plan 215 G (D5): Chat on stream rides the same relay to Studio.
+  const setChatOnStream = (showOnStream: boolean): void => {
+    void sendBuddyAction({ kind: 'chat-show-on-stream', showOnStream })
+  }
   // Plan 168 S-D3: a reaction chip plays on air (Studio calls cohost.pet.react).
   const reactBuddy = (reaction: string): void => {
     void sendBuddyAction({ kind: 'buddy-react', reaction })
@@ -556,6 +704,35 @@ function CommentsWindowApp(): ReactElement {
       .then((state) => state && setCohost(state))
       .catch((error) =>
         toastUserError(error, { action: 'turn on', object: 'listening' }, { id: 'cohost-enable' })
+      )
+  }
+
+  // Plan 213 J1: "Use Sign in" on a stream-key destination's chat row opens
+  // that destination in Livestream → Setup in the main window.
+  const openDestination = (targetId: string): void => {
+    void window.videorc
+      ?.openDestinationFromCommentsWindow?.({ requestId: crypto.randomUUID(), targetId })
+      .catch((error) =>
+        toastUserError(
+          error,
+          { action: 'open', object: 'the destination' },
+          { id: 'open-destination' }
+        )
+      )
+  }
+
+  // Plan 215 A3: "Sign in to Videorc" on a chat row the relay parked. Main
+  // shows the main window, which starts the account sign-in it owns; this
+  // window never sees the authorize URL.
+  const signInToVideorc = (): void => {
+    void window.videorc
+      ?.signInToVideorcFromCommentsWindow?.({ requestId: crypto.randomUUID() })
+      .catch((error) =>
+        toastUserError(
+          error,
+          { action: 'start', object: 'the Videorc sign-in' },
+          { id: 'sign-in-videorc' }
+        )
       )
   }
 
@@ -632,8 +809,8 @@ function CommentsWindowApp(): ReactElement {
     live && cohost.enabled && cohost.entitled && cohost.consented && cohost.state.status === 'off'
 
   return (
-    // Real glass: the OS material under the body's window coat, and the
-    // frame's content coat on top (plan 050), like every other window.
+    // The body's window coat under the frame's content coat (plan 050), like
+    // every other window.
     <WindowFrame>
       <ChatGifModeProvider mode={gifMode}>
         <StreamManager
@@ -671,6 +848,8 @@ function CommentsWindowApp(): ReactElement {
           buddyPending={buddyPending}
           onBuddySay={sayBuddy}
           onBuddyShowOnStream={setBuddyShowOnStream}
+          chatOnStream={cohost.chatOnStream}
+          onChatOnStream={setChatOnStream}
           onBuddyReact={reactBuddy}
           moderationOperations={moderationOperations}
           removalAnsweringIds={removalAnsweringIds}
@@ -730,29 +909,28 @@ function CommentsWindowApp(): ReactElement {
               : undefined
           }
           onHighlight={live ? requestHighlight : undefined}
-          onMarkClip={
-            live
-              ? () => {
-                  void window.videorc
-                    ?.markClipFromCommentsWindow?.({ requestId: crypto.randomUUID() })
-                    .then((event) => {
-                      const copy = clipMarkedToast(event)
-                      ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
-                        id: 'clip-marked',
-                        description: copy.description
-                      })
-                    })
-                    .catch((error) =>
-                      toastUserError(
-                        error,
-                        { action: 'mark', object: 'the clip' },
-                        { id: 'clip-marked' }
-                      )
-                    )
-                }
-              : undefined
-          }
+          onMarkClip={(seconds) => {
+            void saveClip(seconds)
+              .then((copy) => {
+                ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
+                  id: 'clip-marked',
+                  description: copy.description
+                })
+              })
+              .catch((error) =>
+                toastUserError(error, { action: 'save', object: 'the clip' }, { id: 'clip-marked' })
+              )
+          }}
+          onClip={(seconds) => saveClip(seconds).then((copy) => copy.title)}
+          onScreenPrivacy={runScreenPrivacy}
+          banners={banners}
+          onBanner={runBanner}
+          sounds={sounds}
+          onSound={runSound}
+          onBuddy={runBuddy}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
+          onUseSignIn={openDestination}
+          onSignInToVideorc={signInToVideorc}
           onShowFollowNames={() => {
             void window.videorc
               ?.showFollowNamesFromCommentsWindow?.({
@@ -902,6 +1080,13 @@ function CommentsWindowApp(): ReactElement {
           onToggleAlwaysOnTop={() =>
             void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)
           }
+          hiddenFromStream={hiddenFromStream}
+          hideFromStreamMethod={hideFromStreamMethod}
+          onToggleHiddenFromStream={() => {
+            // Optimistic, like the pin: main's state event is the truth.
+            setHiddenFromStream(!hiddenFromStream)
+            void window.videorc?.setCommentsWindowHiddenFromStream?.(!hiddenFromStream)
+          }}
         />
       </ChatGifModeProvider>
       <BuddyConsentDialog open={buddyConsentAsked} onAnswer={answerBuddyConsent} />

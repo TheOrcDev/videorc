@@ -22,7 +22,25 @@ import { RecordingTab, SAVE_RECORDING_OFF, SAVE_RECORDING_ON } from './recording
 // resolution picker: its Output row opens this page (S3.3, B-15).
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  // Plan 181: the Clips section reads the ring; off and unblocked here.
+  useStudioReplay: () => ({
+    state: { state: 'off', seconds: 30, bufferedSeconds: 0 },
+    armed: false,
+    blockedReason: null,
+    setEnabled: () => {}
+  }),
+  // The Studio's Chat row under Captions (plan 213 B1), idle.
+  useStudioChat: () => ({
+    liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
+    chatNewCount: 0
+  }),
+  useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
+  useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
+}))
+const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
+vi.mock('@/lib/toast', () => ({ toast }))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: () => {} })
 }))
@@ -52,15 +70,20 @@ function Harness({
   surface,
   video,
   recordEnabled,
-  initialSettings
+  initialSettings,
+  configPatch,
+  platform = 'darwin'
 }: {
   surface: () => ReactElement
   video: VideoSettings
   recordEnabled: boolean
   initialSettings: SettingsState
+  configPatch?: Partial<CaptureConfig>
+  platform?: string
 }) {
   const [config, setConfig] = useState<CaptureConfig>({
     ...defaultCaptureConfig,
+    ...configPatch,
     video,
     recordEnabled
   })
@@ -72,7 +95,7 @@ function Harness({
     setCaptureConfig: setConfig,
     settings,
     setSettings,
-    runtimeInfo: { platform: 'darwin' },
+    runtimeInfo: { platform },
     encoderPreference: null,
     setEncoderPreference: vi.fn(),
     patchVideo: (patch: Partial<VideoSettings>) => {
@@ -106,6 +129,7 @@ function Harness({
     captionsStatus: { state: 'idle' },
     captionsCommandPending: false,
     wsStatus: 'connected',
+    screenPrivacy: { hidden: false },
     systemAudioConfirmed: null,
     systemAudioIssue: null
   }
@@ -115,19 +139,43 @@ function Harness({
 async function render(
   surface: () => ReactElement,
   video: VideoSettings = videoPresets['tutorial-1080p30'],
-  { recordEnabled = true, settings = defaultSettings } = {}
+  {
+    recordEnabled = true,
+    settings = defaultSettings,
+    config,
+    platform
+  }: {
+    recordEnabled?: boolean
+    settings?: SettingsState
+    config?: Partial<CaptureConfig>
+    platform?: string
+  } = {}
 ): Promise<void> {
   await act(async () =>
     root.render(
-      createElement(Harness, { surface, video, recordEnabled, initialSettings: settings })
+      createElement(Harness, {
+        surface,
+        video,
+        recordEnabled,
+        initialSettings: settings,
+        configPatch: config,
+        platform
+      })
     )
   )
 }
 
+/**
+ * The control a label names: the element it points at, or the Base UI switch
+ * whose hidden input it points at (the switch is labelled by it).
+ */
 function labelled(text: string): HTMLElement {
   const label = [...document.querySelectorAll('label')].find((entry) => entry.textContent === text)!
   expect(label, text).toBeTruthy()
-  return document.getElementById(label.htmlFor)!
+  return (
+    document.querySelector<HTMLElement>(`[role="switch"][aria-labelledby="${label.id}"]`) ??
+    document.getElementById(label.htmlFor)!
+  )
 }
 
 function button(text: string): HTMLButtonElement | undefined {
@@ -171,6 +219,58 @@ const renderOutputPage = (
   video?: VideoSettings,
   options?: { recordEnabled?: boolean; settings?: SettingsState }
 ): Promise<void> => render(() => createElement(RecordingTab), video, options)
+
+describe('the Windows encoder bridge envelope (issue #1062)', () => {
+  it('says why a saved 4K60 output cannot record on a Windows PC', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['record-4k60-experimental'], {
+      platform: 'win32'
+    })
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+      "4K at 60 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 60 fps."
+    )
+  })
+
+  it('stays quiet on a Mac', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['record-4k60-experimental'])
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('stays quiet at 4K30 on Windows', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['record-4k30'], {
+      platform: 'win32'
+    })
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+  })
+})
+
+describe('separate files encoder notice (plan 200 D4)', () => {
+  const separateFiles: Partial<CaptureConfig> = {
+    separateSourceRecordings: { enabled: true, keepCombined: true },
+    sources: { screenId: 'screen:1', cameraId: 'camera:1', testPattern: false }
+  }
+  const notice = (): HTMLElement | null =>
+    document.querySelector('[data-testid="output-separate-source-recordings-encoder-notice"]')
+
+  it('says at 4K what the separate files cost before Record', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['record-4k30'], {
+      config: separateFiles
+    })
+    expect(notice()?.textContent).toBe(
+      'Separate files at 4K · 30 fps use about 3× the encoder. If your Mac falls behind, Videorc stops the separate files and keeps the main recording.'
+    )
+  })
+
+  it('stays quiet at 1080p30 and with the switch off', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['tutorial-1080p30'], {
+      config: separateFiles
+    })
+    expect(notice()).toBeNull()
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await render(() => createElement(RecordingTab), videoPresets['record-4k30'])
+    expect(notice()).toBeNull()
+  })
+})
 
 describe('Output page typed fields (plan 174, D-1)', () => {
   it('typing 2560 into Width gives 2560×1080, committed once on blur', async () => {
@@ -279,6 +379,26 @@ describe('the Output page is the one home for the local file (plan 174 S3.6)', (
     expect(button('Use default')).toBeUndefined()
     expect(button('Show in Finder')).toBeUndefined()
     expect(document.body.textContent).not.toMatch(/Browse|Reveal|Output directory|Blank uses/)
+  })
+
+  it('says why Choose… failed instead of doing nothing', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    vi.stubGlobal('videorc', {
+      pickDirectory: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            "Error invoking remote method 'system:pick-directory': Error: Protected desktop persistence is unavailable."
+          )
+        )
+    })
+    await renderOutputPage()
+    await act(async () => button('Choose…')!.click())
+    expect(toast.error).toHaveBeenCalledWith(
+      "Couldn't use that folder",
+      expect.objectContaining({ description: expect.stringContaining('keyring') })
+    )
+    expect(storedSettings).toMatchObject({ outputDirectory: '', outputDirectoryHandle: undefined })
   })
 
   it('puts a chosen folder back to the default with Use default', async () => {

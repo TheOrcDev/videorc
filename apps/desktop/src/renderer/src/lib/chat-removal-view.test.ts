@@ -248,6 +248,34 @@ describe('removalCardView: Buddy removal cards', () => {
     expect(removalCardView(operation({ phase: 'removed' }), NOW)).toBeNull()
   })
 
+  it("shows an agent's YouTube removal as the same card, and its toast (plan 209 S12)", () => {
+    const pending = operation({
+      source: 'agent',
+      platform: 'youtube',
+      reason: undefined,
+      confirmBy: '2026-10-04T12:00:30Z'
+    })
+    expect(removalCardView(pending, NOW)).toMatchObject({
+      mode: 'confirm',
+      title: REMOVAL_CARD_TITLE,
+      timer: 'Expires in 20s',
+      note: YOUTUBE_CONFIRM_NOTE,
+      primary: 'confirm',
+      confirmLabel: 'Remove'
+    })
+    expect(removalToastView(pending, NOW)).toMatchObject({
+      title: "Remove coders_x's message?",
+      action: { label: 'Remove', answer: 'confirm' }
+    })
+    const removed = operation({
+      source: 'agent',
+      phase: 'removed',
+      outcome: 'Removed from Twitch.',
+      updatedAt: '2026-10-04T12:00:09Z'
+    })
+    expect(removalResultView(removed, NOW)?.text).toBe('Removed from Twitch.')
+  })
+
   it('counts whole seconds and never below zero', () => {
     expect(secondsUntil('2026-10-04T12:00:12.200Z', NOW)).toBe(3)
     expect(secondsUntil('2026-10-04T11:59:00Z', NOW)).toBe(0)

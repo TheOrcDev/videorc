@@ -6,16 +6,23 @@ import type { SessionActivity } from '../../../shared/capture-state'
  * whether a file was being saved. Go Live's record+stream gets both (plan 174
  * B-6).
  */
-export type SessionRuntimeActivity = SessionActivity
+export type SessionRuntimeActivity = SessionActivity | 'clips'
+
+/**
+ * Issue 1064: the backend's silence watchdog found the captured microphone to
+ * be digital silence. It rides the microphone-loss notice; its recovery code
+ * (`microphone-signal-recovered`) clears it like a timeline recovery.
+ */
+export const MICROPHONE_SILENT_CODE = 'microphone-silent'
 
 /** Viewers were watching: the notice speaks of the livestream. */
 export function activityIsLive(activity: SessionRuntimeActivity): boolean {
-  return activity !== 'recording'
+  return activity !== 'recording' && activity !== 'clips'
 }
 
 /** A local file was being saved: the notice can open it in the Library or reveal it. */
 export function activitySavesRecording(activity: SessionRuntimeActivity): boolean {
-  return activity !== 'live-stream'
+  return activity !== 'live-stream' && activity !== 'clips'
 }
 
 export type SessionRuntimeNotice =
@@ -44,6 +51,24 @@ export function sessionRuntimeNoticeTitle(notice: SessionRuntimeNotice): string 
       : 'Recording stopped unexpectedly'
   }
 
+  // Issue 1064: the microphone never stopped; its frames hold no sound. The
+  // backend's line (the device, since when, "Try choosing it again") is the
+  // description.
+  if (notice.audioIssues?.every((issue) => issue.code === MICROPHONE_SILENT_CODE)) {
+    if (notice.phase === 'ended') {
+      return notice.activity === 'clips'
+        ? 'Microphone was silent: Clips contain silence'
+        : activityIsLive(notice.activity)
+          ? 'Microphone was silent during the livestream'
+          : 'Microphone was silent: saved recording contains silence'
+    }
+    return notice.activity === 'clips'
+      ? 'Your microphone is silent in Clips'
+      : activityIsLive(notice.activity)
+        ? 'Your microphone is silent on the livestream'
+        : 'Your microphone is silent in the recording'
+  }
+
   if (notice.audioIssues?.some((issue) => issue.code !== 'microphone-input-lost')) {
     const sources = new Set(
       notice.audioIssues.map((issue) =>
@@ -61,6 +86,12 @@ export function sessionRuntimeNoticeTitle(notice: SessionRuntimeNotice): string 
           ? 'System audio lost'
           : "Microphone audio couldn't be recorded"
     return notice.phase === 'ended' ? `${subject}: saved session has missing audio` : subject
+  }
+
+  if (notice.activity === 'clips') {
+    if (notice.phase === 'ended') return 'Microphone stopped: Clips contain silence'
+    if (notice.phase === 'ending') return 'Microphone stopped: Clips finishing with silence'
+    return 'Microphone stopped: Clips continue with silence'
   }
 
   if (notice.phase === 'ended') {

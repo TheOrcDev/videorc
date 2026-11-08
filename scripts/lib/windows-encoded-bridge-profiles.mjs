@@ -96,6 +96,23 @@ export function parseWindowsEncodedBridgeArgs(argv = []) {
   }
 }
 
+/**
+ * The `smoke:windows-native-screen` arguments that carry the selected D3D11
+ * mode into each profile run. The child decides which recording assertions
+ * apply from its own arguments, so the environment alone is not enough.
+ */
+export function windowsEncodedBridgeNativeScreenArgs({
+  d3d11 = false,
+  requireD3d11 = false,
+  expectFallback = null
+} = {}) {
+  return [
+    ...(d3d11 ? ['--d3d11'] : []),
+    ...(requireD3d11 ? ['--require-d3d11'] : []),
+    ...(expectFallback ? ['--expect-fallback', expectFallback] : [])
+  ]
+}
+
 function takeFlag(values, name) {
   const matches = values.reduce((count, value) => count + (value === name ? 1 : 0), 0)
   if (matches > 1) throw new Error(`${name} may be supplied only once.`)

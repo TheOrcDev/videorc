@@ -1,13 +1,16 @@
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { toast } from '@/lib/toast'
+import { recordUserError } from '@/lib/user-error-log'
 
 // Plan 174 S2.4 (J2-7, J2-14): raw error text never reaches a toast or a line.
 // A caller names what it tried ("import", "the image") and this module turns
 // any failure into copy the streamer can act on: a known cause gets its own
 // sentence, Videorc offline says so, and anything else gets the one generic
-// next step. The raw text goes to the console, which the support bundle
-// collects. It duck-types errors (`code`, `name`) so a window without the
-// backend client (Stream Manager) can use it without loading that client.
+// next step. The raw text goes to the console and to the ring of the last
+// user-facing errors (`user-error-log`), which the support bundle ships as
+// rendererDiagnostics.recentUserErrors (plan 216 A5). It duck-types errors
+// (`code`, `name`) so a window without the backend client (Stream Manager)
+// can use it without loading that client.
 
 /** The one sentence for Videorc's own connection being down. */
 export const OFFLINE_REASON = 'Videorc is reconnecting. Try again in a moment.'
@@ -24,9 +27,20 @@ export class VideorcOfflineError extends Error {
   }
 }
 
-/** A renderer-written reason that already reads as copy; shown as is. */
+/**
+ * A reason that already reads as copy; shown as is. A refusal ("can't now",
+ * like a backend sentence the renderer recognized) passes `warning`: it is
+ * never an error (plan 174 S2.4).
+ */
 export class UserFacingError extends Error {
   readonly name = 'UserFacingError'
+
+  constructor(
+    message: string,
+    readonly tone: 'error' | 'warning' = 'error'
+  ) {
+    super(message)
+  }
 }
 
 /** The rejection for a call made while Videorc's engine is down. */
@@ -45,6 +59,24 @@ const OFFLINE_RAW = [
   /^Couldn't send the "[^"]+" request/
 ]
 const UNKNOWN_OUTCOME = /its outcome is unknown\.$/
+// SecurePersistenceCodec's refusal: safeStorage has no OS store to seal
+// folder grants or sign-in with (on Linux, no keyring answered).
+const SECURE_STORAGE_UNAVAILABLE = /^Protected desktop persistence is unavailable\.$/
+/** The sentence for that refusal. */
+export const SECURE_STORAGE_REASON =
+  "Videorc couldn't reach your system keyring to save this. Make sure a keyring is running and unlocked, then try again."
+
+// The backend's refusal of an MP4 export with no room for the copy (plan 200
+// C5, disk_space.rs `export_space_message`). It names the sizes and the next
+// step, so it is shown as is: "Try again" cannot work until space is freed.
+const EXPORT_SPACE_REFUSAL =
+  /^Not enough disk space to finish the MP4 \(needs [^(),]+, [^(),]+ free\)\. Your recording is safe as MKV; free some space and use Export MP4\.$/
+
+/** `raw` when it is the backend's no-room refusal of an MP4 export, else null. */
+export function exportSpaceRefusal(raw: string | undefined): string | null {
+  const reason = raw?.trim()
+  return reason && EXPORT_SPACE_REFUSAL.test(reason) ? reason : null
+}
 
 const BUSY_REASON = "Videorc was busy and didn't do it. Try again in a moment."
 
@@ -55,7 +87,7 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   'command-expired-before-dispatch': BUSY_REASON,
   'command-lane-full': BUSY_REASON,
   'screen-import-busy':
-    'An image is already being imported. Wait for it to finish, then try again.',
+    'Another file is already being imported. Wait for it to finish, then try again.',
   'command-not-applied': BUSY_REASON,
   'clean-cut-mutation-blocked':
     'Clean cut is still working on this recording. Try again when it finishes.',
@@ -64,6 +96,12 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   'session-rename-invalid': 'A title needs 1 to 120 characters.',
   'youtube-quota-paused':
     "Videorc's daily YouTube API limit is used up. Try again after it resets.",
+  // Plan 216 A3 (D5): a scene switch that adds a source gave up waiting for
+  // its first frame. The backend's code names the source, so the copy can.
+  'layout-camera-not-ready':
+    "Your camera isn't sending video. Check it in Sources, then try again.",
+  'layout-screen-not-ready':
+    "Your screen isn't sending video. Check it in Sources, then try again.",
   // Plan 184 C6b: the Test cloud's refusals (the button is disabled for each,
   // so these cover a click that raced a change).
   'cloud-test-session-active': "Locked while you're recording or live.",
@@ -143,9 +181,18 @@ export function userErrorMessage(error: unknown, context?: UserErrorContext): Us
   if (name === 'VideorcOfflineError' || OFFLINE_RAW.some((pattern) => pattern.test(raw))) {
     return shape('offline', OFFLINE_REASON, 'warning', true)
   }
-  if (name === 'UserFacingError' && raw) return shape('known', raw, 'error')
+  if (name === 'UserFacingError' && raw) {
+    return shape('known', raw, (error as UserFacingError).tone === 'warning' ? 'warning' : 'error')
+  }
   if (code && KNOWN_CODES[code]) {
     return shape('known', KNOWN_CODES[code], WARNING_CODES.has(code) ? 'warning' : 'error')
+  }
+  if (SECURE_STORAGE_UNAVAILABLE.test(raw)) {
+    return shape('known', SECURE_STORAGE_REASON, 'error')
+  }
+  const spaceRefusal = exportSpaceRefusal(raw)
+  if (spaceRefusal) {
+    return shape('known', spaceRefusal, 'error')
   }
   if (UNKNOWN_OUTCOME.test(raw)) {
     return shape('known', KNOWN_CODES['request-outcome-unknown'], 'error')
@@ -171,6 +218,7 @@ export function toastUserError(
   const copy = userErrorMessage(error, context)
   if (copy.kind === 'canceled') return copy
   console.warn(`[user-error] ${copy.title}:`, copy.raw || error)
+  recordUserError(copy, error, context)
   const show = copy.tone === 'warning' ? toast.warning : toast.error
   show(copy.title, { ...options, description: copy.description })
   return copy
@@ -189,6 +237,7 @@ export function inlineUserError(
   const copy = userErrorMessage(error, context)
   if (copy.kind !== 'canceled') {
     console.warn(`[${tag}] ${copy.title}:`, copy.raw || error)
+    recordUserError(copy, error, context)
   }
   return copy.text
 }

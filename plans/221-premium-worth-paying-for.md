@@ -151,7 +151,14 @@ The owner said "put all to that pr we have". So:
   - an e2e smoke;
   - an FFmpeg build;
   - a LiveKit churn run.
-- At most two run at the same time. Before starting one:
+- At most two run at the same time, and **at most one of them is a
+  `videorc-backend` test or clippy build**.
+  - Measured on 2026-11-08: two backend test targets at once put one
+    `rustc` at about 5 GB, swap at 14.4 of 15 GB, and disk at 19 GB, and
+    the port stopped on the floor.
+  - The second slot is for light work only: web builds, the runner crate,
+    and docs.
+- Before starting one:
   - `df -h /` must show at least 20 GB free;
   - swap use must leave at least 1 GB.
 - Past incidents: 9 parallel compiles once drove 30 GB of swap, and 7
@@ -305,9 +312,15 @@ Stop and ask the owner when:
 | Wave | Item | State |
 | --- | --- | --- |
 | — | Plans 221 to 225 written; 183 recovered from an untracked copy | **Done** 2026-11-08 |
-| 0 | 222 R, P, P-land; P10 web port; P11 runner gates; 225 A–B; 224 S0h | Not started |
-| 1 | 223 A–B; 225 C–E; 222 L, U; 224 S0a-r, S0b, S0f; web W-G, F1–F2, H2, D1, U4 | Not started |
-| 2 | 224 R-G, C-G; 223 C, D2; 225 F3–F5 | Not started |
+| 0 | 222 R (`plan-222-r` `aad92eb60`), P (`plan-222-cloud-on-main` `ce05fb46e`), P-land onto #727 | **Done** 2026-11-08. Every Phase P gate is green except the three below. Rust: 4,722 tests, clippy, fmt and audit. TS: typecheck, lint, format, vitest and test:scripts. `pnpm build`. `smoke:cloud-solo` ×10 plus the rollback run (largest gap 34 ms every run). 8 direct-path smokes. Recording matrix 20/20. The three: (1) **the renderer budget, an owner call**: eager gzip 479,188 against a 477,000 ceiling; main is 61 bytes under the ceiling by itself, and the port adds 2,249. (2) `smart-scenes` switches p95 168 ms, inherited host load. (3) `recording-studio` steps 12 to 44 were not run, because of the disk floor. |
+| 0 | 222 P10, the web port onto web main (#85) | **Done** (`067d629b`) |
+| 0 | 222 P11, the runner gates | **Done**, with runner #1 at `8b6d478` |
+| 0 | 225 A–B, the community store and live arrivals | **Done** on `plan-225-community` `33eda7dc0` (cut from main `611f2de5f`); green. Merges into #727 next |
+| 0 | 224 S0h, the facts refresh | Not started (folds into S0a-r) |
+| 1 | Web: U4, 224 W-G1–6, 223 D1, 225 F1–F2, H2, 223 B2, 222 L3/L5/Y2/U7/O2 | **Done** on #85 (`be159d28`), after two security reviews (11 + 6 findings, all fixed with tests) |
+| 1 | Runner: 222 L6, O4, I2, I3, I4, O3; 223 C1, C2 | **Done** on #1 (`8b6d478`). Owed: the hold-image harness re-run and the 5-minute hold spawn count (disk floor) |
+| 1 | Desktop: 223 A–B; 225 C–E; 222 L, U, Y1; 224 S0a-r, S0b, S0f | Not started |
+| 2 | 224 R-G, C-G; 223 C3, D2; 225 F3–F5 | Not started |
 | 3 | Smokes, the bundle, review passes; 225 G if allowed | Not started |
 
 ## Handoff (cold start)

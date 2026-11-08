@@ -15,9 +15,15 @@ import {
   firstFrameBlockedReason,
   firstFrameContractMet,
   nativePreviewFirstFrameWatchdogEnabled,
+  dockHiddenReasonText,
+  firstFrameStandDownHandback,
+  PREVIEW_HOLD_REASON,
+  PREVIEW_SYNTHETIC_REFUSED_REASON,
   nativePreviewProofWatchdogEnabled,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
+  proofSourceLiveReason,
+  proofSourceStalledReason,
   proofWatchdogRendererReadAllowed,
   WatchdogTickOwnership,
   type FirstFrameSnapshot,
@@ -35,6 +41,8 @@ function snapshot(overrides: Partial<FirstFrameSnapshot> = {}): FirstFrameSnapsh
     compositorSceneRevision: 42,
     compositorFrameSceneRevision: 42,
     metalTargetPresent: true,
+    previewHold: null,
+    dockHidden: null,
     ...overrides
   }
 }
@@ -316,6 +324,22 @@ describe('proofPresentationFallbackReason', () => {
         pendingElapsedMs: 200
       })
     ).toBe(
+      'Windows preview source frames have not advanced for 1501ms; keeping the last good frame while polling retries.'
+    )
+  })
+})
+
+describe('proof source frame status copy', () => {
+  it('names Linux on Linux, where the Preview window shows it', () => {
+    expect(proofSourceLiveReason('linux')).toBe('Linux preview pixels are live.')
+    expect(proofSourceStalledReason('linux', 1_513)).toBe(
+      'Linux preview source frames have not advanced for 1513ms; keeping the last good frame while polling retries.'
+    )
+  })
+
+  it('keeps the Windows copy on Windows', () => {
+    expect(proofSourceLiveReason('win32')).toBe('Windows preview pixels are live.')
+    expect(proofSourceStalledReason('win32', 1_501)).toBe(
       'Windows preview source frames have not advanced for 1501ms; keeping the last good frame while polling retries.'
     )
   })
@@ -606,6 +630,265 @@ describe('assessFirstFrame', () => {
 // ladder; exhaustion declares a truthful stall but KEEPS watching so a revival
 // (the reporter's "click brings it back") re-arms a fresh ladder instead of
 // leaving the placeholder forever.
+describe('a Preview hold (plan 212)', () => {
+  const held = snapshot({
+    elapsedMs: 20_000,
+    nativePresenting: true,
+    framesAdvancing: true,
+    presentationAdvancing: false,
+    compositorFrameSceneRevision: 41,
+    previewHold: 'performance-check'
+  })
+
+  it('is pending for the first-frame contract: no heal, no fallback, the ledger untouched', () => {
+    const ledger = emptyFirstFrameLedger()
+    const { assessment, ledger: next } = assessFirstFrame(held, ledger)
+    expect(assessment).toEqual({ kind: 'pending', reason: PREVIEW_HOLD_REASON })
+    expect(next).toBe(ledger)
+    expect(
+      assessFirstFrame(snapshot({ ...held, surfaceLive: false, metalTargetPresent: false }), ledger)
+        .assessment
+    ).toEqual({ kind: 'pending', reason: PREVIEW_HOLD_REASON })
+  })
+
+  it('is observed by the presenting watch without charging the stall ladder', () => {
+    let watch = emptyPresentingWatch()
+    for (let tick = 0; tick < 200; tick += 1) {
+      const next = assessPresenting(held, watch, 250)
+      expect(next.assessment).toEqual({ kind: 'observing', reason: PREVIEW_HOLD_REASON })
+      watch = next.watch
+    }
+    expect(watch).toEqual(emptyPresentingWatch())
+    // The hold ends: a presenting frame is presenting at once.
+    const after = assessPresenting(snapshot(), watch, 250)
+    expect(after.assessment).toEqual({ kind: 'presenting' })
+  })
+
+  it("names the packaged backstop without the check's words", () => {
+    const refused = snapshot({ ...held, previewHold: 'synthetic-refused' })
+    expect(assessFirstFrame(refused, emptyFirstFrameLedger()).assessment).toEqual({
+      kind: 'pending',
+      reason: PREVIEW_SYNTHETIC_REFUSED_REASON
+    })
+    expect(assessPresenting(refused, emptyPresentingWatch(), 250).assessment).toEqual({
+      kind: 'observing',
+      reason: PREVIEW_SYNTHETIC_REFUSED_REASON
+    })
+  })
+
+  it('hands back with a fresh first-frame clock and heartbeat when the hold ends', () => {
+    const shown = { dockHidden: null }
+    expect(
+      firstFrameStandDownHandback({
+        previous: { previewHold: 'performance-check', ...shown },
+        current: { previewHold: null, ...shown },
+        nowMs: 5_000
+      })
+    ).toEqual({ startedAtMs: 5_000, heartbeatAtMs: 5_000 })
+    expect(
+      firstFrameStandDownHandback({
+        previous: { previewHold: 'synthetic-refused', ...shown },
+        current: { previewHold: null, ...shown },
+        nowMs: 6_000
+      })
+    ).toEqual({ startedAtMs: 6_000, heartbeatAtMs: 6_000 })
+    expect(
+      firstFrameStandDownHandback({
+        previous: { previewHold: null, ...shown },
+        current: { previewHold: null, ...shown },
+        nowMs: 7_000
+      })
+    ).toBeNull()
+    expect(
+      firstFrameStandDownHandback({
+        previous: { previewHold: null, ...shown },
+        current: { previewHold: 'performance-check', ...shown },
+        nowMs: 7_000
+      })
+    ).toBeNull()
+    expect(
+      firstFrameStandDownHandback({
+        previous: { previewHold: 'performance-check', ...shown },
+        current: { previewHold: 'performance-check', ...shown },
+        nowMs: 8_000
+      })
+    ).toBeNull()
+  })
+})
+
+// Plan 213 D: a docked Preview the user hid on purpose (another page, the
+// slot scrolled away, a dialog over it) presents nothing, so the chain reads
+// as broken. The 0.18.0 field log stalled it every time (eight stalls, each
+// on Scene scrolled away, Library, Livestream, Sources, Settings or under
+// "End livestream?") and only recovered when Studio showed again. The
+// watchdog stands down while the dock predicate hides the surface, and
+// starts fresh when it shows, the way it does around a Preview hold.
+describe('a docked Preview hidden on purpose (plan 213 D)', () => {
+  const TICK_MS = 750
+  // What main sees while hidden: the compositor keeps rendering, the native
+  // presenter confirms nothing, and the presented frame id stands still.
+  const hidden = (reason: NonNullable<FirstFrameSnapshot['dockHidden']> = 'slot-unmounted') =>
+    snapshot({
+      elapsedMs: 60_000,
+      nativePresenting: false,
+      presentationAdvancing: false,
+      dockHidden: reason
+    })
+  const reasons: NonNullable<FirstFrameSnapshot['dockHidden']>[] = [
+    'scrolled-away',
+    'slot-unmounted',
+    'overlay-open',
+    'main-window-hidden',
+    'main-window-fullscreen',
+    'no-slot-report'
+  ]
+
+  it('is pending for the first-frame contract: no heal, no fallback, the ledger untouched', () => {
+    for (const reason of reasons) {
+      const ledger = emptyFirstFrameLedger()
+      const { assessment, ledger: next } = assessFirstFrame(hidden(reason), ledger)
+      expect(assessment).toEqual({ kind: 'pending', reason: dockHiddenReasonText(reason) })
+      expect(next).toBe(ledger)
+      // Even a chain that is broken in every link is not judged while hidden.
+      expect(
+        assessFirstFrame(
+          snapshot({ ...hidden(reason), surfaceLive: false, metalTargetPresent: false }),
+          ledger
+        ).assessment.kind
+      ).toBe('pending')
+    }
+  })
+
+  it('is observed by the presenting watch for a minute without a heal or a stall', () => {
+    let watch = emptyPresentingWatch()
+    const kinds = new Set<string>()
+    for (let tick = 0; tick < Math.ceil(60_000 / TICK_MS); tick += 1) {
+      const next = assessPresenting(hidden('scrolled-away'), watch, TICK_MS)
+      kinds.add(next.assessment.kind)
+      expect(next.assessment).toEqual({
+        kind: 'observing',
+        reason: dockHiddenReasonText('scrolled-away')
+      })
+      watch = next.watch
+    }
+    expect([...kinds]).toEqual(['observing'])
+    expect(watch).toEqual(emptyPresentingWatch())
+  })
+
+  it('names why the surface is hidden in the waiting reason', () => {
+    expect(dockHiddenReasonText('scrolled-away')).toBe('Preview is hidden while scrolled away.')
+    expect(dockHiddenReasonText('slot-unmounted')).toBe('Preview is hidden on another page.')
+    expect(dockHiddenReasonText('overlay-open')).toBe('Preview is hidden under a window.')
+    expect(
+      assessPresenting(hidden('overlay-open'), emptyPresentingWatch(), TICK_MS).assessment
+    ).toEqual({ kind: 'observing', reason: 'Preview is hidden under a window.' })
+  })
+
+  it('hands back with a fresh clock when the surface shows again, and not before', () => {
+    const noHold = { previewHold: null }
+    // Hidden, then shown: a fresh first-frame clock and heartbeat.
+    expect(
+      firstFrameStandDownHandback({
+        previous: { ...noHold, dockHidden: 'slot-unmounted' },
+        current: { ...noHold, dockHidden: null },
+        nowMs: 61_000
+      })
+    ).toEqual({ startedAtMs: 61_000, heartbeatAtMs: 61_000 })
+    // Shown, then hidden: nothing to hand back.
+    expect(
+      firstFrameStandDownHandback({
+        previous: { ...noHold, dockHidden: null },
+        current: { ...noHold, dockHidden: 'scrolled-away' },
+        nowMs: 1_000
+      })
+    ).toBeNull()
+    // Hidden for one reason, then another (Scene scrolled away, then
+    // Settings): still standing down, no hand-back.
+    expect(
+      firstFrameStandDownHandback({
+        previous: { ...noHold, dockHidden: 'scrolled-away' },
+        current: { ...noHold, dockHidden: 'slot-unmounted' },
+        nowMs: 2_000
+      })
+    ).toBeNull()
+    // A hold that ends while the dock is still hidden is not a hand-back
+    // either; the one hand-back comes when the surface shows.
+    expect(
+      firstFrameStandDownHandback({
+        previous: { previewHold: 'performance-check', dockHidden: 'overlay-open' },
+        current: { previewHold: null, dockHidden: 'overlay-open' },
+        nowMs: 3_000
+      })
+    ).toBeNull()
+    expect(
+      firstFrameStandDownHandback({
+        previous: { previewHold: null, dockHidden: 'overlay-open' },
+        current: { previewHold: null, dockHidden: null },
+        nowMs: 4_000
+      })
+    ).toEqual({ startedAtMs: 4_000, heartbeatAtMs: 4_000 })
+  })
+
+  it('judges from a fresh clock after it shows: no stall on the first ticks, presenting once frames move', () => {
+    // A minute hidden, then shown. Main hands the ledger and the clock back
+    // (the test above), so the first visible tick sees elapsedMs 0 and an
+    // empty watch: the presenter has not caught up yet, and that is a
+    // transient under the tick threshold, never a heal or a stall.
+    let watch = emptyPresentingWatch()
+    for (let tick = 0; tick < 80; tick += 1) {
+      watch = assessPresenting(hidden(), watch, TICK_MS).watch
+    }
+    const firstShown = assessPresenting(
+      snapshot({ elapsedMs: 0, presentationAdvancing: false }),
+      emptyPresentingWatch(),
+      TICK_MS
+    )
+    expect(firstShown.assessment.kind).toBe('observing')
+    const presenting = assessPresenting(snapshot({ elapsedMs: TICK_MS }), firstShown.watch, TICK_MS)
+    expect(presenting.assessment).toEqual({ kind: 'presenting' })
+    expect(presenting.watch).toEqual(emptyPresentingWatch())
+    // The first-frame contract, too, judges the shown surface from zero.
+    expect(
+      assessFirstFrame(
+        snapshot({ elapsedMs: 0, nativePresenting: false, presentationAdvancing: false }),
+        emptyFirstFrameLedger()
+      ).assessment.kind
+    ).toBe('pending')
+  })
+
+  it('still heals and still declares a stall for a VISIBLE docked or floating Preview', () => {
+    // dockHidden null is both the floating Preview and a docked one that
+    // shows: the same broken chain goes through the ladder to a stall.
+    const visibleBroken = () =>
+      snapshot({ nativePresenting: false, presentationAdvancing: false, dockHidden: null })
+    let watch = emptyPresentingWatch()
+    const kinds: string[] = []
+    const actions: string[] = []
+    const ticks =
+      Math.ceil(DEFAULT_PRESENTING_WATCH_BUDGETS.healing.declareFallbackAfterMs / TICK_MS) + 4
+    for (let tick = 0; tick < ticks; tick += 1) {
+      const next = assessPresenting(visibleBroken(), watch, TICK_MS)
+      watch = next.watch
+      kinds.push(next.assessment.kind)
+      if (next.assessment.kind === 'heal') {
+        actions.push(next.assessment.action)
+      }
+    }
+    expect(actions).toContain('reset-native-path')
+    expect(kinds[kinds.length - 1]).toBe('stalled')
+    expect(
+      assessFirstFrame(
+        snapshot({
+          elapsedMs: DEFAULT_FIRST_FRAME_BUDGETS.declareFallbackAfterMs,
+          nativePresenting: false,
+          dockHidden: null
+        }),
+        emptyFirstFrameLedger()
+      ).assessment.kind
+    ).toBe('fallback')
+  })
+})
+
 describe('assessPresenting', () => {
   const TICK_MS = 750
 

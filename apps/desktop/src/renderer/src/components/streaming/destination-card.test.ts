@@ -6,6 +6,7 @@ import type {
   OAuthProviderCredentialStatus,
   PlatformAccount,
   PlatformAccountValidation,
+  StreamTargetRuntime,
   StreamTargetSettings,
   XNativeLiveCapability
 } from '@/lib/backend'
@@ -13,7 +14,9 @@ import type {
 import {
   accountStatus,
   DestinationCard,
+  destinationUplinkLine,
   idleDestinationBadge,
+  manualKeyGuidance,
   missingPermissionsRow
 } from './destination-card'
 
@@ -102,6 +105,7 @@ function render(props: {
   sharedAccountWith?: string
   xNativeCapability?: XNativeLiveCapability | null
   expanded?: boolean
+  runtime?: StreamTargetRuntime
 }): string {
   return renderToStaticMarkup(
     createElement(DestinationCard, {
@@ -150,8 +154,11 @@ describe('DestinationCard header', () => {
       /<button[^>]*data-slot="list-row-button"[^>]*aria-expanded="false"[^>]*>kick</
     )
     expect(markup).not.toContain('role="button"')
-    expect(markup).toMatch(/<button[^>]*role="switch"[^>]*aria-label="Enable kick"/)
+    expect(markup).toMatch(/<span[^>]*role="switch"[^>]*aria-label="Enable kick"/)
     expect(markup).toContain('>Stream key<')
+    // The chevron is the button's picture, never a control of its own: a
+    // click on it opens the row (plan 213 A1).
+    expect(markup).toMatch(/<svg[^>]*aria-hidden="true"[^>]*data-testid="destination-chevron"/)
   })
 
   it('stays quiet when a destination is ready, and says Needs setup when it is not', () => {
@@ -174,6 +181,34 @@ describe('DestinationCard header', () => {
   })
 })
 
+// Plan 218: a leg whose connection fell behind stays on air, so its state
+// badge says so; the row adds the news beside it in plain words.
+describe('DestinationCard falling behind', () => {
+  const live: StreamTargetRuntime = {
+    targetId: 'youtube',
+    platform: 'youtube',
+    label: 'YouTube',
+    state: 'live'
+  }
+
+  it('says nothing while the leg keeps up', () => {
+    expect(destinationUplinkLine(live)).toBeNull()
+    expect(destinationUplinkLine(undefined)).toBeNull()
+    expect(render({ target: target('youtube'), runtime: live, expanded: false })).not.toContain(
+      'destination-uplink'
+    )
+  })
+
+  it('counts the times the connection fell behind, next to the on-air badge', () => {
+    const behind = { ...live, uplinkOverflows: 3, uplinkOverflowAt: '2026-11-05T12:00:00Z' }
+    const markup = render({ target: target('youtube'), runtime: behind, expanded: false })
+    expect(markup).toContain('data-testid="destination-uplink"')
+    expect(markup).toContain('>Falling behind<')
+    expect(markup).toContain('fell behind on this destination 3 times')
+    expect(destinationUplinkLine({ ...live, uplinkOverflows: 1 })).toContain('once')
+  })
+})
+
 describe('DestinationCard connection mode', () => {
   it('offers Sign in / Stream key as a segmented control', () => {
     const markup = render({ target: target('twitch'), account: account('twitch') })
@@ -187,6 +222,23 @@ describe('DestinationCard connection mode', () => {
     expect(markup).not.toContain('Manual RTMP')
   })
 
+  // Plan 213 J2: X shares chat only with apps you sign in to, so the choice
+  // says so where it is made: Sign in first, the key without chat.
+  it('says on the X choice that Sign in brings chat and a stream key does not', () => {
+    const markup = render({
+      target: target('x', { authMode: 'manual-rtmp' }),
+      account: account('x')
+    })
+    const signIn = markup.indexOf('>Sign in · Chat works<')
+    const streamKey = markup.indexOf('>Stream key · No chat<')
+    expect(signIn).toBeGreaterThan(-1)
+    expect(streamKey).toBeGreaterThan(signIn)
+    // Other platforms keep the plain words.
+    const twitch = render({ target: target('twitch'), account: account('twitch') })
+    expect(twitch).not.toContain('Chat works')
+    expect(twitch).not.toContain('No chat')
+  })
+
   it('shows no switch for a key-only platform, just one line and where to find the key', () => {
     const markup = render({ target: target('tiktok', { authMode: 'manual-rtmp' }) })
     expect(markup).not.toContain('Connect with')
@@ -194,6 +246,20 @@ describe('DestinationCard connection mode', () => {
     expect(markup).toContain('TikTok LIVE Center')
     expect(markup).toContain('>Server URL<')
     expect(markup).toContain('>Stream key<')
+  })
+
+  it('keeps Facebook on a stream key until its sign-in exists (plan 206)', () => {
+    for (const authMode of ['manual-rtmp', 'oauth'] as const) {
+      const markup = render({ target: target('facebook', { authMode }) })
+      expect(markup, authMode).not.toContain('Connect with')
+      expect(markup, authMode).not.toContain('>Sign in<')
+      expect(markup, authMode).toContain('Signing in with Facebook isn&#x27;t available yet.')
+      expect(markup, authMode).toContain('choose Streaming software')
+      expect(markup, authMode).toContain('100 followers')
+      expect(markup, authMode).toContain('Live Producer<svg')
+      expect(markup, authMode).toContain('>Stream key<')
+    }
+    expect(manualKeyGuidance('facebook').link?.url).toBe('https://www.facebook.com/live/producer')
   })
 
   it('shows Kick key guidance only in Stream key mode', () => {

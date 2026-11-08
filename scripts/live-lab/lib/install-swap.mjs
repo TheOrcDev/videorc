@@ -1,9 +1,10 @@
 import { randomBytes } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, readdir, readFile, readlink, realpath, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 
 import { writeLabJson } from './config.mjs'
 import { refuse } from './install-runner.mjs'
+import { isLinux } from './platform.mjs'
 
 // Plan 178 U5: put a verified Videorc.app in place and keep the one it
 // replaced for --rollback.
@@ -13,11 +14,17 @@ import { refuse } from './install-runner.mjs'
 // until the new app is in place; a failed rename restores the old app. Node
 // has no rename-swap, so there is a sub-millisecond gap with no app at the
 // target path, which is why an install refuses while Videorc runs from it.
+//
+// Plan 179: on Linux the "app" is a directory (the extracted AppImage) and the
+// same two renames swap it; only the running check differs.
 
 export const INSTALL_RECORD_FILE = 'install.json'
 export const INSTALL_RECORD_SCHEMA = 1
 
+// Videorc.app -> Videorc.previous.app (macOS); Videorc -> Videorc.previous
+// (the Linux install directory).
 export function previousAppPath(appPath) {
+  if (!appPath.endsWith('.app')) return join(dirname(appPath), `${basename(appPath)}.previous`)
   return join(dirname(appPath), `${basename(appPath, '.app')}.previous.app`)
 }
 
@@ -59,8 +66,49 @@ export async function runningPids(runner, appPath) {
     .filter((value) => /^[0-9]+$/.test(value))
 }
 
-export async function assertNotRunning(runner, appPath) {
-  const pids = await runningPids(runner, appPath)
+function isInside(path, dir) {
+  return path === dir || path.startsWith(`${dir}/`)
+}
+
+async function listProcPids() {
+  return (await readdir('/proc')).filter((name) => /^[0-9]+$/.test(name))
+}
+
+// Linux (plan 179): no lsof needed. /proc/<pid>/exe names each process's
+// executable, so a process runs "from" the install dir when that link points
+// inside it (videorc, its zygote and GPU children, videorc-backend, the
+// bundled ffmpeg). Read-only: nothing is signalled. Processes we may not
+// inspect (other users) or that exit mid-scan are skipped; the lab user's own
+// Videorc is always readable.
+export async function linuxRunningPids(
+  appPath,
+  { listProcs = listProcPids, readlink: readLink = readlink } = {}
+) {
+  const roots = [appPath]
+  const real = await realpath(appPath).catch(() => null)
+  if (real && real !== appPath) roots.push(real)
+  const pids = []
+  for (const pid of await listProcs()) {
+    let exe
+    try {
+      exe = await readLink(`/proc/${pid}/exe`)
+    } catch {
+      continue
+    }
+    const path = String(exe).replace(/ \(deleted\)$/, '')
+    if (roots.some((root) => isInside(path, root))) pids.push(String(pid))
+  }
+  return pids
+}
+
+export async function assertNotRunning(
+  runner,
+  appPath,
+  { platform = process.platform, procfs } = {}
+) {
+  const pids = isLinux(platform)
+    ? await linuxRunningPids(appPath, procfs)
+    : await runningPids(runner, appPath)
   if (pids.length > 0) {
     refuse(
       'app-running',

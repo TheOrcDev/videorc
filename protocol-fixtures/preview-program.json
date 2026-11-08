@@ -1,0 +1,562 @@
+{
+  "schemaVersion": 1,
+  "description": "Plan 205: the program, the picture the Preview shows. An item is in it when at least one running output carries it; while nothing runs (shape null, or a shape with neither output), when either switch is on. A buffer-only (Clips) session is planned as null for the Preview. Rust program_shows and TS programShows must both reproduce every case.",
+  "cases": [
+    {
+      "name": "nothing runs, off",
+      "shape": null,
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "nothing runs, stream only",
+      "shape": null,
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "nothing runs, recording only",
+      "shape": null,
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "nothing runs, both",
+      "shape": null,
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "no output, aux none, off",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "none"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "no output, aux none, stream only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "none"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "no output, aux none, recording only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "none"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "no output, aux none, both",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "none"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "no output, aux stream, off",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "stream"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "no output, aux stream, stream only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "stream"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "no output, aux stream, recording only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "stream"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "no output, aux stream, both",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "stream"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "no output, aux vertical-simulcast, off",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "no output, aux vertical-simulcast, stream only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "no output, aux vertical-simulcast, recording only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "no output, aux vertical-simulcast, both",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": false,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record, aux none, off",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "none"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "record, aux none, stream only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "none"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "record, aux none, recording only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "none"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record, aux none, both",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "none"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record, aux stream, off",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "stream"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "record, aux stream, stream only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "stream"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "record, aux stream, recording only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "stream"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record, aux stream, both",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "stream"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record, aux vertical-simulcast, off",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "record, aux vertical-simulcast, stream only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "record, aux vertical-simulcast, recording only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record, aux vertical-simulcast, both",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": false,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "stream, aux none, off",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "none"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "stream, aux none, stream only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "none"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "stream, aux none, recording only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "none"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": false
+    },
+    {
+      "name": "stream, aux none, both",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "none"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "stream, aux stream, off",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "stream"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "stream, aux stream, stream only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "stream"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "stream, aux stream, recording only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "stream"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": false
+    },
+    {
+      "name": "stream, aux stream, both",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "stream"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "stream, aux vertical-simulcast, off",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "stream, aux vertical-simulcast, stream only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "stream, aux vertical-simulcast, recording only",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": false
+    },
+    {
+      "name": "stream, aux vertical-simulcast, both",
+      "shape": {
+        "recordEnabled": false,
+        "streamEnabled": true,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record + stream, aux none, off",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "none"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "record + stream, aux none, stream only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "none"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "record + stream, aux none, recording only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "none"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record + stream, aux none, both",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "none"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record + stream, aux stream, off",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "stream"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "record + stream, aux stream, stream only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "stream"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "record + stream, aux stream, recording only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "stream"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record + stream, aux stream, both",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "stream"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record + stream, aux vertical-simulcast, off",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": false,
+      "showInRecording": false,
+      "expected": false
+    },
+    {
+      "name": "record + stream, aux vertical-simulcast, stream only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": true,
+      "showInRecording": false,
+      "expected": true
+    },
+    {
+      "name": "record + stream, aux vertical-simulcast, recording only",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": false,
+      "showInRecording": true,
+      "expected": true
+    },
+    {
+      "name": "record + stream, aux vertical-simulcast, both",
+      "shape": {
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "auxLeg": "vertical-simulcast"
+      },
+      "showOnStream": true,
+      "showInRecording": true,
+      "expected": true
+    }
+  ]
+}

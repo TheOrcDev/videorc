@@ -5,6 +5,7 @@ import { LockAlert } from '@/components/lock-alert'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import type { BuddyCreateGate } from '@/lib/buddy-create-gate'
+import { lockAlertAction } from '@/lib/lock-view'
 
 /**
  * The one way a creating surface says why creating is off (plan 174 S3.15a,
@@ -44,5 +45,12 @@ export function BuddyCreateGateAlert({
       </Alert>
     )
   }
-  return <LockAlert action={action} data-gate={gate.kind} reason={gate.reason} {...props} />
+  return (
+    <LockAlert
+      action={lockAlertAction(action)}
+      data-gate={gate.kind}
+      reason={gate.reason}
+      {...props}
+    />
+  )
 }

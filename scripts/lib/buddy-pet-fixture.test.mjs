@@ -174,6 +174,26 @@ describe('buddy pet smoke fixture', () => {
     assert.ok(!buddyPetTalkAlternates(timeline, 5))
     const stutter = ['talk-a', 'look-22', 'talk-a', 'talk-b'].map((id, t) => ({ t, id }))
     assert.ok(!buddyPetTalkAlternates(stutter, 2))
+    // Two lines: the first ends one step into a cycle, the next starts on talk-a.
+    const frames = (id, count) => Array.from({ length: count }, () => id)
+    const twoLines = [
+      ...frames('talk-a', 4),
+      ...frames('talk-b', 4),
+      ...frames('look-22', 3),
+      ...frames('talk-a', 1),
+      ...frames('look-22', 15),
+      ...frames('talk-a', 4),
+      ...frames('talk-b', 4)
+    ].map((id, t) => ({ t, id }))
+    assert.ok(buddyPetTalkAlternates(twoLines, 4))
+    // A mouth stuck on talk-a inside one line still fails.
+    const stuck = [
+      ...frames('talk-a', 4),
+      ...frames('look-22', 3),
+      ...frames('talk-a', 4),
+      ...frames('talk-b', 4)
+    ].map((id, t) => ({ t, id }))
+    assert.ok(!buddyPetTalkAlternates(stuck, 2))
     assert.deepEqual(
       buddyPetMedianBox([
         { body: [10, 10, 50, 90] },

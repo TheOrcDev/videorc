@@ -12,6 +12,67 @@ default-deny **Alpha** track. Linux is a third, candidate-only **Alpha**
 track. Do not rename these artifacts, reuse the macOS or Windows storage
 keys, or treat a CI artifact as a public release.
 
+## Faster coordinated release
+
+0.13.0 spent about four hours from the version PR to all three platforms
+published. Most of that was idle CI and serialized platform work, not signing
+or notarization. Use this sequence:
+
+1. Open one version PR that only changes `apps/desktop/package.json` (the
+   version field), `changelog/*.md`, and optionally `docs/releases/*.md`.
+   CI classifies that as `version-release` and skips the heavy Windows source
+   gates, Windows installer, Linux Rust compile, and hosted macOS Rust job.
+   Wait for **JS (format + lint + tests)** and required review. Do not wait
+   for the checks listed under [Known-bad CI checks](#known-bad-ci-checks).
+2. The moment that PR lands on protected `main`, start these three in
+   parallel. Do not wait for macOS upload before dispatching Windows or Linux:
+   - local macOS build / notarize / validate / upload
+   - `gh workflow run release-windows-alpha.yml --ref main -f release_id=…`
+   - `gh workflow run release-linux-alpha.yml --ref main -f release_id=…`
+3. Watch with `gh run watch <id>` (or `gh run view --json status,conclusion`
+   every couple of minutes). Do not idle ten minutes between steps.
+4. As soon as a candidate identity exists, open its owner-waiver or
+   acceptance-record PR. A PR that only touches `docs/releases/**`,
+   `docs/acceptance/windows-alpha/**`, or `docs/acceptance/linux-alpha/**` is
+   `docs-record` and skips JS, Linux, Windows, and hosted macOS Rust.
+5. Promote Windows and finish the release record after the platform gates in
+   this runbook and [windows-alpha-runbook.md](windows-alpha-runbook.md).
+
+Ordinary code PRs still run the full macOS, Linux, and Windows gates. A
+package.json edit that is not exactly the version field, or any other path,
+is classified as `code` and keeps today's checks.
+
+### Known-bad CI checks
+
+The release routine ignores these. They fail on `main` independently of a
+version bump. Do not block a release on them, and do not "fix" them as part
+of cutting a release:
+
+| Check | Workflow | Why it is ignored |
+| ----- | -------- | ----------------- |
+| `Rust (test + clippy + fmt)` | `ci.yml` | Hosted macOS Metal goldens have failed since #810. The local signed macOS build and `pnpm release:validate:macos` are the real Mac gate. |
+| `Windows startup incident diagnostics` | `windows.yml` | Fails or times out on every PR. Not a release source or signing gate. |
+
+Windows source gates and the Windows installer artifact are real gates for
+**code** PRs. They are intentionally skipped on `version-release` and
+`docs-record` PRs because `release-windows-alpha.yml` re-runs its own
+protected-main source checks on the merge commit.
+
+### macOS FFmpeg and Rust reuse
+
+On the owner's release Mac, keep `vendor/ffmpeg/current`,
+`vendor/ffmpeg/_src`, and `target/` between releases. They are gitignored.
+
+```sh
+pnpm ffmpeg:status:macos
+# reusable bundle → pnpm ffmpeg:build:macos returns in seconds
+# missing/stale bundle → budget a source compile; do not set FFMPEG_REBUILD=1
+```
+
+`scripts/build-ffmpeg-macos.sh` already exits early when the current bundle
+passes the capture-clock check. Do not `cargo clean` before
+`pnpm package:backend:macos`. A clean clone is the only cold compile.
+
 ## Linux Alpha Is A Separate Candidate-Only Track
 
 Linux x64 AppImage builds stay private until a promote workflow, Ubuntu 24.04
@@ -24,8 +85,14 @@ lane is `.github/workflows/release-linux-alpha.yml`. It writes only:
 
 It must never write `releases/macos/`, `releases/windows/`, `updates/macos/`,
 `updates/windows/`, `latest-mac.yml`, or the Windows `latest.yml` feed. Public
-download remains disabled. See [../distribution.md](../distribution.md) and
-[../linux-port-plan.md](../linux-port-plan.md).
+download remains disabled. When a Linux step changes
+`VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY` on videorc-web, apply it with
+`pnpm release:web:redeploy` (see "Redeploying videorc-web production"). Hold the Linux Discord announcement until that
+download is public; preview with
+`pnpm release:notify:discord <releaseId> --dry-run`, then send with
+`pnpm release:notify:discord <releaseId>`. Never print
+`VIDEORC_DISCORD_RELEASE_WEBHOOK`. See [../distribution.md](../distribution.md)
+and [../linux-port-plan.md](../linux-port-plan.md).
 
 ## Windows Alpha Is A Separate Gated Track
 
@@ -85,6 +152,10 @@ check (default in packaged builds since 0.9.10; opt out via
   keychain (or `CSC_LINK`). See [macos-signing.md](macos-signing.md).
   **Auto-update requires a signed build** — electron-updater refuses to apply an
   unsigned/ad-hoc update.
+- **Videorc Camera profile** (plan 214) — `VIDEORC_MACOS_PROFILE_APP` in
+  `~/.videorc-release.env` (base64 or a path to the one Developer ID
+  provisioning profile, for the app; the extension needs none). See
+  [Videorc Camera](#videorc-camera-plan-214) below.
 - **Storage write creds** — the Neon uploader key
   (`VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `storage:read` + `storage:write`) in
   `~/.videorc-release.env`. While R2 is still an origin, also the
@@ -105,6 +176,71 @@ check (default in packaged builds since 0.9.10; opt out via
   `videorc-releases/updates/...` (where nothing reads them) while the upload still
   reports success. If your `.env` endpoint has the bucket suffix, fix it there or
   override per-run (Step 3 below).
+
+## Videorc Camera (plan 214)
+
+The signed build embeds the Videorc Camera system extension
+(`apps/desktop/camera-extension/`) when `VIDEORC_MACOS_PROFILE_APP` is set:
+the one Developer ID profile, for the app (the extension embeds none, spike
+P0a). The secret, how to renew the profile when the Developer ID certificate
+is renewed (next: 2027-02-01), the macOS approval path and what the signed app
+looks like are in
+[macos-signing.md, "Videorc Camera"](macos-signing.md#videorc-camera-plan-214).
+What the release path checks:
+
+- `release:preflight:macos` requires `VIDEORC_MACOS_PROFILE_APP` and fails on
+  the retired `VIDEORC_MACOS_PROFILE_CAMERA` when it is still set.
+- `package:preflight:macos` requires the built extension
+  (`pnpm build:camera-extension`, part of `package:backend:macos`) when
+  the profile is set, and prints `Videorc Camera skipped: ...` when not.
+- The packaging hook checks the profile (team, App ID, the restricted key,
+  expiry, and that it embeds the certificate signing the build) and logs
+  `Videorc Camera embedded at
+  Contents/Library/SystemExtensions/dev.theorcdev.videorc.camera.systemextension (<version>)`.
+  A release log that says `Videorc Camera skipped` is not a release.
+- `release:validate:macos` fails a release that lacks the extension, its
+  signature, its exact two entitlements, `SYSX`, the app's embedded profile or
+  the restricted keys on the app, and fails if the extension embeds a profile,
+  if the bundle holds more than the app's one profile, or if any other binary
+  (bare tools, helpers, crashpad, ShipIt) shows anything but the five inherit
+  keys (the lines are listed in macos-signing.md). `check:packaged-app` fails a
+  Developer ID build that lacks any part of it and repeats the shape checks.
+- The acceptance gate for the camera is plan 214 F2 on the lab Mac: the
+  approval flow in System Settings (General → Login Items & Extensions →
+  Camera Extensions), Meet, Zoom, FaceTime, an update that replaces the
+  extension without re-approval or a reboot, and delete-the-app uninstalling it.
+
+Rollback: a build without the profile never passes validation; a shipped
+camera problem rolls forward with a higher version like any other. Shipping
+without the camera is a reviewed PR that removes the hook, the entitlements
+split and the validator checks together, never an unset secret.
+
+## Redeploying videorc-web production
+
+Every "redeploy" in this runbook and in [../distribution.md](../distribution.md)
+means this. Use it after you change a videorc-web production env var, such as
+`VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY`,
+`VIDEORC_DOWNLOAD_MANIFEST_OBJECT_KEY` or `VIDEORC_DOWNLOAD_STORAGE_PRIMARY`:
+
+```sh
+pnpm release:web:redeploy   # rebuild production from the GitHub build of videorc-web main, then check it
+pnpm release:web:check      # PASS only when www.videorc.com serves that build
+```
+
+Never run `vercel deploy --prod` or `vercel --prod` from a videorc-web
+checkout. Never `vercel redeploy` whatever production serves now. A CLI deploy
+ships the checkout's files, however long ago it last pulled `main`. On
+2026-11-05 and 2026-11-06, Linux alpha steps deployed this way from a checkout
+last pulled on 2026-10-10, and the 0.20.3 Linux step redeployed that build.
+Production lost 24 merged web PRs, among them the X chat relay fix
+(videorc-web#104). X chat then showed "reconnecting" with HTTP 400
+`x-chat-broadcast-invalid` on every desktop version. `release:web:check` fails
+such a deployment: it follows redeploys back to the first build and requires a
+GitHub build of the current `main`.
+
+If `release:web:redeploy` finds no READY GitHub build of `main`, Vercel's git
+deployment of `main` is still building or has failed. Wait for it or fix it.
+Never deploy a local checkout instead.
 
 ## Storage origins
 
@@ -184,7 +320,8 @@ git commit -am "Release: bump desktop to 0.9.1"
 
 # 2. Build + sign + notarize + staple, WITH the update feed, + write release.json.
 #    (dist:desktop:release = the signed build incl. the zip/latest-mac.yml feed,
-#    unlike dist:desktop:signed which is dmg-only.) Slow: rebuilds backend+ffmpeg.
+#    unlike dist:desktop:signed which is dmg-only.) Reuses vendor/ffmpeg/current
+#    and target/ when they are already valid; see "macOS FFmpeg and Rust reuse".
 export APPLE_ID=…  APPLE_APP_SPECIFIC_PASSWORD=…
 pnpm dist:desktop:release
 
@@ -215,11 +352,16 @@ Newsletter: `pnpm changelog:email <releaseId>` renders the entry to
 email-ready HTML + plaintext under `dist/changelog/email/` (sending is manual —
 no ESP is wired yet).
 
-Discord announcement: after the feed is verified, `pnpm release:notify:discord`
-posts a short "what's new" (release title + up to 4 changelog highlights) to the
-Videorc Discord channel. `-- --dry-run` previews without posting; a releaseId
-argument re-announces an older release. The webhook is a post-anywhere
-credential and this repo is PUBLIC, so it is **never committed** — it lives in
+Discord announcement: after the macOS feed is verified, preview with
+`pnpm release:notify:discord <releaseId> --dry-run`, then send with
+`pnpm release:notify:discord <releaseId>`. The post is a short "what's new"
+(release title + up to 4 changelog highlights). A releaseId argument
+re-announces an older release. This is the macOS Beta post. After Windows
+public promotion, send that platform's Alpha entry the same way. After the
+Linux download is public, send the Linux Alpha entry the same way. If one
+Alpha entry names both Windows and Linux, send that post only when every
+named platform is publicly live. The webhook is a post-anywhere credential
+and this repo is PUBLIC, so it is **never committed** — it lives in
 `~/.videorc-release.env` as `VIDEORC_DISCORD_RELEASE_WEBHOOK` (gitignored,
 already sourced by the build); the script refuses to run without it and never
 echoes the URL.
@@ -746,6 +888,9 @@ ever changes again, update `publish.url`, `videorc-web-links.ts`, and the Rust
   presigned URL and is intentionally cached `max-age=60`. Do not restore a long /
   `immutable` cache, or the CDN serves an expired redirect (403). (videorc-web
   `lib/updates-route.ts`.)
+- **Web redeploys build GitHub `main`, never a checkout.** Use
+  `pnpm release:web:redeploy`, then confirm `pnpm release:web:check` PASS (see
+  "Redeploying videorc-web production").
 - **Signed builds only** — unsigned/ad-hoc builds won't self-update.
 - **arm64 only** — `latest-mac.yml` is arm64; Intel Macs are not served or
   updated. Add x64/universal before claiming Intel support.
@@ -756,8 +901,12 @@ ever changes again, update `publish.url`, `videorc-web-links.ts`, and the Rust
 
 Fail closed instead of mutating a bad release — see "Beta Download Rollback" in
 [../distribution.md](../distribution.md): set
-`VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` or repoint the manifest and redeploy, and
+`VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` or repoint the manifest and redeploy
+(`pnpm release:web:redeploy`), and
 cut a `-beta.N+1` rather than overwriting. For the feed, publish a corrected build
 with a **higher** version; the bad one stops being offered once a higher version
 exists. (The flat `updates/macos/` prefix is overwritten each release, so the
-feed always reflects the latest upload.)
+feed always reflects the latest upload.) Videorc Camera (plan 214): a build that
+lacks the app's provisioning profile fails the validator and never ships; a camera
+that misbehaves in a shipped Beta rolls forward the same way, and the next
+activation replaces the installed extension.

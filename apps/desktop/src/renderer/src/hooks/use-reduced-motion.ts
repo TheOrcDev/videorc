@@ -27,7 +27,7 @@ export const useReducedMotion = (): boolean =>
   useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
 
 /**
- * The behaviour for a script-driven scroll (plan 174 S1.8, J1-23): smooth,
+ * The behaviour for a script-driven scroll: smooth,
  * unless the user asked the system to reduce motion. CSS scroll-behavior
  * already collapses under reduced motion; `scrollIntoView` and `scrollTo`
  * calls pass this instead of a bare 'smooth'.

@@ -2,6 +2,7 @@ import { CheckIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { MediaCard } from '@/components/media-card'
+import { Badge } from '@/components/ui/badge'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { cn } from '@/lib/utils'
 
@@ -9,9 +10,13 @@ import { cn } from '@/lib/utils'
  * One scene card (plan 174 S3.3, B-20) for every scene the streamer switches
  * to: a built-in scene, a saved scene and a vertical-stream scene. It is
  * `MediaCard`'s look: the layout thumbnail, then the name on up to two lines
- * (V-4: never "Screen …" at 1,280 px), then one quiet meta line (a shortcut,
- * "Modified", "Resolve sources"). The scene in use has one marker on every
- * gallery: the card's selected look, a check, and `aria-pressed`.
+ * (V-4: never "Screen …" at 1,280 px) after the app's icon for a scene made
+ * for an app (plan 210 D6), then one quiet meta line (a shortcut, "Resolve
+ * sources", why it can't go on). The scene in use has one marker on every
+ * gallery: the card's selected look, a check, and `aria-pressed`. The check
+ * sits on the picture's corner, never beside the name: there it took 20 px
+ * of the name's line, and "Screen + camera" broke into three lines in an
+ * 84 px vertical tile, cut to "Screen +" (#1083).
  *
  * Why a card can't be chosen: a reason the cards share is the gallery's one
  * line under the grid (`sceneGalleryReason`); a card's own reason
@@ -20,6 +25,7 @@ import { cn } from '@/lib/utils'
  */
 export function SceneCard({
   thumb,
+  icon,
   label,
   selected = false,
   pressed = selected,
@@ -33,6 +39,8 @@ export function SceneCard({
 }: {
   /** The layout diagram (`LayoutThumb`). */
   thumb: ReactNode
+  /** The app's icon before the name (a scene made for an app). */
+  icon?: ReactNode
   /** The scene's name, or "Switching…" while it applies. */
   label: string
   /** The scene in use: the card's selected look and the check. */
@@ -70,27 +78,32 @@ export function SceneCard({
           onClick={onSelect}
         >
           {thumb}
-          <span className="flex min-w-0 items-start justify-between gap-1.5">
+          <span className="flex min-w-0 items-start gap-1.5">
+            {icon ? <span className="mt-px flex shrink-0">{icon}</span> : null}
             <span
               className={cn(
-                'line-clamp-2 min-w-0 font-medium break-words',
+                'line-clamp-2 min-w-0 flex-1 font-medium break-words',
                 size === 'sm' ? 'text-xs' : 'text-sm'
               )}
               data-slot="scene-card-label"
             >
               {label}
             </span>
-            {selected ? (
-              <CheckIcon
-                aria-hidden
-                className={cn('mt-0.5 shrink-0', size === 'sm' ? 'size-3.5' : 'size-4')}
-                weight="bold"
-              />
-            ) : null}
           </span>
           {meta ? <span className="text-xs text-muted-foreground">{meta}</span> : null}
         </button>
       </DisabledReason>
+      {/* The check mirrors the menu on the other corner. It takes no click,
+          so a click on it selects the card under it. */}
+      {selected ? (
+        <Badge
+          aria-hidden
+          className="pointer-events-none absolute top-1 left-1 px-1"
+          data-testid="scene-card-check"
+        >
+          <CheckIcon weight="bold" />
+        </Badge>
+      ) : null}
       {menu ? <div className="absolute top-1 right-1">{menu}</div> : null}
     </MediaCard>
   )

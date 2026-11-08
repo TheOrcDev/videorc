@@ -91,7 +91,8 @@ const COPY_RULES: ReadonlyArray<{ id: string; pattern: RegExp }> = [
   { id: 'Customize', pattern: /\bCustomize\b/ },
   { id: 'Command Palette', pattern: /\bCommand Palette\b/i },
   { id: 'receive-only', pattern: /\breceive-only\b/i },
-  { id: '...', pattern: /\.\.\./ }
+  { id: '...', pattern: /\.\.\./ },
+  { id: 'session source transactions', pattern: /session source transac(?:tions)/i }
 ]
 
 /** JSX attributes a reader sees or hears; any other attribute's string is code. */
@@ -238,17 +239,23 @@ const CAPITALIZED_NAMES = new Set([
   'Still',
   'Auto',
   'Check',
+  // Plan 213 J1: "Use Sign in" names the connection choice, "Sign in".
+  'Sign',
   'YouTube',
   'Twitch',
   'Kick',
   'TikTok',
   'Instagram',
   'Facebook',
+  // Plan 187: "View in Discord".
+  'Discord',
   'Google',
   'OBS',
   'Finder',
   'macOS',
-  'Windows'
+  'Windows',
+  // Plan 214 D2: "Videorc Camera", the camera other apps see, is a name.
+  'Camera'
 ])
 
 /**

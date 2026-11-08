@@ -1,3 +1,4 @@
+import { CAMERA_LOOK_FFMPEG_FILTERS } from './camera-look-ffmpeg-filters.mjs'
 import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
 
 const AUTOBUILD_DOWNLOAD =
@@ -15,9 +16,13 @@ export const REQUIRED_LINUX_FFMPEG_CONFIGURATION = [
 
 export const REQUIRED_LINUX_H264_ENCODERS = ['h264_vaapi', 'libopenh264']
 
-/** The filters Clean cut renders with (plan 119 S13), plus `hwupload` for the
- * VAAPI arm. Required from `ffmpeg -filters`; a missing listing fails closed. */
-export const REQUIRED_LINUX_FFMPEG_FILTERS = [...CLEAN_CUT_FFMPEG_FILTERS, 'hwupload']
+/** The filters Clean cut renders with (plan 119 S13), the full-range YUV
+ * lookup-table chain the legacy recording path grades the camera look with
+ * (plan 213 I; never the GPL-only `eq`), plus `hwupload` for the VAAPI arm.
+ * Required from `ffmpeg -filters`; a missing listing fails closed. */
+export const REQUIRED_LINUX_FFMPEG_FILTERS = [
+  ...new Set([...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS, 'hwupload'])
+]
 
 export function lastDayOfMonth(year, month) {
   return new Date(Date.UTC(year, month, 0)).getUTCDate()
@@ -68,7 +73,31 @@ function configurationLine(versionOutput) {
     .find((line) => line.startsWith('configuration:'))
 }
 
-export function assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, filtersOutput }) {
+/** The replay buffer (plan 181): a rolling ring of MPEG-TS segments from the
+ * `segment` muxer, stream-copied into an MP4 through the `concat` demuxer;
+ * the MP4 muxer inserts `aac_adtstoasc` itself. Required from `-muxers`,
+ * `-demuxers` and `-bsfs`; a missing listing fails closed like `-filters`. */
+export const REQUIRED_LINUX_FFMPEG_MUXERS = ['segment', 'mpegts', 'mp4']
+export const REQUIRED_LINUX_FFMPEG_DEMUXERS = ['concat', 'mpegts']
+export const REQUIRED_LINUX_FFMPEG_BITSTREAM_FILTERS = ['aac_adtstoasc']
+
+function listedNames(output) {
+  // `-muxers` / `-demuxers` print one component per line, flags first; a
+  // comma-joined alias list (`stream_segment,ssegment`) is one component.
+  return String(output ?? '')
+    .split(/\r?\n/)
+    .flatMap((line) => line.trim().split(/\s+/).slice(0, 2))
+    .flatMap((token) => token.split(','))
+}
+
+export function assessLinuxFfmpegCapabilities({
+  versionOutput,
+  encodersOutput,
+  filtersOutput,
+  muxersOutput,
+  demuxersOutput,
+  bitstreamFiltersOutput
+}) {
   const problems = []
   const configuration = configurationLine(versionOutput)
   if (!configuration) {
@@ -94,6 +123,21 @@ export function assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, f
     const filters = filtersOutput.split(/\s+/)
     for (const filter of REQUIRED_LINUX_FFMPEG_FILTERS) {
       if (!filters.includes(filter)) problems.push(`missing filter ${filter}`)
+    }
+  }
+
+  for (const [flag, output, required, noun] of [
+    ['-muxers', muxersOutput, REQUIRED_LINUX_FFMPEG_MUXERS, 'muxer'],
+    ['-demuxers', demuxersOutput, REQUIRED_LINUX_FFMPEG_DEMUXERS, 'demuxer'],
+    ['-bsfs', bitstreamFiltersOutput, REQUIRED_LINUX_FFMPEG_BITSTREAM_FILTERS, 'bitstream filter']
+  ]) {
+    if (typeof output !== 'string') {
+      problems.push(`ffmpeg ${flag} output was not provided`)
+      continue
+    }
+    const names = listedNames(output)
+    for (const name of required) {
+      if (!names.includes(name)) problems.push(`missing ${noun} ${name}`)
     }
   }
 

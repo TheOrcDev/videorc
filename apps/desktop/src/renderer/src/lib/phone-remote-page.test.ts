@@ -3,6 +3,7 @@ import { Window, type HTMLButtonElement, type Node } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type State = {
+  screenHidden?: boolean
   sessionState: string
   sessionActive: boolean
   streamEnabled: boolean
@@ -10,6 +11,8 @@ type State = {
   micMuted: boolean
   systemAudioAvailable: boolean
   systemAudioOn: boolean
+  savedScenes?: Array<{ id: string; name: string }>
+  activeSavedSceneId?: string | null
   layoutPreset: string
 }
 type FakeClient = {
@@ -20,7 +23,13 @@ type FakeClient = {
   setStatus: (status: string) => void
 }
 
-const remote = vi.hoisted(() => ({ client: null as FakeClient | null, state: {} as State }))
+const remote = vi.hoisted(() => ({
+  client: null as FakeClient | null,
+  state: {} as State,
+  banners: [] as Array<{ id: string; name: string; shown: boolean }>,
+  sounds: [] as Array<{ id: string; name: string; playing: boolean }>,
+  describeCalls: 0
+}))
 
 // Load the shipping app module unchanged, replacing only its transport. Fragment
 // parsing remains real; no renderer, socket, backend session or media is started.
@@ -60,11 +69,14 @@ vi.mock(
         }
 
         async describe(): Promise<unknown> {
+          remote.describeCalls += 1
           return {
             describe: {
               layoutPresets: ['screen-only', 'vertical-split'],
               layoutLabels: { 'screen-only': 'Screen only', 'vertical-split': 'Vertical split' },
-              takeovers: []
+              takeovers: [],
+              banners: remote.banners,
+              sounds: remote.sounds
             },
             state: remote.state
           }
@@ -114,6 +126,9 @@ beforeEach(async () => {
   vi.resetModules()
   vi.useFakeTimers()
   remote.client = null
+  remote.banners = []
+  remote.sounds = []
+  remote.describeCalls = 0
   remote.state = {
     sessionState: 'recording',
     sessionActive: true,
@@ -408,7 +423,26 @@ describe('shipping phone remote states and semantics (plan 174 S3.20)', () => {
     const mic = keyNamed('Mic muted')
     expect(mic.dataset.on).toBe('false')
     expect(mic.dataset.accent).toBeUndefined()
+    expect(mic.dataset.lit).toBeUndefined()
     expect(mic.querySelector('.hint')!.textContent).toBe('Tap to unmute')
+  })
+
+  it('wears the desktop chrome: Record an LED, Go Live the primary, stop the lit LED (plan 208 D8)', () => {
+    const lit = (key: HTMLButtonElement) => key.dataset.lit !== undefined
+    expect(sessionButton().dataset.accent).toBe('record')
+    expect(lit(sessionButton())).toBe(true)
+    stateUpdate({ sessionActive: false, sessionState: 'idle' })
+    expect(keyNamed('Record').dataset.accent).toBe('record')
+    expect(lit(keyNamed('Record'))).toBe(false)
+    stateUpdate({ streamEnabled: true })
+    expect(keyNamed('Go Live').dataset.accent).toBe('primary')
+    expect(lit(keyNamed('Go Live'))).toBe(false)
+    stateUpdate({ sessionActive: true, sessionState: 'streaming' })
+    expect(sessionButton().dataset.accent).toBe('record')
+    expect(lit(sessionButton())).toBe(true)
+    // Nothing else is ever an LED: a scene that is on wears the plate.
+    expect(keyNamed('Screen only').dataset.accent).toBeUndefined()
+    expect(lit(keyNamed('Screen only'))).toBe(false)
   })
 
   it('marks keys that stay on with aria-pressed (I-12)', () => {
@@ -476,4 +510,119 @@ describe('shipping phone remote states and semantics (plan 174 S3.20)', () => {
     expect($('gate-title').textContent).toBe('Pair this phone')
     expect(page.location.hash).toBe('')
   })
+})
+
+describe('shipping phone remote banners (plan 186 S7)', () => {
+  const bannerKeys = () =>
+    [...page.document.querySelectorAll<HTMLButtonElement>('#deck-banners .key')].map((key) => ({
+      name: key.querySelector('.name')!.textContent,
+      hint: key.querySelector('.hint')?.textContent ?? null,
+      pressed: key.getAttribute('aria-pressed')
+    }))
+  // Let the describe re-read that follows a state event land.
+  const settle = async () => {
+    for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  }
+
+  it('lists banners by name, shows or hides each by id, and follows describe after state', async () => {
+    expect((page.document.getElementById('banners-label') as unknown as HTMLElement).hidden).toBe(
+      true
+    )
+    remote.banners = [
+      { id: 'sponsor', name: 'Sponsor', shown: true },
+      { id: 'follow', name: 'Follow me', shown: false }
+    ]
+    // A banner change on the desktop arrives as remote.state; the page re-reads describe.
+    const before = remote.describeCalls
+    stateUpdate({})
+    await settle()
+    expect(remote.describeCalls).toBeGreaterThan(before)
+    expect((page.document.getElementById('banners-label') as unknown as HTMLElement).hidden).toBe(
+      false
+    )
+    expect(bannerKeys()).toEqual([
+      { name: 'Sponsor', hint: 'Showing. Tap to hide', pressed: 'true' },
+      { name: 'Follow me', hint: null, pressed: 'false' }
+    ])
+    const keys = page.document.querySelectorAll<HTMLButtonElement>('#deck-banners .key')
+    keys[0].click()
+    keys[1].click()
+    expect(client().intent.mock.calls.map(([intent]) => intent)).toEqual([
+      { kind: 'bannerHide', bannerId: 'sponsor' },
+      { kind: 'bannerShow', bannerId: 'follow' }
+    ])
+    // Names only: no image or path ever reaches the page.
+    expect(page.document.querySelector('#deck-banners img')).toBeNull()
+  })
+})
+
+describe('shipping phone remote sounds (plan 189 S10)', () => {
+  const soundKeys = () =>
+    [...page.document.querySelectorAll<HTMLButtonElement>('#deck-sounds .key')].map((key) => ({
+      name: key.querySelector('.name')!.textContent,
+      hint: key.querySelector('.hint')?.textContent ?? null,
+      disabled: key.disabled
+    }))
+  const settle = async () => {
+    for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  }
+
+  it('lists sounds by name, presses each by id, and stops them all', async () => {
+    expect((page.document.getElementById('sounds-label') as unknown as HTMLElement).hidden).toBe(
+      true
+    )
+    remote.sounds = [
+      { id: 'airhorn', name: 'Airhorn', playing: false },
+      { id: 'applause', name: 'Applause', playing: true }
+    ]
+    stateUpdate({})
+    await settle()
+    expect((page.document.getElementById('sounds-label') as unknown as HTMLElement).hidden).toBe(
+      false
+    )
+    expect(soundKeys()).toEqual([
+      { name: 'Airhorn', hint: null, disabled: false },
+      { name: 'Applause', hint: 'Playing', disabled: false },
+      { name: 'Stop all sounds', hint: null, disabled: false }
+    ])
+    const keys = page.document.querySelectorAll<HTMLButtonElement>('#deck-sounds .key')
+    keys[0].click()
+    keys[2].click()
+    expect(client().intent.mock.calls.map(([intent]) => intent)).toEqual([
+      { kind: 'soundPlay', soundId: 'airhorn' },
+      { kind: 'soundStop' }
+    ])
+    // Names only: no file or path ever reaches the page.
+    expect(page.document.querySelector('#deck-sounds')?.innerHTML).not.toMatch(/\.wav|src=|href=/)
+
+    // Nothing plays: Stop all sounds waits.
+    remote.sounds = [{ id: 'airhorn', name: 'Airhorn', playing: false }]
+    stateUpdate({})
+    await settle()
+    expect(soundKeys().at(-1)).toEqual({ name: 'Stop all sounds', hint: null, disabled: true })
+  })
+})
+
+it('shows saved scenes above layouts and sends their ids, marking confirmed state', () => {
+  stateUpdate({
+    savedScenes: [{ id: 'figma', name: 'Figma <script>' }],
+    activeSavedSceneId: 'figma'
+  })
+  const keys = [...page.document.querySelectorAll<HTMLButtonElement>('#deck-scenes .key')]
+  expect(keys[0].querySelector('.name')!.textContent).toBe('Figma <script>')
+  expect(keys[0].getAttribute('aria-pressed')).toBe('true')
+  expect(keys[1].getAttribute('aria-pressed')).toBe('false')
+  keys[0].click()
+  expect(client().intent).toHaveBeenCalledWith({ kind: 'sceneApply', sceneId: 'figma' })
+})
+
+it('the phone privacy key toggles and follows confirmed hidden state', () => {
+  const button = () => page.document.querySelector<HTMLButtonElement>('#deck-takeovers button')!
+  expect(button().textContent).toContain('Hide screen')
+  button().click()
+  expect(client().intent).toHaveBeenLastCalledWith({ kind: 'screenHideToggle' })
+  remote.state.screenHidden = true
+  client().emit('state', remote.state)
+  expect(button().textContent).toContain('Screen hidden')
+  expect(button().getAttribute('aria-pressed')).toBe('true')
 })

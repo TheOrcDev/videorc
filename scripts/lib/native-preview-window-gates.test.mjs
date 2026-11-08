@@ -3,7 +3,8 @@ import test from 'node:test'
 
 import {
   nativePreviewSurfaceStatusReady,
-  previewWindowSurfaceReady
+  previewWindowSurfaceReady,
+  windowsD3d11SurfaceReady
 } from './native-preview-window-gates.mjs'
 
 const windowsOptions = {
@@ -208,4 +209,43 @@ test('native Windows D3D11 readiness requires the canonical presenter triple and
   assert.equal(previewWindowSurfaceReady(evidence, options), false)
   evidence.surfaceStatus.nativePreviewHostKind = 'proof-surface'
   assert.equal(previewWindowSurfaceReady(evidence, options), false)
+})
+
+test('Windows D3D11 surface wait needs backend presents and the Electron host claim', () => {
+  const evidence = () => ({
+    backendStatus: {
+      state: 'live',
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      targetFps: 60,
+      framesRendered: 40,
+      framePollingSuppressed: true,
+      windowsD3d11Presenter: { firstPresentSucceeded: true, sourceLive: true }
+    },
+    hostStatus: {
+      state: 'live',
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      nativePreviewHostKind: 'backend-d3d11-presenter',
+      firstFrameContract: 'met',
+      framePollingSuppressed: true
+    }
+  })
+
+  assert.equal(windowsD3d11SurfaceReady(evidence(), { previousFrames: 39 }), true)
+  assert.equal(windowsD3d11SurfaceReady(evidence(), { previousFrames: 40 }), false)
+  for (const mutate of [
+    // The backend never reports the host kind or first-frame contract itself.
+    (value) => delete value.hostStatus,
+    (value) => (value.hostStatus.nativePreviewHostKind = 'proof-surface'),
+    (value) => (value.hostStatus.firstFrameContract = 'pending'),
+    (value) => (value.hostStatus.framePollingSuppressed = false),
+    (value) => (value.backendStatus.windowsD3d11Presenter.sourceLive = false),
+    (value) => (value.backendStatus.windowsD3d11Presenter.firstPresentSucceeded = false),
+    (value) => (value.backendStatus.backing = 'electron-browser-window')
+  ]) {
+    const value = evidence()
+    mutate(value)
+    assert.equal(windowsD3d11SurfaceReady(value), false)
+  }
 })

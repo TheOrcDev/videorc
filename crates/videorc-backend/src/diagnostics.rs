@@ -616,7 +616,19 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         stream_measured_bitrate_min_kbps: None,
         stream_measured_bitrate_max_kbps: None,
         stream_output_total_bytes: 0,
+        recording_measured_bitrate_kbps: None,
+        recording_output_total_bytes: 0,
         stream_duplicated_frames: 0,
+        stream_delivery: None,
+        stream_leg_overflows: None,
+        stream_destination_count: None,
+        stream_destination_platforms: None,
+        microphone_sync_offset_ms: None,
+        encoder_bridge_stream_video_toolbox_fifo_write_p95_ms: None,
+        encoder_bridge_stream_queue_age_p95_ms: None,
+        encoder_bridge_stream_queue_depth_trips: 0,
+        encoder_bridge_stream_queue_age_trips: 0,
+        encoder_bridge_stream_queue_last_trip: None,
         encoder_bridge_active_video_toolbox_output_encoders: 0,
         encoder_bridge_recording_video_toolbox_output_frames: 0,
         encoder_bridge_recording_video_toolbox_output_bytes: 0,
@@ -861,6 +873,7 @@ pub fn apply_runtime_diagnostics_snapshot(
     )))
 }
 
+#[cfg_attr(target_os = "windows", allow(unused_mut))]
 fn apply_metal_retention_snapshot(mut stats: DiagnosticStats) -> DiagnosticStats {
     #[cfg(target_os = "macos")]
     {
@@ -1274,10 +1287,51 @@ pub fn apply_active_scene_revision(
     stats
 }
 
+/// Which output FFmpeg's progress `bitrate=` / `total_size=` describe: its
+/// first output (plan 218 S2). With a recording that is the recording file;
+/// without one the first output is an RTMP leg and FFmpeg prints `N/A`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfmpegProgressOutput {
+    Stream,
+    Recording,
+}
+
+#[cfg(test)]
 pub fn apply_stream_health(
+    stats: DiagnosticStats,
+    health: &StreamHealth,
+    target_fps: u32,
+) -> DiagnosticStats {
+    apply_stream_health_from(stats, health, target_fps, FfmpegProgressOutput::Stream)
+}
+
+/// Folds the stream's measured video bitrate into the diagnostics, keeping
+/// the session's non-zero minimum and maximum.
+pub fn apply_measured_stream_bitrate(
+    mut stats: DiagnosticStats,
+    bitrate_kbps: f64,
+) -> DiagnosticStats {
+    stats.stream_measured_bitrate_kbps = Some(bitrate_kbps);
+    if bitrate_kbps > 0.0 {
+        stats.stream_measured_bitrate_min_kbps = Some(
+            stats
+                .stream_measured_bitrate_min_kbps
+                .map_or(bitrate_kbps, |minimum| minimum.min(bitrate_kbps)),
+        );
+        stats.stream_measured_bitrate_max_kbps = Some(
+            stats
+                .stream_measured_bitrate_max_kbps
+                .map_or(bitrate_kbps, |maximum| maximum.max(bitrate_kbps)),
+        );
+    }
+    stats
+}
+
+pub fn apply_stream_health_from(
     mut stats: DiagnosticStats,
     health: &StreamHealth,
     target_fps: u32,
+    progress_output: FfmpegProgressOutput,
 ) -> DiagnosticStats {
     let new_session = stats.session_id.as_deref() != Some(health.session_id.as_str());
     if new_session {
@@ -1285,6 +1339,8 @@ pub fn apply_stream_health(
         stats.stream_measured_bitrate_min_kbps = None;
         stats.stream_measured_bitrate_max_kbps = None;
         stats.stream_output_total_bytes = 0;
+        stats.recording_measured_bitrate_kbps = None;
+        stats.recording_output_total_bytes = 0;
         stats.stream_duplicated_frames = 0;
     }
     stats.session_id = Some(health.session_id.clone());
@@ -1293,30 +1349,38 @@ pub fn apply_stream_health(
     // either the capture or render stage. Those fields remain owned by their
     // stage-specific samplers; aliasing output cadence into both makes
     // attribution report healthy media stages when capture/render are unknown.
+    // The bottleneck reads drops since the last sample (#981): the health
+    // counter is a session total, and a drop during one reconnect must not
+    // name the encoder for the rest of the stream.
+    let dropped_frames_since_last_sample = health.dropped_frames.map_or(0, |dropped_frames| {
+        let previous = if new_session { 0 } else { stats.dropped_frames };
+        dropped_frames.saturating_sub(previous)
+    });
     if let Some(dropped_frames) = health.dropped_frames {
         stats.dropped_frames = dropped_frames;
         stats.skipped_frames = dropped_frames;
     }
-    if let Some(bitrate_kbps) = health
+    let bitrate_kbps = health
         .bitrate_kbps
-        .filter(|bitrate_kbps| bitrate_kbps.is_finite() && *bitrate_kbps >= 0.0)
-    {
-        stats.stream_measured_bitrate_kbps = Some(bitrate_kbps);
-        if bitrate_kbps > 0.0 {
-            stats.stream_measured_bitrate_min_kbps = Some(
-                stats
-                    .stream_measured_bitrate_min_kbps
-                    .map_or(bitrate_kbps, |minimum| minimum.min(bitrate_kbps)),
-            );
-            stats.stream_measured_bitrate_max_kbps = Some(
-                stats
-                    .stream_measured_bitrate_max_kbps
-                    .map_or(bitrate_kbps, |maximum| maximum.max(bitrate_kbps)),
-            );
+        .filter(|bitrate_kbps| bitrate_kbps.is_finite() && *bitrate_kbps >= 0.0);
+    match progress_output {
+        FfmpegProgressOutput::Stream => {
+            if let Some(bitrate_kbps) = bitrate_kbps {
+                stats = apply_measured_stream_bitrate(stats, bitrate_kbps);
+            }
+            if let Some(total_bytes) = health.total_bytes {
+                stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+            }
         }
-    }
-    if let Some(total_bytes) = health.total_bytes {
-        stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+        FfmpegProgressOutput::Recording => {
+            if bitrate_kbps.is_some() {
+                stats.recording_measured_bitrate_kbps = bitrate_kbps;
+            }
+            if let Some(total_bytes) = health.total_bytes {
+                stats.recording_output_total_bytes =
+                    stats.recording_output_total_bytes.max(total_bytes);
+            }
+        }
     }
     if let Some(duplicated_frames) = health.duplicated_frames {
         stats.stream_duplicated_frames = stats.stream_duplicated_frames.max(duplicated_frames);
@@ -1328,7 +1392,7 @@ pub fn apply_stream_health(
         stats.capture_fps,
         stats.render_fps,
         stats.encoder_speed,
-        stats.dropped_frames,
+        dropped_frames_since_last_sample,
         stats.mic_dropped_frames,
         target_fps,
         stats.device_disconnected,
@@ -1429,6 +1493,17 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub stream_video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
     pub recording_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
     pub stream_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    /// Plan 218 S2: the stream encoder's own figures. `None`/`0` where this
+    /// emission does not come from the writer that feeds the stream, so the
+    /// previous stream values are kept.
+    pub stream_measured_bitrate_kbps: Option<f64>,
+    pub stream_output_total_bytes: Option<u64>,
+    pub stream_video_toolbox_fifo_write_p95_ms: Option<f64>,
+    pub stream_queue_age_p95_ms: Option<f64>,
+    pub stream_queue_depth_trips: Option<u64>,
+    pub stream_queue_age_trips: Option<u64>,
+    pub stream_queue_last_trip: Option<String>,
+    pub stream_delivery: Option<crate::protocol::StreamDeliveryState>,
     pub error: Option<String>,
 }
 
@@ -1470,6 +1545,11 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_recording_role_diagnostics = bridge.recording_role_diagnostics;
     stats.encoder_bridge_stream_role_diagnostics = bridge.stream_role_diagnostics;
     stats.encoder_bridge_input_fps = input_fps;
+    // Drops since the last bridge sample (#981): the snapshot carries the
+    // session total, which must not read as a current encoder problem.
+    let dropped_frames_since_last_sample = bridge
+        .dropped_frames
+        .saturating_sub(stats.encoder_bridge_dropped_frames);
     stats.encoder_bridge_dropped_frames = bridge.dropped_frames;
     stats.encoder_bridge_recording_dropped_frames = bridge.recording_dropped_frames;
     stats.encoder_bridge_stream_dropped_frames = bridge.stream_dropped_frames;
@@ -1545,6 +1625,36 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_schedule_skipped_ms = bridge.schedule_skipped_ms;
     stats.encoder_bridge_recording_input_fps = recording_input_fps;
     stats.encoder_bridge_stream_input_fps = stream_input_fps;
+    // Plan 218 S2: the stream's bitrate is what its encoder produced. A
+    // recording-role emission in a split session carries none and keeps the
+    // stream writer's last figures.
+    if let Some(bitrate_kbps) =
+        finite_non_negative_encoder_stat(bridge.stream_measured_bitrate_kbps)
+    {
+        stats = apply_measured_stream_bitrate(stats, bitrate_kbps);
+    }
+    if let Some(total_bytes) = bridge.stream_output_total_bytes {
+        stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+    }
+    if bridge.stream_video_toolbox_fifo_write_p95_ms.is_some() {
+        stats.encoder_bridge_stream_video_toolbox_fifo_write_p95_ms =
+            bridge.stream_video_toolbox_fifo_write_p95_ms;
+    }
+    if bridge.stream_queue_age_p95_ms.is_some() {
+        stats.encoder_bridge_stream_queue_age_p95_ms = bridge.stream_queue_age_p95_ms;
+    }
+    if let Some(trips) = bridge.stream_queue_depth_trips {
+        stats.encoder_bridge_stream_queue_depth_trips = trips;
+    }
+    if let Some(trips) = bridge.stream_queue_age_trips {
+        stats.encoder_bridge_stream_queue_age_trips = trips;
+    }
+    if bridge.stream_queue_last_trip.is_some() {
+        stats.encoder_bridge_stream_queue_last_trip = bridge.stream_queue_last_trip;
+    }
+    if bridge.stream_delivery.is_some() {
+        stats.stream_delivery = bridge.stream_delivery;
+    }
     stats.encoder_bridge_recording_queue_depth = bridge.recording_queue_depth;
     stats.encoder_bridge_recording_queue_oldest_frame_age_ms =
         bridge.recording_queue_oldest_frame_age_ms;
@@ -1580,7 +1690,7 @@ pub fn apply_encoder_bridge_stats(
         stats.capture_fps,
         stats.render_fps,
         stats.encoder_speed,
-        stats.dropped_frames,
+        dropped_frames_since_last_sample,
         stats.mic_dropped_frames,
         target_fps,
         stats.device_disconnected,
@@ -1638,6 +1748,11 @@ pub fn apply_preview_camera_source_stats(
 ) -> DiagnosticStats {
     stats.preview_camera_frame_age_ms = status.frame_age_ms;
     stats.preview_camera_source_fps = status.source_fps;
+    // Drops name the capture stage only while they grow (#981): the status
+    // carries a run total, and one old drop is not a current slowdown.
+    let dropped_frames_since_last_sample = status
+        .dropped_frames
+        .saturating_sub(stats.preview_camera_dropped_frames);
     stats.preview_camera_dropped_frames = status.dropped_frames;
     stats.preview_camera_state = Some(status.state.clone());
     stats.preview_camera_device_unique_id = status.device_unique_id.clone();
@@ -1650,7 +1765,7 @@ pub fn apply_preview_camera_source_stats(
     stats.preview_camera_selected_format_height = status.selected_format_height;
     stats.preview_camera_selected_format_min_fps = status.selected_format_min_fps;
     stats.preview_camera_selected_format_max_fps = status.selected_format_max_fps;
-    if status.dropped_frames > 0 {
+    if dropped_frames_since_last_sample > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
     stats.updated_at = Utc::now().to_rfc3339();
@@ -1734,6 +1849,11 @@ pub fn apply_preview_screen_source_stats(
 ) -> DiagnosticStats {
     stats.preview_screen_frame_age_ms = status.frame_age_ms;
     stats.preview_screen_source_fps = status.source_fps;
+    // Same rule as the camera (#981): only new drops name the capture stage.
+    // A static screen's idle callbacks are not drops (preview_screen.rs).
+    let dropped_frames_since_last_sample = status
+        .dropped_frames
+        .saturating_sub(stats.preview_screen_dropped_frames);
     stats.preview_screen_dropped_frames = status.dropped_frames;
     stats.preview_screen_message = status.message.clone();
     stats.preview_screen_native_width = status.native_width;
@@ -1744,7 +1864,7 @@ pub fn apply_preview_screen_source_stats(
     stats.preview_screen_actual_height = status.actual_height;
     stats.preview_screen_iosurface_available = status.iosurface_available;
     stats.preview_screen_d3d11_texture_available = status.d3d11_texture_available;
-    if status.dropped_frames > 0 {
+    if dropped_frames_since_last_sample > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
     stats.updated_at = Utc::now().to_rfc3339();
@@ -2174,11 +2294,16 @@ pub fn apply_system_audio_stats(
     stats
 }
 
+/// The slowest stage right now. `dropped_frames_since_last_sample` is the
+/// growth of the encoder's drop counter since the previous sample, never the
+/// session total (#981): a stuck total would name the encoder for the rest of
+/// the run after one drop. The cumulative view lives in
+/// `classify_recording_risk`, where a defect the file has taken on must stay.
 pub fn classify_bottleneck(
     capture_fps: Option<f64>,
     render_fps: Option<f64>,
     encoder_speed: Option<f64>,
-    dropped_frames: u64,
+    dropped_frames_since_last_sample: u64,
     mic_dropped_frames: u64,
     target_fps: u32,
     device_disconnected: bool,
@@ -2198,7 +2323,7 @@ pub fn classify_bottleneck(
     if render_fps.is_some_and(|fps| fps < f64::from(target_fps) * 0.9) {
         return DiagnosticBottleneck::Render;
     }
-    if dropped_frames > 0 {
+    if dropped_frames_since_last_sample > 0 {
         return DiagnosticBottleneck::Encoder;
     }
     if capture_fps.is_some() || render_fps.is_some() || encoder_speed.is_some() {
@@ -2294,6 +2419,22 @@ pub fn start_runtime_resource_sampler() {
 }
 
 fn collect_runtime_resource_snapshot() -> RuntimeResourceSnapshot {
+    let backend_pid = std::process::id();
+    // Plan 191: one `ps -axo` sample reads every process on the machine and costs
+    // ~40 ms of CPU, ~32 ms of it system time (measured), so forking it every second
+    // burned ~4% of a core for as long as the app was open. On macOS libproc reads
+    // the same rows for the backend's own process tree in ~35 µs, with `ps` kept as
+    // the fallback for any sample libproc cannot take. Every other platform keeps `ps`.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(rows) = collect_native_process_rows() {
+            return runtime_resource_snapshot_from_rows(&rows, backend_pid);
+        }
+    }
+    collect_ps_runtime_resource_snapshot(backend_pid)
+}
+
+fn collect_ps_runtime_resource_snapshot(backend_pid: u32) -> RuntimeResourceSnapshot {
     let output = Command::new("ps")
         .args(["-axo", "pid=,ppid=,rss=,comm="])
         .output();
@@ -2301,7 +2442,7 @@ fn collect_runtime_resource_snapshot() -> RuntimeResourceSnapshot {
         Ok(output) if output.status.success() => output,
         _ => return RuntimeResourceSnapshot::default(),
     };
-    parse_runtime_resource_snapshot(&String::from_utf8_lossy(&output.stdout), std::process::id())
+    parse_runtime_resource_snapshot(&String::from_utf8_lossy(&output.stdout), backend_pid)
 }
 
 #[derive(Debug)]
@@ -2317,10 +2458,19 @@ fn parse_runtime_resource_snapshot(output: &str, backend_pid: u32) -> RuntimeRes
         .lines()
         .filter_map(parse_process_sample_row)
         .collect::<Vec<_>>();
+    runtime_resource_snapshot_from_rows(&rows, backend_pid)
+}
+
+/// The one aggregation both collectors feed: the backend's own RSS, plus the FFmpeg
+/// and FFprobe processes anywhere in its descendant tree.
+fn runtime_resource_snapshot_from_rows(
+    rows: &[ProcessSampleRow],
+    backend_pid: u32,
+) -> RuntimeResourceSnapshot {
     let mut owned_pids = std::collections::HashSet::from([backend_pid]);
     loop {
         let previous_len = owned_pids.len();
-        for row in &rows {
+        for row in rows {
             if owned_pids.contains(&row.parent_pid) {
                 owned_pids.insert(row.pid);
             }
@@ -2366,6 +2516,129 @@ fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
         rss_kib,
         command,
     })
+}
+
+/// This process and its live descendants, read from libproc as the rows the `ps`
+/// collector parses: `rss_kib` is the resident size in KiB and `command` names the
+/// executable. `None` when libproc cannot read this process itself, so the sample
+/// falls back to `ps`.
+#[cfg(target_os = "macos")]
+fn collect_native_process_rows() -> Option<Vec<ProcessSampleRow>> {
+    let backend_pid = std::process::id();
+    let root = libc::pid_t::try_from(backend_pid).ok()?;
+    let mut rows = vec![ProcessSampleRow {
+        pid: backend_pid,
+        // SAFETY: getppid has no preconditions and cannot fail.
+        parent_pid: unsafe { libc::getppid() } as u32,
+        rss_kib: native_resident_size_bytes(root)? / 1024,
+        command: native_process_name(root)?,
+    }];
+    let mut visited = std::collections::HashSet::from([root]);
+    let mut parents = std::collections::VecDeque::from([root]);
+    while let Some(parent) = parents.pop_front() {
+        let children = match native_child_pids(parent) {
+            Some(children) => children,
+            // Without our own children every count would read zero: use `ps`.
+            None if parent == root => return None,
+            None => continue,
+        };
+        for child in children {
+            if !visited.insert(child) {
+                continue;
+            }
+            // A pid that exits mid-walk has no name left: skip it, like a row missing
+            // from `ps` output. Zombies land here too (`ps` shows them as `<defunct>`).
+            let Some(command) = native_process_name(child) else {
+                continue;
+            };
+            rows.push(ProcessSampleRow {
+                pid: child as u32,
+                parent_pid: parent as u32,
+                rss_kib: native_resident_size_bytes(child).map_or(0, |bytes| bytes / 1024),
+                command,
+            });
+            parents.push_back(child);
+        }
+    }
+    Some(rows)
+}
+
+/// Resident size in bytes. `ps` prints the same field, in KiB.
+#[cfg(target_os = "macos")]
+fn native_resident_size_bytes(pid: libc::pid_t) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    // SAFETY: `info` is writable for `size` bytes, the exact size of proc_taskinfo.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if filled != size {
+        return None;
+    }
+    // SAFETY: an all-zero proc_taskinfo is valid, and libproc filled every byte.
+    Some(unsafe { info.assume_init() }.pti_resident_size)
+}
+
+/// The name the kernel keeps from the executable's file name at exec: `ffmpeg` for
+/// the bundled `…/ffmpeg`, the same file name `ps` shows in its `comm` column. Unlike
+/// `proc_pidpath`, it still reads after the binary is replaced on disk.
+#[cfg(target_os = "macos")]
+fn native_process_name(pid: libc::pid_t) -> Option<String> {
+    // proc_name copies a 32-byte field; the byte held back stays NUL either way.
+    let mut buffer = [0u8; 64];
+    // SAFETY: `buffer` is writable for the length passed.
+    let len =
+        unsafe { libc::proc_name(pid, buffer.as_mut_ptr().cast(), (buffer.len() - 1) as u32) };
+    if len <= 0 {
+        return None;
+    }
+    let name = std::ffi::CStr::from_bytes_until_nul(&buffer)
+        .ok()?
+        .to_string_lossy();
+    (!name.is_empty()).then(|| name.into_owned())
+}
+
+/// The most direct children one sample reads for a single parent.
+#[cfg(target_os = "macos")]
+const NATIVE_CHILD_PID_LIMIT: usize = 1 << 16;
+
+/// Direct children of `parent`, or `None` when libproc reports an error.
+#[cfg(target_os = "macos")]
+fn native_child_pids(parent: libc::pid_t) -> Option<Vec<libc::pid_t>> {
+    let mut capacity = 64;
+    loop {
+        let mut buffer: Vec<libc::pid_t> = vec![0; capacity];
+        let size = libc::c_int::try_from(capacity * std::mem::size_of::<libc::pid_t>()).ok()?;
+        // SAFETY: errno is this thread's own slot. libproc reports an empty list and a
+        // failure both as 0, so errno is what tells them apart.
+        unsafe { *libc::__error() = 0 };
+        // SAFETY: `buffer` is writable for `size` bytes.
+        let listed = unsafe { libc::proc_listchildpids(parent, buffer.as_mut_ptr().cast(), size) };
+        if listed < 0 || (listed == 0 && std::io::Error::last_os_error().raw_os_error() != Some(0))
+        {
+            return None;
+        }
+        // Current macOS returns a count of pids; older releases returned bytes. The
+        // buffer starts zeroed and no child is pid 0, so reading up to the larger
+        // figure and dropping zeros is right under either convention.
+        let filled = (listed as usize).min(capacity);
+        let children = buffer[..filled]
+            .iter()
+            .copied()
+            .filter(|pid| *pid > 0)
+            .collect::<Vec<_>>();
+        // A full buffer may have cut the list short: read again with more room.
+        if children.len() < capacity || capacity >= NATIVE_CHILD_PID_LIMIT {
+            return Some(children);
+        }
+        capacity *= 2;
+    }
 }
 
 #[cfg(test)]
@@ -2431,6 +2704,119 @@ mod tests {
         assert_eq!(stats.active_ffprobe_processes, 3);
     }
 
+    /// Kills and reaps a test's child (and removes its scratch directory) even when an
+    /// assertion fails first.
+    #[cfg(target_os = "macos")]
+    struct OwnedTestChild {
+        child: std::process::Child,
+        scratch_dir: Option<std::path::PathBuf>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for OwnedTestChild {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(dir) = self.scratch_dir.take() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn executable_file_name(command: &str) -> Option<&str> {
+        std::path::Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_process_rows_read_own_rss_and_a_spawned_child() {
+        // spawn() returns once the child has exec'd, so it is listed by name at once.
+        let sleeper = OwnedTestChild {
+            child: Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn /bin/sleep"),
+            scratch_dir: None,
+        };
+        let own_pid = std::process::id();
+
+        let rows = collect_native_process_rows().expect("libproc samples this process");
+
+        let own = rows.iter().find(|row| row.pid == own_pid).expect("own row");
+        assert!(own.rss_kib > 0, "own resident size is sampled");
+        let child = rows
+            .iter()
+            .find(|row| row.pid == sleeper.child.id())
+            .expect("the spawned child is sampled");
+        assert_eq!(child.parent_pid, own_pid);
+        assert_eq!(executable_file_name(&child.command), Some("sleep"));
+    }
+
+    /// Stands in for a bundled `ffmpeg` child: blocks until its parent test kills it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "ffmpeg-named child fixture launched explicitly by the native sampler test"]
+    fn ffmpeg_named_child_fixture() {
+        if std::env::var_os("VIDEORC_FFMPEG_NAMED_CHILD_FIXTURE").is_none() {
+            return;
+        }
+        let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_process_rows_count_an_ffmpeg_named_child() {
+        // A copied /bin/sleep is killed at launch (platform binaries carry launch
+        // constraints), so this ad-hoc signed test binary runs its fixture under the
+        // bundled binary's file name instead.
+        let scratch_dir =
+            std::env::temp_dir().join(format!("videorc-native-sampler-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch_dir).unwrap();
+        let ffmpeg = scratch_dir.join("ffmpeg");
+        std::fs::copy(std::env::current_exe().unwrap(), &ffmpeg).unwrap();
+        let fixture = OwnedTestChild {
+            child: Command::new(&ffmpeg)
+                .args([
+                    "--exact",
+                    "diagnostics::tests::ffmpeg_named_child_fixture",
+                    "--ignored",
+                ])
+                .env("VIDEORC_FFMPEG_NAMED_CHILD_FIXTURE", "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn the ffmpeg-named fixture"),
+            scratch_dir: Some(scratch_dir),
+        };
+        let own_pid = std::process::id();
+        let fixture_pid = fixture.child.id();
+
+        let rows = collect_native_process_rows().expect("libproc samples this process");
+
+        let row = rows
+            .iter()
+            .find(|row| row.pid == fixture_pid)
+            .expect("the fixture is sampled");
+        assert_eq!(row.parent_pid, own_pid);
+        assert_eq!(executable_file_name(&row.command), Some("ffmpeg"));
+        // Other tests in this binary may run real FFmpeg children at the same time, so
+        // the exact count aggregates only this test's own row and its fixture.
+        let ours = rows
+            .into_iter()
+            .filter(|row| row.pid == own_pid || row.pid == fixture_pid)
+            .collect::<Vec<_>>();
+        let snapshot = runtime_resource_snapshot_from_rows(&ours, own_pid);
+        assert_eq!(snapshot.active_ffmpeg_processes, 1);
+        assert_eq!(snapshot.active_ffprobe_processes, 0);
+        assert!(snapshot.backend_rss_bytes.is_some_and(|bytes| bytes > 0));
+        // The sampler's own collection counts it too, beside any concurrent ones.
+        assert!(collect_runtime_resource_snapshot().active_ffmpeg_processes >= 1);
+    }
+
     #[test]
     fn stream_health_updates_stats_and_classifies_encoder_lag() {
         let stats = apply_stream_health(
@@ -2480,6 +2866,84 @@ mod tests {
             );
             assert_eq!(stats.encoder_speed, None);
         }
+    }
+
+    // Plan 218 S2: FFmpeg's progress describes its first output. With a
+    // recording that is the recording file, and it must never pose as the
+    // stream; the stream's own encoder fills the stream fields.
+    #[test]
+    fn ffmpeg_progress_for_the_recording_file_fills_the_recording_fields() {
+        let health = StreamHealth {
+            session_id: "session-a".to_string(),
+            fps: Some(30.0),
+            dropped_frames: Some(0),
+            speed: Some(1.0),
+            bitrate_kbps: Some(8_166.0),
+            total_bytes: Some(50_000),
+            duplicated_frames: Some(0),
+            created_at: "first".to_string(),
+        };
+        let stats = apply_stream_health_from(
+            idle_diagnostics(),
+            &health,
+            30,
+            FfmpegProgressOutput::Recording,
+        );
+        assert_eq!(stats.recording_measured_bitrate_kbps, Some(8_166.0));
+        assert_eq!(stats.recording_output_total_bytes, 50_000);
+        assert_eq!(stats.stream_measured_bitrate_kbps, None);
+        assert_eq!(stats.stream_output_total_bytes, 0);
+
+        let bridge = EncoderBridgeDiagnosticSnapshot {
+            stream_measured_bitrate_kbps: Some(5_900.0),
+            stream_output_total_bytes: Some(40_000),
+            stream_video_toolbox_fifo_write_p95_ms: Some(79.8),
+            stream_queue_age_p95_ms: Some(133.0),
+            stream_queue_depth_trips: Some(2),
+            stream_queue_age_trips: Some(300),
+            stream_queue_last_trip: Some("age".to_string()),
+            stream_delivery: Some(crate::protocol::StreamDeliveryState {
+                target_fps: 30,
+                delivered_fps: 21.0,
+                drop_percent: 30.0,
+                window_seconds: 30.0,
+                degraded: true,
+                degraded_since: Some("t".to_string()),
+                bitrate_kbps: Some(4_800),
+                chosen_bitrate_kbps: Some(6_000),
+                at_floor: false,
+                uplink_overflows: 1,
+            }),
+            ..Default::default()
+        };
+        let stats = apply_encoder_bridge_stats(stats, bridge, 30);
+        assert_eq!(stats.stream_measured_bitrate_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_measured_bitrate_min_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_output_total_bytes, 40_000);
+        assert_eq!(
+            stats.encoder_bridge_stream_video_toolbox_fifo_write_p95_ms,
+            Some(79.8)
+        );
+        assert_eq!(stats.encoder_bridge_stream_queue_age_p95_ms, Some(133.0));
+        assert_eq!(stats.encoder_bridge_stream_queue_depth_trips, 2);
+        assert_eq!(stats.encoder_bridge_stream_queue_age_trips, 300);
+        assert_eq!(
+            stats.encoder_bridge_stream_queue_last_trip.as_deref(),
+            Some("age")
+        );
+        assert!(stats.stream_delivery.as_ref().is_some_and(|d| d.degraded));
+
+        // A recording-role emission carries none of it and erases nothing.
+        let quiet = EncoderBridgeDiagnosticSnapshot {
+            stream_measured_bitrate_kbps: Some(4_100.0),
+            ..Default::default()
+        };
+        let stats = apply_encoder_bridge_stats(stats, quiet, 30);
+        assert_eq!(stats.stream_measured_bitrate_min_kbps, Some(4_100.0));
+        assert_eq!(stats.stream_measured_bitrate_max_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_output_total_bytes, 40_000);
+        assert_eq!(stats.encoder_bridge_stream_queue_age_trips, 300);
+        assert!(stats.stream_delivery.is_some());
     }
 
     #[test]
@@ -3569,6 +4033,7 @@ mod tests {
                 sequence: Some(120),
                 updated_at: "2026-06-08T00:00:00Z".to_string(),
                 message: Some("Live".to_string()),
+                no_video: None,
             },
         );
 
@@ -3583,6 +4048,168 @@ mod tests {
         assert_eq!(stats.preview_camera_actual_height, Some(1080));
         assert_eq!(stats.preview_camera_selected_format_width, Some(1920));
         assert_eq!(stats.preview_camera_selected_format_max_fps, Some(60.0));
+    }
+
+    fn screen_status_with_drops(dropped_frames: u64, frames_captured: u64) -> PreviewScreenStatus {
+        PreviewScreenStatus {
+            state: PreviewScreenState::Live,
+            source_id: Some("screen:screencapturekit:1".to_string()),
+            source_kind: Some(PreviewScreenSourceKind::Screen),
+            target_fps: 30,
+            width: Some(1920),
+            height: Some(1080),
+            native_width: Some(1920),
+            native_height: Some(1080),
+            requested_width: Some(1920),
+            requested_height: Some(1080),
+            actual_width: Some(1920),
+            actual_height: Some(1080),
+            iosurface_available: Some(true),
+            d3d11_texture_available: Some(false),
+            source_fps: Some(30.0),
+            frame_age_ms: Some(12),
+            frames_captured,
+            dropped_frames,
+            sequence: Some(frames_captured),
+            include_cursor: true,
+            exclude_current_process_windows: true,
+            updated_at: "2026-11-04T00:00:00Z".to_string(),
+            message: None,
+        }
+    }
+
+    fn camera_status_with_drops(dropped_frames: u64, frames_captured: u64) -> PreviewCameraStatus {
+        PreviewCameraStatus {
+            state: PreviewCameraState::Live,
+            camera_id: Some("camera:avfoundation-native:abc".to_string()),
+            device_unique_id: Some("device-abc".to_string()),
+            target_fps: 30,
+            width: Some(1920),
+            height: Some(1080),
+            requested_width: Some(1920),
+            requested_height: Some(1080),
+            actual_width: Some(1920),
+            actual_height: Some(1080),
+            selected_format_width: Some(1920),
+            selected_format_height: Some(1080),
+            selected_format_min_fps: Some(1.0),
+            selected_format_max_fps: Some(30.0),
+            source_fps: Some(30.0),
+            frame_age_ms: Some(8),
+            frames_captured,
+            dropped_frames,
+            sequence: Some(frames_captured),
+            updated_at: "2026-11-04T00:00:00Z".to_string(),
+            message: Some("Live".to_string()),
+            no_video: None,
+        }
+    }
+
+    /// #981: the screen status carries a run total. Drops name the capture
+    /// stage when they grow, and an old total never keeps naming it.
+    #[test]
+    fn preview_screen_drops_flag_capture_only_while_they_grow() {
+        let dropping =
+            apply_preview_screen_source_stats(idle_diagnostics(), &screen_status_with_drops(3, 90));
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Capture);
+        assert_eq!(dropping.preview_screen_dropped_frames, 3);
+
+        let mut settled = dropping.clone();
+        settled.bottleneck = DiagnosticBottleneck::None;
+        let same_total =
+            apply_preview_screen_source_stats(settled.clone(), &screen_status_with_drops(3, 120));
+        assert_eq!(same_total.bottleneck, DiagnosticBottleneck::None);
+        assert_eq!(same_total.preview_screen_dropped_frames, 3);
+
+        let growing =
+            apply_preview_screen_source_stats(same_total, &screen_status_with_drops(4, 150));
+        assert_eq!(growing.bottleneck, DiagnosticBottleneck::Capture);
+
+        // A new run starts its counter at zero: not a drop, not a slowdown.
+        let new_run = apply_preview_screen_source_stats(settled, &screen_status_with_drops(0, 1));
+        assert_eq!(new_run.bottleneck, DiagnosticBottleneck::None);
+        assert_eq!(new_run.preview_screen_dropped_frames, 0);
+    }
+
+    #[test]
+    fn preview_camera_drops_flag_capture_only_while_they_grow() {
+        let dropping =
+            apply_preview_camera_source_stats(idle_diagnostics(), &camera_status_with_drops(2, 60));
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Capture);
+        assert_eq!(dropping.preview_camera_dropped_frames, 2);
+
+        let mut settled = dropping;
+        settled.bottleneck = DiagnosticBottleneck::None;
+        let same_total =
+            apply_preview_camera_source_stats(settled, &camera_status_with_drops(2, 90));
+        assert_eq!(same_total.bottleneck, DiagnosticBottleneck::None);
+
+        let growing =
+            apply_preview_camera_source_stats(same_total, &camera_status_with_drops(5, 120));
+        assert_eq!(growing.bottleneck, DiagnosticBottleneck::Capture);
+        assert_eq!(growing.preview_camera_dropped_frames, 5);
+    }
+
+    /// #981: one frame dropped while a stream leg reconnected must not read as
+    /// "Encoder" for the rest of the session. Only new drops do.
+    #[test]
+    fn encoder_bridge_drops_flag_encoder_only_while_they_grow() {
+        let healthy_bridge = |dropped_frames: u64| EncoderBridgeDiagnosticSnapshot {
+            input_fps: Some(30.0),
+            encoder_speed: Some(1.0),
+            dropped_frames,
+            ..Default::default()
+        };
+        let stats = apply_encoder_bridge_stats(idle_diagnostics(), healthy_bridge(0), 30);
+        assert_eq!(stats.bottleneck, DiagnosticBottleneck::None);
+
+        let dropping = apply_encoder_bridge_stats(stats, healthy_bridge(1), 30);
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Encoder);
+        assert_eq!(dropping.dropped_frames, 1);
+        assert_eq!(dropping.encoder_bridge_dropped_frames, 1);
+
+        let settled = apply_encoder_bridge_stats(dropping, healthy_bridge(1), 30);
+        assert_eq!(settled.bottleneck, DiagnosticBottleneck::None);
+        // The session total stays visible; only the verdict moved on.
+        assert_eq!(settled.dropped_frames, 1);
+        assert_eq!(settled.encoder_bridge_dropped_frames, 1);
+
+        let dropping_again = apply_encoder_bridge_stats(settled, healthy_bridge(3), 30);
+        assert_eq!(dropping_again.bottleneck, DiagnosticBottleneck::Encoder);
+    }
+
+    #[test]
+    fn stream_health_drops_flag_encoder_only_while_they_grow() {
+        let health = |session_id: &str, dropped_frames: u64| StreamHealth {
+            session_id: session_id.to_string(),
+            fps: Some(30.0),
+            dropped_frames: Some(dropped_frames),
+            speed: Some(1.0),
+            bitrate_kbps: Some(6_000.0),
+            total_bytes: Some(1_024),
+            duplicated_frames: Some(0),
+            created_at: "now".to_string(),
+        };
+        let mut stats = idle_diagnostics();
+        stats.capture_fps = Some(30.0);
+        stats.render_fps = Some(30.0);
+
+        let dropping = apply_stream_health(stats, &health("session", 1), 30);
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Encoder);
+        assert_eq!(dropping.dropped_frames, 1);
+
+        let settled = apply_stream_health(dropping, &health("session", 1), 30);
+        assert_eq!(settled.bottleneck, DiagnosticBottleneck::None);
+        assert_eq!(settled.dropped_frames, 1);
+
+        let dropping_again = apply_stream_health(settled, &health("session", 2), 30);
+        assert_eq!(dropping_again.bottleneck, DiagnosticBottleneck::Encoder);
+
+        // A new session's first drops are new, whatever the old total was.
+        let next_session = apply_stream_health(dropping_again, &health("session-2", 1), 30);
+        assert_eq!(next_session.bottleneck, DiagnosticBottleneck::Encoder);
+        let next_settled = apply_stream_health(next_session, &health("session-2", 1), 30);
+        assert_eq!(next_settled.bottleneck, DiagnosticBottleneck::None);
     }
 
     #[test]
@@ -3822,6 +4449,14 @@ mod tests {
                 stream_video_toolbox_fifo_enqueue_p95_ms: None,
                 recording_video_toolbox_fifo_enqueue_max_ms: None,
                 stream_video_toolbox_fifo_enqueue_max_ms: None,
+                stream_measured_bitrate_kbps: None,
+                stream_output_total_bytes: None,
+                stream_video_toolbox_fifo_write_p95_ms: None,
+                stream_queue_age_p95_ms: None,
+                stream_queue_depth_trips: None,
+                stream_queue_age_trips: None,
+                stream_queue_last_trip: None,
+                stream_delivery: None,
                 error: None,
             },
             30,
@@ -3926,6 +4561,14 @@ mod tests {
                 stream_video_toolbox_fifo_enqueue_p95_ms: Some(9.0),
                 recording_video_toolbox_fifo_enqueue_max_ms: Some(14.0),
                 stream_video_toolbox_fifo_enqueue_max_ms: Some(18.0),
+                stream_measured_bitrate_kbps: None,
+                stream_output_total_bytes: None,
+                stream_video_toolbox_fifo_write_p95_ms: None,
+                stream_queue_age_p95_ms: None,
+                stream_queue_depth_trips: None,
+                stream_queue_age_trips: None,
+                stream_queue_last_trip: None,
+                stream_delivery: None,
                 error: None,
             },
             30,

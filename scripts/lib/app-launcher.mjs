@@ -9,7 +9,7 @@
 // Harnesses default to isolated app/user data and ledger reaping. Product launches
 // still use the normal app data path unless a smoke explicitly opts into this helper.
 
-import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
   closeSync,
@@ -26,6 +26,16 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
+import './smoke-env.mjs'
+import {
+  acquireHostSmokeLock,
+  waitForHostMemory,
+  waitWhileVideorcLive,
+  withBuildSlot
+} from './host-lock.mjs'
+
+import { spawnProcessGroup } from './process-group.mjs'
+
 import { assertSmokeCommandConnection } from './smoke-command-client.mjs'
 
 export const repoRoot = resolve(import.meta.dirname, '..', '..')
@@ -38,6 +48,7 @@ const LAUNCH_SERVICES_COMPUTED_ENV_NAMES = [
   'VIDEORC_RECORDINGS_DIR',
   'VIDEORC_SECRETS_PATH',
   'VIDEORC_SMOKE_PRINT_BACKEND_READY',
+  'VIDEORC_SMOKE_SKIP_FIRST_RUN',
   'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
   'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN',
   'VIDEORC_USER_DATA_DIR'
@@ -193,6 +204,7 @@ export function smokeAppEnv(env = {}, options = {}) {
     // Every isolated profile is a new install: a smoke that records or goes
     // live must not reach the anonymous usage stats unless a run asks to.
     VIDEORC_USAGE_STATS: smokeEnvValue(env, 'VIDEORC_USAGE_STATS') ?? '0',
+    VIDEORC_SMOKE_SKIP_FIRST_RUN: env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1',
     VIDEORC_APP_DATA_DIR: appDataDir,
     VIDEORC_USER_DATA_DIR: userDataDir,
     // Isolating Electron userData is NOT enough: the backend resolves its own
@@ -228,6 +240,39 @@ export function smokeAppEnv(env = {}, options = {}) {
   // a parent shell must not silently redirect a new harness into an older run.
   if (!explicitStateDir) delete result.VIDEORC_SMOKE_STATE_DIR
   if (!explicitOutputDir) delete result.VIDEORC_SMOKE_OUTPUT_DIR
+  // The smoke Trash stand-in (plan 209 S16) lives in this run's own state, or
+  // nowhere: a Library delete in any other smoke still reaches the real Trash.
+  const smokeTrashDir = explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_TRASH_DIR')
+  if (smokeTrashDir) {
+    result.VIDEORC_SMOKE_TRASH_DIR = isolatedSmokePath(
+      env,
+      'VIDEORC_SMOKE_TRASH_DIR',
+      smokeTrashDir,
+      isolationRoots
+    )
+  } else {
+    delete result.VIDEORC_SMOKE_TRASH_DIR
+  }
+  // A packaged Linux build started through its AppImage writes the user's
+  // videorc.desktop and icon under XDG_DATA_HOME, aimed at the AppImage it ran
+  // from: a smoke of a scratch AppImage left the real app menu entry and the
+  // videorc:// handler pointing at a file the run then deleted. Keep them in
+  // the run. The dev app writes none, and its pnpm launch reads its own paths
+  // from XDG_DATA_HOME, so only packaged launches move. XDG_CONFIG_HOME stays
+  // shared: Electron's appData there holds the global owned-process ledger,
+  // and `xdg-mime` re-asserts the same `x-scheme-handler/videorc` line every
+  // real launch writes.
+  if (
+    (options.platform ?? process.platform) === 'linux' &&
+    result.VIDEORC_PACKAGED_SMOKE_TEST === '1'
+  ) {
+    result.XDG_DATA_HOME = isolatedSmokePath(
+      env,
+      'XDG_DATA_HOME',
+      join(appDataDir, 'xdg-data'),
+      isolationRoots
+    )
+  }
   return result
 }
 
@@ -315,7 +360,55 @@ function smokeEnvValue(env, name) {
  *   `prebuildDevBackend` (asynchronously), so the synchronous one is skipped.
  * @returns {Promise<{connections:Record<string,object>, process:import('node:child_process').ChildProcess, stop:()=>Promise<void>}>}
  */
-export function launchDevApp({
+// API origins the backend honours only in debug builds (`cfg!(debug_assertions)`
+// in discord_announce/client.rs and youtube_quota.rs). A release dev backend
+// logs "refused in packaged builds" and sends the smoke's fixture webhook or
+// token to the real service instead of the local fake.
+export const DEBUG_ONLY_API_ORIGIN_ENV = Object.freeze([
+  'VIDEORC_DISCORD_API_BASE_URL',
+  'VIDEORC_YOUTUBE_API_BASE_URL'
+])
+
+/**
+ * Why a dev-app launch must not start, or null: a fake API origin with the
+ * release dev backend would reach the real service. Pure for the unit test.
+ */
+export function releaseBackendFakeOriginRefusal(env = {}, processEnv = process.env) {
+  const profile = env.VIDEORC_DEV_BACKEND_PROFILE ?? processEnv.VIDEORC_DEV_BACKEND_PROFILE
+  if (profile !== 'release') return null
+  const names = DEBUG_ONLY_API_ORIGIN_ENV.filter((name) => env[name] ?? processEnv[name])
+  if (names.length === 0) return null
+  return (
+    `${names.join(', ')} only works with the debug backend; with ` +
+    'VIDEORC_DEV_BACKEND_PROFILE=release the backend ignores it and calls the real ' +
+    'service. Unset VIDEORC_DEV_BACKEND_PROFILE (or set it to debug) for this smoke.'
+  )
+}
+
+export async function prepareSmokeLaunch({
+  dev = true,
+  env = process.env,
+  onLine,
+  prebuild = async () => {
+    const spec = devBackendPrebuildSpec({ env })
+    if (spec) {
+      const failure = await runDevBackendPrebuild(spec, { onLine, env: smokeAppEnv(env) })
+      if (failure) throw new Error(failure)
+    }
+  },
+  buildSlot = withBuildSlot,
+  hostLock = acquireHostSmokeLock,
+  memory = waitForHostMemory,
+  live = waitWhileVideorcLive
+} = {}) {
+  const options = { env, log: onLine }
+  await live(options)
+  if (dev && env.VIDEORC_SMOKE_SKIP_PREBUILD !== '1') await buildSlot(prebuild, options)
+  await hostLock(options)
+  await memory(options)
+}
+
+export async function launchDevApp({
   env = {},
   timeoutMs = 120000,
   requiredMarkers = ['backend-ready'],
@@ -325,6 +418,16 @@ export function launchDevApp({
   skipPrebuild = false,
   spawnSpec: requestedSpawnSpec
 } = {}) {
+  const fakeOriginRefusal = requestedSpawnSpec ? null : releaseBackendFakeOriginRefusal(env)
+  if (fakeOriginRefusal) return Promise.reject(new Error(fakeOriginRefusal))
+  // `skipPrebuild`: the caller built the backend already (`prebuildDevBackend`,
+  // the cloud smoke); the host lock, the memory wait and the live wait still
+  // run.
+  await prepareSmokeLaunch({
+    dev: !launchViaMacosLaunchServices && !requestedSpawnSpec && !skipPrebuild,
+    env: { ...process.env, ...env },
+    onLine
+  })
   return new Promise((resolveLaunch, rejectLaunch) => {
     const connections = {}
     let settled = false
@@ -350,23 +453,6 @@ export function launchDevApp({
     }
     if (spawnSpec.appOwnership) {
       mkdirSync(dirname(spawnSpec.appOwnership.path), { recursive: true })
-    }
-
-    if (!launchViaMacosLaunchServices && !requestedSpawnSpec && !skipPrebuild) {
-      // `pnpm dev` runs `cargo run --quiet`, which prints nothing while the
-      // debug backend recompiles (5-7 min on ogre after a pull), so the
-      // launch clock used to race the compiler and fail with misleading GPU
-      // noise from a SIGTERMed Electron (Plan 0009). Build first, with its
-      // own bounded deadline, then start the launch clock.
-      const prebuild = devBackendPrebuildSpec({ env: process.env })
-      if (prebuild) {
-        const failure = runDevBackendPrebuild(prebuild, { onLine, env: childEnv })
-        if (failure) {
-          settled = true
-          rejectLaunch(new Error(failure))
-          return
-        }
-      }
     }
 
     const child = spawn(spawnSpec.command, spawnSpec.args, spawnSpec.options)
@@ -1102,27 +1188,35 @@ export function devBackendPrebuildFailure(spec, { status, signal, error, stderrT
   return null
 }
 
-function runDevBackendPrebuild(spec, { onLine, env }) {
+export async function runDevBackendPrebuild(spec, { onLine, env } = {}) {
+  if (!spec) return null
   const startedAt = Date.now()
   const describe = `${spec.command} ${spec.args.join(' ')}`
   onLine?.(`[smoke:prebuild] ${describe} (timeout ${Math.round(spec.timeoutMs / 1000)}s)`)
-  const result = spawnSync(spec.command, spec.args, {
+  const { child, result } = spawnProcessGroup(spec.command, spec.args, {
     cwd: spec.cwd,
     env,
-    encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: spec.timeoutMs,
-    killSignal: 'SIGTERM',
-    maxBuffer: 64 * 1024 * 1024
+    timeoutMs: spec.timeoutMs
   })
-  const stderrTail = `${result.stdout ?? ''}${result.stderr ?? ''}`.split(/\r?\n/)
-  for (const line of stderrTail.slice(-20)) {
+  const stderrTail = []
+  const keepLine = (line) => {
+    stderrTail.push(line)
+    if (stderrTail.length > 20) stderrTail.shift()
+  }
+  const stdout = createLineBuffer(keepLine)
+  const stderr = createLineBuffer(keepLine)
+  child.stdout.setEncoding('utf8').on('data', (chunk) => stdout.write(chunk))
+  child.stderr.setEncoding('utf8').on('data', (chunk) => stderr.write(chunk))
+  const outcome = await result
+  stdout.flush()
+  stderr.flush()
+  for (const line of stderrTail) {
     if (line.trim()) onLine?.(`[smoke:prebuild] ${line}`)
   }
   const failure = devBackendPrebuildFailure(spec, {
-    status: result.status,
-    signal: result.signal,
-    error: result.error,
+    ...outcome,
+    error: outcome.timedOut ? { code: 'ETIMEDOUT' } : outcome.error,
     stderrTail
   })
   if (!failure) {
@@ -1131,17 +1225,15 @@ function runDevBackendPrebuild(spec, { onLine, env }) {
   return failure
 }
 
-/** The prebuild output lines kept for the failure message and the log. */
-const PREBUILD_TAIL_LINES = 200
-
 /**
- * The same prebuild as `launchDevApp`'s, without blocking the event loop.
- * A smoke that serves HTTP in its own process (the cloud smokes' fake web,
- * which the node agent heartbeats every 10 s) keeps answering while cargo
- * compiles; the synchronous prebuild left it deaf for minutes (cloud test
- * lane 3 F4). Run it, then launch with `skipPrebuild: true`. Resolves with
- * the failure message, or `null` when the backend built (or the caller opted
- * out with `VIDEORC_SMOKE_SKIP_PREBUILD=1`).
+ * The dev backend prebuild on its own, before a smoke serves anything from its
+ * process: the cloud smokes' fake web is an in-process HTTP server the node
+ * agent heartbeats every 10 s, so the build runs first and each launch then
+ * passes `skipPrebuild: true` (cloud test lane 3 F4). Main's prebuild is
+ * asynchronous already (`runDevBackendPrebuild`); this takes a build slot
+ * for it like `prepareSmokeLaunch` does, and resolves with the failure
+ * message, or `null` when the backend built (or `spec` is null: the caller
+ * opted out with `VIDEORC_SMOKE_SKIP_PREBUILD=1`).
  *
  * @param {object} [options]
  * @param {Record<string,string>} [options.env] - cargo's environment; pass the
@@ -1151,71 +1243,20 @@ const PREBUILD_TAIL_LINES = 200
  * @param {ReturnType<typeof devBackendPrebuildSpec>} [options.spec]
  * @returns {Promise<string|null>}
  */
-export function prebuildDevBackend({
+export async function prebuildDevBackend({
   env = process.env,
   onLine,
   spec = devBackendPrebuildSpec({ env: process.env })
 } = {}) {
-  if (!spec) return Promise.resolve(null)
-  const startedAt = Date.now()
-  const describe = `${spec.command} ${spec.args.join(' ')}`
-  onLine?.(`[smoke:prebuild] ${describe} (timeout ${Math.round(spec.timeoutMs / 1000)}s)`)
-  return new Promise((resolvePrebuild) => {
-    const tail = []
-    const keep = (line) => {
-      tail.push(line)
-      if (tail.length > PREBUILD_TAIL_LINES) tail.shift()
-    }
-    let timedOut = false
-    let settled = false
-    let child
-    const settle = ({ status, signal, error }) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      stdout.flush()
-      stderr.flush()
-      for (const line of tail.slice(-20)) {
-        if (line.trim()) onLine?.(`[smoke:prebuild] ${line}`)
-      }
-      const failure = devBackendPrebuildFailure(spec, {
-        status,
-        signal,
-        error: timedOut
-          ? Object.assign(new Error(`${describe} timed out`), { code: 'ETIMEDOUT' })
-          : error,
-        stderrTail: tail
-      })
-      if (!failure) {
-        onLine?.(
-          `[smoke:prebuild] backend built in ${Math.round((Date.now() - startedAt) / 1000)}s`
-        )
-      }
-      resolvePrebuild(failure)
-    }
-    const stdout = createLineBuffer(keep)
-    const stderr = createLineBuffer(keep)
-    const timer = setTimeout(() => {
-      timedOut = true
-      child?.kill('SIGTERM')
-    }, spec.timeoutMs)
-    try {
-      child = spawn(spec.command, spec.args, {
-        cwd: spec.cwd,
-        env,
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
-    } catch (error) {
-      settle({ status: null, signal: null, error })
-      return
-    }
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (text) => stdout.write(text))
-    child.stderr.on('data', (text) => stderr.write(text))
-    child.once('error', (error) => settle({ status: null, signal: null, error }))
-    child.once('close', (status, signal) => settle({ status, signal, error: undefined }))
-  })
+  if (!spec) return null
+  let failure = null
+  await withBuildSlot(
+    async () => {
+      failure = await runDevBackendPrebuild(spec, { onLine, env })
+    },
+    { env, log: onLine }
+  )
+  return failure
 }
 
 export function devAppSpawnOptions({ env, platform = process.platform } = {}) {

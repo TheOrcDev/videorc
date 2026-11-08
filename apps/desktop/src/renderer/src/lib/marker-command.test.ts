@@ -24,6 +24,7 @@ describe('marker outcome recovery', () => {
   it('recovers the persisted current revision after a lost create reply', async () => {
     const relay = vi.fn(async (command: MarkerRelayCommand): Promise<MarkerRelayResult> => {
       if (command.action === 'create') throw new Error('Disconnected')
+      if (command.action !== 'get') throw new Error('Expected lookup')
       expect(command.params).toEqual({ sessionId: 'capture-a', markerId: params.operationId })
       return { status: 'found', marker }
     })

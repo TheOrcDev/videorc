@@ -47,8 +47,8 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 
-type MetalDevice = ProtocolObject<dyn MTLDevice>;
-type MetalTexture = ProtocolObject<dyn MTLTexture>;
+pub type MetalDevice = ProtocolObject<dyn MTLDevice>;
+pub type MetalTexture = ProtocolObject<dyn MTLTexture>;
 
 const SHADER_SOURCE: &str = r#"
 #include <metal_stdlib>
@@ -67,9 +67,12 @@ struct FragParams {
     // color.rs. If these drift, the CPU and GPU keyers disagree.
     float4 chroma_key;
     float4 chroma_key2;
-    // (opacity, reserved, reserved, reserved): multiplies the quad's alpha
-    // (plan 168 S-B2, the Buddy sprite); 1 for every other quad.
+    // (opacity, crop_clamp, reserved, reserved). opacity multiplies the
+    // quad's alpha (plan 168 S-B2, the Buddy sprite); 1 for every other quad.
+    // crop_clamp (plan 200 D3) keeps a linear sample half a texel inside the
+    // crop so a scaled draw never blends in pixels the crop removed.
     float4 layer;
+    float4 camera_look; // brightness, contrast, saturation, enabled
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
@@ -124,6 +127,12 @@ fragment float4 f_main(VOut in [[stage_in]],
     // Crop: sample only the visible region [cl, 1-cr] x [ct, 1-cb] of the source.
     float cl = params.crop.x, ct = params.crop.y, cr = params.crop.z, cb = params.crop.w;
     float2 src = float2(cl + u * (1.0 - cl - cr), ct + uv.y * (1.0 - ct - cb));
+    if (params.layer.y > 0.5) {
+        float2 half_texel = 0.5 / float2(tex.get_width(), tex.get_height());
+        float2 lo = float2(cl, ct) + half_texel;
+        float2 hi = float2(1.0 - cr, 1.0 - cb) - half_texel;
+        src = clamp(src, min(lo, hi), max(lo, hi));
+    }
     float4 color = tex.sample(samp, src);
     // Chroma key (scene_geometry::chroma_key_alpha / chroma_key_despill in
     // f32, ANGLE model): the angle between the pixel's CbCr vector and the
@@ -162,6 +171,12 @@ fragment float4 f_main(VOut in [[stage_in]],
         }
         color.a *= alpha;
     }
+    if (params.camera_look.w > 0.5) {
+        float y = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
+        color.rgb = clamp(y + params.camera_look.x
+            + (params.camera_look.y - 1.0) * (y - 0.5)
+            + params.camera_look.z * (color.rgb - y), 0.0, 1.0);
+    }
     color.a *= params.layer.x;
     return color;
 }
@@ -186,6 +201,7 @@ struct FragParams {
     chroma_key2: [f32; 4],
     /// (opacity, reserved, reserved, reserved); see the MSL comment.
     layer: [f32; 4],
+    camera_look: [f32; 4],
 }
 
 /// Per-quad chroma key in shader units, converted once from
@@ -265,6 +281,8 @@ pub struct GpuSource<'a> {
     /// Chroma key applied in the fragment shader (camera green screen). The
     /// caller must also set `blend` or the computed alpha is ignored.
     pub chroma_key: Option<GpuChromaKey>,
+    /// Brightness, contrast and saturation in gamma-encoded RGB.
+    pub camera_look: Option<[f32; 3]>,
     /// A turned quad (plan 168 S-B2, the Buddy sprite): the source's corners
     /// in normalized [0,1] canvas coords, top-left origin, in the order
     /// top-left, top-right, bottom-left, bottom-right of the (cropped)
@@ -275,30 +293,123 @@ pub struct GpuSource<'a> {
     /// Multiplies the quad's alpha (needs `blend`); 1 for everything but
     /// the Buddy sprite.
     pub opacity: f32,
+    /// A texture this compositor's device already rendered (plan 190: the
+    /// live background frame). Drawn as it is: no import, no upload and no
+    /// cache slot; `bgra` is ignored.
+    pub texture: Option<&'a MetalTexture>,
 }
 
 /// The sampler a quad reads with (plan 168 D7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuSourceSampler {
     /// The compositor's scene sampler: nearest on recording compositors (exact
-    /// crop edges at ~1:1), linear on preview compositors.
+    /// crop edges at 1:1; a scaled draw reads linear, plan 200 D3), linear on
+    /// preview compositors.
     Scene,
     /// Always linear: the Buddy sprite, which is scaled, turned and squashed.
     Linear,
 }
 
+/// How far a quad's drawn size may differ from its source crop and still
+/// count as a 1:1 draw (plan 200 D3): 0.5% absorbs rounding of a fitted rect.
+pub(crate) const SCALED_DRAW_TOLERANCE: f64 = 0.005;
+
+/// Plan 200 D3: does this draw resample its source? Compares the source crop
+/// in pixels with the destination rect in output pixels, per axis. A 1:1 draw
+/// (a 1080p screen on a 1080p canvas, an overlay bitmap rendered at its rect)
+/// is not scaled; a camera minified into a bubble or a 1080p camera upscaled
+/// onto a 4K canvas is.
+pub(crate) fn gpu_draw_is_scaled(
+    source_width: usize,
+    source_height: usize,
+    crop: [f32; 4],
+    dest: [f32; 4],
+    out_width: usize,
+    out_height: usize,
+) -> bool {
+    let crop_width = source_width as f64 * (1.0 - f64::from(crop[0]) - f64::from(crop[2]));
+    let crop_height = source_height as f64 * (1.0 - f64::from(crop[1]) - f64::from(crop[3]));
+    let dest_width = f64::from(dest[2]) * out_width as f64;
+    let dest_height = f64::from(dest[3]) * out_height as f64;
+    if crop_width <= 0.0 || crop_height <= 0.0 || dest_width <= 0.0 || dest_height <= 0.0 {
+        return false;
+    }
+    (dest_width / crop_width - 1.0).abs() > SCALED_DRAW_TOLERANCE
+        || (dest_height / crop_height - 1.0).abs() > SCALED_DRAW_TOLERANCE
+}
+
+/// The sampler a quad actually reads with (plan 200 D3). Recording, stream
+/// and ISO compositors keep the nearest scene sampler for 1:1 draws, so a
+/// 1:1 screen stays pixel-exact, and read scaled draws with the linear
+/// sampler: a nearest minification shimmers on fine detail and a nearest
+/// upscale is blocky. Preview compositors are linear already.
+fn effective_quad_sampler(
+    source: &GpuSource<'_>,
+    smooth_scaling: bool,
+    out_width: usize,
+    out_height: usize,
+) -> GpuSourceSampler {
+    if source.sampler == GpuSourceSampler::Scene
+        && !smooth_scaling
+        && gpu_draw_is_scaled(
+            source.width,
+            source.height,
+            source.crop,
+            source.dest,
+            out_width,
+            out_height,
+        )
+    {
+        GpuSourceSampler::Linear
+    } else {
+        source.sampler
+    }
+}
+
 /// Content namespaces whose texture lives in a key-addressed slot rather than
 /// the per-index cache (plan 168 D8): a layer whose index shifts (a caption
-/// appearing below it) never re-uploads. One slot per namespace.
-/// Namespace 7 is the Buddy sprite atlas (`buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE`;
-/// the compositor asserts the two agree at compile time).
-pub const KEYED_TEXTURE_NAMESPACES: [u64; 1] = [7];
+/// appearing below it) never re-uploads.
+/// Namespace 7 is the Buddy sprite atlas (`buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE`),
+/// one slot whatever its key's `variant`. Namespace 9 is the banners (plan
+/// 186 S3, `banner_prepare::BANNER_METAL_NAMESPACE`): one slot per `variant`
+/// (the banner's slot id), at most `BANNER_KEYED_TEXTURE_SLOTS` of them, the
+/// least recently drawn evicted first. The compositor asserts both at compile
+/// time.
+pub const KEYED_TEXTURE_NAMESPACES: [u64; 2] = [7, 9];
+/// The banners showing at once (D7), so four slots never evict each other.
+pub const BANNER_KEYED_TEXTURE_SLOTS: usize = 4;
 
-fn keyed_texture_namespace(source: &GpuSource<'_>) -> Option<u64> {
-    source
-        .content_key
-        .map(|key| key.namespace)
-        .filter(|namespace| KEYED_TEXTURE_NAMESPACES.contains(namespace))
+/// Which key-addressed slot a source draws from: `(namespace, slot)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyedSlotId {
+    namespace: u64,
+    slot: u64,
+}
+
+/// How many slots a keyed namespace may hold.
+fn keyed_slot_capacity(namespace: u64) -> usize {
+    if namespace == KEYED_TEXTURE_NAMESPACES[1] {
+        BANNER_KEYED_TEXTURE_SLOTS
+    } else {
+        1
+    }
+}
+
+fn keyed_slot_id(source: &GpuSource<'_>) -> Option<KeyedSlotId> {
+    let key = source.content_key?;
+    if !KEYED_TEXTURE_NAMESPACES.contains(&key.namespace) {
+        return None;
+    }
+    // A one-slot namespace ignores the variant: the Buddy keeps its slot.
+    let slot = if keyed_slot_capacity(key.namespace) > 1 {
+        key.variant
+    } else {
+        0
+    };
+    Some(KeyedSlotId {
+        namespace: key.namespace,
+        slot,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -796,11 +907,15 @@ pub struct MetalSceneCompositor {
     targets: Vec<CachedTargetTexture>,
     // Index of the LAST-RENDERED slot; advanced at the start of each compose.
     target_cursor: usize,
+    target_ring_busy: bool,
     target_width: usize,
     target_height: usize,
     source_textures: Vec<Option<CachedSourceTexture>>,
-    /// Key-addressed slots (`KEYED_TEXTURE_NAMESPACES`), one per namespace.
-    keyed_textures: Vec<CachedSourceTexture>,
+    /// Key-addressed slots (`KEYED_TEXTURE_NAMESPACES`): one per namespace,
+    /// or per `(namespace, variant)` for a multi-slot namespace.
+    keyed_textures: Vec<KeyedSourceTexture>,
+    /// Advances on every keyed use; the eviction order of a full namespace.
+    keyed_texture_clock: u64,
     /// Byte uploads into the key-addressed slots, for the "uploads once"
     /// contract (plan 168 S-B2).
     keyed_texture_uploads: u64,
@@ -833,6 +948,14 @@ struct CachedSourceTexture {
     height: usize,
     content_key: Option<GpuSourceContentKey>,
     _retention: Option<MetalRetentionLease>,
+}
+
+/// One key-addressed slot: which `(namespace, slot)` it serves and when it
+/// was last drawn from.
+struct KeyedSourceTexture {
+    id: KeyedSlotId,
+    cached: CachedSourceTexture,
+    used_at: u64,
 }
 
 enum CachedSourceBacking {
@@ -1111,6 +1234,53 @@ impl MetalCompositorTargetPixelBuffer {
         let iosurface = CVPixelBufferGetIOSurface(Some(self.pixel_buffer.as_ref()))?;
         Some(iosurface.id())
     }
+
+    /// Plan 209 S6 (`get_picture`): the target's pixels as tightly packed,
+    /// top-down BGRA rows. Holds the slot in flight while it reads, so the
+    /// compositor never renders into the rows being copied.
+    pub fn copy_bgra(&self) -> Option<Vec<u8>> {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let _in_flight = self.begin_in_flight();
+        let pixel_buffer: &CVPixelBuffer = &self.pixel_buffer;
+        let row_bytes = self.width.checked_mul(4)?;
+        let expected_len = row_bytes.checked_mul(self.height)?;
+        // SAFETY: a retained pixel buffer, locked read-only for the copy and
+        // unlocked on every path below.
+        if unsafe { CVPixelBufferLockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly) }
+            != 0
+        {
+            return None;
+        }
+        let copied = (|| {
+            let stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
+            let base = CVPixelBufferGetBaseAddress(pixel_buffer);
+            if stride < row_bytes || base.is_null() {
+                return None;
+            }
+            let mut bytes = vec![0_u8; expected_len];
+            for row in 0..self.height {
+                // SAFETY: `row < height` and `stride >= row_bytes`, inside
+                // the locked buffer's `stride * height` bytes.
+                let source = unsafe {
+                    std::slice::from_raw_parts(
+                        base.cast::<u8>().add(row.checked_mul(stride)?),
+                        row_bytes,
+                    )
+                };
+                let start = row * row_bytes;
+                bytes[start..start + row_bytes].copy_from_slice(source);
+            }
+            Some(bytes)
+        })();
+        // SAFETY: paired with the lock above.
+        unsafe {
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
+        }
+        copied
+    }
 }
 
 // SAFETY: The wrapper owns a retained CoreVideo pixel buffer whose IOSurface-backed storage
@@ -1145,8 +1315,9 @@ impl MetalSceneCompositor {
     }
 
     /// `smooth_scaling` selects a linear min/mag sampler for scene draws.
-    /// Recording compositors keep the nearest sampler: their sources land at
-    /// ~1:1 scale and nearest preserves exact crop edges. Preview-owned
+    /// Recording compositors keep the nearest sampler for 1:1 draws, where it
+    /// preserves exact crop edges, and read scaled draws linear (plan 200 D3,
+    /// `effective_quad_sampler`). Preview-owned
     /// compositors render the scene into a small canvas — point-sampling that
     /// minification re-picks a different subset of source pixels every frame,
     /// which reads as crawling grain ("snow") on any noisy source.
@@ -1177,10 +1348,12 @@ impl MetalSceneCompositor {
             smooth_scaling,
             targets: Vec::new(),
             target_cursor: 0,
+            target_ring_busy: false,
             target_width: 0,
             target_height: 0,
             source_textures: Vec::new(),
             keyed_textures: Vec::new(),
+            keyed_texture_clock: 0,
             keyed_texture_uploads: 0,
             source_texture_cache,
             pending_source_import_stats: PendingMetalSourceImportStats::default(),
@@ -1190,6 +1363,19 @@ impl MetalSceneCompositor {
             #[cfg(test)]
             force_next_pixel_buffer_import_failure: false,
         })
+    }
+
+    /// The device this compositor renders on, for a renderer that shares it
+    /// (plan 190: the live background renders its frame on the leg's device
+    /// and queue, in its own command buffer, so the compose draws a texture
+    /// of this device with no import).
+    pub fn device(&self) -> &Retained<MetalDevice> {
+        &self.device
+    }
+
+    /// The queue this compositor commits on (see `device`).
+    pub fn queue(&self) -> &Retained<ProtocolObject<dyn MTLCommandQueue>> {
+        &self.queue
     }
 
     /// Swaps the scene sampler in place (instant-record P4): an armed preview
@@ -1301,13 +1487,15 @@ impl MetalSceneCompositor {
                 });
                 encoder_blend = source.blend;
             }
-            if source.sampler != encoder_sampler {
-                let sampler = match source.sampler {
+            let quad_sampler =
+                effective_quad_sampler(source, self.smooth_scaling, out_width, out_height);
+            if quad_sampler != encoder_sampler {
+                let sampler = match quad_sampler {
                     GpuSourceSampler::Scene => &self.sampler,
                     GpuSourceSampler::Linear => &self.linear_sampler,
                 };
                 unsafe { encoder.setFragmentSamplerState_atIndex(Some(sampler), 0) };
-                encoder_sampler = source.sampler;
+                encoder_sampler = quad_sampler;
             }
             let vertices = match source.corners {
                 Some(corners) => quad_vertices_corners(corners),
@@ -1345,37 +1533,61 @@ impl MetalSceneCompositor {
                 radius: source.mask.shader_radius(),
                 chroma_key,
                 chroma_key2,
-                layer: [source.opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+                camera_look: source
+                    .camera_look
+                    .map_or([0.0, 1.0, 1.0, 0.0], |[b, c, s]| [b, c, s, 1.0]),
+                layer: [
+                    source.opacity.clamp(0.0, 1.0),
+                    // Only a draw D3 moved to linear: explicit linear quads
+                    // (the Buddy sprite) and preview compositors keep theirs.
+                    f32::from(u8::from(
+                        quad_sampler == GpuSourceSampler::Linear
+                            && source.sampler == GpuSourceSampler::Scene,
+                    )),
+                    0.0,
+                    0.0,
+                ],
             };
             command_encode_ms += encode_segment_started_at.elapsed().as_secs_f64() * 1000.0;
-            let source_texture_started_at = Instant::now();
-            let source_texture = self.ensure_source_texture(source_index, source);
-            let source_texture_elapsed_ms =
-                source_texture_started_at.elapsed().as_secs_f64() * 1000.0;
-            source_texture_ms += source_texture_elapsed_ms;
-            match source_texture {
-                Ok(ready) => {
-                    source_import_stats.record_ready(source.kind, ready, source_texture_elapsed_ms);
+            let texture = if let Some(external) = source.texture {
+                // Plan 190: a texture this device already rendered (the live
+                // background frame): no import, no upload, no cache slot.
+                external
+            } else {
+                let source_texture_started_at = Instant::now();
+                let source_texture = self.ensure_source_texture(source_index, source);
+                let source_texture_elapsed_ms =
+                    source_texture_started_at.elapsed().as_secs_f64() * 1000.0;
+                source_texture_ms += source_texture_elapsed_ms;
+                match source_texture {
+                    Ok(ready) => {
+                        source_import_stats.record_ready(
+                            source.kind,
+                            ready,
+                            source_texture_elapsed_ms,
+                        );
+                    }
+                    Err(failures) => {
+                        source_import_stats.record_failed_source(
+                            source.kind,
+                            failures,
+                            source_texture_elapsed_ms,
+                        );
+                        encode_result = Err(());
+                        break;
+                    }
                 }
-                Err(failures) => {
-                    source_import_stats.record_failed_source(
-                        source.kind,
-                        failures,
-                        source_texture_elapsed_ms,
-                    );
+                let texture = match keyed_slot_id(source) {
+                    Some(id) => self.keyed_texture(id),
+                    None => self.source_textures[source_index]
+                        .as_ref()
+                        .map(|cached| &*cached.texture),
+                };
+                let Some(texture) = texture else {
                     encode_result = Err(());
                     break;
-                }
-            }
-            let texture = match keyed_texture_namespace(source) {
-                Some(namespace) => self.keyed_texture(namespace),
-                None => self.source_textures[source_index]
-                    .as_ref()
-                    .map(|cached| &*cached.texture),
-            };
-            let Some(texture) = texture else {
-                encode_result = Err(());
-                break;
+                };
+                texture
             };
             let Some(params_ptr) = NonNull::new(std::ptr::addr_of!(params) as *mut c_void) else {
                 encode_result = Err(());
@@ -1507,10 +1719,17 @@ impl MetalSceneCompositor {
         })
     }
 
+    /// The last compose could not acquire a slot because native encoders
+    /// still retained the entire bounded ring, rather than a GPU failure.
+    pub fn target_ring_busy(&self) -> bool {
+        self.target_ring_busy
+    }
+
     // Advance to the next ring slot and make sure it exists at the requested
     // size. Called once at the start of each compose; after it returns,
     // `latest_target()` is the slot this frame renders into.
     fn ensure_target_texture(&mut self, width: usize, height: usize) -> Option<()> {
+        self.target_ring_busy = false;
         if self.target_width != width || self.target_height != height {
             self.targets.clear();
             self.target_cursor = 0;
@@ -1555,6 +1774,7 @@ impl MetalSceneCompositor {
         }
         // Pathological: every slot (including growth headroom) is held.
         // Skipping this compose is strictly better than corrupting frames.
+        self.target_ring_busy = true;
         None
     }
 
@@ -1565,33 +1785,34 @@ impl MetalSceneCompositor {
         self.targets.get(self.target_cursor)
     }
 
-    /// The texture of a key-addressed namespace's slot.
-    fn keyed_texture(&self, namespace: u64) -> Option<&MetalTexture> {
+    /// The texture of a key-addressed slot.
+    fn keyed_texture(&self, id: KeyedSlotId) -> Option<&MetalTexture> {
         self.keyed_textures
             .iter()
-            .find(|cached| cached.content_key.map(|key| key.namespace) == Some(namespace))
-            .map(|cached| &*cached.texture)
+            .find(|slot| slot.id == id)
+            .map(|slot| &*slot.cached.texture)
     }
 
     /// Plan 168 D8: an immutable source addressed by its content key, not its
-    /// layer index. The slot of its namespace is reused while the key (and
-    /// size) holds; a new revision uploads once into it.
+    /// layer index. Its slot is reused while the key (and size) holds; a new
+    /// revision uploads once into it. A namespace at its slot capacity gives
+    /// a new slot id the least recently drawn slot (plan 186: four banners).
     fn ensure_keyed_texture(
         &mut self,
-        namespace: u64,
+        id: KeyedSlotId,
         source: &GpuSource<'_>,
     ) -> Result<SourceTextureReady, SourceImportFailures> {
         let failures = SourceImportFailures::default();
-        let position = self
-            .keyed_textures
-            .iter()
-            .position(|cached| cached.content_key.map(|key| key.namespace) == Some(namespace));
+        self.keyed_texture_clock = self.keyed_texture_clock.wrapping_add(1);
+        let now = self.keyed_texture_clock;
+        let position = self.keyed_textures.iter().position(|slot| slot.id == id);
         if let Some(index) = position {
-            let cached = &self.keyed_textures[index];
-            if cached.width == source.width
-                && cached.height == source.height
-                && cached.content_key == source.content_key
+            let slot = &mut self.keyed_textures[index];
+            if slot.cached.width == source.width
+                && slot.cached.height == source.height
+                && slot.cached.content_key == source.content_key
             {
+                slot.used_at = now;
                 return Ok(SourceTextureReady {
                     outcome: SourceImportOutcome::ImmutableByteReused,
                     failures,
@@ -1599,7 +1820,7 @@ impl MetalSceneCompositor {
             }
         }
         let reusable = position.filter(|index| {
-            let cached = &self.keyed_textures[*index];
+            let cached = &self.keyed_textures[*index].cached;
             cached.width == source.width && cached.height == source.height
         });
         let index = match reusable {
@@ -1612,35 +1833,67 @@ impl MetalSceneCompositor {
                     MTLTextureUsage::ShaderRead,
                 )
                 .ok_or(failures)?;
-                let cached = CachedSourceTexture {
-                    texture,
-                    backing: CachedSourceBacking::ByteUpload,
-                    width: source.width,
-                    height: source.height,
-                    content_key: None,
-                    _retention: None,
+                let slot = KeyedSourceTexture {
+                    id,
+                    cached: CachedSourceTexture {
+                        texture,
+                        backing: CachedSourceBacking::ByteUpload,
+                        width: source.width,
+                        height: source.height,
+                        content_key: None,
+                        _retention: None,
+                    },
+                    used_at: now,
                 };
-                match position {
+                match position.or_else(|| self.keyed_slot_to_evict(id.namespace)) {
                     Some(index) => {
-                        self.keyed_textures[index] = cached;
+                        self.keyed_textures[index] = slot;
                         index
                     }
                     None => {
-                        self.keyed_textures.push(cached);
+                        self.keyed_textures.push(slot);
                         self.keyed_textures.len() - 1
                     }
                 }
             }
         };
-        let cached = &mut self.keyed_textures[index];
-        upload_bgra_to_texture(&cached.texture, source).ok_or(failures)?;
-        // The namespace stays on the slot even before the first key lands.
-        cached.content_key = source.content_key;
+        let slot = &mut self.keyed_textures[index];
+        upload_bgra_to_texture(&slot.cached.texture, source).ok_or(failures)?;
+        // The slot id stays on the slot even before the first key lands.
+        slot.cached.content_key = source.content_key;
+        slot.used_at = now;
         self.keyed_texture_uploads = self.keyed_texture_uploads.saturating_add(1);
         Ok(SourceTextureReady {
             outcome: SourceImportOutcome::ImmutableByteUploaded,
             failures,
         })
+    }
+
+    /// The slot a new id in `namespace` replaces: the least recently drawn
+    /// one once the namespace holds its capacity, else none (append).
+    fn keyed_slot_to_evict(&self, namespace: u64) -> Option<usize> {
+        let in_namespace = self
+            .keyed_textures
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.id.namespace == namespace)
+            .collect::<Vec<_>>();
+        if in_namespace.len() < keyed_slot_capacity(namespace) {
+            return None;
+        }
+        in_namespace
+            .into_iter()
+            .min_by_key(|(_, slot)| slot.used_at)
+            .map(|(index, _)| index)
+    }
+
+    /// How many key-addressed slots `namespace` holds now.
+    #[cfg(test)]
+    pub(crate) fn keyed_slot_count(&self, namespace: u64) -> usize {
+        self.keyed_textures
+            .iter()
+            .filter(|slot| slot.id.namespace == namespace)
+            .count()
     }
 
     #[cfg(test)]
@@ -1653,8 +1906,8 @@ impl MetalSceneCompositor {
         index: usize,
         source: &GpuSource<'_>,
     ) -> Result<SourceTextureReady, SourceImportFailures> {
-        if let Some(namespace) = keyed_texture_namespace(source) {
-            return self.ensure_keyed_texture(namespace, source);
+        if let Some(id) = keyed_slot_id(source) {
+            return self.ensure_keyed_texture(id, source);
         }
         if self.source_textures.len() <= index {
             self.source_textures.resize_with(index + 1, || None);
@@ -2511,6 +2764,7 @@ fn encode_texture_present(
         chroma_key: [0.0; 4],
         chroma_key2: [0.0; 4],
         layer: [1.0, 0.0, 0.0, 0.0],
+        camera_look: [0.0, 1.0, 1.0, 0.0],
     };
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -2767,6 +3021,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: 2,
             height: 2,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -2775,6 +3030,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -3331,6 +3587,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -3339,6 +3596,7 @@ mod tests {
             mask,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -3498,6 +3756,133 @@ mod tests {
         );
     }
 
+    fn checker(side: usize) -> Vec<u8> {
+        let mut bgra = Vec::with_capacity(side * side * 4);
+        for y in 0..side {
+            for x in 0..side {
+                let value = if (x + y) % 2 == 0 { 255 } else { 0 };
+                bgra.extend([value, value, value, 255]);
+            }
+        }
+        bgra
+    }
+
+    #[test]
+    fn scaled_draw_detection_compares_the_crop_with_the_drawn_rect() {
+        // 1:1, and a fitted rect that rounds within 0.5%.
+        assert!(!gpu_draw_is_scaled(
+            1920,
+            1080,
+            [0.0; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            1920,
+            1080
+        ));
+        assert!(!gpu_draw_is_scaled(
+            1000,
+            1000,
+            [0.0; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            1004,
+            1000
+        ));
+        // A 1080p camera minified into a bubble, or upscaled onto 4K.
+        assert!(gpu_draw_is_scaled(
+            1920,
+            1080,
+            [0.0; 4],
+            [0.7, 0.0, 0.25, 0.25],
+            1920,
+            1080
+        ));
+        assert!(gpu_draw_is_scaled(
+            1920,
+            1080,
+            [0.0; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            3840,
+            2160
+        ));
+        // The crop counts: half of a 3840-wide source drawn 1920 wide is 1:1.
+        assert!(!gpu_draw_is_scaled(
+            3840,
+            1080,
+            [0.25, 0.0, 0.25, 0.0],
+            [0.0, 0.0, 1.0, 1.0],
+            1920,
+            1080
+        ));
+        // Degenerate sizes never claim a resample.
+        assert!(!gpu_draw_is_scaled(
+            0,
+            0,
+            [0.0; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            8,
+            8
+        ));
+    }
+
+    #[test]
+    fn recording_compositor_minifies_with_linear_and_keeps_1_to_1_exact_or_skips() {
+        if !metal_available() {
+            return;
+        }
+        // Plan 200 D3: a 1-pixel checker minified 4:1. Nearest picks the same
+        // parity texel for every output pixel (solid black or white: aliasing);
+        // linear averages two white and two black texels into an even grey.
+        let source = checker(32);
+        let sources = [full_frame(
+            &source,
+            32,
+            32,
+            false,
+            SourceMask::None,
+            [0.0; 4],
+        )];
+        let px = composite_sources(8, 8, [1.0, 0.0, 0.0, 1.0], &sources).unwrap();
+        for y in 0..8 {
+            for x in 0..8 {
+                let [b, g, r, a] = pixel(&px, 8, x, y);
+                assert_eq!(a, 255);
+                for channel in [b, g, r] {
+                    assert!(
+                        (124..=131).contains(&channel),
+                        "minified checker at {x},{y} is grey, not aliased: {channel}"
+                    );
+                }
+            }
+        }
+        // A 1:1 draw keeps the nearest sampler: bit-exact against the source.
+        let exact = composite_sources(32, 32, [1.0, 0.0, 0.0, 1.0], &sources).unwrap();
+        assert_eq!(exact, source, "a 1:1 draw is pixel-exact");
+    }
+
+    #[test]
+    fn preview_and_explicit_linear_quads_keep_their_sampler() {
+        let source = checker(4);
+        let mut quad = full_frame(&source, 4, 4, false, SourceMask::None, [0.0; 4]);
+        // A preview compositor's scene sampler is linear already: no change.
+        assert_eq!(
+            effective_quad_sampler(&quad, true, 2, 2),
+            GpuSourceSampler::Scene
+        );
+        // A recording compositor promotes the scaled draw, never a 1:1 one.
+        assert_eq!(
+            effective_quad_sampler(&quad, false, 2, 2),
+            GpuSourceSampler::Linear
+        );
+        assert_eq!(
+            effective_quad_sampler(&quad, false, 4, 4),
+            GpuSourceSampler::Scene
+        );
+        quad.sampler = GpuSourceSampler::Linear;
+        assert_eq!(
+            effective_quad_sampler(&quad, false, 4, 4),
+            GpuSourceSampler::Linear
+        );
+    }
+
     #[test]
     fn gpu_composites_1080p_screen_plus_camera_or_skips() {
         let Some(mut compositor) = MetalSceneCompositor::new() else {
@@ -3514,6 +3899,7 @@ mod tests {
                 content_key: None,
                 iosurface: None,
                 pixel_buffer: None,
+                texture: None,
                 width: 1920,
                 height: 1080,
                 dest: [0.0, 0.0, 1.0, 1.0],
@@ -3522,6 +3908,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -3532,6 +3919,7 @@ mod tests {
                 content_key: None,
                 iosurface: None,
                 pixel_buffer: None,
+                texture: None,
                 width: 320,
                 height: 180,
                 dest: [0.7, 0.7, 0.28, 0.28],
@@ -3540,6 +3928,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -3563,6 +3952,7 @@ mod tests {
                 content_key: None,
                 iosurface: None,
                 pixel_buffer: None,
+                texture: None,
                 width: 2,
                 height: 2,
                 dest: [0.0, 0.0, 1.0, 1.0],
@@ -3571,6 +3961,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -3581,6 +3972,7 @@ mod tests {
                 content_key: None,
                 iosurface: None,
                 pixel_buffer: None,
+                texture: None,
                 width: 2,
                 height: 2,
                 dest: [0.0, 0.0, 0.5, 0.5],
@@ -3589,6 +3981,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -3683,6 +4076,7 @@ mod tests {
             content_key: Some(key),
             iosurface: None,
             pixel_buffer: Some(&pixel_buffer),
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -3691,6 +4085,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -3731,6 +4126,7 @@ mod tests {
             }),
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -3739,6 +4135,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -3823,6 +4220,7 @@ mod tests {
                     .source_pixel_buffer
                     .as_ref()
                     .map(|retained| retained.pixel_buffer()),
+                texture: None,
                 width: w,
                 height: h,
                 dest: [0.0, 0.0, 1.0, 1.0],
@@ -3831,6 +4229,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -3982,6 +4381,7 @@ mod tests {
             }),
             iosurface: None,
             pixel_buffer: Some(&pixel_buffer),
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -3990,6 +4390,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -4088,6 +4489,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: Some(&pixel_buffer),
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -4096,6 +4498,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -4138,6 +4541,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: Some(&pixel_buffer),
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -4146,6 +4550,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -4319,13 +4724,14 @@ mod tests {
         // 8×8 blue background; a 2×2 solid-green source drawn into the right half
         // (dest x=0.5,y=0, w=0.5,h=1.0 → covers columns 4..8).
         let out = 8usize;
-        let green = vec![0u8, 255, 0, 255].repeat(2 * 2); // BGRA green, 2×2
+        let green = [0u8, 255, 0, 255].repeat(2 * 2); // BGRA green, 2×2
         let sources = [GpuSource {
             kind: GpuSourceKind::TestPattern,
             bgra: &green,
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: 2,
             height: 2,
             dest: [0.5, 0.0, 0.5, 1.0],
@@ -4334,6 +4740,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,

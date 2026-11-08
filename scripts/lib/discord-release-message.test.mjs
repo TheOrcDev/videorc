@@ -16,7 +16,8 @@ describe('buildDiscordReleaseMessage', () => {
     assert.ok(!message.includes('beta'))
     assert.match(message, /• Grant no longer errors/)
     assert.match(message, /• Preview no longer stretches/)
-    assert.match(message, /Update from Settings/)
+    assert.doesNotMatch(message, /Update from Settings/)
+    assert.doesNotMatch(message, /videorc\.com\/download/)
   })
 
   it('labels Windows Alpha and directs users to the Windows download', () => {
@@ -51,6 +52,40 @@ describe('buildDiscordReleaseMessage', () => {
     assert.match(message, /0\.10\.0 Alpha 2 for macOS and Windows/)
     assert.match(message, /Choose your Alpha download: https:\/\/www\.videorc\.com\/download/)
     assert.doesNotMatch(message, /download\/windows/)
+    assert.doesNotMatch(message, /Update from Settings/)
+  })
+
+  it('labels Linux Alpha and directs users to the download page', () => {
+    const message = buildDiscordReleaseMessage({
+      version: '0.10.0-alpha.1',
+      channel: 'alpha',
+      platforms: ['linux'],
+      title: 'The first Linux test build',
+      highlights: ['Unsigned Ubuntu AppImage.']
+    })
+
+    assert.match(
+      message,
+      /🚀 \*\*Videorc 0\.10\.0 Alpha 1 for Linux — The first Linux test build\*\*/
+    )
+    assert.match(message, /Download the Linux Alpha: https:\/\/www\.videorc\.com\/download/)
+    assert.doesNotMatch(message, /download\/windows/)
+    assert.doesNotMatch(message, /Update from Settings/)
+  })
+
+  it('names Windows and Linux on a shared Alpha entry', () => {
+    const message = buildDiscordReleaseMessage({
+      version: '0.10.0-alpha.3',
+      channel: 'alpha',
+      platforms: ['windows', 'linux'],
+      title: 'A shared Alpha build',
+      highlights: ['Available on Windows and Linux.']
+    })
+
+    assert.match(message, /0\.10\.0 Alpha 3 for Windows and Linux/)
+    assert.match(message, /Choose your Alpha download: https:\/\/www\.videorc\.com\/download/)
+    assert.doesNotMatch(message, /download\/windows/)
+    assert.doesNotMatch(message, /Update from Settings/)
   })
 
   it('caps at 4 highlights and adds an "and more" line', () => {
@@ -61,6 +96,7 @@ describe('buildDiscordReleaseMessage', () => {
     })
     assert.equal((message.match(/^• /gm) ?? []).length, 4)
     assert.match(message, /…and more\./)
+    assert.doesNotMatch(message, /Update from Settings/)
   })
 
   it('strips inline markdown emphasis and links from highlights', () => {
@@ -71,5 +107,6 @@ describe('buildDiscordReleaseMessage', () => {
     })
     assert.match(message, /• See bold and the page and code$/m)
     assert.ok(!message.includes('https://videorc.com/x'))
+    assert.doesNotMatch(message, /Update from Settings/)
   })
 })

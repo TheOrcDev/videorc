@@ -222,13 +222,15 @@ impl JournalCollector {
     }
 
     fn observe_status(&mut self, status: &RecordingStatus) {
-        let active = matches!(
-            status.state,
-            RecordingState::Starting
-                | RecordingState::Recording
-                | RecordingState::Streaming
-                | RecordingState::Stopping
-        );
+        // Plan 181: a buffer-only session is not a recording or a stream.
+        let active = !status.replay_only
+            && matches!(
+                status.state,
+                RecordingState::Starting
+                    | RecordingState::Recording
+                    | RecordingState::Streaming
+                    | RecordingState::Stopping
+            );
         let Some(session_id) = status.session_id.as_ref().filter(|_| active) else {
             self.session_id = None;
             self.recording = false;
@@ -988,6 +990,8 @@ mod tests {
                         "Live at rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}"
                     )),
                     redacted_url: Some("rtmps://a.rtmp.youtube.com/live2/••••".to_string()),
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 },
                 StreamTargetRuntime {
                     target_id: "twitch-main".to_string(),
@@ -996,6 +1000,8 @@ mod tests {
                     state: StreamTargetState::Reconnecting,
                     message: Some(format!("rtmp://live.twitch.tv/app/{TWITCH_KEY} retrying")),
                     redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 },
                 StreamTargetRuntime {
                     target_id: "kick-main".to_string(),
@@ -1006,6 +1012,8 @@ mod tests {
                         "rtmps://fa723fc1b171.global-contribute.live-video.net/app/{KICK_KEY}"
                     )),
                     redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 },
             ],
         })

@@ -14,12 +14,17 @@ import { extname, join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { analyzeMediaAudioAmplitude } from './lib/audio-amplitude.mjs'
 import {
+  captionsPlatformUnavailableReason,
+  captionsSkipLine
+} from './lib/captions-platform-skip.mjs'
+import {
   analyzeCaptionsAbsentArtifact,
   analyzeCaptionsLiveArtifact,
   formatCaptionsLiveArtifactSummary
 } from './lib/captions-live-artifact.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { evaluateMicrophoneLossContinuity } from './lib/microphone-loss-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -80,6 +85,11 @@ let backend
 let listener
 let sessionActive = false
 let observed = { statuses: [], updates: [], recordingStatuses: [], healthEvents: [] }
+// Set when the product says this platform can't caption at all (Linux
+// today): every check below is a caption check, so the whole smoke SKIPs
+// with the product's own reason instead of timing out on `desiredEnabled`.
+let captionsUnavailableReason = null
+class CaptionsPlatformSkip extends Error {}
 
 try {
   launched = await launchDevApp({
@@ -100,9 +110,14 @@ try {
   backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
   const smoke = launched.connections['preview-motion-ready']
   observed = collectCaptionEvents(backend)
+  captionsUnavailableReason = await captionsPlatformUnavailableReason(
+    async (code) => (await smokeCommand(smoke, 'eval-js', { code }))?.result
+  )
+  if (captionsUnavailableReason) throw new CaptionsPlatformSkip(captionsUnavailableReason)
 
   fake.state.realtimeAvailable = false
   fake.state.realtimeFailureCode = 'captions-realtime-disabled'
+  await ensureCaptionsOnBothOutputs(backend)
   await seedRendererCaptionsProfile(smoke)
   await waitForCaptionStatus(backend, (status) => {
     return status.state === 'ready' && status.desiredEnabled === true
@@ -543,34 +558,36 @@ try {
       `Evidence: ${outputDirectory}`
   )
 } catch (error) {
-  const [diagnostics, recordingStatus, captionsStatus] = backend
-    ? await Promise.all([
-        requestSafe(backend, 'diagnostics.stats', {}),
-        requestSafe(backend, 'recording.status', {}),
-        requestSafe(backend, 'captions.status.get', {})
-      ])
-    : [null, null, null]
-  const failure = {
-    pass: false,
-    error: {
-      message: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : null
-    },
-    diagnostics,
-    recordingStatus,
-    captionsStatus,
-    observed,
-    fake: {
-      ...safeFakeCounters(fake.state),
-      chunkAudio: fake.state.chunkAudio
-    },
-    artifacts: artifactInventory(outputDirectory)
+  if (!(error instanceof CaptionsPlatformSkip)) {
+    const [diagnostics, recordingStatus, captionsStatus] = backend
+      ? await Promise.all([
+          requestSafe(backend, 'diagnostics.stats', {}),
+          requestSafe(backend, 'recording.status', {}),
+          requestSafe(backend, 'captions.status.get', {})
+        ])
+      : [null, null, null]
+    const failure = {
+      pass: false,
+      error: {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : null
+      },
+      diagnostics,
+      recordingStatus,
+      captionsStatus,
+      observed,
+      fake: {
+        ...safeFakeCounters(fake.state),
+        chunkAudio: fake.state.chunkAudio
+      },
+      artifacts: artifactInventory(outputDirectory)
+    }
+    writeFileSync(reportPath, JSON.stringify(failure, null, 2))
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)} Full failure evidence: ${reportPath}`,
+      { cause: error }
+    )
   }
-  writeFileSync(reportPath, JSON.stringify(failure, null, 2))
-  throw new Error(
-    `${error instanceof Error ? error.message : String(error)} Full failure evidence: ${reportPath}`,
-    { cause: error }
-  )
 } finally {
   try {
     if (backend) {
@@ -582,6 +599,37 @@ try {
   } finally {
     await launched?.stop().catch(() => {})
     await fake.close()
+  }
+}
+if (captionsUnavailableReason) {
+  console.log(captionsSkipLine('Captions live smoke', 'every check', captionsUnavailableReason))
+}
+
+/** Plan 164 D14: the captions item's two switches are the one home of the
+ * burn target. The renderer derives `captions.burnTarget` from them after
+ * every load, so a seeded `both` reads back as the default layout's `stream`.
+ * Both switches go on through the backend, written until the layout reads
+ * back the same twice in a row (the renderer pushes its own copy at start). */
+async function ensureCaptionsOnBothOutputs(ws) {
+  let steady = 0
+  let last = null
+  for (let attempt = 0; attempt < 20 && steady < 2; attempt += 1) {
+    last = await request(ws, timeoutMs, 'overlays.layout.get', {})
+    if (last?.captions?.showOnStream === true && last?.captions?.showInRecording === true) {
+      steady += 1
+    } else {
+      steady = 0
+      await request(ws, timeoutMs, 'overlays.layout.set', {
+        ...last,
+        captions: { ...last?.captions, showOnStream: true, showInRecording: true }
+      })
+    }
+    await sleep(750)
+  }
+  if (steady < 2) {
+    throw new Error(
+      `The overlay layout would not hold both captions switches: ${JSON.stringify(last?.captions)}`
+    )
   }
 }
 
@@ -610,6 +658,9 @@ async function seedRendererCaptionsProfile(smoke) {
       }
       localStorage.setItem('videorc.captureConfig', JSON.stringify(next))
       localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
+      // The reload rides the seed's own eval: a second eval could find the
+      // renderer's own write already over the seed (plan 0008).
+      ${reloadKeepingSeedJs({ forgetWorkingScene: false, delayMs: 150 })}
       return {
         captions: next.captions,
         video: next.video,
@@ -629,12 +680,6 @@ async function seedRendererCaptionsProfile(smoke) {
   ) {
     throw new Error(`Could not seed renderer caption profile: ${JSON.stringify(seeded)}`)
   }
-  await smokeCommand(smoke, 'eval-js', {
-    code: `
-      window.setTimeout(() => window.location.reload(), 150)
-      return { reloadScheduled: true }
-    `
-  })
   await sleep(750)
 
   let latest = null

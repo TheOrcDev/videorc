@@ -424,7 +424,10 @@ function key({ name, hint, on = false, toggle = false, accent, disabled = false,
   // A key that stays on (a scene, a takeover, system audio) says so to a
   // screen reader too (plan 174 I-12).
   if (toggle) node.setAttribute('aria-pressed', String(on))
+  // Plan 208 D8: `primary` is the chrome primary, `record` the red LED, lit
+  // while it is on (a recording or livestream runs).
   if (accent) node.dataset.accent = accent
+  if (accent === 'record' && on) node.dataset.lit = ''
   node.append(el('span', 'name', name))
   if (hint) node.append(el('span', 'hint', hint))
   if (!onHold) {
@@ -511,13 +514,14 @@ function renderDeck() {
         name: streaming ? 'End livestream' : 'Stop recording',
         hint: 'Hold to stop',
         on: true,
-        accent: 'red',
+        accent: 'record',
         onHold: () => send({ kind: action })
       }))
     : key({
         name: streaming ? 'Go Live' : 'Record',
         hint: streaming && state.recordEnabled ? 'Stream + record' : 'Tap to start',
-        accent: 'red',
+        // Like the desktop: Record is the unlit LED, Go Live the chrome primary.
+        accent: streaming ? 'primary' : 'record',
         onTap: () => send({ kind: action })
       })
   sessionControl = { action, sessionState: state.sessionState, connected, node: session }
@@ -551,12 +555,21 @@ function renderDeck() {
   )
 
   const presets = describe.layoutPresets ?? []
-  $('scenes-label').hidden = presets.length === 0
+  const savedScenes = state.savedScenes ?? []
+  $('scenes-label').hidden = presets.length === 0 && savedScenes.length === 0
   $('deck-scenes').replaceChildren(
+    ...savedScenes.map(({ id, name }) =>
+      key({
+        name,
+        on: state.activeSavedSceneId === id,
+        toggle: true,
+        onTap: () => send({ kind: 'sceneApply', sceneId: id })
+      })
+    ),
     ...presets.map((layoutPreset) =>
       key({
         name: presetName(layoutPreset),
-        on: state.layoutPreset === layoutPreset,
+        on: !state.activeSavedSceneId && state.layoutPreset === layoutPreset,
         toggle: true,
         onTap: () => send({ kind: 'sceneApply', layoutPreset })
       })
@@ -564,8 +577,14 @@ function renderDeck() {
   )
 
   const takeovers = describe.takeovers ?? []
-  $('takeovers-label').hidden = takeovers.length === 0
+  $('takeovers-label').hidden = false
   $('deck-takeovers').replaceChildren(
+    key({
+      name: state.screenHidden ? 'Screen hidden' : 'Hide screen',
+      on: Boolean(state.screenHidden),
+      toggle: true,
+      onTap: () => send({ kind: 'screenHideToggle' })
+    }),
     ...takeovers.map((takeover) => {
       const on = state.activeTakeoverId === takeover.id
       return key({
@@ -578,6 +597,76 @@ function renderDeck() {
       })
     })
   )
+
+  // Plan 186: banners by name only (never an image or a path), each its own
+  // explicit show or hide, from the `shown` describe carries.
+  const banners = describe.banners ?? []
+  $('banners-label').hidden = banners.length === 0
+  $('deck-banners').replaceChildren(
+    ...banners.map((banner) =>
+      key({
+        name: banner.name,
+        hint: banner.shown ? 'Showing. Tap to hide' : undefined,
+        on: banner.shown,
+        toggle: true,
+        onTap: () => send({ kind: banner.shown ? 'bannerHide' : 'bannerShow', bannerId: banner.id })
+      })
+    )
+  )
+
+  // Plan 189: the soundboard by name only (never a file, a path or audio).
+  // A tap is a press, so each sound plays the way its mode says on the
+  // desktop; Stop all sounds stops every one.
+  const sounds = describe.sounds ?? []
+  $('sounds-label').hidden = sounds.length === 0
+  $('deck-sounds').replaceChildren(
+    ...sounds.map((sound) =>
+      key({
+        name: sound.name,
+        hint: sound.playing ? 'Playing' : undefined,
+        on: sound.playing,
+        onTap: () => send({ kind: 'soundPlay', soundId: sound.id })
+      })
+    ),
+    ...(sounds.length
+      ? [
+          key({
+            name: 'Stop all sounds',
+            disabled: !sounds.some((sound) => sound.playing),
+            onTap: () => send({ kind: 'soundStop' })
+          })
+        ]
+      : [])
+  )
+}
+
+// A banner shown or hidden (plan 186) or a sound that starts or stops (plan
+// 189) changes describe, not state, and every change the desktop publishes
+// arrives as remote.state: re-read describe after each one, one read at a
+// time, keeping the newer state from events.
+let describeReading = false
+let describeStale = false
+async function refreshDescribe() {
+  if (describeReading) {
+    describeStale = true
+    return
+  }
+  describeReading = true
+  try {
+    const answer = await client?.describe()
+    if (answer?.describe) {
+      describe = answer.describe
+      renderDeck()
+    }
+  } catch {
+    // The next remote.state reads it again.
+  } finally {
+    describeReading = false
+    if (describeStale) {
+      describeStale = false
+      void refreshDescribe()
+    }
+  }
 }
 
 /** The renderer publishes describe/state shortly AFTER it connects. */
@@ -681,6 +770,7 @@ function start() {
     own((next) => {
       state = next
       if (!describe) void loadDescribe()
+      else void refreshDescribe()
       renderDeck()
     })
   )

@@ -27,6 +27,7 @@ fn camera_adaptive_registry()
 }
 
 /// Record what a camera start actually negotiated (called on every start).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn record_negotiated_camera_format(camera_id: &str, width: u32, height: u32) {
     let mut registry = camera_adaptive_registry()
         .lock()
@@ -38,6 +39,7 @@ pub fn record_negotiated_camera_format(camera_id: &str, width: u32, height: u32)
 }
 
 /// The ceiling the format chooser must respect for this camera, if armed.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn camera_format_ceiling(camera_id: &str) -> Option<(u32, u32)> {
     camera_adaptive_registry()
         .lock()
@@ -99,12 +101,14 @@ pub struct CameraFormatSummary {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct CameraFormatChoice {
     pub format: CameraFormatSummary,
     pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub enum NativeCameraPermission {
     Authorized,
     NotDetermined,
@@ -189,6 +193,7 @@ pub fn camera_capability_matrix_for_id(
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn native_camera_device_id(unique_id: &str) -> String {
     format!("{NATIVE_CAMERA_PREFIX}{}", encode_hex(unique_id.as_bytes()))
 }
@@ -206,13 +211,14 @@ pub fn parse_windows_dshow_camera_id(id: &str) -> Option<String> {
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn windows_dshow_camera_device_id(device_name: &str) -> String {
+pub(crate) fn windows_dshow_camera_device_id(device_name: &str) -> String {
     format!(
         "{WINDOWS_DSHOW_CAMERA_PREFIX}{}",
         encode_hex(device_name.as_bytes())
     )
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn camera_permission_status(permission: NativeCameraPermission) -> DeviceStatus {
     match permission {
         NativeCameraPermission::Authorized => DeviceStatus::Available,
@@ -223,6 +229,7 @@ pub fn camera_permission_status(permission: NativeCameraPermission) -> DeviceSta
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn choose_camera_format(
     formats: &[CameraFormatSummary],
     target_width: u32,
@@ -251,28 +258,24 @@ pub fn choose_camera_format(
     // Resolution first among the fps-capable formats: a format that covers the
     // requested pixels keeps the image native, while a smaller one is upscaled
     // for the rest of the session. The nearest covering format wins so a 4K ask
-    // does not grab an 8K sensor mode it does not need.
+    // does not grab an 8K sensor mode it does not need. When nothing covers the
+    // target, the canvas-shaped region a format can supply beats its raw area:
+    // for a 2560x1440 canvas a square 1552x1552 mode only yields 1552x873 of
+    // 16:9 picture, while the native 1920x1080 mode yields all of it.
+    let fallback_rank = |format: &&CameraFormatSummary| {
+        (
+            camera_format_target_aspect_extent(format, target_width, target_height),
+            camera_format_pixels(format),
+            format.max_fps.round().max(0.0) as u64,
+        )
+    };
     let selected = fps_capable
         .iter()
         .copied()
         .filter(|format| camera_format_pixels(format) >= target_pixels)
         .min_by_key(|format| camera_format_pixels(format).saturating_sub(target_pixels))
-        .or_else(|| {
-            fps_capable.iter().copied().max_by_key(|format| {
-                (
-                    camera_format_pixels(format),
-                    format.max_fps.round().max(0.0) as u64,
-                )
-            })
-        })
-        .or_else(|| {
-            formats.iter().max_by_key(|format| {
-                (
-                    camera_format_pixels(format),
-                    format.max_fps.round().max(0.0) as u64,
-                )
-            })
-        })?;
+        .or_else(|| fps_capable.iter().copied().max_by_key(fallback_rank))
+        .or_else(|| formats.iter().max_by_key(fallback_rank))?;
 
     Some(CameraFormatChoice {
         format: selected.clone(),
@@ -283,6 +286,7 @@ pub fn choose_camera_format(
     })
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn normalize_camera_formats(mut formats: Vec<CameraFormatSummary>) -> Vec<CameraFormatSummary> {
     formats.retain(|format| {
         format.width > 0
@@ -316,8 +320,10 @@ pub fn normalize_camera_formats(mut formats: Vec<CameraFormatSummary>) -> Vec<Ca
 /// the 4K session upscales it, with only a "closest format" warning to show
 /// for it. One frame of slack costs nothing and matches the renderer's own
 /// FPS_TOLERANCE in camera-format-shortfall.ts.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const FPS_TOLERANCE: f64 = 1.0;
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn format_supports_fps(format: &CameraFormatSummary, target_fps: f64) -> bool {
     format.min_fps <= target_fps + FPS_TOLERANCE && format.max_fps >= target_fps - FPS_TOLERANCE
 }
@@ -332,6 +338,7 @@ fn format_supports_fps(format: &CameraFormatSummary, target_fps: f64) -> bool {
 /// resolves to an endpoint, and may only build its own rational for a value
 /// strictly inside an open range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub enum CameraFrameRateEndpoint {
     /// Use the range's `minFrameDuration` (the CMTime for its MAX fps).
     RangeMax,
@@ -342,6 +349,7 @@ pub enum CameraFrameRateEndpoint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct CameraFrameRateResolution {
     /// Index into the ranges slice the request resolved against.
     pub range_index: usize,
@@ -359,6 +367,7 @@ pub struct CameraFrameRateResolution {
 /// `floor(max) = 30 < ceil(min) = 31`, the empty interval lets `.max(31)`
 /// win, and the device rejects `1/31` with an NSException on every camera
 /// start (the field-logged 31-on-30 and 61-on-60 requests).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn resolve_camera_frame_rate(
     requested_fps: u32,
     ranges: &[(f64, f64)],
@@ -396,8 +405,22 @@ pub fn resolve_camera_frame_rate(
     })
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn camera_format_pixels(format: &CameraFormatSummary) -> u64 {
     u64::from(format.width) * u64::from(format.height)
+}
+
+/// Orders formats by the largest target-aspect region each one can supply.
+/// That region is `min(w·th, h·tw) / th` wide, so the numerator alone ranks
+/// formats exactly, in whole numbers, for one target.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn camera_format_target_aspect_extent(
+    format: &CameraFormatSummary,
+    target_width: u32,
+    target_height: u32,
+) -> u64 {
+    (u64::from(format.width) * u64::from(target_height))
+        .min(u64::from(format.height) * u64::from(target_width))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -494,8 +517,10 @@ mod windows_native {
         let mut devices = Vec::new();
         for index in 0..count {
             let activate = unsafe { activates.add(index as usize).read() };
-            if let Some(activate) = activate {
-                devices.push(device_from_activate(&activate, index));
+            if let Some(device) =
+                activate.and_then(|activate| device_from_activate(&activate, index))
+            {
+                devices.push(device);
             }
         }
         unsafe { CoTaskMemFree(Some(activates.cast())) };
@@ -503,13 +528,21 @@ mod windows_native {
         Ok(devices)
     }
 
-    fn device_from_activate(activate: &IMFActivate, index: u32) -> Device {
+    /// `None` for Videorc Camera itself (plan 214 A5): by the media source
+    /// CLSID in the symbolic link, and by the name prefix as a belt.
+    fn device_from_activate(activate: &IMFActivate, index: u32) -> Option<Device> {
         let friendly_name = mf_string(activate, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME)
             .unwrap_or_else(|| format!("Camera {}", index + 1));
         let symbolic_link = mf_string(
             activate,
             &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
         );
+        if crate::virtual_camera::is_videorc_camera_windows(
+            symbolic_link.as_deref(),
+            &friendly_name,
+        ) {
+            return None;
+        }
         // The capture name is what ffmpeg's dshow demuxer receives as
         // `-i video=<name>`. dshow's device selector is the DirectShow FRIENDLY
         // NAME, not the MediaFoundation symbolic link — feeding it the MF
@@ -518,7 +551,10 @@ mod windows_native {
         // tester "camera granted but not working" report). The symbolic link
         // stays in the detail for support triage, not as the ffmpeg arg.
         let capture_name = friendly_name.clone();
-        Device {
+        Some(Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
             id: windows_dshow_camera_device_id(&capture_name),
             name: friendly_name.clone(),
             kind: DeviceKind::Camera,
@@ -529,7 +565,7 @@ mod windows_native {
             )),
             width: None,
             height: None,
-        }
+        })
     }
 
     fn mf_string(activate: &IMFActivate, key: &GUID) -> Option<String> {
@@ -564,6 +600,9 @@ mod windows_native {
 
     fn unavailable_camera(id: &str, detail: &str) -> Device {
         Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
             id: id.to_string(),
             name: "Camera".to_string(),
             kind: DeviceKind::Camera,
@@ -597,12 +636,52 @@ fn utf16_z(value: &[u16]) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn camera_default_priority(is_system_preferred: bool, is_builtin: bool) -> u8 {
+    if is_system_preferred {
+        0
+    } else if is_builtin {
+        1
+    } else {
+        2
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn camera_is_builtin(device_type: &str, is_continuity: bool) -> bool {
+    device_type == "AVCaptureDeviceTypeBuiltInWideAngleCamera" && !is_continuity
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn continuity_camera_label(name: &str) -> String {
+    if name.to_ascii_lowercase().contains("iphone") {
+        name.to_string()
+    } else {
+        format!("{name} · iPhone camera")
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn camera_device_type_label(device_type: &str) -> &str {
+    match device_type {
+        "AVCaptureDeviceTypeContinuityCamera" => "iPhone camera",
+        "AVCaptureDeviceTypeBuiltInWideAngleCamera" => "Built-in camera",
+        "AVCaptureDeviceTypeExternal" | "AVCaptureDeviceTypeExternalUnknown" => "External camera",
+        _ => "Camera",
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeVideo};
+    #[allow(deprecated)]
+    use objc2_av_foundation::AVCaptureDeviceTypeExternalUnknown;
+    use objc2_av_foundation::{
+        AVAuthorizationStatus, AVCaptureDevice, AVCaptureDeviceDiscoverySession,
+        AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera, AVMediaTypeVideo,
+    };
     use objc2_core_media::CMVideoFormatDescriptionGetDimensions;
-    use objc2_foundation::NSString;
+    use objc2_foundation::{NSArray, NSString};
 
     pub fn list_native_cameras() -> NativeCameraDevices {
         let Some(video_media_type) = video_media_type() else {
@@ -617,8 +696,31 @@ mod macos {
 
         let permission = native_camera_permission();
         let status = camera_permission_status(permission);
-        #[allow(deprecated)]
-        let devices = unsafe { AVCaptureDevice::devicesWithMediaType(video_media_type) };
+        // External and Continuity are distinct opt-in types starting with Sonoma.
+        let external = NSString::from_str("AVCaptureDeviceTypeExternal");
+        let continuity = NSString::from_str("AVCaptureDeviceTypeContinuityCamera");
+        let mut types = vec![unsafe { AVCaptureDeviceTypeBuiltInWideAngleCamera }];
+        if objc2::available!(macos = 14.0) {
+            types.extend([&*external, &*continuity]);
+        } else {
+            #[allow(deprecated)]
+            types.push(unsafe { AVCaptureDeviceTypeExternalUnknown });
+        }
+        let discovery = unsafe {
+            AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
+                &NSArray::from_slice(&types),
+                Some(video_media_type),
+                AVCaptureDevicePosition::Unspecified,
+            )
+        };
+        let devices = unsafe { discovery.devices() };
+        let preferred_id = if objc2::available!(macos = 14.0) {
+            unsafe { AVCaptureDevice::systemPreferredCamera() }
+                .map(|camera| unsafe { camera.uniqueID() }.to_string())
+        } else {
+            None
+        };
+        let mut priorities = std::collections::HashMap::new();
         let mut camera_devices = Vec::new();
 
         for index in 0..devices.count() {
@@ -629,6 +731,34 @@ mod macos {
             let name = unsafe { camera.localizedName() };
             let name =
                 ns_string_to_string(&name).unwrap_or_else(|| format!("Camera {}", index + 1));
+            // Plan 214 A5: never list Videorc Camera as a source of itself.
+            if crate::virtual_camera::is_videorc_camera_macos(&unique_id, &name) {
+                continue;
+            }
+            let device_type = unsafe { camera.deviceType() }.to_string();
+            let is_continuity = device_type == "AVCaptureDeviceTypeContinuityCamera"
+                || (objc2::available!(macos = 13.0) && unsafe { camera.isContinuityCamera() });
+            priorities.insert(
+                native_camera_device_id(&unique_id),
+                camera_default_priority(
+                    preferred_id.as_deref() == Some(unique_id.as_str()),
+                    camera_is_builtin(&device_type, is_continuity),
+                ),
+            );
+            let transport = unsafe { camera.transportType() };
+            let name = if is_continuity {
+                continuity_camera_label(&name)
+            } else {
+                name
+            };
+            let type_detail = format!(
+                "{} · device type: {device_type} · transport: 0x{transport:08x}.",
+                if is_continuity {
+                    "iPhone camera"
+                } else {
+                    camera_device_type_label(&device_type)
+                }
+            );
             let formats = normalize_camera_formats(camera_formats(&camera));
             let active_format = active_camera_format_detail(&camera);
             let permission_detail = camera_permission_detail(permission);
@@ -652,16 +782,22 @@ mod macos {
             };
 
             camera_devices.push(Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: native_camera_device_id(&unique_id),
                 name,
                 kind: DeviceKind::Camera,
                 status: status.clone(),
-                detail: Some(detail),
+                detail: Some(format!("{type_detail} {detail}")),
                 width: None,
                 height: None,
             });
         }
 
+        // Discovery order is the default order consumed by Studio and first run.
+        // A saved selection is resolved before this default in the renderer.
+        camera_devices.sort_by_key(|camera| priorities.get(&camera.id).copied().unwrap_or(2));
         if camera_devices.is_empty() {
             camera_devices.push(unavailable_camera(
                 "camera:avfoundation-native-missing",
@@ -680,6 +816,10 @@ mod macos {
     }
 
     pub fn camera_name_for_unique_id(unique_id: &str) -> Option<String> {
+        // Plan 214 A5: a saved id naming Videorc Camera resolves to nothing.
+        if crate::virtual_camera::is_videorc_camera_macos(unique_id, "") {
+            return None;
+        }
         let unique_id = NSString::from_str(unique_id);
         let camera = unsafe { AVCaptureDevice::deviceWithUniqueID(&unique_id) }?;
         let name = unsafe { camera.localizedName() };
@@ -813,6 +953,9 @@ mod macos {
 
     fn unavailable_camera(id: &str, detail: &str) -> Device {
         Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
             id: id.to_string(),
             name: "Camera".to_string(),
             kind: DeviceKind::Camera,
@@ -833,6 +976,65 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuity_camera_label_only_adds_the_tag_when_iphone_is_absent() {
+        for (name, expected) in [
+            ("iPhone Camera", "iPhone Camera"),
+            ("Uroš's iPhone Camera", "Uroš's iPhone Camera"),
+            ("IPHONE Camera", "IPHONE Camera"),
+            ("My iPhOnE", "My iPhOnE"),
+            ("Orc phone", "Orc phone · iPhone camera"),
+            ("", " · iPhone camera"),
+        ] {
+            assert_eq!(continuity_camera_label(name), expected, "name: {name:?}");
+        }
+    }
+
+    #[test]
+    fn camera_defaults_prefer_the_system_then_builtin_then_discovery_order() {
+        let mut cameras = [
+            ("iPhone", false, false),
+            ("USB", false, false),
+            ("Built-in", false, true),
+        ];
+        cameras
+            .sort_by_key(|(_, preferred, builtin)| camera_default_priority(*preferred, *builtin));
+        assert_eq!(cameras[0].0, "Built-in");
+        cameras[2].1 = true;
+        cameras
+            .sort_by_key(|(_, preferred, builtin)| camera_default_priority(*preferred, *builtin));
+        assert_eq!(cameras[0].0, "USB");
+        assert_eq!(cameras[1].0, "Built-in");
+    }
+
+    #[test]
+    fn a_ventura_continuity_camera_does_not_get_builtin_default_priority() {
+        let legacy_type = "AVCaptureDeviceTypeBuiltInWideAngleCamera";
+        assert!(camera_is_builtin(legacy_type, false));
+        assert!(!camera_is_builtin(legacy_type, true));
+        assert!(
+            camera_default_priority(false, camera_is_builtin(legacy_type, false))
+                < camera_default_priority(false, camera_is_builtin(legacy_type, true))
+        );
+    }
+
+    #[test]
+    fn camera_device_types_have_plain_labels() {
+        assert_eq!(
+            camera_device_type_label("AVCaptureDeviceTypeContinuityCamera"),
+            "iPhone camera"
+        );
+        assert_eq!(
+            camera_device_type_label("AVCaptureDeviceTypeBuiltInWideAngleCamera"),
+            "Built-in camera"
+        );
+        assert_eq!(
+            camera_device_type_label("AVCaptureDeviceTypeExternal"),
+            "External camera"
+        );
+        assert_eq!(camera_device_type_label("future"), "Camera");
+    }
 
     #[test]
     fn native_camera_ids_round_trip_unique_ids() {
@@ -1045,6 +1247,104 @@ mod tests {
         assert_eq!(choice.format.width, 3840);
         assert_eq!(choice.format.height, 2160);
         assert!(choice.fallback_reason.unwrap().contains("1-30 fps"));
+    }
+
+    /// The built-in MacBook Pro Camera, as macOS enumerates it (issue #977):
+    /// a square mode with more pixels than its native 16:9 one.
+    fn macbook_pro_camera_formats() -> Vec<CameraFormatSummary> {
+        [
+            (640, 480),
+            (1280, 720),
+            (1760, 1328),
+            (1328, 1760),
+            (1552, 1552),
+            (1920, 1080),
+            (1080, 1920),
+        ]
+        .into_iter()
+        .map(|(width, height)| CameraFormatSummary {
+            width,
+            height,
+            min_fps: 15.0,
+            max_fps: 30.0,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_1440p_canvas_takes_the_native_16_9_mode_over_the_larger_square_one() {
+        // 1552x1552 has more pixels, but only a 1552x873 slice of it is 16:9.
+        let choice = choose_camera_format(&macbook_pro_camera_formats(), 2560, 1440, 30).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (1920, 1080));
+        assert!(
+            choice
+                .fallback_reason
+                .unwrap()
+                .contains("Requested 2560x1440@30 was not available; selected native 1920x1080")
+        );
+    }
+
+    #[test]
+    fn a_4k_canvas_takes_the_native_16_9_mode_over_the_larger_square_one() {
+        let choice = choose_camera_format(&macbook_pro_camera_formats(), 3840, 2160, 30).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (1920, 1080));
+    }
+
+    #[test]
+    fn a_vertical_1440p_canvas_takes_the_native_vertical_mode() {
+        let choice = choose_camera_format(&macbook_pro_camera_formats(), 1440, 2560, 30).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (1080, 1920));
+    }
+
+    #[test]
+    fn a_large_square_canvas_takes_the_square_mode() {
+        let choice = choose_camera_format(&macbook_pro_camera_formats(), 2160, 2160, 30).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (1552, 1552));
+    }
+
+    #[test]
+    fn a_1080p_canvas_still_takes_the_exact_native_mode() {
+        let choice = choose_camera_format(&macbook_pro_camera_formats(), 1920, 1080, 30).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (1920, 1080));
+        assert_eq!(choice.fallback_reason, None);
+    }
+
+    #[test]
+    fn a_1440p60_canvas_beyond_the_cameras_rate_still_takes_the_16_9_mode() {
+        // No mode reaches 60 fps, so the any-rate fallback ranks the same way.
+        let choice = choose_camera_format(&macbook_pro_camera_formats(), 2560, 1440, 60).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (1920, 1080));
+        assert!(choice.fallback_reason.is_some());
+    }
+
+    #[test]
+    fn equal_canvas_shaped_regions_keep_the_larger_format() {
+        // iPhone Continuity Camera: both supply a full 1920x1080 16:9 region,
+        // so total pixels decide exactly as before.
+        let formats = vec![
+            CameraFormatSummary {
+                width: 1920,
+                height: 1080,
+                min_fps: 1.0,
+                max_fps: 30.0,
+            },
+            CameraFormatSummary {
+                width: 1920,
+                height: 1440,
+                min_fps: 1.0,
+                max_fps: 30.0,
+            },
+        ];
+
+        let choice = choose_camera_format(&formats, 2560, 1440, 30).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (1920, 1440));
     }
 
     /// The owner's Elgato Cam Link 4K, as macOS enumerates it: the 2160p mode

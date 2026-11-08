@@ -242,17 +242,19 @@ export function BuddyVoiceCommands({
                     // The fix as a sentence stays on the button (its name and
                     // tooltip); the row itself says only the short status.
                     <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          aria-label={row.message}
-                          disabled={pending !== null}
-                          size="xs"
-                          type="button"
-                          variant="outline"
-                          onClick={() => fix(row)}
-                        >
-                          {row.action.label}
-                        </Button>
+                      <TooltipTrigger
+                        render={
+                          <Button
+                            aria-label={row.message}
+                            disabled={pending !== null}
+                            size="xs"
+                            type="button"
+                            variant="outline"
+                            onClick={() => fix(row)}
+                          />
+                        }
+                      >
+                        {row.action.label}
                       </TooltipTrigger>
                       <TooltipContent>{row.message}</TooltipContent>
                     </Tooltip>

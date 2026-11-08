@@ -198,6 +198,8 @@ pub struct SourceSwitchCoordinator {
     pending_request: Option<SourceSwitchParams>,
     completed: VecDeque<(SourceSwitchParams, SourceSwitchOperation)>,
     stopping: bool,
+    camera_removed_at: Option<Instant>,
+    capture_removed_at: Option<Instant>,
     deadline: Option<Instant>,
     cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// `(live producer ID, confirmed ID)` when session start opened the picked
@@ -414,6 +416,17 @@ impl SourceSwitchCoordinator {
             }
             SourceKind::Microphone => return Err(SwitchError::InvalidRequest),
         }
+        if request.device_id.is_none() {
+            match request.kind {
+                SourceKind::Camera => {
+                    self.camera_removed_at.get_or_insert_with(Instant::now);
+                }
+                SourceKind::Capture => {
+                    self.capture_removed_at.get_or_insert_with(Instant::now);
+                }
+                SourceKind::Microphone => {}
+            }
+        }
         snapshot.source_revision = snapshot.source_revision.saturating_add(1);
         self.finish(request, SwitchStage::Applied, None)
     }
@@ -471,9 +484,30 @@ impl SourceSwitchCoordinator {
         if snapshot.confirmed == confirmed {
             return None;
         }
+        if snapshot.confirmed.camera_id.is_some() && confirmed.camera_id.is_none() {
+            self.camera_removed_at.get_or_insert_with(Instant::now);
+        }
+        if (snapshot.confirmed.screen_id.is_some() || snapshot.confirmed.window_id.is_some())
+            && confirmed.screen_id.is_none()
+            && confirmed.window_id.is_none()
+        {
+            self.capture_removed_at.get_or_insert_with(Instant::now);
+        }
         snapshot.confirmed = confirmed;
         snapshot.source_revision = snapshot.source_revision.saturating_add(1);
         Some(snapshot.clone())
+    }
+
+    /// Sticky for this session: re-adding a source cannot append to an ended ISO.
+    pub(crate) fn source_removed_at(&self, session_id: &str, camera: bool) -> Option<Instant> {
+        self.snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.session_id == session_id)?;
+        if camera {
+            self.camera_removed_at
+        } else {
+            self.capture_removed_at
+        }
     }
 
     pub fn stop(&mut self, session_id: &str) {
@@ -495,7 +529,20 @@ impl SourceSwitchCoordinator {
 
     /// Admission is synchronous under the session coordinator mutex. Duplicate
     /// requests return the existing operation, including after response loss.
+    #[cfg(test)]
     pub fn admit(&mut self, request: &SourceSwitchParams) -> Result<Admission, SwitchError> {
+        self.admit_with(request, false)
+    }
+
+    /// `same_microphone_reopen`: the backend reopening the confirmed
+    /// microphone after its capture stopped (retest 151). That is not a user
+    /// source change, so it is admitted where live microphone changes are not
+    /// offered (Linux); any other device is still refused.
+    fn admit_with(
+        &mut self,
+        request: &SourceSwitchParams,
+        same_microphone_reopen: bool,
+    ) -> Result<Admission, SwitchError> {
         let snapshot = self.snapshot(&request.session_id)?;
         if request.request_id.is_empty() || request.request_id.len() > 128 {
             return Err(SwitchError::InvalidRequest);
@@ -530,10 +577,15 @@ impl SourceSwitchCoordinator {
         if self.pending_request.is_some() {
             return Err(SwitchError::Busy);
         }
-        if !snapshot
-            .capabilities
-            .iter()
-            .any(|capability| capability.kind == request.kind && capability.supported)
+        let reopens_confirmed_microphone = same_microphone_reopen
+            && request.kind == SourceKind::Microphone
+            && request.device_id.is_some()
+            && request.device_id == snapshot.confirmed.microphone_id;
+        if !reopens_confirmed_microphone
+            && !snapshot
+                .capabilities
+                .iter()
+                .any(|capability| capability.kind == request.kind && capability.supported)
         {
             return Err(SwitchError::Unsupported);
         }
@@ -848,6 +900,26 @@ pub async fn switch(
     state: &AppState,
     request: SourceSwitchParams,
 ) -> Result<SessionSources, SwitchError> {
+    switch_with(state, request, false).await
+}
+
+/// Opens the session's confirmed microphone again after its capture stopped
+/// (retest 151), through the same bus replacement a microphone change uses.
+pub async fn reopen_microphone(
+    state: &AppState,
+    request: SourceSwitchParams,
+) -> Result<SessionSources, SwitchError> {
+    if request.kind != SourceKind::Microphone {
+        return Err(SwitchError::InvalidRequest);
+    }
+    switch_with(state, request, true).await
+}
+
+async fn switch_with(
+    state: &AppState,
+    request: SourceSwitchParams,
+    same_microphone_reopen: bool,
+) -> Result<SessionSources, SwitchError> {
     let (handle, existing, ffmpeg_path) = {
         let recording = state.recording.lock().await;
         let active = recording
@@ -862,7 +934,7 @@ pub async fn switch(
         if active.stop_requested {
             coordinator.stop(&request.session_id);
         }
-        let existing = match coordinator.admit(&request)? {
+        let existing = match coordinator.admit_with(&request, same_microphone_reopen)? {
             Admission::Existing(snapshot) => Some(snapshot),
             Admission::New(_) => {
                 if request.kind == SourceKind::Microphone
@@ -1027,6 +1099,64 @@ mod tests {
     }
 
     #[test]
+    fn only_the_confirmed_microphone_reopens_where_changes_are_not_offered() {
+        // Retest 151: Linux offers no live microphone change, yet a stopped
+        // capture must be able to reopen the same microphone.
+        let mut owner = SourceSwitchCoordinator::default();
+        owner.start(
+            "session".into(),
+            SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: Some("microphone:coreaudio:7".into()),
+                test_pattern: false,
+            },
+        );
+        let same = request("reopen-1");
+        assert_eq!(owner.admit(&same).err(), Some(SwitchError::Unsupported));
+        let other = SourceSwitchParams {
+            device_id: Some("microphone:coreaudio:8".into()),
+            ..request("reopen-2")
+        };
+        assert_eq!(
+            owner.admit_with(&other, true).err(),
+            Some(SwitchError::Unsupported)
+        );
+        let none = SourceSwitchParams {
+            device_id: None,
+            ..request("reopen-3")
+        };
+        assert_eq!(
+            owner.admit_with(&none, true).err(),
+            Some(SwitchError::Unsupported)
+        );
+        assert!(matches!(
+            owner.admit_with(&same, true),
+            Ok(Admission::New(_))
+        ));
+    }
+
+    #[test]
+    fn source_iso_removal_is_sticky_across_reselection_but_not_visibility() {
+        let mut owner = coordinator();
+        let mut selected = owner.snapshot("session").unwrap().confirmed;
+        selected.camera_id = Some("camera:iso".into());
+        owner.commit_visual_selection("session", &selected);
+        assert!(owner.source_removed_at("session", true).is_none());
+        // Recommitting a hidden-but-still-selected source is not removal.
+        owner.commit_visual_selection("session", &selected);
+        assert!(owner.source_removed_at("session", true).is_none());
+        selected.camera_id = None;
+        owner.commit_visual_selection("session", &selected);
+        let removed = owner.source_removed_at("session", true).unwrap();
+        selected.camera_id = Some("camera:iso".into());
+        owner.commit_visual_selection("session", &selected);
+        assert_eq!(owner.source_removed_at("session", true), Some(removed));
+        assert!(owner.source_removed_at("different-session", true).is_none());
+    }
+
+    #[test]
     fn visual_intent_commits_capture_tuple_and_off_without_reverting_newer_microphone() {
         let mut owner = coordinator();
         let picked = SourceSelection {
@@ -1091,6 +1221,9 @@ mod tests {
         request.kind = SourceKind::Camera;
         request.device_id = Some("camera:stable".into());
         let device = Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
             id: "camera:stable".into(),
             name: "Camera".into(),
             kind: DeviceKind::Camera,

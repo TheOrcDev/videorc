@@ -20,6 +20,12 @@ export interface VisualFrame {
   historyStart: number
   /** Number of valid entries in `history`. */
   historyLength: number
+  /** Time of the newest history entry, in the requestAnimationFrame clock. */
+  historyUpdatedAt?: number
+  /** Minimum time between entries, used for playback delay. 0 disables smoothing. */
+  historyIntervalMs?: number
+  /** Last entry removed from a full history ring, for its scrolling edge. */
+  historyPreviousLevel?: number
   /** Raw time-domain samples, −1..1, for line and scope drawing. */
   timeDomain?: Float32Array
   /** Sample peak of this frame in dBFS. */

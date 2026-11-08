@@ -1,6 +1,30 @@
+import { posix, resolve, win32 } from 'node:path'
+
+/** The FFmpeg the app ships on this platform: the staged macOS build, or the
+ * pinned Windows or Linux archive. The camera look parity test must run
+ * against it and never against PATH's ffmpeg: a Homebrew GPL build has
+ * `eq`, so the test passed while the 0.18.0 bundle could not start a
+ * recording with a non-neutral look (`No such filter: 'eq'`). */
+export function bundledFfmpegPath({
+  repoRoot = resolve(import.meta.dirname, '..', '..'),
+  platform = process.platform
+} = {}) {
+  const bundle =
+    platform === 'win32'
+      ? ['windows-x64', 'bin', 'ffmpeg.exe']
+      : platform === 'linux'
+        ? ['linux-x64', 'bin', 'ffmpeg']
+        : ['current', 'bin', 'ffmpeg']
+  // Join with the target platform's separator, not the host's, so a path
+  // computed for another platform (the unit tests do) reads as that one.
+  const join = platform === 'win32' ? win32.join : posix.join
+  return join(repoRoot, 'vendor', 'ffmpeg', ...bundle)
+}
+
 export function buildRecordingStudioGateSteps({
   includeAppSmoke = true,
-  includeDeviceSmoke = false
+  includeDeviceSmoke = false,
+  bundledFfmpeg = bundledFfmpegPath()
 } = {}) {
   const steps = [
     {
@@ -51,6 +75,26 @@ export function buildRecordingStudioGateSteps({
       args: ['test', '-p', 'videorc-backend', 'recording::tests::']
     },
     {
+      // Plan 213 I: the legacy FFmpeg camera look grades on the shipped LGPL
+      // bundle within 8/255 of the float law. The test is #[ignore]d because
+      // it spawns FFmpeg, so it runs here, pinned to the bundled binary; a
+      // missing bundle fails the step instead of falling back to PATH.
+      label: 'backend camera look parity against the bundled FFmpeg',
+      command: 'cargo',
+      args: [
+        'test',
+        '-p',
+        'videorc-backend',
+        'recording::tests::camera_look_ffmpeg_lut_agrees_with_float_law',
+        '--',
+        '--ignored',
+        '--exact'
+      ],
+      env: {
+        VIDEORC_BUNDLED_FFMPEG_PATH: bundledFfmpeg
+      }
+    },
+    {
       label: 'backend audio pipeline tests',
       command: 'cargo',
       args: ['test', '-p', 'videorc-backend', 'audio::tests::']
@@ -64,6 +108,26 @@ export function buildRecordingStudioGateSteps({
       label: 'scene switch recording and stream pixel artifacts',
       command: 'pnpm',
       args: ['smoke:scene-switch-pixels']
+    },
+    {
+      label: 'app scenes, follow the app in front and Hide screen smoke (plan 210)',
+      command: 'pnpm',
+      args: ['smoke:smart-scenes']
+    },
+    {
+      label: 'separate source recordings fixture take',
+      command: 'pnpm',
+      args: ['smoke:separate-source-fixture']
+    },
+    {
+      label: 'soundboard fixture press',
+      command: 'pnpm',
+      args: ['smoke:soundboard-fixture']
+    },
+    {
+      label: 'separate source production session runtime',
+      command: 'pnpm',
+      args: ['smoke:separate-source-runtime']
     }
   ]
 
@@ -122,6 +186,21 @@ export function buildRecordingStudioGateSteps({
         label: 'imported screen image recording smoke',
         command: 'pnpm',
         args: ['smoke:screens']
+      },
+      {
+        // Plan 186: banners drawn, moved, routed per leg and blended in the
+        // recording and both stream orientations, above a takeover.
+        label: 'banners recording and stream smoke',
+        command: 'pnpm',
+        args: ['smoke:banners']
+      },
+      {
+        // Plan 190: a live background moves in the recording, never freezes,
+        // never draws over the stage, uploads nothing per frame, and releases
+        // everything when it comes off.
+        label: 'live background recording smoke',
+        command: 'pnpm',
+        args: ['smoke:live-background']
       },
       {
         // The reality gate: real capture config (no synthetic preview scene),
@@ -204,6 +283,21 @@ export function buildRecordingStudioGateSteps({
           VIDEORC_PREVIEW_SURFACE_MAX_INTERVAL_P95_MS: '120',
           VIDEORC_PREVIEW_SURFACE_MAX_INPUT_TO_PRESENT_P95_MS: '100'
         }
+      },
+      {
+        // With frame polling on, as in a production build: Buddy, Clips and
+        // banners change while the native Preview must keep presenting.
+        label: 'native preview presentation across overlay changes smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-overlay-presentation']
+      },
+      {
+        // Plan 212: a performance check never shows in the Preview. Reads the
+        // frame main is handed (the lease-free dev oracle) while a real check
+        // runs with Clips on, off, and with Record pressed during rung 2.
+        label: 'performance check invisible in the Preview smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-check-invisible']
       },
       {
         label: 'real ScreenCaptureKit screen recording smoke',

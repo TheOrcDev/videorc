@@ -8,7 +8,11 @@ import { useFieldControlId, useFieldDescribedBy } from '@/components/ui/field-co
 import { InputGroup, InputGroupAddon, InputGroupButton } from '@/components/ui/input-group'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import { shortcutRecorderName, shortcutRecorderStep } from '@/lib/shortcut-recorder'
+import {
+  shortcutRecorderName,
+  shortcutRecorderStep,
+  type ShortcutRecorderAppKey
+} from '@/lib/shortcut-recorder'
 import { cn } from '@/lib/utils'
 
 interface ShortcutRecorderFieldProps {
@@ -16,6 +20,8 @@ interface ShortcutRecorderFieldProps {
   label: string
   /** Stored Electron accelerator; empty or undefined means unassigned. */
   value: string | undefined
+  /** Videorc's own key for the action, shown while no global key is set. */
+  appKey?: ShortcutRecorderAppKey
   platform: string | undefined
   /** Extra refusal on top of the shared rules (the duplicate check). */
   validate: (accelerator: string) => string | null
@@ -75,6 +81,7 @@ function ShortcutRecorderControl({
   id,
   label,
   value,
+  appKey,
   platform,
   validate,
   onChange,
@@ -212,7 +219,7 @@ function ShortcutRecorderControl({
         ref={lifecycleRef}
         aria-describedby={describedBy}
         aria-invalid={registrationFailed || undefined}
-        aria-label={shortcutRecorderName({ label, value, armed, platform })}
+        aria-label={shortcutRecorderName({ label, value, appKey, armed, platform })}
         className="flex h-full min-w-0 flex-1 cursor-default items-center gap-1 rounded-chip px-2.5 text-left text-xs outline-none"
         data-slot="input-group-control"
         id={controlId}
@@ -235,6 +242,11 @@ function ShortcutRecorderControl({
           )
         ) : value ? (
           <ShortcutKeys accelerator={value} platform={platform} />
+        ) : appKey ? (
+          <span className="flex min-w-0 items-center gap-1.5">
+            <ShortcutKeys accelerator={appKey.accelerator} platform={platform} />
+            <span className="truncate text-muted-foreground">{appKey.where}</span>
+          </span>
         ) : (
           <span className="truncate text-muted-foreground">Unassigned</span>
         )}

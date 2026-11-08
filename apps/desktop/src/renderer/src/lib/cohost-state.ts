@@ -58,18 +58,32 @@ export function cohostEnableRelayPatch(
   return patch
 }
 
-/** The stored `autoChat` when none has been loaded yet: everything off. */
+/**
+ * The stored `autoChat` when none has been loaded yet: Rust's defaults
+ * (plan 192, plan 211 D4). Buddy talks in its bubble (`mode` is the legacy
+ * projection the backend writes, Off); Greetings (with AI and both welcomes)
+ * and Answers are on, so Bubble and Suggest have something to say.
+ */
 export const DEFAULT_COHOST_AUTO_CHAT: CohostAutoChat = {
+  talk: 'bubble',
   mode: 'off',
-  greetings: { enabled: false, templates: [] },
-  answers: { enabled: false, cooldownSeconds: 20 },
+  greetings: {
+    enabled: true,
+    templates: [],
+    ai: true,
+    welcomes: { firstTime: { enabled: true }, returning: { enabled: true } }
+  },
+  answers: { enabled: true, cooldownSeconds: 20 },
   banter: { enabled: false, cooldownSeconds: 240 }
 }
 
 /**
- * The Stream Manager's mode control and behaviour switches (plan 164 S-D6)
- * change only those fields: the templates and cooldowns the Buddy tab holds
- * ride along unchanged, so the save never drops them.
+ * The Stream Manager's talk control and behaviour switches (plan 164 S-D6,
+ * plan 211 D3) change only those fields: the templates and cooldowns the
+ * Buddy tab holds ride along unchanged, so the save never drops them. The
+ * block is rebuilt from named keys, so a new `autoChat` field must be named
+ * here or the save silently drops it. The legacy `mode` rides along as
+ * stored; the backend re-projects it from `talk` on every save.
  */
 export function mergeAutoChatRelayPatch(
   current: CohostAutoChat | null,
@@ -77,7 +91,8 @@ export function mergeAutoChatRelayPatch(
 ): CohostAutoChat {
   const base = current ?? DEFAULT_COHOST_AUTO_CHAT
   return {
-    mode: patch.mode ?? base.mode,
+    talk: patch.talk ?? base.talk,
+    mode: base.mode,
     greetings: { ...base.greetings, enabled: patch.greetings ?? base.greetings.enabled },
     answers: { ...base.answers, enabled: patch.answers ?? base.answers.enabled },
     banter: { ...base.banter, enabled: patch.banter ?? base.banter.enabled }

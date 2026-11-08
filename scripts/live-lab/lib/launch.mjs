@@ -46,8 +46,20 @@ export function labProfileDirs(workDir, destination) {
   }
 }
 
+// Plan 179: the Linux build under test is an extracted AppImage directory
+// (live:install), whose executable is `videorc` (electron-builder.yml
+// linux.executableName). The layout, not the host, picks the path, so the
+// tests mean the same thing on any machine.
+export const LINUX_APP_EXECUTABLE_NAME = 'videorc'
+
+export function isMacAppBundle(appPath) {
+  return String(appPath).replace(/\/+$/, '').endsWith('.app')
+}
+
 export function appExecutablePath(appPath) {
-  return join(appPath, 'Contents', 'MacOS', APP_EXECUTABLE_NAME)
+  return isMacAppBundle(appPath)
+    ? join(appPath, 'Contents', 'MacOS', APP_EXECUTABLE_NAME)
+    : join(appPath, LINUX_APP_EXECUTABLE_NAME)
 }
 
 /**
@@ -142,6 +154,11 @@ export async function readPublishedAppPid(
  * endpoint comes from the app's stderr ("DevTools listening on ws://...",
  * redirected to a file by LaunchServices), with DevToolsActivePort as the
  * fallback. Lines never reach the console (they carry local tokens).
+ *
+ * A macOS bundle goes through LaunchServices (TCC identity). A Linux app
+ * directory is spawned directly in its own process group, so the app PID is
+ * the child the launcher owns (no ownership file exists on Linux) and stop()
+ * quits it through quitLinuxApp, then signals that group only.
  */
 export async function launchApp({
   appPath,
@@ -152,11 +169,12 @@ export async function launchApp({
   onLine = () => {}
 }) {
   let devtoolsUrl = null
+  const bundle = isMacAppBundle(appPath)
   const launched = await launcher({
     env,
     timeoutMs,
     requiredMarkers: ['backend-ready'],
-    launchViaMacosLaunchServices: true,
+    launchViaMacosLaunchServices: bundle,
     spawnSpec: { command: appExecutablePath(appPath), args: [] },
     onLine(line) {
       devtoolsUrl ??= parseDevtoolsLine(line)
@@ -165,10 +183,12 @@ export async function launchApp({
   })
   return {
     backend: launched.connections['backend-ready'],
-    stop: launched.stop,
+    stop: bundle ? launched.stop : () => quitLinuxApp(launched.process, launched.stop),
     controller: launched.process,
     devtoolsUrl: async () => devtoolsUrl ?? (await readDevToolsActivePort(dirs.userDataDir)),
-    appPid: () => readPublishedAppPid(dirs.launchStateDir)
+    appPid: bundle
+      ? () => readPublishedAppPid(dirs.launchStateDir)
+      : async () => launched.process?.pid ?? null
   }
 }
 
@@ -185,6 +205,37 @@ function waitForExit(child, ms) {
       resolveExit(true)
     })
   })
+}
+
+// The app's backend shutdown waits up to 35 s (BACKEND_SHUTDOWN_TIMEOUT_MS in
+// apps/desktop/src/main/backend-process-shutdown.ts); the browser then closes
+// its own children.
+export const LINUX_APP_QUIT_GRACE_MS = 45_000
+
+/**
+ * Quits the Linux app the way a person would, then sweeps its group.
+ *
+ * The launcher's stop() sends SIGTERM to the whole process group at once, so
+ * Chromium's GPU process died under a browser that was still running. With
+ * hardware acceleration off (VIDEORC_DISABLE_GPU on the lab box) the browser
+ * cannot relaunch it and crashes on purpose
+ * (IntentionallyCrashBrowserForUnusableGpuProcess): a minidump in every
+ * run's crash/, read by the verdict as an Electron crash. The main process
+ * quits gracefully on SIGTERM (installPersistentBackendShutdownSignalHandlers),
+ * so it gets the signal alone first; groupStop then reaps whatever is left.
+ */
+export async function quitLinuxApp(
+  child,
+  groupStop,
+  { graceMs = LINUX_APP_QUIT_GRACE_MS, wait = waitForExit } = {}
+) {
+  let quit = 'not-running'
+  if (child?.pid && child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGTERM')
+    quit = (await wait(child, graceMs)) ? 'exited' : 'timed-out'
+  }
+  const swept = await groupStop()
+  return { ...swept, quit }
 }
 
 /** SIGTERM then SIGKILL, to this exact child only. */
@@ -219,6 +270,53 @@ export function caffeinateArgs(harnessPid = process.pid) {
 export function startCaffeinate({ spawnFn = spawn, harnessPid = process.pid } = {}) {
   const child = spawnFn('/usr/bin/caffeinate', caffeinateArgs(harnessPid), { stdio: 'ignore' })
   return owned(child, 'caffeinate')
+}
+
+// Plan 179: the Linux twin of caffeinate. A block-mode logind inhibitor for
+// sleep, idle (hypridle honours it) and the lid switch, held by a
+// `tail --pid` that ends with the harness even if teardown never runs.
+export function sleepInhibitorArgs(harnessPid = process.pid) {
+  return [
+    '--what=sleep:idle:handle-lid-switch',
+    '--who=videorc-live-lab',
+    '--why=Videorc live lab run',
+    '--mode=block',
+    'tail',
+    `--pid=${harnessPid}`,
+    '-f',
+    '/dev/null'
+  ]
+}
+
+/**
+ * True when the inhibitor still runs after `ms`. polkit allows block-mode
+ * inhibitors only to the seat's active session by default, so from SSH or a
+ * user unit `systemd-inhibit` may exit at once; the run then relies on the
+ * masked sleep targets and on hypridle being off (both doctor checks).
+ */
+export function inhibitorHeld(helper, ms = 500) {
+  const child = helper?.child
+  if (!child) return Promise.resolve(false)
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(false)
+  return new Promise((resolveHeld) => {
+    const timer = setTimeout(() => {
+      child.off?.('exit', onExit)
+      resolveHeld(true)
+    }, ms)
+    const onExit = () => {
+      clearTimeout(timer)
+      resolveHeld(false)
+    }
+    child.once('exit', onExit)
+  })
+}
+
+export function startSleepInhibitor({ spawnFn = spawn, harnessPid = process.pid, env } = {}) {
+  const child = spawnFn('systemd-inhibit', sleepInhibitorArgs(harnessPid), {
+    stdio: 'ignore',
+    ...(env ? { env: { ...process.env, ...env } } : {})
+  })
+  return owned(child, 'systemd-inhibit')
 }
 
 // NSScreen frames are bottom-left based; Chrome's --window-position is in
@@ -277,16 +375,39 @@ export function cardBrowserArgs({ url, bounds, profileDir }) {
   ]
 }
 
+// Plan 179: Chrome on the Linux lab. Wayland ignores --window-position, so
+// the window lands on the lab output because that output has focus when it
+// maps (linux-desktop.mjs focusLabOutput / placeCardWindow). The page's
+// audio goes to the lab speech sink through PULSE_SINK in its environment.
+export function linuxCardBrowserArgs({ url, profileDir }) {
+  return [
+    `--user-data-dir=${profileDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-session-crashed-bubble',
+    '--disable-features=Translate,MediaRouter',
+    '--autoplay-policy=no-user-gesture-required',
+    '--force-device-scale-factor=1',
+    '--ozone-platform-hint=auto',
+    '--password-store=basic',
+    '--start-fullscreen',
+    `--app=${url}`
+  ]
+}
+
 /** Opens the card fullscreen on the lab display in a Chrome instance this run owns. */
 export function startCardBrowser({
   url,
   bounds,
   profileDir,
   chromePath = DEFAULT_CHROME_PATH,
-  spawnFn = spawn
+  spawnFn = spawn,
+  args = null,
+  env = null
 }) {
-  const child = spawnFn(chromePath, cardBrowserArgs({ url, bounds, profileDir }), {
-    stdio: 'ignore'
+  const child = spawnFn(chromePath, args ?? cardBrowserArgs({ url, bounds, profileDir }), {
+    stdio: 'ignore',
+    ...(env ? { env: { ...process.env, ...env } } : {})
   })
   return owned(child, 'card-browser')
 }

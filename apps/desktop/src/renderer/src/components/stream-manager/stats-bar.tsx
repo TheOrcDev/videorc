@@ -1,7 +1,8 @@
 import { useState, type DragEvent, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
-import { StatusDot, type StatusDotTone } from '@/components/status-dot'
+import { HiddenIcon } from '@/components/icons'
+import { StatusBadge } from '@/components/status-badge'
 import { ViewersIcon } from '@/components/stream-manager/activity-icons'
 import { Sparkline } from '@/components/stream-manager/sparkline'
 import { Badge } from '@/components/ui/badge'
@@ -15,12 +16,7 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
-import {
-  DEFAULT_STAT_ORDER,
-  type StatId,
-  type StatItemModel,
-  type StatTone
-} from '@/lib/stream-manager-stats'
+import { DEFAULT_STAT_ORDER, type StatId, type StatItemModel } from '@/lib/stream-manager-stats'
 import {
   arrangeStats,
   DEFAULT_STATS_LAYOUT,
@@ -29,14 +25,15 @@ import {
   setStatHidden,
   type StatsLayout
 } from '@/lib/stream-manager-stats-layout'
+import { SCREEN_HIDDEN_LABEL } from '@/lib/screen-privacy-view'
 import { cn } from '@/lib/utils'
 
 // The stats bar (plan 057, D1): one 32 px row at every width, flush under the
-// title row. The main slots (by default the clock, viewers and health) sit
+// title row. The main slots (by default the clock, viewers and followers) sit
 // together at the leading edge and are never clipped. The rest follow after a
 // hairline and wrap onto a clipped second line when they do not fit, so a
 // stat drops off the end whole and nothing measures the window. Numbers stay
-// monochrome and tabular; tone lives in the dot and the chip. Every detail is
+// monochrome and tabular; tone lives in the chip. Every detail is
 // one hover away. Drag a stat to move it; right-click the bar to show or
 // hide stats (plan 057, D2).
 
@@ -44,7 +41,6 @@ import { cn } from '@/lib/utils'
 export const STAT_NAMES: Record<StatId, string> = {
   session: 'Clock',
   viewers: 'Viewers',
-  health: 'Stream health',
   followers: 'Followers',
   supporters: 'Subs and members',
   tips: 'Tips',
@@ -58,14 +54,6 @@ interface StatDrag {
   onDragOver: (event: DragEvent<HTMLElement>) => void
   onDrop: (event: DragEvent<HTMLElement>) => void
   onDragEnd: () => void
-}
-
-const HEALTH_DOTS: Record<StatTone, StatusDotTone> = {
-  good: 'good',
-  warning: 'warn',
-  error: 'error',
-  neutral: 'neutral',
-  subtle: 'neutral'
 }
 
 function SessionChip({ badge }: { badge: StatItemModel['badge'] }): ReactElement | null {
@@ -92,8 +80,6 @@ function StatLead({ item }: { item: StatItemModel }): ReactElement | null {
       return <SessionChip badge={item.badge} />
     case 'viewers':
       return <ViewersIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-    case 'health':
-      return <StatusDot className="shrink-0" tone={HEALTH_DOTS[item.tone]} />
     default:
       return null
   }
@@ -112,10 +98,7 @@ function StatDetails({ item }: { item: StatItemModel }): ReactElement {
             {row.platform ? <ChatPlatformIcon decorative platform={row.platform} /> : null}
             <span className="min-w-0 flex-1 truncate text-muted-foreground">{row.label}</span>
             <span className="flex shrink-0 flex-col items-end">
-              <span className="flex items-center gap-1.5 font-medium text-foreground tabular-nums">
-                {row.dot ? <StatusDot tone={row.dot} /> : null}
-                {row.value}
-              </span>
+              <span className="font-medium text-foreground tabular-nums">{row.value}</span>
               {row.note ? (
                 <span
                   className="max-w-40 truncate text-[11px] text-muted-foreground"
@@ -142,9 +125,10 @@ function StatCell({
   drag?: StatDrag
 }): ReactElement {
   const trouble = item.tone === 'warning' || item.tone === 'error'
-  // Health is the one main value that can grow ("YouTube Vertical failed"):
-  // it truncates rather than push the bar past a 320 px window.
-  const shrinks = main && item.id === 'health'
+  // The clock and viewers are short. Whatever holds the third main slot can
+  // grow ("61,942 followers +12"): it truncates rather than push the bar past
+  // a 320 px window.
+  const shrinks = main && !LOCKED_STATS.has(item.id)
   const cell = (
     <span
       aria-label={item.description}
@@ -169,10 +153,13 @@ function StatCell({
       onDrop={drag?.onDrop}
     >
       <StatLead item={item} />
+      {/* A main value's line is 20 px, never leading-none: a shrinking one
+          truncates, so it clips at its line box, and Segoe UI's comma falls
+          below a 15 px one (1.33 em from ascent to descent; #1083). */}
       <span
         className={cn(
           'tabular-nums',
-          main ? 'text-[15px] leading-none font-semibold' : 'text-[13px] font-medium',
+          main ? 'text-[15px] leading-5 font-semibold' : 'text-[13px] font-medium',
           item.tone === 'subtle' ? 'text-subtle' : 'text-foreground',
           shrinks && 'min-w-0 truncate'
         )}
@@ -204,8 +191,8 @@ function StatCell({
   )
   if (item.details.length === 0) return cell
   return (
-    <HoverCard closeDelay={80} openDelay={400}>
-      <HoverCardTrigger asChild>{cell}</HoverCardTrigger>
+    <HoverCard>
+      <HoverCardTrigger closeDelay={80} delay={400} render={cell} />
       <StatDetails item={item} />
     </HoverCard>
   )
@@ -214,12 +201,15 @@ function StatCell({
 export function StatsBar({
   items,
   layout = DEFAULT_STATS_LAYOUT,
-  onLayoutChange
+  onLayoutChange,
+  screenHidden = false
 }: {
   items: readonly StatItemModel[]
   layout?: StatsLayout
   /** Absent: the order is fixed (tests, previews). */
   onLayoutChange?: (layout: StatsLayout) => void
+  /** Plan 210 D9: the screen is hidden from viewers; the chip closes the bar. */
+  screenHidden?: boolean
 }): ReactElement {
   const { main, more } = arrangeStats(items, layout)
   const [dragging, setDragging] = useState<StatId | null>(null)
@@ -319,12 +309,20 @@ export function StatsBar({
           ))}
         </div>
       ) : null}
+      {/* Hide screen's chip (plan 210 D9) at the trailing edge: it is never
+          clipped, and no stat moves when it comes or goes. The stats wrap
+          out of sight before it. */}
+      {screenHidden ? (
+        <span className="ml-auto flex shrink-0 items-center pl-3" data-slot="stats-screen-hidden">
+          <StatusBadge icon={HiddenIcon} tone="warn" value={SCREEN_HIDDEN_LABEL} />
+        </span>
+      ) : null}
     </section>
   )
   if (!onLayoutChange) return bar
   return (
     <ContextMenu>
-      <ContextMenuTrigger asChild>{bar}</ContextMenuTrigger>
+      <ContextMenuTrigger render={bar} />
       <ContextMenuContent className="w-52" data-testid="stats-bar-menu">
         <ContextMenuLabel>Stats</ContextMenuLabel>
         {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
@@ -332,7 +330,6 @@ export function StatsBar({
             key={id}
             checked={!layout.hidden.includes(id)}
             onCheckedChange={(checked) => change(setStatHidden(layout, id, checked !== true))}
-            onSelect={(event) => event.preventDefault()}
           >
             {STAT_NAMES[id]}
           </ContextMenuCheckboxItem>
@@ -340,16 +337,16 @@ export function StatsBar({
         {menuTarget ? (
           <>
             <ContextMenuSeparator />
-            <ContextMenuItem disabled={moveLeft === layout} onSelect={() => change(moveLeft)}>
+            <ContextMenuItem disabled={moveLeft === layout} onClick={() => change(moveLeft)}>
               Move {STAT_NAMES[menuTarget]} left
             </ContextMenuItem>
-            <ContextMenuItem disabled={moveRight === layout} onSelect={() => change(moveRight)}>
+            <ContextMenuItem disabled={moveRight === layout} onClick={() => change(moveRight)}>
               Move {STAT_NAMES[menuTarget]} right
             </ContextMenuItem>
           </>
         ) : null}
         <ContextMenuSeparator />
-        <ContextMenuItem disabled={isDefault} onSelect={() => change(DEFAULT_STATS_LAYOUT)}>
+        <ContextMenuItem disabled={isDefault} onClick={() => change(DEFAULT_STATS_LAYOUT)}>
           Reset stats
         </ContextMenuItem>
         <ContextMenuLabel className="text-subtle">Drag a stat to move it.</ContextMenuLabel>

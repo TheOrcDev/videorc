@@ -8,7 +8,7 @@ only together with a new row here.
 
 | Signal | Budget | Source |
 | --- | --- | --- |
-| Encoder speed | >= 0.95 | FFmpeg `speed=` (cumulative since process start) |
+| Encoder speed | >= 0.95 | Encoder pace: FFmpeg output clock (`out_time`) advance per wall second between the first progress report after the warm-up and the first after the measured window; FFmpeg `speed=` (cumulative since process start) only when no clock is reported (see 2026-10-26) |
 | Delivered fps | >= 0.95 x target | `encoderBridgeInputFps`, else `renderFps` |
 | Skipped + dropped + repeated frames | <= 2 % of the measured window | bridge counters, delta over the window |
 | Oldest queued frame | <= 500 ms | `encoderBridgeOutputQueueOldestFrameAgeHighWaterMs` |
@@ -74,6 +74,29 @@ packaged auto-rerun never fired.
 Scoring change: OpenH264 synthetic no longer uses speed, delivered fps or
 stalled frames. Linux never fast-skips mid-ladder. Capability key is now v2
 plus desktop app version plus render-node identity.
+
+### 2026-10-26 — Omarchy Linux, i7-8750H + UHD 630 (ogre), packaged 0.13.0
+
+The packaged auto-run failed every rung, so Output said "Nothing held steady on
+this computer, not even 540p · 30 fps" and recommended 540p30 (CPU held at
+800 MHz by the platform during the run).
+
+| Rung (VAAPI renderD128) | Cumulative speed | Delivered fps | Stalled | Drain | Verdict | Reasons |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2560x1440@30 | 0.5 | 7.4 | 74 | 8369 ms | failed | speed, fps, stalls, queue, pipe, drain |
+| 1920x1080@30 | 0.708 | 14.3 | 29 | 3964 ms | failed | speed, fps, stalls, queue, pipe, drain |
+| 1280x720@30 | 0.941 | 30.0 | 0 | 557 ms | failed | `encoder-below-realtime` only |
+| 960x540@30 | 0.941 | 30.0 | 0 | 498 ms | failed | `encoder-below-realtime` only |
+
+The same reading at two sizes is the encoder's startup, not its pace. A real
+720p30 VAAPI recording on the same box delivered 30.0 fps throughout while the
+cumulative speed read 0.866 at 2 s, 0.94 at 5 s, 0.976 at 12 s and 0.99 at 26 s:
+a constant ~0.3 s start lag spread over a 5.5 s rung. The speed signal is now
+the encoder's pace: how far FFmpeg's output clock moves per wall second between
+the first progress report after the warm-up and the first after the measured
+window (each pinned to within 20 ms by waiting for the clock to move). The
+budget stays 0.95. The 1440p and
+1080p rungs fail on every other signal as before.
 
 ## Still to calibrate
 

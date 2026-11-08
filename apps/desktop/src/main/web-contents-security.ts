@@ -5,6 +5,7 @@ import {
   rendererRoleArgument,
   type RendererRole
 } from '../shared/renderer-security-policy'
+import { windowGroundArgument, type WindowGround } from '../shared/window-ground'
 import { rendererSecurityRegistry } from './secure-ipc'
 
 type PermissionCheckHandler = Exclude<Parameters<Session['setPermissionCheckHandler']>[0], null>
@@ -98,15 +99,20 @@ export function installRendererSessionPermissions(
   targetSession.setDisplayMediaRequestHandler(displayMediaHandler)
 }
 
-export function rendererWindowWebPreferences(role: RendererRole): {
+export function rendererWindowWebPreferences(
+  role: RendererRole,
+  ground: WindowGround
+): {
   additionalArguments: string[]
   sandbox: true
   contextIsolation: true
   nodeIntegration: false
 }
-export function rendererWindowWebPreferences(role: RendererRole) {
+export function rendererWindowWebPreferences(role: RendererRole, ground: WindowGround) {
   return {
-    additionalArguments: [rendererRoleArgument(role)],
+    // The role decides the preload surface; the ground (plan 208) tells the
+    // renderer what it sits on before its first paint. Both ride the argv.
+    additionalArguments: [rendererRoleArgument(role), windowGroundArgument(ground)],
     sandbox: true as const,
     contextIsolation: true as const,
     nodeIntegration: false as const

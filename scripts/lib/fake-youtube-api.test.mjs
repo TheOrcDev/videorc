@@ -98,6 +98,18 @@ test('the fake serves prepare, chat and viewers, then flips to quotaExceeded on 
     ).json()
     assert.equal(viewers.items[0].liveStreamingDetails.concurrentViewers, '7')
 
+    // A broadcast delete answers 204 and the attempt ledger records that
+    // outcome (not "pending"), like the chat-message delete does.
+    const deleted = await fetch(`${api.origin}/youtube/v3/liveBroadcasts?id=${created.id}`, {
+      method: 'DELETE',
+      headers
+    })
+    assert.equal(deleted.status, 204)
+    assert.equal(
+      summarizeYouTubeAttempts(api.requests).endpoints['liveBroadcasts.delete'].outcomes['204'],
+      1
+    )
+
     const before = api.requests.length
     api.controls.quotaExhausted = true
     const refused = await fetch(`${api.origin}/youtube/v3/liveChat/messages?liveChatId=x`, {

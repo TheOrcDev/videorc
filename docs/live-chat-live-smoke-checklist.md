@@ -187,10 +187,9 @@ viewer account that can post.
 - [ ] Off: chat, questions and highlights keep working and nothing ever goes on stream by itself.
 - [ ] What I talk about: have a viewer post a comment, then talk about it in your own words
       (do not read it out). Within a few seconds the comment row shows the quiet "Talking about
-      this" mark, the Comments window scrolls it into view (unless you scrolled up in the last
-      5 s), the matching question row carries the same mark, and the card appears on the
-      viewer-facing output. Close the Comments window and confirm the pull-up still shows in
-      the Stream Manager.
+      this" mark, the chat list stays on the newest messages (the mark never scrolls it), the
+      matching question row carries the same mark, and the card appears on the viewer-facing
+      output. Close the Comments window and confirm the mark still shows in the Stream Manager.
 - [ ] While the card is up, keep talking about the same comment: it stays up (one refresh at
       most) and is never taken down and put back. Press `H` on another comment: your manual card
       wins and the automatic one never replaces it.

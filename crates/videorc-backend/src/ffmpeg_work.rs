@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -29,6 +30,11 @@ impl MaintenanceDeferral {
 struct FfmpegWorkState {
     capture_waiting: usize,
     capture_active: bool,
+    /// Buffer-only sessions' captures (plan 181): the ring runs by default
+    /// whenever Videorc is open, muxing a copy of the hardware encode, so it
+    /// never defers, cancels or waits for maintenance; shutdown still joins
+    /// it. A count: the re-arm can overlap the previous ring's teardown.
+    light_captures: usize,
     finalizing_active: bool,
     /// Background MP4 exports (post-terminal finalization). They block
     /// maintenance and the shutdown lifecycle join but never a new capture.
@@ -39,6 +45,12 @@ struct FfmpegWorkState {
     recording_file_mutation_active: bool,
     maintenance_cancel_generation: u64,
     maintenance_cancel_requested: bool,
+    /// Blocking maintenance threads (FFmpeg analysis/repair) still running.
+    /// A permit can be dropped by a timeout while its thread is still killing
+    /// FFmpeg (plan 200 C6); nothing new starts and quit waits until it exits.
+    maintenance_workers: usize,
+    /// Process shutdown cancels every maintenance job, now and later.
+    shutdown_cancel: bool,
 }
 
 #[derive(Debug, Default)]
@@ -55,26 +67,59 @@ impl FfmpegWorkCoordinator {
     pub async fn begin_capture_when_available(self: &Arc<Self>) -> CapturePermit {
         let mut waiting_registered = false;
         loop {
-            let notified = {
+            // Register the wakeup BEFORE inspecting the state: a permit
+            // released between the state check and this waiter's first poll
+            // must never be missed (lost wakeup), same contract as
+            // begin_maintenance_when_idle_after_wait_registered.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            let acquired = {
                 let mut state = self.state.lock().expect("ffmpeg work state poisoned");
                 if !state.maintenance_running && !state.finalizing_active {
                     if waiting_registered {
                         state.capture_waiting = state.capture_waiting.saturating_sub(1);
                     }
                     state.capture_active = true;
+                    true
+                } else {
+                    if !waiting_registered {
+                        state.capture_waiting += 1;
+                        waiting_registered = true;
+                    }
+                    if state.maintenance_running && !state.maintenance_cancel_requested {
+                        state.maintenance_cancel_generation =
+                            state.maintenance_cancel_generation.saturating_add(1);
+                        state.maintenance_cancel_requested = true;
+                        self.notify.notify_waiters();
+                    }
+                    false
+                }
+            };
+            if acquired {
+                return CapturePermit {
+                    coordinator: self.clone(),
+                    light: false,
+                };
+            }
+            notified.await;
+        }
+    }
+
+    /// A buffer-only session's permit (plan 181, redesign R2): waits only for
+    /// an active finalization (the previous take's MP4 work), never for or
+    /// against maintenance, so posters, quality checks and repairs keep
+    /// running while the ring is on.
+    pub async fn begin_light_capture_when_available(self: &Arc<Self>) -> CapturePermit {
+        loop {
+            let notified = {
+                let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+                if !state.finalizing_active {
+                    state.light_captures = state.light_captures.saturating_add(1);
                     return CapturePermit {
                         coordinator: self.clone(),
+                        light: true,
                     };
-                }
-                if !waiting_registered {
-                    state.capture_waiting += 1;
-                    waiting_registered = true;
-                }
-                if state.maintenance_running && !state.maintenance_cancel_requested {
-                    state.maintenance_cancel_generation =
-                        state.maintenance_cancel_generation.saturating_add(1);
-                    state.maintenance_cancel_requested = true;
-                    self.notify.notify_waiters();
                 }
                 self.notify.notified()
             };
@@ -123,6 +168,7 @@ impl FfmpegWorkCoordinator {
             return Err(MaintenanceDeferral::FinalizingActive);
         }
         if state.maintenance_running
+            || state.maintenance_workers > 0
             || state.priority_maintenance_waiting > 0
             || state.recording_file_mutation_waiting > 0
             || state.recording_file_mutation_active
@@ -158,27 +204,53 @@ impl FfmpegWorkCoordinator {
 
     /// Wait for the next idle maintenance slot ahead of background maintenance.
     /// This is for short, user-visible work such as poster extraction. Capture
-    /// and finalization still take precedence.
+    /// and finalization still take precedence. An in-flight background
+    /// maintenance job (post-recording quality gate, repair scan, ...) is
+    /// asked to cancel — those jobs observe the token, defer, and re-run
+    /// later — instead of queueing behind a multi-minute analysis, which
+    /// would push a stateful caller such as sessions.poster past its
+    /// execution contract and restart the backend (2026-08-29 tester log:
+    /// poster queued behind a 110s-recording quality assessment).
     pub async fn begin_priority_maintenance_when_idle(self: &Arc<Self>) -> MaintenancePermit {
         let mut waiter = PriorityMaintenanceWaiter::new(self.clone());
         loop {
-            let notified = {
+            // Register the wakeup BEFORE inspecting the state. Otherwise a
+            // permit released between the state check and the waiter's first
+            // poll is missed forever: later background maintenance stays
+            // excluded by the priority waiter, nothing ever notifies again,
+            // and a stateful caller such as sessions.poster wedges until its
+            // execution contract restarts the backend (2026-08-29 Windows CI).
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            let acquired = {
                 let mut state = self.state.lock().expect("ffmpeg work state poisoned");
                 if !state.capture_active
                     && state.capture_waiting == 0
                     && !state.finalizing_active
                     && state.export_active == 0
                     && !state.maintenance_running
+                    && state.maintenance_workers == 0
                     && state.recording_file_mutation_waiting == 0
                     && !state.recording_file_mutation_active
                 {
                     state.priority_maintenance_waiting =
                         state.priority_maintenance_waiting.saturating_sub(1);
                     waiter.registered = false;
-                    return self.begin_maintenance_locked(&mut state);
+                    Some(self.begin_maintenance_locked(&mut state))
+                } else {
+                    if state.maintenance_running && !state.maintenance_cancel_requested {
+                        state.maintenance_cancel_generation =
+                            state.maintenance_cancel_generation.saturating_add(1);
+                        state.maintenance_cancel_requested = true;
+                        self.notify.notify_waiters();
+                    }
+                    None
                 }
-                self.notify.notified()
             };
+            if let Some(permit) = acquired {
+                return permit;
+            }
             notified.await;
         }
     }
@@ -192,6 +264,40 @@ impl FfmpegWorkCoordinator {
         MaintenancePermit {
             coordinator: self.clone(),
             generation: state.maintenance_cancel_generation,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Process shutdown (quit, quit-and-update): cancel the running repair or
+    /// analysis so its FFmpeg is killed, and every later one before it starts.
+    pub fn cancel_maintenance_for_shutdown(&self) {
+        {
+            let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+            state.shutdown_cancel = true;
+            state.maintenance_cancel_generation =
+                state.maintenance_cancel_generation.saturating_add(1);
+            state.maintenance_cancel_requested = state.maintenance_running;
+        }
+        self.notify.notify_waiters();
+    }
+
+    /// Resolves once no maintenance thread is running (a cancelled repair has
+    /// killed its FFmpeg and removed its temp).
+    pub async fn wait_for_maintenance_workers(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            if self
+                .state
+                .lock()
+                .expect("ffmpeg work state poisoned")
+                .maintenance_workers
+                == 0
+            {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -206,25 +312,39 @@ impl FfmpegWorkCoordinator {
     ) -> RecordingFileMutationPermit {
         let mut waiter = RecordingFileMutationWaiter::new(self.clone());
         loop {
-            let notified = {
+            // Register the wakeup BEFORE inspecting the state: a permit
+            // released between the state check and this waiter's first poll
+            // must never be missed (lost wakeup), same contract as
+            // begin_maintenance_when_idle_after_wait_registered.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            let acquired = {
                 let mut state = self.state.lock().expect("ffmpeg work state poisoned");
-                if !state.maintenance_running && !state.recording_file_mutation_active {
+                if !state.maintenance_running
+                    && state.maintenance_workers == 0
+                    && !state.recording_file_mutation_active
+                {
                     state.recording_file_mutation_waiting =
                         state.recording_file_mutation_waiting.saturating_sub(1);
                     waiter.registered = false;
                     state.recording_file_mutation_active = true;
-                    return RecordingFileMutationPermit {
-                        coordinator: self.clone(),
-                    };
+                    true
+                } else {
+                    if state.maintenance_running && !state.maintenance_cancel_requested {
+                        state.maintenance_cancel_generation =
+                            state.maintenance_cancel_generation.saturating_add(1);
+                        state.maintenance_cancel_requested = true;
+                        self.notify.notify_waiters();
+                    }
+                    false
                 }
-                if state.maintenance_running && !state.maintenance_cancel_requested {
-                    state.maintenance_cancel_generation =
-                        state.maintenance_cancel_generation.saturating_add(1);
-                    state.maintenance_cancel_requested = true;
-                    self.notify.notify_waiters();
-                }
-                self.notify.notified()
             };
+            if acquired {
+                return RecordingFileMutationPermit {
+                    coordinator: self.clone(),
+                };
+            }
             notified.await;
         }
     }
@@ -239,6 +359,7 @@ impl FfmpegWorkCoordinator {
         FfmpegWorkSnapshot {
             capture_waiting: state.capture_waiting,
             capture_active: state.capture_active,
+            light_capture_active: state.light_captures > 0,
             finalizing_active: state.finalizing_active,
             export_active: state.export_active,
             maintenance_running: state.maintenance_running,
@@ -260,7 +381,10 @@ impl FfmpegWorkCoordinator {
             let _ = notified.as_mut().enable();
             let idle = {
                 let state = self.state.lock().expect("ffmpeg work state poisoned");
-                !state.capture_active && !state.finalizing_active && state.export_active == 0
+                !state.capture_active
+                    && state.light_captures == 0
+                    && !state.finalizing_active
+                    && state.export_active == 0
             };
             if idle {
                 return;
@@ -271,13 +395,30 @@ impl FfmpegWorkCoordinator {
 
     fn maintenance_cancelled_since(&self, generation: u64) -> bool {
         let state = self.state.lock().expect("ffmpeg work state poisoned");
-        state.maintenance_cancel_generation > generation
+        state.shutdown_cancel || state.maintenance_cancel_generation > generation
     }
 
-    fn end_capture(&self) {
+    fn begin_maintenance_worker(&self) {
+        let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+        state.maintenance_workers = state.maintenance_workers.saturating_add(1);
+    }
+
+    fn end_maintenance_worker(&self) {
         {
             let mut state = self.state.lock().expect("ffmpeg work state poisoned");
-            state.capture_active = false;
+            state.maintenance_workers = state.maintenance_workers.saturating_sub(1);
+        }
+        self.notify.notify_waiters();
+    }
+
+    fn end_capture(&self, light: bool) {
+        {
+            let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+            if light {
+                state.light_captures = state.light_captures.saturating_sub(1);
+            } else {
+                state.capture_active = false;
+            }
         }
         self.notify.notify_waiters();
     }
@@ -399,6 +540,8 @@ impl Drop for RecordingFileMutationWaiter {
 pub struct FfmpegWorkSnapshot {
     pub capture_waiting: usize,
     pub capture_active: bool,
+    /// A buffer-only session's capture (plan 181): never a deferral.
+    pub light_capture_active: bool,
     pub finalizing_active: bool,
     pub export_active: usize,
     pub maintenance_running: bool,
@@ -422,11 +565,12 @@ impl FfmpegWorkSnapshot {
 #[derive(Debug)]
 pub struct CapturePermit {
     coordinator: Arc<FfmpegWorkCoordinator>,
+    light: bool,
 }
 
 impl Drop for CapturePermit {
     fn drop(&mut self) {
-        self.coordinator.end_capture();
+        self.coordinator.end_capture(self.light);
     }
 }
 
@@ -456,6 +600,8 @@ impl Drop for ExportPermit {
 pub struct MaintenancePermit {
     coordinator: Arc<FfmpegWorkCoordinator>,
     generation: u64,
+    /// This job's own cancellation (a timeout), shared by its tokens.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl MaintenancePermit {
@@ -463,6 +609,7 @@ impl MaintenancePermit {
         MaintenanceCancelToken {
             coordinator: self.coordinator.clone(),
             generation: self.generation,
+            cancelled: self.cancelled.clone(),
         }
     }
 }
@@ -471,6 +618,42 @@ impl MaintenancePermit {
 pub struct MaintenanceCancelToken {
     coordinator: Arc<FfmpegWorkCoordinator>,
     generation: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Counts one blocking maintenance thread for as long as it lives (moved
+/// into the `spawn_blocking` closure).
+#[derive(Debug)]
+pub struct MaintenanceWorker {
+    coordinator: Arc<FfmpegWorkCoordinator>,
+}
+
+impl Drop for MaintenanceWorker {
+    fn drop(&mut self) {
+        self.coordinator.end_maintenance_worker();
+    }
+}
+
+/// Cancels its job when dropped before [`MaintenanceCancelOnDrop::disarm`]:
+/// a `timeout` that drops the waiting future then kills the FFmpeg child
+/// instead of leaving it running unowned.
+#[derive(Debug)]
+pub struct MaintenanceCancelOnDrop {
+    token: Option<MaintenanceCancelToken>,
+}
+
+impl MaintenanceCancelOnDrop {
+    pub fn disarm(mut self) {
+        self.token = None;
+    }
+}
+
+impl Drop for MaintenanceCancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            token.cancel();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -486,8 +669,28 @@ impl Drop for RecordingFileMutationPermit {
 
 impl MaintenanceCancelToken {
     pub fn is_cancelled(&self) -> bool {
-        self.coordinator
-            .maintenance_cancelled_since(self.generation)
+        self.cancelled.load(Ordering::Acquire)
+            || self
+                .coordinator
+                .maintenance_cancelled_since(self.generation)
+    }
+
+    /// Cancels this job only (its timeout fired).
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn worker(&self) -> MaintenanceWorker {
+        self.coordinator.begin_maintenance_worker();
+        MaintenanceWorker {
+            coordinator: self.coordinator.clone(),
+        }
+    }
+
+    pub fn cancel_on_drop(&self) -> MaintenanceCancelOnDrop {
+        MaintenanceCancelOnDrop {
+            token: Some(self.clone()),
+        }
     }
 }
 
@@ -500,6 +703,68 @@ impl Drop for MaintenancePermit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_timed_out_repair_is_cancelled_and_holds_maintenance_until_it_exits() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let permit = coordinator.try_begin_maintenance().unwrap();
+        let token = permit.cancel_token();
+        let worker = token.worker();
+        let waiting = tokio::spawn({
+            let token = token.clone();
+            async move {
+                let _cancel_on_drop = token.cancel_on_drop();
+                std::future::pending::<()>().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!token.is_cancelled());
+        // The timeout drops the waiting future: the job is cancelled.
+        waiting.abort();
+        let _ = waiting.await;
+        assert!(token.is_cancelled());
+        // The job's permit is gone, but its thread is still killing FFmpeg.
+        drop(permit);
+        assert_eq!(
+            coordinator.try_begin_maintenance().unwrap_err(),
+            MaintenanceDeferral::MaintenanceRunning
+        );
+        let joined = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.wait_for_maintenance_workers().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!joined.is_finished());
+        drop(worker);
+        tokio::time::timeout(std::time::Duration::from_secs(1), joined)
+            .await
+            .unwrap()
+            .unwrap();
+        // A later job is not cancelled by the earlier timeout.
+        let next = coordinator.try_begin_maintenance().unwrap();
+        assert!(!next.cancel_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_disarmed_cancel_guard_leaves_the_job_running() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let permit = coordinator.try_begin_maintenance().unwrap();
+        let token = permit.cancel_token();
+        token.cancel_on_drop().disarm();
+        assert!(!token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_the_running_repair_and_every_later_one() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let permit = coordinator.try_begin_maintenance().unwrap();
+        let token = permit.cancel_token();
+        coordinator.cancel_maintenance_for_shutdown();
+        assert!(token.is_cancelled());
+        drop(permit);
+        let later = coordinator.try_begin_maintenance().unwrap();
+        assert!(later.cancel_token().is_cancelled());
+    }
 
     #[tokio::test]
     async fn maintenance_is_deferred_while_capture_is_active() {
@@ -596,6 +861,42 @@ mod tests {
         drop(capture);
         drop(export);
         assert_eq!(coordinator.snapshot().export_active, 0);
+    }
+
+    /// Plan 181 (redesign R2): the default ring's capture is light. Posters
+    /// and other maintenance run beside it, a waiting maintenance job is not
+    /// cancelled by it, and shutdown still joins it.
+    #[tokio::test]
+    async fn light_capture_never_defers_maintenance_but_shutdown_joins_it() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let ring = coordinator.begin_light_capture_when_available().await;
+        assert!(coordinator.snapshot().light_capture_active);
+        assert!(!coordinator.snapshot().capture_active);
+        let maintenance = coordinator
+            .try_begin_maintenance()
+            .expect("maintenance runs beside a light capture");
+        assert!(!coordinator.snapshot().maintenance_cancel_requested);
+        // A second light capture (the re-arm) starts beside running maintenance.
+        let next = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            coordinator.begin_light_capture_when_available(),
+        )
+        .await
+        .expect("a light capture never waits for maintenance");
+        assert!(!coordinator.snapshot().maintenance_cancel_requested);
+        drop(maintenance);
+        drop(next);
+        let join = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.wait_for_capture_and_finalization_idle().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!join.is_finished(), "shutdown join must wait for the ring");
+        drop(ring);
+        tokio::time::timeout(std::time::Duration::from_secs(1), join)
+            .await
+            .expect("shutdown join must resolve once the ring's permit drops")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -708,6 +1009,86 @@ mod tests {
 
         drop(priority_permit);
         drop(background.await.unwrap());
+    }
+
+    /// 2026-08-29 Windows CI: a priority waiter that checked the state while a
+    /// maintenance permit was still held could miss the release notification
+    /// (its Notify future registered only on first poll), stay wedged behind
+    /// its own `priority_maintenance_waiting` registration forever, and force
+    /// the backend to restart on the mutation execution contract. The waiter
+    /// must always acquire after the release, across many interleavings.
+    #[tokio::test]
+    async fn released_maintenance_wakes_a_waiting_priority_waiter() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        for _ in 0..200 {
+            let maintenance = coordinator.try_begin_maintenance().unwrap();
+            let waiter = tokio::spawn({
+                let coordinator = coordinator.clone();
+                async move { coordinator.begin_priority_maintenance_when_idle().await }
+            });
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            drop(maintenance);
+            let permit = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .expect("priority waiter must acquire after the release")
+                .expect("priority waiter task");
+            drop(permit);
+        }
+    }
+
+    #[tokio::test]
+    async fn released_maintenance_wakes_a_waiting_capture() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        for _ in 0..200 {
+            let maintenance = coordinator.try_begin_maintenance().unwrap();
+            let waiter = tokio::spawn({
+                let coordinator = coordinator.clone();
+                async move { coordinator.begin_capture_when_available().await }
+            });
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            drop(maintenance);
+            let capture = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .expect("capture waiter must acquire after the release")
+                .expect("capture waiter task");
+            drop(capture);
+        }
+    }
+
+    /// 2026-08-29 tester log: a priority waiter (sessions.poster) queued
+    /// behind a still-running post-recording quality assessment for minutes
+    /// and blew its 25s execution contract, restarting the backend. Priority
+    /// maintenance is short, user-visible work: it must request cancellation
+    /// of the active background job (which defers and re-runs later) instead
+    /// of queueing behind it.
+    #[tokio::test]
+    async fn priority_maintenance_cancels_the_active_maintenance_and_acquires() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        for _ in 0..25 {
+            let maintenance = coordinator.try_begin_maintenance().unwrap();
+            let cancel_token = maintenance.cancel_token();
+            let waiter = tokio::spawn({
+                let coordinator = coordinator.clone();
+                async move { coordinator.begin_priority_maintenance_when_idle().await }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !cancel_token.is_cancelled() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("priority waiter must request cancellation of the active maintenance");
+            drop(maintenance);
+            let permit = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .expect("priority waiter must acquire after the cancelled job releases")
+                .expect("priority waiter task");
+            drop(permit);
+        }
     }
 
     #[tokio::test]

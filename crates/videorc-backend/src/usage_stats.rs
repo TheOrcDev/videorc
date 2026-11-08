@@ -728,7 +728,7 @@ async fn send(
 fn http_client() -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
-        .user_agent(concat!("Videorc-Desktop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(crate::performance_check::desktop_user_agent())
         .build()
         .ok()
 }
@@ -770,6 +770,8 @@ mod tests {
                     state: StreamTargetState::Connecting,
                     message: None,
                     redacted_url: Some("rtmp://example.invalid/live/••••".to_string()),
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 })
                 .collect(),
         };

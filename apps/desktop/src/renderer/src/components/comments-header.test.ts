@@ -45,6 +45,24 @@ describe('Stream Manager status bar', () => {
     // One chat vocabulary (plan 174 H-13): never "off" or "receive-only".
     expect(providerCapabilityLabel(provider({ state: 'unsupported' }))).toBe('unavailable')
     expect(providerCapabilityLabel(provider({ write: 'unavailable' }))).toBe('read-only')
+    // Plan 213 J1: a stream key's chat needs Sign in, the choice's own name,
+    // with the reason in the hover text.
+    const streamKeyX = provider({
+      id: 'x:x',
+      platform: 'x',
+      targetId: 'x',
+      state: 'unsupported',
+      read: 'needs-sign-in',
+      write: 'unavailable',
+      message:
+        'X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to.'
+    })
+    expect(providerCapabilityLabel(streamKeyX)).toBe('needs Sign in')
+    expect(providerCapabilityTitle(streamKeyX, null).split('\n')).toEqual([
+      'X chat: needs Sign in',
+      streamKeyX.message
+    ])
+    expect(providerProblem(streamKeyX)).toBe('')
     // The words still live in the hover text.
     expect(providerCapabilityTitle(provider(), null).split('\n')[0]).toBe(
       'Twitch chat: reads and sends'
@@ -171,14 +189,6 @@ describe('StatsBar (plan 057)', () => {
       description: '1.2k viewers, peak 1.4k'
     },
     {
-      id: 'health',
-      label: 'Stream health',
-      value: 'X failed',
-      tone: 'error',
-      details: [],
-      description: 'Stream health: X failed'
-    },
-    {
       id: 'followers',
       label: 'Followers',
       value: '61,942',
@@ -187,6 +197,15 @@ describe('StatsBar (plan 057)', () => {
       tone: 'neutral',
       details: [],
       description: '61,942 followers, +12 this stream'
+    },
+    {
+      id: 'chat',
+      label: 'Chat',
+      value: '14',
+      unit: 'msg/min',
+      tone: 'neutral',
+      details: [],
+      description: '14 messages a minute'
     }
   ]
 
@@ -196,15 +215,12 @@ describe('StatsBar (plan 057)', () => {
     expect(markup).not.toContain('stats-summary')
     expect(markup).toContain('>ON AIR<')
     const order = [...markup.matchAll(/data-stat="([a-z]+)"/g)].map((match) => match[1])
-    expect(order).toEqual(['session', 'viewers', 'health', 'followers'])
+    expect(order).toEqual(['session', 'viewers', 'followers', 'chat'])
     expect(markup.match(/data-group="main"/g)).toHaveLength(3)
     expect(markup).toContain('data-group="more"')
     // The viewer count is drawn once, at every width: never hidden while live.
     expect(markup.match(/>1\.2k</g)?.length).toBe(1)
-    // Health speaks only when something is wrong, and in the error tone.
-    expect(markup).toContain('X failed')
-    expect(markup).toContain('data-tone="error"')
-    expect(markup).toContain('aria-label="Stream health: X failed"')
     expect(markup).toContain('+12')
+    expect(markup).not.toContain('data-slot="status-dot"')
   })
 })

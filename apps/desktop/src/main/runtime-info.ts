@@ -2,6 +2,7 @@ import { release } from 'node:os'
 
 import type {
   BackendCrashRecord,
+  FirstFrameDecisionRecord,
   RuntimeGpuDevice,
   RuntimeInfo,
   SystemPermissionPane
@@ -43,12 +44,17 @@ export interface RuntimeInfoInput {
   gpuFallback?: RuntimeInfo['gpuFallback']
   /** Persisted crash evidence, most recent first (see backend-crash-log.ts). */
   backendCrashes?: readonly BackendCrashRecord[]
+  /** The Preview watchdog's last decisions (see first-frame-decisions.ts). */
+  firstFrameDecisions?: readonly FirstFrameDecisionRecord[]
   windowGlass?: RuntimeInfo['windowGlass']
+  /** Why this session can't hold a global shortcut (see global-shortcut-lifecycle.ts). */
+  globalShortcutsUnavailable?: string | null
   env: Partial<
     Pick<
       NodeJS.ProcessEnv,
       | 'VIDEORC_NATIVE_PREVIEW_SURFACE'
       | 'VIDEORC_SMOKE_PREVIEW_MOTION'
+      | 'VIDEORC_SMOKE_SKIP_FIRST_RUN'
       | 'VIDEORC_DISABLE_AUTO_PREVIEW'
       | 'VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW'
       | 'VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED'
@@ -57,6 +63,7 @@ export interface RuntimeInfoInput {
       | 'VIDEORC_COMMENTS_WINDOW'
       | 'VIDEORC_COMMENTS_RECORDING_OVERLAY'
       | 'VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE'
+      | 'VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE'
     >
   >
 }
@@ -114,7 +121,9 @@ export function buildRuntimeInfo({
     retryAttempts: 0
   },
   backendCrashes = [],
+  firstFrameDecisions = [],
   windowGlass,
+  globalShortcutsUnavailable = null,
   env
 }: RuntimeInfoInput): RuntimeInfo {
   const targetPath = permissionTargetPath(execPath)
@@ -130,8 +139,11 @@ export function buildRuntimeInfo({
     hardwareAccelerationDisabled,
     gpuFallback,
     backendCrashes: [...backendCrashes],
+    firstFrameDecisions: [...firstFrameDecisions],
     ...(windowGlass ? { windowGlass } : {}),
+    ...(globalShortcutsUnavailable ? { globalShortcutsUnavailable } : {}),
     isPackaged,
+    firstRunSuppressed: env.VIDEORC_SMOKE_SKIP_FIRST_RUN === '1',
     permissionTargetName: isPackaged ? 'Videorc' : 'Electron',
     permissionTargetPath: targetPath,
     capturePermissionTargetName: permissionTargetName(captureTargetPath, 'Videorc capture helper'),
@@ -145,6 +157,7 @@ export function buildRuntimeInfo({
       env.VIDEORC_COMMENTS_WINDOW !== '0' && env.VIDEORC_COMMENTS_RECORDING_OVERLAY !== '0',
     previewSmokeMode: env.VIDEORC_SMOKE_PREVIEW_MOTION === '1',
     windowsLiveAudioSmokeMode: env.VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE === '1',
+    windowsD3d11PreviewSmokeMode: env.VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE === '1',
     disableAutoPreview: env.VIDEORC_DISABLE_AUTO_PREVIEW === '1',
     disableAutoSourcePreview: env.VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW === '1',
     nativePreviewSurfaceStageSuspended: env.VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED === '1'

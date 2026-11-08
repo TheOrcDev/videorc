@@ -712,6 +712,10 @@ pub(crate) struct CreatorEnv {
     /// Tests hold the builder just before it writes until they pass this.
     #[cfg(test)]
     build_hold: Option<Arc<std::sync::Barrier>>,
+    /// Tests hold a sheet job just before it reads the creation until they
+    /// notify this.
+    #[cfg(test)]
+    sheet_hold: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl CreatorEnv {
@@ -725,6 +729,8 @@ impl CreatorEnv {
             shared: PROCESS_CREATOR.clone(),
             #[cfg(test)]
             build_hold: None,
+            #[cfg(test)]
+            sheet_hold: None,
         }
     }
 
@@ -917,19 +923,41 @@ fn commit<T>(
     change: impl FnOnce(&Path, &mut BuildState) -> Result<T, BuddyPetCreatorError>,
 ) -> Result<T, BuddyPetCreatorError> {
     let _lock = shared.commit.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = job_state(dir, cancelled)?;
+    let out = change(dir, &mut state)?;
+    write_state(dir, &mut state)?;
+    Ok(out)
+}
+
+/// Read the state (and the files it names) under the commit lock without
+/// writing it. Refused as `commit` is, so a job that starts reading after a
+/// cancel reports the cancel, never a missing or half-removed creation.
+fn inspect<T>(
+    shared: &CreatorShared,
+    dir: &Path,
+    cancelled: &AtomicBool,
+    read: impl FnOnce(&Path, &BuildState) -> Result<T, BuddyPetCreatorError>,
+) -> Result<T, BuddyPetCreatorError> {
+    let _lock = shared.commit.lock().unwrap_or_else(|e| e.into_inner());
+    read(dir, &job_state(dir, Some(cancelled))?)
+}
+
+/// A job's view of its creation; the caller holds the commit lock. A
+/// cancelled (or removed) creation is the cancel.
+fn job_state(
+    dir: &Path,
+    cancelled: Option<&AtomicBool>,
+) -> Result<BuildState, BuddyPetCreatorError> {
     if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
         return Err(cancelled_error());
     }
-    let mut state = read_state(dir).map_err(|error| {
+    read_state(dir).map_err(|error| {
         if error.code == COHOST_PET_CREATION_NONE {
             cancelled_error()
         } else {
             error
         }
-    })?;
-    let out = change(dir, &mut state)?;
-    write_state(dir, &mut state)?;
-    Ok(out)
+    })
 }
 
 fn cancelled_error() -> BuddyPetCreatorError {
@@ -1815,19 +1843,27 @@ async fn run_sheet(
     redo: bool,
     cancelled: Arc<AtomicBool>,
 ) -> Result<(BuddyPetCreationSource, (u32, u32)), BuddyPetCreatorError> {
+    #[cfg(test)]
+    if let Some(hold) = &env.sheet_hold {
+        hold.notified().await;
+    }
+    // Read under the commit lock: a cancel that landed before this job ran
+    // is reported as the cancel, and the removal cannot run mid-read.
     let (reference, reference_version, notes) = {
+        let shared = env.shared.clone();
         let dir = dir.to_path_buf();
+        let cancelled = cancelled.clone();
         blocking(move || {
-            let build_state = read_state(&dir)?;
-            let source = build_state
-                .reference()
-                .cloned()
-                .ok_or_else(|| not_ready("Read the reference first."))?;
-            let notes = build_state
-                .notes
-                .clone()
-                .ok_or_else(|| not_ready("Read the reference first."))?;
-            Ok((read_source(&dir, &source)?, source.version, notes))
+            inspect(&shared, &dir, &cancelled, |dir, build_state| {
+                let source = build_state
+                    .reference()
+                    .ok_or_else(|| not_ready("Read the reference first."))?;
+                let notes = build_state
+                    .notes
+                    .clone()
+                    .ok_or_else(|| not_ready("Read the reference first."))?;
+                Ok((read_source(dir, source)?, source.version, notes))
+            })
         })
         .await?
     };

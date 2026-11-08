@@ -8,7 +8,10 @@ import type { ChannelLevel, FrameSource, MeterFrame } from './audio/types'
 import { AUDIO_LEVEL_FLOOR_DB, type AudioLevelReading, type AudioLevelsEvent } from './backend'
 import type { BackendAudioLevelsStore } from './backend-audio-levels'
 
-export type BackendLevelKind = keyof Pick<AudioLevelsEvent, 'microphone' | 'systemAudio' | 'master'>
+export type BackendLevelKind = keyof Pick<
+  AudioLevelsEvent,
+  'microphone' | 'systemAudio' | 'sounds' | 'master'
+>
 
 /** The wire floor (JSON cannot carry -Infinity) read back as digital silence. */
 function wireDb(db: number): number {

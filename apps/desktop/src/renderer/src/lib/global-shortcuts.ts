@@ -1,20 +1,28 @@
 import {
+  globalShortcutEntries,
   globalShortcutLayout,
   isGlobalShortcutAction,
   type GlobalShortcutAction
 } from '../../../shared/global-shortcuts'
 export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
+import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
 import { toast } from '@/lib/toast'
 import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 
-import type { DeviceStatus, GlobalShortcutsConfig, GlobalShortcutsResult } from '@/lib/backend'
+import type {
+  ClipLength,
+  DeviceStatus,
+  GlobalShortcutsConfig,
+  GlobalShortcutsResult
+} from '@/lib/backend'
 import { openSettingsTab } from '@/lib/settings-tabs'
 import { systemAudioTarget } from '@/lib/system-audio'
 
 type RegisterFn = (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
 
 export interface GlobalShortcutContext {
+  toggleScreenHidden?: () => Promise<unknown>
   sessionActive: boolean
   /**
    * The Studio's two explicit starts (plan 174 S3.1, B-3): the record key
@@ -26,8 +34,10 @@ export interface GlobalShortcutContext {
   startLivestream: () => Promise<unknown>
   stopSession: () => Promise<unknown>
   toggleMicrophoneMute: () => void
-  /** Plan 068 D6: mark a clip at the current moment. */
-  markClip?: () => void
+  /** Save a clip (plan 068 D6; plan 181 R4): the last seconds whenever the
+   * ring holds frames, and a mark in the recording while one runs. Plan 199:
+   * `seconds` is 30 or 60; none is the 30-second clip. */
+  markClip?: (seconds?: ClipLength) => void
   /** Plan 069 S6: the system-audio device status and the state the Studio
    * shows (the session's confirmed mix, else the request). */
   systemAudio?: readonly [status: DeviceStatus | undefined, shown: boolean]
@@ -41,7 +51,7 @@ export function executeGlobalShortcut(
   context: GlobalShortcutContext
 ): void {
   if (!isGlobalShortcutAction(action)) return
-  if (action.startsWith('layout')) {
+  if (action.startsWith('layout') || action.startsWith('scene:')) {
     context.switchLayout?.(action)
     return
   }
@@ -55,9 +65,11 @@ export function executeGlobalShortcut(
     void (context.sessionActive ? context.stopSession() : context.startLivestream())
     return
   }
+  if (action === 'screen-hide-toggle') void context.toggleScreenHidden?.()
   if (action === 'mic-toggle') context.toggleMicrophoneMute()
   if (action === 'system-audio-toggle') toggleSystemAudio(context)
   if (action === 'clip-mark') context.markClip?.()
+  if (action === 'clip-mark-long') context.markClip?.(LONG_CLIP_SECONDS)
 }
 
 function toggleSystemAudio(context: GlobalShortcutContext): void {
@@ -85,11 +97,13 @@ function toggleSystemAudio(context: GlobalShortcutContext): void {
 // "Already used by" refusal and the registration toast all read it (plan 174
 // S2.3a, after S2.4). The session pair is S2.2's verb pair.
 const GLOBAL_SHORTCUT_LABELS: Partial<Record<GlobalShortcutAction, string>> = {
+  'screen-hide-toggle': 'Hide screen',
   'record-toggle': RECORD_SHORTCUT_LABEL,
   'stream-toggle': GO_LIVE_SHORTCUT_LABEL,
   'mic-toggle': 'Mute / unmute microphone',
   'system-audio-toggle': 'Turn system audio on or off',
-  'clip-mark': 'Mark a clip',
+  'clip-mark': 'Save a 30-second clip',
+  'clip-mark-long': 'Save a 1-minute clip',
   'layout-next': 'Next scene',
   'layout-previous': 'Previous scene'
 }
@@ -185,6 +199,20 @@ export class GlobalShortcutsRegistrar {
         }
         this.lastRegisteredBody = body
         publishRegistration({ ...result?.registered })
+        if (result?.unavailable) {
+          // Nothing registered (Linux on Wayland). Keys someone set would
+          // otherwise do nothing without a word; with none set (the default
+          // Hide screen key alone), Settings says it.
+          const userSet = { ...shortcuts, screenHideToggle: shortcuts.screenHideToggle ?? '' }
+          if (globalShortcutEntries(userSet).some(([, value]) => value?.trim())) {
+            toast.warning("Global shortcuts don't work here", {
+              id: 'global-shortcuts-conflict',
+              description: result.unavailable,
+              action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
+            })
+          }
+          return
+        }
         const failed = Object.entries(result?.registered ?? {})
           .filter(([, ok]) => !ok)
           .map(([action]) => action)

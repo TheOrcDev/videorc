@@ -4,8 +4,9 @@ import { useEffect, useState, type ReactElement } from 'react'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCaptions, useStudioCore } from '@/hooks/use-studio'
 import { renderCaptionCueFramePng } from '@/lib/caption-overlay'
+import { CAPTIONS_PREVIEW_PIN } from '@/lib/page-layout'
 import { formatResolution } from '@/lib/format-video'
 import { cn } from '@/lib/utils'
 
@@ -15,7 +16,8 @@ const PREVIEW_WIDTH = 960
 const SAMPLE_CAPTION = 'Your words become clear, live captions.'
 
 export function CaptionPreview(): ReactElement {
-  const { captionLines, captureConfig } = useStudioCore()
+  const { captureConfig } = useStudioCore()
+  const { captionLines } = useStudioCaptions()
   const [backdrop, setBackdrop] = useState<PreviewBackdrop>('motion')
   const [overlayUrl, setOverlayUrl] = useState<string | null>(null)
   const latest = captionLines.at(-1)
@@ -53,7 +55,7 @@ export function CaptionPreview(): ReactElement {
         // Which text the preview shows, not a status (plan 174 D-26): never a green "Live".
         <Badge>{isSample ? 'Sample' : 'Latest caption'}</Badge>
       }
-      className="lg:sticky lg:top-0"
+      className={CAPTIONS_PREVIEW_PIN}
       description="The selected style at your current video aspect ratio."
       icon={PreviewIcon}
       title="Caption preview"

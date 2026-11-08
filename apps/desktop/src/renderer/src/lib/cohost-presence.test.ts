@@ -142,6 +142,54 @@ describe('cohostPresenceView', () => {
     expect(view.tooltipLines).toContain('ai-gateway-error (HTTP 502): Every model failed.')
   })
 
+  it('reads a failed tick with a scheduled retry as calm Retrying, never Stopped', () => {
+    // The 2026-10-21 stream: 22 of 83 ticks answered 502 and the engine
+    // retried each within seconds, yet the header flashed a red "Stopped".
+    const view = cohostPresenceView(
+      listening({
+        status: 'error',
+        reason: 'gateway-error',
+        retryAt: '2026-08-24T12:00:05.000Z',
+        detail: {
+          code: 'ai-gateway-error',
+          message: 'The Buddy tick failed on every configured model.',
+          status: 502
+        }
+      }),
+      NOW
+    )
+    expect(view.kind).toBe('retrying')
+    expect(view.label).toBe("Retrying: Videorc AI didn't answer")
+    expect(view.dotTone).toBe('muted')
+    expect(view.pulse).toBe(true)
+    expect(view.dots).toBe(false)
+    expect(view.tooltipLines).toContain('next try in ~5s')
+    expect(view.tooltipLines).toContain(
+      'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
+    )
+    expect(cohostEmptyStateCopy(view, null)).toContain('trying again')
+  })
+
+  it('still says Stopped once the engine stops promising a retry', () => {
+    const view = cohostPresenceView(
+      listening({ status: 'error', reason: 'gateway-error', retryAt: null }),
+      NOW
+    )
+    expect(view.kind).toBe('error')
+    expect(view.label).toBe('Stopped: Videorc AI error')
+    expect(view.dotTone).toBe('destructive')
+  })
+
+  it('names other retry reasons with the shared vocabulary', () => {
+    const state = listening({
+      status: 'error',
+      reason: 'network',
+      retryAt: '2026-08-24T12:00:10.000Z'
+    })
+    expect(cohostPresenceView(state, NOW).label).toBe('Retrying: no connection')
+    expect(cohostStatusLabel(state)).toBe('Retrying: no connection')
+  })
+
   it('builds the tooltip from lastTickAt, messagesSeen and questionsTotal', () => {
     const view = cohostPresenceView(listening({ questions: [question()] }), NOW)
     expect(view.tooltipLines).toEqual([

@@ -138,6 +138,8 @@ function forSession(
  * with a `streamUrl`: it is on air all the same (plan 095 S5).
  */
 function sessionStateOf(status: RecordingStatus): LiveDashboardSessionState | null {
+  // A buffer-only session (plan 181) is nothing to manage: off air.
+  if (status.replayOnly) return 'off-air'
   if (sessionIsLive(status)) return 'live'
   if (status.state === 'recording') return 'recording'
   if (status.state === 'idle' || status.state === 'failed') return 'off-air'
@@ -288,6 +290,33 @@ const CLOUD_PHASES: ReadonlySet<string> = new Set<LiveDashboardCloudPhase>([
 ])
 
 /**
+ * The cloud show as it carries `sessionId` (plan 184 C7), or null: a status
+ * for another session, for none, or with the cloud off carries nothing. The
+ * Studio's Session section and the Livestream page read the same view the
+ * Stream Manager's dashboard keeps.
+ */
+export function dashboardCloudFromStatus(
+  status: CloudStatus,
+  sessionId: string | null
+): LiveDashboardCloud | null {
+  const carries =
+    status.sessionId !== undefined &&
+    sessionId !== null &&
+    status.sessionId === sessionId &&
+    CLOUD_PHASES.has(status.phase)
+  if (!carries) return null
+  const remaining = status.hold?.active ? status.hold.remainingSeconds : undefined
+  const feedKbps = (status.feeds ?? [])
+    .filter((feed) => feed.connected)
+    .reduce((sum, feed) => sum + (feed.kbps ?? 0), 0)
+  return {
+    phase: status.phase as LiveDashboardCloudPhase,
+    ...(typeof remaining === 'number' ? { holdRemainingSeconds: remaining } : {}),
+    ...(feedKbps > 0 ? { feedKbps } : {})
+  }
+}
+
+/**
  * `cloud.state` (plan 184 C7): the show while it carries this session. A
  * status for another session, or none, clears it; the session never comes
  * from here.
@@ -297,21 +326,7 @@ export function reduceDashboardCloud(
   status: CloudStatus,
   now: string
 ): LiveDashboardState {
-  const carries =
-    status.sessionId !== undefined &&
-    status.sessionId === state.sessionId &&
-    CLOUD_PHASES.has(status.phase)
-  const remaining = status.hold?.active ? status.hold.remainingSeconds : undefined
-  const feedKbps = (status.feeds ?? [])
-    .filter((feed) => feed.connected)
-    .reduce((sum, feed) => sum + (feed.kbps ?? 0), 0)
-  const cloud: LiveDashboardCloud | null = carries
-    ? {
-        phase: status.phase as LiveDashboardCloudPhase,
-        ...(typeof remaining === 'number' ? { holdRemainingSeconds: remaining } : {}),
-        ...(feedKbps > 0 ? { feedKbps } : {})
-      }
-    : null
+  const cloud = dashboardCloudFromStatus(status, state.sessionId)
   const previous = state.cloud ?? null
   if (
     previous?.phase === cloud?.phase &&

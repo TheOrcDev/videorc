@@ -57,6 +57,23 @@ channel:write chat:write streamkey:read events:subscribe`.
 | Chat | Read via Kick webhooks (`chat.message.sent`) relayed by videorc-web (`/api/desktop/kick-chat`, long-poll); send via `POST /public/v1/chat` under `chat:write` (500 graphemes, 2,048 bytes, 429 on limit). The desktop creates the `chat.message.sent`, `livestream.status.updated` and `channel.followed` webhook subscriptions with the user token (`events:subscribe`) at Go Live, stores their ids in the secret store (`platform:kick:{account}:event-subscriptions`), and deletes them at stream end and on disconnect (`kick_chat.rs`). | Events, Chat |
 | Followers | No total in the channel read. `channel.followed` relay events arrive as named follow rows in Activity, with the follower's `profile_picture` as the avatar since plan 071 (relay `followerAvatarUrl`) and count up the `stream-audience` row, which reports `capability: "delta-only"` (new follows since the stream started, never a total). No subscribers or tips. | Events |
 
+## Facebook (plan 206)
+
+Stream key only until Meta approves Page sign-in (plan 206, Phases 2 to 4).
+Facebook has a live API, but none of it works from a pasted key, so the
+Stream Manager treats a Facebook destination like TikTok and Instagram:
+its comments row says sign-in isn't available yet, and there are no viewers,
+followers or title.
+
+| Question | Answer | Source |
+| --- | --- | --- |
+| Stream key and ingest | The streamer copies the key from Live Producer (`facebook.com/live/producer`, Streaming software). "Persistent stream key" under Advanced Settings makes it reusable; one live at a time per persistent key. RTMPS only: Live Producer shows `rtmps://live-api-s.facebook.com:443/rtmp/` (the card's default), OBS lists `rtmps://rtmp-api.facebook.com:443/rtmp/`. | Facebook Help 587160588142067; OBS `services.json` |
+| Going public | The stream arrives as a preview; the streamer presses Go live in Live Producer. Videorc reminds them in the Go Live dialog. | Facebook Help 587160588142067 |
+| Who can go live | Since 2024-06-10: the account is 60+ days old, and a Page or professional-mode profile has 100+ followers. Applies to streaming software too (a refused key is a "permissions error" at the encoder). | Facebook Help 1636872026560015; vMix KB 369 |
+| Output | H.264, key frame every 2 s, AAC 48 kHz, at most 1080p60 (OBS's matrix: 1080p60 up to 9,000 kbps). Videorc's shared non-YouTube cap of 1080p / 6,000 kbps applies; 60 fps is allowed. OBS caps audio at 128 kbps for Facebook; Videorc's stream audio is 160 kbps AAC. The owner's first live take checks Live Producer raises no audio warning. | OBS `services.json`, Live Video API guide |
+| Chat, viewers, followers, title | None with a key. A connected Page gets them through the Live Video API (plan 206 S8 to S10). | Live Video API |
+| Retention | Facebook deletes lives after 30 days unless saved (since 2025-02). The local recording is the archive. | Meta newsroom 2025-02 |
+
 ## TikTok, Instagram, custom RTMP
 
 These have no public live chat, viewer or follower API, and Videorc uses manual

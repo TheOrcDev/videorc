@@ -1,7 +1,10 @@
-import { createElement } from 'react'
+// @vitest-environment happy-dom
+import { act, createElement } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { gainReset } from '@/components/audio/gain-faders'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { createFrameEmitter } from '@/lib/audio/frame-source'
 import type { MeterFrame } from '@/lib/audio/types'
@@ -11,10 +14,11 @@ import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system
 import {
   applySyncChange,
   keepMicrophoneReadyHint,
-  gainReset,
   MicrophoneChannel,
+  noiseReductionSwitchView,
   SyncCalibrationView,
   syncOffsetTag,
+  SoundsSettings,
   SystemAudioSettings
 } from './sources-audio-mixer'
 
@@ -35,7 +39,9 @@ function render(
     device: { status: 'available' },
     requested: false,
     sessionActive: false,
+    audioBusActive: false,
     confirmed: null,
+    joining: false,
     issue: null,
     ...input
   })
@@ -67,7 +73,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(markup).toContain('data-slot="source-item"')
     expect(markup).toContain('data-videorc-system-audio-settings=""')
     expect(markup).toContain('>System audio<')
-    expect(markup).toMatch(/<button[^>]*aria-label="System audio"/)
+    expect(markup).toMatch(/<span[^>]*role="switch"[^>]*aria-label="System audio"/)
     expect(markup).toContain('Everything your Mac plays, except Videorc.')
     // Plan 173, D4: the long explanation is folded into More.
     expect(markup).not.toContain('browser tab')
@@ -76,7 +82,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
   it('shows its level and the Level fader only while On', () => {
     const off = render({})
     expect(off).not.toContain('aria-label="System audio gain"')
-    expect(off).not.toContain('Level shows while recording or live.')
+    expect(off).not.toContain('Level shows while you record, go live, or keep Clips on.')
     const on = render({ requested: true })
     expect(on).toContain('aria-label="System audio gain"')
     expect(on).toContain('>−6.0 dB<')
@@ -85,20 +91,35 @@ describe('Sources System audio row (plans 069, 173)', () => {
 
   it('says when the level moves instead of drawing a dead meter (plan 173)', () => {
     const idle = render({ requested: true })
-    expect(idle).toContain('Level shows while recording or live.')
+    expect(idle).toContain('Level shows while you record, go live, or keep Clips on.')
     expect(idle).not.toContain('data-videorc-system-audio-visualizer')
     expect(idle).not.toContain('aria-label="System audio level"')
+    expect(idle).not.toContain('data-slot="lcd-display"')
   })
 
   it('draws the meter once the bus level drives it', () => {
     const source = createFrameEmitter<MeterFrame>()
     const markup = render(
-      { requested: true, sessionActive: true, confirmed: true },
+      { requested: true, sessionActive: true, audioBusActive: true, confirmed: true },
       { meter: { kind: 'source', source } }
     )
     expect(markup).toContain('data-videorc-system-audio-visualizer=""')
     expect(markup).toContain('aria-label="System audio level"')
-    expect(markup).not.toContain('Level shows while recording or live.')
+    // The segmented bar; the LCD screen is Retro LCD's (plan 197).
+    expect(markup).toMatch(/data-videorc-system-audio-visualizer=""[^]*data-slot="level-meter"/)
+    expect(markup).not.toContain('data-slot="lcd-display"')
+    expect(markup).not.toContain('Level shows while you record, go live, or keep Clips on.')
+  })
+
+  it('draws the idle Clips meter without a recording or livestream', () => {
+    const source = createFrameEmitter<MeterFrame>()
+    const markup = render(
+      { requested: true, sessionActive: false, audioBusActive: true, confirmed: true },
+      { meter: { kind: 'source', source } }
+    )
+    expect(markup).toContain('data-videorc-system-audio-visualizer=""')
+    expect(markup).toContain('aria-label="System audio level"')
+    expect(markup).not.toContain('Level shows while you record, go live, or keep Clips on.')
   })
 
   it('opens More to the echo guard and the three facts', () => {
@@ -125,13 +146,25 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(idle).not.toContain('Mac')
     expect(idle).not.toContain('Screen Recording')
     const failed = render(
-      { requested: true, sessionActive: true, confirmed: false, issue: 'unavailable' },
+      {
+        requested: true,
+        sessionActive: true,
+        audioBusActive: true,
+        confirmed: false,
+        issue: 'unavailable'
+      },
       { macOS: false }
     )
     expect(failed).toContain('System audio couldn&#x27;t start.')
     expect(failed).not.toContain('Open Permissions')
     const bypassed = render(
-      { requested: true, sessionActive: true, confirmed: false, issue: 'bypassed' },
+      {
+        requested: true,
+        sessionActive: true,
+        audioBusActive: true,
+        confirmed: false,
+        issue: 'bypassed'
+      },
       { macOS: false }
     )
     expect(bypassed).toContain(
@@ -140,7 +173,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
   })
 
   it('has the echo guard On by default, and it can be turned off (plan 076)', () => {
-    const guard = /<button[^>]*role="switch"[^>]*>/
+    const guard = /<span[^>]*role="switch"[^>]*>/
     const echoRow = (markup: string): string =>
       markup.slice(markup.indexOf('data-videorc-echo-guard'))
     expect(echoRow(render({}, { open: true })).match(guard)?.[0]).toContain('aria-checked="true"')
@@ -156,7 +189,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(echo).toMatch(
       /data-slot="field-description"[^>]*>Stops System audio when your own stream/
     )
-    expect(echo).toMatch(/<button[^>]*role="switch"/)
+    expect(echo).toMatch(/<span[^>]*role="switch"/)
   })
 
   it('locks the row with one reason without Screen Recording permission', () => {
@@ -165,16 +198,22 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(markup).toContain('Uses the Screen Recording permission. Turn it on above.')
     expect(markup).not.toContain('Open Permissions')
     expect(markup).toContain('>Needs permission<')
-    const onSwitch = markup.match(/<button[^>]*aria-label="System audio"[^>]*>/)?.[0]
-    expect(onSwitch).toContain('disabled=""')
-    expect(markup).toMatch(/data-disabled="true"[^>]*data-slot="source-item"/)
+    const onSwitch = markup.match(/<span[^>]*aria-label="System audio"[^>]*>/)?.[0]
+    expect(onSwitch).toContain('aria-disabled="true"')
+    expect(markup).toMatch(/<section(?=[^>]*data-slot="source-item")[^>]*data-disabled="true"/)
     const echo = markup.slice(markup.indexOf('data-videorc-echo-guard'))
-    expect(echo.match(/<button[^>]*role="switch"[^>]*>/)?.[0]).toContain('disabled=""')
+    expect(echo.match(/<span[^>]*role="switch"[^>]*>/)?.[0]).toContain('aria-disabled="true"')
   })
 
   it('makes an issue a warning Alert, with its action (plan 174 S3.8)', () => {
     const failed = render(
-      { requested: true, sessionActive: true, confirmed: false, issue: 'unavailable' },
+      {
+        requested: true,
+        sessionActive: true,
+        audioBusActive: true,
+        confirmed: false,
+        issue: 'unavailable'
+      },
       { macOS: true }
     )
     expect(failed).toMatch(/data-slot="alert"[^>]*data-variant="warning"/)
@@ -182,11 +221,11 @@ describe('Sources System audio row (plans 069, 173)', () => {
   })
 
   it('keeps the On switch styled by its own state under the shortcut tooltip', () => {
-    // Radix TooltipTrigger asChild writes data-state onto its child; on the
-    // Switch that replaced checked/unchecked, the only hook its track styles use.
-    const onSwitch = /<button[^>]*aria-label="System audio"[^>]*>/
-    expect(render({ requested: true }).match(onSwitch)?.[0]).toContain('data-state="checked"')
-    expect(render({}).match(onSwitch)?.[0]).toContain('data-state="unchecked"')
+    // The tooltip's trigger is a wrapper, so nothing it writes lands on the
+    // Switch, whose track styles read its own data-checked/data-unchecked.
+    const onSwitch = /<span[^>]*aria-label="System audio"[^>]*>/
+    expect(render({ requested: true }).match(onSwitch)?.[0]).toContain('data-checked=""')
+    expect(render({}).match(onSwitch)?.[0]).toContain('data-unchecked=""')
   })
 
   it('chips On outside a session, Receiving while mixed, and nothing while Off', () => {
@@ -194,13 +233,33 @@ describe('Sources System audio row (plans 069, 173)', () => {
     const source = createFrameEmitter<MeterFrame>()
     expect(
       render(
-        { requested: true, sessionActive: true, confirmed: true },
+        { requested: true, sessionActive: true, audioBusActive: true, confirmed: true },
         { meter: { kind: 'source', source } }
       )
     ).toContain('>Receiving<')
     expect(render({})).not.toContain('data-slot="source-status"')
   })
 })
+
+function microphoneProps(): Parameters<typeof MicrophoneChannel>[0] {
+  return {
+    picker: createElement('div', { 'data-test-picker': '' }),
+    microphoneSelected: true,
+    status: null,
+    meter: { kind: 'value', peakDb: -18 },
+    monitorState: 'monitoring',
+    unavailableReason: undefined,
+    gainDb: 0,
+    muted: false,
+    syncOffsetMs: 0,
+    syncUserSet: false,
+    sessionActive: false,
+    calibration: null,
+    onGainChange: noop,
+    onMutedChange: noop,
+    onSyncChange: noop
+  }
+}
 
 function renderMicrophone(
   overrides: Partial<Parameters<typeof MicrophoneChannel>[0]> = {}
@@ -209,24 +268,7 @@ function renderMicrophone(
     createElement(
       TooltipProvider,
       null,
-      createElement(MicrophoneChannel, {
-        picker: createElement('div', { 'data-test-picker': '' }),
-        microphoneSelected: true,
-        status: null,
-        meter: { kind: 'value', peakDb: -18 },
-        monitorState: 'monitoring',
-        unavailableReason: undefined,
-        gainDb: 0,
-        muted: false,
-        syncOffsetMs: 0,
-        syncUserSet: false,
-        sessionActive: false,
-        calibration: null,
-        onGainChange: noop,
-        onMutedChange: noop,
-        onSyncChange: noop,
-        ...overrides
-      })
+      createElement(MicrophoneChannel, { ...microphoneProps(), ...overrides })
     )
   )
 }
@@ -239,6 +281,8 @@ describe('Sources Microphone row (plans 093, 173)', () => {
     expect(markup).toContain('data-videorc-mic-channel=""')
     expect(markup).toContain('data-videorc-mic-monitor-state="monitoring"')
     expect(markup).toMatch(/data-videorc-mic-preview=""[^]*aria-label="Microphone level"/)
+    expect(markup).toMatch(/data-videorc-mic-preview=""[^]*data-slot="level-meter"/)
+    expect(markup).not.toContain('data-slot="lcd-display"')
     expect(markup).toContain('data-slot="fader"')
     expect(markup).toContain('aria-label="Microphone gain"')
     expect(markup).toContain('>Gain<')
@@ -305,6 +349,29 @@ describe('Sources Microphone row (plans 093, 173)', () => {
     expect(renderMicrophone()).not.toContain('data-videorc-mic-level-reason')
   })
 
+  // Issue 1064: a running bus with no level paints nothing and says so; a
+  // microphone the bus reads as digital silence is "Silent", not "Receiving".
+  it("says the level is unavailable during a session, and Silent on the watchdog's word", () => {
+    const unavailable = renderMicrophone({
+      meter: NO_READING,
+      monitorState: 'idle',
+      sessionActive: true,
+      sessionLevelUnavailable: true
+    })
+    expect(unavailable).toContain('data-videorc-mic-level-reason="session"')
+    expect(unavailable).toContain(
+      'Level unavailable. The meter shows only what your recording and stream hear.'
+    )
+    const silent = renderMicrophone({
+      monitorState: 'silent',
+      sessionActive: true,
+      status: { label: 'Silent', tone: 'warn' }
+    })
+    expect(silent).toContain('data-videorc-mic-monitor-state="silent"')
+    expect(silent).toContain('>Silent<')
+    expect(silent).not.toContain('>Receiving<')
+  })
+
   it('folds Sync into More, closed by default (plan 173, D2)', () => {
     const closed = renderMicrophone({ syncOffsetMs: 150, syncUserSet: true })
     expect(closed).not.toContain('data-slot="parameter-slider"')
@@ -343,7 +410,7 @@ describe('Sources Microphone row (plans 093, 173)', () => {
     expect(markup).toContain('>Keep microphone ready<')
     // A settings row: the Field's label names its switch once mounted.
     expect(markup).toMatch(
-      /data-videorc-mic-keep-ready=""[^]*>Keep microphone ready<[^]*role="switch" aria-checked="true"/
+      /data-videorc-mic-keep-ready=""[^]*>Keep microphone ready<[^]*role="switch"[^>]*aria-checked="true"/
     )
     expect(markup).toContain('macOS shows its microphone indicator while it&#x27;s open')
     expect(renderMicrophone({ defaultMoreOpen: true })).not.toContain('Keep microphone ready')
@@ -366,6 +433,135 @@ describe('syncOffsetTag (plan 173)', () => {
     expect(syncOffsetTag(-40, true)).toBe('Sync −40 ms')
     expect(syncOffsetTag(0, true)).toBeNull()
     expect(syncOffsetTag(150, false)).toBeNull()
+  })
+})
+
+describe('microphone noise reduction switch (PR 1036)', () => {
+  const noiseRow = (markup: string): string =>
+    markup.slice(markup.indexOf('data-videorc-mic-noise-reduction'))
+  const noiseSwitch = (markup: string): string =>
+    noiseRow(markup).match(/<span[^>]*role="switch"[^>]*>/)?.[0] ?? ''
+
+  it('is a labelled settings row in the body, right under Gain, never folded into More', () => {
+    const markup = renderMicrophone()
+    expect(markup).toContain('data-videorc-mic-noise-reduction=""')
+    expect(noiseRow(markup)).toMatch(/data-slot="field-label"[^>]*>Noise reduction</)
+    expect(noiseRow(markup)).toMatch(
+      /data-slot="field-description"[^>]*>Cuts background noise while you record or go live\. The level shows the cleaned sound only then\.</
+    )
+    // One switch, not an Off/On pair.
+    expect(noiseSwitch(markup)).toContain('data-size="sm"')
+    expect(markup).not.toMatch(/>Off<\/button>|>On<\/button>/)
+    expect(markup).not.toContain('>RNNoise<')
+    // Below the Gain fader, and visible with More closed.
+    expect(markup.indexOf('aria-label="Microphone gain"')).toBeLessThan(
+      markup.indexOf('data-videorc-mic-noise-reduction')
+    )
+    expect(markup).not.toContain('data-slot="parameter-slider"')
+  })
+
+  it('is checked for rnnoise and unchecked for off', () => {
+    expect(noiseSwitch(renderMicrophone())).toContain('aria-checked="false"')
+    expect(noiseSwitch(renderMicrophone({ noiseSuppression: 'off' }))).toContain(
+      'aria-checked="false"'
+    )
+    expect(noiseSwitch(renderMicrophone({ noiseSuppression: 'rnnoise' }))).toContain(
+      'aria-checked="true"'
+    )
+  })
+
+  it("can't turn On with no microphone, and says why", () => {
+    const markup = renderMicrophone({ microphoneSelected: false })
+    expect(noiseSwitch(markup)).toContain('aria-checked="false"')
+    expect(noiseSwitch(markup)).toContain('aria-disabled="true"')
+    expect(noiseRow(markup)).toContain(
+      'Cuts background noise while you record or go live. Choose a microphone to turn it on.'
+    )
+  })
+
+  it('keeps Off possible after the microphone is removed while On', () => {
+    const markup = renderMicrophone({ noiseSuppression: 'rnnoise', microphoneSelected: false })
+    expect(noiseSwitch(markup)).toContain('aria-checked="true"')
+    expect(noiseSwitch(markup)).not.toContain('aria-disabled="true"')
+    expect(noiseRow(markup)).not.toContain('Choose a microphone')
+  })
+
+  it('maps each state to checked, disabled and its line', () => {
+    const level = 'The level shows the cleaned sound only then.'
+    const reason = 'Choose a microphone to turn it on.'
+    expect(noiseReductionSwitchView('off', true)).toMatchObject({ checked: false, disabled: false })
+    expect(noiseReductionSwitchView('off', true).description).toContain(level)
+    expect(noiseReductionSwitchView('rnnoise', true)).toMatchObject({
+      checked: true,
+      disabled: false
+    })
+    expect(noiseReductionSwitchView('off', false)).toMatchObject({ checked: false, disabled: true })
+    expect(noiseReductionSwitchView('off', false).description).toContain(reason)
+    expect(noiseReductionSwitchView('rnnoise', false)).toMatchObject({
+      checked: true,
+      disabled: false
+    })
+    expect(noiseReductionSwitchView('rnnoise', false).description).toContain(level)
+  })
+})
+
+describe('microphone noise reduction switch, clicked (PR 1036)', () => {
+  let container: HTMLDivElement
+  let root: Root
+
+  beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+  })
+
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    container.remove()
+    vi.unstubAllGlobals()
+  })
+
+  async function clickNoiseSwitch(
+    overrides: Partial<Parameters<typeof MicrophoneChannel>[0]>
+  ): Promise<ReturnType<typeof vi.fn>> {
+    const onNoiseSuppressionChange = vi.fn()
+    await act(async () => {
+      root.render(
+        createElement(
+          TooltipProvider,
+          null,
+          createElement(MicrophoneChannel, {
+            ...microphoneProps(),
+            onNoiseSuppressionChange,
+            ...overrides
+          })
+        )
+      )
+    })
+    const control = container.querySelector<HTMLElement>(
+      '[data-videorc-mic-noise-reduction] [role="switch"]'
+    )
+    if (!control) throw new Error('no Noise reduction switch')
+    // The row's label names its switch.
+    const labelledBy = control.getAttribute('aria-labelledby')
+    expect(labelledBy && document.getElementById(labelledBy)?.textContent).toBe('Noise reduction')
+    await act(async () => control.click())
+    return onNoiseSuppressionChange
+  }
+
+  it('turns On to rnnoise and Off to off', async () => {
+    expect(await clickNoiseSwitch({ noiseSuppression: 'off' })).toHaveBeenCalledWith('rnnoise')
+    expect(await clickNoiseSwitch({ noiseSuppression: 'rnnoise' })).toHaveBeenCalledWith('off')
+  })
+
+  it('never turns On with no microphone, and always turns Off', async () => {
+    expect(
+      await clickNoiseSwitch({ noiseSuppression: 'off', microphoneSelected: false })
+    ).not.toHaveBeenCalled()
+    const off = await clickNoiseSwitch({ noiseSuppression: 'rnnoise', microphoneSelected: false })
+    expect(off).toHaveBeenCalledTimes(1)
+    expect(off).toHaveBeenCalledWith('off')
   })
 })
 
@@ -438,5 +634,59 @@ describe('Sync calibration (plan 093, D3)', () => {
   it('offers the pnpm stimulus only in development builds', () => {
     expect(renderCalibration({ defaultOpen: true })).not.toContain('Stimulus')
     expect(renderCalibration({ defaultOpen: true, developer: true })).toContain('Stimulus')
+  })
+})
+
+describe('Sources Sounds row (plan 189 S7)', () => {
+  const renderSounds = (props: Partial<Parameters<typeof SoundsSettings>[0]> = {}): string =>
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(SoundsSettings, {
+          volumeDb: 0,
+          monitor: true,
+          meter: NO_READING,
+          disabled: false,
+          onVolumeChange: noop,
+          onMonitorChange: noop,
+          ...props
+        })
+      )
+    )
+
+  it('is one row: the Level fader, the meter line and Hear sounds yourself, on by default', () => {
+    const markup = renderSounds()
+    expect(markup).toContain('data-slot="source-item"')
+    expect(markup).toContain('data-videorc-sounds-source-row=""')
+    expect(markup).toContain('>Sounds<')
+    expect(markup).toContain('aria-label="Sounds level"')
+    expect(markup).toContain('>Level<')
+    expect(markup).toContain('Hear sounds yourself')
+    expect(markup).toContain('Use headphones, or your microphone may pick the sound up again.')
+    expect(markup).toMatch(
+      /role="switch"[^>]*aria-checked="true"|aria-checked="true"[^>]*role="switch"/
+    )
+    // No dead meter outside a session (plan 173).
+    expect(markup).toContain('Level shows while recording or live.')
+  })
+
+  it('draws the meter once the bus mixes sounds, and resets Level off its default', () => {
+    const source = createFrameEmitter<MeterFrame>()
+    const markup = renderSounds({ meter: { kind: 'source', source }, volumeDb: -6 })
+    expect(markup).toContain('data-videorc-sounds-visualizer=""')
+    expect(markup).toMatch(/data-videorc-sounds-visualizer=""[^]*data-slot="level-meter"/)
+    expect(markup).not.toContain('Level shows while recording or live.')
+    expect(markup).toContain('Reset to 0.0 dB')
+    expect(markup).toContain('−6.0 dB')
+  })
+
+  it('turns off with Hear sounds yourself off, and locks while Videorc reconnects', () => {
+    expect(renderSounds({ monitor: false })).toMatch(
+      /role="switch"[^>]*aria-checked="false"|aria-checked="false"[^>]*role="switch"/
+    )
+    const locked = renderSounds({ disabled: true, volumeDb: 3 })
+    expect(locked).toContain('data-disabled="true"')
+    expect(locked).not.toContain('Reset to 0.0 dB')
   })
 })

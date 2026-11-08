@@ -50,6 +50,18 @@ describe('destinationSetup with a server URL', () => {
     expect(destinationSetupHint(destinationSetup(bad, undefined))).toBe('fix the server URL')
   })
 
+  it('is not ready with a key but no server URL, and says to add the server', () => {
+    // X, TikTok and Custom start with an empty server URL; a pasted key alone
+    // used to read as "add a stream key".
+    const noServer = keyTarget({ serverUrl: '   ' })
+    expect(isStreamTargetReady(noServer)).toBe(false)
+    expect(destinationSetup(noServer, undefined)).toEqual({
+      ready: false,
+      reason: 'server-url-missing'
+    })
+    expect(destinationSetupHint(destinationSetup(noServer, undefined))).toBe('add the server URL')
+  })
+
   it('is ready with a good URL and a key, and never checks a full URL it cannot read', () => {
     expect(destinationSetup(keyTarget(), undefined)).toEqual({ ready: true })
     const fullUrl = keyTarget({ urlMode: 'full-url', serverUrl: '', streamKeyPresent: true })

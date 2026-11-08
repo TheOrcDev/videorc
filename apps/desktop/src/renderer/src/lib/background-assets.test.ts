@@ -3,32 +3,40 @@ import { describe, expect, it } from 'vitest'
 import {
   BACKGROUND_SLOT_COUNT,
   applyBundledBackgroundAssets,
+  applyLiveBackground,
+  createDefaultRegistry,
+  defaultBackgroundStyle,
+  effectiveSceneBackground,
+  liveBackgroundSettings,
+  liveSceneBackground,
+  nextLiveBackgroundStatusView,
+  reconcileRegistry,
+  registryForCommittedLiveBackground,
+  removeSlotAsset,
+  type BackgroundAsset,
+  type BackgroundAssetRegistry,
+  type BackgroundAssetSlot
+} from './background-assets'
+import {
   applySlot,
   backgroundAssetDisplayUrl,
   backgroundImportTarget,
   canApplySlot,
   checkableBackgroundAssetPath,
   clearActiveSlot,
-  createDefaultRegistry,
   createImportedAsset,
-  defaultBackgroundStyle,
-  effectiveSceneBackground,
   importIntoSlot,
   markSlotStatus,
   markSlotMissingIfAssetMatches,
-  reconcileRegistry,
-  removeSlotAsset,
   removeSlotNeedsConfirm,
   restoreSlotDefault,
   renameAsset,
   setAssetStyle,
+  setLiveBackgroundSettings,
   slotDisplayStatus,
   slotName,
-  unattendedImportSlot,
-  type BackgroundAsset,
-  type BackgroundAssetRegistry,
-  type BackgroundAssetSlot
-} from './background-assets'
+  unattendedImportSlot
+} from './background-library'
 
 function importedAsset(id: string, name: string): BackgroundAsset {
   return createImportedAsset({
@@ -636,5 +644,131 @@ describe('backgroundAssetDisplayUrl', () => {
     ]) {
       expect(backgroundAssetDisplayUrl(passthrough)).toBe(passthrough)
     }
+  })
+})
+
+describe('live backgrounds in the registry (plan 190)', () => {
+  it('applies one background at a time: live replaces a picture and back', () => {
+    const picture = applySlot(createDefaultRegistry(), 'bg-01')
+    const live = applyLiveBackground(picture, 'silk')
+    expect(live.activeSlotId).toBeNull()
+    expect(live.live.activeId).toBe('silk')
+    const backToPicture = applySlot(live, 'bg-02')
+    expect(backToPicture.live.activeId).toBeNull()
+    expect(backToPicture.activeSlotId).toBe('bg-02')
+    expect(clearActiveSlot(applyLiveBackground(picture, 'silk')).live.activeId).toBeNull()
+  })
+
+  it('resolves the live background to its poster plus the shader spec', () => {
+    const registry = setLiveBackgroundSettings(
+      applyLiveBackground(createDefaultRegistry(), 'plasma-wave'),
+      'plasma-wave',
+      { look: 'ember', motion: 'normal', dimPercent: 30, visibilityPercent: 10 }
+    )
+    expect(effectiveSceneBackground(registry)).toStrictEqual({
+      assetId: 'live-plasma-wave-ember',
+      managedAssetPath: 'videorc-asset://background/live-plasma-wave-ember.webp',
+      fit: 'fill',
+      scale: 100,
+      offsetX: 0,
+      offsetY: 0,
+      blurPx: 0,
+      dimPercent: 30,
+      saturationPercent: 100,
+      vignettePercent: 0,
+      visibilityPercent: 10,
+      live: { id: 'plasma-wave', look: 'ember', motion: 'normal' }
+    })
+  })
+
+  it('defaults to the first look, Calm, and clamps stored choices', () => {
+    const registry = applyLiveBackground(createDefaultRegistry(), 'line-waves')
+    expect(liveBackgroundSettings(registry, 'line-waves')).toStrictEqual({
+      look: 'silk',
+      motion: 'calm',
+      dimPercent: 0,
+      visibilityPercent: 20
+    })
+    const clamped = setLiveBackgroundSettings(registry, 'line-waves', {
+      dimPercent: 95,
+      visibilityPercent: -3
+    })
+    expect(liveBackgroundSettings(clamped, 'line-waves')).toMatchObject({
+      dimPercent: 80,
+      visibilityPercent: 0
+    })
+  })
+
+  it('survives storage and drops what it does not know', () => {
+    const stored = JSON.parse(
+      JSON.stringify(
+        setLiveBackgroundSettings(applyLiveBackground(createDefaultRegistry(), 'silk'), 'silk', {
+          look: 'midnight'
+        })
+      )
+    )
+    const reloaded = reconcileRegistry(stored)
+    expect(reloaded.live.activeId).toBe('silk')
+    expect(reloaded.live.settings.silk?.look).toBe('midnight')
+    const junk = reconcileRegistry({
+      ...stored,
+      activeSlotId: 'bg-01',
+      live: { activeId: 'lava-lamp', settings: { silk: { look: 'Not A Look!', motion: 'warp' } } }
+    })
+    expect(junk.live.activeId).toBeNull()
+    expect(junk.activeSlotId).toBe('bg-01')
+    expect(junk.live.settings.silk).toMatchObject({ look: 'satin', motion: 'calm' })
+    // An older registry with no live section loads with nothing live.
+    const legacy = { ...stored }
+    delete legacy.live
+    expect(reconcileRegistry(legacy).live).toStrictEqual({ activeId: null, settings: {} })
+  })
+
+  it('takes a committed live background as the registry truth', () => {
+    const registry = applySlot(createDefaultRegistry(), 'bg-03')
+    const committed = liveSceneBackground('liquid-chrome', {
+      look: 'gold',
+      motion: 'calm',
+      dimPercent: 10,
+      visibilityPercent: 25
+    })
+    const next = registryForCommittedLiveBackground(registry, committed)
+    expect(next.activeSlotId).toBeNull()
+    expect(next.live.activeId).toBe('liquid-chrome')
+    expect(next.live.settings['liquid-chrome']).toStrictEqual({
+      look: 'gold',
+      motion: 'calm',
+      dimPercent: 10,
+      visibilityPercent: 25
+    })
+    expect(registryForCommittedLiveBackground(next, committed)).toBe(next)
+  })
+
+  it("keeps the status view while only the live background's timings move", () => {
+    const shader = nextLiveBackgroundStatusView(null, {
+      id: 'silk',
+      look: 'satin',
+      rendering: 'shader',
+      p95Ms: 0.4
+    })
+    expect(shader).toStrictEqual({ id: 'silk', rendering: 'shader', reason: undefined })
+    const sameShader = nextLiveBackgroundStatusView(shader, {
+      id: 'silk',
+      look: 'satin',
+      rendering: 'shader',
+      p95Ms: 0.9
+    })
+    expect(sameShader).toBe(shader)
+
+    const still = nextLiveBackgroundStatusView(sameShader, {
+      id: 'silk',
+      look: 'satin',
+      rendering: 'still',
+      reason: 'gpu-budget',
+      p95Ms: 6.1
+    })
+    expect(still).toStrictEqual({ id: 'silk', rendering: 'still', reason: 'gpu-budget' })
+    expect(nextLiveBackgroundStatusView(still, undefined)).toBeNull()
+    expect(nextLiveBackgroundStatusView(null, null)).toBeNull()
   })
 })

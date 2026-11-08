@@ -23,6 +23,15 @@ export const ABOVE_NARROW = '@max-[639px]/stream-manager:hidden'
  * 800 px, where the status bar keeps icons and tooltips only. */
 export const COMPACT_LABEL = '@max-[799px]/stream-manager:sr-only'
 
+/** An icon that leaves below 800 px where its word already names the
+ * control (the Clip button): the word carries it, so nothing is clipped. */
+export const COMPACT_ICON = '@max-[799px]/stream-manager:hidden'
+
+/** A status bar word shown at Wide only (plan 210's Hide screen, the ⌘F ⌘L
+ * ⌘J hints): below 1,040 px the icon or the key and the tooltip carry it,
+ * so nothing is clipped. */
+export const WIDE_LABEL = '@max-[1039px]/stream-manager:sr-only'
+
 /** The body grid: one column below Wide, chat plus a right pane at Wide. */
 export const PANES_GRID =
   'grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)] @min-[1040px]/stream-manager:grid-cols-[minmax(0,1fr)_clamp(340px,34%,440px)]'

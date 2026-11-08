@@ -8,11 +8,18 @@ import { SourceFacts, SourceItem } from '@/components/sources/source-item'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Switch } from '@/components/ui/switch'
+import { useCameraLowLight } from '@/hooks/use-camera-low-light'
 import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
 import type { Device, DeviceList, SourceSelection } from '@/lib/backend'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
-import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
+import {
+  buildCameraSources,
+  buildCaptureSources,
+  capturePickerDevices,
+  sourceStandIn
+} from '@/lib/capture'
 import { cameraFacts, screenFacts } from '@/lib/source-facts'
+import { screenShareLostStatus } from '@/lib/screen-share-recovery'
 import { selectedDeviceStatus, videoSourceStatus, type SourceStatus } from '@/lib/source-status'
 import { systemAccessRows } from '@/lib/system-access'
 
@@ -50,6 +57,11 @@ export interface VideoSourcesViewProps {
     shortfall: string | null
     switchStatus?: ReactNode
     onChange: (cameraId: string | undefined) => void
+    /**
+     * Issue #1066: the camera's low-light compensation, where Videorc can set
+     * it (a Windows camera with the control); null hides the switch.
+     */
+    lowLight?: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void } | null
   }
   /** Development builds only: the deterministic synthetic screen. */
   synthetic: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void } | null
@@ -150,6 +162,24 @@ export function VideoSourcesView({
           ) : camera.facts ? (
             <SourceFacts>{camera.facts}</SourceFacts>
           ) : null}
+          {camera.lowLight ? (
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex min-w-0 flex-col">
+                <span className="text-xs font-medium text-foreground">Low-light compensation</span>
+                <span className="text-xs text-muted-foreground">
+                  Brightens a dark picture, but the camera may drop to half its frame rate.
+                </span>
+              </span>
+              <Switch
+                aria-label="Low-light compensation"
+                checked={camera.lowLight.checked}
+                data-videorc-camera-low-light-toggle
+                disabled={camera.lowLight.disabled}
+                size="sm"
+                onCheckedChange={camera.lowLight.onChange}
+              />
+            </div>
+          ) : null}
         </SourceItem>
       </GroupedList>
     </PanelSection>
@@ -162,10 +192,12 @@ export function VideoSourcesView({
  * permission. The page's alerts (`source-permission-alerts.tsx`) read it too.
  */
 export function videoPermissionState({
+  systemAccessContext,
   deviceList,
   platform,
   mediaAccess
 }: {
+  systemAccessContext?: import('@/lib/system-access').SystemAccessContext
   deviceList: DeviceList
   platform: Parameters<typeof systemAccessRows>[0]['platform']
   mediaAccess: Parameters<typeof systemAccessRows>[0]['mediaAccess']
@@ -176,6 +208,7 @@ export function videoPermissionState({
 } {
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameraAccess = systemAccessRows({
+    ...systemAccessContext,
     deviceList,
     audioMeter: null,
     platform,
@@ -194,7 +227,10 @@ export function videoPermissionState({
     // one way the system asks, Off must stay reachable, and the alert for a
     // chosen camera carries the fix.
     cameraPermissionRequired:
-      cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted'
+      !cameraAccess?.checking &&
+      (cameraAccess?.state === 'first-use' ||
+        cameraAccess?.state === 'not-granted' ||
+        cameraAccess?.state === 'waiting')
   }
 }
 
@@ -212,22 +248,45 @@ export function VideoSources(): ReactElement {
     allowCaptureNone,
     runtimeInfo,
     mediaAccess,
-    wsStatus
+    systemAccessContext,
+    wsStatus,
+    requestCameraLowLight
   } = useStudioCore()
-  const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
+  const { previewCameraStatus, previewCameraLowFrameRate, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats } = useStudioDiagnostics()
   const sources = captureConfig.sources
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const selectedCaptureId = sources.screenId ?? sources.windowId
+  // Plan 213 E1: the picker shows what is in use; with nothing standing in,
+  // it shows the pick itself as the device that is gone.
+  const cameraStandIn = sourceStandIn(sources, 'camera', deviceList.devices)
+  const captureStandIn = sourceStandIn(sources, 'capture', deviceList.devices)
+  const selectedCameraId = sources.cameraId ?? sources.wantedCameraId
+  const selectedCaptureId =
+    sources.screenId ?? sources.windowId ?? sources.wantedWindowId ?? sources.wantedScreenId
 
   const { screenLocked, cameraPermissionRequired } = videoPermissionState({
+    systemAccessContext,
     deviceList,
     platform: runtimeInfo?.platform,
     mediaAccess
   })
 
   const shortfall = sources.cameraId ? cameraFormatShortfall(diagnosticStats) : null
+  const {
+    state: cameraLowLight,
+    pending: cameraLowLightPending,
+    setCompensation: setCameraLowLight
+  } = useCameraLowLight({
+    cameraId: sources.cameraId,
+    connected: wsStatus === 'connected',
+    request: requestCameraLowLight
+  })
+  // Issue #1066: only the answer for the camera in use counts.
+  const lowLight =
+    sources.cameraId && cameraLowLight?.cameraId === sources.cameraId && cameraLowLight.supported
+      ? cameraLowLight
+      : null
 
   const switchCapture = (captureId: string | undefined): void => {
     const next: SourceSelection = buildCaptureSources(sources, captureDevices, captureId)
@@ -241,42 +300,65 @@ export function VideoSources(): ReactElement {
     <VideoSourcesView
       camera={{
         devices: cameras,
-        value: sources.cameraId,
-        selectedName: sources.cameraName,
+        value: selectedCameraId,
+        selectedName: sources.cameraName ?? sources.wantedCameraName,
         disabled: Boolean(sourceSwitchReason('camera') || layoutSwitchPending),
         status: videoSourceStatus({
           kind: 'camera',
-          selected: Boolean(sources.cameraId),
+          selected: Boolean(selectedCameraId),
           switching: sourceDeviceSwitchPending === 'camera',
           device: cameraPermissionRequired
             ? 'permission-required'
-            : selectedDeviceStatus(deviceList.devices, sources.cameraId),
-          preview: previewCameraStatus
+            : selectedDeviceStatus(deviceList.devices, selectedCameraId),
+          preview: previewCameraStatus,
+          // The camera in use: a stand-in is the one that may send nothing.
+          name: sources.cameraName,
+          standIn: cameraStandIn,
+          lowFrameRate: previewCameraLowFrameRate,
+          lowLightCompensation: lowLight?.compensation
         }),
         // Facts describe the selected source only (the synthetic screen and a
         // camera turned Off leave the picker saying None or Off).
         facts: sources.cameraId ? cameraFacts(previewCameraStatus) : null,
         shortfall: shortfall ? cameraFormatShortfallMessage(shortfall) : null,
         switchStatus: <SourceSwitchStatus kind="camera" />,
-        onChange: switchCamera
+        onChange: switchCamera,
+        lowLight: lowLight
+          ? {
+              checked: lowLight.compensation,
+              disabled: wsStatus !== 'connected' || cameraLowLightPending,
+              onChange: (on) => void setCameraLowLight(on)
+            }
+          : null
       }}
       discoveryPending={wsStatus !== 'connected'}
       screen={{
         devices: captureDevices,
         value: selectedCaptureId,
-        selectedName: sources.screenName ?? sources.windowName,
+        selectedName:
+          sources.screenName ??
+          sources.windowName ??
+          sources.wantedWindowName ??
+          sources.wantedScreenName,
         selectedDevice: deviceList.devices.find((device) => device.id === selectedCaptureId),
         allowNone: allowCaptureNone,
         disabled: screenLocked || Boolean(sourceSwitchReason('capture') || layoutSwitchPending),
-        status: videoSourceStatus({
-          kind: 'screen',
-          selected: Boolean(selectedCaptureId),
-          switching: sourceDeviceSwitchPending === 'capture',
-          // The whole list, not the picker's: a selected legacy capture row the
-          // picker hides is still connected.
-          device: selectedDeviceStatus(deviceList.devices, selectedCaptureId),
-          preview: previewScreenStatus
-        }),
+        status:
+          screenShareLostStatus({
+            selected: Boolean(selectedCaptureId),
+            switching: sourceDeviceSwitchPending === 'capture',
+            preview: previewScreenStatus
+          }) ??
+          videoSourceStatus({
+            kind: 'screen',
+            selected: Boolean(selectedCaptureId),
+            switching: sourceDeviceSwitchPending === 'capture',
+            // The whole list, not the picker's: a selected legacy capture row the
+            // picker hides is still connected.
+            device: selectedDeviceStatus(deviceList.devices, selectedCaptureId),
+            preview: previewScreenStatus,
+            standIn: captureStandIn
+          }),
         facts: selectedCaptureId ? screenFacts(previewScreenStatus) : null,
         switchStatus: <SourceSwitchStatus kind="capture" />,
         onChange: switchCapture
@@ -295,6 +377,7 @@ export function VideoSources(): ReactElement {
                         ...current.sources,
                         screenId: undefined,
                         screenName: undefined,
+                        screenUuid: undefined,
                         windowId: undefined,
                         windowName: undefined,
                         testPattern

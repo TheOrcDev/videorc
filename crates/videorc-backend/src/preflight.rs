@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::account::SessionState;
 use crate::live_chat::{CommentsReadState, CommentsWriteState};
 use crate::streaming::{
     PlatformAccount, PlatformAccountStatus, StreamAuthMode, StreamMetadataDraft, StreamPlatform,
@@ -71,10 +72,13 @@ pub enum GoLivePreflightIssueSeverity {
     Error,
 }
 
+/// `session` is the Videorc account the relay platforms need (plan 215 A2):
+/// signed out, X and Kick chat warn and name it, and the stream still goes.
 pub fn validate_go_live_preflight(
     params: GoLivePreflightParams,
     metadata: &StreamMetadataDraft,
     accounts: &[PlatformAccount],
+    session: &SessionState,
 ) -> GoLivePreflight {
     let mut issues = Vec::new();
     if metadata.title.trim().is_empty()
@@ -115,6 +119,7 @@ pub fn validate_go_live_preflight(
                         .get(&target.id)
                         .unwrap_or(metadata),
                     accounts,
+                    session,
                     &mut issues,
                 )
             })
@@ -151,6 +156,7 @@ fn destination_preflight(
     target: &StreamTargetSettings,
     metadata: &StreamMetadataDraft,
     accounts: &[PlatformAccount],
+    session: &SessionState,
     issues: &mut Vec<GoLivePreflightIssue>,
 ) -> GoLiveDestinationPreflight {
     let (title, description) = effective_metadata(target.platform, metadata);
@@ -262,7 +268,8 @@ fn destination_preflight(
         }
     }
 
-    let (chat_read, chat_write, chat_message) = destination_chat_preflight(target, accounts);
+    let (chat_read, chat_write, chat_message) =
+        destination_chat_preflight(target, accounts, session);
     if ready
         && target.platform != StreamPlatform::Custom
         && (chat_read != CommentsReadState::Ready || chat_write != CommentsWriteState::Ready)
@@ -314,23 +321,29 @@ fn scheduled_smoke_x_fixture(_target: &StreamTargetSettings) -> Option<String> {
 fn destination_chat_preflight(
     target: &StreamTargetSettings,
     accounts: &[PlatformAccount],
+    session: &SessionState,
 ) -> (CommentsReadState, CommentsWriteState, String) {
-    let capability =
-        crate::live_chat::chat_capability(target.platform, account_for_target(target, accounts));
+    let capability = crate::live_chat::chat_capability(
+        target.platform,
+        account_for_target(target, accounts),
+        session,
+    );
     if target.platform == StreamPlatform::X {
         let account = account_for_target(target, accounts);
-        let account_connected =
-            account.is_some_and(|account| account.status == PlatformAccountStatus::Connected);
         let (native_available, capability_message) = match x_live::x_native_live_capability(account)
         {
-            Ok(capability) => (capability.native_available, capability.message),
+            Ok(capability) => (
+                capability.native_available,
+                x_live_chat_message(&capability.state, capability.message),
+            ),
             Err(error) => (false, error.to_string()),
         };
         return x_destination_chat_preflight(
             target.auth_mode,
-            account_connected,
+            account.map(|account| account.status),
             native_available,
             capability_message,
+            session,
         );
     }
 
@@ -368,33 +381,83 @@ fn destination_chat_preflight(
     (capability.read, capability.write, message)
 }
 
+/// What the Go Live check says while X Live isn't ready: Authorize X Live in
+/// the Stream Manager's words (plan 213 J3), any other cause in its own.
+fn x_live_chat_message(state: &x_live::XNativeLiveCapabilityState, message: String) -> String {
+    if *state == x_live::XNativeLiveCapabilityState::NeedsAuthorization {
+        crate::live_chat::X_AUTHORIZE_LIVE_FOR_CHAT.to_string()
+    } else {
+        message
+    }
+}
+
+/// X chat rides the native broadcast: the X sign-in plus Authorize X Live read
+/// it and send to it (`POST /2/broadcasts/:id/chat`, #229), the same as
+/// `live_chat::chat_capability`. Ready X chat is no limit, so it raises no
+/// Chat limits warning; YouTube's chat also attaches once its broadcast
+/// exists and reads as ready here too. A stream key has no broadcast, so it
+/// can neither read nor send: chat needs Sign in, in the Stream Manager's
+/// words (plan 213 J1). Authorize X Live comes up only once Sign in is done
+/// (J3).
 fn x_destination_chat_preflight(
     auth_mode: StreamAuthMode,
-    account_connected: bool,
+    account_status: Option<PlatformAccountStatus>,
     native_available: bool,
     capability_message: String,
+    session: &SessionState,
 ) -> (CommentsReadState, CommentsWriteState, String) {
     if auth_mode != StreamAuthMode::Oauth {
         return (
-            CommentsReadState::Unavailable,
-            CommentsWriteState::ReadOnly,
-            "Manual RTMP has no native X broadcast context, so X live chat is receive-only and unavailable."
-                .to_string(),
+            CommentsReadState::NeedsSignIn,
+            CommentsWriteState::Unavailable,
+            crate::live_chat::X_STREAM_KEY_CHAT_NEEDS_SIGN_IN.to_string(),
         );
     }
-    if !account_connected || !native_available {
+    match account_status {
+        None => {
+            return (
+                CommentsReadState::Unavailable,
+                CommentsWriteState::Unavailable,
+                crate::live_chat::X_SIGN_IN_FOR_CHAT.to_string(),
+            );
+        }
+        Some(status) if status != PlatformAccountStatus::Connected => {
+            return (
+                CommentsReadState::Unavailable,
+                CommentsWriteState::Unavailable,
+                "Reconnect X to read and send chat.".to_string(),
+            );
+        }
+        Some(_) => {}
+    }
+    if !native_available {
         return (
             CommentsReadState::Unavailable,
-            CommentsWriteState::ReadOnly,
+            CommentsWriteState::Unavailable,
             capability_message,
         );
     }
-    (
-        CommentsReadState::WaitingForBroadcastContext,
-        CommentsWriteState::ReadOnly,
-        "X comments attach after the native broadcast is published; X live chat is receive-only."
-            .to_string(),
-    )
+    // Plan 215 A2: X itself is fine, but the relay that reads its chat needs
+    // the Videorc sign-in. Named here, before Go Live, with Sign in as the
+    // fix; the stream still goes live (a warning, never a block). A store
+    // that cannot be read is its own failure, never "signed out".
+    match session {
+        SessionState::SignedIn => (
+            CommentsReadState::Ready,
+            CommentsWriteState::Ready,
+            "X chat is ready to read and send.".to_string(),
+        ),
+        SessionState::SignedOut => (
+            CommentsReadState::NeedsVideorcSignIn,
+            CommentsWriteState::Ready,
+            crate::live_chat::X_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN.to_string(),
+        ),
+        SessionState::Unreadable(error) => (
+            CommentsReadState::Failed,
+            CommentsWriteState::Ready,
+            format!("Couldn't read your Videorc sign-in: {error}"),
+        ),
+    }
 }
 
 fn effective_metadata(
@@ -516,12 +579,13 @@ mod tests {
         for (scopes, read, write, message) in cases {
             let accounts = [account(&scopes)];
             let (actual_read, actual_write, actual_message) =
-                destination_chat_preflight(&target, &accounts);
+                destination_chat_preflight(&target, &accounts, &SessionState::SignedIn);
             assert_eq!(actual_read, read, "{scopes:?}");
             assert_eq!(actual_write, write, "{scopes:?}");
             assert!(actual_message.contains(message), "{actual_message}");
         }
-        let (read, write, message) = destination_chat_preflight(&target, &[]);
+        let (read, write, message) =
+            destination_chat_preflight(&target, &[], &SessionState::SignedIn);
         assert_eq!(read, CommentsReadState::Unavailable);
         assert_eq!(write, CommentsWriteState::Unavailable);
         assert!(message.contains("Connect Kick"));
@@ -562,6 +626,7 @@ mod tests {
                 },
                 &empty,
                 &[],
+                &SessionState::SignedIn,
             );
             assert_eq!(
                 result
@@ -622,6 +687,7 @@ mod tests {
             },
             &metadata,
             &accounts,
+            &SessionState::SignedIn,
         );
 
         assert!(!preflight.valid);
@@ -661,9 +727,9 @@ mod tests {
                 .any(|issue| issue.platform == Some(StreamPlatform::Youtube))
         );
         // This checkout has no release X consumer/user token, so preflight must not pretend
-        // it is merely waiting for publish context.
+        // X chat is ready.
         assert_eq!(x.chat_read, CommentsReadState::Unavailable);
-        assert_eq!(x.chat_write, CommentsWriteState::ReadOnly);
+        assert_eq!(x.chat_write, CommentsWriteState::Unavailable);
         assert!(x.chat_message.contains("OAuth 1.0a"));
         assert_eq!(youtube.chat_read, CommentsReadState::Ready);
         assert_eq!(youtube.chat_write, CommentsWriteState::Ready);
@@ -671,37 +737,169 @@ mod tests {
     }
 
     #[test]
-    fn x_comments_wait_for_publish_only_after_native_oauth_setup_is_ready() {
-        let waiting = x_destination_chat_preflight(
+    fn x_chat_reads_and_sends_once_x_live_is_ready_and_raises_no_chat_limit() {
+        // X chat send landed in #229; the old "receive-only" preflight raised a
+        // Chat limits warning on every healthy X Go Live.
+        let connected = Some(PlatformAccountStatus::Connected);
+        let ready = x_destination_chat_preflight(
             StreamAuthMode::Oauth,
+            connected,
             true,
-            true,
-            "X native live ready.".to_string(),
+            "X Livestream API credentials are configured.".to_string(),
+            &SessionState::SignedIn,
         );
-        assert_eq!(waiting.0, CommentsReadState::WaitingForBroadcastContext);
-        assert_eq!(waiting.1, CommentsWriteState::ReadOnly);
-        assert!(
-            waiting
-                .2
-                .contains("after the native broadcast is published")
-        );
+        assert_eq!(ready.0, CommentsReadState::Ready);
+        assert_eq!(ready.1, CommentsWriteState::Ready);
+        assert_eq!(ready.2, "X chat is ready to read and send.");
 
-        let missing_account = x_destination_chat_preflight(
+        // Plan 213 J3: the Go Live check names Authorize X Live in the Stream
+        // Manager's words; any other cause keeps its own.
+        let authorize = x_live_chat_message(
+            &x_live::XNativeLiveCapabilityState::NeedsAuthorization,
+            "Authorize X Live to let Videorc create stream sources and broadcasts on your X account."
+                .to_string(),
+        );
+        assert_eq!(authorize, crate::live_chat::X_AUTHORIZE_LIVE_FOR_CHAT);
+        assert_eq!(
+            x_live_chat_message(
+                &x_live::XNativeLiveCapabilityState::AccountMismatch,
+                "Connected X account does not match the account that authorized X Live."
+                    .to_string(),
+            ),
+            "Connected X account does not match the account that authorized X Live."
+        );
+        let not_authorized = x_destination_chat_preflight(
             StreamAuthMode::Oauth,
+            connected,
             false,
-            true,
-            "Connect X before going live.".to_string(),
+            authorize,
+            &SessionState::SignedIn,
         );
-        assert_eq!(missing_account.0, CommentsReadState::Unavailable);
+        assert_eq!(not_authorized.0, CommentsReadState::Unavailable);
+        assert_eq!(not_authorized.1, CommentsWriteState::Unavailable);
+        assert_eq!(not_authorized.2, "Authorize X Live to read and send chat.");
 
-        let manual = x_destination_chat_preflight(
-            StreamAuthMode::ManualRtmp,
+        let disconnected = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            Some(PlatformAccountStatus::NeedsReconnect),
             true,
+            "X Livestream API credentials are configured.".to_string(),
+            &SessionState::SignedIn,
+        );
+        assert_eq!(disconnected.0, CommentsReadState::Unavailable);
+        assert_eq!(disconnected.1, CommentsWriteState::Unavailable);
+        assert_eq!(disconnected.2, "Reconnect X to read and send chat.");
+
+        // Plan 213 J3: Authorize X Live comes up only once Sign in is done.
+        let signed_out = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            None,
+            false,
+            crate::live_chat::X_AUTHORIZE_LIVE_FOR_CHAT.to_string(),
+            &SessionState::SignedIn,
+        );
+        assert_eq!(signed_out.0, CommentsReadState::Unavailable);
+        assert_eq!(signed_out.2, "Sign in to X to read and send chat.");
+        assert!(!signed_out.2.contains("Authorize"));
+
+        // Plan 213 J1: a stream key says what brings chat, in the Stream
+        // Manager's words.
+        let stream_key = x_destination_chat_preflight(
+            StreamAuthMode::ManualRtmp,
+            connected,
             true,
             "ignored".to_string(),
+            &SessionState::SignedIn,
         );
-        assert_eq!(manual.0, CommentsReadState::Unavailable);
-        assert!(manual.2.contains("Manual RTMP"));
+        assert_eq!(stream_key.0, CommentsReadState::NeedsSignIn);
+        assert_eq!(stream_key.1, CommentsWriteState::Unavailable);
+        assert_eq!(
+            stream_key.2,
+            "X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to."
+        );
+        assert!(!stream_key.2.contains("Authorize"));
+
+        for (_, _, message) in [ready, not_authorized, disconnected, signed_out, stream_key] {
+            assert!(!message.contains("receive-only"), "{message}");
+            assert!(!message.contains("Manual RTMP"), "{message}");
+        }
+    }
+
+    /// Plan 215 A2: X and Kick chat ride the Videorc relay. Signed out of
+    /// Videorc, the Go Live check names that sign-in in its own words and
+    /// leaves sending (the platform's own credentials) ready; a store that
+    /// cannot be read is a failure with its error, never "signed out".
+    #[test]
+    fn relay_chat_preflight_names_the_missing_videorc_sign_in() {
+        let connected = Some(PlatformAccountStatus::Connected);
+        let signed_out = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            connected,
+            true,
+            "X Livestream API credentials are configured.".to_string(),
+            &SessionState::SignedOut,
+        );
+        assert_eq!(signed_out.0, CommentsReadState::NeedsVideorcSignIn);
+        assert_eq!(signed_out.1, CommentsWriteState::Ready);
+        assert_eq!(signed_out.2, "X chat needs your Videorc sign-in.");
+        assert!(!signed_out.2.contains("Sign in to X"));
+
+        let unreadable = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            connected,
+            true,
+            "ignored".to_string(),
+            &SessionState::Unreadable("permission denied".to_string()),
+        );
+        assert_eq!(unreadable.0, CommentsReadState::Failed);
+        assert!(
+            unreadable.2.contains("permission denied"),
+            "{}",
+            unreadable.2
+        );
+
+        // The X side still comes first: a stream key or a signed-out X
+        // account says so before the Videorc account is looked at.
+        let stream_key = x_destination_chat_preflight(
+            StreamAuthMode::ManualRtmp,
+            connected,
+            true,
+            "ignored".to_string(),
+            &SessionState::SignedOut,
+        );
+        assert_eq!(stream_key.0, CommentsReadState::NeedsSignIn);
+
+        let kick_target = default_stream_targets()
+            .into_iter()
+            .find(|target| target.platform == StreamPlatform::Kick)
+            .expect("default Kick target");
+        let kick = PlatformAccount {
+            id: "kick-acct".to_string(),
+            platform: StreamPlatform::Kick,
+            account_id: "4242".to_string(),
+            account_label: "orcdev".to_string(),
+            account_handle: None,
+            avatar_url: None,
+            scopes: vec!["events:subscribe".to_string(), "chat:write".to_string()],
+            access_token_present: true,
+            refresh_token_present: true,
+            stream_key_present: false,
+            expires_at: None,
+            connected_at: "2026-09-25T00:00:00Z".to_string(),
+            updated_at: "2026-09-25T00:00:00Z".to_string(),
+            status: PlatformAccountStatus::Connected,
+        };
+        let (read, write, message) = destination_chat_preflight(
+            &kick_target,
+            std::slice::from_ref(&kick),
+            &SessionState::SignedOut,
+        );
+        assert_eq!(read, CommentsReadState::NeedsVideorcSignIn);
+        assert_eq!(write, CommentsWriteState::Ready);
+        assert_eq!(message, "Kick chat needs your Videorc sign-in.");
+        let (read, _, _) =
+            destination_chat_preflight(&kick_target, &[kick], &SessionState::SignedIn);
+        assert_eq!(read, CommentsReadState::Ready);
     }
 
     #[test]
@@ -779,6 +977,7 @@ mod tests {
             },
             &metadata,
             &[],
+            &SessionState::SignedIn,
         );
 
         assert!(!preflight.valid);
@@ -823,12 +1022,62 @@ mod tests {
             },
             &metadata,
             &[],
+            &SessionState::SignedIn,
         );
 
         assert!(preflight.valid, "{preflight:?}");
         assert_eq!(preflight.destinations.len(), 1);
         assert!(preflight.destinations[0].ready);
         assert!(preflight.issues.is_empty());
+    }
+
+    #[test]
+    fn facebook_stream_key_is_ready_and_warns_that_comments_need_sign_in() {
+        let mut targets = default_stream_targets();
+        let facebook = targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Facebook)
+            .unwrap();
+        facebook.enabled = true;
+        facebook.stream_key_present = true;
+        facebook.stream_key_secret_ref = Some("stream-target:facebook:test-key".to_string());
+        let streaming = StreamingSettings {
+            enabled: true,
+            mode: StreamMode::Single,
+            selected_target_id: Some("facebook".to_string()),
+            default_output_preset: crate::protocol::VideoPreset::Stream1080p60,
+            default_bitrate_kbps: 6000,
+            enabled_target_ids: vec!["facebook".to_string()],
+            targets,
+        };
+        let metadata = StreamMetadataDraft {
+            title: "Launch stream".to_string(),
+            ..default_stream_metadata_draft("2026-10-27T00:00:00Z".to_string())
+        };
+
+        let preflight = validate_go_live_preflight(
+            GoLivePreflightParams {
+                streaming,
+                scheduled_event_ids: HashMap::new(),
+                scheduled_metadata: HashMap::new(),
+                scheduled_confirmations: HashMap::new(),
+            },
+            &metadata,
+            &[],
+            &SessionState::SignedIn,
+        );
+
+        assert!(preflight.valid, "{preflight:?}");
+        assert!(preflight.destinations[0].ready);
+        assert_eq!(preflight.issues.len(), 1, "{:?}", preflight.issues);
+        assert_eq!(
+            preflight.issues[0].severity,
+            GoLivePreflightIssueSeverity::Warning
+        );
+        assert_eq!(
+            preflight.issues[0].message,
+            crate::live_chat::FACEBOOK_COMMENTS_UNAVAILABLE
+        );
     }
 
     fn account(platform: StreamPlatform, account_id: &str, label: &str) -> PlatformAccount {
@@ -884,6 +1133,7 @@ mod tests {
             },
             &metadata,
             &[twitch_account],
+            &SessionState::SignedIn,
         )
     }
 
@@ -893,6 +1143,7 @@ mod tests {
             StreamPlatform::Twitch => "twitch",
             StreamPlatform::Kick => "kick",
             StreamPlatform::X => "x",
+            StreamPlatform::Facebook => "facebook",
             StreamPlatform::Tiktok => "tiktok",
             StreamPlatform::Instagram => "instagram",
             StreamPlatform::Custom => "custom",

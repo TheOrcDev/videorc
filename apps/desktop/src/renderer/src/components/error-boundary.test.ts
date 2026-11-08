@@ -3,9 +3,9 @@ import { act, createElement, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { AppErrorBoundary } from './error-boundary'
+import { AppErrorBoundary } from './app-error-boundary'
+import { errorDetails } from './error-boundary'
 import { PageErrorBoundary } from './page-error-boundary'
-import { errorDetails } from './root-error-panel'
 
 // Plan 174 S3.21 (A-7): a page crash stays inside the page and can be
 // reloaded in place; the root panel keeps a drag band and offers the support

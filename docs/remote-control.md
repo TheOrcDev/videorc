@@ -2,8 +2,8 @@
 
 Videorc exposes a local, token-gated remote-control surface (issue #143) so a
 Stream Deck — or any local integration (Companion, Loupedeck, scripts) — can
-start/stop sessions, switch scenes, mute the mic, show takeovers, and bring
-windows forward. **Off by default**; enable it in Settings → Remote → Remote control.
+start/stop sessions, switch scenes, mute the mic, show takeovers and banners,
+and bring windows forward. **Off by default**; enable it in Settings → Remote → Remote control.
 
 Two integration tiers:
 
@@ -12,9 +12,18 @@ Two integration tiers:
    macro tool or a Stream Deck Hotkey action. Works while Videorc is in the
    background. While live, a stop needs a second press within 2 s ("Press
    again to end the livestream", plan 174 D2).
-2. **The remote protocol below** — richer: scenes, takeovers, windows, and
-   live state for key rendering. The official plugin lives in
+2. **The remote protocol below** — richer: scenes, takeovers, banners, windows,
+   and live state for key rendering. The official plugin lives in
    `apps/streamdeck-plugin`.
+
+**AI agents** (Claude, Cursor, Codex and other MCP apps on this computer)
+use a separate door, Videorc MCP: Settings → Remote → Agents, its own
+loopback listener, role, per-agent tokens and tool catalog
+([`docs/agents-mcp.md`](agents-mcp.md), plan 209). It reuses the same Studio
+action executor as the intents below, so a tool and a key run the same
+handler, but it changes nothing here: the remote and Phone remote
+allowlists, `RemoteIntent`, `LAN_EVENTS` and the Stream Deck's Go Live
+behaviour are exactly as this page describes (D19).
 
 ## Pairing (same machine)
 
@@ -45,6 +54,25 @@ Phone remote and every Stream Deck with it.
   backend, then RELAYED to the renderer, which executes them through the
   same code paths as the on-screen buttons — validation and confirmation
   logic included. There is no way to start a session the UI would refuse.
+  The three banner intents are one family of their own, so a banner key
+  never swallows the takeover key beside it.
+- A banner intent names its banner by id. One the list no longer has acks
+  `ok: false` with "That banner isn't available anymore."; a refusal acks
+  the desktop's own sentence ("Four banners are showing. Hide one first.");
+  any other failure "Couldn't show the banner.", "Couldn't hide the banner."
+  or "Couldn't hide the banners.".
+- The two sound intents (plan 189) are a family of their own too, debounced
+  at 80 ms instead of 150 ms so a fast drummer still gets every press, and
+  per sound: two different sound keys pressed together both play, while one
+  key bouncing is refused (`soundStop` with a `soundId` shares that sound's
+  window; stop-all has its own). One
+  whose sound is gone acks "That sound isn't available anymore."; a refusal
+  acks the desktop's sentence; any other failure "Couldn't play the sound.",
+  "Couldn't stop the sound." or "Couldn't stop the sounds.". The renderer
+  runs sound intents in order among themselves but never behind another kind
+  of intent (a slow scene switch can't hold an airhorn back); a sound intent
+  that still waited over a second acks "That sound was pressed too long ago,
+  so it didn't play." instead of playing late.
 
 ## Requests
 
@@ -52,7 +80,15 @@ Phone remote and every Stream Deck with it.
 where `describe` lists `layoutPresets`, `layoutLabels` (each preset id's
 name as the desktop shows it, `{ "screen-camera": "Screen + camera" }`,
 since plan 174 S2.3a; absent from older apps), `takeovers` (`{id, name}`),
-and `windows`.
+`banners` (`{id, name, shown}` in Assets order, since plan 186; absent from
+older apps), `sounds` (`{id, name, playing}` in board order, since plan 189;
+absent from older apps), and `windows`.
+
+`describe` changes too: a banner shown or hidden flips its `shown` there, and
+a sound starting or ending flips its `playing`, not in `remote.state`. Every change the desktop publishes arrives as a
+`remote.state` event, so a client that renders banners re-reads
+`remote.describe` after each one (one read at a time). The official Stream
+Deck plugin and the phone page both do.
 
 `{"id":"…","method":"remote.intent","params":{…}}` → `{ intentId, accepted,
 message? }`. Accepted intents produce a `remote.ack` event
@@ -60,19 +96,24 @@ message? }`. Accepted intents produce a `remote.ack` event
 
 Intent params (`kind` + fields):
 
-| kind                                                     | fields                                   | effect                                                                            |
-| -------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------- |
-| `recordStart` / `recordStop` / `recordToggle`            | —                                        | start or stop recording (see [Starting and stopping](#starting-and-stopping))     |
-| `streamStart` / `streamStop`                             | —                                        | go live or end the livestream; `streamStart` needs a ready destination            |
-| `micMute` / `micUnmute` / `micToggle`                    | —                                        | microphone mute                                                                   |
-| `systemAudioOn` / `systemAudioOff` / `systemAudioToggle` | —                                        | system audio on/off (plan 069); refused while the device cannot run               |
-| `sceneApply`                                             | `layoutPreset`                           | switch layout preset                                                              |
-| `takeoverShow`                                           | `assetId`                                | show a takeover image (BRB etc.)                                                  |
-| `takeoverHide`                                           | —                                        | hide the takeover                                                                 |
-| `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward (`comments` is the Stream Manager)                           |
-| `commentHighlight`                                       | `messageId`                              | put that live-chat comment on stream (explicit show, idempotent — never a toggle) |
-| `commentHighlightClear`                                  | —                                        | take the on-stream comment down                                                   |
-| `clipMark`                                               | —                                        | mark this moment for a clip (plan 068); needs an active session and recording on  |
+| kind                                                     | fields                                   | effect                                                                                                                                                                                  |
+| -------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `recordStart` / `recordStop` / `recordToggle`            | —                                        | start or stop recording (see [Starting and stopping](#starting-and-stopping))                                                                                                           |
+| `streamStart` / `streamStop`                             | —                                        | go live or end the livestream; `streamStart` needs a ready destination                                                                                                                  |
+| `micMute` / `micUnmute` / `micToggle`                    | —                                        | microphone mute                                                                                                                                                                         |
+| `systemAudioOn` / `systemAudioOff` / `systemAudioToggle` | —                                        | system audio on/off (plan 069); refused while the device cannot run                                                                                                                     |
+| `sceneApply`                                             | `sceneId?`, `screenId?`, `layoutPreset?` | switch saved scene by id, or a built-in layout (at least one target required; `sceneId` takes precedence)                                                                               |
+| `takeoverShow`                                           | `assetId`                                | show a takeover image (BRB etc.)                                                                                                                                                        |
+| `takeoverHide`                                           | —                                        | hide the takeover                                                                                                                                                                       |
+| `bannerShow`                                             | `bannerId`                               | show that banner (plan 186; explicit, idempotent)                                                                                                                                       |
+| `bannerHide`                                             | `bannerId?`                              | hide that banner; without `bannerId`, hide every banner                                                                                                                                 |
+| `bannerToggle`                                           | `bannerId`                               | show or hide that banner, from its `shown` in `describe` (for one deck key)                                                                                                             |
+| `soundPlay`                                              | `soundId`                                | press that sound (plan 189): the sound's own mode decides, like its key in Studio                                                                                                       |
+| `soundStop`                                              | `soundId?`                               | stop that sound; without `soundId`, stop every sound                                                                                                                                    |
+| `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward (`comments` is the Stream Manager)                                                                                                                                 |
+| `commentHighlight`                                       | `messageId`                              | put that live-chat comment on stream (explicit show, idempotent — never a toggle)                                                                                                       |
+| `commentHighlightClear`                                  | —                                        | take the on-stream comment down                                                                                                                                                         |
+| `clipMark`                                               | `seconds?`: `30`\|`60`                   | save a clip: the last 30 seconds (no `seconds`) or the last minute (`60`) whenever the ring holds frames, and a mark while recording; any other length is refused (plans 068, 181, 199) |
 
 ### Starting and stopping
 
@@ -98,7 +139,7 @@ would refuse. The failed ack carries the reason, so a deck key can say why.
 
 - `remote.state` — the full projection on every change:
   `{ sessionState, sessionActive, recordEnabled, streamEnabled, micMuted,
-layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable }`.
+layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable, savedScenes, activeSavedSceneId }`.
   Render keys from THIS, not from optimistic intent. `systemAudioOn` is what
   the session mixes (the request while idle, or until the session reports
   it) and is always `false` while `systemAudioAvailable` is `false`. An app
@@ -129,8 +170,8 @@ backend-confirmed state, debounce, and regenerate-cuts-clients.
 # Protocol 2 — Phone remote (LAN)
 
 A phone on the same Wi-Fi as a **live comment monitor + Stream Deck**: read
-every chat message, tap one to put it on stream, switch scenes, show takeovers,
-mute the mic, start/stop. **Off by default**; Settings → Remote → Phone remote. Turning
+every chat message, tap one to put it on stream, switch scenes, show takeovers
+and banners, mute the mic, start/stop. **Off by default**; Settings → Remote → Phone remote. Turning
 it on also turns Remote control on; turning Remote control off closes it (the
 confirmation names how many paired phones it disconnects).
 
@@ -275,6 +316,43 @@ unchanged, and the backend stores `describe` as an opaque value as before. A
 paired phone learns nothing it could not already derive from the ids, and
 can do nothing new.
 
+### Banners on the phone (plan 186 leak argument)
+
+The phone lists the streamer's banners by name under Controls → Banners, and
+each key shows or hides one. What crosses the LAN socket is one more field
+in the existing `remote.describe` answer, `banners: [{id, name, shown}]`,
+and what a paired phone can do is send `bannerShow`, `bannerHide` or
+`bannerToggle` through the existing `remote.intent`:
+
+- Ids are opaque UUIDs.
+- Names are labels the streamer typed for graphics they show viewers.
+- No file paths and no image bytes cross the LAN. The phone shows names
+  only: the renderer whitelists the three fields when it builds `describe`.
+- No route is added to the LAN router and nothing is added to `LAN_EVENTS`.
+  The intents ride the existing `remote.intent` and `remote.describe`.
+
+The worst a paired device can do is what the Studio's Show and Hide do:
+put one of the streamer's own banners on the picture, or take it off. A
+show past the four-at-once cap is refused with the desktop's sentence.
+
+### Sounds on the phone (plan 189 leak argument)
+
+The phone lists the soundboard's sounds by name under Controls → Sounds;
+each key presses one, and "Stop all sounds" stops them. What crosses the LAN
+socket is one more field in `remote.describe`, `sounds: [{id, name,
+playing}]`, and what a paired phone can do is send `soundPlay` or
+`soundStop` through the existing `remote.intent`:
+
+- Ids are opaque UUIDs.
+- Names are labels the streamer typed for sounds they play to viewers.
+- No file paths and no audio bytes cross the LAN.
+- No route is added to the LAN router and nothing is added to `LAN_EVENTS`.
+
+The worst a paired device can do is what a pad in Studio does: play one of
+the streamer's own sounds into the stream, or stop it. A While held sound
+pressed from a remote plays to its end: `describe` carries no mode, so a
+remote has no release to send.
+
 The phone's other words now match the desktop too, with no protocol change:
 the tabs read Chat and Controls, the header reads ON AIR while a livestream
 runs, the on-stream badge reads "On stream", the clear key reads "Take off
@@ -339,3 +417,30 @@ Unit coverage: `cargo test -p videorc-backend remote_` (handshake, replay,
 limiter, projection leak test, router isolation over a real socket) and
 `scripts/lib/remote-lan-client.test.mjs` in `pnpm test:scripts` (pure-JS HMAC
 vs `node:crypto`, and the client against an independent node-crypto desktop).
+
+### Saved scene names on the phone (plan 210)
+
+`remote.state` includes `savedScenes: { id, name }[]` in library order and
+`activeSavedSceneId: string | null`. Only opaque ids and typed display names
+cross the socket; scene sources, app identities, paths, window titles and
+scene snapshots stay on the desktop. Takeover names are the precedent: typed
+names already reach a paired phone. Names may contain personal text the owner
+chose, so paired phones can now read those scene labels. A paired device can
+apply a saved scene through `sceneApply { sceneId }` (non-empty, at most 128
+characters), with the same orientation and app-availability refusals as Studio.
+No new route, method or event is added; `LAN_EVENTS` and the router are unchanged.
+
+## Hide screen (plan 210 S8a)
+
+| Intent             | Fields | Effect             |
+| ------------------ | ------ | ------------------ |
+| `screenHide`       | none   | Hide screen        |
+| `screenShow`       | none   | Show screen        |
+| `screenHideToggle` | none   | Toggle Hide screen |
+
+These share the `privacy` debounce bucket and a renderer lane independent
+of scene switches. `remote.state.screenHidden` is a boolean, confirmed by
+the Studio's privacy state. Only that boolean crosses the LAN: no reason,
+timestamp or screen contents. The phone is the streamer's own paired
+device. Hiding is the safe direction; showing is a deliberate key press.
+No route, credential or LAN event is added.

@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { promisify } from 'node:util'
 
+import { symlinkSkipReason } from './test-symlink-support.mjs'
+
 import {
   CAPTURE_DECAY_APP_BUNDLE_PROFILE,
   captureDecayAppBundleIdentityFromExecutable,
@@ -22,7 +24,8 @@ import {
 
 const run = promisify(execFile)
 
-describe('capture-decay app bundle identity', () => {
+// Every bundle here carries a symlink (the macOS app bundle shape it proves).
+describe('capture-decay app bundle identity', { skip: symlinkSkipReason() }, () => {
   it('deterministically binds paths, significant modes, file contents, and symlink targets', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'videorc-app-bundle-test-'))
     try {

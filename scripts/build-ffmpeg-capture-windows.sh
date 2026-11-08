@@ -5,7 +5,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_EXE="$(cygpath -u "${VIDEORC_NODE_EXECUTABLE:?Pass the Windows Node executable from the build wrapper}")"
 PIN="${REPO_ROOT}/vendor/ffmpeg/windows-capture-pin.json"
 VERSION="$("${NODE_EXE}" -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).version' "${PIN}")"
-SOURCE_URL="$("${NODE_EXE}" -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).sourceUrl' "${PIN}")"
 SOURCE_SHA="$("${NODE_EXE}" -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).sourceSha256' "${PIN}")"
 ARCHIVE="${REPO_ROOT}/vendor/ffmpeg/_src/ffmpeg-${VERSION}.tar.xz"
 WORK="${REPO_ROOT}/vendor/ffmpeg/_build/windows-capture"
@@ -17,7 +16,12 @@ if [[ "${FFMPEG_CAPTURE_REBUILD:-0}" != 1 ]] && "${NODE_EXE}" "${REPO_ROOT}/scri
   exit 0
 fi
 mkdir -p "$(dirname "${ARCHIVE}")"
-[[ -f "${ARCHIVE}" ]] || curl -fL "${SOURCE_URL}" -o "${ARCHIVE}"
+# Retries plus the www.ffmpeg.org fallback. SHA-256 is still the authority;
+# a cached or mirrored tarball that does not match SOURCE_SHA is deleted.
+"${NODE_EXE}" "${REPO_ROOT}/scripts/download-file.mjs" \
+  --pin "${PIN}" \
+  --out "${ARCHIVE}" \
+  --sha256 "${SOURCE_SHA}"
 printf '%s  %s\n' "${SOURCE_SHA}" "${ARCHIVE}" | sha256sum -c -
 rm -rf "${WORK}"
 mkdir -p "${WORK}/source" "${WORK}/build"

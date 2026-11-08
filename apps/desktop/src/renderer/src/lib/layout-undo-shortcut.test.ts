@@ -61,7 +61,7 @@ describe('what blocks the layout undo', () => {
     document.body.innerHTML = `<div id="page"></div>`
     const page = document.getElementById('page')
     expect(layoutUndoShortcutBlocked(keydown(page), document)).toBe(false)
-    document.body.insertAdjacentHTML('beforeend', '<div role="dialog" data-state="open"></div>')
+    document.body.insertAdjacentHTML('beforeend', '<div role="dialog" data-open></div>')
     expect(layoutUndoShortcutBlocked(keydown(page), document)).toBe(true)
     document.body.innerHTML = `<div id="page"></div><div data-videorc-stage-phase="pending"></div>`
     expect(layoutUndoShortcutBlocked(keydown(document.getElementById('page')), document)).toBe(true)

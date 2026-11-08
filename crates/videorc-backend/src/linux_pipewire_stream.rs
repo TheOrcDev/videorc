@@ -18,10 +18,15 @@ use pw::spa::pod::Pod;
 use crate::linux_portal_capture::{PortalPixelLayout, copy_to_bgra};
 
 /// One negotiated frame, already converted to packed BGRA.
+///
+/// `bgra` is the stream's own conversion buffer, lent for the call. Plan 191:
+/// the consumer publishes it as is and leaves a frame-store buffer in its
+/// place, instead of copying the frame a second time; the next conversion
+/// resizes and overwrites whatever buffer it finds there.
 pub struct PipewireFrame<'a> {
     pub width: u32,
     pub height: u32,
-    pub bgra: &'a [u8],
+    pub bgra: &'a mut Vec<u8>,
 }
 
 #[derive(Default)]
@@ -44,12 +49,14 @@ fn layout_for(format: VideoFormat) -> Option<PortalPixelLayout> {
 
 /// Runs the stream until `stop_rx` fires (or its sender drops), calling
 /// `on_frame` for every complete frame. `on_revoked` is polled from the loop
-/// so a portal `Closed` signal ends the read within one tick.
-pub fn run_pipewire_capture(
+/// so a portal `Closed` signal ends the read within one tick. Any message is
+/// a stop: the portal stream never swaps its target in place (plan 210 S3 is
+/// macOS only), so the preview's screen commands all end it.
+pub fn run_pipewire_capture<T: 'static>(
     fd: OwnedFd,
     node_id: u32,
     target_fps: u32,
-    stop_rx: std_mpsc::Receiver<()>,
+    stop_rx: std_mpsc::Receiver<T>,
     on_revoked: impl FnMut() -> bool + 'static,
     mut on_frame: impl FnMut(PipewireFrame<'_>) + 'static,
 ) -> Result<(), String> {
@@ -144,7 +151,7 @@ pub fn run_pipewire_capture(
                 on_frame(PipewireFrame {
                     width,
                     height,
-                    bgra: &scratch,
+                    bgra: &mut scratch,
                 });
             }
             user_data.scratch = scratch;
@@ -233,7 +240,7 @@ pub fn run_pipewire_capture(
         mainloop.loop_().add_timer(move |_| {
             let stop = matches!(
                 stop_rx.try_recv(),
-                Ok(()) | Err(std_mpsc::TryRecvError::Disconnected)
+                Ok(_) | Err(std_mpsc::TryRecvError::Disconnected)
             );
             if stop || (on_revoked.borrow_mut())() {
                 quit_loop.quit();

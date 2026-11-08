@@ -1,41 +1,30 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import {
-  OFFLINE_LOCK_REASON,
-  SESSION_LOCK_REASON,
-  sessionLockReason,
-  unlockActionForGate,
-  unlockActionForReason,
-  unlockActionLabel
-} from './lock-view'
+import { lockAlertAction, unlockActionForGate, unlockActionForReason } from './lock-view'
 import { VIDEORC_PREMIUM_URL } from './premium-upgrade'
+import { beginVideorcSignIn, openVideorcWebLink } from './videorc-web-links'
+
+vi.mock('./videorc-web-links', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./videorc-web-links')>()),
+  beginVideorcSignIn: vi.fn(),
+  openVideorcWebLink: vi.fn()
+}))
 
 // Plan 174 S1.5 (D-13, J2-9): locked means disabled with one reason and at
 // most one action.
 
 describe('lock view', () => {
-  it('has one wording for a session lock and one for an offline backend', () => {
-    expect(SESSION_LOCK_REASON).toBe(
-      "Locked while you're recording or live. Changes apply the next time you record or go live."
-    )
-    expect(OFFLINE_LOCK_REASON).toBe(
-      'Videorc is reconnecting. These controls come back in a moment.'
-    )
-    for (const copy of [SESSION_LOCK_REASON, OFFLINE_LOCK_REASON]) expect(copy).not.toMatch(/—/)
-  })
-
-  it('names what a session lock locks when asked, with the same second sentence', () => {
-    expect(sessionLockReason()).toBe(SESSION_LOCK_REASON)
-    expect(sessionLockReason('Destinations and stream details')).toBe(
-      "Destinations and stream details are locked while you're recording or live. Changes apply the next time you record or go live."
-    )
-  })
-
-  it('labels the two actions', () => {
-    expect(unlockActionLabel({ kind: 'sign-in' })).toBe('Sign in')
-    expect(unlockActionLabel({ kind: 'view-premium', url: VIDEORC_PREMIUM_URL })).toBe(
-      'View Premium'
-    )
+  it("hands the LockAlert Videorc's sign-in and the system browser", () => {
+    expect(lockAlertAction(null)).toBeNull()
+    expect(lockAlertAction({ kind: 'sign-in' })).toEqual({
+      kind: 'sign-in',
+      onClick: beginVideorcSignIn
+    })
+    expect(lockAlertAction({ kind: 'view-premium', url: VIDEORC_PREMIUM_URL })).toEqual({
+      kind: 'view-premium',
+      url: VIDEORC_PREMIUM_URL,
+      onClick: openVideorcWebLink
+    })
   })
 
   it('offers View Premium only for a Premium gate', () => {

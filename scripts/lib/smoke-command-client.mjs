@@ -12,10 +12,7 @@ export function assertSmokeCommandConnection(smoke) {
   if (!Number.isInteger(smoke.port) || smoke.port < 1 || smoke.port > 65_535) {
     throw new Error('Smoke command connection has an invalid port.')
   }
-  if (
-    typeof smoke.capability !== 'string' ||
-    !SMOKE_CAPABILITY_PATTERN.test(smoke.capability)
-  ) {
+  if (typeof smoke.capability !== 'string' || !SMOKE_CAPABILITY_PATTERN.test(smoke.capability)) {
     throw new Error('Smoke command connection is missing its per-run capability.')
   }
   return smoke
@@ -117,6 +114,53 @@ export async function requestSmokeCommandWithRetry(
   } while (Date.now() < deadline)
 
   throw lastError ?? new Error(`${command} smoke command failed`)
+}
+
+/**
+ * Wait until the main window's renderer exposes a DEV smoke hook
+ * (`window.<hook>` is a function). The smoke command server answers as soon
+ * as main is up; on a slow machine the renderer still has the React tree to
+ * mount (retest 153: an empty page 10 s after `preview-motion-ready`), so a
+ * one-shot `window.<hook>?.()` read `null` and the smoke failed with "the
+ * renderer has no clip buffer smoke hook". Returns once the hook exists;
+ * throws with the last answer at the deadline.
+ */
+export async function waitForRendererHook(
+  smoke,
+  hook,
+  { timeoutMs = 60_000, pollMs = 250, requestTimeoutMs = 5000 } = {}
+) {
+  if (!/^__videorc[A-Za-z0-9]+$/.test(hook)) {
+    throw new Error(`Not a renderer smoke hook name: ${hook}`)
+  }
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  do {
+    try {
+      const response = await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        { hook, code: 'return typeof window[params.hook] === "function"' },
+        { timeoutMs: Math.max(1, Math.min(requestTimeoutMs, deadline - Date.now())) }
+      )
+      if (response?.result === true) return
+      last = `window.${hook} is not defined yet`
+    } catch (error) {
+      // A read-only poll may also outlive a renderer busy loading its bundle
+      // (eval-js waits for the page): that is the wait, not a failure.
+      const timedOut = isSmokeCommandTimeout(error)
+      if (!isRetryableSmokeCommandError(error) && !timedOut) throw error
+      // The last poll before the deadline gets a clamped request timeout;
+      // keep the renderer's own answer over that timeout.
+      if (!timedOut || last === null) last = String(error?.message ?? error)
+    }
+    await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())))
+  } while (Date.now() < deadline)
+  throw new Error(`Timed out after ${timeoutMs}ms waiting for window.${hook}: ${last}`)
+}
+
+function isSmokeCommandTimeout(error) {
+  return errorMessages(error).some((message) => /smoke command timed out after \d+ms/.test(message))
 }
 
 export function isRetryableSmokeCommandError(error) {

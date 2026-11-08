@@ -14,7 +14,12 @@ import {
   createMicVisualSource,
   type MicMeterSettings
 } from '@/lib/mic-frame-sources'
-import { meterHasNoReading, micMeterInput, type MeterInput } from '@/lib/mic-meter-input'
+import {
+  meterHasNoReading,
+  micMeterInput,
+  micSessionLevelUnavailable,
+  type MeterInput
+} from '@/lib/mic-meter-input'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
 import { audioMixerMonitorState } from '@/lib/mic-visual-gate'
 import type { MicMonitorState } from '@/lib/state-labels'
@@ -45,11 +50,12 @@ export function useStudioMicVisualSource(): FrameSource<VisualFrame> {
 /**
  * Plan 092 Phase C: the backend's post-gain levels during a session, one
  * stable source per bus tap: the processed microphone, the gained system
- * audio, and the mix as written.
+ * audio, the soundboard's sounds as mixed (plan 189), and the mix as written.
  */
 export const backendLevelSources = Object.freeze({
   microphone: createBackendLevelSource(backendAudioLevels, 'microphone'),
   systemAudio: createBackendLevelSource(backendAudioLevels, 'systemAudio'),
+  sounds: createBackendLevelSource(backendAudioLevels, 'sounds'),
   master: createBackendLevelSource(backendAudioLevels, 'master')
 })
 
@@ -66,6 +72,15 @@ function finiteOrNull(value: number | null | undefined): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
+/** Issue 1064: true while the bus's silence watchdog reports the captured microphone silent. */
+export function useBackendMicrophoneSilent(): boolean {
+  return useSyncExternalStore(
+    backendAudioLevels.subscribeMicrophoneSilent,
+    backendAudioLevels.isMicrophoneSilent,
+    backendAudioLevels.isMicrophoneSilent
+  )
+}
+
 export type MicrophoneMeter = Readonly<{
   meter: MeterInput
   monitorState: MicMonitorState
@@ -74,24 +89,34 @@ export type MicrophoneMeter = Readonly<{
    * the meter and the renderer analyser, the last live input, failed.
    */
   unavailableReason: MicStreamFailureReason | undefined
+  /**
+   * Issue 1064: a session's bus runs but sends no level, so the meter shows
+   * none (never the analyser); the row says so in words.
+   */
+  sessionLevelUnavailable: boolean
 }>
 
 /**
  * The selected microphone's meter input and state (plans 092 and 093), one
  * build for the Studio Microphone section and the Sources Audio mixer. The
  * level runs whenever either is open: the backend's levels (the warm
- * microphone between sessions, the bus during one), then the renderer
- * analyser, then the session's 1 Hz level.
+ * microphone between sessions, the bus during one), then, outside a session,
+ * the renderer analyser, then the session's 1 Hz level. Issue 1064: while a
+ * recording, livestream or Clips ring runs its bus, the analyser never paints
+ * (it hears Chromium's microphone, not the recording's) and the backend's
+ * silence watchdog owns the status word.
  */
 export function useMicrophoneMeter(): MicrophoneMeter {
-  const { captureConfig, selectedMicrophone, isSessionActive } = useStudioCore()
+  const { captureConfig, selectedMicrophone, isSessionActive, audioBusActive } = useStudioCore()
   const { diagnosticStats } = useStudioDiagnostics()
   const muted = captureConfig.audio.microphoneMuted
   const micVisual = useStudioMicVisualLifecycle()
   const backendLevelsLive = useBackendAudioLevelsLive()
+  const backendMicrophoneSilent = useBackendMicrophoneSilent()
   // The visible meter owns fallback demand even before the analyser is active.
-  // Backend levels own painting while live, so this retain ends when they return.
-  useStudioMicVisualDemand(!backendLevelsLive)
+  // Backend levels own painting while live, so this retain ends when they
+  // return; a running bus never paints from the analyser, so it asks for none.
+  useStudioMicVisualDemand(!backendLevelsLive && !audioBusActive)
   const analyserSource = useStudioMicMeterSource({
     gainDb: captureConfig.audio.microphoneGainDb,
     muted
@@ -105,19 +130,31 @@ export function useMicrophoneMeter(): MicrophoneMeter {
     backendSource: backendLevelsLive ? backendLevelSources.microphone : null,
     analyserDriven: micVisual.active && !muted,
     source: analyserSource,
-    backendPeakDb: liveLevel === null ? null : finiteOrNull(diagnosticStats?.micLivePeakDb)
+    backendPeakDb: liveLevel === null ? null : finiteOrNull(diagnosticStats?.micLivePeakDb),
+    sessionActive: audioBusActive
   })
-  const signalLive = !muted && (backendLevelsLive || micVisual.active || liveLevel !== null)
+  const signalLive =
+    !muted && (backendLevelsLive || (micVisual.active && !audioBusActive) || liveLevel !== null)
   return {
     meter,
     monitorState: audioMixerMonitorState({
       sessionActive: isSessionActive,
       signalLive,
-      muted: muted && microphoneSelected
+      muted: muted && microphoneSelected,
+      silent: microphoneSelected && backendLevelsLive && backendMicrophoneSilent
     }),
     unavailableReason:
-      microphoneSelected && meterHasNoReading(meter) && micVisual.status === 'unavailable'
+      microphoneSelected &&
+      !audioBusActive &&
+      meterHasNoReading(meter) &&
+      micVisual.status === 'unavailable'
         ? (micVisual.reason ?? 'unknown')
-        : undefined
+        : undefined,
+    sessionLevelUnavailable: micSessionLevelUnavailable({
+      microphoneSelected,
+      muted,
+      sessionActive: audioBusActive,
+      meter
+    })
   }
 }

@@ -6,7 +6,7 @@ Current release policy:
 | ----------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | macOS 13+ Apple Silicon | **Beta**  | Publish only the signed, notarized, stapled DMG after the macOS clean-machine gate.                                                                                                          |
 | Windows 11 x64          | **Alpha** | Default deny. Publish only a signed installer whose exact publisher and timestamp, digest and byte size, malware scan, real-device acceptance, update feed, and uninstall evidence all pass. |
-| Ubuntu 24.04 LTS x64    | **Alpha** | Default deny. The candidate workflow may store a private unsigned AppImage. Do not publish a public download, website button, or updater pointer until promote and named-box proof exist.     |
+| Ubuntu 24.04 LTS x64    | **Alpha** | Default deny. The candidate workflow may store a private unsigned AppImage. Do not publish a public download, website button, or updater pointer until promote and named-box proof exist.    |
 
 Hosted CI and local unsigned packages are engineering evidence, not public
 Windows or Linux Alpha releases. Keep those downloads unavailable when any
@@ -75,6 +75,33 @@ Run both packaged release smokes:
 pnpm smoke:packaged:release
 ```
 
+### Packaged hardening (fuses and test hooks)
+
+Every packaged build flips four Electron fuses before signing (`electronFuses` in `apps/desktop/electron-builder.yml`): `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `--inspect` and the `SIGUSR1` inspector are off, and app code loads only from `app.asar`. A release build also ignores `VIDEORC_REMOTE_DEBUG_PORT`, `--remote-debugging-port`/`--remote-debugging-pipe` and the native preview module/helper path overrides (`VIDEORC_NATIVE_PREVIEW_HOST_MODULE`, `VIDEORC_NATIVE_PREVIEW_IN_PROCESS_MODULE`, `VIDEORC_NATIVE_PREVIEW_HOST_HELPER`) and logs one `Release build ignored test-only hooks` line. Each of those lets another same-user process run code as Videorc, inheriting its Screen Recording, Camera and Microphone grants on macOS.
+
+Check an artifact:
+
+```sh
+pnpm check:packaged-app                      # default release/ path for this OS
+pnpm check:packaged-app --app /path/to/Videorc.app
+pnpm check:packaged-app --app /path/to/Videorc-<version>-linux-x64.AppImage
+```
+
+An AppImage keeps the Electron binary inside its squashfs, so the check has
+the AppImage's own runtime extract the binary and `app.asar` to a temporary
+folder (without starting the app) and reads those.
+
+A harness that needs CDP in a packaged app (the live lab, `smoke:windows-main-window-recovery`, perf probes against a packaged build) needs a **packaged test build**: set `VIDEORC_PACKAGED_TEST_HOOKS=1` when `electron-vite build` runs (`pnpm --filter @videorc/desktop package:linux:test-hooks`, `VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop`, or `$env:VIDEORC_PACKAGED_TEST_HOOKS='1'` before `pnpm package:desktop:windows`). The fuses stay flipped. `pnpm check:packaged-app` refuses such a build unless you pass `--allow-test-hooks`; it must never ship. The packaged smoke command server (`VIDEORC_PACKAGED_SMOKE_TEST`, used by `smoke:packaged*` against the exact release payload) is unchanged.
+
+`pnpm smoke:windows-main-window-recovery` prepares that separate test package
+automatically from the current source and existing compiled backend/FFmpeg.
+Set `VIDEORC_PERF_APP_EXECUTABLE` to the original production executable. The
+runner checks its hardening, builds a temporary directory with CDP enabled,
+checks the test package's fuses, runs recovery there, and verifies that the
+original executable and app.asar hashes did not change. Its report identifies
+the result as test-build evidence. The original installer and its recording
+checks remain production-build evidence; the recovery test package never ships.
+
 For development acceptance, run the same backend recording smoke through `pnpm dev`:
 
 ```sh
@@ -82,6 +109,17 @@ pnpm smoke:dev
 ```
 
 The development smoke test opens the Electron app through `electron-vite`, waits for the Electron main process to launch the Rust backend, records a short test-pattern MKV, stops the session, and verifies the output file. It intentionally avoids camera, microphone, and screen sources so it can validate app boot and recording control flow even before macOS permissions are granted.
+
+## Bundled microphone denoiser
+
+The Rust backend links the pinned `rnnoise-rs` implementation and its embedded
+float model. Cargo fetches the pinned source during the build; the running app
+does not download a model or load a C RNNoise library. Shared Electron resources
+include `licenses/rnnoise-rs/LICENSE.txt`, `UPSTREAM-NOTICES.txt` and `SOURCE.txt` on
+every platform.
+Keep these notices with the backend binary when distributing it separately.
+See [RNNoise](rnnoise.md) for the source pin, model digest and capture-path
+restrictions.
 
 ## Current macOS Beta Target
 
@@ -99,6 +137,20 @@ The development smoke test opens the Electron app through `electron-vite`, waits
 - Packaging tool: Electron Builder
 - Supported candidate target: Ubuntu 24.04 LTS x64 AppImage only
 - Signing: unsigned (no Linux code-signing lane yet)
+- AppImage runtime: the static type2-runtime (`toolsets.appimage: '1.0.2'`
+  in `apps/desktop/electron-builder.yml`). FUSE is linked in and it mounts
+  through `fusermount3`, so stock Ubuntu 24.04 needs no `libfuse2`.
+- Chromium sandbox: an AppImage cannot carry a setuid `chrome-sandbox`, so
+  AppRun probes `unshare -Ur true` and adds `--no-sandbox` only where
+  unprivileged user namespaces are refused (Ubuntu 24.04's AppArmor
+  default). This is a backport of electron-builder #9590 in
+  `patches/app-builder-lib@26.8.1.patch`. Neither desktop entry passes the
+  flag itself: the bundled `videorc.desktop` runs `AppRun %U` (the
+  `AppImageTarget` hunk of the same patch) and the entry the app writes for
+  `videorc://` links runs the AppImage with `%U`
+  (`apps/desktop/src/main/linux-desktop-entry.ts`), so a launch from the
+  menu or a link gets the same probe. `pnpm check:packaged-app` fails an
+  AppImage whose bundled entry passes `--no-sandbox`.
 - FFmpeg: the SHA-256-pinned LGPL Linux x64 bundle fetched by
   `pnpm ffmpeg:fetch:linux`, including `ffmpeg`, `ffprobe`, license,
   source-offer, and build-config metadata. `libx264` is forbidden.
@@ -109,9 +161,20 @@ The development smoke test opens the Electron app through `electron-vite`, waits
 - Intended later public prefix:
   `releases/linux-alpha/<releaseId>/`
 - Updater feed filename: `latest-linux.yml` only
+- In-app update notice: Linux builds never run electron-updater. They read
+  the public `https://www.videorc.com/api/changelog?since=<core>-alpha.0`
+  and show "Videorc X is available. Download it from videorc.com" for the
+  newest entry whose `platforms` include `linux` and whose version is newer
+  (`apps/desktop/src/main/linux-update-notice.ts`). Publishing a Linux
+  release must therefore publish its `linux` changelog entry; until the
+  changelog lists the running Linux line, Settings says nothing about being
+  up to date.
 - Public download, videorc-web button, and `updates/linux-alpha/` pointers
   stay disabled until `promote-linux-alpha.yml` and Ubuntu 24.04 named-box
-  packaged/updater proof exist
+  packaged/updater proof exist. Hold the Linux Discord announcement until
+  that public download exists; preview with
+  `pnpm release:notify:discord <releaseId> --dry-run` first, and never print
+  `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
 
 Build a local AppImage with:
 
@@ -336,10 +399,12 @@ If a beta fails before clean-machine acceptance:
 
 If a beta has already been exposed on Videorc Web:
 
-- Set `VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` and redeploy the web app to stop
-  issuing signed download URLs immediately.
+- Set `VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` and redeploy the web app with
+  `pnpm release:web:redeploy` to stop issuing signed download URLs immediately.
+  Never deploy a local videorc-web checkout (see "Redeploying videorc-web
+  production" in [releases/release-runbook.md](releases/release-runbook.md)).
 - Or change `VIDEORC_DOWNLOAD_MANIFEST_OBJECT_KEY` back to the last accepted
-  `releases/macos/<releaseId>/release.json` and redeploy.
+  `releases/macos/<releaseId>/release.json` and run `pnpm release:web:redeploy`.
 - Confirm anonymous requests still return `401`, signed-in requests no longer
   receive the bad release URL, and `/account/download` shows the expected
   fallback or previous release metadata.
@@ -620,24 +685,61 @@ backend is intentionally not the default in this build because unsigned/dev
 rebuilds repeatedly prompt for the login password and make local validation
 unstable.
 
+On Windows the default is `dpapi` (#1078): the same JSON payload, at the same
+path, wrapped with `CryptProtectData` in user scope (no prompt, no UI). The
+signed-in Windows account is the boundary; the per-user `%APPDATA%` ACL alone
+left the account session, entitlement token, Phone remote device keys and the
+agents registry token readable as plain text.
+
 Default location:
 
 - Development and packaged macOS: `videorc-secrets.json` beside the app's SQLite
   database in the per-user app-data directory.
 - Unix permissions: the file is written with mode `0600`.
-- Windows/self-hosting: the same JSON model is used; the file relies on the
-  per-user app-data ACL.
+- Windows: `%APPDATA%\Videorc\videorc-secrets.json`, DPAPI-protected. The file
+  starts with the line `videorc-secrets:dpapi:1`, followed by the blob.
+
+Windows migration and recovery:
+
+- A plaintext `videorc-secrets.json` from an older build is protected in place
+  the first time the backend reads it (one atomic replace, so the plaintext
+  copy never coexists with the protected one).
+- A file the signed-in account cannot decrypt (copied from another user or
+  machine, or damaged) is never deleted or overwritten. Every secret access
+  fails with the file's path in the error until the file is removed by hand
+  (quit Videorc, delete it, sign in and re-pair) or opened by the account that
+  wrote it.
+- Downgrading to a build without `dpapi` behaves the same way: the older build
+  reports the file as "not valid JSON" on every access and writes nothing, so
+  the protected store survives a round trip through an older version.
+- Smokes and self-hosting that read the file back can set
+  `VIDEORC_SECRET_STORE=json-file` explicitly; a plain JSON file handed to a
+  `dpapi` backend (as every smoke does today) is migrated on first read.
+
+Startup maintenance, every platform with a file store:
+
+- A `videorc-secrets.json.tmp` left by a backend that died between staging the
+  new file and renaming it over the store is removed once the store itself has
+  loaded. A store that fails to load keeps its `.tmp`: after a crash it may be
+  the only readable copy.
+- A one-time purge drops the Kick event-subscription entries that unit tests
+  before 2026-11-01 (`802acbe1`) wrote into a developer's real store (the
+  `kick-flow`, `kick-flap`, `kick-relay-down`, … fixture account ids). It
+  records itself under `maintenance:test-fixture-purge` and matches whole refs
+  only; real Kick account ids are numeric. The same pre-fix runs also replaced
+  `remote-control.lan` and `agents.registry` with fixtures: if Phone remote or
+  an agent pairing looks wrong on a developer machine, re-pair it.
 
 Useful overrides:
 
 ```sh
-VIDEORC_SECRET_STORE=json-file
+VIDEORC_SECRET_STORE=json-file   # or dpapi (Windows builds only)
 VIDEORC_SECRETS_PATH=/path/to/videorc-secrets.json
 ```
 
 `VIDEORC_SECRET_STORE=keychain` is rejected in this build instead of silently
-falling back. Revisit Keychain only after a signed identity can prove stable
-permissions without repeated prompts.
+falling back, and so is `dpapi` on a build without it. Revisit Keychain only
+after a signed identity can prove stable permissions without repeated prompts.
 
 To delete local credentials, disconnect provider accounts in the Streaming tab
 and clear saved manual stream keys. For a full local reset, quit Videorc and

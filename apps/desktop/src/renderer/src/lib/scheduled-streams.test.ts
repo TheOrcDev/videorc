@@ -154,6 +154,23 @@ describe('scheduled stream ownership', () => {
     expect(result.streaming.enabledTargetIds).toEqual(['x'])
     expect(() => selectScheduledStreamForTarget(config, target.id, event)).toThrow('X destination')
   })
+  it('does not call a failed operation "still running" when the backend gives no message', async () => {
+    const request = vi.fn().mockResolvedValue({
+      id: eventId,
+      eventId,
+      state: 'needs-retry',
+      error: null,
+      result: null
+    })
+    await expect(
+      runScheduledOperation({ request }, 'schedule', {
+        operationId: eventId,
+        eventId,
+        expectedRevision: 1
+      })
+    ).rejects.toThrow('did not finish')
+  })
+
   it('deduplicates a supplied intent UUID and surfaces reconciliation rather than replaying', async () => {
     const request = vi.fn().mockResolvedValue({
       id: eventId,

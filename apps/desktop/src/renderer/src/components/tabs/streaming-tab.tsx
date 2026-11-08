@@ -3,6 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactEl
 import { PageTabs } from '@/components/page-tabs'
 import { TabsContent } from '@/components/ui/tabs'
 import { LIVESTREAM_VIEWS, type LivestreamViewId } from '@/lib/livestream-tabs'
+import { LIVESTREAM_SETUP_GRID, PAGE_LEAD_COLUMN } from '@/lib/page-layout'
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
@@ -15,6 +16,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { BroadcastInfoFields } from '@/components/streaming/broadcast-info-fields'
 import { CategoryCombobox } from '@/components/streaming/category-combobox'
 import { DestinationCard } from '@/components/streaming/destination-card'
+import { DiscordSection } from '@/components/streaming/discord-section'
 import { youtubeQuotaPausedUntil } from '@/lib/youtube-quota'
 import { GoLivePanel } from '@/components/streaming/go-live-panel'
 import { ThumbnailField } from '@/components/streaming/thumbnail-field'
@@ -67,7 +69,7 @@ import type {
 import { streamingDestinationCap, streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
-import { unlockActionForReason } from '@/lib/lock-view'
+import { lockAlertAction, unlockActionForReason } from '@/lib/lock-view'
 import { destinationSetup } from '@/lib/destination-readiness'
 import { destinationLabel } from '@/lib/platform-copy'
 import { otherDestinationsLine } from '@/lib/stream-target-notices'
@@ -83,10 +85,15 @@ import { streamLanguageOptions } from '@/lib/stream-languages'
  */
 export function StreamingTab({
   view,
-  onViewChange
+  onViewChange,
+  destinationToOpen = null,
+  onDestinationOpened
 }: {
   view: LivestreamViewId
   onViewChange: (view: LivestreamViewId) => void
+  /** A destination to open once Setup shows (plan 213 J1: "Use Sign in"). */
+  destinationToOpen?: string | null
+  onDestinationOpened?: () => void
 }): ReactElement {
   return (
     <PageTabs
@@ -96,7 +103,10 @@ export function StreamingTab({
       onValueChange={onViewChange}
     >
       <TabsContent value="setup">
-        <StreamingSetup />
+        <StreamingSetup
+          destinationToOpen={destinationToOpen}
+          onDestinationOpened={onDestinationOpened}
+        />
       </TabsContent>
       <TabsContent value="upcoming">
         <Suspense fallback={<p role="status">Loading upcoming streams…</p>}>
@@ -107,7 +117,13 @@ export function StreamingTab({
   )
 }
 
-function StreamingSetup(): ReactElement {
+function StreamingSetup({
+  destinationToOpen,
+  onDestinationOpened
+}: {
+  destinationToOpen: string | null
+  onDestinationOpened?: () => void
+}): ReactElement {
   const {
     captureConfig,
     connectPlatformAccount,
@@ -208,7 +224,7 @@ function StreamingSetup(): ReactElement {
   // The list moves focus to the destination's row too (plan 174 S3.5a,
   // D-24), so the keyboard lands where the eye goes.
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({})
-  const openDestination = (targetId: string): void => {
+  const openDestination = useCallback((targetId: string): void => {
     setExpandedOverrides((current) => ({ ...current, [targetId]: true }))
     requestAnimationFrame(() => {
       const card = document.getElementById(`destination-${targetId}`)
@@ -217,7 +233,16 @@ function StreamingSetup(): ReactElement {
         ?.querySelector<HTMLElement>('[data-slot="list-row-button"]')
         ?.focus({ preventScroll: true })
     })
-  }
+  }, [])
+  // Plan 213 J1: the Stream Manager's "Use Sign in" names a destination; open
+  // its card once, and drop an id that is not a saved destination.
+  useEffect(() => {
+    if (!destinationToOpen) return
+    if (streaming.targets.some((target) => target.id === destinationToOpen)) {
+      openDestination(destinationToOpen)
+    }
+    onDestinationOpened?.()
+  }, [destinationToOpen, onDestinationOpened, openDestination, streaming.targets])
   // Only the first destination that needs setup opens on its own (D-14).
   const firstNeedsSetupId = streaming.targets.find(
     (target) =>
@@ -239,13 +264,13 @@ function StreamingSetup(): ReactElement {
     scheduledTargets.length > 0
 
   return (
-    <div className="grid lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
-      <div className="flex min-w-0 flex-col lg:border-r">
+    <div className={LIVESTREAM_SETUP_GRID}>
+      <div className={PAGE_LEAD_COLUMN}>
         {showNotices ? (
           <div className="flex flex-col gap-2 border-b border-border p-gutter">
             {livestreamingEntitlementReason && !isSessionActive ? (
               <LockAlert
-                action={unlockActionForReason(livestreamingEntitlementReason)}
+                action={lockAlertAction(unlockActionForReason(livestreamingEntitlementReason))}
                 reason={livestreamingEntitlementReason}
               />
             ) : null}
@@ -353,6 +378,9 @@ function StreamingSetup(): ReactElement {
           onSearchTwitchCategories={searchTwitchCategories}
           onSearchKickCategories={searchKickCategories}
         />
+        {/* Plan 187: tell the streamer's Discord server when they go live. It
+            stays editable while live; changes apply to the next stream. */}
+        <DiscordSection sessionActive={isSessionActive} targets={streaming.targets} />
       </div>
 
       <GoLivePanel onOpenDestination={openDestination} />
@@ -599,7 +627,7 @@ export function MetadataEditor({
           {visibleOverrides.length ? (
             <Accordion
               aria-label="Details for each destination"
-              type="multiple"
+              multiple
               value={accordionValue}
               onValueChange={setOpenPlatforms}
             >
@@ -685,6 +713,7 @@ function MetadataOverride({
   const twitch = override.platform === 'twitch'
   const youtube = override.platform === 'youtube'
   const x = override.platform === 'x'
+  const languageOptions = streamLanguageOptions(override.twitchLanguage)
 
   // The switch gates custom TEXT only. Platform settings below it (made for
   // kids, category, language, announce) always apply, on or off.
@@ -806,14 +835,17 @@ function MetadataOverride({
             <FieldLabel htmlFor="twitch-language">Language</FieldLabel>
             <Select
               disabled={disabled}
+              items={languageOptions}
               value={override.twitchLanguage?.trim().toLowerCase() ?? ''}
-              onValueChange={(twitchLanguage) => onPatch({ twitchLanguage })}
+              onValueChange={(twitchLanguage) => {
+                if (twitchLanguage !== null) onPatch({ twitchLanguage })
+              }}
             >
               <SelectTrigger className="w-full" id="twitch-language">
                 <SelectValue placeholder="Choose a language" />
               </SelectTrigger>
               <SelectContent>
-                {streamLanguageOptions(override.twitchLanguage).map((option) => (
+                {languageOptions.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>

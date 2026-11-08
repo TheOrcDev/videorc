@@ -29,3 +29,21 @@ export const START_BLOCKED_COPY = {
   checkingRecorder: 'Checking the recorder…',
   recorderMissing: "Videorc's recorder isn't available. Export a support bundle from Health."
 } as const
+
+/**
+ * Why Record, Go Live and Clips wait when the scene shows a source the
+ * streamer turned off (Screen None, Camera Off), or null. What to do next,
+ * never "the screen preview source(s) produced no frames".
+ */
+export function sceneSourceOffBlockedReason(off: {
+  screen: boolean
+  camera: boolean
+}): string | null {
+  if (off.screen && off.camera)
+    return 'This scene shows a screen and a camera, but both are off. Choose them in Sources.'
+  if (off.screen)
+    return 'This scene shows a screen, but Screen is set to None. Choose a screen in Sources, or pick a scene without one.'
+  if (off.camera)
+    return 'This scene shows a camera, but Camera is off. Turn it on in Sources, or pick a scene without one.'
+  return null
+}

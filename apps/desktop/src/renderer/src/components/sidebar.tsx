@@ -2,6 +2,7 @@ import { type AppIcon, SearchIcon, SyncIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 import { AccountMenu } from '@/components/account-menu'
+import { OwnBuddyIcon } from '@/components/own-buddy-icon'
 import { SectionLabel } from '@/components/section-label'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
@@ -68,8 +69,10 @@ function NavRow({
       onClick={onClick}
       className={cn(
         'group flex h-row-compact items-center gap-2.5 rounded-row px-2.5 text-sm',
+        // The page you're on wears the chrome plate (plan 208 S4); hover stays
+        // the flat block, so rows highlight instantly.
         isActive
-          ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'
+          ? 'chrome-plate font-medium text-sidebar-accent-foreground'
           : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground'
       )}
     >
@@ -159,24 +162,26 @@ function SidebarUpdateChip({
       <div className="overflow-hidden">
         <div className="px-3 pb-1">
           <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                aria-description={chip.detail}
-                className="flex h-row-compact w-full items-center gap-2.5 rounded-row px-2.5 text-left text-sm text-foreground hover:bg-accent"
-                type="button"
-                onClick={() => (chip.action === 'install' ? install() : onOpenSettings())}
-              >
-                <span className="relative flex size-4 shrink-0 items-center justify-center">
-                  <SyncIcon className="size-4 text-muted-foreground" />
-                  <span
-                    className={cn(
-                      'absolute -right-0.5 -top-0.5 size-1.5 rounded-full glass-dot',
-                      chip.tone === 'good' ? 'tone-success' : 'tone-neutral'
-                    )}
-                  />
-                </span>
-                <span className="min-w-0 flex-1 truncate">{chip.label}</span>
-              </button>
+            <TooltipTrigger
+              render={
+                <button
+                  aria-description={chip.detail}
+                  className="flex h-row-compact w-full items-center gap-2.5 rounded-row px-2.5 text-left text-sm text-foreground hover:bg-accent"
+                  type="button"
+                  onClick={() => (chip.action === 'install' ? install() : onOpenSettings())}
+                />
+              }
+            >
+              <span className="relative flex size-4 shrink-0 items-center justify-center">
+                <SyncIcon className="size-4 text-muted-foreground" />
+                <span
+                  className={cn(
+                    'absolute -right-0.5 -top-0.5 size-1.5 rounded-full glass-dot',
+                    chip.tone === 'good' ? 'tone-success' : 'tone-neutral'
+                  )}
+                />
+              </span>
+              <span className="min-w-0 flex-1 truncate">{chip.label}</span>
             </TooltipTrigger>
             <TooltipContent side="top">{chip.detail}</TooltipContent>
           </Tooltip>
@@ -191,6 +196,7 @@ export function Sidebar({
   activeStudioPanel,
   accountPlan = null,
   accountTier,
+  accountNeedsSignIn = false,
   onSelect,
   onSelectStudioPanel,
   onOpenSettings,
@@ -207,6 +213,8 @@ export function Sidebar({
   /** `max` labels the account Max (plan 185 T4). */
   accountPlan?: EntitlementPlan | null
   accountTier: EntitlementTier | null
+  /** Chat or Buddy waits on the Videorc sign-in (plan 215 A5): a dot on the account button. */
+  accountNeedsSignIn?: boolean
   onSelect: (tab: WorkspaceTab) => void
   onSelectStudioPanel: (panel: StudioPanel) => void
   /** Opens Settings on a named tab (plan 064), or on the one used last. */
@@ -237,7 +245,8 @@ export function Sidebar({
   ): ReactElement => (
     <NavRow
       key={tab.id}
-      icon={tab.icon}
+      // The Buddy row wears the streamer's own Buddy, not the golem.
+      icon={tab.id === 'ai' ? OwnBuddyIcon : tab.icon}
       label={tab.label}
       isActive={active === tab.id}
       triggerId={tab.id}
@@ -343,6 +352,7 @@ export function Sidebar({
         <AccountMenu
           plan={accountPlan}
           tier={accountTier}
+          needsSignIn={accountNeedsSignIn}
           statusTone={statusTone}
           statusLabel={statusLabel}
           statusPulse={statusPulse}

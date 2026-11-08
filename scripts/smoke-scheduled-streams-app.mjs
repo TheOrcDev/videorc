@@ -41,7 +41,7 @@ const openUpcoming = async () => {
   await waitFor(
     () =>
       evaluate(
-        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.dispatchEvent(new MouseEvent('mousedown',{button:0,bubbles:true})); return Boolean(tab)`
+        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.click(); return Boolean(tab)`
       ),
     'Upcoming tab mounted'
   )
@@ -83,6 +83,15 @@ const launch = async () => {
   await openUpcoming()
 }
 const get = (eventId) => request(ws, timeoutMs, 'scheduledStreams.get', { eventId })
+// Clips re-arms its buffer-only session after each Stop (plan 199), so the
+// ring may hold the session slot; only a take or a stream counts.
+const assertNoTake = async () => {
+  const status = await request(ws, timeoutMs, 'recording.status')
+  assert.ok(
+    status.state === 'idle' || status.replayOnly === true,
+    `expected no take or stream, got ${status.state}`
+  )
+}
 const action = async (name, eventId, fields = {}) => {
   console.log(`[scheduling] ${name}`)
   const event = await get(eventId)
@@ -199,7 +208,7 @@ try {
       )
     )
     const scrolling = await evaluate(
-      `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-slot="dialog-body"]')??dialog.querySelector('[data-radix-scroll-area-viewport]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail…');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
+      `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-slot="dialog-body"]')??dialog.querySelector('[data-slot="scroll-area-viewport"]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail…');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
     )
     assert.ok(scrolling.viewportHeight >= 64, '200% form must retain a usable scroll viewport')
     assert.ok(scrolling.after > scrolling.initial, '200% form must actually scroll')
@@ -328,7 +337,7 @@ try {
       `window.__scheduleOriginalNow=Date.now; Date.now=()=>new Date('2036-01-01').getTime(); return true`
     )
     await wait(600)
-    assert.equal((await request(ws, timeoutMs, 'recording.status')).state, 'idle')
+    await assertNoTake()
     assert.equal(fixture.calls.filter((call) => call.path.endsWith('/transition')).length, 0)
     await evaluate(
       `Date.now=window.__scheduleOriginalNow; delete window.__scheduleOriginalNow; return true`
@@ -664,7 +673,7 @@ try {
     assert.equal(fixture.xSources.size, 0, 'completed schedule releases its source')
     assert.equal(
       fixture.calls.filter(
-        (call) => call.method === 'POST' && /^\/2\/users\/[^/]+\/broadcasts$/.test(call.path)
+        (call) => call.method === 'POST' && call.path === '/2/broadcasts'
       ).length,
       0,
       'no instant X broadcast was created'
@@ -687,7 +696,7 @@ try {
       assert.ok(report.verdict.pass, report.verdict.failures.join('; '))
       console.log(`Scheduled X artifact: ${writeReports(report).mdPath}`)
     }
-    assert.equal((await request(ws, timeoutMs, 'recording.status')).state, 'idle')
+    await assertNoTake()
     const stoppedChat = await request(ws, timeoutMs, 'liveChat.stop', {})
     assert.equal(
       stoppedChat.sessionId ?? null,

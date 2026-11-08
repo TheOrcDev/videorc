@@ -18,6 +18,7 @@ packaging, or release are supported yet.
 | Preview | CPU composition and JPEG transport | L5 |
 | H.264 encode | VAAPI hardware, OpenH264 software fallback | L1.5 implemented; hardware proof pending |
 | Packaging | AppImage | L6 |
+| Videorc Camera (plan 214 D) | v4l2loopback: the user installs the module, the app loads it with `pkexec modprobe … exclusive_caps=1 card_label="Videorc Camera" video_nr=42` and writes YUYV 1080p30 to the device found by name | Written and compiled by the Linux CI job; hidden (`PROVEN = false` in `virtual_camera_linux.rs`) until spike P0c passes on a named box |
 
 The Ubuntu 24.04 row is the packaging and support baseline that L6 must prove
 on. The encoder contract in L1.5 is distribution-independent and is accepted
@@ -61,9 +62,24 @@ GPU hang, so the policy keeps the app from touching a bad node at all:
   `<app data>/linux-vaapi/probe-in-progress.json` (`node`, `driver`,
   `startedAt`, `ffmpegSha`) and deletes it when the probe returns, pass or
   fail. A file still present at the next backend start means the previous
-  probe never returned: the node is appended to
-  `<app data>/linux-vaapi/quarantined.json`, logged at `warn`, listed in
-  diagnostics, and never probed again unless the pin names it explicitly.
+  backend died mid-probe (the host hung or was rebooted, the backend was
+  killed): the node is appended to `<app data>/linux-vaapi/quarantined.json`,
+  logged at `warn`, listed in diagnostics, and never probed again unless the
+  pin names it explicitly. A probe future dropped in-process (a cancelled
+  session start, quit mid-probe) clears its own sentinel: the process is
+  still alive, so the node did not hang the host.
+- A probe still running after 20 s is the same hang seen from inside the
+  process (#1027): FFmpeg is killed and reaped, the node is quarantined on
+  the spot with `timedOutAfterSecs`, the `compat` argument profile is never
+  tried on it (a timeout is not an argument rejection), and no further node
+  is probed in that backend lifetime, because the timed-out FFmpeg may still
+  hold its GPU and the driver may be mid-reset. The nodes left over are
+  listed as `skipped` and probed at the next start.
+- `cargo test -p videorc-backend` never probes a render node and never reads
+  or writes the real quarantine: a unit test gets a throwaway quarantine
+  directory under the temp dir unless `VIDEORC_DATABASE_PATH` isolates one,
+  and the resolver answers "unit tests never probe render nodes" unless
+  `VIDEORC_LINUX_VAAPI_DEVICE` names the one node a test may use.
 - The backend probes once per lifetime per FFmpeg path and caches the
   decision; sessions do not re-probe. A forced `openh264` session does not
   invalidate the cached VAAPI decision.
@@ -112,10 +128,11 @@ which argument the iHD driver rejects (Plan 053, S3).
 - Keep shared geometry and pixel conversion outside Apple-only modules.
 - Return explicit unsupported results for runtime paths with no Linux backend.
 
-The temporary Linux clippy allow list matches the documented Windows
-cross-platform allow list: `dead_code`, `unused_imports`, `unused_variables`,
-and `unused_mut`. Both platform gates should remove those allows together as
-the shared warning wall is eliminated.
+The temporary Linux clippy allow list is `dead_code`, `unused_imports`,
+`unused_variables`, and `unused_mut`. The Windows gate dropped the same list
+once its warning wall was burned down: each helper that only macOS or Linux
+calls carries `#[cfg_attr(target_os = "windows", allow(dead_code))]` (or the
+matching lint) at the item. The Linux gate should drop its list the same way.
 
 ### L1.5 — Encoder policy and provisioning
 
@@ -150,6 +167,25 @@ pnpm smoke:linux-encoder-acceptance
 `--backend=openh264` or `--backend=vaapi` may be used to diagnose one path,
 but only the default two-backend run emits `complete: true` evidence and clears
 the L1.5 hardware gate. CI runners and virtual machines are not substitutes.
+
+### Videorc Camera (plan 214 D)
+
+The Linux camera is v4l2loopback (`docs/linux-dev-loop.md` has the tester
+steps). No Mac compiles its `cfg(target_os = "linux")` writer, so the Linux
+CI job is its compile gate and spike P0c on a named box is its behaviour
+gate: `ffmpeg -f v4l2 -i /dev/video42` reads 30 fps for 10 s and Chrome
+Meet lists the camera only while the switch is on. Until P0c passes,
+`virtual_camera_linux::PROVEN` is `false`, `platform_sink` answers
+`hidden_until_proven("Linux")`, the status reports `platformStep:
+unsupported` and the Output page shows no section; flipping that one
+constant turns it on. The pure half (module detection, the state table,
+the V4L2 ABI mirror) is tested on every platform. The `needs-setup`
+message is the distribution's install command alone (the page shows it as
+one copyable line; absent when the distribution is unknown); a load the
+kernel refuses under Secure Boot comes back as a `failed` step with the
+Machine Owner Key words. No kernel module is bundled, built or signed
+(D9). STOP (plan 214): if the baseline box cannot load the module under
+Secure Boot, Linux ships guidance only.
 
 ### Hardware stop before L2
 

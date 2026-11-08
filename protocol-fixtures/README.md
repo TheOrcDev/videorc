@@ -61,3 +61,40 @@ are an explicit `null`.
 - Regenerate after a deliberate schema change (bump `schemaVersion`):
   `cargo test -p videorc-backend metrics_journal::tests::write_shared_fixture -- --ignored`
 - Rust: `cargo test -p videorc-backend metrics_journal`
+
+## `preview-program.json`
+
+The program (plan 205): whether an item with a given pair of output switches
+is in the picture the Preview shows, for every session shape. It is edited by
+hand; both functions must reproduce every case:
+
+- Rust: `cargo test -p videorc-backend preview_program`
+- TypeScript: `pnpm --filter @videorc/desktop test -- overlay-layout.test.ts`
+
+## `screen-privacy.json`
+
+Hide screen's wire shapes (plan 210 S7): the `ScreenPrivacy` state as
+`screen.privacy.get` returns it and `screen.privacy.changed` carries it
+(visible, hidden by you, hidden by the password-manager list, unavailable on a
+legacy FFmpeg session), the `screen.hide` params, and shapes the renderer must
+reject (a `null` field, an unknown reason). Absent fields are omitted, never
+`null`; the Rust test serializes the backend types and compares them with the
+JSON field for field.
+
+- Rust: `cargo test -p videorc-backend screen_privacy_fixture`
+- TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
+
+## `virtual-camera.json`
+
+Videorc Camera's wire shapes (plan 214 A4): the `VirtualCameraStatus` as
+`virtualCamera.status` and `virtualCamera.set` return it and
+`virtualCamera.changed` carries it (off, unavailable without a sink, needs
+approval, needs setup, ready, streaming with and without a viewer count),
+the `virtualCamera.set` params, the `virtualCamera.platform.report` params
+main sends (with and without a message), and shapes the renderer must reject
+(a `null` field, an unknown state, a missing flag). Absent fields are
+omitted, never `null`; the Rust test serializes the backend types and
+compares them with the JSON field for field.
+
+- Rust: `cargo test -p videorc-backend virtual_camera_fixture`
+- TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`

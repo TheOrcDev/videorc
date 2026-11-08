@@ -18,7 +18,7 @@
 //
 // No recording is started.
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import WebSocket from 'ws'
@@ -27,6 +27,7 @@ import { RemoteClient, parseFragment } from '../crates/videorc-backend/remote_we
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { connectRemote, remoteRequest } from './lib/remote-control-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-remote-lan-user-data-'))
@@ -114,6 +115,13 @@ try {
   if (/https?:\/\//.test(html)) fail('page references a third-party URL')
   for (const asset of ['/app.js', '/remote-client.js', '/hmac.js', '/app.css', '/icon.svg']) {
     if ((await fetch(`${origin}${asset}`)).status !== 200) fail(`${asset} not served`)
+  }
+  // Plan 208 S6: the chrome ground under the page, as WebP.
+  for (const ground of ['/chrome-ground-dark.webp', '/chrome-ground-light.webp']) {
+    const response = await fetch(`${origin}${ground}`)
+    if (response.status !== 200 || response.headers.get('content-type') !== 'image/webp') {
+      fail(`${ground} not served as image/webp (status ${response.status})`)
+    }
   }
   // Main-backend routes, probed WITHOUT credentials on purpose: they must not
   // exist here at all. (Segments, not literals — smoke-command-callers.test
@@ -296,6 +304,6 @@ try {
   try {
     await stopApp()
   } finally {
-    rmSync(userDataDir, { recursive: true, force: true })
+    await removeProfileDir(userDataDir, { label: 'remote-lan smoke' })
   }
 }

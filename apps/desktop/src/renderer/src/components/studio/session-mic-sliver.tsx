@@ -21,29 +21,34 @@ const SILENT_BARS: readonly number[] = Object.freeze(new Array<number>(SLIVER_BA
 export function SessionMicSliver({
   sessionActive,
   deviceName,
-  muted
+  muted,
+  ink = false
 }: {
   sessionActive: boolean
   deviceName: string | undefined
   muted: boolean
+  /** On the Retro LCD transport screen (plan 197): the bars in the screen's ink. */
+  ink?: boolean
 }): ReactElement | null {
   if (!sessionActive || !deviceName) {
     return null
   }
 
-  return muted ? <SessionMicSliverBars muted /> : <ActiveSessionMicSliver />
+  return muted ? <SessionMicSliverBars ink={ink} muted /> : <ActiveSessionMicSliver ink={ink} />
 }
 
-function ActiveSessionMicSliver(): ReactElement {
+function ActiveSessionMicSliver({ ink }: { ink: boolean }): ReactElement {
   const source = useStudioMicVisualSource()
-  return <SessionMicSliverBars muted={false} source={source} />
+  return <SessionMicSliverBars ink={ink} muted={false} source={source} />
 }
 
 function SessionMicSliverBars({
   muted,
+  ink,
   source
 }: {
   muted: boolean
+  ink: boolean
   source?: FrameSource<VisualFrame>
 }): ReactElement {
   return (
@@ -56,7 +61,13 @@ function SessionMicSliverBars({
         barCount={SLIVER_BAR_COUNT}
         className={cn(
           'h-4 w-full [--bar-gap:0.125rem]',
-          muted ? 'text-muted-foreground/50' : 'text-foreground/70'
+          ink
+            ? muted
+              ? 'text-(--lcd-display-ink-dim)'
+              : 'text-(--lcd-display-lit)'
+            : muted
+              ? 'text-muted-foreground/50'
+              : 'text-foreground/70'
         )}
         idle="static"
         levels={source ? undefined : SILENT_BARS}

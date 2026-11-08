@@ -14,10 +14,15 @@
   } catch {
     document.documentElement.classList.add('dark')
   }
-  // The platform before first paint: Windows (Mica) takes its own coats.
+  // The platform before first paint: Windows-only chrome keys on it.
   document.documentElement.dataset.platform = /Win/i.test(navigator.platform)
     ? 'win32'
     : /Mac/i.test(navigator.platform)
       ? 'darwin'
       : 'linux'
+  // What the window sits on (plan 208): main's call, read off the preload's
+  // bridge (it came in on the window's argv, like the renderer role). The
+  // solid palette is the default; `glass` is the VIDEORC_GLASS=clear A/B.
+  const ground = window.videorc?.windowGround
+  document.documentElement.dataset.ground = ground === 'glass' ? 'glass' : 'solid'
 })()

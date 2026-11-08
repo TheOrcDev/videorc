@@ -7,9 +7,12 @@ import test from 'node:test'
 import { createFakeClock } from './harness-test-fakes.mjs'
 import {
   EXIT,
+  buildKindOf,
   buildManifest,
   countRunsToday,
   executeRun,
+  gatherMachineFacts,
+  osReleaseName,
   parseRunArgs,
   sha256
 } from './harness.mjs'
@@ -557,4 +560,34 @@ test('every run ends with verdict.json and report.md in the run folder (plan 178
   })
   assert.equal(second.exitCode, EXIT.ok)
   assert.ok(broken.out.some((line) => /Verdict failed: verdict exploded/.test(line)))
+})
+
+test('plan 179: Linux install sources count as candidates for the policy', () => {
+  assert.equal(buildKindOf('release'), 'release')
+  assert.equal(buildKindOf('candidate'), 'candidate')
+  assert.equal(buildKindOf('file'), 'candidate')
+  assert.equal(buildKindOf('local-build'), 'candidate')
+  assert.equal(buildKindOf('unknown'), null)
+})
+
+test('plan 179: Linux machine facts name the distro and kernel, never macOS', async () => {
+  const exec = async (command, args) => {
+    if (command === 'uname') return { stdout: '6.17.1-arch1-1\n' }
+    if (command === 'git') return { stdout: args.includes('rev-parse') ? 'abc123\n' : '' }
+    throw new Error(`unexpected ${command}`)
+  }
+  const facts = await gatherMachineFacts({
+    repoRoot: '/r',
+    exec,
+    platform: 'linux',
+    readText: async (path) =>
+      path === '/etc/os-release'
+        ? 'NAME="Arch Linux"\nPRETTY_NAME="Arch Linux"\n'
+        : 'MacBookPro16,1\n'
+  })
+  assert.deepEqual(facts.harness, { commit: 'abc123', dirty: false })
+  assert.equal(facts.macOS, null)
+  assert.deepEqual(facts.linux, { distro: 'Arch Linux', kernel: '6.17.1-arch1-1' })
+  assert.equal(facts.hardware.model, 'MacBookPro16,1')
+  assert.equal(osReleaseName('PRETTY_NAME=Ubuntu 24.04.3 LTS\n'), 'Ubuntu 24.04.3 LTS')
 })

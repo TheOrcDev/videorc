@@ -60,6 +60,31 @@ describe('comments destination status', () => {
     ).toBe('No writable destinations · Twitch reconnect to send · X read-only')
   })
 
+  // Plan 213 J1: the old stream-key X row was "Failed" and its composer note
+  // "X read-only"; it is a neutral "Needs Sign in" that the composer skips.
+  it('shows a stream-key X destination as a neutral Needs Sign in, never Failed', () => {
+    const streamKeyX = provider('x', {
+      state: 'unsupported',
+      read: 'needs-sign-in',
+      write: 'unavailable',
+      message:
+        'X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to.'
+    })
+    const markup = renderToStaticMarkup(
+      createElement(CommentsDestinationStatus, { providers: [streamKeyX] })
+    )
+    expect(markup).toContain('Needs Sign in')
+    expect(markup).toContain('tone-neutral')
+    expect(markup).not.toContain('tone-destructive')
+    expect(markup).not.toContain('Failed')
+    expect(
+      commentsDestinationNotes({
+        providers: [provider('twitch'), streamKeyX],
+        sendTargets: ['twitch']
+      })
+    ).toBe('')
+  })
+
   it('names the bound account so a wrong-channel manual stream is visible', () => {
     expect(providerBadgeTitle(provider('twitch', { message: '', accountLabel: 'OrcDev' }))).toBe(
       'Reading chat as OrcDev.'

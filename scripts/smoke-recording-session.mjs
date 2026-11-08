@@ -222,19 +222,15 @@ export async function recordScenario({
       ).capabilityId
     : undefined
   const mkvsBeforeStart = snapshotScenarioMkvPaths({ outputDirectory })
+  const params = sessionParams({
+    outputDirectoryCapability,
+    preset: scenario.preset,
+    background: scenario.background,
+    video: scenario.video
+  })
   let started
   try {
-    started = await request(
-      ws,
-      timeoutMs,
-      'session.start',
-      sessionParams({
-        outputDirectoryCapability,
-        preset: scenario.preset,
-        background: scenario.background,
-        video: scenario.video
-      })
-    )
+    started = await request(ws, timeoutMs, 'session.start', params)
   } catch (error) {
     assertNoZeroByteMkvsCreatedAfter({
       scenarioLabel: scenario.label,
@@ -298,6 +294,10 @@ export async function recordScenario({
     ffprobePath,
     intendedFps: SMOKE_VIDEO_FPS,
     expectAudio: true,
+    // The test-pattern session selects no microphone, so its audio is the
+    // paced-silence bus (hosted runners have no input device at all). The
+    // silent-microphone gate re-arms if a scenario ever selects one.
+    microphoneAvailable: sessionSelectsMicrophone(params.sources),
     gates: TEST_PATTERN_GATES
   })
   const reportPaths = writeReports(quality)
@@ -490,8 +490,13 @@ export async function startSessionWhenScreenSettles(
 export function request(ws, timeoutMs, method, params) {
   const id = `smoke-${Date.now()}-${Math.random().toString(16).slice(2)}`
   return new Promise((resolveRequest, rejectRequest) => {
-    const timer = setTimeout(() => {
+    const settle = () => {
+      clearTimeout(timer)
       ws.removeEventListener('message', onMessage)
+      ws.removeEventListener('close', onClose)
+    }
+    const timer = setTimeout(() => {
+      settle()
       rejectRequest(new Error(`Timed out waiting for ${method}.`))
     }, timeoutMs)
 
@@ -500,8 +505,7 @@ export function request(ws, timeoutMs, method, params) {
       try {
         message = JSON.parse(event.data)
       } catch (error) {
-        clearTimeout(timer)
-        ws.removeEventListener('message', onMessage)
+        settle()
         rejectRequest(error)
         return
       }
@@ -509,18 +513,33 @@ export function request(ws, timeoutMs, method, params) {
         return
       }
 
-      clearTimeout(timer)
-      ws.removeEventListener('message', onMessage)
+      settle()
       if (message.ok) {
         resolveRequest(message.payload)
       } else {
         rejectRequest(new Error(message.error?.message ?? `${method} failed.`))
       }
     }
+    // A backend that restarts (a mutating command past its execution
+    // contract) closes the socket; no answer can follow.
+    const onClose = () => {
+      settle()
+      rejectRequest(new Error(`Backend connection closed before ${method} answered.`))
+    }
 
     ws.addEventListener('message', onMessage)
+    ws.addEventListener('close', onClose)
     ws.send(JSON.stringify({ id, method, params }))
   })
+}
+
+/**
+ * Whether a session's sources select a microphone, read from the protocol's
+ * `microphoneId` (`SourceSelection`). Arms the analyzer's silent-microphone
+ * gate.
+ */
+export function sessionSelectsMicrophone(sources) {
+  return typeof sources?.microphoneId === 'string' && sources.microphoneId !== ''
 }
 
 function sessionParams({ outputDirectoryCapability, preset = 'screen-camera', background, video }) {
@@ -680,7 +699,13 @@ function assertAssetBackgroundFrame({ outputPath, outputDirectory, ffmpegPath })
   }
 }
 
-function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath, sourcePath }) {
+export function assertBundledBackgroundFrame({
+  outputPath,
+  outputDirectory,
+  ffmpegPath,
+  sourcePath,
+  seekSeconds = 0.5
+}) {
   const width = 640
   const height = 360
   const recordedRawPath = join(outputDirectory, `bundled-background-recording-${Date.now()}.rgb`)
@@ -691,7 +716,7 @@ function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath,
     ffmpegPath,
     width,
     height,
-    seekSeconds: 0.5,
+    seekSeconds,
     label: 'extract bundled background recording frame'
   })
   extractRgbFrame({
@@ -724,12 +749,21 @@ function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath,
   }
   if (meanDifference > 48) {
     throw new Error(
-      `Packaged bundled background pixels do not match the decoded source asset: mean RGB difference ${meanDifference.toFixed(1)} exceeded 48.`
+      `Packaged bundled background pixels do not match the decoded source asset at ${seekSeconds}s: mean RGB difference ${meanDifference.toFixed(1)} exceeded 48.`
     )
   }
+  return { seekSeconds, meanDifference }
 }
 
-function extractRgbFrame({ inputPath, outputPath, ffmpegPath, width, height, seekSeconds, label }) {
+export function extractRgbFrame({
+  inputPath,
+  outputPath,
+  ffmpegPath,
+  width,
+  height,
+  seekSeconds,
+  label
+}) {
   runCommand(
     ffmpegPath,
     [
@@ -753,7 +787,7 @@ function extractRgbFrame({ inputPath, outputPath, ffmpegPath, width, height, see
   )
 }
 
-function meanRgbDifference(left, right, width, points) {
+export function meanRgbDifference(left, right, width, points) {
   let total = 0
   let samples = 0
   for (const [x, y] of points) {
@@ -766,7 +800,7 @@ function meanRgbDifference(left, right, width, points) {
   return total / Math.max(1, samples)
 }
 
-function rgbRange(bytes, width, points) {
+export function rgbRange(bytes, width, points) {
   let minimum = 255
   let maximum = 0
   for (const [x, y] of points) {
@@ -780,7 +814,7 @@ function rgbRange(bytes, width, points) {
   return maximum - minimum
 }
 
-function sampleGrid({ x0, x1, y0, y1, columns, rows }) {
+export function sampleGrid({ x0, x1, y0, y1, columns, rows }) {
   const points = []
   for (let yIndex = 0; yIndex < rows; yIndex += 1) {
     const y = Math.round(y0 + ((y1 - y0) * yIndex) / Math.max(1, rows - 1))

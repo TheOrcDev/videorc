@@ -6,6 +6,10 @@ import { join } from 'node:path'
 
 import {
   appQuitRecordingSessionParams,
+  barrierNeverEngagedError,
+  finalizationBarrierSessionFfmpegPath,
+  finalizationBarrierSessionStart,
+  finalizationBarrierShimFiles,
   isMp4FinalizationExport,
   readFinalizationRecoveryRecords
 } from '../smoke-app-quit-recording-finalization.mjs'
@@ -53,6 +57,44 @@ test('recognizes only the private MKV-to-MP4 finalization export', () => {
   )
 })
 
+test('recognizes the plan 200 export that copies AAC and adds chapters', () => {
+  const copyAudioExport = [
+    '-n',
+    '-hide_banner',
+    '-loglevel',
+    'warning',
+    '-i',
+    '/tmp/recording.mkv',
+    '-f',
+    'ffmetadata',
+    '-i',
+    '/tmp/chapters.txt',
+    '-map',
+    '0',
+    '-map_chapters',
+    '1',
+    '-c:v',
+    'copy',
+    '-c:a',
+    'copy',
+    '-movflags',
+    '+faststart',
+    '-metadata',
+    'creation_time=2026-10-31T00:00:00Z',
+    '/tmp/.videorc-export-abc.partial/export.mp4'
+  ]
+
+  assert.equal(isMp4FinalizationExport(copyAudioExport), true)
+  assert.equal(
+    isMp4FinalizationExport(
+      copyAudioExport.map((argument, index) =>
+        argument === 'copy' && copyAudioExport[index - 1] === '-c:a' ? 'opus' : argument
+      )
+    ),
+    false
+  )
+})
+
 test('builds a synthetic recording with a one-shot output directory capability', () => {
   const params = appQuitRecordingSessionParams({
     outputDirectoryCapability: 'capability-1'
@@ -94,4 +136,80 @@ test('reads only published JSON finalization recovery records', () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('the POSIX barrier shim stays one executable `ffmpeg` node script', () => {
+  const shim = finalizationBarrierShimFiles({
+    platform: 'darwin',
+    moduleUrl: 'file:///repo/scripts/smoke-app-quit-recording-finalization.mjs'
+  })
+  assert.equal(shim.entry, 'ffmpeg')
+  assert.equal(shim.files.length, 1)
+  assert.equal(shim.files[0].name, 'ffmpeg')
+  assert.match(shim.files[0].content, /^#!\/usr\/bin\/env node\n/)
+  assert.match(
+    shim.files[0].content,
+    /import \{ runFfmpegFinalizationBarrierShim \} from "file:\/\/\/repo\/scripts\/smoke-app-quit-recording-finalization\.mjs"/
+  )
+  assert.equal(
+    finalizationBarrierSessionFfmpegPath('/state/finalization-barrier-bin/ffmpeg', 'darwin'),
+    undefined
+  )
+})
+
+test('Linux names the POSIX shim as the session FFmpeg: dev main pins the vendored binary ahead of it', () => {
+  const shim = finalizationBarrierShimFiles({
+    platform: 'linux',
+    moduleUrl: 'file:///repo/scripts/smoke-app-quit-recording-finalization.mjs'
+  })
+  assert.equal(shim.entry, 'ffmpeg')
+  const shimPath = '/state/finalization-barrier-bin/ffmpeg'
+  const ffmpegPath = finalizationBarrierSessionFfmpegPath(shimPath, 'linux')
+  assert.equal(ffmpegPath, shimPath)
+  const params = appQuitRecordingSessionParams({ outputDirectoryCapability: 'c', ffmpegPath })
+  assert.equal(params.output.ffmpegPath, shimPath)
+})
+
+test('a session naming the shim starts through the admin bridge; the renderer socket strips ffmpegPath', () => {
+  const named = appQuitRecordingSessionParams({
+    outputDirectoryCapability: 'c',
+    ffmpegPath: '/state/finalization-barrier-bin/ffmpeg'
+  })
+  assert.deepEqual(finalizationBarrierSessionStart(named), {
+    route: 'backend-debug-rpc',
+    method: 'recording.start_test'
+  })
+  const unnamed = appQuitRecordingSessionParams({ outputDirectoryCapability: 'c' })
+  assert.equal('ffmpegPath' in unnamed.output, false)
+  assert.deepEqual(finalizationBarrierSessionStart(unnamed), {
+    route: 'renderer',
+    method: 'session.start'
+  })
+})
+
+test('the Windows barrier shim is ffmpeg.cmd running a sibling module, named as the session FFmpeg (#1081)', () => {
+  const shim = finalizationBarrierShimFiles({
+    platform: 'win32',
+    moduleUrl: 'file:///C:/repo/scripts/smoke-app-quit-recording-finalization.mjs',
+    nodePath: 'C:\\Program Files\\nodejs\\node.exe'
+  })
+  assert.equal(shim.entry, 'ffmpeg.cmd')
+  const files = Object.fromEntries(shim.files.map((file) => [file.name, file.content]))
+  assert.deepEqual(Object.keys(files).sort(), ['ffmpeg.cmd', 'shim.mjs'])
+  assert.equal(files['ffmpeg.cmd'], '@"C:\\Program Files\\nodejs\\node.exe" "%~dp0shim.mjs" %*\r\n')
+  assert.doesNotMatch(files['shim.mjs'], /^#!/)
+  assert.match(files['shim.mjs'], /runFfmpegFinalizationBarrierShim\(process\.argv\.slice\(2\)\)/)
+
+  const shimPath = 'C:\\state\\finalization-barrier-bin\\ffmpeg.cmd'
+  const ffmpegPath = finalizationBarrierSessionFfmpegPath(shimPath, 'win32')
+  assert.equal(ffmpegPath, shimPath)
+  const params = appQuitRecordingSessionParams({ outputDirectoryCapability: 'c', ffmpegPath })
+  assert.equal(params.output.ffmpegPath, shimPath)
+})
+
+test('a process lost before the barrier engaged is reported as the barrier, not finalization', () => {
+  const error = barrierNeverEngagedError(new Error('Original backend pid 7 exited.'), '/s/ffmpeg')
+  assert.match(error.message, /never entered the barrier/)
+  assert.match(error.message, /\/s\/ffmpeg/)
+  assert.match(error.message, /Original backend pid 7 exited\./)
 })

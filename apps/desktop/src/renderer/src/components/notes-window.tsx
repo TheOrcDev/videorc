@@ -270,7 +270,7 @@ export function NotesWindow({
           </span>
         ) : null}
         <div className="ml-auto flex shrink-0 items-center">
-          {/* SegmentedControl has no Radix, so it splits no shared chunk the
+          {/* SegmentedControl has no Tabs primitive, so it splits no shared chunk the
               main window loads eagerly (asset budget). A pick goes back to
               writing. */}
           <SegmentedControl

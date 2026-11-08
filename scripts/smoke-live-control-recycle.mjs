@@ -22,14 +22,17 @@ import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   appQuitRecordingSessionParams,
+  barrierNeverEngagedError,
   createExecutableFfmpegShim,
   createFinalizationBarrierServer,
   finalizationBarrierEnvironment,
+  finalizationBarrierSessionFfmpegPath,
+  finalizationBarrierSessionStart,
   readFinalizationRecoveryRecords,
   readSessionRow,
   resolveToolPath
 } from './smoke-app-quit-recording-finalization.mjs'
-import { connectBackend, request } from './smoke-recording-session.mjs'
+import { connectBackend, request, sessionSelectsMicrophone } from './smoke-recording-session.mjs'
 
 const BLOCK_METHOD = 'test.commandLanes.liveControl.block'
 const STATUS_METHOD = 'test.commandLanes.accountMaintenance.status'
@@ -113,17 +116,23 @@ try {
     { kind: 'output-directory', path: outputDirectory },
     { timeoutMs }
   )
-  const recording = await request(
-    oldSocket,
-    timeoutMs,
-    'session.start',
-    dualOutputRecordingSessionParams({
-      outputDirectoryCapability: requiredString(
-        outputAuthorization.capabilityId,
-        'output directory capability'
-      )
-    })
-  )
+  const sessionParams = dualOutputRecordingSessionParams({
+    outputDirectoryCapability: requiredString(
+      outputAuthorization.capabilityId,
+      'output directory capability'
+    ),
+    ffmpegPath: finalizationBarrierSessionFfmpegPath(shimPath)
+  })
+  const sessionStart = finalizationBarrierSessionStart(sessionParams)
+  const recording =
+    sessionStart.route === 'backend-debug-rpc'
+      ? await requestSmokeCommand(
+          smoke,
+          'backend-debug-rpc',
+          { method: sessionStart.method, params: sessionParams, timeoutMs },
+          { timeoutMs }
+        )
+      : await request(oldSocket, timeoutMs, sessionStart.method, sessionParams)
   assert.equal(recording?.state, 'recording', `Expected recording, got ${recording?.state}.`)
   const sessionId = requiredString(recording.sessionId, 'recording session ID')
   await waitForStreamBytes(10_000)
@@ -211,6 +220,7 @@ try {
     ffprobePath: realFfprobe,
     intendedFps: 30,
     expectAudio: true,
+    microphoneAvailable: sessionSelectsMicrophone(sessionParams.sources),
     gates: { requireMotion: false }
   })
   const reports = writeReports(quality)
@@ -355,7 +365,13 @@ async function waitForFinalizationEntryWithLiveProcesses(
 ) {
   const deadline = Date.now() + budgetMs
   while (!barrier.entry && Date.now() < deadline) {
-    assertProcessesAliveWithoutReplacement({ connections, oldBackendPid, appPid })
+    // A backend that exits before the export reaches the barrier means the
+    // barrier never engaged (#1081), not that safe finalization failed.
+    try {
+      assertProcessesAliveWithoutReplacement({ connections, oldBackendPid, appPid })
+    } catch (error) {
+      throw barrierNeverEngagedError(error, shimPath)
+    }
     await Promise.race([barrier.entryPromise, sleep(pollMs)])
   }
   if (!barrier.entry) {
@@ -424,8 +440,8 @@ function assertBackendConnection(connection, label) {
   assert.ok(Number.isSafeInteger(connection.port) && connection.port > 0, `${label} port missing`)
 }
 
-function dualOutputRecordingSessionParams({ outputDirectoryCapability }) {
-  const params = appQuitRecordingSessionParams({ outputDirectoryCapability })
+function dualOutputRecordingSessionParams({ outputDirectoryCapability, ffmpegPath }) {
+  const params = appQuitRecordingSessionParams({ outputDirectoryCapability, ffmpegPath })
   return {
     ...params,
     output: {

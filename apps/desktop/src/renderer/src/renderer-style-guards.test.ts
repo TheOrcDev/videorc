@@ -21,6 +21,8 @@ import { describe, expect, it } from 'vitest'
 //   SelectTrigger or Slider outside one names itself, a FieldLabel never
 //   points `htmlFor` at a group no label element can name, and no Switch
 //   sits inside a button.
+// - No hand-rolled gradient on a screen, and the chrome materials only on the
+//   primitives (plan 208 S4): the shine is the controls', never a screen's.
 
 const RENDERER_ROOT = join(__dirname, '..')
 
@@ -44,7 +46,38 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/components/notes-window.tsx',
   // shadcn chart: selectors that MATCH Recharts' own default strokes
   // ([stroke='#ccc']) to restyle them with tokens; it paints no literal.
-  'src/components/ui/chart.tsx'
+  'src/components/ui/chart.tsx',
+  // audiocn's LCD (plan 196): the screen's bezel and glass are the
+  // instrument's own materials, and the hardware inks are choices Videorc
+  // never makes. Videorc draws the ink in --primary (MicLevelMeter).
+  'src/components/ui/lcd-display.tsx'
+])
+
+// Plan 208 S4 (D2): the shine lives on the controls. The chrome materials are
+// defined once in styles.css and worn by the primitives in components/ui (and
+// the two primitives outside it: the sidebar's page row and MediaCard). A
+// screen never rolls its own gradient, so the shine can't spread screen by
+// screen. Each exception draws a picture or stream content, never chrome.
+const HAND_ROLLED_GRADIENT =
+  /\bbg-(?:linear|radial|conic|gradient)-|\b(?:linear|radial|conic)-gradient\(/
+const GRADIENT_ALLOWLIST = new Set([
+  // A scrim under a picture's name, over the picture itself.
+  'src/components/live-backgrounds-group.tsx',
+  'src/components/background-replace-dialog.tsx',
+  'src/components/tabs/assets-tab.tsx',
+  // The checkerboard behind a banner's transparent pixels.
+  'src/components/banner-thumbnail.tsx',
+  // The blank picture a scene thumbnail shows before its first frame.
+  'src/components/studio/scenes-gallery.tsx',
+  // The level meter's zones (healthy, hot, clipping) as one gradient.
+  'src/components/studio/mic-level-meter.tsx',
+  // Caption style previews: stand-ins for the stream behind a caption.
+  'src/components/captions/caption-preview.tsx'
+])
+const CHROME_MATERIAL = /\bchrome-(?:fill|plate|bead|bead-ink|led|row-live|row-member)\b/
+const CHROME_PRIMITIVES_OUTSIDE_UI = new Set([
+  'src/components/sidebar.tsx',
+  'src/components/media-card.tsx'
 ])
 
 function rendererFiles(): string[] {
@@ -264,6 +297,54 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
     ).toEqual([])
   })
 
+  it('paints no chrome ground under the windows: nothing imports its stills (owner, 2026-10-29)', () => {
+    // The owner took the Liquid Chrome still out from under every window. Only
+    // the phone remote serves it now, from the backend.
+    expect(offenders(/chrome-ground-(?:dark|light)\.webp/)).toEqual([])
+  })
+
+  it('keeps hand-rolled gradients out of the screens: the shine is the primitives (plan 208 S4)', () => {
+    const screens = (path: string): boolean =>
+      path !== 'src/styles.css' && !path.startsWith('src/components/ui/')
+    expect(
+      offenders(HAND_ROLLED_GRADIENT, (path) => screens(path) && !GRADIENT_ALLOWLIST.has(path))
+    ).toEqual([])
+    // Each exception still draws its gradient, so the list cannot rot.
+    for (const path of GRADIENT_ALLOWLIST) {
+      expect(
+        offenders(HAND_ROLLED_GRADIENT, (candidate) => candidate === path),
+        path
+      ).not.toEqual([])
+    }
+    expect(HAND_ROLLED_GRADIENT.test("'bg-linear-to-b from-foreground/10'")).toBe(true)
+    expect(HAND_ROLLED_GRADIENT.test("'bg-gradient-to-t from-background/95'")).toBe(true)
+    expect(HAND_ROLLED_GRADIENT.test("'bg-[radial-gradient(circle,white,black)]'")).toBe(true)
+    expect(HAND_ROLLED_GRADIENT.test('`linear-gradient(to right, ${stops})`')).toBe(true)
+    expect(HAND_ROLLED_GRADIENT.test("'chrome-fill border-0'")).toBe(false)
+  })
+
+  it('wears the chrome materials only in the primitives (plan 208 S4)', () => {
+    expect(
+      offenders(
+        CHROME_MATERIAL,
+        (path) =>
+          /\.(tsx|ts)$/.test(path) &&
+          !path.startsWith('src/components/ui/') &&
+          !CHROME_PRIMITIVES_OUTSIDE_UI.has(path)
+      )
+    ).toEqual([])
+    for (const path of CHROME_PRIMITIVES_OUTSIDE_UI) {
+      expect(
+        offenders(CHROME_MATERIAL, (candidate) => candidate === path),
+        path
+      ).not.toEqual([])
+    }
+    // The chrome rows (plan 0011) are materials too: screens take them from
+    // components/ui/chrome-row.ts.
+    expect(CHROME_MATERIAL.test("'chrome-row-member'")).toBe(true)
+    expect(CHROME_MATERIAL.test("'chrome-row-live'")).toBe(true)
+  })
+
   it('paints floating surfaces with glass-float, never the popover coat', () => {
     // Plan 072: a fresh shadcn add brings `bg-popover`, which read as a black
     // slab on the window glass. Floating surfaces use `border glass-float`.
@@ -305,10 +386,13 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
   })
 
   it('never passes data-slot to a component: hooks on components are data-testid', () => {
-    // components/ui is shadcn's own: its primitives name their Radix parts.
+    // components/ui is shadcn's own: its primitives name their own parts.
+    // SectionLabel's `Element` is the tag name it renders ('span', 'h3'…), so
+    // its slot lands on the element, never on a component.
+    const slotOnIntrinsicTag = new Set(['src/components/section-label.tsx'])
     const offending = files
       .filter(({ path, code }) => path.endsWith('.tsx') && code.includes('data-slot'))
-      .filter(({ path }) => !path.startsWith('src/components/ui/'))
+      .filter(({ path }) => !path.startsWith('src/components/ui/') && !slotOnIntrinsicTag.has(path))
       .flatMap(({ path }) => passedSlots(path, readFileSync(join(RENDERER_ROOT, path), 'utf8')))
     expect(offending).toEqual([])
   })
@@ -611,7 +695,10 @@ function pressedButtonGroups(path: string, source: string): string[] {
   const found: string[] = []
   const visit = (node: ts.Node, inMap: boolean): void => {
     const parts = jsxParts(file, node)
-    if (parts && inMap && parts.attributes.has('aria-pressed')) {
+    // LcdPanelPressRow is a pressed button too: it sets aria-pressed inside (plan 197).
+    const pressed =
+      parts && (parts.attributes.has('aria-pressed') || parts.tag === 'LcdPanelPressRow')
+    if (parts && inMap && pressed) {
       const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
       found.push(`${path}:${line + 1}: <${parts.tag} aria-pressed>`)
     }
@@ -671,7 +758,9 @@ const POPUP_TIER_FILES = new Set([
   'src/components/ui/chart.tsx',
   // audiocn (plan 092): its channel chips and slider well keep the kit's look.
   'src/components/ui/channel-toggle.tsx',
-  'src/components/ui/parameter-slider.tsx'
+  'src/components/ui/parameter-slider.tsx',
+  // audiocn (plan 196): the LCD's bezel, 10 px like a row.
+  'src/components/ui/lcd-display.tsx'
 ])
 
 const OFF_TIER_RADIUS_ALLOWLIST = new Set([
@@ -686,7 +775,13 @@ const OFF_TIER_RADIUS_ALLOWLIST = new Set([
   'src/components/ui/chart.tsx',
   'src/components/ui/checkbox.tsx',
   // audiocn (plan 092): the mixer's dashed empty well.
-  'src/components/ui/mixer.tsx'
+  'src/components/ui/mixer.tsx',
+  // audiocn (plan 189): the pad root's `rounded-xl`; Videorc passes
+  // `rounded-row` from outside (docs/audiocn.md), so no pad shows it.
+  'src/components/ui/sound-pad.tsx',
+  // audiocn (plan 196): the LCD's screen, its select and the CLIP flag.
+  'src/components/ui/lcd-display.tsx',
+  'src/components/ui/lcd-meter.tsx'
 ])
 
 describe('guardrails consolidated (plan 174 S4.1)', SOURCE_SCAN_TIMEOUT, () => {
@@ -700,13 +795,22 @@ describe('guardrails consolidated (plan 174 S4.1)', SOURCE_SCAN_TIMEOUT, () => {
 
   it('never hand-rolls a choice from pressed buttons in a list (S1.7)', () => {
     // The Studio's takeovers: any number of them, one on at a time, each a
-    // button with its own disabled reason. A ToggleGroup would need the
-    // reasons rebuilt; a follow-up, not a mechanical swap.
-    const allowed = 'src/components/studio/session-panel.tsx'
+    // button (or, with Retro LCD, a row on the Takeover screen; plan 197)
+    // with its own disabled reason. A ToggleGroup would need the reasons
+    // rebuilt; a follow-up, not a mechanical swap.
+    const allowed = [
+      'src/components/studio/session-panel.tsx',
+      'src/components/studio/retro-lcd-studio.tsx'
+    ]
     const found = parsed(pressedButtonGroups)
-    expect(found.filter((line) => !line.startsWith(`${allowed}:`))).toEqual([])
-    // The exception stays real, so it cannot outlive its reason.
-    expect(found.some((line) => line.startsWith(`${allowed}:`))).toBe(true)
+    expect(found.filter((line) => !allowed.some((path) => line.startsWith(`${path}:`)))).toEqual([])
+    // Each exception stays real, so it cannot outlive its reason.
+    for (const path of allowed) {
+      expect(
+        found.some((line) => line.startsWith(`${path}:`)),
+        path
+      ).toBe(true)
+    }
   })
 
   it('sizes controls in components/ui, never per call site (J1-11)', () => {

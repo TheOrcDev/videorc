@@ -52,6 +52,7 @@ import type {
   CohostPromise,
   CohostQuestion,
   CohostSayHi,
+  ClipLength,
   CohostState,
   CohostUtteranceState,
   CohostWindowBuddy,
@@ -65,6 +66,7 @@ import type {
   LiveChatSnapshot,
   ModerationOperation,
   ScopeReconnectPlatform,
+  StreamManagerHideMethod,
   ViewerSample
 } from '@/lib/backend'
 import { isActivityOnlyEvent } from '@/lib/backend'
@@ -86,7 +88,7 @@ import {
 } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { CHAT_HEADER_CONTAINER, CHAT_HEADER_TIGHT_HIDDEN } from '@/lib/chat-header-tiers'
-import { sortMessagesChronological } from '@/lib/live-chat-view'
+import { isSortedChronologically, sortMessagesChronological } from '@/lib/live-chat-view'
 import { activityItems, thankYouDraft, type ActivityItem } from '@/lib/stream-activity'
 import { formatHistoryDate, statItems } from '@/lib/stream-manager-stats'
 import {
@@ -104,7 +106,7 @@ import {
   type StreamManagerPane,
   type StreamManagerRightPane
 } from '@/lib/stream-manager-layout'
-import { chatDraftMaxChars, sendablePlatforms } from '@/lib/chat-send'
+import { sendablePlatforms } from '@/lib/chat-send'
 import { shortcutLabel } from '@/lib/platform'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
@@ -117,6 +119,7 @@ import {
 } from '@/components/stream-manager/command-cards'
 import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/buddy-command-view'
 import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
+import { buddyOffOutputsNotice } from '@/lib/buddy-output-notice'
 import {
   removalPaneView,
   removeFromChatAvailable,
@@ -124,6 +127,9 @@ import {
 } from '@/lib/chat-removal-view'
 
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
+import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
+import type { SoundRelayAction, SoundboardSummary } from '../../../../shared/sound-commands'
+import type { CohostActAnswer } from '../../../../shared/buddy-act'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
@@ -241,11 +247,9 @@ function PaneLabel({
       ) : null}
       {onStream ? (
         <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="flex" data-slot="pane-on-stream">
-              <StatusDot tone="good" />
-              <span className="sr-only">On stream:</span>
-            </span>
+          <TooltipTrigger render={<span className="flex" data-slot="pane-on-stream" />}>
+            <StatusDot tone="good" />
+            <span className="sr-only">On stream:</span>
           </TooltipTrigger>
           <TooltipContent>On stream</TooltipContent>
         </Tooltip>
@@ -268,6 +272,11 @@ export interface StreamManagerProps {
   viewerSample?: ViewerSample | null
   alwaysOnTop?: boolean
   onToggleAlwaysOnTop?: () => void
+  /** Hide from stream (plan 215 D6): the switch's state and this platform's
+   * way of hiding the window, from main's window state. */
+  hiddenFromStream?: boolean
+  hideFromStreamMethod?: StreamManagerHideMethod
+  onToggleHiddenFromStream?: () => void
   highlightAnchor?: CommentHighlightAnchor
   onHighlightAnchorChange?: (anchor: CommentHighlightAnchor) => void
   highlightedId?: string | null
@@ -281,11 +290,42 @@ export interface StreamManagerProps {
   markerContext?: import('@/lib/backend').MarkerContext | null
   onMarker?: (label?: string) => Promise<import('@/lib/backend').SessionMarker>
   onUndoMarker?: (marker: import('@/lib/backend').SessionMarker) => Promise<void>
-  onMarkClip?: () => void
+  /** The Clip buttons (plan 199: 30 s or the minute). */
+  onMarkClip?: (seconds: ClipLength) => void
+  /** `/clip` in the composer (plan 181 R4): the same action, answered with its words. */
+  onClip?: (seconds: ClipLength) => Promise<string>
+  /** Plan 210 S8b: Hide screen (true) or Show screen (false), relayed to Studio. */
+  onScreenPrivacy?: (hidden: boolean) => unknown
+  /**
+   * Banners (plan 186 S7): the list Studio pushed (null until it loads) and
+   * one show or hide, relayed to Studio. The status bar's Banners menu and
+   * the composer's `/banner` use them, on air or not: banners matter in
+   * recordings too. Resolves false when it didn't happen, already said.
+   */
+  banners?: readonly BannerSummary[] | null
+  onBanner?: (action: BannerRelayAction) => Promise<boolean>
+  /**
+   * Sounds (plan 189 S9): the board Studio pushed (null until it loads) and
+   * one pad, `/sound` or Stop all, relayed to Studio. The status bar's Sounds
+   * popover and the composer's `/sound` use them, on air or not: sounds
+   * matter in recordings too. Resolves false when it didn't happen, already
+   * said.
+   */
+  sounds?: SoundboardSummary | null
+  onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /** Plan 209 S20: `/buddy <words>`, relayed to Studio; resolves to Buddy's
+   * final answer, which the composer shows. */
+  onBuddy?: (sentence: string) => Promise<CohostActAnswer>
   onOpenPreview?: () => void
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */
   onShowFollowNames?: () => void
+  /** "Use Sign in" on a stream-key destination's chat row (plan 213 J1):
+   * the main window opens that destination in Livestream → Setup. */
+  onUseSignIn?: (targetId: string) => void
+  /** "Sign in to Videorc" on a chat row the relay parked (plan 215 A3): the
+   * main window starts the account sign-in. */
+  onSignInToVideorc?: () => void
   /** Auto-show Activity celebrations on stream (plan 156): the one switch,
    * owned by Electron main; the Studio renderer runs the engine. */
   autoShowActivity?: boolean
@@ -331,12 +371,17 @@ export interface StreamManagerProps {
   onBuddySay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   /** `overlayLayout.buddy.showOnStream`, through the Studio relay. */
   onBuddyShowOnStream?: (showOnStream: boolean) => void
+  /** Chat on stream (plan 215 G, D5): `overlayLayout.chat.showOnStream` and
+   * its switch in the chat pane, through the Studio relay. */
+  chatOnStream?: boolean
+  onChatOnStream?: (showOnStream: boolean) => void
   /** A reaction chip (plan 168 S-D3), through the Studio relay. */
   onBuddyReact?: (reaction: string) => void
   /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's
-   * posting mode control and behaviour chips; unknown hides them. */
+   * talk control and behaviour chips; unknown hides them. */
   cohostAutoChat?: CohostAutoChat
-  /** The posting mode (plan 174 S3.14a): `{mode}` alone, never `enabled`. */
+  /** How Buddy talks (plan 174 S3.14a, plan 211 D3): `{talk}` alone, never
+   * `enabled` and never the legacy `mode`. */
   onCohostAutoChatChange?: (patch: CohostAutoChatRelayPatch) => void
   /** The behaviour chips' link to Buddy → Chat, their one home (plan 174 D7). */
   onCohostOpenChatSettings?: () => void
@@ -378,6 +423,9 @@ export function StreamManager({
   viewerSample = null,
   alwaysOnTop = false,
   onToggleAlwaysOnTop,
+  hiddenFromStream = false,
+  hideFromStreamMethod = 'unsupported',
+  onToggleHiddenFromStream,
   highlightAnchor,
   onHighlightAnchorChange,
   highlightedId = null,
@@ -388,11 +436,20 @@ export function StreamManager({
   onHighlight,
   onClear,
   onMarkClip,
+  onClip,
+  onScreenPrivacy,
+  banners,
+  onBanner,
+  sounds,
+  onSound,
+  onBuddy,
   markerContext,
   onMarker,
   onUndoMarker,
   onOpenPreview,
   onShowFollowNames,
+  onUseSignIn,
+  onSignInToVideorc,
   autoShowActivity = false,
   onAutoShowActivityChange,
   onReconnectScopes,
@@ -420,6 +477,8 @@ export function StreamManager({
   onBuddySay,
   onBuddyShowOnStream,
   onBuddyReact,
+  chatOnStream,
+  onChatOnStream,
   cohostAutoChat,
   onCohostAutoChatChange,
   onCohostOpenChatSettings,
@@ -441,7 +500,15 @@ export function StreamManager({
   onCohostEnableConsent,
   onCohostUpgrade
 }: StreamManagerProps): ReactElement {
-  const messages = useMemo(() => sortMessagesChronological(snapshot.messages), [snapshot.messages])
+  // The buffer almost always arrives sorted: one scan instead of a copy and a
+  // full sort per chat message (plan 191). Either way the rows are the same.
+  const messages = useMemo<readonly LiveChatMessage[]>(
+    () =>
+      isSortedChronologically(snapshot.messages)
+        ? snapshot.messages
+        : sortMessagesChronological(snapshot.messages),
+    [snapshot.messages]
+  )
   // The message on stream now (plan 095, S2): the backend's live state when
   // it has one. Chat, Activity and Buddy all read this one slot.
   const liveHighlightId =
@@ -455,6 +522,9 @@ export function StreamManager({
   const [nowMs, setNowMs] = useState(() => Date.now())
   const onAir =
     !inHistory && dashboard?.session.state !== undefined && dashboard.session.state !== 'off-air'
+  // The Clip button (plan 181 R4): on air, or whenever the ring holds frames
+  // (the main window says so through the marker context).
+  const clipAvailable = !inHistory && (onAir || markerContext?.clip?.available === true)
   // Chat removals (plan 140, S6): each row's newest removal, and Buddy's
   // cards and their result lines. History never has any.
   const removalOperations = live ? moderationOperations : NO_MODERATION_OPERATIONS
@@ -618,21 +688,27 @@ export function StreamManager({
     chatVisible,
     (message) => !isActivityOnlyEvent(message.eventType)
   )
-  const communityGifts = new Set([
-    ...messages.flatMap((message) =>
-      message.details?.kind === 'subscription' &&
-      message.details.subscription === 'community-sub-gift' &&
-      !message.isDeleted &&
-      message.details.communityGiftId
-        ? [message.details.communityGiftId]
-        : []
-    ),
-    ...(snapshot.delivery?.entries.flatMap(({ message }) =>
-      message.gift === 'community' && message.communityGiftId && !message.isDeleted
-        ? [message.communityGiftId]
-        : []
-    ) ?? [])
-  ])
+  // Rebuilt only when the rows or the journal change, not on every render
+  // (plan 191).
+  const communityGifts = useMemo(
+    () =>
+      new Set([
+        ...messages.flatMap((message) =>
+          message.details?.kind === 'subscription' &&
+          message.details.subscription === 'community-sub-gift' &&
+          !message.isDeleted &&
+          message.details.communityGiftId
+            ? [message.details.communityGiftId]
+            : []
+        ),
+        ...(snapshot.delivery?.entries.flatMap(({ message }) =>
+          message.gift === 'community' && message.communityGiftId && !message.isDeleted
+            ? [message.communityGiftId]
+            : []
+        ) ?? [])
+      ]),
+    [messages, snapshot.delivery]
+  )
   const activityUnseen = useUnseen(
     inHistory ? undefined : snapshot.delivery,
     arrivalKey,
@@ -905,15 +981,17 @@ export function StreamManager({
           />
         ) : null}
       </div>
-      {/* Plan 164 S-D6, plan 174 S3.14a: the posting mode governs only what
-          Buddy posts; the behaviours are read-only chips linking to Buddy →
-          Chat. Neither touches Buddy Live. */}
+      {/* Plan 164 S-D6, plan 174 S3.14a, plan 211 D1: the talk control
+          governs only how Buddy talks on its own; the behaviours are
+          read-only chips linking to Buddy → Chat. Neither touches Buddy Live. */}
       {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
         <BuddyChatControls
+          aiGreetings={cohostGate?.allowed === true && cohostConsented}
           autoChat={cohostAutoChat}
           name={buddyName}
           picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
-          onModeChange={(mode) => onCohostAutoChatChange({ mode })}
+          // Plan 211 D3: the relay carries `talk` alone, never the legacy `mode`.
+          onTalkChange={(talk) => onCohostAutoChatChange({ talk })}
           onOpenChatSettings={onCohostOpenChatSettings}
         />
       ) : null}
@@ -1035,11 +1113,17 @@ export function StreamManager({
       {cohostBuddy ? (
         <BuddySayFooter
           buddy={cohostBuddy}
+          offOutputsNotice={buddyOffOutputsNotice({
+            enabled: cohostEnabled,
+            talk: cohostAutoChat?.talk,
+            onAir,
+            showOnStream: cohostBuddy.showOnStream,
+            showInRecording: cohostBuddy.showInRecording,
+            name: buddyName
+          })}
           packReactions={buddyPackReactions}
           previewRef={buddyPreviewRef}
-          sayChatCap={sendTargets.length > 0 ? chatDraftMaxChars(sendTargets) : null}
           sayPending={buddyPending}
-          sayPostsToChat={live && cohostAutoChat?.mode === 'auto'}
           onReact={onBuddyReact}
           onSay={onBuddySay}
           onShowOnStreamChange={onBuddyShowOnStream}
@@ -1087,7 +1171,12 @@ export function StreamManager({
         </div>
       ) : null}
 
-      <StatsBar items={stats} layout={statsLayout} onLayoutChange={changeStatsLayout} />
+      <StatsBar
+        items={stats}
+        layout={statsLayout}
+        screenHidden={markerContext?.screen?.hidden === true}
+        onLayoutChange={changeStatsLayout}
+      />
 
       <div className={PANES_GRID} data-slot="stream-manager-panes">
         {/* Below Wide: one segmented control picks the pane. */}
@@ -1192,7 +1281,17 @@ export function StreamManager({
             onRemoveFromChat={live ? onRemoveFromChat : undefined}
             markerContext={inHistory ? null : markerContext}
             onMarker={inHistory ? undefined : onMarker}
+            onClip={inHistory ? undefined : onClip}
             onUndoMarker={inHistory ? undefined : onUndoMarker}
+            banners={banners}
+            onBanner={inHistory ? undefined : onBanner}
+            sounds={sounds}
+            onSound={inHistory ? undefined : onSound}
+            onBuddy={inHistory ? undefined : onBuddy}
+            onUseSignIn={inHistory ? undefined : onUseSignIn}
+            chatOnStream={inHistory ? undefined : chatOnStream}
+            onChatOnStreamChange={inHistory ? undefined : onChatOnStream}
+            onSignInToVideorc={inHistory ? undefined : onSignInToVideorc}
             onSend={onSend}
           />
         </div>
@@ -1232,6 +1331,9 @@ export function StreamManager({
 
       <StreamManagerStatusBar
         alwaysOnTop={alwaysOnTop}
+        hiddenFromStream={hiddenFromStream}
+        hideFromStreamMethod={hideFromStreamMethod}
+        onToggleHiddenFromStream={onToggleHiddenFromStream}
         audience={inHistory ? (history?.audience ?? null) : (dashboard?.audience ?? null)}
         highlightAnchor={onHighlightAnchorChange && !inHistory ? highlightAnchor : undefined}
         providers={snapshot.providers}
@@ -1239,7 +1341,14 @@ export function StreamManager({
         onFocusBuddy={cohostVisible ? showBuddy : undefined}
         onFocusComposer={composerAvailable ? writeInChat : undefined}
         onHighlightAnchorChange={inHistory ? undefined : onHighlightAnchorChange}
-        onMarkClip={onAir ? onMarkClip : undefined}
+        clip={markerContext?.clip}
+        onMarkClip={clipAvailable ? onMarkClip : undefined}
+        screen={markerContext?.screen}
+        onScreenPrivacy={onScreenPrivacy}
+        banners={banners}
+        onBanner={onBanner}
+        sounds={sounds}
+        onSound={onSound}
         onOpenPreview={onOpenPreview}
         onSearchChat={searchChat}
         onStatsLayoutChange={changeStatsLayout}

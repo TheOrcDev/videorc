@@ -166,6 +166,30 @@ describe('mapping table rows', () => {
     expect(result.layout.cameraTransform!.width).toBeCloseTo(0.25, 2)
   })
 
+  it('a PipeWire screen capture never claims to capture a known display', () => {
+    const portal = {
+      name: 'Portal',
+      kind: 'display' as const,
+      obsKind: 'pipewire-screen-capture-source'
+    }
+    const setup = setupFrom({
+      sources: [portal],
+      scenes: [{ name: 'Main', current: true, items: [item('Portal')] }]
+    })
+    const row = mapObsSetup(setup, DEVICES).report.find((entry) => entry.subject === 'Portal')
+    expect(row?.verdict).toBe('approximated')
+    expect(row?.note).toMatch(
+      /^This OBS source can capture a monitor or a window, so it starts on /
+    )
+    const noScreen = mapObsSetup(
+      setup,
+      DEVICES.filter((device) => device.kind !== 'screen')
+    ).report.find((entry) => entry.subject === 'Portal')
+    expect(noScreen?.note).toBe(
+      'This OBS source can capture a monitor or a window. Pick one in Sources.'
+    )
+  })
+
   it('portrait-cropped camera → portrait aspect', () => {
     const result = mapObsSetup(
       setupFrom({
@@ -257,6 +281,66 @@ describe('mapping table rows', () => {
       DEVICES
     )
     expect(result.stream).toMatchObject({ kind: 'oauth-suggest', platform: 'twitch' })
+  })
+
+  // Plan 206: Facebook is a stream-key card, so OBS's key belongs in it and
+  // never in "connect the account".
+  it('the OBS Facebook Live service imports to the Facebook card', () => {
+    const result = mapObsSetup(
+      setupFrom({
+        sources: [display],
+        scenes: [{ name: 'S', current: true, items: [item('Screen')] }],
+        service: {
+          type: 'rtmp_common',
+          service: 'Facebook Live',
+          server: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+          hasKey: true
+        }
+      }),
+      DEVICES
+    )
+    expect(result.stream).toMatchObject({
+      kind: 'rtmp-platform',
+      platform: 'facebook',
+      serverUrl: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+      hasKey: true
+    })
+    const notes = reportNotes(result).join('\n')
+    expect(notes).toContain('into Facebook, set to Stream key')
+    expect(notes).not.toContain('Connect the account')
+  })
+
+  it('a custom server on a Facebook host imports to the Facebook card', () => {
+    const result = mapObsSetup(
+      setupFrom({
+        sources: [display],
+        scenes: [{ name: 'S', current: true, items: [item('Screen')] }],
+        service: {
+          type: 'rtmp_custom',
+          server: 'rtmps://live-api-s.facebook.com:443/rtmp/',
+          hasKey: true
+        }
+      }),
+      DEVICES
+    )
+    expect(result.stream).toMatchObject({ kind: 'rtmp-platform', platform: 'facebook' })
+    expect(reportNotes(result, 'imported').join('\n')).toContain(
+      'Facebook Live: Imports the server and the stream key into Facebook'
+    )
+    // A look-alike host stays a custom server.
+    const lookalike = mapObsSetup(
+      setupFrom({
+        sources: [display],
+        scenes: [{ name: 'S', current: true, items: [item('Screen')] }],
+        service: {
+          type: 'rtmp_custom',
+          server: 'rtmp://facebook.com.example.net/live',
+          hasKey: true
+        }
+      }),
+      DEVICES
+    )
+    expect(lookalike.stream).toMatchObject({ kind: 'rtmp-custom' })
   })
 
   it('browser/text/media sources are skipped with human reasons', () => {

@@ -1,4 +1,4 @@
-import ScenePresetControls from '@/components/scene-presets'
+import { CameraLookControls } from '@/components/scene/camera-look-controls'
 import {
   AdjustIcon,
   ArrowDownIcon,
@@ -9,22 +9,48 @@ import {
   LayoutIcon,
   MobileIcon
 } from '@/components/icons'
-import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
-import type { ReactElement, ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState
+} from 'react'
+import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { dockHiddenDisplay } from '@/components/preview-stage'
+import { BannerInspector, SceneBannersSection } from '@/components/scene/banner-inspector'
 import { CameraResetButton } from '@/components/scene/camera-reset-button'
 import {
+  BannerEdits,
   OverlayEdits,
+  bannerStageId,
+  bannerStageItems,
   overlayEditsBlockedReason,
+  overlayItemOff,
+  overlayStageId,
   overlayStageItems,
-  withOverlayRect
+  withOverlayRect,
+  type StageItemDraft
 } from '@/components/scene/overlay-stage'
+import { HideScreenSection } from '@/components/scene/hide-screen-section'
+import { SceneList } from '@/components/scene/scene-list'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
+import { ScreenSizeField } from '@/components/scene/screen-size-field'
+import { ScreenZoomField } from '@/components/scene/screen-zoom-field'
+import { presetCameraCornerRect } from '@/components/scene/stage-corner'
 import { stageUndoControl } from '@/components/scene/stage-undo-control'
-import { SourceTransformFields } from '@/components/scene/source-transform-fields'
+import { SourceCropFields, SourceTransformFields } from '@/components/scene/source-transform-fields'
+import { stageCropOf } from '@/components/scene/stage-transform'
+import {
+  cropEditOnPicture,
+  pictureEditFramePatch,
+  type TransformPatch
+} from '@/components/scene/transform-fields-math'
 import { PowerSlider } from '@/components/power-slider'
 import { ScreenFramingControl } from '@/components/studio/scenes-gallery'
 import { Badge } from '@/components/ui/badge'
@@ -36,7 +62,9 @@ import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Toggle } from '@/components/ui/toggle'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useEditScene } from '@/hooks/use-edit-scene'
+import { useStudioBanners, useStudioCore } from '@/hooks/use-studio'
+import { BANNER_MAX_SHOWN } from '@/lib/backend'
 import type {
   CameraAspect,
   CameraCorner,
@@ -61,8 +89,19 @@ import {
   studioModeTogglePreset,
   type LayoutOrientation
 } from '@/lib/capture'
+import { bannerSnapRect } from '@/lib/banner-place'
+import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
+import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
+import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
-import { freeformEntryOverrides, peekLayoutUndo, rememberedFreeform } from '@/lib/freeform-memory'
+import { freeformEntryPatch, peekLayoutUndo, sourceCroppable } from '@/lib/freeform-memory'
+import { scenePictureSizes, sourcePictureSize } from '@/lib/scene-source-sizes'
+import {
+  SCENE_VISIBILITY_LOCK_REASON,
+  cameraShapePatch,
+  sceneCameraControls,
+  withOverlaySwitches
+} from '@/lib/scene-edits'
 import { isLayoutUndoShortcut, layoutUndoShortcutBlocked } from '@/lib/layout-undo-shortcut'
 import {
   OVERLAY_ITEM_LABELS,
@@ -72,20 +111,97 @@ import {
   overlaySnapRect
 } from '@/lib/overlay-layout'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
+import {
+  PAGE_LEAD_COLUMN,
+  SCENE_GRID,
+  SCENE_INSPECTOR,
+  SCENE_INSPECTOR_PAIR
+} from '@/lib/page-layout'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
-import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proof-geometry'
+import { freeformSwitching, presetSwitching } from '@/lib/layout-switch-pending'
+import {
+  effectiveCameraMaskShape,
+  previewProofBackgroundStageMargin,
+  previewProofLayerFit
+} from '../../../../shared/native-preview-proof-geometry'
+import {
+  sceneFrameRect,
+  scenePictureRect,
+  screenBoxIsPicture,
+  type FractionRect
+} from '../../../../shared/scene-picture-geometry'
 
 // The two real-world screen colors; the protocol takes any #RRGGBB so a
 // custom picker later needs no wire change.
 const CHROMA_KEY_GREEN = '#00FF00'
 const CHROMA_KEY_BLUE = '#0000FF'
 
-// What a running recording or livestream locks on this page (plan 174, C-22):
-// where a source sits and whether it shows. The layout, the camera's frame and
-// its lens still change live, so the copy names only what is locked.
+// What a running recording or livestream locks on this page (plan 174, C-22,
+// narrowed by plan 215 D1): where a source sits, until the session says a
+// commit reaches its picture; whether it shows; and the orientation. The
+// layout, the camera's frame and its lens still change live, so the copy
+// names only what is locked.
 export const SCENE_POSITION_LOCK_REASON =
   "Position and size are locked while you're recording or live."
-export const SCENE_VISIBILITY_LOCK_REASON = "Visibility is locked while you're recording or live."
+// Plan 215 D1: a session on the legacy FFmpeg graph composes a fixed picture,
+// and the backend refuses a move with this sentence (`scene-edit-refused`).
+export const SCENE_POSITION_UNAVAILABLE_REASON =
+  "Moving and resizing isn't available on this recording. Stop and record again."
+// The screen's share of the canvas is the background's Visibility (plan 213
+// G4), not a source's box, so it keeps the session lock (out of plan 215).
+const SCREEN_SIZE_LOCK_REASON = "Screen size is locked while you're recording or live."
+const PLACEMENT_HINT =
+  'Click the source on the stage to edit it: drag it, or nudge it with the arrows.'
+// Plan 216 D2: in Freeform a screen's box is the shape of its picture.
+export const SCREEN_PICTURE_ASPECT_REASON = 'The picture sets the shape. Crop to change it.'
+// Plan 215 D1: a drag shows the outline, and the outputs move on release
+// (a draft never reaches them, plan 058 decision 4).
+export const LIVE_PLACEMENT_HINT = 'Changes apply to your stream when you let go.'
+
+/**
+ * Why a source's position and size are locked right now, or null while they
+ * can change (plan 215 D1). A running session keeps the lock until the
+ * backend says a commit reaches its picture (`acceptsLiveSceneEdits`): a
+ * session on the legacy FFmpeg graph says it never will (`false`), and a
+ * session still starting, or an older backend, has not said (`null`).
+ */
+export function scenePositionLockReason({
+  isSessionActive,
+  acceptsLiveSceneEdits
+}: {
+  isSessionActive: boolean
+  acceptsLiveSceneEdits: boolean | null
+}): string | null {
+  if (!isSessionActive || acceptsLiveSceneEdits === true) return null
+  return acceptsLiveSceneEdits === false
+    ? SCENE_POSITION_UNAVAILABLE_REASON
+    : SCENE_POSITION_LOCK_REASON
+}
+
+/**
+ * The Placement section's arrows and its one line. The arrows wait for the
+ * editor (a click on the stage, or Edit scene, plan 215 D4) and for the
+ * position lock to lift (plan 215 D1); the line says what is locked, or,
+ * while recording or live with the lock lifted, where a change lands.
+ */
+export function placementControls({
+  sceneEditMode,
+  isSessionActive,
+  acceptsLiveSceneEdits,
+  stageDragging
+}: {
+  sceneEditMode: boolean
+  isSessionActive: boolean
+  acceptsLiveSceneEdits: boolean | null
+  stageDragging: boolean
+}): { nudgeDisabled: boolean; description: string; lockReason: string | null } {
+  const lockReason = scenePositionLockReason({ isSessionActive, acceptsLiveSceneEdits })
+  return {
+    lockReason,
+    nudgeDisabled: !sceneEditMode || lockReason !== null || stageDragging,
+    description: lockReason ?? (isSessionActive ? LIVE_PLACEMENT_HINT : PLACEMENT_HINT)
+  }
+}
 const ORIENTATION_LOCK_REASON =
   "The canvas is fixed while you're recording or live. Stop to switch orientation."
 
@@ -207,6 +323,7 @@ export function LayoutTab(): ReactElement {
     captureConfig,
     patchLayout,
     applyLayoutPatch,
+    applyCameraLook,
     undoLayoutPatch,
     previewWindow,
     togglePreviewWindow,
@@ -215,6 +332,7 @@ export function LayoutTab(): ReactElement {
     nativePreviewSurfaceEnabled,
     runtimeInfo,
     scene,
+    sourcePictureSizes,
     sceneEditMode,
     setSceneGesturePending,
     selectedSceneSourceId,
@@ -228,23 +346,35 @@ export function LayoutTab(): ReactElement {
     applyCameraPreset,
     setSceneSourceVisible,
     isSessionActive,
+    acceptsLiveSceneEdits,
     layoutSwitchPending,
     savedScenePendingId,
     savedScenes,
     activeSavedSceneId,
-    savedSceneModified,
     settings,
     setSettings,
     overlayLayout,
     setOverlayLayout,
+    cohostSettings,
     reportError,
     wsStatus
   } = useStudioCore()
+  const editScene = useEditScene()
   // The stage's phase (plan 174, C-5): only a pointer gesture takes the
   // inspector out of play (`inert`); a commit still landing leaves every
   // control enabled and focused, and `runPreciseEdit` drops the input instead.
   const [stagePhase, setStagePhase] = useState<StagePhase>('idle')
   const stageDragging = stagePhase === 'dragging'
+  const placement = placementControls({
+    sceneEditMode,
+    isSessionActive,
+    acceptsLiveSceneEdits,
+    stageDragging
+  })
+  // Plan 215 D1: a source's box moves while recording or live once the
+  // session says a commit reaches its picture; visibility and the
+  // orientation keep the session lock.
+  const positionLocked = placement.lockReason !== null
   const stageBusy = stagePhase !== 'idle'
   // Overlay items on the canvas (plan 164, D15). One selection on the stage:
   // picking an item clears the source selection and the other way round.
@@ -255,6 +385,29 @@ export function LayoutTab(): ReactElement {
     overlayEditsRef.current = new OverlayEdits(setOverlayLayout, redrawOverlays, reportError)
   const overlayEdits = overlayEditsRef.current
   overlayEdits.configure(setOverlayLayout, reportError)
+  // Banners (plan 186): the one set, placed here like the overlay items. The
+  // selection lives in the Studio, so Assets → Place on Scene arrives with
+  // its banner selected on the stage.
+  const {
+    banners,
+    bannersLoaded,
+    bannersOffline,
+    selectedBannerId,
+    selectBanner,
+    updateBanner,
+    reorderBanners,
+    showBanner,
+    hideBanner
+  } = useStudioBanners()
+  const selectedBanner = banners.find((banner) => banner.id === selectedBannerId) ?? null
+  const bannerEditsRef = useRef<BannerEdits | null>(null)
+  if (!bannerEditsRef.current)
+    bannerEditsRef.current = new BannerEdits(updateBanner, redrawOverlays)
+  const bannerEdits = bannerEditsRef.current
+  bannerEdits.configure(updateBanner)
+  useLayoutEffect(() => {
+    bannerEdits.observe(banners)
+  }, [bannerEdits, banners])
   // Plan 174, C-6: overlay changes need the backend; without it the controls
   // are off with one reason, and every failed change is reported.
   const overlayBlockedReason = overlayEditsBlockedReason(wsStatus)
@@ -276,6 +429,15 @@ export function LayoutTab(): ReactElement {
   useEffect(() => {
     if (!verticalLegArmed) setOrientationChoice('horizontal')
   }, [verticalLegArmed])
+  // The stage canvas's shape (width / height): the Output, or the vertical
+  // stream's 9:16 while the stage shows it. A banner's rect converts its
+  // image's aspect into these canvas units.
+  const stageAspect =
+    verticalView && verticalLeg?.video
+      ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
+      : verticalView
+        ? 9 / 16
+        : captureConfig.video.width / Math.max(1, captureConfig.video.height)
   const handleStagePhaseChange = useCallback(
     (phase: StagePhase) => {
       setStagePhase(phase)
@@ -283,6 +445,48 @@ export function LayoutTab(): ReactElement {
     },
     [setSceneGesturePending]
   )
+  // Plan 216 B3: each source's picture size, so the stage draws its box on
+  // the picture the compositor fits, not on its frame.
+  const sceneSources = scene?.sources
+  const sourceSizes = useMemo(
+    () => scenePictureSizes(sceneSources ?? [], sourcePictureSizes),
+    [sceneSources, sourcePictureSizes]
+  )
+  // Plan 216 B5: the inspector's X, Y, W, H, px line and Zoom describe the
+  // selected source's PICTURE, the box the stage shows, and every edit
+  // commits the frame that box maps back to.
+  const stageMargin = previewProofBackgroundStageMargin(scene?.background ?? null)
+  const pictureBoxOf = (source: SceneSource): FractionRect =>
+    scenePictureRect({
+      frame: source.transform,
+      kind: source.kind,
+      fit: previewProofLayerFit(source, captureConfig.layout),
+      source: sourcePictureSize(source, sourcePictureSizes),
+      crop: source.transform,
+      stageMargin,
+      canvas: captureConfig.video
+    })
+  const boxIsPictureOf = (source: SceneSource): boolean =>
+    captureConfig.layout.arrangementMode === 'freeform' &&
+    screenBoxIsPicture(
+      source.kind,
+      previewProofLayerFit(source, captureConfig.layout),
+      sourcePictureSize(source, sourcePictureSizes)
+    )
+  const commitPictureEdit = (source: SceneSource, patch: TransformPatch): void =>
+    runPreciseEdit(() =>
+      setSceneSourceTransform(
+        source.id,
+        pictureEditFramePatch(
+          patch,
+          pictureBoxOf(source),
+          source.transform,
+          source.kind,
+          stageMargin,
+          captureConfig.video
+        )
+      )
+    )
   const sceneSwitchPending = layoutSwitchPending !== null || savedScenePendingId !== null
   const [preciseEditPending, setPreciseEditPending] = useState(false)
   const preciseEditPendingRef = useRef(false)
@@ -309,25 +513,66 @@ export function LayoutTab(): ReactElement {
   }
   const layout = captureConfig.layout
   const orientation = layoutPresetOrientation(layout.layoutPreset)
-  const selectedSource = scene?.sources.find((source) => source.id === selectedSceneSourceId)
+  // One selection on the stage: a banner wins over a source left selected
+  // from before (Assets → Place on Scene selects only the banner).
+  const selectedSource = selectedBanner
+    ? undefined
+    : scene?.sources.find((source) => source.id === selectedSceneSourceId)
   // SC2: the inspector follows the stage selection; default to the camera
   // (the thing people usually frame) so the panel is never empty.
   useEffect(() => {
-    if (selectedSceneSourceId || selectedOverlayItem || !scene?.sources.length) {
+    if (
+      selectedSceneSourceId ||
+      selectedOverlayItem ||
+      selectedBannerId ||
+      !scene?.sources.length
+    ) {
       return
     }
     const camera = scene.sources.find((source) => source.kind === 'camera')
     setSelectedSceneSourceId((camera ?? scene.sources[0]).id)
-  }, [scene, selectedOverlayItem, selectedSceneSourceId, setSelectedSceneSourceId])
+  }, [
+    scene,
+    selectedBannerId,
+    selectedOverlayItem,
+    selectedSceneSourceId,
+    setSelectedSceneSourceId
+  ])
+  // A banner selected from elsewhere (Assets → Place on Scene) takes the
+  // stage's one selection.
+  useEffect(() => {
+    if (!selectedBannerId) return
+    setSelectedOverlayItem(null)
+    setSelectedSceneSourceId(null)
+  }, [selectedBannerId, setSelectedSceneSourceId])
+  const selectStageBanner = (id: string): void => {
+    selectBanner(id)
+    setSelectedOverlayItem(null)
+    setSelectedSceneSourceId(null)
+  }
+  const shownBannerCount = banners.filter((banner) => banner.shown).length
+  const bannerShowLimitReason =
+    shownBannerCount >= BANNER_MAX_SHOWN ? BANNER_SHOWN_LIMIT_REASON : null
+  const setBannerShown = (id: string, shown: boolean): void => {
+    void (shown ? showBanner(id) : hideBanner(id))
+  }
+  const moveSelectedBanner = (targetIndex: number): void => {
+    if (!selectedBanner) return
+    const ids = bannerOrderAfterMove(banners, selectedBanner.id, targetIndex)
+    if (ids) void reorderBanners(ids)
+  }
+  const stageDrafts = [
+    overlayEdits.stageDraft(overlayOrientation),
+    bannerEdits.stageDraft(overlayOrientation)
+  ].filter((draft): draft is StageItemDraft => draft !== null)
   const selectedOverlayLayout = selectedOverlayItem ? overlayLayout[selectedOverlayItem] : null
   const patchSelectedOverlay = (
     patch: Partial<{ showOnStream: boolean; showInRecording: boolean }>
   ): void => {
     if (!selectedOverlayItem) return
-    void setOverlayLayout({
-      ...overlayLayout,
-      [selectedOverlayItem]: { ...overlayLayout[selectedOverlayItem], ...patch }
-    }).catch(reportError)
+    void setOverlayLayout(withOverlaySwitches(overlayLayout, selectedOverlayItem, patch)).catch(
+      reportError
+    )
   }
   const snapSelectedOverlay = (snap: OverlaySnap): void => {
     if (!selectedOverlayItem) return
@@ -352,15 +597,15 @@ export function LayoutTab(): ReactElement {
     layout.layoutPreset === 'vertical-camera-top' ||
     layout.layoutPreset === 'vertical-camera-bottom' ||
     layout.layoutPreset === 'vertical-split'
-  const showOverlayControls =
-    layout.layoutPreset === 'screen-camera' || layout.layoutPreset === 'vertical-screen-camera'
-  const isFreeform = layout.arrangementMode === 'freeform'
   // Corner/size/margin place the camera inside a preset scene; in freeform the
-  // stage and the numeric fields own position and size instead.
-  const showCameraCornerControls = showOverlayControls && !isFreeform
-  // The mask (shape/radius/aspect) and the precise fields apply wherever the
-  // camera is a user-owned bubble: the inset scenes and freeform.
-  const showCameraBubbleControls = showOverlayControls || isFreeform
+  // stage and the numeric fields own position and size instead. The mask
+  // (shape/radius/aspect) and the precise fields apply wherever the camera is
+  // a user-owned bubble: the inset scenes and freeform (lib/scene-edits).
+  const cameraControls = sceneCameraControls(layout)
+  const showOverlayControls = cameraControls.inset
+  const isFreeform = cameraControls.freeform
+  const showCameraCornerControls = cameraControls.corner
+  const showCameraBubbleControls = cameraControls.bubble
 
   // Entering freeform restores the arrangement a preset last replaced in this
   // orientation (plan 174, C-4); a source with no memory is seeded from the
@@ -369,12 +614,24 @@ export function LayoutTab(): ReactElement {
     if (!scene) {
       return
     }
-    const sourceTransformOverrides = freeformEntryOverrides(
-      rememberedFreeform(),
-      orientation,
-      scene.sources
+    // Plan 216 B6 (D2): a screen on Fit with a known size starts at its
+    // picture, the box the stage shows, stored as the frame it maps back
+    // to through the stage margin; nothing moves on entry.
+    applyCameraPreset(
+      freeformEntryPatch(orientation, scene.sources, (entry) => {
+        const source = scene.sources.find((candidate) => candidate.id === entry.id)
+        if (
+          !source ||
+          !screenBoxIsPicture(
+            source.kind,
+            previewProofLayerFit(source, captureConfig.layout),
+            sourcePictureSize(source, sourcePictureSizes)
+          )
+        )
+          return null
+        return sceneFrameRect(pictureBoxOf(source), source.kind, stageMargin)
+      })
     )
-    applyCameraPreset({ arrangementMode: 'freeform', sourceTransformOverrides })
   }
   // The orientation control re-enters each mode where it was left; the
   // orientation ⇄ canvas coupling in applyCameraPreset flips the output
@@ -440,6 +697,12 @@ export function LayoutTab(): ReactElement {
       ? dockHiddenDisplay(previewWindow.dockHiddenReason ?? 'no-slot-report')
       : null
   const liveHint = liveHidden ? `${liveHidden.title}. ${liveHidden.detail}` : null
+  // The Buddy's still, drawn in its zone on the schematic canvas (the live
+  // canvas shows the pet itself while it is selected or dragged).
+  const buddyPicture = buddyStateImageUrl(
+    cohostSettings?.persona ?? { images: {}, source: 'default' },
+    'idle'
+  )
   // Decision 6: entering the tab with the preview CLOSED opens it docked into
   // the canvas; an open floating preview stays floating (the footer offers
   // "Show preview here"); leaving the tab changes nothing. Once per tab entry,
@@ -476,18 +739,26 @@ export function LayoutTab(): ReactElement {
     }
   }, [openPreviewWindow, previewWindow.open, setPreviewWindowMode])
 
-  // The canvas section names the saved scene it shows and whether it has
-  // drifted; its actions ("Update “{name}”", "Save scene") sit in the header
-  // (plan 174, C-23 and V-10).
+  // The canvas edits the scene on stream. A saved scene keeps each edit as it
+  // lands (plan 210 D3), so the section says where they go; there is no
+  // Modified state and no Update to press.
   const activeSavedScene = savedScenes.find((entry) => entry.id === activeSavedSceneId)
   const canvasDescription = activeSavedScene
-    ? `${activeSavedScene.name} · ${savedSceneModified ? 'Modified' : 'Applied'}`
+    ? `Changes save to “${activeSavedScene.name}” as you make them.`
     : 'Drag sources and overlays into place.'
 
   return (
     <div className="flex flex-col">
-      <div className="grid lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
-        <div className="flex min-w-0 flex-col lg:border-r">
+      {/* Plan 210 D6: the scene list leads the page. */}
+      <SceneList
+        onEditScene={() => {
+          // The stage's one selection goes to the camera, as a click on it does.
+          setSelectedOverlayItem(null)
+          editScene()
+        }}
+      />
+      <div className={SCENE_GRID}>
+        <div className={PAGE_LEAD_COLUMN}>
           <PanelSection
             action={
               // The canvas is fixed at session start, so the orientation is
@@ -528,7 +799,9 @@ export function LayoutTab(): ReactElement {
                     value: preset.id,
                     label: (
                       <>
-                        {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
+                        {presetSwitching(layoutSwitchPending, preset.id)
+                          ? 'Switching…'
+                          : preset.label}
                         {!preset.enabled ? <Badge variant="outline">Soon</Badge> : null}
                       </>
                     ),
@@ -539,12 +812,16 @@ export function LayoutTab(): ReactElement {
                     // one, so a click on it supersedes a newer pending switch.
                     onClick:
                       !isFreeform && layout.layoutPreset === preset.id
-                        ? () => applyCameraPreset({ layoutPreset: preset.id })
+                        ? () => applyCameraPreset({ layoutPreset: preset.id }, { keepScene: true })
                         : undefined
                   }
                 })}
                 value={isFreeform ? null : layout.layoutPreset}
-                onValueChange={(layoutPreset) => applyCameraPreset({ layoutPreset })}
+                // Plan 210 D3: a layout picked here edits the scene on stream
+                // (a saved one keeps it); the list's Layouts switch to a layout.
+                onValueChange={(layoutPreset) =>
+                  applyCameraPreset({ layoutPreset }, { keepScene: true })
+                }
               />
               <Separator className="data-[orientation=vertical]:h-5" orientation="vertical" />
               {/* Freeform is a mode, not a preset: composition becomes the
@@ -557,7 +834,7 @@ export function LayoutTab(): ReactElement {
                 // Every click is an intent, as on the presets.
                 onPressedChange={enterFreeform}
               >
-                {layoutSwitchPending && isFreeform ? 'Switching…' : 'Freeform'}
+                {freeformSwitching(layoutSwitchPending) ? 'Switching…' : 'Freeform'}
               </Toggle>
             </div>
             {/* Devices are chosen on Sources (plan 174, C-21), so the hint
@@ -584,6 +861,17 @@ export function LayoutTab(): ReactElement {
                 value={layout.verticalScreenFraming}
                 onChange={(verticalScreenFraming) => applyCameraPreset({ verticalScreenFraming })}
               />
+            ) : hasScreen && landscapeScreenFramed(layout.layoutPreset) ? (
+              // Plan 213 G3: the same Fill / Fit for the landscape screen
+              // scenes (Freeform follows the scene it came from); side by
+              // side always fills and Camera only has no screen.
+              <ScreenFramingControl
+                orientation="horizontal"
+                value={layout.horizontalScreenFraming}
+                onChange={(horizontalScreenFraming) =>
+                  applyCameraPreset({ horizontalScreenFraming })
+                }
+              />
             ) : null}
             {/* Scene motion changes what viewers see, so it lives with the
                 layouts, not under Settings (plan 174, D17). */}
@@ -605,11 +893,7 @@ export function LayoutTab(): ReactElement {
               picture and the SVG stage owns pointer input (plan 058);
               elsewhere, or while the surface is hidden or floating, the SVG
               draws the committed composition as a schematic (zero idle IPC). */}
-          <PanelSection
-            action={<ScenePresetControls toolbar />}
-            description={canvasDescription}
-            title="Canvas"
-          >
+          <PanelSection description={canvasDescription} title="Canvas">
             {verticalLeg ? (
               <Field orientation="horizontal">
                 <FieldContent>
@@ -643,70 +927,100 @@ export function LayoutTab(): ReactElement {
               dragEnabled={
                 !verticalView &&
                 (showOverlayControls || isFreeform) &&
-                !isSessionActive &&
+                !positionLocked &&
                 !preciseEditPending &&
                 !sceneSwitchPending
               }
               freeform={isFreeform}
-              outputAspect={
-                verticalView && verticalLeg?.video
-                  ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
-                  : verticalView
-                    ? 9 / 16
-                    : captureConfig.video.width / Math.max(1, captureConfig.video.height)
-              }
+              outputAspect={stageAspect}
               previewOpen={previewWindow.open}
               // Free resize: the backend honors custom camera width/height
               // (aspect law permitting) since plan phase 3.
               resizeEnabled={
                 !verticalView &&
                 (showOverlayControls || isFreeform) &&
-                !isSessionActive &&
+                !positionLocked &&
                 !preciseEditPending &&
                 !sceneSwitchPending
               }
+              // Plan 213 G2: a crop is saved with the freeform box, so only
+              // Freeform crops; locked exactly when the box is.
+              cropEnabled={isFreeform && !positionLocked}
               // The vertical view is the derived stream's canvas: a greyed
               // stage with that stream's overlay rects; the sources stay with
               // the primary (the stream is derived, plan 164 out of scope).
               scene={verticalView ? null : scene}
-              selectedSourceId={verticalView ? null : selectedSceneSourceId}
+              selectedSourceId={verticalView || selectedBanner ? null : selectedSceneSourceId}
               liveDocked={!verticalView && liveCanvasActive}
+              // Plan 215 D1: a running session refuses drafts (plan 058
+              // decision 4), so the stage paints the outline and the
+              // outputs move on release.
+              draftsRefused={isSessionActive}
               liveHint={verticalView ? 'Vertical stream: overlay placement only.' : liveHint}
               liveSurface={!verticalView && liveSurface}
+              // The preview floating in its own window follows a drag too.
+              previewFollowsGestures={
+                liveCanvasSupported &&
+                !verticalView &&
+                previewWindow.open &&
+                previewWindow.mode === 'floating'
+              }
               slotRef={liveCanvasSupported && !verticalView ? slotRef : undefined}
               overlays={{
-                items: overlayStageItems(overlayLayout, overlayOrientation),
-                selectedItem: selectedOverlayItem,
-                draft:
-                  overlayEdits.draft?.orientation === overlayOrientation
-                    ? overlayEdits.draft
+                // Banners first: they draw under the overlay items (D5).
+                items: [
+                  ...bannerStageItems(banners, selectedBannerId, overlayOrientation, stageAspect),
+                  ...overlayStageItems(overlayLayout, overlayOrientation, buddyPicture)
+                ],
+                // A source selected from elsewhere (Edit scene, plan 215 D4)
+                // wins over an overlay item, as it does in the inspector.
+                selectedId: selectedBanner
+                  ? bannerStageId(selectedBanner.id)
+                  : selectedOverlayItem && !selectedSource
+                    ? overlayStageId(selectedOverlayItem)
                     : null,
+                drafts: stageDrafts,
                 editable: !preciseEditPending && !sceneSwitchPending && !overlayBlockedReason,
-                onSelect: (item) => {
-                  setSelectedOverlayItem(item)
+                onSelect: (entry) => {
+                  if (entry.kind === 'banner') {
+                    selectStageBanner(entry.id)
+                    return
+                  }
+                  setSelectedOverlayItem(entry.item)
                   setSelectedSceneSourceId(null)
+                  selectBanner(null)
                 },
-                onCommit: (item, rect) =>
-                  overlayEdits.submit(overlayLayout, item, overlayOrientation, rect)
+                onCommit: (entry, rect) => {
+                  if (entry.kind === 'banner')
+                    bannerEdits.submit(entry.id, overlayOrientation, rect)
+                  else overlayEdits.submit(overlayLayout, entry.item, overlayOrientation, rect)
+                }
               }}
               onPopOut={
                 liveCanvasSupported ? () => void setPreviewWindowMode('floating') : undefined
               }
               onShowLive={liveCanvasSupported ? () => void showLiveHere() : undefined}
               // Live drafts (plan 058 S4): only flow while the surface is the
-              // canvas; the stage gates them on `liveSurface`.
-              onDraft={liveCanvasSupported ? setSceneEditorDraft : undefined}
-              onDraftClear={liveCanvasSupported ? clearSceneEditorDraft : undefined}
+              // canvas; the stage gates them on `liveSurface`. Off while
+              // recording or live (plan 215 D1): the backend refuses them.
+              onDraft={liveCanvasSupported && !isSessionActive ? setSceneEditorDraft : undefined}
+              onDraftClear={
+                liveCanvasSupported && !isSessionActive ? clearSceneEditorDraft : undefined
+              }
               outputWidth={captureConfig.video.width}
+              outputHeight={captureConfig.video.height}
+              layout={layout}
+              sourceSizes={sourceSizes}
               onCommitTransform={setSceneSourceTransform}
               // Arrows on the focused canvas (C-31) ride the same one-at-a-time
               // precise edit as the inspector's d-pad.
               onNudge={(sourceId, directionX, directionY, large) =>
                 runPreciseEdit(() => nudgeSceneSource(sourceId, directionX, directionY, large))
               }
-              onRequestFreeform={isFreeform || isSessionActive ? undefined : enterFreeform}
+              onRequestFreeform={isFreeform || positionLocked ? undefined : enterFreeform}
               onSelectSource={(sourceId) => {
                 setSelectedOverlayItem(null)
+                selectBanner(null)
                 setSelectedSceneSourceId(sourceId)
                 if (!sceneEditMode) {
                   setSceneEditMode(true)
@@ -716,6 +1030,19 @@ export function LayoutTab(): ReactElement {
               // drop is just a position.
               onSnapCorner={
                 isFreeform ? undefined : (cameraCorner) => applyCameraPreset({ cameraCorner })
+              }
+              // ...at the preset's size and margin: the stage shows that box
+              // while the camera is in the corner.
+              cornerDropRect={
+                isFreeform
+                  ? undefined
+                  : (cameraCorner) =>
+                      presetCameraCornerRect(
+                        layout,
+                        cameraCorner,
+                        captureConfig.video.width,
+                        captureConfig.video.height
+                      )
               }
               onTogglePreview={() => void togglePreviewWindow()}
               onUndo={undoControl.shown ? undoLayout : undefined}
@@ -727,31 +1054,62 @@ export function LayoutTab(): ReactElement {
               it duplicated the stage: the stage's rects and legend chips ARE
               the source list, clicking one selects it (and enables editing),
               and visibility now lives in the Inspector. */}
+
+          {/* Hide screen's setup (plan 210 D9, D11), under the canvas that
+              shows its frosted picture; the action is on Studio's Screen row. */}
+          <HideScreenSection />
         </div>
 
         {/* The inspector: one section named after the selection, then the
             camera's Placement, Lens and Green screen (plan 174 S3.9, C-33 and
             C-35). Inert only during a pointer gesture (C-5). */}
-        <FieldSet className="min-w-0 gap-0" inert={stageDragging}>
-          {!selectedSource && selectedOverlayItem && selectedOverlayLayout ? (
-            <PanelSection
-              className="min-w-0"
-              icon={AdjustIcon}
-              title={OVERLAY_ITEM_LABELS[selectedOverlayItem]}
-            >
-              <OverlayItemInspector
-                blockedReason={overlayBlockedReason}
-                item={selectedOverlayItem}
-                layout={selectedOverlayLayout}
-                orientation={overlayOrientation}
-                onPatch={patchSelectedOverlay}
-                onSnap={snapSelectedOverlay}
-              />
-            </PanelSection>
+        <FieldSet className={SCENE_INSPECTOR} inert={stageDragging}>
+          {selectedBanner ? (
+            <BannerInspector
+              key={selectedBanner.id}
+              atBack={banners[0]?.id === selectedBanner.id}
+              banner={selectedBanner}
+              blockedReason={overlayBlockedReason}
+              inFront={banners[banners.length - 1]?.id === selectedBanner.id}
+              placeLabel={verticalView ? 'Place on the vertical stream' : 'Place'}
+              showLimitReason={bannerShowLimitReason}
+              sizeAdvice={bannerSizeAdvice({
+                banner: selectedBanner,
+                output: captureConfig.video,
+                verticalStream: verticalLeg?.video ?? null
+              })}
+              onBringToFront={() => moveSelectedBanner(banners.length - 1)}
+              onManage={() => openWorkspaceTab('assets')}
+              onPatch={(patch) => updateBanner(selectedBanner.id, patch)}
+              onSendToBack={() => moveSelectedBanner(0)}
+              onShowChange={(shown) => setBannerShown(selectedBanner.id, shown)}
+              onSnap={(snap) => {
+                const rect = bannerSnapRect(
+                  selectedBanner,
+                  selectedBanner[overlayOrientation],
+                  overlayOrientation,
+                  stageAspect,
+                  snap
+                )
+                void updateBanner(
+                  selectedBanner.id,
+                  overlayOrientation === 'vertical' ? { vertical: rect } : { horizontal: rect }
+                )
+              }}
+            />
+          ) : !selectedSource && selectedOverlayItem && selectedOverlayLayout ? (
+            <OverlayItemSection
+              blockedReason={overlayBlockedReason}
+              item={selectedOverlayItem}
+              layout={selectedOverlayLayout}
+              orientation={overlayOrientation}
+              onPatch={patchSelectedOverlay}
+              onSnap={snapSelectedOverlay}
+            />
           ) : !selectedSource ? (
             <PanelSection
               className="min-w-0"
-              description="Click a source or an overlay on the stage to edit it."
+              description="Click a source, an overlay or a banner on the stage to edit it."
               icon={AdjustIcon}
               title="Inspector"
             />
@@ -767,17 +1125,25 @@ export function LayoutTab(): ReactElement {
               layout={layout}
               outputHeight={captureConfig.video.height}
               outputWidth={captureConfig.video.width}
+              positionLockReason={placement.lockReason}
               showCameraBubbleControls={showCameraBubbleControls}
               showCameraCornerControls={showCameraCornerControls}
               source={selectedSource}
+              box={pictureBoxOf(selectedSource)}
               stageDragging={stageDragging}
               onApplyCameraPreset={applyCameraPreset}
               onApplyLayoutPatch={applyLayoutPatch}
+              onCameraLookChange={applyCameraLook}
+              cameraLookDisabledReason={
+                wsStatus !== 'connected'
+                  ? 'Videorc is reconnecting.'
+                  : !captureConfig.sources.cameraId
+                    ? 'Choose a camera in Sources.'
+                    : undefined
+              }
               onAspectLockedChange={setAspectLocked}
               onPatchLayout={patchLayout}
-              onTransformCommit={(patch) =>
-                runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
-              }
+              onTransformCommit={(patch) => commitPictureEdit(selectedSource, patch)}
               onVisibilityChange={setSceneSourceVisible}
             />
           ) : sourceIsFullCanvas(selectedSource) && !isFreeform ? (
@@ -787,7 +1153,11 @@ export function LayoutTab(): ReactElement {
             // the disabled-arrow grid read as a broken app).
             <PanelSection
               className="min-w-0"
-              description="Fills the whole canvas. Position is fixed for this layout."
+              description={
+                scene?.background
+                  ? 'Fills the canvas inside the background in this layout. Use Freeform to move, resize or crop it.'
+                  : 'Fills the whole canvas in this layout. Use Freeform to move, resize or crop it.'
+              }
               icon={AdjustIcon}
               title={selectedSource.name}
             >
@@ -797,6 +1167,13 @@ export function LayoutTab(): ReactElement {
                 source={selectedSource}
                 onVisibilityChange={setSceneSourceVisible}
               />
+              {/* Plan 213 G4: the background's Visibility, where the screen is. */}
+              {scene?.background ? (
+                <ScreenSizeField
+                  background={scene.background}
+                  disabledReason={isSessionActive ? SCREEN_SIZE_LOCK_REASON : null}
+                />
+              ) : null}
             </PanelSection>
           ) : (
             <>
@@ -807,11 +1184,17 @@ export function LayoutTab(): ReactElement {
                   source={selectedSource}
                   onVisibilityChange={setSceneSourceVisible}
                 />
+                {scene?.background ? (
+                  <ScreenSizeField
+                    background={scene.background}
+                    disabledReason={isSessionActive ? SCREEN_SIZE_LOCK_REASON : null}
+                  />
+                ) : null}
               </PanelSection>
               <PanelSection
                 action={
                   <Button
-                    disabled={isSessionActive || stageDragging}
+                    disabled={positionLocked || stageDragging}
                     variant="outline"
                     onClick={() => void resetSceneSource(selectedSource.id)}
                   >
@@ -825,11 +1208,7 @@ export function LayoutTab(): ReactElement {
                 // first pointerdown on the stage starts it, and a line that
                 // left then would shrink the page under the pointer and
                 // cancel that very gesture (stage-undo-control.ts).
-                description={
-                  isSessionActive
-                    ? SCENE_POSITION_LOCK_REASON
-                    : 'Click the source on the stage to edit it: drag it, or nudge it with the arrows.'
-                }
+                description={placement.description}
                 headingLevel={3}
                 title="Placement"
               >
@@ -839,15 +1218,67 @@ export function LayoutTab(): ReactElement {
                   key={selectedSource.id}
                   aspectLocked={aspectLocked}
                   onAspectLockedChange={setAspectLocked}
-                  disabled={isSessionActive || stageDragging}
-                  disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : undefined}
+                  // Plan 216 D2: a Freeform screen's box is its picture; the
+                  // lock cannot open, and crop is how its shape changes.
+                  aspectForced={boxIsPictureOf(selectedSource)}
+                  aspectForcedReason={SCREEN_PICTURE_ASPECT_REASON}
+                  box={pictureBoxOf(selectedSource)}
+                  disabled={positionLocked || stageDragging}
+                  disabledReason={placement.lockReason ?? undefined}
                   outputHeight={captureConfig.video.height}
                   outputWidth={captureConfig.video.width}
                   source={selectedSource}
-                  onCommit={(patch) =>
-                    runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
-                  }
+                  onCommit={(patch) => commitPictureEdit(selectedSource, patch)}
                 />
+                {/* Plan 215 E4 (D2): the screen's Zoom, 100 to 400% of the
+                  canvas, around its centre; what runs past the canvas is cut
+                  off. Zooming softens text, so the crop below is the sharp
+                  way to show part of the screen. */}
+                {isFreeform && sourceCroppable(selectedSource.kind) ? (
+                  <ScreenZoomField
+                    key={`${selectedSource.id}-zoom`}
+                    box={pictureBoxOf(selectedSource)}
+                    disabled={positionLocked || stageDragging}
+                    disabledReason={placement.lockReason ?? undefined}
+                    source={selectedSource}
+                    onCommit={(patch) => commitPictureEdit(selectedSource, patch)}
+                  />
+                ) : null}
+                {/* Plan 213 G2: the screen's crop, saved with its freeform box. */}
+                {isFreeform && sourceCroppable(selectedSource.kind) ? (
+                  <SourceCropFields
+                    key={`${selectedSource.id}-crop`}
+                    disabled={positionLocked || stageDragging}
+                    source={selectedSource}
+                    // While the box is the picture (D2), a typed crop keeps
+                    // the uncropped picture in place and the box shrinks to
+                    // what is kept, as an Alt-drag on the stage does.
+                    onCommit={(patch) => {
+                      if (!boxIsPictureOf(selectedSource)) {
+                        runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
+                        return
+                      }
+                      const { x, y, width, height, ...crop } = cropEditOnPicture(
+                        patch,
+                        pictureBoxOf(selectedSource),
+                        stageCropOf(selectedSource.transform)
+                      )
+                      runPreciseEdit(() =>
+                        setSceneSourceTransform(selectedSource.id, {
+                          ...crop,
+                          ...pictureEditFramePatch(
+                            { x, y, width, height },
+                            pictureBoxOf(selectedSource),
+                            selectedSource.transform,
+                            selectedSource.kind,
+                            stageMargin,
+                            captureConfig.video
+                          )
+                        })
+                      )
+                    }}
+                  />
+                ) : null}
                 {/* w-fit + auto columns keep the arrows a tight d-pad cluster;
                   1fr side columns stretched, stranding ← at the panel edge
                   (external tester report, 2026-07-06). Shift takes the bigger
@@ -856,7 +1287,7 @@ export function LayoutTab(): ReactElement {
                   <span />
                   <Button
                     aria-label="Nudge source up"
-                    disabled={!sceneEditMode || isSessionActive || stageDragging}
+                    disabled={placement.nudgeDisabled}
                     size="icon"
                     variant="outline"
                     onClick={(event) =>
@@ -870,7 +1301,7 @@ export function LayoutTab(): ReactElement {
                   <span />
                   <Button
                     aria-label="Nudge source left"
-                    disabled={!sceneEditMode || isSessionActive || stageDragging}
+                    disabled={placement.nudgeDisabled}
                     size="icon"
                     variant="outline"
                     onClick={(event) =>
@@ -883,7 +1314,7 @@ export function LayoutTab(): ReactElement {
                   </Button>
                   <Button
                     aria-label="Nudge source down"
-                    disabled={!sceneEditMode || isSessionActive || stageDragging}
+                    disabled={placement.nudgeDisabled}
                     size="icon"
                     variant="outline"
                     onClick={(event) =>
@@ -896,7 +1327,7 @@ export function LayoutTab(): ReactElement {
                   </Button>
                   <Button
                     aria-label="Nudge source right"
-                    disabled={!sceneEditMode || isSessionActive || stageDragging}
+                    disabled={placement.nudgeDisabled}
                     size="icon"
                     variant="outline"
                     onClick={(event) =>
@@ -911,6 +1342,20 @@ export function LayoutTab(): ReactElement {
               </PanelSection>
             </>
           )}
+          {/* Every banner, below the selection's own sections (plan 186). */}
+          <SceneBannersSection
+            banners={banners}
+            loaded={bannersLoaded}
+            offline={bannersOffline}
+            // The banner and overlay inspectors above lead with the same
+            // reconnecting lock: the pane says it once.
+            offlineAlert={!selectedBanner && !(!selectedSource && selectedOverlayItem)}
+            selectedId={selectedBanner?.id ?? null}
+            showLimitReason={bannerShowLimitReason}
+            onOpenAssets={() => openWorkspaceTab('assets')}
+            onSelect={selectStageBanner}
+            onShowChange={(banner, shown) => setBannerShown(banner.id, shown)}
+          />
         </FieldSet>
       </div>
     </div>
@@ -925,6 +1370,7 @@ type CameraLayout = ReturnType<typeof useStudioCore>['captureConfig']['layout']
 // in the right place instead of a loose paragraph.
 function CameraInspector({
   source,
+  box,
   layout,
   isFreeform,
   isSideBySide,
@@ -934,6 +1380,7 @@ function CameraInspector({
   showCameraCornerControls,
   showCameraBubbleControls,
   isSessionActive,
+  positionLockReason,
   stageDragging,
   aspectLocked,
   outputWidth,
@@ -941,11 +1388,15 @@ function CameraInspector({
   onAspectLockedChange,
   onApplyCameraPreset,
   onApplyLayoutPatch,
+  onCameraLookChange,
+  cameraLookDisabledReason,
   onPatchLayout,
   onTransformCommit,
   onVisibilityChange
 }: {
   source: SceneSource
+  /** The camera's picture as the stage shows it (plan 216 B5). */
+  box: FractionRect
   layout: CameraLayout
   isFreeform: boolean
   isSideBySide: boolean
@@ -955,6 +1406,8 @@ function CameraInspector({
   showCameraCornerControls: boolean
   showCameraBubbleControls: boolean
   isSessionActive: boolean
+  /** Why the camera's box can't move now, or null while it can (plan 215 D1). */
+  positionLockReason: string | null
   stageDragging: boolean
   aspectLocked: boolean
   outputWidth: number
@@ -962,19 +1415,28 @@ function CameraInspector({
   onAspectLockedChange: (locked: boolean) => void
   onApplyCameraPreset: (patch: Partial<CameraLayout>) => void
   onApplyLayoutPatch: (patch: Partial<CameraLayout>) => void
+  onCameraLookChange: (look: NonNullable<CameraLayout['cameraLook']>) => void
+  cameraLookDisabledReason?: string
   onPatchLayout: (patch: Partial<CameraLayout>) => void
   onTransformCommit: (patch: { x?: number; y?: number; width?: number; height?: number }) => void
   onVisibilityChange: (sourceId: string, visible: boolean) => Promise<void>
 }): ReactElement {
-  const placementDescription = isFreeform
-    ? 'Drag and resize the camera on the stage, or set exact numbers below.'
-    : isCameraOnly
-      ? "Camera only fills the frame as a rectangle. Corner, size and shape don't apply; frame yourself under Lens."
-      : isVerticalCameraOnly
-        ? "The camera fills the whole 9:16 canvas and crops to fit. Corner, size and shape don't apply; frame yourself under Lens."
-        : isVerticalStack
-          ? "The stacked vertical scenes give the camera and the screen fixed bands of the 9:16 canvas. Corner, size and shape don't apply; frame yourself under Lens."
-          : undefined
+  // Plan 215 D1: while recording or live, the box's line says what is locked
+  // or where a change lands; the preset copy stays where there is no box.
+  const positionLocked = positionLockReason !== null
+  const liveBox = isSessionActive && !positionLocked && (isFreeform || showCameraBubbleControls)
+  const placementDescription = liveBox
+    ? LIVE_PLACEMENT_HINT
+    : isFreeform
+      ? (positionLockReason ??
+        'Drag and resize the camera on the stage, or set exact numbers below.')
+      : isCameraOnly
+        ? "Camera only fills the frame as a rectangle. Corner, size and shape don't apply; frame yourself under Lens."
+        : isVerticalCameraOnly
+          ? "The camera fills the whole 9:16 canvas and crops to fit. Corner, size and shape don't apply; frame yourself under Lens."
+          : isVerticalStack
+            ? "The stacked vertical scenes give the camera and the screen fixed bands of the 9:16 canvas. Corner, size and shape don't apply; frame yourself under Lens."
+            : undefined
   // Vertical bands and the full-canvas vertical camera ALWAYS fill and crop:
   // a "Fit frame" option would letterbox the short-form frame (2026-07-13
   // fill-crop plan), so the toggle is hidden and honest copy replaces it.
@@ -1022,7 +1484,7 @@ function CameraInspector({
   }
   if (showCameraBubbleControls) {
     placement.push(
-      <div key="size-shape" className="grid min-w-0 grid-cols-2 gap-4">
+      <div key="size-shape" className={SCENE_INSPECTOR_PAIR}>
         {!isFreeform ? (
           <Field className="min-w-0">
             <FieldLabel>Size</FieldLabel>
@@ -1040,17 +1502,8 @@ function CameraInspector({
             className="w-full"
             options={CAMERA_SHAPE_OPTIONS}
             value={layout.cameraShape}
-            onValueChange={(cameraShape) =>
-              onApplyLayoutPatch(
-                // Rounded means a rounded SQUARE by default (owner decision
-                // 2026-07-06): picking it snaps the aspect to square in the
-                // same gesture; the Aspect control below still allows the
-                // original or portrait afterwards.
-                cameraShape === 'rounded'
-                  ? { cameraShape: 'rounded', cameraAspect: 'square' }
-                  : { cameraShape }
-              )
-            }
+            // Rounded means a rounded SQUARE by default (lib/scene-edits).
+            onValueChange={(cameraShape) => onApplyLayoutPatch(cameraShapePatch(cameraShape))}
           />
         </Field>
       </div>
@@ -1110,8 +1563,9 @@ function CameraInspector({
         aspectLocked={aspectLocked}
         onAspectLockedChange={onAspectLockedChange}
         aspectForced={layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'}
-        disabled={isSessionActive || stageDragging}
-        disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : undefined}
+        box={box}
+        disabled={positionLocked || stageDragging}
+        disabledReason={positionLockReason ?? undefined}
         outputHeight={outputHeight}
         outputWidth={outputWidth}
         source={source}
@@ -1207,6 +1661,11 @@ function CameraInspector({
           onCommit={(cameraOffsetY) => onApplyLayoutPatch({ cameraOffsetY })}
         />
       </PanelSection>
+      <CameraLookControls
+        look={layout.cameraLook}
+        onChange={onCameraLookChange}
+        disabledReason={cameraLookDisabledReason}
+      />
       <PanelSection className="min-w-0" headingLevel={3} title="Green screen">
         <Field orientation="horizontal">
           <FieldContent>
@@ -1328,7 +1787,40 @@ const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   highlight: 'The highlighted message card. Drag it on the stage or snap it to a corner.',
   captions:
     'The caption bar. Drag its edges to set its width; style and text size live in Captions.',
-  buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.'
+  buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.',
+  // Plan 215 D5: viewers' names go on stream, so the switches say so.
+  chat: "The last five chat messages, with each viewer's name. Drag the box on the stage or snap it to a corner."
+}
+
+/** What the selected overlay item's first row says while both switches are
+ * off (plan 205 S3, D4): no output carries it, so the Preview draws nothing
+ * for it, even while it is selected, and these words say why. Only Buddy and
+ * the chat box (plan 215 D5, off by default because it shows viewers' names)
+ * have a picture you'd look for at rest; the highlight card's and the
+ * caption bar's chips still say "Off". */
+export const OVERLAY_ITEM_OFF_LINES: Partial<Record<OverlayItem, string>> = {
+  buddy: "Off. Viewers don't see Buddy.",
+  chat: "Off. Viewers don't see chat."
+}
+
+/** The selected overlay item's section: its name, then its state while no
+ * output shows it, above the inspector's two switches. Exported for its test. */
+export function OverlayItemSection(
+  props: ComponentProps<typeof OverlayItemInspector>
+): ReactElement {
+  const offLine = overlayItemOff(props.layout) ? (OVERLAY_ITEM_OFF_LINES[props.item] ?? null) : null
+  return (
+    <PanelSection
+      className="min-w-0"
+      description={
+        offLine ? <span data-videorc-overlay-off-line={props.item}>{offLine}</span> : undefined
+      }
+      icon={AdjustIcon}
+      title={OVERLAY_ITEM_LABELS[props.item]}
+    >
+      <OverlayItemInspector {...props} />
+    </PanelSection>
+  )
 }
 
 /** Exported for its test: the overlay controls, off with one reason while
@@ -1391,6 +1883,11 @@ export function OverlayItemInspector({
       </Field>
     </div>
   )
+}
+
+/** The landscape scenes whose screen fits or fills by the user's choice. */
+function landscapeScreenFramed(preset: LayoutPreset): boolean {
+  return preset === 'screen-camera' || preset === 'screen-only'
 }
 
 function sourceIsFullCanvas(source: SceneSource): boolean {

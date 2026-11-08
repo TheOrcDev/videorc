@@ -23,11 +23,21 @@ export const IPC_INVOKE_ROLES = {
   'account:callbacks-list': MAIN_ONLY,
   'account:callback-ack': MAIN_ONLY,
   'app:get-runtime-info': MAIN_ONLY,
+  'app:front-window-watch': MAIN_ONLY,
+  'app:self-bundle-ids': MAIN_ONLY,
+  'app:icons': MAIN_ONLY,
   'app:retry-hardware-acceleration': MAIN_ONLY,
   'app:set-native-theme': MAIN_ONLY,
   'app:exit': MAIN_ONLY,
   'system:open-permissions': MAIN_ONLY,
+  // Videorc Camera (plan 214 E): System Settings, removal and setup are the
+  // Output page's and Health's, so the Studio renderer only.
+  'virtual-camera:action': MAIN_ONLY,
   'system:request-media-access': MAIN_ONLY,
+  'system:request-screen-access': MAIN_ONLY,
+  'system:recheck-permission-grants': MAIN_ONLY,
+  'app:relaunch-for-permission': MAIN_ONLY,
+  'app:workspace-shown': MAIN_ONLY,
   'system:media-access-status': MAIN_ONLY,
   'system:reveal-permission-target': MAIN_ONLY,
   'resource:reveal-selection': MAIN_ONLY,
@@ -35,6 +45,12 @@ export const IPC_INVOKE_ROLES = {
   'resource:reveal-session': MAIN_ONLY,
   'resource:reveal-background': MAIN_ONLY,
   'resource:reveal-support-bundle': MAIN_ONLY,
+  // Settings → Remote → Agents (plan 209 S7): the bridge's path for the
+  // config line, and the Linux copy on Connect. The Studio renderer only.
+  'agents:bridge': MAIN_ONLY,
+  // "Add to …" in Connect (plan 209 S22): writes another app's config file
+  // with an agent token. The Studio renderer only.
+  'agents:add-to-app': MAIN_ONLY,
   'resource:trash-session-deletion': MAIN_ONLY,
   'resource:open-session': MAIN_ONLY,
   // In-app playback grants (plan 119, S11). Only the Studio renderer may mint
@@ -44,6 +60,12 @@ export const IPC_INVOKE_ROLES = {
   'system:pick-directory': MAIN_ONLY,
   'system:check-directory': MAIN_ONLY,
   'screens:pick-image': MAIN_ONLY,
+  // Assets → Banners → Import image… (plan 186): the Studio renderer only.
+  'banners:pick-image': MAIN_ONLY,
+  // Assets → Sounds and the starter seeding (plan 189): the Studio renderer only.
+  'sounds:pick-files': MAIN_ONLY,
+  'sounds:starter-list': MAIN_ONLY,
+  'sounds:starter-files': MAIN_ONLY,
   'backgrounds:import-image': MAIN_ONLY,
   'scheduled-streams:import-thumbnail': MAIN_ONLY,
   // The Buddy's avatar images (plan 164 S-A3): the Studio renderer only.
@@ -113,6 +135,7 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:toggle': MAIN_ONLY,
   'comments-window:get-state': MAIN_AND_COMMENTS,
   'comments-window:set-always-on-top': MAIN_AND_COMMENTS,
+  'comments-window:set-hidden-from-stream': MAIN_AND_COMMENTS,
   'comments-window:set-highlight-anchor': MAIN_AND_COMMENTS,
   'comments-window:set-auto-show-activity': MAIN_AND_COMMENTS,
   'comments-window:push-snapshot': MAIN_ONLY,
@@ -143,11 +166,35 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:marker-result-push': MAIN_ONLY,
   'comments-window:clip-mark': MAIN_AND_COMMENTS,
   'comments-window:clip-mark-result-push': MAIN_ONLY,
+  // Banners (plan 186 S7): the Stream Manager reads the list Studio pushes
+  // and asks for a show or hide (its handler refuses any other sender);
+  // Studio replies.
+  'comments-window:banners-get': MAIN_AND_COMMENTS,
+  'comments-window:banners-push': MAIN_ONLY,
+  'comments-window:banner': MAIN_AND_COMMENTS,
+  'comments-window:banner-result-push': MAIN_ONLY,
+  // Sounds (plan 189 S9): the Stream Manager reads the board Studio pushes
+  // and asks for a pad, `/sound` or Stop all (its handler refuses any other
+  // sender); Studio replies.
+  'comments-window:sounds-get': MAIN_AND_COMMENTS,
+  'comments-window:sounds-push': MAIN_ONLY,
+  'comments-window:sound': MAIN_AND_COMMENTS,
+  'comments-window:sound-result-push': MAIN_ONLY,
+  // Plan 209 S20: `/buddy <words>` from the Stream Manager (its handler
+  // refuses any other sender); Studio replies with Buddy's answer.
+  'comments-window:buddy-act': MAIN_AND_COMMENTS,
+  'comments-window:buddy-act-result-push': MAIN_ONLY,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
   'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
   // The Buddy pane's behaviour chips open Buddy → Chat (plan 174 S3.14a):
   // the Chat window asks, main shows the main window.
   'comments-window:open-buddy-tab': MAIN_AND_COMMENTS,
+  // "Use Sign in" on an X stream-key destination (plan 213 J1): the Chat
+  // window asks, main shows the main window on that destination.
+  'comments-window:open-destination': MAIN_AND_COMMENTS,
+  // "Sign in to Videorc" on a chat row that waits on it (plan 215 A3): the
+  // Chat window asks, main shows the main window, which starts the sign-in.
+  'comments-window:sign-in-videorc': MAIN_AND_COMMENTS,
   // Remove from chat and the removal card's answers (plan 140, S6): the Chat
   // window asks (its handler refuses any other sender), Studio replies.
   'comments-window:moderation': MAIN_AND_COMMENTS,
@@ -229,6 +276,16 @@ function normalizedDocumentUrl(rawUrl: string): string | null {
     url.hash = ''
     if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'file:') {
       url.search = ''
+    }
+    if (url.protocol === 'file:') {
+      // Node's pathToFileURL escapes Windows short-path tildes (%7E), while
+      // Electron loadFile's legacy URL formatter leaves them literal. They
+      // identify the same file. Normalize only unreserved ASCII characters;
+      // never decode separators, URL delimiters, or another percent escape.
+      url.pathname = url.pathname.replace(/%([0-9a-f]{2})/gi, (escape, hex: string) => {
+        const character = String.fromCharCode(Number.parseInt(hex, 16))
+        return /^[A-Za-z0-9._~-]$/.test(character) ? character : escape
+      })
     }
     return url.toString()
   } catch {

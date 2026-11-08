@@ -14,8 +14,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: Change scope
+    uses: ./.github/workflows/ci-change-scope.yml
+
   gates:
     name: Linux gates (FFmpeg policy + Rust compile/test)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.linux_heavy == 'true' }}
     runs-on: ubuntu-latest
     # Warm-cache Rust tests on this job sit near the old 30m wall; portal
     # proof-surface PRs were cancelled mid-run. Keep headroom for this suite.
@@ -78,3 +84,16 @@ jobs:
         # Platform-neutral tests run normally. Tests that require Apple or
         # Windows frameworks remain gated at their implementation boundary.
         run: cargo test -p videorc-backend
+
+  gates-skip:
+    name: Linux gates (FFmpeg policy + Rust compile/test)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.linux_heavy != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip Linux Rust compile/test for an allow-listed docs or version-only change
+        run: |
+          echo "Skipped Linux FFmpeg policy and Rust compile/test for a ${{ needs.scope.outputs.kind }} change set."
+          echo "The Linux alpha candidate workflow still compiles and tests on protected main."
+          echo "Ordinary code PRs still run the identical Linux gates job."

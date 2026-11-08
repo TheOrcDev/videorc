@@ -563,7 +563,7 @@ async function runAttempt({
             scenario.audio === 'controlled'
               ? 'Portable debug native PCM fixture: continuous 440 Hz tone; coreaudio-prefixed fixture ID does not mean physical CoreAudio capture'
               : scenario.audio === 'ffmpeg-control'
-                ? 'Independent FFmpeg lavfi 880 Hz tone; native PCM capture bus bypassed, no physical microphone selected'
+                ? 'Independent 880 Hz tone on its own paced PCM FIFO; native PCM capture bus bypassed, no physical microphone selected'
                 : 'Selected physical Windows microphone',
           fallbackReason,
           milestones: events,

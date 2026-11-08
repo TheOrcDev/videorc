@@ -12,6 +12,7 @@ import {
   nativePreviewHelperFallbackAllowed,
   nativePreviewLifecycleFramePollingSuppressed,
   nativePreviewProofPollingSuppressed,
+  windowsD3d11ClaimPending,
   reconcileWindowsD3d11PresenterStatus,
   nativePreviewSupervisorFallbackReason,
   nativePreviewSupervisorDisposition,
@@ -270,6 +271,40 @@ describe('native preview host policy', () => {
     ).toBe(true)
   })
 
+  it('keeps the proof surface quiet while a live D3D11 generation claims the window', () => {
+    const armed = { generation: 4, atMs: 1_000 }
+    const pending = (patch: Partial<Parameters<typeof windowsD3d11ClaimPending>[0]> = {}) =>
+      windowsD3d11ClaimPending({ armed, generation: 4, nowMs: 2_000, ...patch })
+
+    expect(pending()).toBe(true)
+    expect(
+      pending({ presenterFallbackReason: 'windows-d3d11-preview-waiting-trusted-window' })
+    ).toBe(true)
+    // A named failure, a newer generation or a stalled claim hands it back.
+    expect(
+      pending({ presenterFallbackReason: 'windows-d3d11-preview-window-stacking-failed' })
+    ).toBe(false)
+    expect(pending({ generation: 5 })).toBe(false)
+    expect(pending({ nowMs: 6_000 })).toBe(false)
+    expect(pending({ armed: null })).toBe(false)
+
+    expect(
+      nativePreviewProofPollingSuppressed({
+        lifecycleSuppressed: false,
+        nativeSurfaceOwnsPresentation: false,
+        nativeClaimPending: true
+      })
+    ).toBe(true)
+    expect(
+      nativePreviewProofPollingSuppressed({
+        lifecycleSuppressed: false,
+        nativeSurfaceOwnsPresentation: false,
+        nativeClaimPending: true,
+        nativeFailureFallbackActive: true
+      })
+    ).toBe(true)
+  })
+
   it('suppresses polling for a closed preview lifecycle and resumes it while open', () => {
     expect(nativePreviewLifecycleFramePollingSuppressed(false)).toBe(true)
     expect(nativePreviewLifecycleFramePollingSuppressed(true)).toBe(false)
@@ -336,6 +371,52 @@ describe('native preview host policy', () => {
       nativePreviewHostAttached: false,
       message: 'native presenter failed'
     })
+  })
+
+  it('reports the D3D11 presenter cadence and latency, not the hidden proof surface', () => {
+    const current = surfaceStatus({
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      nativePreviewHostKind: 'proof-surface',
+      sourcePixelsPresent: true,
+      presentFps: 61,
+      intervalP95Ms: 16.8,
+      inputToPresentLatencyMs: 51,
+      inputToPresentLatencyP95Ms: 474
+    })
+    const backend = {
+      ...d3d11BackendStatus(),
+      presentFps: 59.9,
+      intervalP95Ms: 17.1,
+      intervalP99Ms: 18.2,
+      inputToPresentLatencyMs: 3,
+      inputToPresentLatencyP50Ms: 3,
+      inputToPresentLatencyP95Ms: 6,
+      inputToPresentLatencyP99Ms: 9
+    }
+    const input = { platform: 'win32' as const, previewWindowOpen: true, generation: 7 }
+    const canonical = reconcileWindowsD3d11PresenterStatus(current, backend, {
+      ...input,
+      trustedGeneration: 7
+    })
+    expect(canonical).toMatchObject({
+      nativePreviewHostKind: 'backend-d3d11-presenter',
+      presentFps: 59.9,
+      intervalP95Ms: 17.1,
+      intervalP99Ms: 18.2,
+      inputToPresentLatencyMs: 3,
+      inputToPresentLatencyP50Ms: 3,
+      inputToPresentLatencyP95Ms: 6,
+      inputToPresentLatencyP99Ms: 9
+    })
+
+    // Before the presenter has timing samples nothing is carried over.
+    const unmeasured = reconcileWindowsD3d11PresenterStatus(current, d3d11BackendStatus(), {
+      ...input,
+      trustedGeneration: 7
+    })
+    expect(unmeasured.presentFps).toBeUndefined()
+    expect(unmeasured.inputToPresentLatencyP95Ms).toBeUndefined()
   })
 
   it('adopts the backend D3D11 triple only after all first-present evidence is true', () => {

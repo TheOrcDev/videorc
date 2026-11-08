@@ -4,6 +4,14 @@
 // env would falsely fail the documented `pnpm dist:desktop:release` path.
 export const REQUIRED_RELEASE_ENV_VARS = ['APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD']
 
+// Plan 214 (P0a): the one Developer ID provisioning profile, for the app
+// (base64 or a path), that lets the release embed the Videorc Camera
+// extension. A release without it ships no camera and fails the artifact
+// validator, so the preflight fails first and names it. The extension itself
+// needs no profile; the retired VIDEORC_MACOS_PROFILE_CAMERA fails when set.
+export const REQUIRED_CAMERA_PROFILE_ENV_VARS = ['VIDEORC_MACOS_PROFILE_APP']
+export const RETIRED_CAMERA_PROFILE_ENV_VARS = ['VIDEORC_MACOS_PROFILE_CAMERA']
+
 export const REQUIRED_RELEASE_TOOLS = [
   { id: 'codesign', label: 'codesign' },
   { id: 'spctl', label: 'spctl' },
@@ -15,6 +23,10 @@ export const REQUIRED_RELEASE_PATHS = [
   {
     id: 'macEntitlements',
     label: 'apps/desktop/build-resources/entitlements.mac.plist'
+  },
+  {
+    id: 'macInheritEntitlements',
+    label: 'apps/desktop/build-resources/entitlements.mac.inherit.plist'
   },
   {
     id: 'releaseOutputDir',
@@ -46,6 +58,31 @@ export function evaluateMacosReleasePreflight({
       ok: present,
       detail: present ? 'present' : 'missing'
     })
+  }
+
+  for (const name of REQUIRED_CAMERA_PROFILE_ENV_VARS) {
+    const present = typeof env[name] === 'string' && env[name].trim().length > 0
+    checks.push({
+      type: 'env',
+      label: name,
+      ok: present,
+      detail: present
+        ? 'present'
+        : 'missing: the Videorc Camera app provisioning profile (plan 214; see docs/releases/macos-signing.md)'
+    })
+  }
+
+  for (const name of RETIRED_CAMERA_PROFILE_ENV_VARS) {
+    const present = typeof env[name] === 'string' && env[name].trim().length > 0
+    if (present) {
+      checks.push({
+        type: 'env',
+        label: name,
+        ok: false,
+        detail:
+          'set but no longer used: the extension embeds no profile (plan 214 P0a); remove it from the environment and ~/.videorc-release.env'
+      })
+    }
   }
 
   // Signing can come from either the keychain "Developer ID Application"

@@ -5,13 +5,18 @@
 
 import type { CohostAvatarState } from './backend'
 import { isBuddyOfficialSlug, officialAlivePackVersion } from './buddy-library'
+import { BUDDY_ASSET_HOST, parseBuddyAssetPath } from './buddy-persona-image'
+
+export {
+  BUDDY_ASSET_HOST,
+  BUDDY_IMAGE_EXTENSIONS,
+  type BuddyImageExtension,
+  buddyPersonaImageUrl,
+  parseBuddyAssetPath
+} from './buddy-persona-image'
 
 /** A persona image read back as bytes never exceeds this (plan 164 D20). */
 export const BUDDY_IMAGE_MAX_BYTES = 4 * 1024 * 1024
-export const BUDDY_IMAGE_EXTENSIONS = ['png', 'webp', 'jpg'] as const
-export type BuddyImageExtension = (typeof BUDDY_IMAGE_EXTENSIONS)[number]
-/** The managed protocol host the renderer loads persona images from. */
-export const BUDDY_ASSET_HOST = 'buddy'
 
 /** A persona id names a folder under the managed root: a plain token only. */
 export function isBuddyPersonaId(value: unknown): value is string {
@@ -29,32 +34,6 @@ export function buddyAssetUrl(relativePath: string): string | null {
     ? parseBuddyDraftPath(versioned[1]) !== null
     : parseBuddyAssetPath(relativePath) !== null || parseBuddyDraftPath(relativePath) !== null
   return ok ? `videorc-asset://${BUDDY_ASSET_HOST}/${relativePath}` : null
-}
-
-/**
- * A persona image path taken apart, or null for anything else:
- * `<personaId>/<state>.<ext>` (an upload from before plan 169) or
- * `<personaId>/<state>-<tag>.<ext>` (a kept look, plan 169: the tag is 8 hex
- * digits, so each kept look has its own path and no surface shows a cached
- * picture of the one before). `file` is the name inside the persona folder.
- */
-export function parseBuddyAssetPath(relativePath: string): {
-  personaId: string
-  state: CohostAvatarState
-  extension: BuddyImageExtension
-  file: string
-} | null {
-  const match =
-    /^([A-Za-z0-9_-]{1,128})\/((idle|talk|laugh|think)(?:-[0-9a-f]{8})?\.(png|webp|jpg))$/.exec(
-      relativePath
-    )
-  if (!match) return null
-  return {
-    personaId: match[1]!,
-    state: match[3] as CohostAvatarState,
-    extension: match[4] as BuddyImageExtension,
-    file: match[2]!
-  }
 }
 
 /**

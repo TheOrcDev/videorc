@@ -1,0 +1,21 @@
+{
+  "generator_version": 1,
+  "background_id": "liquid-chrome",
+  "look": "polished",
+  "phase": 1.2,
+  "width": 1280,
+  "height": 720,
+  "sigma": 24.0,
+  "grey": "Rec.709 luma of gamma-encoded sRGB: (0.2126 R + 0.7152 G + 0.0722 B) / 255; no linearization",
+  "encoding": "cwebp lossy quality 90",
+  "dark": {
+    "min": 0.023529411764705882,
+    "max": 0.9215686274509803,
+    "mean": 0.3676160079166982
+  },
+  "light": {
+    "min": 0.07843137254901959,
+    "max": 0.9787090196078431,
+    "mean": 0.6333239199411039
+  }
+}

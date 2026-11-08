@@ -474,7 +474,7 @@ pub fn probe_source_blocking(
         "stream=r_frame_rate,avg_frame_rate,duration:format=duration",
         "-of",
         "json",
-        &source.display().to_string(),
+        &crate::ffmpeg::ffmpeg_file_path(source),
     ]);
     let output = output_owned_std_with_timeout(&mut command, PROBE_TIMEOUT)
         .map_err(|error| JobFailure::new(ERROR_PROBE, format!("Could not run ffprobe: {error}")))?;
@@ -529,7 +529,7 @@ pub fn extract_audio_blocking(
             "-loglevel",
             "error",
             "-i",
-            &source.display().to_string(),
+            &crate::ffmpeg::ffmpeg_file_path(source),
             "-vn",
             "-map",
             "0:a:0",
@@ -541,7 +541,7 @@ pub fn extract_audio_blocking(
             "pcm_s16le",
             "-f",
             "wav",
-            &staging.display().to_string(),
+            &crate::ffmpeg::ffmpeg_file_path(&staging),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

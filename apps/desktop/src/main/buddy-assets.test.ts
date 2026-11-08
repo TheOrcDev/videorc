@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import {
   mkdir,
   mkdtemp,
@@ -44,6 +44,24 @@ const ONE_PIXEL_PNG = Buffer.from(
 )
 
 const roots: string[] = []
+// Windows refuses file symlinks without Developer Mode or an elevated token
+// (EPERM). The link cases prove a path rule that the production code enforces
+// the same way on every platform; a host that cannot make the link skips
+// them, and a real fault still fails on a host that can.
+const CAN_SYMLINK = (() => {
+  const probe = mkdtempSync(join(tmpdir(), 'videorc-symlink-probe-'))
+  try {
+    writeFileSync(join(probe, 'target'), '')
+    symlinkSync(join(probe, 'target'), join(probe, 'link'))
+    return true
+  } catch (error) {
+    if ((error as { code?: string }).code === 'EPERM') return false
+    throw error
+  } finally {
+    rmSync(probe, { recursive: true, force: true })
+  }
+})()
+
 async function root(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), 'buddy-assets-'))
   roots.push(path)
@@ -281,7 +299,7 @@ describe('buddy pet pack store (plan 168 S-A2)', () => {
     )
   })
 
-  it('refuses an oversize file and a link that leaves the root', async () => {
+  it.skipIf(!CAN_SYMLINK)('refuses an oversize file and a link that leaves the root', async () => {
     const write = await root()
     const outside = await root()
     const folder = join(write, 'p', 'pets', PACK)
@@ -330,9 +348,15 @@ describe('buddy pet folder import (plan 168 S-A3)', () => {
     await writeFile(join(source, 'extra', 'other.png'), ONE_PIXEL_PNG)
     const outside = await root()
     await writeFile(join(outside, 'secret.png'), ONE_PIXEL_PNG)
-    await symlink(join(outside, 'secret.png'), join(source, 'linked.png'))
+    if (CAN_SYMLINK) {
+      await symlink(join(outside, 'secret.png'), join(source, 'linked.png'))
+    }
     return source
   }
+
+  /** What the import skips in a picked folder; the link only where one exists. */
+  const SKIPPED = ['.DS_Store', 'extra', 'gaze-review.json', 'sources/notes.txt']
+  const skippedFiles = CAN_SYMLINK ? [...SKIPPED.slice(0, 3), 'linked.png', SKIPPED[3]] : SKIPPED
 
   it('copies the pack files, skips the rest and registers the folder token', async () => {
     const base = await root()
@@ -351,7 +375,7 @@ describe('buddy pet folder import (plan 168 S-A3)', () => {
     expect(tokens).toEqual([`persona-1/pets/${PACK}`])
     expect(result).toEqual({
       pack: summary,
-      skippedFiles: ['.DS_Store', 'extra', 'gaze-review.json', 'linked.png', 'sources/notes.txt']
+      skippedFiles
     })
     const folder = join(base, 'persona-1', 'pets', PACK)
     expect((await readdir(folder)).sort()).toEqual([
@@ -436,7 +460,7 @@ describe('buddy creation files for the creator wizard (plan 168 S-F5)', () => {
     expect(await readBuddyCreationFile(write, 'p', BUILD, 'sources/missing-v1.png')).toBeNull()
   })
 
-  it('refuses a link that leaves the root', async () => {
+  it.skipIf(!CAN_SYMLINK)('refuses a link that leaves the root', async () => {
     const write = await root()
     const outside = await root()
     const sources = join(write, 'p', 'creations', BUILD, 'sources')
@@ -483,6 +507,7 @@ describe('the golem-assets folder moves to buddy-assets once (plan 171 D3)', () 
     await writeFile(join(withFile, LEGACY_BUDDY_ASSETS_FOLDER), 'not a folder')
     expect(moveLegacyBuddyAssets(withFile)).toEqual({ kind: 'nothing' })
 
+    if (!CAN_SYMLINK) return
     const withLink = await root()
     const elsewhere = await root()
     await symlink(elsewhere, join(withLink, LEGACY_BUDDY_ASSETS_FOLDER))

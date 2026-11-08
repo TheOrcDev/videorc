@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  MAX_SOURCE_FRACTION,
+  MIN_CROP_KEPT,
   MIN_SOURCE_FRACTION,
+  MIN_SOURCE_POSITION,
   STAGE_HANDLE_IDS,
   STAGE_SNAP_THRESHOLD,
+  cropGhost,
   handleCursor,
   moveGhost,
   resizeGhost,
@@ -47,7 +51,7 @@ describe('moveGhost', () => {
     expect(rect.height).toBeCloseTo(0.3)
   })
 
-  it('clamps to the canvas', () => {
+  it('keeps 5% of the canvas covered (plan 215 E3): the box may hang off by the rest', () => {
     const { rect } = moveGhost({
       start: box(0.6, 0.6),
       dx: 0.9,
@@ -56,11 +60,21 @@ describe('moveGhost', () => {
       disableSnap: true,
       targets: noTargets
     })
-    expect(rect.x).toBeCloseTo(0.7)
-    expect(rect.y).toBeCloseTo(0.7)
+    expect(rect.x).toBeCloseTo(0.95)
+    expect(rect.y).toBeCloseTo(0.95)
+    const left = moveGhost({
+      start: box(0.2, 0.2),
+      dx: -0.9,
+      dy: -0.9,
+      constrainAxis: false,
+      disableSnap: true,
+      targets: noTargets
+    }).rect
+    expect(left.x).toBeCloseTo(-0.25)
+    expect(left.y).toBeCloseTo(-0.25)
   })
 
-  it('keeps a full-canvas box pinned at the origin', () => {
+  it('lets a full-canvas box slide until 5% of the canvas is left', () => {
     const { rect } = moveGhost({
       start: box(0, 0, 1, 1),
       dx: 0.4,
@@ -69,8 +83,31 @@ describe('moveGhost', () => {
       disableSnap: true,
       targets: noTargets
     })
-    expect(rect.x).toBe(0)
-    expect(rect.y).toBe(0)
+    expect(rect.x).toBeCloseTo(0.4)
+    expect(rect.y).toBeCloseTo(0.4)
+    const far = moveGhost({
+      start: box(0, 0, 1, 1),
+      dx: 4,
+      dy: -4,
+      constrainAxis: false,
+      disableSnap: true,
+      targets: noTargets
+    }).rect
+    expect(far.x).toBeCloseTo(0.95)
+    expect(far.y).toBeCloseTo(-0.95)
+  })
+
+  it('a 400% box stops at the position bounds', () => {
+    const { rect } = moveGhost({
+      start: box(-1.5, -1.5, 4, 4),
+      dx: -9,
+      dy: 9,
+      constrainAxis: false,
+      disableSnap: true,
+      targets: noTargets
+    })
+    expect(rect.x).toBe(MIN_SOURCE_POSITION)
+    expect(rect.y).toBeCloseTo(0.95)
   })
 
   it('constrains to the dominant axis with Shift', () => {
@@ -212,7 +249,7 @@ describe('resizeGhost (free aspect)', () => {
     expect(rect.height).toBeCloseTo(MIN_SOURCE_FRACTION)
   })
 
-  it('never leaves the canvas', () => {
+  it('may pull an edge past the canvas, up to 400% and the position bounds (plan 215 E3)', () => {
     const { rect } = resizeGhost({
       start: box(0.6, 0.6),
       handle: 'se',
@@ -220,8 +257,53 @@ describe('resizeGhost (free aspect)', () => {
       dy: 0.9,
       lockAspect: false
     })
-    expect(rect.x + rect.width).toBeLessThanOrEqual(1)
-    expect(rect.y + rect.height).toBeLessThanOrEqual(1)
+    expect(rect.x).toBeCloseTo(0.6)
+    expect(rect.y).toBeCloseTo(0.6)
+    expect(rect.x + rect.width).toBeCloseTo(1.8)
+    expect(rect.y + rect.height).toBeCloseTo(1.8)
+    // The 400% ceiling from the anchored edge.
+    const huge = resizeGhost({
+      start: box(0.1, 0.1),
+      handle: 'se',
+      dx: 9,
+      dy: 9,
+      lockAspect: false
+    }).rect
+    expect(huge.width).toBeCloseTo(MAX_SOURCE_FRACTION)
+    expect(huge.height).toBeCloseTo(MAX_SOURCE_FRACTION)
+    // The position bound on the far side.
+    const far = resizeGhost({
+      start: box(-1.5, -1.5, 2, 2),
+      handle: 'nw',
+      dx: -9,
+      dy: -9,
+      lockAspect: false
+    }).rect
+    expect(far.x).toBe(MIN_SOURCE_POSITION)
+    expect(far.y).toBe(MIN_SOURCE_POSITION)
+    expect(far.width).toBeCloseTo(3.5)
+  })
+
+  it('keeps 5% of the canvas covered when an edge is pulled in past the canvas', () => {
+    // A box hanging off the right: its right edge pulled left stops 5% in.
+    const { rect } = resizeGhost({
+      start: box(0.5, 0.2, 1, 0.3),
+      handle: 'e',
+      dx: -9,
+      dy: 0,
+      lockAspect: false
+    })
+    expect(rect.x).toBeCloseTo(0.5)
+    expect(rect.width).toBeCloseTo(MIN_SOURCE_FRACTION)
+    const off = resizeGhost({
+      start: box(-0.5, 0.2, 1, 0.3),
+      handle: 'w',
+      dx: 9,
+      dy: 0,
+      lockAspect: false
+    }).rect
+    expect(off.x).toBeCloseTo(0.45)
+    expect(off.x + off.width).toBeCloseTo(0.5)
   })
 })
 
@@ -259,7 +341,7 @@ describe('resizeGhost (aspect locked)', () => {
     expect(rect.x).toBeCloseTo(0.3)
   })
 
-  it('clamps the scale so the anchored box stays on the canvas', () => {
+  it('clamps the scale to 400% and the position bounds from the anchor', () => {
     const start = box(0.5, 0.5, 0.4, 0.4)
     const { rect } = resizeGhost({
       start,
@@ -268,10 +350,31 @@ describe('resizeGhost (aspect locked)', () => {
       dy: 0.5,
       lockAspect: true
     })
+    // Past the canvas now (plan 215 E3): the pull is honoured as is.
     expect(rect.x).toBeCloseTo(0.5)
     expect(rect.y).toBeCloseTo(0.5)
-    expect(rect.width).toBeCloseTo(0.5)
-    expect(rect.height).toBeCloseTo(0.5)
+    expect(rect.width).toBeCloseTo(0.9)
+    expect(rect.height).toBeCloseTo(0.9)
+    const ceiling = resizeGhost({
+      start,
+      handle: 'se',
+      dx: 9,
+      dy: 9,
+      lockAspect: true
+    }).rect
+    expect(ceiling.x).toBeCloseTo(0.5)
+    expect(ceiling.width).toBeCloseTo(MAX_SOURCE_FRACTION)
+    expect(ceiling.height).toBeCloseTo(MAX_SOURCE_FRACTION)
+    // An edge pull centred on the other axis stops at that axis's bounds.
+    const edge = resizeGhost({
+      start: box(0.4, 0.4, 0.2, 0.2),
+      handle: 'e',
+      dx: 9,
+      dy: 0,
+      lockAspect: true
+    }).rect
+    expect(edge.width).toBeCloseTo(MAX_SOURCE_FRACTION)
+    expect(edge.y + edge.height / 2).toBeCloseTo(0.5)
   })
 
   it('respects the minimum on shrink', () => {
@@ -374,5 +477,55 @@ describe('compositor mask geometry', () => {
   it('caps rounded corners at half the shorter side, matching the compositor', () => {
     const shape = stageSourceShape(box(0.1, 0.2, 0.4, 0.2), 160, 90, 'rounded', 100)
     expect(shape).toEqual({ kind: 'rect', x: 16, y: 18, width: 64, height: 18, rx: 9 })
+  })
+})
+
+describe('cropGhost (plan 213 G2)', () => {
+  const crop = { cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }
+  // A 16:9 screen drawn in a box half the canvas wide: one canvas unit of the
+  // box shows two units of the picture.
+  const start = box(0.25, 0.25, 0.5, 0.5)
+
+  it('cuts the picture at the edge the pointer moves, so what stays does not move', () => {
+    const { rect, crop: next } = cropGhost({ start, crop, handle: 'w', dx: 0.1, dy: 0 })
+    expect(rect.x).toBeCloseTo(0.35)
+    expect(rect.width).toBeCloseTo(0.4)
+    expect(rect.y).toBe(start.y)
+    expect(rect.height).toBe(start.height)
+    expect(next.cropLeft).toBeCloseTo(0.2)
+    // The scale is unchanged: what's left of the picture over the box.
+    expect((1 - next.cropLeft - next.cropRight) / rect.width).toBeCloseTo(1 / start.width)
+  })
+
+  it('crops the opposite edges and the corners the same way', () => {
+    const east = cropGhost({ start, crop, handle: 'e', dx: -0.1, dy: 0 })
+    expect(east.rect.x).toBe(start.x)
+    expect(east.rect.width).toBeCloseTo(0.4)
+    expect(east.crop.cropRight).toBeCloseTo(0.2)
+    const corner = cropGhost({ start, crop, handle: 'se', dx: -0.05, dy: -0.1 })
+    expect(corner.crop.cropRight).toBeCloseTo(0.1)
+    expect(corner.crop.cropBottom).toBeCloseTo(0.2)
+    expect(corner.crop.cropLeft).toBe(0)
+    expect(corner.crop.cropTop).toBe(0)
+  })
+
+  it('pulling out uncrops and stops at the picture own edge', () => {
+    const cropped = { ...crop, cropLeft: 0.2 }
+    const from = box(0.35, 0.25, 0.4, 0.5)
+    const back = cropGhost({ start: from, crop: cropped, handle: 'w', dx: -0.3, dy: 0 })
+    expect(back.crop.cropLeft).toBe(0)
+    expect(back.rect.x).toBeCloseTo(0.25)
+    expect(back.rect.width).toBeCloseTo(0.5)
+    // Nothing to uncrop: the edge stays put.
+    const none = cropGhost({ start, crop, handle: 'n', dx: 0, dy: -0.2 })
+    expect(none.rect).toEqual(start)
+    expect(none.crop).toEqual(crop)
+  })
+
+  it('always leaves 5% of the picture and the smallest box', () => {
+    const { rect, crop: next } = cropGhost({ start, crop, handle: 'w', dx: 2, dy: 0 })
+    expect(1 - next.cropLeft - next.cropRight).toBeGreaterThanOrEqual(MIN_CROP_KEPT - 1e-9)
+    expect(rect.width).toBeGreaterThanOrEqual(MIN_SOURCE_FRACTION - 1e-9)
+    expect(rect.x + rect.width).toBeCloseTo(start.x + start.width)
   })
 })

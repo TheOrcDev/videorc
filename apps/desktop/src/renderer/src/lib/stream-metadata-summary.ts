@@ -7,7 +7,8 @@ import type {
 } from '@/lib/backend'
 import { destinationLabel } from '@/lib/platform-copy'
 
-/** The platforms that carry a per-destination row in Stream details. */
+/** The platforms that carry a per-destination row in Stream details.
+ * Facebook joins once a connected Page can take a title (plan 206 S8). */
 export type MetadataPlatform = 'youtube' | 'twitch' | 'kick' | 'x'
 
 export function isMetadataPlatform(platform: StreamPlatform): platform is MetadataPlatform {
@@ -24,6 +25,8 @@ export function metadataPlatformLabel(platform: StreamPlatform): string {
       return 'Kick'
     case 'x':
       return 'X'
+    case 'facebook':
+      return 'Facebook'
     case 'tiktok':
       return 'TikTok'
     case 'instagram':

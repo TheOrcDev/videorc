@@ -175,17 +175,23 @@ export interface RemovalCardView {
   confirmLabel: string
 }
 
+/** The removals that show a card: Buddy's voice commands, and an AI
+ * agent's (plan 209 S12), which waits on YouTube for the streamer's click. */
+function removalHasCard(operation: Pick<ModerationOperation, 'source'>): boolean {
+  return operation.source === 'orcle-voice' || operation.source === 'agent'
+}
+
 /**
- * The card for one Buddy voice removal: while it waits for an answer, and
- * while it runs once answered. Manual removals never have a card; the menu
- * click was the consent. YouTube is always confirm-first.
+ * The card for one Buddy voice removal, or an agent's: while it waits for an
+ * answer, and while it runs once answered. Manual removals never have a card;
+ * the menu click was the consent. YouTube is always confirm-first.
  */
 export function removalCardView(
   operation: ModerationOperation,
   nowMs: number,
   answering = false
 ): RemovalCardView | null {
-  if (operation.source !== 'orcle-voice') return null
+  if (!removalHasCard(operation)) return null
   if (operation.phase !== 'pending-confirm' && operation.phase !== 'executing') return null
   const countdown = operation.confirmMode === 'countdown' && !operation.requiresExplicitConfirm
   const base = {
@@ -251,12 +257,12 @@ export interface RemovalResultView {
   text: string
 }
 
-/** The brief line a finished Buddy removal leaves where its card was. */
+/** The brief line a finished Buddy (or agent) removal leaves where its card was. */
 export function removalResultView(
   operation: ModerationOperation,
   nowMs: number
 ): RemovalResultView | null {
-  if (operation.source !== 'orcle-voice' || !moderationOperationTerminal(operation)) return null
+  if (!removalHasCard(operation) || !moderationOperationTerminal(operation)) return null
   const endedAt = Date.parse(operation.updatedAt)
   // Recent on either side of now: a skewed stamp never pins the line.
   if (!Number.isFinite(endedAt) || Math.abs(nowMs - endedAt) >= REMOVAL_RESULT_VISIBLE_MS) {

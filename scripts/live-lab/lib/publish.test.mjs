@@ -25,8 +25,10 @@ import {
 } from './publish.mjs'
 import { QuotaRefused } from './quota-ledger.mjs'
 
-// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
-const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
 
 const RUN_ID = '2026-10-12-chat-a1b2c3'
 const POLICY = {
@@ -208,7 +210,7 @@ async function exists(path) {
 
 test(
   'a run publishes files, files issues (dedupe), pings Discord on P0, links the VOD and writes published.json 0600',
-  macOnly,
+  posixOnly,
   async (t) => {
     const work = await workDir(t)
     const runDir = await writeRun(work)
@@ -572,7 +574,7 @@ test('updateVodDescription skips on quota, another channel, or an existing link'
 
 test(
   'boot doctor FAILs become doctor:<check> issues once, with home paths withheld',
-  macOnly,
+  posixOnly,
   async (t) => {
     const work = await workDir(t)
     await mkdir(join(work, 'doctor'), { recursive: true })

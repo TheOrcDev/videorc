@@ -84,7 +84,7 @@ describe('spaceShortcutBlocked (plan 174 S0.1, A-1)', () => {
 
   it('yields to a target inside a dialog body, and to any open dialog, menu or list', () => {
     const host = mount(`
-      <div role="dialog" data-state="open"><p data-dialog-text>Confirm Go Live</p></div>
+      <div role="dialog" data-open><p data-dialog-text>Confirm Go Live</p></div>
     `)
     expect(spaceShortcutBlocked(press(host.querySelector('[data-dialog-text]')), document)).toBe(
       true
@@ -93,7 +93,7 @@ describe('spaceShortcutBlocked (plan 174 S0.1, A-1)', () => {
     expect(spaceShortcutBlocked(press(document.body), document)).toBe(true)
 
     document.body.innerHTML = ''
-    mount('<div role="menu" data-state="open"><div role="menuitem">Rename</div></div>')
+    mount('<div role="menu" data-open><div role="menuitem">Rename</div></div>')
     expect(spaceShortcutBlocked(press(document.body), document)).toBe(true)
 
     document.body.innerHTML = ''
@@ -107,7 +107,7 @@ describe('spaceShortcutBlocked (plan 174 S0.1, A-1)', () => {
 
   it('ignores a closed dialog and an unfocusable row', () => {
     const host = mount(`
-      <div role="dialog" data-state="closed"></div>
+      <div role="dialog" data-closed></div>
       <div tabindex="-1"><span data-inert-text>Inert</span></div>
       <p><span data-plain-text>Plain</span></p>
     `)

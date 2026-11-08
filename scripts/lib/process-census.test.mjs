@@ -13,6 +13,7 @@ import {
   ownedProcessLedgerPaths,
   parseProcessTable,
   parseWindowsProcessTable,
+  processGroupTreeRows,
   processTreeRows,
   pruneDeadOwnedProcessRecords,
   readOwnedProcessLedgers,
@@ -325,6 +326,58 @@ test('collectProcessCensus reports alive and dead ledger records without killing
   )
   assert.equal(census.processGroupRows.length, 2)
   assert.deepEqual(summarizeRows(census.processRows).cargo, { count: 1, rssKb: 2048 })
+})
+
+test('a pgid census follows pnpm 11 scripts into their own process groups', async () => {
+  // `pnpm dev` on Linux with pnpm 11 (2026-11-03): the launched group 500 only
+  // holds the outer pnpm; electron-vite, Electron and the backend sit in 520.
+  const table = parseProcessTable(`
+  500     1 500 20000 pnpm /usr/bin/pnpm dev
+  510   500 510 30000 node-MainThread /home/u/.local/share/pnpm/exe/pnpm dev
+  511   500 511  1000 sh sh -c trap '' INT TERM HUP
+  520   510 520 40000 node-MainThread node /repo/apps/desktop/node_modules/.bin/../electron-vite/bin/electron-vite.js dev
+  530   520 520 90000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron .
+  531   530 520  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote --no-zygote-sandbox
+  532   530 520  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  533   532 520  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  534   533 520 70000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  540   530 520 50000 videorc-backend target/debug/videorc-backend
+  550   540 550  8000 ffprobe /repo/vendor/ffmpeg/linux-x64/bin/ffprobe -v error probe.mp4
+  600     1 600  9999 electron /opt/other-app/electron .
+`)
+
+  // 550 is a bounded backend job in a group of its own (process_job.rs): the
+  // app made that group, so it stays out exactly as with a plain pgid filter.
+  assert.deepEqual(
+    processGroupTreeRows(table, 500).map((row) => row.pid),
+    [500, 510, 511, 520, 530, 531, 532, 533, 534, 540]
+  )
+  const census = await collectProcessCensus({
+    ledgerPaths: [],
+    pgid: 500,
+    readProcessTable: async () => table
+  })
+  assert.equal(census.summary['electron-main']?.count, 1)
+  assert.equal(census.summary['electron-renderer']?.count, 1)
+  assert.equal(census.summary.backend?.count, 1)
+  assert.ok(!census.processRows.some((row) => row.pid === 600))
+})
+
+test('a pgid census is unchanged when the app tree already shares the launched group', async () => {
+  // macOS-shaped: Electron and the backend sit in the launched group; the
+  // backend's bounded FFmpeg job made its own group and was never counted.
+  const table = parseProcessTable(`
+  700     1 700 20000 pnpm /opt/homebrew/bin/pnpm dev
+  710   700 700 90000 Electron /repo/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron .
+  711   710 700 70000 Electron Helper (Renderer) /repo/node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer) --type=renderer
+  720   710 700 50000 videorc-backend target/debug/videorc-backend
+  730   720 730 30000 ffmpeg /repo/vendor/ffmpeg/macos/bin/ffmpeg -i in.mov out.mp4
+`)
+
+  assert.deepEqual(
+    processGroupTreeRows(table, 700).map((row) => row.pid),
+    table.filter((row) => row.pgid === 700).map((row) => row.pid)
+  )
 })
 
 test('processTreeRows and rootPid census include the complete Windows app tree', async () => {
@@ -812,4 +865,66 @@ test('classifies a Linux dev Electron tree by ancestry (Linux plan 0020)', () =>
       'electron-child'
     ]
   )
+})
+
+test('a renderer the zygote has not reaped yet is not a second Electron main (Linux)', async () => {
+  // Sampled on Linux during the lifecycle gate (2026-11-06): the zygote's dead
+  // renderers keep comm `electron` and lose their command line, so they read
+  // as an `electron` without --type=. 834 is a zombie (ps cuts its comm column,
+  // `electron <defunct>`, at 15 characters), 835 is still exiting.
+  const table = parseProcessTable(`
+  800     1 800 20000 node-MainThread node scripts/preview-lifecycle-probe.mjs --gate
+  830   800 800 90000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron .
+  832   830 800  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  833   832 800  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  834   833 800     0 electron <defun [electron] <defunct>
+  835   833 800     0 electron [electron]
+  836   833 800 70000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+    2     0   0     0 kthreadd [kthreadd]
+`)
+
+  const census = await collectProcessCensus({
+    ledgerPaths: [],
+    pgid: 800,
+    readProcessTable: async () => table
+  })
+  assert.equal(census.summary['electron-main']?.count, 1)
+  assert.equal(census.summary['electron-renderer']?.count, 1)
+  assert.deepEqual(census.summary.exited, { count: 2, rssKb: 0 })
+  // A kernel thread prints the same way but is never an exited app process.
+  assert.equal(classifyProcess(table.at(-1)), 'other')
+  // A live process keeps its command line, even with no resident memory yet.
+  assert.equal(
+    classifyProcess({ pid: 9, pgid: 800, rssKb: 0, command: 'electron', args: 'electron .' }),
+    'electron-main'
+  )
+})
+
+test('a checkout under a path that names FFmpeg is still the Electron app (Linux)', async () => {
+  // The process-memory gate on Linux (2026-11-06) ran from a worktree named
+  // `fix-ffmpeg-early-exit`: every Electron process carried that path in its
+  // argv and the census read the app as nine FFmpeg processes and no main.
+  const repo = '/home/u/worktrees/fix-ffmpeg-early-exit'
+  const electron = `${repo}/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron`
+  const table = parseProcessTable(`
+  900     1 900 20000 node-MainThread node scripts/smoke-process-memory.mjs
+  930   900 900 90000 electron ${electron} .
+  932   930 900  5000 electron ${electron} --type=zygote
+  933   932 900  5000 electron ${electron} --type=zygote
+  936   933 900 70000 electron ${electron} --type=zygote
+  940   930 900 50000 videorc-backend ${repo}/target/debug/videorc-backend
+  950   940 900 30000 ffmpeg ${repo}/vendor/ffmpeg/linux-x64/bin/ffmpeg -f rawvideo -i pipe:0 out.mp4
+  951   940 900  8000 ffprobe ${repo}/vendor/ffmpeg/linux-x64/bin/ffprobe -v error out.mp4
+`)
+
+  const census = await collectProcessCensus({
+    ledgerPaths: [],
+    pgid: 900,
+    readProcessTable: async () => table
+  })
+  assert.equal(census.summary['electron-main']?.count, 1)
+  assert.equal(census.summary['electron-renderer']?.count, 1)
+  assert.equal(census.summary.backend?.count, 1)
+  assert.equal(census.summary.ffmpeg?.count, 1)
+  assert.equal(census.summary.ffprobe?.count, 1)
 })

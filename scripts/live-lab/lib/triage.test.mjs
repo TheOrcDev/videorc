@@ -32,8 +32,10 @@ import {
   verdictSummary
 } from './triage.mjs'
 
-// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
-const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
 
 const settings = JSON.parse(await readFile(SETTINGS_PATH, 'utf8'))
 const skillText = await readFile(SKILL_PATH, 'utf8')
@@ -585,7 +587,7 @@ const redactor = { redactText: localRedactText, findSensitive: localFindSensitiv
 
 test(
   'triageRun end to end with a fake claude: prompt in, validated comment out, triaged.json written',
-  macOnly,
+  posixOnly,
   async () => {
     const dir = await freshDir()
     const runDir = await seedRun(dir)

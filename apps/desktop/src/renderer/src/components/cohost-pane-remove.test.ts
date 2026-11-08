@@ -88,7 +88,7 @@ describe('CohostPane: Remove from chat on a flagged message (plan 140, S6)', () 
     expect(remove!.dataset.variant).toBe('destructive')
     // The key is the chip and the tooltip's, never a native title (plan 174 S1.10).
     expect(remove!.hasAttribute('title')).toBe(false)
-    expect(remove!.parentElement?.getAttribute('data-state')).toBe('closed')
+    expect(remove!.parentElement?.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     expect(remove!.querySelector('kbd')?.textContent).toBe('⇧⌫')
     expect(action('Dismiss')?.dataset.variant).toBe('ghost')
     await act(async () => remove!.click())
@@ -121,12 +121,12 @@ describe('CohostPane: Remove from chat on a flagged message (plan 140, S6)', () 
     expect(onDismissFlag).not.toHaveBeenCalled()
   })
 
-  it('says Buddy posts only in the modes you turn on', async () => {
+  it('says Buddy never posts on its own (plan 211 D6)', async () => {
     await renderPane()
     const hint = container.querySelector<HTMLElement>('[data-slot="cohost-acts-on-ask"]')
-    expect(hint?.textContent).toBe('Posts only in the modes you turn on.')
+    expect(hint?.textContent).toBe('Never posts on its own.')
     // The whole sentence is the line's tooltip (plan 174 S1.10).
     expect(hint?.hasAttribute('title')).toBe(false)
-    expect(hint?.getAttribute('data-state')).toBe('closed')
+    expect(hint?.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
   })
 })

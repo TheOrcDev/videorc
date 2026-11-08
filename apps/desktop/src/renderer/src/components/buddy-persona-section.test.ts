@@ -45,6 +45,7 @@ function settings(overrides: Partial<CohostSettings['persona']> = {}): CohostSet
       ...overrides
     },
     autoChat: {
+      talk: 'off',
       mode: 'off',
       greetings: { enabled: false, templates: [] },
       answers: { enabled: false, cooldownSeconds: 20 },

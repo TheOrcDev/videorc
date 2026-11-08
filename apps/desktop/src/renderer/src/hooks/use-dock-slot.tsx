@@ -144,13 +144,14 @@ export function useDockSlotReporter(
     if (element) {
       resizeObserver.observe(element)
     }
-    // Portal mounts/unmounts (dialogs, menus) and data-state flips.
+    // Portal mounts/unmounts (dialogs, menus), a popup's data-open and
+    // data-closed flips, and toasts arriving, stacking and leaving.
     const mutationObserver = new MutationObserver(queueMeasure)
     mutationObserver.observe(document.body, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['data-state']
+      attributeFilter: ['data-open', 'data-closed', 'data-mounted', 'data-visible', 'data-removed']
     })
     // capture:true reaches scrolls inside nested scroll containers.
     window.addEventListener('scroll', queueMeasure, { capture: true, passive: true })

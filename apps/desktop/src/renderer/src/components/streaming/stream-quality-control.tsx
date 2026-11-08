@@ -28,7 +28,13 @@ export function StreamQualityControl({
         disabled={disabled}
         options={[
           ...(inherit ? [{ value: 'default' as const, label: 'Use default' }] : []),
-          ...options
+          ...options.map((option) =>
+            // The untouched default shows as 1080p30; choosing it again makes
+            // it the user's pick, which Go Live never steps down.
+            value === 'tutorial-1080p30' && option.value === 'stream-safe-1080p30'
+              ? { ...option, onClick: () => onChange('stream-safe-1080p30') }
+              : option
+          )
         ]}
         value={selected}
         onValueChange={onChange}

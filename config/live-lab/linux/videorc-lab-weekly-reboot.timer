@@ -1,0 +1,38 @@
+# Plan 179: reboots the Linux lab every Sunday at 03:30 local time, the twin of
+# the lab Mac's `sudo pmset repeat restart U 03:30:00`, before the 04:00
+# update-check slot. A system timer the owner installs as root; the lab user
+# cannot change it. Local time is the system time zone, so set that to the
+# policy's schedule.timezone first:
+#
+#   sudo timedatectl set-timezone Europe/Madrid
+#
+# Install (as the owner, from any directory):
+#
+#   sudo install -m 0644 -o root -g root \
+#     /home/videorc-lab/videorc/config/live-lab/linux/videorc-lab-weekly-reboot.service \
+#     /home/videorc-lab/videorc/config/live-lab/linux/videorc-lab-weekly-reboot.timer \
+#     /etc/systemd/system/
+#   sudo systemd-analyze verify /etc/systemd/system/videorc-lab-weekly-reboot.service \
+#     /etc/systemd/system/videorc-lab-weekly-reboot.timer
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now videorc-lab-weekly-reboot.timer
+#   systemctl list-timers videorc-lab-weekly-reboot.timer
+#
+# Remove:
+#
+#   sudo systemctl disable --now videorc-lab-weekly-reboot.timer
+#   sudo rm /etc/systemd/system/videorc-lab-weekly-reboot.service \
+#     /etc/systemd/system/videorc-lab-weekly-reboot.timer
+#   sudo systemctl daemon-reload
+
+[Unit]
+Description=Videorc lab weekly reboot, Sunday 03:30 local time (plan 179)
+
+[Timer]
+OnCalendar=Sun *-*-* 03:30:00
+# Never catch up: a box that was off at 03:30 must not reboot as it comes back.
+Persistent=false
+Unit=videorc-lab-weekly-reboot.service
+
+[Install]
+WantedBy=timers.target

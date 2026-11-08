@@ -95,6 +95,11 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Plan 214 (P0a): the one Developer ID provisioning profile (base64),
+          # for the app, that lets the build embed the Videorc Camera extension.
+          # Required: a release without it ships no camera and fails
+          # release:validate:macos. The extension itself needs no profile.
+          VIDEORC_MACOS_PROFILE_APP: ${{ secrets.VIDEORC_MACOS_PROFILE_APP }}
 
       - name: Check private download storage prerequisites
         run: pnpm release:upload:preflight:macos
@@ -176,6 +181,10 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           CSC_IDENTITY_AUTO_DISCOVERY: 'true'
+          # Plan 214 B2: with the app profile set, the afterPack hook embeds and
+          # signs the Videorc Camera extension (sandbox + app group, no profile)
+          # and the app gets the profile and the restricted entitlement.
+          VIDEORC_MACOS_PROFILE_APP: ${{ secrets.VIDEORC_MACOS_PROFILE_APP }}
           VIDEORC_BUNDLED_TWITCH_CLIENT_ID: ${{ secrets.VIDEORC_BUNDLED_TWITCH_CLIENT_ID }}
           VIDEORC_BUNDLED_KICK_CLIENT_ID: ${{ secrets.VIDEORC_BUNDLED_KICK_CLIENT_ID }}
           VIDEORC_BUNDLED_KICK_CLIENT_SECRET: ${{ secrets.VIDEORC_BUNDLED_KICK_CLIENT_SECRET }}

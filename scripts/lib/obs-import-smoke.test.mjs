@@ -61,7 +61,16 @@ for (const scenario of scenarios) {
           body += chunk
         })
         request.on('end', () => {
-          const command = JSON.parse(body)
+          // Only the smoke's JSON commands count. A stray local client (T3 Code
+          // probes every listener of an agent shell's process) gets a 400.
+          let command
+          try {
+            command = JSON.parse(body)
+          } catch {
+            response.writeHead(400)
+            response.end()
+            return
+          }
           requests.push({ command, headers: request.headers })
           const code = command.params.code
           if (scenario.fail === 'discovery' && code.includes('obsDiscover')) {

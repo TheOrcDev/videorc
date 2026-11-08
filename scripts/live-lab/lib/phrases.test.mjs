@@ -61,10 +61,13 @@ for (const command of phrases.commands) {
       )
       assert.match(source, row, `${command.text} with ${kind}/${target} in the phrase table`)
     } else {
+      // Plan 199: each row also names the clip length the phrase saves; a
+      // lab phrase without `seconds` is a 30-second clip.
+      const seconds = command.expect.seconds ?? 30
       const row = new RegExp(
-        `\\("${text}",\\s*Some\\("${escapeRegExp(command.expect.phrase)}"\\)\\)`
+        `\\("${text}",\\s*Some\\(\\("${escapeRegExp(command.expect.phrase)}",\\s*${seconds}\\)\\)\\)`
       )
-      assert.match(source, row, `${command.text} -> ${command.expect.phrase}`)
+      assert.match(source, row, `${command.text} -> ${command.expect.phrase} (${seconds} s)`)
     }
   })
 }

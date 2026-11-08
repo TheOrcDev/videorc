@@ -15,6 +15,553 @@
   - [Plan 225](225-know-your-viewers-across-platforms.md): know your
     viewers across platforms. It absorbs the parked
     [Plan 183](183-buddy-remembers-your-regulars.md).
+- 2026-11-05: [Plan 218](218-the-stream-holds-its-frame-rate.md), a
+  streamer's support bundle (0.18.0): "laggy on YouTube, streaming 1080,
+  saving 1440". PLANNED, not started:
+  - Cause, proven part: in all three of their sessions (two of them
+    stream-only), about 30 % of stream frames were dropped before encode,
+    so YouTube got about 21 of 30 fps, and an RTMP leg overflowed its fifo
+    (`FIFO queue full`). The 1440p recording was clean. Neither problem
+    ever shows on the owner's Mac.
+  - Open: why FFmpeg reads the stream video late on their Mac. Either a
+    slow uplink pushing back, or FFmpeg's 100 ms interleave hold on the
+    150 ms audio playout delay. S0 asks the streamer for evidence; S1
+    reproduces it here.
+  - Fix: adaptive stream bitrate (uplink) or a stream queue budget that
+    allows for the interleave wait, plus a leg-named live warning and a
+    support bundle that can tell the two apart.
+  - Open: D1 (one slow leg lowers all), D2 (bitrate floor), D3 (pre-live
+    upload check).
+- 2026-11-04: [Plan 217](217-the-stream-never-waits-for-the-recording.md),
+  the owner's live stream lagged while recording 4K. PLANNED, not started:
+  - Cause: one FFmpeg carries the audio, the 4K recording and the 1080p
+    stream, and FFmpeg holds every input to the slowest output. When a local
+    release build pushed the load to 24 on 10 cores, the 4K leg fell behind
+    and the stream stalled for 2–3 s at a time, with up to 12 s of silent
+    audio.
+  - Fix: split-output sessions run the stream in its own FFmpeg process; the
+    recording reads a mixed audio tap that can never slow the bus.
+  - Already shipped beside it: agent builds and smokes wait while Videorc is
+    live on this Mac (`waitWhileVideorcLive`).
+  - Open: D1 (replay buffer side), D2 (stream process dies), D3 (Windows).
+- 2026-11-03: [Plan 216](216-freeform-screen-box-and-drag.md), a streamer's
+  bug report with a video and a support bundle (0.18.0, all three bugs still
+  on main). BUILT 2026-11-03 (#1100, #1102, #1098, #1097); the owner took
+  D1 to D5 as recommended:
+  - A: a rearrangement (Freeform, a move, Fill/Fit) never waits for a source
+    already in the scene; their camera said "live" but sent no frames, so
+    Freeform failed after 15 s. One "Switching…" label, a named failure,
+    and the bundle keeps recent errors.
+  - B: in Freeform the screen's box is its picture (one picture-rect rule in
+    Rust and TypeScript), on top of plan 215 E and before 215 F.
+  - C: on macOS the fallback preview lives inside the main window, as on
+    Linux, so the canvas drags; a real-mouse probe gates it.
+  - D: a camera that sends no video says so, and the bundle keeps the
+    watchdog's decisions; why their Mac fell back still needs the streamer.
+  - Owed: by eye in both themes, a real-mouse probe, D1's streamer answers.
+- 2026-11-03: [Plan 215](215-streamer-list-2026-11-02.md), a streamer's
+  list from 2026-11-02. Seven workstreams, one PR each:
+  - A: X chat names the missing Videorc sign-in, warns before Go Live, and
+    attaches when you sign in. A silent sign-out on a 401 was the likely
+    cause; X itself was fine.
+  - B: Edit scene on the Scene page and in ⌘K, as well as in Studio.
+  - C: Hide from stream for the Stream Manager, next to Keep on top.
+  - D: move and resize while recording or live. This was locked since
+    2026-07-03, not a regression; outputs move on release.
+  - E: sources up to 400% and cut off at the canvas edge, never squashed;
+    a screen Zoom slider.
+  - F: rounded corners for the screen on all four render paths.
+  - G: chat on stream, the last 5 messages, off by default.
+
+  **PLANNED** 2026-11-03; the owner took D1 to D7 as recommended. G
+  **BUILT** 2026-11-03 (draft PR; CI, the smokes and the by-eye check owed).
+
+- 2026-11-02: [Plan 214](214-videorc-camera-in-meet-and-zoom.md), Videorc
+  Camera in Meet and Zoom. Owner ask: a virtual camera like OBS's, so the
+  program shows up as a camera in Google Meet, Zoom, Teams and Discord, on
+  macOS, Windows 11 and Linux. Three spikes outside the tree, then six
+  workstreams:
+  - A: the output tap, reading the program as the Preview shows it,
+    converting off the compositor tick, and asking for pixels at idle on
+    Windows and Linux.
+  - B: the macOS Camera Extension in the bundle, with the restricted
+    entitlement, one Developer ID provisioning profile for the app, split
+    entitlements, activation from Electron main, the backend's CMIO sink,
+    and the release validator.
+  - C: the Windows media-source DLL, a cross-session shared ring, and a
+    one-time elevated setup.
+  - D: the Linux v4l2loopback writer with install guidance.
+  - E: the Output page switch, the approval guidance, ⌘K and the agents'
+    mirror, Health.
+  - F: a packaged read-back smoke that compares the camera with a
+    recording and proves Hide screen.
+
+  No audio (a virtual microphone is a separate, harder project).
+
+  **MERGED** 2026-11-03 as #1091 (`bc84c35ec`): A, B, D, E and F, with
+  D1 to D14 as recommended.
+  - P0a is a go on macOS 26: Xcode issued the one profile, a notarized test
+    camera showed a pushed picture in Chrome, and a re-signed app launched
+    with no AMFI kill.
+  - Linux is hidden until P0c. Windows (C) follows in its own PR, hidden
+    until P0b. The review's fixes are in a follow-up PR.
+  - Owed on main (the owner's rule: no smokes or app runs before main):
+    `smoke:virtual-camera`, the recording-studio and record-latency
+    smokes, a signed build in /Applications, and Meet, Zoom and FaceTime by
+    eye.
+
+- 2026-11-01: [Plan 213](213-new-streamer-feedback.md), a new streamer's
+  feedback (macOS, AeroSpace, a 16:9 virtual display on an ultrawide,
+  Continuity Camera). Ten workstreams, one PR each:
+  - A: bigger hit targets; the destination row opens from its chevron.
+  - B: a Chat door in the Studio inspector, under Captions.
+  - C: pages that fit a small window or display.
+  - D: Stick to app draws inside the main window, and a floating Preview
+    stops fighting a tiling window manager.
+  - E: a missing screen or camera never rewrites your choice.
+  - F: real display names, hot-plug, and resolution changes.
+  - G: screen crop and Fill.
+  - H: Continuity Camera disconnects and returns cleanly.
+  - I: camera brightness, contrast and saturation.
+  - J: X chat with a stream key says how to get it.
+
+  The owner took every recommendation except D2 (no window-size change;
+  C2 dropped) and asked for one PR per workstream.
+
+  **BUILT** 2026-11-02: every workstream is on main as of `d74018b0`.
+  - PRs: #1001, #1010, #1003, #1018, #1000 and #1011, #1019, #1029,
+    #1015, #1017, #1002.
+  - Fixes found along the way: #1007 and #1030.
+  - The combined full desktop suite, `test:scripts` and the
+    recording-studio stages pass, apart from the known 4K separate-source
+    and live-background reds and four smokes the dev app can't run
+    without a camera.
+  - Open: videorc-ui#1, the synced `page.tsx` for C.
+  - Owed: owner acceptance by eye, with AeroSpace, a virtual display, an
+    iPhone and X.
+
+- 2026-10-31: [Plan 212](212-the-preview-never-shows-test-noise.md), The
+  Preview never shows test noise. Owner report: on the first launch after
+  0.17.2 the Preview showed coloured noise for about 18 s before the
+  camera. Cause: the performance check re-runs after every update, 8 s
+  after launch. Each rung borrows the Preview's compositor, replaces the
+  user's scene with a test pattern, and turns on a process-wide noise
+  switch. Nothing gives the scene back except a Clips re-arm. Its smoke
+  never looked at the Preview, and this run's verdict came from an
+  overloaded Mac (1080p30 on a 4K30 machine).
+  - Phase 1: a gate that reads the Preview (red first). The benchmark
+    draws only into its encoder, the user's scene stays, the noise
+    belongs to the benchmark, the Preview holds the program across the
+    ladder, main's watchdog leaves a hold alone, and packaged builds
+    never present a test-pattern frame. No launch or post-update check
+    (first-run setup or the Output button only), and no verdict from a
+    busy Mac.
+  - Phase 2 (optional, D2): the Preview stays live during a check.
+    **Phase 1 BUILT** 2026-10-31 (D1 to D3 as recommended; Phase 2 not
+    built). Owed: by-eye in both themes, packaged acceptance, Windows
+    tester, and the owner's "Check this computer" on a quiet Mac.
+- 2026-10-28: [Plan 210](210-scenes-for-your-apps-and-hide-screen.md),
+  Scenes for your apps, and Hide screen. Owner request: "our whole Scene tab
+  needs to be much smarter", quoting a user who switches between T3 Code and
+  Figma on stream and hides a sign-in behind a blurry picture in OBS. Today
+  that takes about nine clicks, the scene breaks when the app relaunches (a
+  window id), every switch stops one capture and starts another (a frozen
+  picture, probably a black frame, never measured), saved scenes have no
+  key, Deck or phone button, and nothing can blur the screen.
+  - Phase A (macOS): New scene… makes one scene per app in your current look.
+    The scene follows the app's front window and survives a relaunch. Swap in
+    place on one capture, holding the last frame (no black). A scene list on
+    the Scene page with auto-save. Keys, Deck and phone for saved scenes.
+  - Phase B (all platforms): Hide screen, a frosted still of the screen on
+    every output while the camera and microphone stay on, done at the
+    capture source. A default key (⌃⌥H) and every other surface. Agents can
+    hide, never show.
+  - Phase C (macOS): Follow the app in front, and Hide screen when a password
+    manager comes to the front on a display scene.
+  - Phase D: the smoke, docs and acceptance.
+
+  **EXECUTING** 2026-10-28: the owner took every recommended answer (D1
+  to D13) and asked for the whole plan in one PR. S11's smoke and docs
+  landed 2026-10-29:
+  [acceptance record](../docs/acceptance/2026-10-29-smarter-scenes-acceptance.md)
+  (owner by-eye checks owed).
+
+- 2026-10-28: [Plan 211](211-buddy-talks-only-in-its-bubble.md), Buddy
+  talks only in its bubble, and Auto is gone. Owner request, after Auto
+  posted an AI welcome in chat as them on the 2026-10-28 stream and Off then
+  skipped 46 greetings: Buddy greets on stream, never in chat. The control
+  becomes "{name} talks: Off · Bubble · Suggest". Bubble speaks greetings,
+  answers ("@name …") and banter in the bubble only. It is paced and queued
+  so no line cuts another short, skipped while Buddy is off stream, and
+  listed under "Said on stream" in Reports. Nothing automatic can reach
+  chat: the lane's send output is deleted, and the Say box and `buddy_say`
+  are bubble-only. A new `autoChat.talk` field keeps older apps safe (Bubble
+  is saved as `mode: off`). New installs and saved Auto start in Bubble;
+  saved Off stays Off. Agents' `set_buddy` takes `talk`. One desktop PR in
+  five phases, plus an eval-fixture tidy on the web. Supersedes plan 202
+  Phases B to D. **BUILT** 2026-10-29 as one desktop PR (all five phases)
+  and a web eval-fixture PR; owner answers recorded 2026-10-28. Owed: the
+  owner's by-eye pass in both themes, a live take, and `smoke:agent-mcp`
+  B1 (local RTMP go-live), red on this Mac before Buddy's step.
+- 2026-10-27: [Plan 209](209-agents-control-videorc-mcp.md), Videorc MCP:
+  agents and Buddy run the studio. Owner request: a complete MCP so people
+  control everything from their agents, with Buddy using it too. Agents on
+  this computer (Claude Desktop, Claude Code, Cursor, Codex, VS Code) connect
+  through `videorc-mcp`, a stdio bridge shipped in the app, to a loopback-only
+  `/mcp` endpoint with per-agent tokens. 43 tools cover looking (status,
+  picture, chat, Library), running the show, arranging the picture ("move
+  Buddy to the top left", "the banner to the bottom left", with the Scene
+  canvas's own snaps), chat, Buddy, preparing and the Library. They run through the same executor as the buttons and Stream
+  Deck, whose allowlists stay unchanged. The owner chose full control with no
+  prompts, so actions are logged and attributed, one Stop cuts every agent,
+  deletes go to the Trash, and YouTube removals still wait for a click (API
+  policy). Free; Buddy's tool use is Premium, triggered only by the
+  streamer's voice or `/buddy`, through a new videorc.com planner whose
+  calls the desktop checks against Buddy's subset.
+  **BUILT** 2026-10-28 as one desktop PR (all 23 slices, plus one-click
+  Connect, a `.mcpb` and two MCP prompts) and a videorc.com PR (the planner
+  route and an agents page; deploy it first). Local gates and smokes green;
+  owner acceptance, packaged by-eye, the planner's live eval and
+  Windows/Linux runs owed; the owner took all seven recommended answers
+  (2026-10-28).
+- 2026-10-27: [Plan 208](208-liquid-chrome-colours.md), Liquid Chrome
+  colours. Owner request: redesign Videorc's colour after the Welcome
+  screen's Liquid Chrome, metallic black with its shine, and the other way
+  around in light mode. Owner calls from a rendered mockup:
+  - every window sits on a solid, frosted still of Liquid Chrome under the
+    coats, with no desktop showing through, the same on every platform;
+  - polished chrome controls and edges (primary buttons, beads, plates, a
+    red LED Record) while panels, menus and text stay flat;
+  - light mode is the crisp pixel invert;
+  - the phone remote and the OAuth page come along.
+
+  Eight slices, from before pictures through the ground assets, opaque
+  windows, the probe, controls, the Welcome invert and the served pages, to
+  docs and gates. **EXECUTED** 2026-10-27 (S0 to S7) on
+  `plan-208-liquid-chrome-colour`, PR #883: every window sits on the
+  chrome ground, controls wear chrome, Record is the red LED, light
+  Welcome is the invert, and the phone remote and OAuth page follow; the
+  design skill is rewritten for it. `VIDEORC_GLASS=clear` keeps the old
+  glass for one release. Gates in the
+  [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md);
+  the owner's by-eye in both themes and a Windows pass are owed.
+
+- 2026-10-27: [Plan 207](207-first-run-setup-steps.md), First-run setup,
+  steps 2 to 5. Owner request: after permissions, "What are you making?",
+  "Your look", "Sound check" and "Where you stream". The goal (Recordings,
+  Livestreams or Both) decides whether the streaming step shows. Your look
+  picks orientation, layout, camera shape and a live background on the
+  scene's own picture, with the background moving. Sound check is the
+  microphone, its level with a verdict, "Set level for me", and System
+  audio. Where you stream signs in to YouTube, Twitch, Kick or X and turns
+  each one on. Nothing in setup opens a capture device. It also fixes
+  "Clips couldn't start" on a fresh install without a screen. **BUILT IN PR**
+  (unmerged); owner acceptance and the final smoke bundle are still owed.
+  [Acceptance](../docs/acceptance/2026-10-27-first-run-steps.md).
+- 2026-10-27: [Plan 206](206-facebook-live.md), Facebook Live in the
+  Livestream tab. Owner request: a Facebook connector like the other
+  platforms, stream key first, the rest once Meta approves. Phase 1 (one
+  desktop PR, no Meta, no web change): a horizontal Facebook card after X,
+  server filled in, key from Live Producer, a Go Live reminder to press Go
+  live there; chat, viewers and title say they need sign-in. Phase 2: the
+  owner's Meta app and Business Verification, plus a spike that picks device
+  code or a website relay for sign-in. Phase 3 (dark in public builds):
+  connect a Page, Go Live with our title, comments, viewers. Phase 4: App
+  Review and the switch. Replaces plan 079 (#504, closed stale). **Phase 1
+  BUILT** (S0 to S5, one desktop PR; owner live take owed); Phases 2 to 4
+  wait on the owner's Meta setup (M1). Owner calls D6 (website) and D7
+  (sign-in, after S6) open.
+- 2026-10-27: [Plan 205](205-preview-is-the-source-of-truth.md), The
+  preview is the source of truth. Owner request: a banner and Buddy put on
+  the picture weren't visible in the preview; "our preview window should
+  actually be the source of truth". Root causes, checked on the owner's
+  profile: Clips (on by default) makes the idle preview a recording, so
+  Buddy set to stream only never draws. The idle preview never draws Buddy
+  at all, and draws it only while the Scene editor holds it. The banner
+  was placed while hidden, and on the docked live canvas no label says so.
+  One rule, "the Preview shows the program": every layer at least one
+  running output carries, and at idle every layer with a switch on. Phase
+  1 covers that rule in Rust and TS, Clips following Show in recording, "Hidden",
+  "Off" and "Stream only" on the Scene chips, and a dev-only Preview pixel
+  oracle with `smoke:preview-truth`. Phase 2 adds a macOS program leg for
+  Clips at idle and record + stream with a split stream leg (measured spike
+  first). Phase 3
+  covers the Windows media session's preview and Buddy on the proof
+  surface. **BUILT**, PR #880: S1 to S9. Owed: S10 (Windows tester pass,
+  Linux box), the owner's by-eye, the 4K idle program-leg cost call.
+- 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
+  Owner request: live chat in the Studio in a small window, optional with a
+  switch, a click putting a message on stream, less detail than the Stream
+  Manager. With **Chat in Studio** on (Settings → General → Chat, off by
+  default; ⌘K mirrors it), the inspector shows a Chat section under Session
+  while on air. Each row has a small avatar, the name, the words and the
+  platform mark. A click shows the message on stream through the same
+  highlight the Stream Manager uses. The list follows the newest message,
+  and the header has Open Stream Manager and a hide button with Undo. It
+  keeps its default look under Retro LCD. The Stream Manager's list
+  mechanics moved, unchanged, into one hook both lists share. Renderer
+  only, in its own lazy chunk (+88 eager gzip bytes). `smoke:studio-chat`
+  proves the card in the stream output. **BUILT IN PR**. Owed: the owner's
+  by-eye on a real stream, the two-destination fit, and confirming that
+  "yes" meant avatars.
+- 2026-10-27: [Plan 203](203-first-run-permissions.md), First-run setup,
+  step 1: permissions. Owner request: onboarding only on the first launch,
+  a Settings button to run it again, and permissions done perfectly first.
+  The Liquid Chrome live background fills the window (the shared WebGL2
+  player, lazy, 30 fps cap, poster when still), and one centred card asks
+  for Screen Recording, System audio, Microphone and Camera in place, with
+  live states and proof. Launch requests were removed; Reopen and resume
+  handle grants that require a relaunch. Existing installs skip it; smokes
+  suppress it by default. "Run setup again…" sits in Settings → General
+  and ⌘K. **SHIPPED IN PR**: S1 to S7 implemented, Polished at Normal
+  chosen by the owner. Owner-owed: S0 clean macOS account (cold launch,
+  main's identity, System audio and Reopen), light and dark by-eye, Windows
+  tester pass, long refused-row copy, review of D2/D3/D5 to D7 shipped as
+  recommended. [Acceptance](../docs/acceptance/2026-10-27-first-run-permissions.md).
+- 2026-10-26: [Plan 202](202-buddy-talks-in-its-bubble.md), Buddy talks in
+  its bubble. Owner request: a mode where Buddy talks only in its bubble, not
+  in chat, and a switch for whether Buddy shows on takeover screens. A fourth
+  mode, "Buddy talks: Off · Bubble · Suggest · Auto": greetings, answers and
+  banter speak only in the on-stream bubble and never post to chat. It needs
+  no posting consent, uses a settings field older apps survive, paces bubbles
+  so none is cut short, and answers start with "@name". "Show on takeovers"
+  in Layout → Buddy hides the pet and bubble while a takeover shows; it
+  starts off for everyone, so the release notes must say so. Four desktop
+  phases, no web change. **PLANNED**; owner answers recorded 2026-10-26.
+  **2026-10-28**: Phases B to D (Bubble mode) are superseded by plan 211.
+  Only Phase A, "Show on takeovers", remains, and it runs after plan 211.
+- 2026-10-26: [Plan 201](201-studio-audio-balance.md), Balance the Microphone
+  and System audio from the Studio. One Audio section puts both levels on
+  one audiocn Mixer scale, each with the same Gain fader Sources uses, in
+  the default and Retro LCD looks. System audio's idle level comes from the
+  Clips bus; no new capture. The Sources mirror keeps Screen and Camera.
+  **BUILT** 2026-10-27: S0 to S4 done. Owed: the granted System audio smoke,
+  the Sources idle meter check, the owner's by-eye in both looks and themes
+  (including D5's LCD faders), and the granted CPU comparison. The four CPU
+  attempts and their failures are in the
+  [acceptance record](../docs/acceptance/2026-10-27-studio-audio-balance.md).
+- 2026-10-26: [Plan 200](200-better-recordings-export-separate-files-sound.md),
+  Better recordings: exports, separate files and sound. Owner request: make
+  exporting with separate sources, sound and system audio even better. Four
+  audits plus measurements of real takes found: Clips squash a frame at every
+  2 s join; the mic fold distorts 2-input interfaces; MP4 frame times sit on a
+  1 ms grid (editors see VFR); 5.3 GB of leaked repair temps and backups;
+  record+stream audio re-encoded AAC→AAC; separate files at 4K can damage
+  Combined; the Camera file is upscaled with nearest sampling. Groups A
+  (sound), B (Clips), C (export and files), D (separate files and picture),
+  19 slices. **SHIPPED** 2026-10-26, D1–D7 at the recommendations. Open:
+  the 4K separate-source runtime case, an intermittent runtime timing case
+  and `1080p60:hard` in the recording matrix (see As built, slice E), and
+  the owner-run checks.
+- 2026-10-25: [Plan 199](199-one-minute-clips.md), A 1-minute clip beside
+  the 30-second clip. Owner request: "Let's also add a 60-second clip." The
+  ring always keeps 1 min, and each press says 30 or 60. There is a second
+  global key (unbound), two Stream Manager buttons, two ⌘K items,
+  `/clip 60`, "clip the last minute" by voice, and the optional `seconds` on
+  `clip.mark`, `replay.save` and the remote `clipMark`. A 1-min mark spans
+  the minute in Buddy's report. The Length setting goes away (D2). Disk use
+  roughly doubles, and CPU does not change. Slices S0–S6. **EXECUTING**
+  2026-10-25 on `plan-199-clip-length`, with D1–D9 at the recommendations
+  (owner: "Execute the entire plan and create a PR"). Rebases onto plan
+  198 when that lands.
+
+- 2026-10-25: [Plan 198](198-separate-recordings-screen-file-and-clips.md),
+  The Screen file dies at Record, and Clips loops after the take. Owner's
+  first 0.11.0 take with Separate source recordings left Combined + Camera
+  only: a capture-recovery latch from an hour earlier failed the Screen role
+  12 ms in. Clips buffer-only starts arm the ISO legs and are refused, and the
+  give-up limit never trips (62 refusals in 40 s). Plus a false "restart
+  Videorc" leak warning. Slices S1 latch scoped to the take, S2 Clips never
+  arms ISO, S3 Clips failure count, S4 leak snapshot, S5 toast + honest
+  Library row, S6 acceptance. **BUILT** 2026-10-25 on
+  `fix/198-screen-iso-startup`; owner's packaged take and by-eye owed;
+  hotfix candidate (0.11.1).
+
+- 2026-10-25: [Plan 195](195-windows-slow-microphone-breaks-recording-start.md),
+  A slow Windows microphone makes Record fail. Tester bundle (0.9.150, Iris
+  Xe, Cirrus Logic mic): the capture worker's fixed 2 s readiness never
+  passes, so the mic falls back to FFmpeg's direct DirectShow input, and
+  FFmpeg then needs 5-7 s to start against an 8 s deadline (0.5 s without a
+  mic on the same PC). Also explains "Microphone can't be changed", "Videorc
+  was busy" (liveControl expiries behind a 19 s poster) and the 3-31 s
+  start delay. Slices: S0 Windows measurement script, S1 evidence, S2
+  per-protocol readiness budget, S3 deadline per input topology (with PR
+  #769), S4 busy toasts, S5 output right-sizing. Part W is a self-contained
+  Windows test guide. **BUILT** 2026-10-25 on
+  `fix/195-windows-slow-mic-recording-start`: S1–S5 done; S0/W3/W4 need
+  Windows hardware; D1 (land #769) and D2 (Quick Sync default) are owner
+  calls.
+
+- 2026-10-25: [Plan 197](197-retro-lcd-studio.md), Retro LCD. Owner asked for
+  the whole Studio in audiocn's LCD-display style, every dropdown included,
+  then, on seeing it, for it to be an option. Settings → General → Retro LCD
+  (off by default) draws each Studio inspector section on one LCD screen
+  (titles, rows, the transport's keys, LCD dropdowns through `DevicePicker
+trigger="lcd"`) and every level meter as plan 196's LCD meter. Off, the
+  Studio is main's and the meters are the segmented bar again. **BUILT**
+  2026-10-25 on `feat/studio-lcd-style`; owner's by-eye owed.
+
+- 2026-10-25: [Plan 196](196-lcd-level-meter.md), The LCD meter for every
+  audio level. Owner request: the Studio microphone meter and the meters on
+  Sources become audiocn's LCD meter. `MicLevelMeter` stays the one meter
+  component and draws `LcdDisplay` + `LcdMeter` in Videorc's `--primary`
+  ink. A spike installed it on `4891fc53`: it builds, the eager bundle moves
+  9 gzip bytes, and it trips only gates on the audiocn files (Base UI fence,
+  colour literals, radii, one `cursor-pointer`, dock-slot coverage), fixed by
+  one upstream line (U1) and allowlists (S1). S2 swaps the meter and
+  measures the glow's CPU cost. The meter grows from 8 px to about 95 px.
+  Owner calls D1 to D5 (ink, readout, size, clip colour, which Sources rows)
+  have recommended defaults. **PR #800** 2026-10-25: built on the
+  defaults, with audiocn PR #32 (U1). Owed: #32 merged and deployed, the CPU
+  comparison and `smoke:sources` on a quiet host, owner by-eye.
+
+- 2026-10-25: [Plan 194](194-five-more-live-backgrounds.md), Five more live
+  backgrounds: Beams, Color Bends, Dither, Ferrofluid and Ghost Fibers from
+  React Bits, on plan 190's machinery (free, three looks each, all three
+  platforms). Beams, Dither and Ferrofluid are multi-pass like Silk and
+  Plasma; Color Bends is one pass. Ferrofluid drops its spring simulation for
+  React Bits' settled target (N1), so it stays a pure function of the phase.
+  Ghost Fibers draws instanced quads with additive blending, so every
+  renderer gains an instanced pass kind (N2), and the uniform block widens.
+  S1 is a hard cost gate on the M4 before any port. **DRAFT PR #810**
+  2026-10-25:
+  all nine slices done. Owner calls: A (ship the two if Metal fits) and
+  Ferrofluid at three quarters (at most 810 on its short side). Owed: Windows
+  CI (the first fxc compile and WARP goldens), Linux GLES goldens, a
+  quiet-host smoke with the budget (Ghost Fibers 1080p60), and the owner's
+  by-eye check.
+
+- 2026-10-24: [Plan 193](193-live-background-on-the-stream.md), The live
+  background moves on the stream. Owner report: live backgrounds animate in
+  Studio but sit still on the live stream. On macOS every record-and-stream
+  session streams from an auxiliary compositor leg, and plan 190 wired the
+  live background to the primary leg only (`live_background: None` on the
+  auxiliary inputs), so the stream drew the poster. The owner's 10-24
+  session proves it: its recording's ring moves on every frame, and the
+  stream leg's code never sees the shader. Fix (D1): the stream leg draws the
+  texture the recording rendered in the same tick, so no shader cost is
+  added and the two can't disagree. Windows gets a WARP test that pins its
+  stream target; Linux shares one frame already. The smoke gains
+  record-and-stream cases (it only recorded). D2: 4K60 stays the poster.
+  **MERGED** 2026-10-24 as #794 `a465a042`, shipped in 0.10.0. The smoke
+  shows the stream ring moving like the recording's on every case. Owed: the
+  Windows CI run of the S3 tests, a quiet-host p95 run and
+  `smoke:recording-studio`, owner by-eye on a real stream.
+
+- 2026-10-24: [Plan 192](192-buddy-greets-and-talks-on-its-own.md), Buddy
+  greets and talks on its own. On the owner's 10-24 stream (0.9.150), Buddy
+  was in Auto and posted nothing by itself, only the owner's two Say lines.
+  There were five causes:
+  - Greetings had no lines, so they posted nothing.
+  - First-time chatters were never greeted automatically (only the "Say hi"
+    nudge to the streamer).
+  - Greetings never use AI (plan 164 D5).
+  - Answers and Banter were off. Answers reply only when a viewer types
+    Buddy's name; the "unanswered question" half of 164 D5 was never built.
+  - About 10% of ticks failed with 502.
+
+  The fix, in six phases:
+  - built-in lines for every kind;
+  - welcomes for first-time and returning chatters;
+  - a Premium `/api/ai/cohost/greet` route that writes each greeting in the
+    persona's voice, with the line as the fallback;
+  - Answers from the streamer notes after 60 s;
+  - a tick 502 diagnosis;
+  - smokes and a live acceptance.
+
+  **BUILT** 2026-10-24 (owner took every recommendation): web #93 and #92
+  merged; the desktop PR carries Phases 0–3 and the smoke. Owed: a live
+  acceptance stream and the next stream's tick failure rate.
+
+- 2026-10-24: [Plan 190](190-live-backgrounds.md), Live backgrounds. The
+  owner wants five animated React Bits backgrounds (Silk, Side Rays, Plasma
+  Wave, Liquid Chrome, Line Waves) behind the screen and camera, free, on
+  macOS, Windows and Linux in one plan, with no cost to anyone who doesn't
+  turn one on. A live background is a bundled poster picture with a shader
+  attached. The GLSL from React Bits is the source of truth. Metal and D3D11
+  run hand ports, checked against golden grids. Linux runs the GLSL through
+  EGL/GLES on a latest-wins readback thread, under `linux_vaapi.rs`'s
+  render-node rules, because a CPU renderer measured far too slow. The two
+  Electron previews run it in WebGL2. A budget guard drops to half size,
+  then to the poster. Measured on an M4: 0.3–1.7 ms GPU per 1080p frame (a
+  still is 0.05–0.08 ms), 0–1 MB extra for four of the five, about 13 MB for
+  Plasma Wave. S1 is a hard cost gate on all three machines before any
+  product code. S9 proves zero cost when off with an A/B against
+  `origin/main`. Licence: the creator gave permission. D2–D6 answered.
+  **MERGED** 2026-10-24 as #779 `2b6114e0`; shipped in 0.9.149 (macOS) and
+  0.9.150 (all three). Every slice is built (S4 Windows and S5 Linux on
+  Opus, never run on their platforms). The gates found and fixed a contract
+  bug that retired main's present pump whenever a live background showed.
+  The macOS stream leg drew the poster: fixed by plan 193. Owed: a
+  quiet-host smoke run, the Windows and ogre checks, S1 cost on both, owner
+  by-eye in both themes.
+
+- 2026-10-24: [Plan 191](191-performance-pass.md), Performance pass. The
+  owner asked for an inspection of leaks and waste that changes no feature,
+  and then for one PR per confirmed problem. Seven read-only subsystem audits,
+  each finding re-checked at its line by the orchestrator, with measurements
+  on copies of the owner's real profile: a 2 GB Chromium cache of stale
+  backend 404s, a Library page that scanned its whole history (111–144 ms →
+  6 ms), rollback-journal writes (2.3 → ~0.3 ms in WAL), a `ps` fork every
+  second (~42 ms → ~35 µs per sample) and a 9.5–56 ms per-frame Windows preview
+  resize. **MERGED** 2026-10-24 (13 PRs plus #777, squashed; last
+  `b9ae4d8b`): one executor and one PR per problem, each reviewed, then
+  verified together on a merged tree (smoke:dev,
+  probe:comments-window, session-decay A/B against the base, clippy). Three
+  findings were closed after measurement showed no worthwhile win (#759,
+  #762, and the proof-surface decode, which moved to Part B). Part B holds the
+  owner decisions (Clips is on by default, so an idle Studio runs a full
+  encode; process-wide renderer un-throttling) and the follow-up slices, which
+  need a quiet host or a Windows box. Found on the way: CI's Rust job dies at
+  `cargo audit` (RUSTSEC-2026-0386, tokio) on main and every PR; #777 fixed
+  that, and the job now times out in its test build instead (N14).
+
+- 2026-10-23: [Plan 189](189-soundboard.md), Soundboard. The owner wants
+  a soundboard in Studio on audiocn's sound pads, with the sounds streamers
+  use most built in. Sounds join the session audio bus as a third mix
+  ingredient after every tap (never in the Microphone ISO file, captions,
+  Buddy or the echo guard), placed at the press instant; a session with no
+  sound played writes byte-identical PCM. Import decodes, trims and levels
+  each sound to -18 LUFS with the bundled FFmpeg; twelve CC0 starters ship
+  in the app. Studio plays, Assets → Sounds manages, Sources → Sounds holds
+  the level and "Hear sounds yourself" (a main-window Web Audio monitor).
+  Phase 2 in the same PR: Stream Manager, `/sound`, ⌘K, Stream Deck and the
+  phone. 9 decisions (D1–D9), taken on the recommended defaults because the
+  owner asked to execute the whole plan and open a PR. **EXECUTED**
+  2026-10-23 (both phases) on `plan-189-soundboard`: every gate and both
+  soundboard smokes pass; brand marks moved to files to keep the eager
+  bundle under its unchanged ceiling; the owner's by-ear on the starters and
+  a live take are owed.
+
+- 2026-10-22: [Plan 187](187-discord-go-live-announcement.md), Discord
+  go-live announcement (issue #634). One Discord webhook, free, automatic:
+  the first ticked destination confirmed live posts one message sent as the
+  streamer (name + avatar), with the title, the thumbnail, a ping (none /
+  @here / @everyone) and a link button per live platform. It edits itself
+  as more legs join and turns into "Was live · 1h 42m" on Stop. Public only
+  (unlisted/private YouTube skipped), a 15-minute restart window never
+  pings twice, and crash recovery is included. The backend owns the secret
+  and the trigger; the Discord section sits on the Livestream page after
+  Stream details. 14 owner decisions (D1–D14), 7 slices. **EXECUTED**
+  2026-10-22 (whole plan) on `plan-187-discord-go-live`: gates and
+  smoke:discord-announce pass; the test RPC is `discord.webhook.sendTest`
+  (`.test` names are admin-only); real-Discord check and owner by-eye owed.
+
+- 2026-10-20: [Plan 186](186-banners-on-the-picture.md), Banners. The
+  owner wants their own images (a sponsor strip, "Follow me", a logo, a
+  full-frame frame) placed anywhere on the picture, with recommended sizes.
+  A banner is an overlay-style layer, not a source: a backend-owned
+  `banners` table (alpha kept, 24 in Assets, 4 showing), rects per
+  orientation and the overlay leg plan unchanged, prepared off the render
+  thread to exact pixels and drawn 1:1 on Metal, CPU, D3D11, the legacy
+  FFmpeg FIFO and the proof surface. Assets manages, Scene places and
+  shows, with Stream Manager, `/banner`, ⌘K and Stream Deck/phone mirrors;
+  sharp sizes plus a per-place "soft at this size" hint. Phase 2: timer
+  (sponsor rotation) and Buddy voice. 11 decisions (D1–D11).
+  **EXECUTED** 2026-10-21 (whole plan, both phases) in draft PR #728: free,
+  one set of banners, the Scene page controls them, stacking as
+  recommended; smoke:banners passes on recording, stream and the vertical
+  stream; owner by-eye owed.
 
 ### Plan 182 Import takeovers while recording or live
 
@@ -25,6 +572,33 @@
 
 Generated by the improve skill.
 
+- 2026-10-12: [Plan 181](181-replay-buffer.md), clips: the replay buffer.
+  A user on X asked for the gamer workflow and the owner redesigned the
+  first build (R1-R4): Videorc keeps the last 30 seconds whenever it is
+  open (one switch on the Output page, on by default; the status bar shows
+  "Clip · 0:30"), and one action saves them as a clip: the Stream Manager's
+  Clip button, the Save a clip key, ⌘K, a deck `clipMark`, `/clip` in the
+  streamer's composer, the spoken "clip that" while a session has captions
+  or Buddy listening. While recording, the press also keeps the mark in the
+  recording. The ring is one more `-f segment` output on the session's
+  FFmpeg child (a stream copy behind the encoded bridges, a split plus a
+  second encode on the raw paths); a buffer-only session composes like a
+  record-only one and writes nothing permanent; Record and Go Live carry the
+  ring and the backend hands over inside `session.start`; a software
+  encoder path keeps the default off and says why. Clips go to
+  `<recordings>/Clips/Clip YYYY-MM-DD HH-MM-SS.mp4` with a Library row.
+  **EXECUTED** 2026-10-12 on `plan-181-replay-buffer` (PR #694): S0-S8,
+  then the redesign slices RS1-RS5; gates with the ring on by default, the
+  idle cost and the owner's by-eye are in the plan's "As built".
+- 2026-10-12: [Plan 179](179-live-lab-on-linux.md), the live lab on Linux.
+  The plan 178 harness runs on ogre (Omarchy, Hyprland) with the same safety
+  guarantees: a Hyprland headless output as the lab display, captured through
+  the ScreenCast portal and answered by a lab share picker (no restore token
+  is ever reused); a PipeWire remap source as the lab mic; espeak-ng speech;
+  `/etc/videorc-lab/policy.json`; a root-owned tc/netem fault helper behind
+  four sudoers verbs; a systemd user timer; `live:install` from an AppImage
+  (`file:`/`local:`, both candidates). **EXECUTED** offline on
+  `feat/live-lab-linux`; every ogre check is owed (SSH key not authorized).
 - 2026-10-12: [Plan 178](178-unattended-live-lab.md), the unattended live
   lab. The owner wants Claude to go live and test with nobody present, on a
   dedicated Mac. Merges plan 166 (soak) and plan 176 (attended lab): the lab
@@ -226,6 +800,58 @@ Generated by the improve skill.
     both redemption subscriptions, best-effort (a refusal never costs chat).
   - Activity-only rows: Power-ups under Tips (counted as bits), redemptions
     under a new Rewards chip (never summed); a reconnect hint in Activity.
+
+### PR 632 separate-source recording review fixes
+
+- 2026-10-07: [Plan 158](158-harden-separate-source-recordings.md)
+  addresses all eight review findings on `b9ee699c`. **IN PROGRESS** with
+  owner authorization to implement and push to PR #632. Execution order:
+  deterministic tests, startup ownership, per-role failures, durable recovery,
+  shared timeline, audio offsets, source removal, metadata, production smokes
+  and final acceptance. The plan records dependencies and verification gates.
+  The first three fix commits are pushed, latest `366721f0`. A reviewed
+  corrective follow-up drains the exact PCM Stop boundary, seeds explicit
+  Windows fixture selection authority and tests FIFO timing deterministically.
+  Compile-check, strict Clippy and formatting pass. Full Rust remains in progress
+  under an owned supervisor. The follow-up uses CI verification in parallel,
+  with all acceptance gates retained. Focused native-latency 30/60 fps recordings
+  and real crash/restart recovery pass. The follow-up passes all 19
+  lifecycle cases and final full Rust, including the late-start rollback
+  regression. The final collected runtime fails six recording cases and the
+  Stop→Idle latency gate; corrections and app/device gates remain in progress.
+  Three simultaneous 4K30 outputs
+  remain blocked by measured M4 hardware throughput. Windows source/audio
+  stability passed on `35b6f71d`; the corrective head still needs the Windows
+  25×/3× gates and macOS full suite. The preceding head failed its Windows
+  selection-authority fixture and a macOS FIFO wall-scheduler test.
+  The latest runtime also overlaps the owner's active installed-app media
+  session, so quiet-host performance qualification remains required.
+
+- 2026-10-06: [Plan 157](157-separate-source-recordings.md), optional separate
+  source recordings: one Record session also writes a Screen file (system
+  audio) and a Camera file (microphone) beside the Combined file, for free
+  editing later. **EXECUTED, in review** on `feat/separate-source-recordings`;
+  the packaged-app camera take and `pnpm smoke:separate-source-take` on it
+  stay with the owner (the dev app has no camera TCC grant).
+  - Recording tab → Output → "Separate source recordings" switch, off by
+    default, locked while live, with the exact reason when the scene lacks a
+    camera or a screen/window. Free, no Premium gate.
+  - Preview, Combined recording and every stream stay composed exactly as
+    today; the ISO legs are extra compositor outputs on the same capture
+    graph (recording canvas, fit/contain, no bubble/chroma/background), each
+    with its own VideoToolbox bridge and MKV muxer fed by a mic or system tap
+    off the audio bus.
+  - Library lists the three files as one take (`takeId`, role badge); each
+    ISO row runs the ordinary MKV → MP4 finalization. Refusals are explicit
+    (no encoder bridge, record off, `keepCombined: false`, missing source).
+
+- 2026-10-07: [Plan 159](159-web-stops-selling-4k-streaming.md) runs Plan
+  075's web slices that never ran. videorcweb no longer sells streaming
+  quality as Premium anywhere (pricing, homepage, account, FAQ, metadata,
+  `llms.txt`, five blog posts, Terms). Basic and Premium web streaming limits
+  now match the desktop, and a copy guard test blocks regressions.
+  **EXECUTED** as videorcweb `641c6e9c`..`b339c1fb` on `main`, live in
+  production. Owner: Creem description check.
 
 - 2026-10-06: [Plan 156](156-auto-show-activity-on-stream.md), one switch
   that auto-shows Activity events (follows, subs, memberships, gifts, tips,

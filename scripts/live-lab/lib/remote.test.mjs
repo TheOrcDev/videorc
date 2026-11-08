@@ -25,8 +25,10 @@ import {
   validateScenario
 } from './remote.mjs'
 
-// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
-const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
 
 const RUN_ID = '2026-10-12-chat-a1b2c3'
 const LAB_RUN_DIR = `/Users/videorc-lab/videorc-live-lab/runs/${RUN_ID}`
@@ -52,7 +54,7 @@ function sh(command, env = {}) {
   return spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', env })
 }
 
-test('shellQuote survives a real shell for hostile strings', macOnly, () => {
+test('shellQuote survives a real shell for hostile strings', posixOnly, () => {
   const nasty = [
     '',
     'plain',
@@ -124,6 +126,13 @@ test('parseRemoteArgs validates every flag and keeps the defaults', () => {
   assert.throws(() =>
     parseRemoteArgs(['--host', 'lab', '--scenario', 'chat', '--build', 'nightly'])
   )
+  // Plan 179: file:/local: are paths on the lab; never a remote --build, on any host.
+  for (const build of ['file:/tmp/Videorc.AppImage', 'local:/tmp/linux-unpacked']) {
+    assert.throws(
+      () => parseRemoteArgs(['--host', 'lab', '--scenario', 'chat', '--build', build]),
+      RemoteUsageError
+    )
+  }
   assert.throws(() => parseRemoteArgs(['--host', 'lab', '--scenario', 'chat', '--privacy', 'x']))
   assert.throws(() => parseRemoteArgs(['--host', 'lab', '--scenario', 'chat', '--evil']))
   assert.throws(() => parseRemoteArgs(['--scenario', 'chat']), /--host/)
@@ -189,7 +198,7 @@ echo "RUN_EXIT=0"`)
 
 test(
   'the SSH script checks out the ref, installs only on a lockfile change, and passes params intact',
-  macOnly,
+  posixOnly,
   async (t) => {
     const lab = await fakeLab(t)
     const params = JSON.stringify({ note: 'it\'s $(rm -rf /) `id` "q" \\ $HOME', hours: 4 })
@@ -230,7 +239,7 @@ test(
   }
 )
 
-test('the SSH script stops at the first failing step', macOnly, async (t) => {
+test('the SSH script stops at the first failing step', posixOnly, async (t) => {
   const lab = await fakeLab(t)
   await writeFile(join(lab.home, '..', 'bin', 'git'), '#!/bin/sh\nexit 128\n')
   const result = lab.run(buildRemoteScript({ scenario: 'dry', ref: 'origin/main' }))
@@ -287,7 +296,7 @@ const baseOptions = {
 
 test(
   'runRemote streams sanitized lines, copies back only guarded files, and keeps the run exit',
-  macOnly,
+  posixOnly,
   async (t) => {
     const source = await labFolder(t)
     const outRoot = join(await tempDir(t), 'remote-runs')

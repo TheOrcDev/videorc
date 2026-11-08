@@ -34,6 +34,13 @@ describe('normalizeEncoderBridgeVideoOutput', () => {
     assert.equal(normalizeEncoderBridgeVideoOutput('bogus'), 'videotoolbox-h264')
   })
 
+  it('keeps the Windows Media Foundation bridge apart from VideoToolbox', () => {
+    assert.equal(
+      normalizeEncoderBridgeVideoOutput('windows-media-foundation-h264-mpegts'),
+      'windows-media-foundation-h264-mpegts'
+    )
+  })
+
   it('keeps raw-YUV only for explicit developer debug aliases', () => {
     assert.equal(normalizeEncoderBridgeVideoOutput('raw'), 'raw-yuv420p')
     assert.equal(normalizeEncoderBridgeVideoOutput('raw-yuv420p'), 'raw-yuv420p')
@@ -49,6 +56,16 @@ describe('assertEncoderBridgeVideoOutputHealthy', () => {
         scenarioLabel: 'raw',
         stats: {},
         videoOutput: 'raw-yuv420p'
+      })
+    )
+  })
+
+  it('does not apply VideoToolbox output gates to Windows Media Foundation output', () => {
+    assert.doesNotThrow(() =>
+      assertEncoderBridgeVideoOutputHealthy({
+        scenarioLabel: 'mf',
+        stats: {},
+        videoOutput: 'windows-media-foundation-h264-mpegts'
       })
     )
   })

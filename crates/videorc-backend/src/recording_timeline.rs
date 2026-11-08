@@ -20,9 +20,20 @@ use crate::protocol::{RecordingTimelineMark, RecordingTimelineSnapshot};
 pub const MAX_CLICK_TO_ORIGIN_MS: u64 = 60_000;
 
 /// Phase boundaries of `start_session`, in the order they normally complete.
+///
+/// The four marks between `admission` and `device-resolve` (plan 195 S1)
+/// split the phase a support bundle showed as one 3–31 s gap on a weak
+/// Windows PC: the encoder-bridge admission, the FFmpeg work permit (a
+/// running quality check must exit first), the Windows recordable-video
+/// probe (Media Foundation, per canvas rung) and the idle preview stop.
+/// `device-resolve` keeps its name and place; scripts parse it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingStartPhase {
     Admission,
+    BridgeAdmission,
+    FfmpegWorkPermit,
+    RecordableVideoProbe,
+    PreviewStop,
     DeviceResolve,
     AudioOpen,
     MicWarm,
@@ -41,6 +52,10 @@ impl RecordingStartPhase {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Admission => "admission",
+            Self::BridgeAdmission => "bridge-admission",
+            Self::FfmpegWorkPermit => "ffmpeg-work-permit",
+            Self::RecordableVideoProbe => "recordable-video-probe",
+            Self::PreviewStop => "preview-stop",
             Self::DeviceResolve => "device-resolve",
             Self::AudioOpen => "audio-open",
             Self::MicWarm => "mic-warm",
@@ -267,6 +282,43 @@ mod tests {
         assert_eq!(snapshot.cold, Some(true));
         assert_eq!(snapshot.kind, "start");
         assert_eq!(snapshot.outcome, "running");
+    }
+
+    #[test]
+    fn start_sub_marks_sit_between_admission_and_device_resolve() {
+        // Plan 195 S1: the new marks keep `device-resolve` where scripts
+        // expect it and report in start order.
+        let mut timeline = RecordingStartTimeline::start(None, false);
+        for phase in [
+            RecordingStartPhase::Admission,
+            RecordingStartPhase::BridgeAdmission,
+            RecordingStartPhase::FfmpegWorkPermit,
+            RecordingStartPhase::RecordableVideoProbe,
+            RecordingStartPhase::PreviewStop,
+            RecordingStartPhase::DeviceResolve,
+        ] {
+            timeline.mark(phase);
+        }
+        let phases: Vec<_> = timeline
+            .snapshot("running")
+            .marks
+            .iter()
+            .map(|mark| mark.phase.clone())
+            .collect();
+        assert_eq!(
+            phases,
+            [
+                "admission",
+                "bridge-admission",
+                "ffmpeg-work-permit",
+                "recordable-video-probe",
+                "preview-stop",
+                "device-resolve",
+            ]
+        );
+        let line = timeline.summary_line("running");
+        assert!(line.contains(" recordable-video-probe=+"), "{line}");
+        assert!(line.contains(" device-resolve=+"), "{line}");
     }
 
     #[test]

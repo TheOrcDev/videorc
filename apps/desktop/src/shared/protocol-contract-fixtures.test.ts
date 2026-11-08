@@ -2,8 +2,11 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
-import { normalizeLayoutSettings } from '../renderer/src/lib/capture'
+import { normalizeAudioSettings, normalizeLayoutSettings } from '../renderer/src/lib/capture'
 import type {
+  AudioSettings,
+  AudioProcessingUpdateParams,
+  AudioProcessingUpdateResult,
   AccountCallbackEnvelope,
   AiCapabilities,
   AiCapabilitiesCloud,
@@ -19,6 +22,11 @@ import type {
   CleanCutUpdateEdlParams,
   ClipMark,
   ClipMarkedEvent,
+  ReplayParams,
+  ReplaySaveAccepted,
+  ReplaySaveFailedEvent,
+  ReplaySavedEvent,
+  ReplayStateEvent,
   CohostAuthorParams,
   CohostCommandChooseParams,
   CohostCommandParams,
@@ -34,6 +42,10 @@ import type {
   CohostSettingsPatch,
   CohostStartParams,
   CohostState,
+  Banner,
+  Sound,
+  SoundboardState,
+  SoundsPlayback,
   CompositorStatus,
   LayoutSettings,
   LiveChatMessage,
@@ -87,6 +99,7 @@ import type {
 } from './buddy-library'
 import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from './buddy-library'
 import {
+  DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT,
   validateBackendEventPayload,
   validateBackendRpcParams,
   validateBackendRpcResult,
@@ -98,7 +111,16 @@ import { validateElectronEventPayload, validateElectronInvokeArgs } from './elec
 import { normalizePreviewSurfaceBounds } from './native-preview-bounds'
 
 interface HighRiskContractFixtures {
+  cameraLook: NonNullable<LayoutSettings['cameraLook']>
   schemaVersion: 2
+  microphoneNoiseSuppression: {
+    audioSettings: AudioSettings
+    legacyAudioSettings: Partial<AudioSettings>
+    update: AudioProcessingUpdateParams
+    legacyUpdate: AudioProcessingUpdateParams
+    applied: AudioProcessingUpdateResult
+    unavailable: AudioProcessingUpdateResult
+  }
   accountPlans: {
     capabilitiesMax: AiCapabilities
     cloudPremium: AiCapabilitiesCloud
@@ -119,10 +141,12 @@ interface HighRiskContractFixtures {
   layout: {
     legacyWire: Partial<LayoutSettings>
     normalized: LayoutSettings
+    freeformCrop: LayoutSettings
   }
   scene: { wire: Scene }
   recordingStatus: {
     wire: RecordingStatus
+    fixedSceneWire: RecordingStatus
     minimalWire: RecordingStatus
     minimalNormalized: RecordingStatus
     mixedAudioWire: RecordingStatus
@@ -144,6 +168,18 @@ interface HighRiskContractFixtures {
   overlayLayout: {
     defaults: OverlayLayout
     placed: OverlayLayout
+  }
+  banner: {
+    minimal: Banner
+    withTimer: Banner
+  }
+  sound: {
+    minimal: Sound
+    starter: Sound
+    state: Omit<SoundboardState, 'sounds'>
+    playback: SoundsPlayback
+    pressStopped: { onAir: boolean }
+    playbackWithoutSounds: SoundsPlayback
   }
   buddyPets: {
     summary: BuddyPetSummary
@@ -228,7 +264,23 @@ interface HighRiskContractFixtures {
     markedSaved: ClipMarkedEvent
     markedUnsaved: ClipMarkedEvent
     listParams: BackendRpcParams<'clip.marks.list'>
+    markParams: BackendRpcParams<'clip.mark'>
+    markParamsLong: BackendRpcParams<'clip.mark'>
     marks: ClipMark[]
+  }
+  replay: {
+    params: ReplayParams
+    paramsAuto: ReplayParams
+    replayOnlyStatus: RecordingStatus
+    stateOn: ReplayStateEvent
+    stateOff: ReplayStateEvent
+    stateError: ReplayStateEvent
+    saveAccepted: ReplaySaveAccepted
+    saveAcceptedMinimal: ReplaySaveAccepted
+    saveParams: BackendRpcParams<'replay.save'>
+    saveParamsLong: BackendRpcParams<'replay.save'>
+    savedEvent: ReplaySavedEvent
+    saveFailedEvent: ReplaySaveFailedEvent
   }
   cleanCut: {
     startParams: CleanCutStartParams
@@ -402,6 +454,31 @@ describe('shared high-risk protocol fixture', () => {
     })
   })
 
+  it('round trips camera looks through the strict RPC and IPC contracts and accepts legacy layouts', () => {
+    for (const cameraLook of [undefined, fixtures.cameraLook]) {
+      const layout = { ...fixtures.layout.normalized, ...(cameraLook ? { cameraLook } : {}) }
+      const params = { intentId: 1, layout, sources: {} }
+      expect(validateBackendRpcParams('scene.layout.apply_live', params)).toEqual(params)
+      const snapshot = { revision: 1, scene: null, layout, activeScreen: null }
+      expect(validateElectronInvokeArgs('preview-surface:update-scene', [snapshot])).toEqual([
+        snapshot
+      ])
+    }
+    for (const cameraLook of [
+      null,
+      { ...fixtures.cameraLook, extra: true },
+      { ...fixtures.cameraLook, saturation: 3 }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('scene.layout.apply_live', {
+          intentId: 1,
+          layout: { ...fixtures.layout.normalized, cameraLook },
+          sources: {}
+        })
+      ).toThrow()
+    }
+  })
+
   it('normalizes legacy layouts and validates the exact scene wire shape', () => {
     expect(fixtures.layout.legacyWire).not.toHaveProperty('sourceVisibility')
     expect(normalizeLayoutSettings(fixtures.layout.legacyWire)).toStrictEqual(
@@ -410,6 +487,25 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendRpcResult('scene.get', fixtures.scene.wire))).toEqual(
       fixtures.scene.wire
     )
+  })
+
+  it("keeps a freeform screen's crop on its box, the same bytes as Rust (plan 213 G2)", () => {
+    const layout = fixtures.layout.freeformCrop
+    expect(normalizeLayoutSettings(layout)).toStrictEqual(layout)
+    expect(
+      validateBackendRpcParams('scene.load_from_capture_config', { sources: {}, layout })
+    ).toStrictEqual({ sources: {}, layout })
+    expect(() =>
+      validateBackendRpcParams('scene.load_from_capture_config', {
+        sources: {},
+        layout: {
+          ...layout,
+          sourceTransformOverrides: {
+            'source:base': { x: 0, y: 0, width: 1, height: 1, cropLeft: 2 }
+          }
+        }
+      })
+    ).toThrow()
   })
 
   // Plan 185 T4: Max is Premium plus a plan. The capabilities answer gains
@@ -512,6 +608,14 @@ describe('shared high-risk protocol fixture', () => {
         fallback: { ...statusFallback.fallback, reason: 'cloud-sleepy' }
       })
     ).toThrow()
+    // Plan 222's additive fields: the two new fallback reasons, the hours
+    // overrun and the test's node facts all pass; nothing else changes.
+    expect(statusHold.allowancePast).toEqual({ seconds: 720 })
+    expect(statusTest.test?.result?.nodeId).toBe('eu-hel-1')
+    for (const reason of ['cloud-quality', 'cloud-unchecked'] as const) {
+      const payload = { ...statusFallback, fallback: { ...statusFallback.fallback, reason } }
+      expect(jsonShape(validateBackendEventPayload('cloud.state', payload))).toEqual(payload)
+    }
   })
 
   it('validates full and defaulted recording status shapes', () => {
@@ -526,6 +630,21 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendRpcResult('recording.status', mixed))).toEqual(mixed)
     expect(mixed.audioTracks?.[0]?.mixSources).toEqual(['microphone', 'system-audio'])
     expect(fixtures.recordingStatus.wire.audioTracks?.[0]).not.toHaveProperty('mixSources')
+  })
+
+  it("carries the running session's word on live scene edits (plan 215 D1)", () => {
+    // A compositor session takes a source moved now; the legacy FFmpeg graph
+    // composes a fixed picture and says so; nothing running says nothing.
+    expect(fixtures.recordingStatus.wire.acceptsLiveSceneEdits).toBe(true)
+    const fixed = fixtures.recordingStatus.fixedSceneWire
+    expect(jsonShape(validateBackendRpcResult('recording.status', fixed))).toEqual(fixed)
+    expect(fixed.acceptsLiveSceneEdits).toBe(false)
+    expect(fixtures.recordingStatus.minimalWire).not.toHaveProperty('acceptsLiveSceneEdits')
+    // Main parses the same status off the event socket (strict contract).
+    expect(jsonShape(validateBackendEventPayload('recording.status', fixed))).toEqual(fixed)
+    expect(() =>
+      validateBackendRpcResult('recording.status', { ...fixed, acceptsLiveSceneEdits: 'yes' })
+    ).toThrow()
   })
 
   it('accepts the Rust stopped compositor wire shape without nullable metrics', () => {
@@ -839,10 +958,158 @@ describe('shared high-risk protocol fixture', () => {
       })
     ).toThrow()
     // The shipped defaults: highlight bottom-left on both outputs, captions
-    // off (today's burnTarget default), the Buddy bottom-right.
+    // off (today's burnTarget default), the Buddy bottom-right, the chat box
+    // (plan 215 D5) top-left and off for both outputs.
     expect(fixtures.overlayLayout.defaults.highlight.showOnStream).toBe(true)
     expect(fixtures.overlayLayout.defaults.captions.showOnStream).toBe(false)
     expect(fixtures.overlayLayout.defaults.buddy.horizontal.x).toBeCloseTo(0.7975, 6)
+    expect(fixtures.overlayLayout.defaults.chat.showOnStream).toBe(false)
+    expect(fixtures.overlayLayout.defaults.chat.showInRecording).toBe(false)
+    expect(fixtures.overlayLayout.defaults.chat.horizontal.y).toBeCloseTo(0.04, 6)
+    // A layout saved before the chat box (plan 215 G) still validates: `chat`
+    // takes the shipped default, like the stored row's `#[serde(default)]`,
+    // and the placed highlight, captions and Buddy come through untouched.
+    const { chat: _chat, ...withoutChat } = fixtures.overlayLayout.placed
+    for (const method of ['overlays.layout.get', 'overlays.layout.set'] as const) {
+      const parsed = (
+        method === 'overlays.layout.get'
+          ? validateBackendRpcResult(method, withoutChat)
+          : validateBackendRpcParams(method, withoutChat)
+      ) as typeof fixtures.overlayLayout.placed
+      expect(parsed).toStrictEqual({ ...withoutChat, chat: fixtures.overlayLayout.defaults.chat })
+    }
+    expect(
+      validateBackendEventPayload('overlays.layout', withoutChat) as typeof withoutChat
+    ).toMatchObject(withoutChat)
+    expect(DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT).toStrictEqual(fixtures.overlayLayout.defaults.chat)
+    // Present, the chat box is exact; the other items stay required.
+    expect(() =>
+      validateBackendRpcResult('overlays.layout.get', {
+        ...withoutChat,
+        chat: { ...fixtures.overlayLayout.placed.chat, extra: true }
+      })
+    ).toThrow()
+    const { buddy: _buddy, ...withoutBuddy } = fixtures.overlayLayout.defaults
+    expect(() => validateBackendRpcResult('overlays.layout.get', withoutBuddy)).toThrow()
+  })
+
+  it('keeps the chat box RPCs strict (plan 215 G)', () => {
+    const png = 'iVBORw0KGgo='
+    const rect = fixtures.overlayLayout.placed.chat.horizontal
+    expect(validateBackendRpcParams('chat.overlay.set', { pngBase64: png })).toStrictEqual({
+      pngBase64: png
+    })
+    expect(
+      validateBackendRpcParams('chat.overlay.set', {
+        pngBase64: png,
+        rect,
+        verticalPngBase64: png,
+        verticalRect: fixtures.overlayLayout.placed.chat.vertical
+      })
+    ).toStrictEqual({
+      pngBase64: png,
+      rect,
+      verticalPngBase64: png,
+      verticalRect: fixtures.overlayLayout.placed.chat.vertical
+    })
+    expect(() => validateBackendRpcParams('chat.overlay.set', { pngBase64: '' })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('chat.overlay.set', { pngBase64: png, anchor: 'top-left' })
+    ).toThrow()
+    const info = { active: true, width: 640, height: 480, revision: 7, vertical: false }
+    expect(validateBackendRpcResult('chat.overlay.set', info)).toStrictEqual(info)
+    expect(
+      validateBackendRpcResult('chat.overlay.clear', { ...info, active: false })
+    ).toStrictEqual({ ...info, active: false })
+    expect(() =>
+      validateBackendRpcResult('chat.overlay.set', { ...info, vertical: null })
+    ).toThrow()
+    expect(validateBackendRpcResult('chat.overlay.canvases', {})).toStrictEqual({})
+    // A dual-orientation session: the horizontal stream rides the primary
+    // leg at the session's own size, the vertical leg has its own canvas.
+    const canvases = {
+      horizontal: { width: 1280, height: 720 },
+      vertical: { width: 720, height: 1280 }
+    }
+    expect(validateBackendRpcResult('chat.overlay.canvases', canvases)).toStrictEqual(canvases)
+    expect(
+      validateBackendRpcResult('chat.overlay.canvases', {
+        horizontal: { width: 1920, height: 1080 }
+      })
+    ).toStrictEqual({ horizontal: { width: 1920, height: 1080 } })
+    // The serde null trap: an absent canvas is omitted, never null.
+    expect(() => validateBackendRpcResult('chat.overlay.canvases', { vertical: null })).toThrow()
+    expect(() => validateBackendRpcResult('chat.overlay.canvases', { horizontal: null })).toThrow()
+  })
+
+  it('keeps the banner wire shape identical across languages, timer off or on (plan 186)', () => {
+    const { minimal, withTimer } = fixtures.banner
+    for (const banner of [minimal, withTimer]) {
+      expect(validateBackendRpcResult('banners.show', banner)).toStrictEqual(banner)
+      expect(validateBackendRpcResult('banners.importImage', banner)).toStrictEqual(banner)
+      expect(validateBackendRpcResult('banners.update', banner)).toStrictEqual(banner)
+      expect(validateBackendRpcResult('banners.list', [banner])).toStrictEqual([banner])
+      expect(validateBackendEventPayload('banners.changed', [banner])).toStrictEqual([banner])
+    }
+    // The timer is omitted when off (skip_serializing_if), never null.
+    expect('hideAfterSec' in minimal).toBe(false)
+    expect('repeatEveryMin' in minimal).toBe(false)
+    expect(withTimer.hideAfterSec).toBe(30)
+    expect(withTimer.repeatEveryMin).toBe(15)
+    for (const field of ['hideAfterSec', 'repeatEveryMin'] as const) {
+      expect(() => validateBackendRpcResult('banners.show', { ...minimal, [field]: null })).toThrow(
+        field
+      )
+      expect(() =>
+        validateBackendEventPayload('banners.changed', [{ ...withTimer, [field]: null }])
+      ).toThrow(field)
+    }
+    expect(() => validateBackendRpcResult('banners.show', { ...minimal, extra: true })).toThrow()
+  })
+
+  it('keeps the soundboard wire shapes identical across languages (plan 189)', () => {
+    const { minimal, starter, state, playback, pressStopped } = fixtures.sound
+    for (const sound of [minimal, starter]) {
+      expect(validateBackendRpcResult('sounds.import', sound)).toStrictEqual(sound)
+      expect(validateBackendRpcResult('sounds.update', sound)).toStrictEqual(sound)
+      expect(validateBackendRpcResult('sounds.reorder', [sound])).toStrictEqual([sound])
+    }
+    const board = { ...state, sounds: [starter, minimal] }
+    expect(validateBackendRpcResult('sounds.list', board)).toStrictEqual(board)
+    expect(validateBackendEventPayload('sounds.changed', board)).toStrictEqual(board)
+    expect(validateBackendEventPayload('sounds.playback', playback)).toStrictEqual(playback)
+    expect(validateBackendRpcResult('sounds.stop', playback)).toStrictEqual(playback)
+    expect(validateBackendRpcResult('sounds.press', pressStopped)).toStrictEqual(pressStopped)
+    // Release test 147, plan 0001: a session sounds can't reach says so; the
+    // flag is omitted when false, never false or null.
+    const without = fixtures.sound.playbackWithoutSounds
+    expect(validateBackendEventPayload('sounds.playback', without)).toStrictEqual(without)
+    expect('sessionWithoutSounds' in playback).toBe(false)
+    for (const value of [false, null]) {
+      expect(() =>
+        validateBackendEventPayload('sounds.playback', { voices: [], sessionWithoutSounds: value })
+      ).toThrow()
+    }
+    // Optional fields are omitted when absent (skip_serializing_if), never null.
+    expect('hotkey' in minimal).toBe(false)
+    expect('starter' in minimal).toBe(false)
+    expect('voiceId' in pressStopped).toBe(false)
+    for (const field of ['hotkey', 'starter'] as const) {
+      expect(() =>
+        validateBackendRpcResult('sounds.update', { ...starter, [field]: null })
+      ).toThrow(field)
+    }
+    expect(() => validateBackendRpcResult('sounds.press', { voiceId: null, onAir: true })).toThrow(
+      'voiceId'
+    )
+    expect(() => validateBackendRpcResult('sounds.update', { ...minimal, extra: true })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('sounds.update', { ...minimal, mode: 'one-shot' })
+    ).toThrow()
+    expect(() => validateBackendRpcResult('sounds.update', { ...minimal, hotkey: '0' })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('sounds.update', { ...minimal, file: '../x.wav' })
+    ).toThrow()
   })
 
   it('keeps the Buddy overlay wire shapes strict (plan 164 Phase C)', () => {
@@ -961,8 +1228,9 @@ describe('shared high-risk protocol fixture', () => {
       removeConfirm: 'countdown'
     })
     // Plan 164 S-A2: the persona and the automatic chat block ride the
-    // settings (defaults: the bundled pack, everything automatic off) and
-    // the patch (whole objects). Absent images are omitted, never null.
+    // settings (defaults: the bundled pack; posting Off, with Greetings, AI
+    // greetings, both welcomes and Answers on since plan 192) and the patch
+    // (whole objects). Absent images are omitted, never null.
     expect(fixtures.cohost.settings.persona).toStrictEqual({
       id: 'default',
       name: 'Buddy',
@@ -975,9 +1243,18 @@ describe('shared high-risk protocol fixture', () => {
       reactions: {}
     })
     expect(fixtures.cohost.settings.autoChat).toStrictEqual({
+      talk: 'bubble',
       mode: 'off',
-      greetings: { enabled: false, templates: [] },
-      answers: { enabled: false, cooldownSeconds: 20 },
+      greetings: {
+        enabled: true,
+        templates: [],
+        ai: true,
+        welcomes: {
+          firstTime: { enabled: true, state: 'talk' },
+          returning: { enabled: true, state: 'talk' }
+        }
+      },
+      answers: { enabled: true, cooldownSeconds: 20 },
       banter: { enabled: false, cooldownSeconds: 240 }
     })
     expect(fixtures.cohost.settingsPatch.persona?.images).toStrictEqual({
@@ -1026,6 +1303,30 @@ describe('shared high-risk protocol fixture', () => {
       validateBackendRpcResult('cohost.report.get', {
         ...fixtures.cohost.reportPayload,
         report: { ...fixtures.cohost.report, commands: { removed: 1 } }
+      })
+    ).toThrow('cohost.report.get')
+    // Plan 211 D11: what Buddy said in its bubble rides beside the posts;
+    // the full report from before `said` has none (never null), the skips
+    // count `noBubble`, and the strict shape refuses an unknown field.
+    expect(fixtures.cohost.reportPayload.report?.said).toStrictEqual([
+      {
+        id: 'utt-4-fixture',
+        at: '2026-08-22T10:08:00Z',
+        trigger: 'greeting',
+        text: 'Welcome, Ada!',
+        source: 'line'
+      },
+      { id: 'utt-5-fixture', at: '2026-08-22T10:09:00Z', trigger: 'manual', text: 'Hello horde' }
+    ])
+    expect(fixtures.cohost.report).not.toHaveProperty('said')
+    expect(fixtures.cohost.reportPayload.report?.greetings.skipped?.noBubble).toBe(3)
+    expect(() =>
+      validateBackendRpcResult('cohost.report.get', {
+        ...fixtures.cohost.reportPayload,
+        report: {
+          ...fixtures.cohost.reportPayload.report,
+          said: [{ ...fixtures.cohost.reportPayload.report!.said![0], destinations: ['twitch'] }]
+        }
       })
     ).toThrow('cohost.report.get')
   })
@@ -1118,6 +1419,74 @@ describe('shared high-risk protocol fixture', () => {
       fixtures.clip.marks
     )
     expect(fixtures.clip.marks[1]).not.toHaveProperty('phrase')
+    // Plan 199 D8: a mark made before the plan has no length; a 1-min press
+    // carries its 60.
+    expect(fixtures.clip.marks[0]).not.toHaveProperty('lookbackSeconds')
+    expect(fixtures.clip.marks[2]?.lookbackSeconds).toBe(60)
+    expect(() =>
+      validateBackendRpcResult('clip.marks.list', [
+        { ...fixtures.clip.marks[0], lookbackSeconds: null }
+      ])
+    ).toThrow()
+  })
+
+  it('keeps the clip length optional on clip.mark and replay.save (plan 199)', () => {
+    // Every older caller sends no params at all.
+    expect(validateBackendRpcParams('clip.mark', undefined)).toBeUndefined()
+    expect(validateBackendRpcParams('replay.save', undefined)).toBeUndefined()
+    for (const [method, params] of [
+      ['clip.mark', fixtures.clip.markParams],
+      ['clip.mark', fixtures.clip.markParamsLong],
+      ['replay.save', fixtures.replay.saveParams],
+      ['replay.save', fixtures.replay.saveParamsLong]
+    ] as const) {
+      expect(validateBackendRpcParams(method, params)).toStrictEqual(params)
+    }
+    expect(fixtures.clip.markParams).toEqual({})
+    expect(fixtures.clip.markParamsLong).toEqual({ seconds: 60 })
+    expect(validateBackendRpcParams('clip.mark', { seconds: 30 })).toEqual({ seconds: 30 })
+    for (const method of ['clip.mark', 'replay.save'] as const) {
+      for (const params of [{ seconds: 45 }, { seconds: '60' }, { seconds: null }, { other: 1 }]) {
+        expect(() => validateBackendRpcParams(method, params), JSON.stringify(params)).toThrow()
+      }
+    }
+  })
+
+  it('keeps the replay buffer request, status mark, state and save envelopes identical across languages (plan 181)', () => {
+    const replay = fixtures.replay
+    // The ring request rides session.start; the status mark rides recording.status.
+    expect(
+      jsonShape(validateBackendRpcResult('recording.status', replay.replayOnlyStatus))
+    ).toEqual(replay.replayOnlyStatus)
+    expect(replay.replayOnlyStatus.replayOnly).toBe(true)
+    expect(fixtures.recordingStatus.wire).not.toHaveProperty('replayOnly')
+    for (const event of [replay.stateOn, replay.stateOff, replay.stateError]) {
+      expect(validateBackendEventPayload('replay.state', event)).toStrictEqual(event)
+      expect(validateBackendRpcResult('replay.status', event)).toStrictEqual(event)
+    }
+    expect(replay.stateOff).not.toHaveProperty('sessionId')
+    expect(replay.stateError.reason).toMatch(/clips are off/)
+    // The request: `auto` rides the wire only on a default start (redesign R2).
+    expect(fixtures.replay.paramsAuto).toEqual({ seconds: 30, auto: true })
+    for (const accepted of [replay.saveAccepted, replay.saveAcceptedMinimal]) {
+      expect(validateBackendRpcResult('replay.save', accepted)).toStrictEqual(accepted)
+    }
+    // Plan 199: the accepted save always names its length.
+    expect(replay.saveAcceptedMinimal.seconds).toBe(30)
+    expect(replay.saveAccepted.seconds).toBe(60)
+    const withoutSeconds: Partial<ReplaySaveAccepted> = { ...replay.saveAcceptedMinimal }
+    delete withoutSeconds.seconds
+    expect(() => validateBackendRpcResult('replay.save', withoutSeconds)).toThrow()
+    expect(validateBackendEventPayload('replay.saved', replay.savedEvent)).toStrictEqual(
+      replay.savedEvent
+    )
+    expect(replay.savedEvent.source).toBe('manual')
+    expect(validateBackendEventPayload('replay.saveFailed', replay.saveFailedEvent)).toStrictEqual(
+      replay.saveFailedEvent
+    )
+    expect(() =>
+      validateBackendEventPayload('replay.state', { ...replay.stateOn, state: 'paused' })
+    ).toThrow()
   })
 
   it('keeps Clean cut jobs, the cut list and its params identical across languages (plan 119)', () => {
@@ -1766,4 +2135,23 @@ describe('Buddy pet creator wire (plan 168, Phase F)', () => {
       })
     ).toThrow('cohost.pet.build.progress')
   })
+})
+
+it('preserves RNNoise audio settings, live requests and confirmed rejection in the shared fixture', () => {
+  const fixture = fixtures.microphoneNoiseSuppression
+  expect(normalizeAudioSettings(fixture.audioSettings).microphoneNoiseSuppression).toBe('rnnoise')
+  expect(normalizeAudioSettings(fixture.legacyAudioSettings).microphoneNoiseSuppression).toBe('off')
+  expect(validateBackendRpcParams('audio.processing.update', fixture.update)).toEqual(
+    fixture.update
+  )
+  expect(validateBackendRpcParams('audio.processing.update', fixture.legacyUpdate)).toEqual(
+    fixture.legacyUpdate
+  )
+  expect(validateBackendRpcResult('audio.processing.update', fixture.applied)).toEqual(
+    fixture.applied
+  )
+  expect(validateBackendRpcResult('audio.processing.update', fixture.unavailable)).toEqual(
+    fixture.unavailable
+  )
+  expect(fixture.unavailable.confirmedMicrophoneNoiseSuppression).toBe('off')
 })

@@ -1,11 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  createDefaultRegistry,
-  effectiveSceneBackground,
-  slotName,
-  unattendedImportSlot
-} from '@/lib/background-assets'
+import { createDefaultRegistry, effectiveSceneBackground } from '@/lib/background-assets'
+import { slotName, unattendedImportSlot } from '@/lib/background-library'
 import { defaultCaptureConfig, legacyStreamKeyMigrationCandidates } from '@/lib/capture'
 import { mergeObsImportIntoConfig, withObsBackground } from './obs-import-apply'
 import type { ObsImportPlanResult } from './obs-import-map'
@@ -133,6 +129,37 @@ describe('mergeObsImportIntoConfig', () => {
       updatedAt: '2026-07-08T00:00:00.000Z'
     })
     expect(next.streaming.enabledTargetIds).toContain('youtube')
+  })
+
+  it('imports OBS Facebook Live into the Facebook card and its key migration (plan 206)', () => {
+    const next = mergeObsImportIntoConfig(
+      defaultCaptureConfig,
+      plan({
+        stream: {
+          kind: 'rtmp-platform',
+          platform: 'facebook',
+          serviceLabel: 'Facebook Live',
+          serverUrl: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+          hasKey: true
+        }
+      }),
+      'facebook-key-from-obs',
+      '2026-10-27T00:00:00.000Z'
+    )
+    const facebook = next.streaming.targets.find((target) => target.id === 'facebook')
+    expect(facebook).toMatchObject({
+      platform: 'facebook',
+      enabled: true,
+      serverUrl: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+      streamKey: 'facebook-key-from-obs',
+      authMode: 'manual-rtmp'
+    })
+    expect(facebook?.outputOrientation).not.toBe('vertical')
+    expect(next.streaming.enabledTargetIds).toContain('facebook')
+    expect(legacyStreamKeyMigrationCandidates(next)).toContainEqual({
+      targetId: 'facebook',
+      streamKey: 'facebook-key-from-obs'
+    })
   })
 })
 

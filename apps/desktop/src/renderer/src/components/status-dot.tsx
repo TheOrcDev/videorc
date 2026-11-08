@@ -1,43 +1,38 @@
 import type { ReactElement } from 'react'
 
-import type { StatusTone } from '@/components/status-badge'
-import { assertStatusWord } from '@/lib/status-word'
+import { assertStatusWord, STATUS_TONE_CLASS } from '@/lib/status-word'
+import type { StatusTone } from '@/lib/status-word'
 import { cn } from '@/lib/utils'
 
-/** The same tones as `StatusBadge` (plan 174 S1.3): one tone API. */
-export type StatusDotTone = StatusTone
+/** The same tones as `StatusBadge`: one tone vocabulary. */
+type StatusDotTone = StatusTone
 
-const toneClass: Record<StatusDotTone, string> = {
-  good: 'tone-success',
-  warn: 'tone-warning',
-  error: 'tone-destructive',
-  live: 'tone-live',
-  neutral: 'tone-neutral'
+interface StatusDotProps {
+  tone?: StatusDotTone
+  /** A word in sentence case, already mapped from its state: never recased. */
+  label?: string
+  /** Rings out from the dot while something runs (reduced motion stills it). */
+  pulse?: boolean
+  className?: string
 }
 
 /**
- * Ambient status: the glass status dot (plan 050, D9), optionally pulsing,
- * and a monochrome label. Replaces the loud header badges. `live` is record
- * and on air; `error` is a failure. The label is a word in sentence case,
- * already mapped from its state (plan 174 S1.3): the dot never recases it.
+ * Ambient status: the glass status dot, optionally pulsing, and a monochrome
+ * label. It replaces a loud header badge. `live` is recording and on air;
+ * `error` is a failure.
  */
-export function StatusDot({
+function StatusDot({
   tone = 'neutral',
   label,
   pulse = false,
   className
-}: {
-  tone?: StatusDotTone
-  label?: string
-  pulse?: boolean
-  className?: string
-}): ReactElement {
+}: StatusDotProps): ReactElement {
   assertStatusWord(label, 'StatusDot')
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 text-xs text-muted-foreground',
-        toneClass[tone],
+        'text-muted-foreground inline-flex items-center gap-1.5 text-xs',
+        STATUS_TONE_CLASS[tone],
         className
       )}
       data-slot="status-dot"
@@ -47,9 +42,12 @@ export function StatusDot({
         {pulse ? (
           <span className="absolute inline-flex size-full rounded-full bg-(--chip-tone) opacity-60 motion-safe:animate-ping" />
         ) : null}
-        <span className="relative inline-flex size-1.5 rounded-full glass-dot" />
+        <span className="glass-dot relative inline-flex size-1.5 rounded-full" />
       </span>
       {label ? <span className="truncate">{label}</span> : null}
     </span>
   )
 }
+
+export { StatusDot }
+export type { StatusDotProps, StatusDotTone }

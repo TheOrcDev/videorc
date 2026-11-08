@@ -16,10 +16,25 @@ import type {
 // ADR boundary). Parsing is pure and fixture-tested; only the discovery
 // entrypoints touch the filesystem. `.bak` twins are the corruption fallback.
 
-export function obsRootPath(): string {
-  return (
-    process.env.VIDEORC_OBS_ROOT ?? join(homedir(), 'Library', 'Application Support', 'obs-studio')
-  )
+/**
+ * Where OBS Studio keeps its config on this platform: `%APPDATA%\obs-studio`
+ * on Windows, `$XDG_CONFIG_HOME/obs-studio` (default `~/.config`) on Linux and
+ * `~/Library/Application Support/obs-studio` on macOS. `VIDEORC_OBS_ROOT`
+ * overrides it everywhere (smokes and fixtures).
+ */
+export function obsRootPath(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir()
+): string {
+  if (env.VIDEORC_OBS_ROOT) return env.VIDEORC_OBS_ROOT
+  if (platform === 'win32') {
+    return join(env.APPDATA || join(home, 'AppData', 'Roaming'), 'obs-studio')
+  }
+  if (platform === 'linux') {
+    return join(env.XDG_CONFIG_HOME || join(home, '.config'), 'obs-studio')
+  }
+  return join(home, 'Library', 'Application Support', 'obs-studio')
 }
 
 // --- INI ---------------------------------------------------------------
@@ -105,11 +120,44 @@ function classifySource(raw: RawObsSource): ObsSource | null {
       applicationHint: str('application') ?? str('window_name') ?? name
     }
   }
-  if (obsKind === 'display_capture') {
+  // Windows (monitor_capture, game_capture), Linux (PipeWire, X11) and the
+  // older mac display_capture all land on the same Videorc kinds. OBS's
+  // PipeWire plugin registers hyphenated ids: screen capture (current),
+  // desktop capture (older) and window capture. The current screen capture
+  // can pick a monitor or a window and saves only a portal token, so it lands
+  // on display and the import report says the target is unknown.
+  if (
+    obsKind === 'display_capture' ||
+    obsKind === 'monitor_capture' ||
+    obsKind === 'pipewire-screen-capture-source' ||
+    obsKind === 'pipewire-desktop-capture-source' ||
+    obsKind === 'xshm_input'
+  ) {
     return { name, kind: 'display', obsKind }
   }
-  if (obsKind === 'window_capture') {
-    return { name, kind: 'window', obsKind, applicationHint: str('window_name') ?? name }
+  if (
+    obsKind === 'window_capture' ||
+    obsKind === 'game_capture' ||
+    obsKind === 'pipewire-window-capture-source' ||
+    obsKind === 'xcomposite_input'
+  ) {
+    return {
+      name,
+      kind: 'window',
+      obsKind,
+      applicationHint: str('window_name') ?? str('window') ?? str('capture_window') ?? name
+    }
+  }
+  if (obsKind === 'dshow_input' || obsKind === 'v4l2_input') {
+    // DirectShow ids read "HP HD Camera:\\?\usb#vid_..."; the name is before
+    // the first colon. V4L2 carries the node path and names the device aside.
+    const deviceId = str('video_device_id') ?? str('device_id')
+    const deviceName =
+      obsKind === 'dshow_input' ? deviceId?.split(':')[0] || undefined : str('device_name')
+    return { name, kind: 'camera', obsKind, deviceName, ...mixer }
+  }
+  if (obsKind === 'wasapi_input_capture' || obsKind === 'pulse_input_capture') {
+    return { name, kind: 'microphone', obsKind, deviceName: str('device_name'), ...mixer }
   }
   if (obsKind === 'av_capture_input') {
     // "AVCaptureSessionPreset3840x2160" carries the native capture dimensions.

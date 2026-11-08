@@ -12,10 +12,7 @@ import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 
-import {
-  assessFfmpegLinuxPin,
-  assessLinuxFfmpegCapabilities
-} from './lib/ffmpeg-linux-pin.mjs'
+import { assessFfmpegLinuxPin, assessLinuxFfmpegCapabilities } from './lib/ffmpeg-linux-pin.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pinPath = join(repoRoot, 'vendor', 'ffmpeg', 'linux-pin.json')
@@ -109,7 +106,10 @@ if (
     const capabilities = assessLinuxFfmpegCapabilities({
       versionOutput: runText(ffmpegBin, ['-version']),
       encodersOutput: runText(ffmpegBin, ['-hide_banner', '-encoders']),
-      filtersOutput: runText(ffmpegBin, ['-hide_banner', '-filters'])
+      filtersOutput: runText(ffmpegBin, ['-hide_banner', '-filters']),
+      muxersOutput: runText(ffmpegBin, ['-hide_banner', '-muxers']),
+      demuxersOutput: runText(ffmpegBin, ['-hide_banner', '-demuxers']),
+      bitstreamFiltersOutput: runText(ffmpegBin, ['-hide_banner', '-bsfs'])
     })
     if (capabilities.ok) {
       verifyOpenH264Encoder(ffmpegBin)
@@ -202,11 +202,17 @@ const filtersOutput = runText(ffmpegBin, ['-hide_banner', '-filters'])
 const capabilityAssessment = assessLinuxFfmpegCapabilities({
   versionOutput,
   encodersOutput,
-  filtersOutput
+  filtersOutput,
+  // The replay ring (plan 181): segment muxer, concat demuxer, aac_adtstoasc.
+  muxersOutput: runText(ffmpegBin, ['-hide_banner', '-muxers']),
+  demuxersOutput: runText(ffmpegBin, ['-hide_banner', '-demuxers']),
+  bitstreamFiltersOutput: runText(ffmpegBin, ['-hide_banner', '-bsfs'])
 })
 if (!capabilityAssessment.ok) {
   await rm(outputDir, { recursive: true, force: true })
-  fail(`archive violates the Linux encoder policy:\n  - ${capabilityAssessment.problems.join('\n  - ')}`)
+  fail(
+    `archive violates the Linux encoder policy:\n  - ${capabilityAssessment.problems.join('\n  - ')}`
+  )
 }
 try {
   verifyOpenH264Encoder(ffmpegBin)

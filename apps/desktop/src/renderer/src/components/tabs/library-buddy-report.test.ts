@@ -57,6 +57,8 @@ beforeEach(() => {
     sessions: SESSIONS,
     sessionsNextCursor: null,
     sessionsLoadingMore: false,
+    sessionDetails: {},
+    loadSessionDetails: vi.fn(async () => undefined),
     loadMoreSessions: vi.fn(),
     sessionStorageTotals: null,
     settings: {},
@@ -120,9 +122,7 @@ async function openMenu(sessionId: string): Promise<HTMLElement[]> {
     `[data-videorc-library-row="${sessionId}"] button[aria-label="Session actions"]`
   ) as HTMLElement
   expect(trigger, sessionId).toBeTruthy()
-  await act(async () =>
-    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-  )
+  await act(async () => trigger.click())
   return [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
 }
 

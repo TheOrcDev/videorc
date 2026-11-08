@@ -12,7 +12,9 @@ export const AUXILIARY_API_KEYS = {
     'setNotesWindowAlwaysOnTop',
     'saveNotesDocument',
     'onNotesFlushRequest',
-    'onNotesWindowState'
+    'onNotesWindowState',
+    // What the window sits on (plan 208): a value, read before first paint.
+    'windowGround'
   ],
   comments: [
     'cacheChatAvatar',
@@ -33,16 +35,33 @@ export const AUXILIARY_API_KEYS = {
     'onMarkerContext',
     'markerFromCommentsWindow',
     'markClipFromCommentsWindow',
+    // Banners (plan 186 S7): read the list, ask for a show or hide; never push.
+    'getCommentsBanners',
+    'onCommentsBanners',
+    'bannerFromCommentsWindow',
+    // Sounds (plan 189 S9): read the board, ask for a pad, `/sound` or Stop
+    // all; never push, and never play (only the main window's monitor does).
+    'getCommentsSounds',
+    'onCommentsSounds',
+    'soundFromCommentsWindow',
+    // `/buddy <words>` (plan 209 S20): ask, never answer or push.
+    'buddyActFromCommentsWindow',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',
     // Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5).
     'reconnectScopesFromCommentsWindow',
     // The behaviour chips open Buddy → Chat in the main window (plan 174 S3.14a).
     'openBuddyTabFromCommentsWindow',
+    // "Use Sign in" opens the destination in the main window (plan 213 J1).
+    'openDestinationFromCommentsWindow',
+    // "Sign in to Videorc" on a chat row (plan 215 A3): main window starts it.
+    'signInToVideorcFromCommentsWindow',
     // Remove from chat and Buddy's removal cards (plan 140, S6): relayed.
     'moderateFromCommentsWindow',
     'getCommentsWindowState',
     'setCommentsWindowAlwaysOnTop',
+    // Hide from stream (plan 215 D6): the status bar's switch.
+    'setCommentsWindowHiddenFromStream',
     'setCommentsWindowHighlightAnchor',
     'setCommentsWindowAutoShowActivity',
     'onCommentsWindowState',
@@ -67,14 +86,18 @@ export const AUXILIARY_API_KEYS = {
     'sendCohostCommand',
     'sendCohostEnable',
     // The Buddy pane's living preview reads its pet pack (plan 168 Phase D).
-    'readBuddyPetFile'
+    'readBuddyPetFile',
+    // What the window sits on (plan 208): a value, read before first paint.
+    'windowGround'
   ],
   captions: [
     'getCaptionsWindowState',
     'setCaptionsWindowAlwaysOnTop',
     'onCaptionsWindowState',
     'getCaptionSnapshot',
-    'onCaptionSnapshot'
+    'onCaptionSnapshot',
+    // What the window sits on (plan 208): a value, read before first paint.
+    'windowGround'
   ]
 } as const satisfies Record<Exclude<RendererRole, 'main'>, readonly VideorcApiKey[]>
 

@@ -33,9 +33,8 @@ export function PlatformFilter({
   return (
     <ToggleGroup
       aria-label={label}
-      type="single"
-      value={value}
-      onValueChange={(next) => onValueChange((next || 'all') as PlatformFilterValue)}
+      value={[value]}
+      onValueChange={(next) => onValueChange((next[0] ?? 'all') as PlatformFilterValue)}
     >
       <ToggleGroupItem className="text-xs" value="all">
         All
@@ -71,9 +70,11 @@ export function PlatformFilterMenuItems({
         value={value}
         onValueChange={(next) => onValueChange(next as PlatformFilterValue)}
       >
-        <DropdownMenuRadioItem value="all">Every platform</DropdownMenuRadioItem>
+        <DropdownMenuRadioItem closeOnClick value="all">
+          Every platform
+        </DropdownMenuRadioItem>
         {platforms.map((platform) => (
-          <DropdownMenuRadioItem key={platform} value={platform}>
+          <DropdownMenuRadioItem key={platform} closeOnClick value={platform}>
             <ChatPlatformIcon decorative platform={platform} />
             {CHAT_PLATFORM_LABELS[platform]}
           </DropdownMenuRadioItem>

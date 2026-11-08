@@ -1,9 +1,10 @@
 // Theme for the secondary windows (Stream Manager, Notes, Captions). They have
 // no theme provider: they follow the app theme through prefers-color-scheme,
 // which main drives from the main window's toggle (nativeTheme.themeSource).
-// That is the same signal the window's vibrancy material follows, so the text
-// tokens and the glass always agree, and a toggle in the main window restyles
-// every open window live. Kept external so the CSP can reject inline scripts.
+// That is the same signal main repaints the window's opaque base from, so the
+// text tokens, the coats and the window's base always agree, and a toggle in
+// the main window restyles every open window live. Kept external so the CSP
+// can reject inline scripts.
 ;(() => {
   const root = document.documentElement
   const query = window.matchMedia('(prefers-color-scheme: dark)')
@@ -15,10 +16,14 @@
   }
   apply()
   query.addEventListener('change', apply)
-  // The platform before first paint: Windows (Mica) takes its own coats.
+  // The platform before first paint: Windows-only chrome keys on it.
   root.dataset.platform = /Win/i.test(navigator.platform)
     ? 'win32'
     : /Mac/i.test(navigator.platform)
       ? 'darwin'
       : 'linux'
+  // What the window sits on (plan 208): main's call, read off the preload's
+  // bridge (it came in on the window's argv, like the renderer role).
+  const ground = window.videorc?.windowGround
+  root.dataset.ground = ground === 'glass' ? 'glass' : 'solid'
 })()

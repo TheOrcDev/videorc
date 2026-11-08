@@ -65,6 +65,34 @@ export function previewWindowSurfaceReady(
   )
 }
 
+// The backend's `preview.surface.status` owns the D3D11 presenter's transport,
+// backing and frame counters, but only Electron main records whether it
+// accepted the presenter's claim (host kind, first-frame contract, proof
+// polling suppressed). A Windows D3D11 surface is ready only when both agree.
+export function windowsD3d11SurfaceReady(
+  { backendStatus, hostStatus } = {},
+  { previousFrames = 0 } = {}
+) {
+  const transport = 'd3d11-shared-texture'
+  const backing = 'directcomposition-swapchain'
+  return (
+    nativePreviewSurfaceStatusReady(backendStatus, {
+      expectedTransport: transport,
+      expectedBacking: backing,
+      previousFrames
+    }) &&
+    backendStatus?.framePollingSuppressed === true &&
+    backendStatus?.windowsD3d11Presenter?.firstPresentSucceeded === true &&
+    backendStatus?.windowsD3d11Presenter?.sourceLive === true &&
+    hostStatus?.state === 'live' &&
+    hostStatus?.transport === transport &&
+    hostStatus?.backing === backing &&
+    hostStatus?.nativePreviewHostKind === 'backend-d3d11-presenter' &&
+    hostStatus?.firstFrameContract === 'met' &&
+    hostStatus?.framePollingSuppressed === true
+  )
+}
+
 export function nativePreviewSurfaceStatusReady(
   status,
   { expectedTransport, expectedBacking, expectedHostKind, previousFrames = 0 } = {}

@@ -474,6 +474,16 @@ pub fn validate_thumbnail(bytes: &[u8]) -> Result<&'static str> {
 }
 
 #[cfg(test)]
+fn test_quota_state() -> crate::state::AppState {
+    crate::state::AppState::new(
+        "test".into(),
+        1234,
+        tokio::sync::broadcast::channel(64).0,
+        crate::storage::Database::open_in_memory_for_tests(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -660,14 +670,4 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         server.abort();
     }
-}
-
-#[cfg(test)]
-fn test_quota_state() -> crate::state::AppState {
-    crate::state::AppState::new(
-        "test".into(),
-        1234,
-        tokio::sync::broadcast::channel(64).0,
-        crate::storage::Database::open_in_memory_for_tests(),
-    )
 }

@@ -1,8 +1,8 @@
 //! The page the system browser shows when a platform sign-in comes back to the
 //! backend's loopback callback (`/oauth/callback`). It looks like Videorc
-//! (black glass, the orb, chrome text; dark always, like the Preview and Chat
-//! windows) and says in one line what happened and what to do next. Everything is inline: the
-//! loopback server serves no other assets.
+//! (the desktop's neutral palette and the orb, following the browser's
+//! scheme; plan 208 D13) and says in one line what happened and what to do
+//! next. Everything is inline: the loopback server serves no other assets.
 
 use base64::Engine as _;
 
@@ -33,6 +33,7 @@ fn platform_label(platform: Option<StreamPlatform>) -> Option<&'static str> {
         StreamPlatform::Twitch => Some("Twitch"),
         StreamPlatform::Kick => Some("Kick"),
         StreamPlatform::X => Some("X"),
+        StreamPlatform::Facebook => Some("Facebook"),
         StreamPlatform::Tiktok => Some("TikTok"),
         StreamPlatform::Instagram => Some("Instagram"),
         StreamPlatform::Custom => None,

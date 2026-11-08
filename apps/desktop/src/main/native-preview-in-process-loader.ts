@@ -1,3 +1,4 @@
+import type { NativePreviewHostWindow } from '../shared/backend'
 import type { NativePreviewRealSurfaceDriver } from '../shared/native-preview-host-driver'
 import {
   createNativePreviewInProcessDriver,
@@ -8,6 +9,7 @@ export interface NativePreviewInProcessDriverLoadOptions {
   modulePath: string
   loadModule: (modulePath: string) => unknown
   getNativeWindowHandle: () => Buffer | null
+  getNativeHostWindow?: () => NativePreviewHostWindow | null
 }
 
 export type NativePreviewInProcessDriverLoadResult =
@@ -38,7 +40,8 @@ export function loadNativePreviewInProcessDriver(
   return {
     driver: createNativePreviewInProcessDriver({
       binding,
-      getNativeWindowHandle: options.getNativeWindowHandle
+      getNativeWindowHandle: options.getNativeWindowHandle,
+      getNativeHostWindow: options.getNativeHostWindow
     })
   }
 }

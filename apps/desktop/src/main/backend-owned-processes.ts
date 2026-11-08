@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import {
   closeSync,
@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   readlinkSync,
+  statSync,
   unlinkSync,
   writeFileSync
 } from 'node:fs'
@@ -72,6 +73,8 @@ export interface OwnedProcessStartupLockOptions {
   lockPath: string
   timeoutMs?: number
   retryMs?: number
+  /** A lock whose contents never arrived is reclaimed once it is this old. */
+  staleAfterMs?: number
   currentPid?: number
   nowMs?: () => number
   sleep?: Sleep
@@ -80,6 +83,52 @@ export interface OwnedProcessStartupLockOptions {
   closeFile?: CloseFile
   removeFile?: RemoveFile
   writeFile?: (path: string, contents: string) => void
+  readFile?: (path: string) => string
+  /** Age of the lock file in ms, or null when it cannot be read. */
+  fileAgeMs?: (path: string) => number | null
+  processAlive?: (pid: number) => boolean
+}
+
+/**
+ * Pure: whether an existing startup lock belongs to nobody. A lock names the
+ * pid that took it; when that pid is gone (or is this very process, which
+ * cannot be holding a lock it is trying to take), the holder crashed while it
+ * held the lock and nothing else will ever remove it. A lock with no readable
+ * pid is a writer that crashed between open and write, or one still writing,
+ * so it is stale only once it is older than `staleAfterMs`.
+ */
+export function startupLockIsStale(
+  contents: string | null,
+  ageMs: number | null,
+  options: { currentPid: number; staleAfterMs: number; processAlive: (pid: number) => boolean }
+): boolean {
+  let pid: unknown
+  try {
+    pid = contents ? (JSON.parse(contents) as { pid?: unknown }).pid : undefined
+  } catch {
+    pid = undefined
+  }
+  if (typeof pid === 'number' && Number.isInteger(pid) && pid > 0) {
+    return pid === options.currentPid || !options.processAlive(pid)
+  }
+  return ageMs !== null && ageMs >= options.staleAfterMs
+}
+
+function processAliveSync(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as { code?: string }).code === 'EPERM'
+  }
+}
+
+function lockFileAgeMs(path: string): number | null {
+  try {
+    return Math.max(0, Date.now() - statSync(path).mtimeMs)
+  } catch {
+    return null
+  }
 }
 
 export function ownedProcessLedgerPath(userDataPath: string, workspaceRoot: string): string {
@@ -100,7 +149,11 @@ export function acquireOwnedProcessStartupLock(
 ): () => void {
   const timeoutMs = options.timeoutMs ?? 5000
   const retryMs = options.retryMs ?? 50
+  const staleAfterMs = options.staleAfterMs ?? 60_000
   const currentPid = options.currentPid ?? process.pid
+  const readFile = options.readFile ?? ((path) => readFileSync(path, 'utf8'))
+  const fileAgeMs = options.fileAgeMs ?? lockFileAgeMs
+  const processAlive = options.processAlive ?? processAliveSync
   const nowMs = options.nowMs ?? (() => Date.now())
   const sleep = options.sleep ?? sleepSync
   const makeDir = options.makeDir ?? ((path) => mkdirSync(path, { recursive: true }))
@@ -116,10 +169,15 @@ export function acquireOwnedProcessStartupLock(
     let fileDescriptor: number | null = null
     try {
       fileDescriptor = openFileExclusive(options.lockPath)
-      writeFile(
-        options.lockPath,
-        `${JSON.stringify({ pid: currentPid, acquiredAt: new Date().toISOString() }, null, 2)}\n`
-      )
+      // The token makes this lock instance distinguishable from a replacement
+      // at the same path, so neither a reclaimer nor this release can remove
+      // a lock it did not observe.
+      const ownedContents = `${JSON.stringify(
+        { pid: currentPid, acquiredAt: new Date().toISOString(), token: randomUUID() },
+        null,
+        2
+      )}\n`
+      writeFile(options.lockPath, ownedContents)
       const ownedFileDescriptor = fileDescriptor
       let released = false
       return () => {
@@ -131,6 +189,19 @@ export function acquireOwnedProcessStartupLock(
           closeFile(ownedFileDescriptor)
         } catch {
           // The descriptor may already be closed; releasing the lock should be best-effort.
+        }
+        let current: string
+        try {
+          current = readFile(options.lockPath)
+        } catch {
+          // Gone already, or unreadable: without our token there is no proof
+          // the path still holds our lock. One left behind names this pid,
+          // so the next launch reclaims it once this process is gone.
+          return
+        }
+        if (current !== ownedContents) {
+          // Not ours any more: another process holds this path now.
+          return
         }
         try {
           removeFile(options.lockPath)
@@ -147,10 +218,25 @@ export function acquireOwnedProcessStartupLock(
         }
       }
 
-      const code =
-        typeof error === 'object' && error ? (error as { code?: string }).code : undefined
-      if (code !== 'EEXIST') {
+      if (errorCode(error) !== 'EEXIST') {
         throw error
+      }
+      // A holder that died with the lock in place would otherwise block every
+      // later launch until someone deletes the file by hand.
+      if (
+        reclaimStaleStartupLock(options.lockPath, {
+          readFile,
+          fileAgeMs,
+          removeFile,
+          openFileExclusive,
+          closeFile,
+          writeFile,
+          currentPid,
+          staleAfterMs,
+          processAlive
+        })
+      ) {
+        continue
       }
       if (nowMs() - startedAtMs >= timeoutMs) {
         throw new Error(`Timed out waiting for owned process startup lock at ${options.lockPath}`, {
@@ -699,6 +785,113 @@ function exactProbeExecOptions(): {
   windowsHide: true
 } {
   return { encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024, windowsHide: true }
+}
+
+type StartupLockIo = {
+  readFile: (path: string) => string
+  fileAgeMs: (path: string) => number | null
+  removeFile: RemoveFile
+  openFileExclusive: OpenExclusiveFile
+  closeFile: CloseFile
+  writeFile: (path: string, contents: string) => void
+  currentPid: number
+  staleAfterMs: number
+  processAlive: (pid: number) => boolean
+}
+
+/**
+ * What a lock path holds now, or null when that cannot be told: only ENOENT
+ * proves a read found nothing (a live lock can fail to read with EACCES,
+ * EPERM, EBUSY or EIO), and a path that exists for `open` but neither reads
+ * nor stats (a dangling link) is no evidence either. Inconclusive is never
+ * stale; the caller waits out its bounded retry instead.
+ */
+function inspectStartupLock(
+  lockPath: string,
+  io: StartupLockIo
+): { contents: string | null; ageMs: number | null } | null {
+  let contents: string | null
+  try {
+    contents = io.readFile(lockPath)
+  } catch (error) {
+    if (errorCode(error) !== 'ENOENT') return null
+    contents = null
+  }
+  const ageMs = io.fileAgeMs(lockPath)
+  if (contents === null && ageMs === null) return null
+  return { contents, ageMs }
+}
+
+/** Guards of guards: each level only exists when a reclaimer crashed. */
+const MAX_RECLAIM_DEPTH = 3
+
+/**
+ * Takes the reclaim guard beside a lock. Only the guard holder removes a
+ * stale lock, and it re-reads the lock under the guard, so two contenders
+ * that both judged the same lock stale cannot remove the replacement the
+ * first one created. A guard left by a reclaimer that crashed inside this
+ * window is judged like a lock (dead pid, or no pid and old) and reclaimed
+ * the same way, under its own guard, so two contenders that both judged the
+ * same crashed guard cannot remove the replacement guard either.
+ */
+function takeReclaimGuard(guardPath: string, io: StartupLockIo, depth: number): number | null {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fileDescriptor = io.openFileExclusive(guardPath)
+      try {
+        io.writeFile(guardPath, `${JSON.stringify({ pid: io.currentPid, token: randomUUID() })}\n`)
+      } catch {
+        // The guard still excludes others without its pid; it ages out.
+      }
+      return fileDescriptor
+    } catch (error) {
+      if (errorCode(error) !== 'EEXIST' || attempt > 0) return null
+      if (!reclaimStaleStartupLock(guardPath, io, depth + 1)) return null
+    }
+  }
+  return null
+}
+
+function reclaimStaleStartupLock(lockPath: string, io: StartupLockIo, depth = 0): boolean {
+  if (depth >= MAX_RECLAIM_DEPTH) {
+    return false
+  }
+  const observed = inspectStartupLock(lockPath, io)
+  if (!observed || !startupLockIsStale(observed.contents, observed.ageMs, io)) {
+    return false
+  }
+  const guardPath = `${lockPath}.reclaim`
+  const guard = takeReclaimGuard(guardPath, io, depth)
+  if (guard === null) {
+    return false
+  }
+  try {
+    // The lock may have been reclaimed and taken again since we looked: only
+    // the instance we judged, still stale, is removed.
+    const current = inspectStartupLock(lockPath, io)
+    if (
+      !current ||
+      current.contents !== observed.contents ||
+      !startupLockIsStale(current.contents, current.ageMs, io)
+    ) {
+      return false
+    }
+    io.removeFile(lockPath)
+    return true
+  } catch {
+    return false
+  } finally {
+    try {
+      io.closeFile(guard)
+    } catch {
+      // Best effort.
+    }
+    try {
+      io.removeFile(guardPath)
+    } catch {
+      // A guard left behind is reclaimed like a lock (see takeReclaimGuard).
+    }
+  }
 }
 
 function sleepSync(delayMs: number): void {

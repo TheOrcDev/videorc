@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { LiveChatMessage } from '@/lib/backend'
 import { renderCommentHighlightCards, type HighlightBitmap } from './caption-overlay'
-import { X_LOGO_WHITE_URL, X_VERIFIED_URL } from './x-mark'
+import {
+  X_LOGO_WHITE_DATA_URL as X_LOGO_WHITE_URL,
+  X_VERIFIED_DATA_URL as X_VERIFIED_URL
+} from './brand-mark-data'
 
 // The card is painted on an OffscreenCanvas, which the node test environment
 // lacks. A recording 2D context stands in: it measures text like the layout

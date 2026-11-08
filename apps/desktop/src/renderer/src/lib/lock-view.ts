@@ -1,35 +1,28 @@
+import type { LockAlertAction } from '@/components/lock-alert'
+
 import type { EntitlementUiGate } from './entitlement-ui'
 import { isPremiumUpgradeMessage, VIDEORC_PREMIUM_URL } from './premium-upgrade'
+import { beginVideorcSignIn, openVideorcWebLink } from './videorc-web-links'
 
 /**
  * Why a set of controls is off, and the one thing that turns them back on
  * (plan 174 S1.5, D-13 and J2-9). Locked means disabled with one reason
  * (videorc-design): a lock is never hidden, it says why in one line and
- * offers at most one action. `components/lock-alert.tsx` draws these.
+ * offers at most one action. `components/lock-alert.tsx` (@videorc) draws
+ * these; the one session and offline wording is `lib/lock-reason.ts`.
  */
 
 /** What unlocks a locked feature: its one action. */
 export type UnlockAction = { kind: 'sign-in' } | { kind: 'view-premium'; url: string }
 
-/** The one wording for controls a running recording or livestream locks. */
-export const SESSION_LOCK_REASON =
-  "Locked while you're recording or live. Changes apply the next time you record or go live."
-
 /**
- * The session lock that names what it locks (plan 174 S3.5a, D-15): "Destinations
- * and stream details are locked while you're recording or live. …". Without
- * `locks` it is the plain SESSION_LOCK_REASON.
+ * The LockAlert's action for an unlock: sign-in starts Videorc's sign-in,
+ * and View Premium opens the page in the system browser.
  */
-export function sessionLockReason(locks?: string): string {
-  if (!locks) return SESSION_LOCK_REASON
-  return `${locks} are locked while you're recording or live. Changes apply the next time you record or go live.`
-}
-
-/** The one wording for controls that wait for the backend to come back. */
-export const OFFLINE_LOCK_REASON = 'Videorc is reconnecting. These controls come back in a moment.'
-
-export function unlockActionLabel(action: UnlockAction): string {
-  return action.kind === 'sign-in' ? 'Sign in' : 'View Premium'
+export function lockAlertAction(action: UnlockAction | null): LockAlertAction | null {
+  if (!action) return null
+  if (action.kind === 'sign-in') return { kind: 'sign-in', onClick: beginVideorcSignIn }
+  return { kind: 'view-premium', url: action.url, onClick: openVideorcWebLink }
 }
 
 /**

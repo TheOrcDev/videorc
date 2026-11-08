@@ -1,4 +1,4 @@
-import { AlertIcon, MicrophoneIcon, BuddyIcon } from '@/components/icons'
+import { MicrophoneIcon, BuddyIcon } from '@/components/icons'
 import type React from 'react'
 import {
   useEffect,
@@ -38,6 +38,7 @@ import type {
   CohostWindowBuddy
 } from '@/lib/backend'
 import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
+import type { BuddyOutputNotice } from '@/lib/buddy-output-notice'
 import {
   BUDDY_HEADER_PREVIEW_PX,
   BUDDY_REACTION_CHIPS,
@@ -682,8 +683,7 @@ export function BuddySayFooter({
   previewRef,
   packReactions = null,
   sayPending = false,
-  sayPostsToChat = false,
-  sayChatCap = null,
+  offOutputsNotice = null,
   onSay,
   onShowOnStreamChange,
   onReact
@@ -694,17 +694,18 @@ export function BuddySayFooter({
   /** The pack's reactions as the header preview reported them. */
   packReactions?: readonly string[] | null
   sayPending?: boolean
-  /** Auto, on air: the line also goes to every chat as you (plan 174 F-6). */
-  sayPostsToChat?: boolean
-  /** The shortest chat cap a posted Say meets (X takes 140); null when unknown. */
-  sayChatCap?: number | null
+  /**
+   * On air with the Buddy on no output while it would talk
+   * (`buddyOffOutputsNotice`): said in words above the Say box, with the
+   * on-stream switch's action one click away, at every width.
+   */
+  offOutputsNotice?: BuddyOutputNotice | null
   onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   onShowOnStreamChange?: (showOnStream: boolean) => void
   onReact?: (reaction: string) => void
 }): ReactElement {
   const [draft, setDraft] = useState('')
   const name = buddy.persona.name
-  const overCap = sayPostsToChat && sayChatCap !== null && draft.length > sayChatCap
   const avatar = buddy.persona.avatar
   const say = (state: CohostUtteranceState): void => {
     const text = draft.trim()
@@ -722,17 +723,37 @@ export function BuddySayFooter({
       className="@container/buddy-header shrink-0 border-t border-border"
       data-slot="buddy-footer"
     >
+      {offOutputsNotice ? (
+        // Buddy Live is on air, the Buddy on no output: words, not a hidden
+        // switch label, and the way out in one click. Quiet, because it is
+        // the streamer's choice to make, not a failure.
+        <Alert data-testid="buddy-off-outputs" variant="quiet">
+          <AlertTitle>{offOutputsNotice.title}</AlertTitle>
+          <AlertDescription>{offOutputsNotice.detail}</AlertDescription>
+          {onShowOnStreamChange ? (
+            <AlertAction>
+              <Button
+                size="xs"
+                type="button"
+                variant="secondary"
+                onClick={() => onShowOnStreamChange(true)}
+              >
+                {offOutputsNotice.action}
+              </Button>
+            </AlertAction>
+          ) : null}
+        </Alert>
+      ) : null}
       <div className="flex flex-wrap items-center gap-1.5 px-3 py-2" data-slot="buddy-say">
         <div className="flex min-w-48 flex-1 items-center gap-1.5">
+          {/* Plan 211 D2: the Say box speaks in the bubble only, in every
+              mode; nothing it says goes to chat. */}
           <Input
-            aria-describedby={sayPostsToChat ? 'buddy-say-posts' : undefined}
             aria-label={`Say something as ${name}`}
             className="h-7 text-xs"
             disabled={!onSay}
             maxLength={200}
-            placeholder={
-              sayPostsToChat ? 'Say something on stream and in chat' : 'Say something on stream'
-            }
+            placeholder="Say something on stream"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
@@ -748,25 +769,6 @@ export function BuddySayFooter({
             <ShortcutKeys accelerator="CmdOrCtrl+Enter" className={HEADER_NARROW_HIDDEN} />
           </HoverHint>
         </div>
-        {sayPostsToChat ? (
-          // Plan 174 F-6: Auto posts the line to every chat as you, so the box
-          // says so and counts against the shortest chat cap (X takes 140).
-          <span
-            className={cn(
-              'flex shrink-0 items-center gap-1 text-[11px] tabular-nums',
-              overCap ? 'font-medium text-foreground' : 'text-muted-foreground'
-            )}
-            data-over-cap={overCap || undefined}
-            data-slot="buddy-say-posts"
-            id="buddy-say-posts"
-          >
-            {overCap ? (
-              <AlertIcon aria-hidden className="size-3 text-warning" weight="fill" />
-            ) : null}
-            Also posts to chat as you
-            {sayChatCap !== null ? ` · ${draft.length}/${sayChatCap}` : ''}
-          </span>
-        ) : null}
         <div
           aria-label="React on stream"
           className="flex shrink-0 items-center gap-1"
@@ -925,16 +927,18 @@ function AnsweredOnAir({
       {line(
         newest,
         older.length > 0 ? (
-          <CollapsibleTrigger asChild>
-            <Button
-              aria-label={`${older.length} more answered on air`}
-              className="shrink-0 tabular-nums"
-              size="xs"
-              type="button"
-              variant="ghost"
-            >
-              +{older.length}
-            </Button>
+          <CollapsibleTrigger
+            render={
+              <Button
+                aria-label={`${older.length} more answered on air`}
+                className="shrink-0 tabular-nums"
+                size="xs"
+                type="button"
+                variant="ghost"
+              />
+            }
+          >
+            +{older.length}
           </CollapsibleTrigger>
         ) : undefined
       )}
@@ -1168,7 +1172,7 @@ const HEADER_NARROW_HIDDEN = '@max-[400px]/buddy-header:hidden'
 function HoverHint({ hint, children }: { hint: string; children: ReactElement }): ReactElement {
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipTrigger render={children} />
       <TooltipContent>{hint}</TooltipContent>
     </Tooltip>
   )

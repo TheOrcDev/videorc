@@ -1,5 +1,5 @@
 import { LockIcon, WarningIcon } from '@/components/icons'
-import type { ReactElement } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SelectGroup, SelectItem, SelectSeparator } from '@/components/ui/select'
@@ -7,6 +7,31 @@ import type { EntitlementsSnapshot, PerformanceCheckResult } from '@/lib/backend
 import { customVideoPresetOption, videoPresets, type VideoPresetOption } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { outputVerdict } from '@/lib/performance-check'
+
+/**
+ * The preset select's `items`: what its trigger shows for each value, the
+ * preset's name with the warning icon an experimental or legacy one carries.
+ * The same presets as `VideoPresetSelectItems`, then Custom.
+ */
+export function videoPresetItems(
+  options: VideoPresetOption[]
+): { value: VideoPresetOption['value']; label: ReactNode }[] {
+  return [
+    ...options.map((option) => ({
+      value: option.value,
+      label:
+        option.tone === 'warning' ? (
+          <>
+            {option.label}
+            <WarningIcon aria-hidden className="size-3.5 text-warning" weight="fill" />
+          </>
+        ) : (
+          option.label
+        )
+    })),
+    { value: customVideoPresetOption.value, label: customVideoPresetOption.label }
+  ]
+}
 
 /**
  * A preset select's items: the given presets, then Custom. The Output page

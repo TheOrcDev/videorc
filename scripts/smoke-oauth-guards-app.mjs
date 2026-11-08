@@ -52,6 +52,20 @@ try {
       )
     }
 
+    // Facebook (plan 206) is stream-key only until Meta approves Page
+    // sign-in: the backend refuses with the card's own words.
+    const facebookStart = await requestRaw(ws, timeoutMs, 'platformAccounts.oauth.startProvider', {
+      platform: 'facebook'
+    })
+    if (
+      facebookStart.ok ||
+      !String(facebookStart.error?.message).includes(
+        "Signing in with Facebook isn't available yet."
+      )
+    ) {
+      throw new Error(`Facebook sign-in should refuse to start: ${JSON.stringify(facebookStart)}`)
+    }
+
     const refreshedAccounts = await request(ws, timeoutMs, 'platformAccounts.refresh')
     if (!Array.isArray(refreshedAccounts)) {
       throw new Error(
@@ -357,9 +371,9 @@ function assertXCapability(capability) {
       `X capability message should explain the OAuth 1.0a credential requirement: ${JSON.stringify(capability)}`
     )
   }
-  if (!String(capability.docsUrl).startsWith('https://github.com/xdevplatform/')) {
+  if (!String(capability.docsUrl).startsWith('https://docs.x.com/livestream-api/')) {
     throw new Error(
-      `X capability should include Livestream API sample docs URL: ${JSON.stringify(capability)}`
+      `X capability should include the Livestream API docs URL: ${JSON.stringify(capability)}`
     )
   }
   if (!String(capability.apiOverviewUrl).startsWith('https://docs.x.com/')) {

@@ -36,6 +36,14 @@ export function updateChip(status: UpdateStatus, captureActive: boolean): Update
         action: 'settings',
         tone: 'neutral'
       }
+    // Linux: a newer release is on videorc.com; Settings → About links to it.
+    case 'download-available':
+      return {
+        label: 'Update available',
+        detail: `Videorc ${status.version} is available on videorc.com`,
+        action: 'settings',
+        tone: 'neutral'
+      }
     case 'downloading': {
       const percent = Math.round(status.percent)
       return {

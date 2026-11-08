@@ -1881,6 +1881,68 @@ mod runtime {
             })
         }
 
+        /// Plan 193 S3: a media device around a raw device and context a
+        /// test made (the hardware adapter, or WARP on CI), so a test can
+        /// compose through the real `WindowsD3d11Compositor`.
+        #[cfg(test)]
+        pub(crate) fn from_raw_for_test(
+            device: ID3D11Device5,
+            immediate_context: ID3D11DeviceContext4,
+        ) -> Result<Self, WindowsD3d11Error> {
+            use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+            let failed = |what: &str, error: windows::core::Error| {
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::DeviceCreationFailed,
+                    format!("{what}: {error}"),
+                )
+            };
+            let dxgi_device: IDXGIDevice = device
+                .cast()
+                .map_err(|error| failed("IDXGIDevice is unavailable", error))?;
+            // SAFETY: the adapter and its description are read on the test's
+            // thread, which owns the device.
+            let description = unsafe {
+                dxgi_device
+                    .GetAdapter()
+                    .map_err(|error| failed("IDXGIDevice::GetAdapter failed", error))?
+                    .GetDesc()
+                    .map_err(|error| failed("IDXGIAdapter::GetDesc failed", error))?
+            };
+            let adapter_luid = luid_from_parts(
+                description.AdapterLuid.HighPart,
+                description.AdapterLuid.LowPart,
+            );
+            let multithread: ID3D11Multithread = immediate_context
+                .cast()
+                .map_err(|error| failed("ID3D11Multithread is unavailable", error))?;
+            let mut fence: Option<ID3D11Fence> = None;
+            // SAFETY: the interface, the output Option and the device belong
+            // to this thread.
+            let feature_level = unsafe {
+                let _ = multithread.SetMultithreadProtected(true);
+                device
+                    .CreateFence(0, D3D11_FENCE_FLAG_NONE, &mut fence)
+                    .map_err(|error| failed("ID3D11Device5::CreateFence failed", error))?;
+                device.GetFeatureLevel()
+            };
+            let fence = fence.ok_or_else(|| {
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::FenceUnavailable,
+                    "ID3D11Device5::CreateFence returned no fence",
+                )
+            })?;
+            Ok(Self {
+                device,
+                immediate_context,
+                fence,
+                adapter_luid,
+                feature_level,
+                multithread_protected: true,
+                device_loss_code: None,
+                _thread_affinity: PhantomData,
+            })
+        }
+
         pub(crate) const fn adapter_luid(&self) -> DxgiAdapterLuid {
             self.adapter_luid
         }
@@ -2233,9 +2295,12 @@ mod runtime {
 
     struct WindowsD3d11EncoderRuntime {
         role: WindowsD3d11MediaRole,
+        /// Declared before `retained_tickets`: dropping the runtime tears the
+        /// MFT down before any ticket it may still reference returns a lease.
         encoder: MediaFoundationD3d11H264Encoder,
         /// A successful ProcessInput moves the ticket here. Only a tracked
-        /// sample release reported by the MFT may remove it.
+        /// sample release reported by the MFT may remove it, or the teardown
+        /// of an encoder that has drained.
         retained_tickets: BTreeMap<u64, WindowsD3d11TextureLeaseTicket>,
     }
 
@@ -2364,6 +2429,9 @@ mod runtime {
         retiring_captures: Vec<ManagedCapture>,
         wake_event: Option<Arc<WindowsD3d11WakeEvent>>,
         compositor: Result<WindowsD3d11Compositor, WindowsD3d11CompositorError>,
+        /// Plan 190 S4: created by the first composition with a live
+        /// background, released by the first one without.
+        live_background: Option<crate::live_background::d3d11::LiveBackgroundD3d11Renderer>,
         encoders: BTreeMap<WindowsD3d11MediaRole, WindowsD3d11EncoderRuntime>,
         presenter: Option<WindowsD3d11Presenter>,
         presenter_last_error: Option<WindowsD3d11Error>,
@@ -2383,6 +2451,7 @@ mod runtime {
                 retiring_captures: Vec::new(),
                 wake_event: None,
                 compositor,
+                live_background: None,
                 encoders: BTreeMap::new(),
                 presenter: None,
                 presenter_last_error: None,
@@ -2397,6 +2466,41 @@ mod runtime {
         pub(crate) diagnostics: WindowsD3d11CaptureDiagnostics,
     }
 
+    /// The bytes of one CPU upload, shared with the owner that already holds
+    /// them instead of copied (plan 191). Overlays, banners and images hand
+    /// over their prepared `Arc<Vec<u8>>`; the session pump hands over the
+    /// published capture or camera frame itself. An owner's bytes must not
+    /// change while it is shared; the compositor only borrows them for the
+    /// one upload call.
+    #[derive(Clone)]
+    pub(crate) struct WindowsD3d11UploadPixels(Arc<dyn AsRef<[u8]> + Send + Sync>);
+
+    impl WindowsD3d11UploadPixels {
+        /// Share an owner whose bytes stay unchanged while it lives.
+        pub(crate) fn shared(owner: impl AsRef<[u8]> + Send + Sync + 'static) -> Self {
+            Self(Arc::new(owner))
+        }
+
+        pub(crate) fn as_slice(&self) -> &[u8] {
+            AsRef::<[u8]>::as_ref(&*self.0)
+        }
+    }
+
+    impl From<Arc<Vec<u8>>> for WindowsD3d11UploadPixels {
+        fn from(pixels: Arc<Vec<u8>>) -> Self {
+            Self(pixels)
+        }
+    }
+
+    impl fmt::Debug for WindowsD3d11UploadPixels {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("WindowsD3d11UploadPixels")
+                .field("len", &self.as_slice().len())
+                .finish_non_exhaustive()
+        }
+    }
+
     #[derive(Debug, Clone)]
     pub(crate) enum WindowsD3d11CompositionSource {
         TextureLease {
@@ -2405,21 +2509,32 @@ mod runtime {
         },
         BgraUpload {
             source_id: u64,
-            pixels: Arc<Vec<u8>>,
+            pixels: WindowsD3d11UploadPixels,
             dimensions: WindowsD3d11OutputDimensions,
             row_pitch: u32,
             pixel_order: WindowsD3d11UploadPixelOrder,
             content_revision: u64,
             immutable: bool,
         },
+        /// Plan 190 S4: the live background, rendered on the media thread
+        /// just before the compose into a frame of the layer's declared size
+        /// (`sizes::internal_size` Full for `output`).
+        LiveBackground {
+            source_id: u64,
+            input: Box<crate::live_background::LiveBackgroundFrameInput>,
+            /// The primary leg's output size.
+            output: (u32, u32),
+            /// The prepared poster the still draws, when there is one.
+            poster: Option<crate::compositor::WindowsSceneImage>,
+        },
     }
 
     impl WindowsD3d11CompositionSource {
         fn source_id(&self) -> u64 {
             match self {
-                Self::TextureLease { source_id, .. } | Self::BgraUpload { source_id, .. } => {
-                    *source_id
-                }
+                Self::TextureLease { source_id, .. }
+                | Self::BgraUpload { source_id, .. }
+                | Self::LiveBackground { source_id, .. } => *source_id,
             }
         }
     }
@@ -2482,6 +2597,8 @@ mod runtime {
         ticket: WindowsD3d11TextureLeaseTicket,
         preview_generation: u64,
         source_live: bool,
+        /// Starts the presenter's handoff-to-present latency sample.
+        offered_at: Instant,
     }
 
     #[derive(Debug)]
@@ -2987,6 +3104,7 @@ mod runtime {
                     ticket,
                     preview_generation,
                     source_live,
+                    offered_at: Instant::now(),
                 })
             };
             let replaced_sequence = replaced
@@ -3243,7 +3361,23 @@ mod runtime {
                     }
                 }
                 WindowsD3d11CompositionSource::BgraUpload { pixels, .. } => {
-                    upload_bytes = upload_bytes.checked_add(pixels.len()).ok_or_else(|| {
+                    let pixel_bytes = pixels.as_slice().len();
+                    upload_bytes = upload_bytes.checked_add(pixel_bytes).ok_or_else(|| {
+                        WindowsD3d11Error::new(
+                            WindowsD3d11ErrorCode::UnsupportedCapability,
+                            "composition upload byte count overflowed",
+                        )
+                    })?;
+                }
+                WindowsD3d11CompositionSource::LiveBackground { output, poster, .. } => {
+                    if output.0 == 0 || output.1 == 0 {
+                        return Err(WindowsD3d11Error::new(
+                            WindowsD3d11ErrorCode::UnsupportedCapability,
+                            "live background output has no size",
+                        ));
+                    }
+                    let poster_bytes = poster.as_ref().map_or(0, |poster| poster.pixels.len());
+                    upload_bytes = upload_bytes.checked_add(poster_bytes).ok_or_else(|| {
                         WindowsD3d11Error::new(
                             WindowsD3d11ErrorCode::UnsupportedCapability,
                             "composition upload byte count overflowed",
@@ -3652,6 +3786,7 @@ mod runtime {
                 sequence: metadata.sequence,
                 source_live: frame.source_live,
             },
+            frame.offered_at,
             metadata.width,
             metadata.height,
         )
@@ -4232,7 +4367,7 @@ mod runtime {
             .encoders
             .get(&role)
             .ok_or_else(|| encoder_missing(role))?;
-        if !runtime.encoder.is_drained() || !runtime.retained_tickets.is_empty() {
+        if !runtime.encoder.is_drained() {
             return Err(WindowsD3d11Error::new(
                 WindowsD3d11ErrorCode::EncoderUnavailable,
                 format!(
@@ -4241,6 +4376,11 @@ mod runtime {
                 ),
             ));
         }
+        // A drained encoder has produced every output, so any ticket still
+        // here is a surface the MFT itself references (NVIDIA keeps its last
+        // input). Removing the runtime drops the encoder (MFT teardown) before
+        // its tickets, so no lease returns while the transform can read it.
+        let transform_held = runtime.retained_tickets.len();
         let diagnostics = runtime.encoder.diagnostics();
         media_runtime
             .retired_encoder_counters
@@ -4253,6 +4393,11 @@ mod runtime {
                 diagnostics.ownership.stale_release_callbacks,
             );
         media_runtime.encoders.remove(&role);
+        if transform_held > 0 {
+            tracing::info!(
+                "{role:?} encoder released {transform_held} transform-held texture lease(s) at teardown"
+            );
+        }
         Ok(progress)
     }
 
@@ -4790,6 +4935,69 @@ mod runtime {
             }
         }
 
+        // Plan 190 S4: the live frame renders on this context before the
+        // compose samples it. A frame D3D11 refused leaves the background out
+        // of this composition instead of failing it.
+        let live_source = sources.iter().find_map(|source| match source {
+            WindowsD3d11CompositionSource::LiveBackground {
+                source_id,
+                input,
+                output,
+                poster,
+            } => Some((*source_id, input, *output, poster)),
+            _ => None,
+        });
+        let live_frame = match live_source {
+            Some((source_id, input, output, poster)) => {
+                let renderer = media_runtime.live_background.get_or_insert_with(|| {
+                    crate::live_background::d3d11::LiveBackgroundD3d11Renderer::new(
+                        device.raw_device().clone(),
+                        device.immediate_context().clone(),
+                        Arc::clone(&input.board),
+                    )
+                });
+                let poster =
+                    poster
+                        .as_ref()
+                        .map(|poster| crate::live_background::d3d11::PosterPixels {
+                            bgra: &poster.pixels,
+                            width: poster.width,
+                            height: poster.height,
+                            revision: poster.revision,
+                        });
+                renderer
+                    .render(
+                        input,
+                        output,
+                        poster,
+                        crate::live_background::preflight_still_reason(),
+                    )
+                    .map(|texture| (source_id, texture))
+            }
+            None => {
+                if let Some(mut renderer) = media_runtime.live_background.take() {
+                    renderer.release();
+                }
+                None
+            }
+        };
+        let without_live;
+        let plan = match live_source {
+            Some((source_id, ..)) if live_frame.is_none() => {
+                without_live = WindowsD3d11ScenePlan {
+                    layers: plan
+                        .layers
+                        .iter()
+                        .filter(|layer| layer.source_id != source_id)
+                        .copied()
+                        .collect(),
+                    ..plan.clone()
+                };
+                &without_live
+            }
+            _ => plan,
+        };
+
         let composition = (|| {
             let mut gpu_sources = Vec::with_capacity(sources.len());
             for source in sources {
@@ -4814,7 +5022,7 @@ mod runtime {
                         gpu_sources.push(WindowsD3d11GpuSource {
                             source_id: *source_id,
                             content: WindowsD3d11GpuSourceContent::Upload(WindowsD3d11BgraUpload {
-                                pixels,
+                                pixels: pixels.as_slice(),
                                 dimensions: *dimensions,
                                 row_pitch: *row_pitch,
                                 pixel_order: *pixel_order,
@@ -4822,6 +5030,14 @@ mod runtime {
                                 immutable: *immutable,
                             }),
                         });
+                    }
+                    WindowsD3d11CompositionSource::LiveBackground { .. } => {
+                        if let Some((source_id, texture)) = live_frame.as_ref() {
+                            gpu_sources.push(WindowsD3d11GpuSource {
+                                source_id: *source_id,
+                                content: WindowsD3d11GpuSourceContent::Texture(texture),
+                            });
+                        }
                     }
                 }
             }
@@ -4999,7 +5215,7 @@ pub(crate) use runtime::{
     WindowsD3d11CompositionSource, WindowsD3d11CompositionSubmission, WindowsD3d11Device,
     WindowsD3d11EncoderProgress, WindowsD3d11EncoderStatus, WindowsD3d11EncoderSubmissionFailure,
     WindowsD3d11MediaClient, WindowsD3d11MediaThread, WindowsD3d11PreviewOffer,
-    WindowsD3d11TestPatternSubmission, WindowsD3d11TicketedTexture,
+    WindowsD3d11TestPatternSubmission, WindowsD3d11TicketedTexture, WindowsD3d11UploadPixels,
 };
 
 #[cfg(test)]

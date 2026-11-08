@@ -35,9 +35,104 @@ const htmlPath = resolve(
 // 385,123 against the 385,000 ceiling. Prefer keeping the proof-path honesty in
 // the eager Studio chunk over a split for ~123 bytes; raise gzip with the same
 // ~2.5% challenge margin. Prefer re-splitting if this trips again on net-new UI.
+// Recalibrated 2026-10-23: main measured 389,804 gzip (196 bytes of headroom)
+// and the Screen None intent (release test 146, plan 0002: reconcile, scene
+// visuals, live confirmations) is Studio correctness logic of ~300 gzip bytes,
+// tipping it to 390,086. Raise gzip to 395,000 (~1.3%); keep re-splitting the
+// answer for net-new UI.
+// Recalibrated 2026-10-25 (Linux retests 148 and 150): main measured 394,848
+// gzip (152 bytes of headroom). Two Studio correctness fixes need eager bytes:
+// the source pickers stay live while only the Clips buffer runs (~700 bytes)
+// and a start waits with plain copy when the scene shows a source turned off
+// (~280 bytes). Raise gzip to 400,000 (~1.3%); keep re-splitting the answer
+// for net-new UI.
+// Recalibrated 2026-10-27 (plan 203 S5): main measured 399,287 gzip (713 bytes
+// of headroom) and first-run setup's shell state (the surface switch, the
+// replay opener, the preview and global-key gate in the provider, ~790 bytes)
+// takes it to 400,072. The setup UI itself is lazy (its chunk is 308 KB raw,
+// ~43 KB gzip). Raise gzip to 405,000 (~1.2%); keep re-splitting the answer
+// for net-new UI.
+// Recalibrated 2026-10-27 (plan 207): main measured 1,996,019 raw (3,981
+// bytes of headroom). Setup's steps add 6,695 raw bytes of shell and Studio
+// state: the record's step and goal (~1.9 KB), the provider applying a look
+// as state or holding it behind a running session (~2.8 KB), Clips waiting
+// for a chosen screen (~0.6 KB) and the shell's step wiring (~0.8 KB). The
+// step UI and the look's helpers are lazy (setup's chunk is 357 KB raw).
+// Raise raw to 2,030,000 (~1.4%); keep re-splitting the answer for net-new UI.
+// Recalibrated 2026-10-28 (plan 209, Videorc MCP): main measured 404,071 gzip
+// (929 bytes of headroom). The agents' Studio wiring needs ~1.9 KB of eager
+// gzip: the Go Live path the dialog and agents share, the agent intent lane
+// and its cancel handles, the agent surface input and the notices watcher's
+// mount. Executors, the surface publisher, the headless Go Live, the Agents
+// settings and the Connect dialog are lazy. Measured 405,989. Raise gzip to
+// 410,000 (~1.2%); keep re-splitting the answer for net-new UI.
+// Recalibrated 2026-10-29 (retest 154 B1): main measured 2,028,805 raw. The
+// performance check now steps the default Clips ring aside and waits for a
+// ready capture before its launch run (the hold, the step-aside, the gate,
+// ~1.4 KB raw in the Studio provider; no new UI). Measured 2,030,166 raw /
+// 409,985 gzip. Raise raw to 2,031,000 (~0.05%); gzip unchanged.
+// Recalibrated 2026-10-29 (plan 210, smarter scenes): its base measured
+// 2,028,805 raw / 409,745 gzip (255 bytes of headroom) and the branch added
+// 49,353 raw / 11,841 gzip. Re-splitting took back 24,874 raw / 5,968 gzip:
+// the follower with its reducer and the one password-manager list (macOS,
+// once the backend is up), the window resolver and strict preflight (a chunk
+// warmed at connect), the app-scene helpers and the Settings-only shortcut
+// bindings are lazy. What stays is ~5.9 KB of eager gzip: the Studio's scene
+// switch with D5's resolve-and-retry (~1.8 KB), Hide screen's state read at
+// connect and its relays (~1.2 KB), each scene's app state and window memory
+// from launch (~1.0 KB), D3's autosave and the scene library's edits
+// (~1.0 KB) and the key walk through saved scenes (~0.7 KB). Measured
+// 2,053,284 raw / 415,618 gzip. Raise raw to 2,060,000 (~1.5%) and gzip to
+// 420,000 (~2.4%, two of the usual steps); keep re-splitting the answer for
+// net-new UI.
+// Recalibrated 2026-10-30 (videorc-ui plan 001, Phase 7, the leaf family):
+// main measured 2,055,020 raw / 416,191 gzip. Button and Badge now come from
+// the @videorc registry on Base UI, and Button is in the eager shell, so
+// Base UI's button, render and merge-props core joins it: 19,200 raw (the
+// renderer is not minified) and ~4.9 KB gzip, with no new UI. Radix stayed
+// eager beside it until the migration removed radix-ui (the next note).
+// Measured 2,076,549 raw / 421,102 gzip. Raise raw to 2,082,000 and gzip to
+// 425,000, keeping the headroom main had (~5 KB raw, ~3.9 KB gzip); keep
+// re-splitting the answer for net-new UI.
+// Recalibrated 2026-10-30 (videorc-ui plan 001, Phase 7, the last family;
+// owner-approved): every component now comes from the @videorc registry on
+// Base UI, and radix-ui is gone. Main (7820df4a) measured 2,052,742 raw /
+// 415,570 gzip; the migration measures 2,252,658 raw / 458,936 gzip
+// (+199,916 raw, +43,366 gzip) with the same eager UI. The eager dropdown
+// menu and tooltip are the two Radix had there, and Base UI's are heavier:
+// ~341 KB raw of Base UI, ~149 KB of it its floating-ui layer. Removing
+// radix-ui changed nothing eager (2,252,133 raw / 458,729 gzip before and
+// after): its last import had already gone. Button's solid, chromatic and
+// glitch variants add 617 raw / 230 gzip. The renderer is still
+// unminified. Raise raw to 2,310,000 (~2.5%) and gzip to 470,000 (~2.4%),
+// the usual challenge margin; the entry ceilings hold (946,770 raw /
+// 196,998 gzip). Keep re-splitting the answer for net-new UI.
+// Raised 2026-11-03 (owner-approved): plan 216 A (#1100) and plan 215 G
+// (#1095) each fit, and together put main (e2509fe2) at 2,300,398 raw /
+// 470,565 gzip; plan 216 B (#1102) on top measures 2,302,646 / 471,209.
+// None of it is a new eager screen: it is wiring in use-studio (layout
+// switch state, the chat-on-stream setting, the screen's picture size)
+// plus the contract fields it reads. No inlined image is left to split
+// out, and the next candidates (captions-preflight, performance-check)
+// are called during render. Raise gzip to 475,000 (~3.8 KB over B); raw
+// and the entry ceilings hold.
+// 2026-11-04 (owner-approved): the issue sweep (#1118–#1153) merged 26 fixes
+// that each fit alone; together main measures 2,315,909 raw / 474,854 gzip.
+// The additions are small Studio wiring (the recent-drop window, the camera
+// frame-rate tracker, the silent-mic meter source, the bridge envelope, the
+// page-scoped loading line). Raise raw to 2,320,000; gzip holds at 475,000.
+// 2026-11-04 (owner-approved): microphone noise reduction (PR #1036: the
+// Sources switch, the live-update confirm and rollback, the silenced toast)
+// adds 308 gzip bytes to main's 474,854, landing at 475,162. Raise gzip to
+// 476,000.
+// 2026-11-06 (release 0.20.2): post-0.20.1 product fixes on main (#1211
+// hidden-window pause, #1213 custom Buddy display, #1212 Clips ring share,
+// recording/folder and Linux OpenH264 wiring) measure 2,322,131 raw /
+// 476,319 gzip. Raise raw to 2,325,000 and gzip to 477,000; keep
+// re-splitting the answer for net-new UI.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_000_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 390_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_325_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 477_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

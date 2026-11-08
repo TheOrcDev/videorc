@@ -252,6 +252,46 @@ try {
   assert.equal(customFullUrl.streamKeySecretRef, undefined)
   assert.equal(customFullUrl.streamKeyPresent, false)
 
+  // Facebook (plan 206): a saved key persists as a secret ref, never raw, and
+  // reloads on the Facebook card. A saved sign-in can't exist yet: it reloads
+  // as a stream key, without the key a sign-in would have fetched.
+  const persistedFacebook = persistableCaptureConfig({
+    ...defaultCaptureConfig,
+    streaming: {
+      ...defaultCaptureConfig.streaming,
+      enabled: true,
+      enabledTargetIds: ['facebook'],
+      targets: defaultCaptureConfig.streaming.targets.map((target) =>
+        target.platform === 'facebook'
+          ? {
+              ...target,
+              enabled: true,
+              streamKey: 'raw-facebook-key',
+              streamKeySecretRef: 'stream-target:facebook:manual-stream-key',
+              streamKeyPresent: true
+            }
+          : target
+      )
+    }
+  })
+  assert.ok(!JSON.stringify(persistedFacebook).includes('raw-facebook-key'))
+  const reloadedFacebook = normalizeStreamingSettings(persistedFacebook.streaming).targets.find(
+    (target) => target.id === 'facebook'
+  )
+  assert.equal(reloadedFacebook.platform, 'facebook')
+  assert.equal(reloadedFacebook.authMode, 'manual-rtmp')
+  assert.equal(reloadedFacebook.streamKey, '')
+  assert.equal(reloadedFacebook.streamKeyPresent, true)
+  assert.equal(reloadedFacebook.streamKeySecretRef, 'stream-target:facebook:manual-stream-key')
+  const signedInFacebook = normalizeStreamingSettings({
+    ...persistedFacebook.streaming,
+    targets: persistedFacebook.streaming.targets.map((target) =>
+      target.id === 'facebook' ? { ...target, authMode: 'oauth' } : target
+    )
+  }).targets.find((target) => target.id === 'facebook')
+  assert.equal(signedInFacebook.authMode, 'manual-rtmp')
+  assert.equal(signedInFacebook.streamKeyPresent, false)
+
   console.log(
     'Streaming secret smoke OK - available YouTube OAuth and manual secret refs persist without raw keys.'
   )

@@ -575,10 +575,10 @@ export function SessionPlayerControls({
           min={0}
           max={max}
           step={PLAYER_SCRUB_STEP_MS}
-          value={[Math.min(Math.max(0, positionMs), max)]}
+          value={Math.min(Math.max(0, positionMs), max)}
           disabled={disabled}
-          onValueChange={(values) => onScrub(values[0] ?? 0)}
-          onValueCommit={(values) => onScrubCommit(values[0] ?? 0)}
+          onValueChange={(ms) => onScrub(ms)}
+          onValueCommitted={(ms) => onScrubCommit(ms)}
         />
         {markers?.length && onSelectMarker ? (
           <MarkerPins

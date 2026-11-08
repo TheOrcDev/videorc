@@ -103,10 +103,15 @@ import {
   type CleanCutJobDetailWithKeeps,
   type CleanCutTranscript as CleanCutTranscriptData
 } from '@/lib/clean-cut-view'
-import { isActiveRecordingState, plural } from '@/lib/format'
+import { plural } from '@/lib/format'
+import {
+  CLEAN_CUT_REVIEW_GRID,
+  CLEAN_CUT_REVIEW_PLAYER,
+  CLEAN_CUT_REVIEW_PLAYER_PANE
+} from '@/lib/page-layout'
 import { isCommandKey } from '@/lib/platform'
 import { cn } from '@/lib/utils'
-import { sessionIsLive } from '../../../../shared/capture-state'
+import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-state'
 
 const SessionPlayer = lazy(async () => ({
   default: (await import('@/components/media/session-player')).SessionPlayer
@@ -374,7 +379,8 @@ export function CleanCutReview({
   const title = source?.title.trim() || UNTITLED
   const playable =
     !source || (source.status === 'completed' && source.finalizationState !== 'finalizing')
-  const captureActive = isActiveRecordingState(recording.state)
+  // Plan 181: the default ring is not a capture that Clean cut must wait for.
+  const captureActive = sessionOwnsTransport(recording)
   const job = data?.job ?? (load.kind === 'waiting' ? load.job : null)
   const status = cleanCutStatusView(job, { captureActive, streaming: sessionIsLive(recording) })
   const editable = data ? cleanCutJobEditable(data.job) : false
@@ -708,11 +714,12 @@ export function CleanCutReview({
       </header>
 
       {load.kind === 'ready' && data ? (
-        // Two panes from the lg breakpoint (the player beside the transcript);
-        // below it the player sits beside its controls, above the transcript.
-        <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-          <div className="flex shrink-0 gap-4 border-b border-border p-gutter lg:min-h-0 lg:flex-col lg:gap-3 lg:overflow-y-auto lg:border-r lg:border-b-0">
-            <div className="w-[min(22rem,50%)] shrink-0 lg:w-full">
+        // Two panes from the page's wide width (the player beside the
+        // transcript); below it the player sits beside its controls, above
+        // the transcript (plan 213 C3).
+        <div className={CLEAN_CUT_REVIEW_GRID}>
+          <div className={CLEAN_CUT_REVIEW_PLAYER_PANE}>
+            <div className={CLEAN_CUT_REVIEW_PLAYER}>
               {playable ? (
                 <Suspense fallback={<PlayerPlaceholder label="Loading the player…" />}>
                   <SessionPlayer
@@ -1053,7 +1060,7 @@ function KindChips({
       data-testid="clean-cut-chips"
       size="xs"
       spacing={1}
-      type="multiple"
+      multiple
       value={pressed}
       onValueChange={(values) => {
         const changed = chips.find(
@@ -1092,12 +1099,10 @@ function KindChips({
           )
         }
         // What a click does, on hover and on focus (plan 174 S1.10). The chip
-        // sits in a span trigger: the toggle's own data-state must stay on/off.
+        // sits in a span trigger, so it carries only its own pressed state.
         return (
           <Tooltip key={chip.group.id}>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">{item}</span>
-            </TooltipTrigger>
+            <TooltipTrigger render={<span className="inline-flex" />}>{item}</TooltipTrigger>
             <TooltipContent>
               {chip.state === 'on' ? `Keep all ${chip.total}` : `Cut all ${chip.total}`}
             </TooltipContent>
@@ -1133,18 +1138,20 @@ function Moments({
           const Glyph = MOMENT_ICONS[pin.kind] ?? PinIcon
           return (
             <Tooltip key={pin.key}>
-              <TooltipTrigger asChild>
-                <Button
-                  className="max-w-full"
-                  size="xs"
-                  type="button"
-                  variant="ghost"
-                  onClick={() => onSeek(pin.startMs)}
-                >
-                  <Glyph data-icon="inline-start" />
-                  <span className="tabular-nums">{formatCutClock(pin.startMs)}</span>
-                  <span className="truncate">{pin.label}</span>
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button
+                    className="max-w-full"
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                    onClick={() => onSeek(pin.startMs)}
+                  />
+                }
+              >
+                <Glyph data-icon="inline-start" />
+                <span className="tabular-nums">{formatCutClock(pin.startMs)}</span>
+                <span className="truncate">{pin.label}</span>
               </TooltipTrigger>
               <TooltipContent>{pin.excerpt || pin.label}</TooltipContent>
             </Tooltip>

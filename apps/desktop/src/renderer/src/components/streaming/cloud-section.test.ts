@@ -69,8 +69,9 @@ function renderSection(next: CloudStatus | null, sessionActive = false): string 
   return renderToStaticMarkup(createElement(TooltipProvider, null, createElement(CloudSection)))
 }
 
+// Main's Switch is Base UI's: a span with the switch role, disabled by aria.
 function switchMarkup(html: string): string {
-  return html.match(/<button[^>]*role="switch"[^>]*>/)?.[0] ?? ''
+  return html.match(/<(?:span|button)[^>]*role="switch"[^>]*>/)?.[0] ?? ''
 }
 
 function testButton(html: string): string {
@@ -101,7 +102,7 @@ describe('Videorc Cloud section (plan 184 C6)', () => {
     expect(html).toContain('Videorc Cloud is part of Videorc Premium.')
     expect(html).toContain('View Premium')
     expect(switchMarkup(html)).toContain('aria-checked="false"')
-    expect(switchMarkup(html)).toContain('disabled=""')
+    expect(switchMarkup(html)).toContain('aria-disabled="true"')
     // The locked section still shows what the cloud does.
     expect(html).toContain('End the stream after')
     expect(html).not.toContain('cloud hours left')
@@ -111,14 +112,14 @@ describe('Videorc Cloud section (plan 184 C6)', () => {
     const html = renderSection(status({ entitled: false, plan: 'max' }))
     expect(html).toContain('Videorc Cloud isn&#x27;t on for your account yet.')
     expect(html).not.toContain('View Premium')
-    expect(switchMarkup(html)).toContain('disabled=""')
+    expect(switchMarkup(html)).toContain('aria-disabled="true"')
   })
 
   it('opens for an entitled account: the switch, the hours and the hold choices', () => {
     const html = renderSection(status())
     expect(html).not.toContain('data-variant="locked"')
     expect(switchMarkup(html)).toContain('aria-checked="true"')
-    expect(switchMarkup(html)).not.toContain('disabled=""')
+    expect(switchMarkup(html)).not.toContain('aria-disabled="true"')
     expect(html).toContain('9 of 10 cloud hours left · resets Nov 1')
     expect(html).toContain('If this computer drops, show')
     expect(checkedHold(html)).toBe('30 min')
@@ -133,7 +134,7 @@ describe('Videorc Cloud section (plan 184 C6)', () => {
 
   it('locks every control while a recording or livestream runs', () => {
     const html = renderSection(status(), true)
-    expect(switchMarkup(html)).toContain('disabled=""')
+    expect(switchMarkup(html)).toContain('aria-disabled="true"')
     expect(html).toContain('aria-disabled="true"')
   })
 

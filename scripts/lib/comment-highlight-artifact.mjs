@@ -398,6 +398,175 @@ export async function analyzeCommentHighlightArtifact(
   }
 }
 
+// --- Chat on stream (plan 215 G, D5) ------------------------------------------
+
+/** The chat box's thresholds. The box is exactly its rect's width, drawn from
+ * the rect's top-left corner, and each row leads with the platform icon after
+ * the box's padding (0.7 × the text size, ~2-3.5% of the default rects'
+ * widths). The fake chatter is on YouTube, so the icon is YouTube's red mark;
+ * it and the emote are ~0.5% of the rect at 640x360. A box the backend
+ * centre-cropped (painted wider than the rect it lands on) has lost its left
+ * edge: the icon is gone or sits on the rect's edge with no glass before it,
+ * so the gate reads the padding, not only what is somewhere in the rect.
+ * No mirrored-rect comparison: the portrait rect is 80% of the frame wide,
+ * so its mirror overlaps it and the comparison proved nothing there. */
+export const CHAT_BOX_ARTIFACT_DEFAULTS = Object.freeze({
+  minEmotePixelRatio: COMMENT_HIGHLIGHT_MIN_IMAGE_PIXEL_RATIO,
+  minIconPixelRatio: COMMENT_HIGHLIGHT_MIN_IMAGE_PIXEL_RATIO,
+  /** The glass before the icon, as a fraction of the rect's width. */
+  minLeadingPaddingRatio: 0.01,
+  /** How much of that padding (over the icon's rows) is the box's glass. */
+  minLeadingGlassRatio: 0.6,
+  minFrames: 2
+})
+
+/** A normalized overlay rect (`overlayLayout.chat.horizontal` or
+ * `.vertical`) as sampled pixels. */
+export function chatBoxRegions(rect, { width, height }) {
+  const xStart = Math.max(0, Math.min(width - 1, Math.round(rect.x * width)))
+  const xEnd = Math.max(xStart + 1, Math.min(width, Math.round((rect.x + rect.w) * width)))
+  const yStart = Math.max(0, Math.min(height - 1, Math.round(rect.y * height)))
+  const yEnd = Math.max(yStart + 1, Math.min(height, Math.round((rect.y + rect.h) * height)))
+  return { box: { xStart, xEnd, yStart, yEnd } }
+}
+
+/** Per frame, inside the chat rect: the emote's colour, the leading icon's
+ * (YouTube red) and where it starts, and the glass between the rect's left
+ * edge and the icon over the icon's rows. `chatDarkPixelRatio` is the glass
+ * in the whole rect, an observation only: one message is a short box at the
+ * top of a tall rect. */
+export function measureChatBoxArtifactRgb(
+  rgb,
+  {
+    width = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleWidth,
+    height = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleHeight,
+    rect
+  }
+) {
+  const frameBytes = width * height * 3
+  const sampledFrames = frameBytes > 0 ? Math.floor((rgb?.length ?? 0) / frameBytes) : 0
+  const regions = chatBoxRegions(rect, { width, height })
+  const { box } = regions
+  const boxPixels = (box.xEnd - box.xStart) * (box.yEnd - box.yStart)
+  const boxWidth = box.xEnd - box.xStart
+  const frames = []
+  for (let frame = 0; frame < sampledFrames; frame += 1) {
+    const frameStart = frame * frameBytes
+    const at = (x, y) => {
+      const offset = frameStart + (y * width + x) * 3
+      return [rgb[offset], rgb[offset + 1], rgb[offset + 2]]
+    }
+    let emote = 0
+    let dark = 0
+    let icon = 0
+    let iconLeft = Infinity
+    let iconTop = Infinity
+    let iconBottom = -Infinity
+    for (let y = box.yStart; y < box.yEnd; y += 1) {
+      for (let x = box.xStart; x < box.xEnd; x += 1) {
+        const [red, green, blue] = at(x, y)
+        if (isHighlightEmotePixel(red, green, blue)) emote += 1
+        if (isHighlightCardDarkPixel(red, green, blue)) dark += 1
+        if (isChatBoxIconPixel(red, green, blue)) {
+          icon += 1
+          iconLeft = Math.min(iconLeft, x)
+          iconTop = Math.min(iconTop, y)
+          iconBottom = Math.max(iconBottom, y)
+        }
+      }
+    }
+    // The padding: the columns from the rect's left edge up to the icon, over
+    // the icon's rows. No icon, no padding.
+    let leadingPaddingPx = 0
+    let leadingGlassRatio = 0
+    if (icon > 0) {
+      leadingPaddingPx = iconLeft - box.xStart
+      let glass = 0
+      let total = 0
+      for (let y = iconTop; y <= iconBottom; y += 1) {
+        for (let x = box.xStart; x < iconLeft; x += 1) {
+          total += 1
+          if (isChatBoxGlassPixel(...at(x, y))) glass += 1
+        }
+      }
+      leadingGlassRatio = total > 0 ? glass / total : 0
+    }
+    frames.push({
+      index: frame,
+      chatEmotePixelRatio: emote / boxPixels,
+      chatIconPixelRatio: icon / boxPixels,
+      chatLeadingPaddingRatio: leadingPaddingPx / boxWidth,
+      chatLeadingGlassRatio: leadingGlassRatio,
+      chatDarkPixelRatio: dark / boxPixels
+    })
+  }
+  return { sampleWidth: width, sampleHeight: height, rect, regions, sampledFrames, frames }
+}
+
+/** The box is on stream, whole: in enough frames the emote and the leading
+ * icon show inside the chat rect, and the icon has the box's glass padding
+ * before it, so a box cropped at its left edge fails. */
+export function evaluateChatBoxArtifactMetrics(
+  metrics,
+  {
+    minEmotePixelRatio = CHAT_BOX_ARTIFACT_DEFAULTS.minEmotePixelRatio,
+    minIconPixelRatio = CHAT_BOX_ARTIFACT_DEFAULTS.minIconPixelRatio,
+    minLeadingPaddingRatio = CHAT_BOX_ARTIFACT_DEFAULTS.minLeadingPaddingRatio,
+    minLeadingGlassRatio = CHAT_BOX_ARTIFACT_DEFAULTS.minLeadingGlassRatio,
+    minFrames = CHAT_BOX_ARTIFACT_DEFAULTS.minFrames
+  } = {}
+) {
+  const frames = metrics?.frames ?? []
+  const checks = [
+    ['emote', (frame) => frame.chatEmotePixelRatio >= minEmotePixelRatio],
+    ['icon', (frame) => frame.chatIconPixelRatio >= minIconPixelRatio],
+    ['padding', (frame) => frame.chatLeadingPaddingRatio >= minLeadingPaddingRatio],
+    ['glass', (frame) => frame.chatLeadingGlassRatio >= minLeadingGlassRatio]
+  ]
+  const passing = Object.fromEntries(
+    checks.map(([name, test]) => [name, frames.filter((frame) => test(frame)).length])
+  )
+  const boxFrames = frames.filter((frame) => checks.every(([, test]) => test(frame))).length
+  const failures = []
+  if ((metrics?.sampledFrames ?? 0) === 0) failures.push('chat box: no frames were sampled')
+  else if (boxFrames < minFrames) {
+    failures.push(
+      `chat box: the whole box (emote, the leading icon and the glass padding before it, inside the chat rect) showed in ${boxFrames} frame(s), expected at least ${minFrames} (emote in ${passing.emote}, icon in ${passing.icon}, padding before the icon in ${passing.padding}, glass in that padding in ${passing.glass})`
+    )
+  }
+  return {
+    pass: failures.length === 0,
+    failures,
+    observations: {
+      boxFrames,
+      emoteFrames: passing.emote,
+      iconFrames: passing.icon,
+      paddingFrames: passing.padding,
+      glassFrames: passing.glass,
+      maxChatEmotePixelRatio: maxFrameRatio(frames, 'chatEmotePixelRatio'),
+      maxChatIconPixelRatio: maxFrameRatio(frames, 'chatIconPixelRatio'),
+      maxChatLeadingPaddingRatio: maxFrameRatio(frames, 'chatLeadingPaddingRatio'),
+      maxChatLeadingGlassRatio: maxFrameRatio(frames, 'chatLeadingGlassRatio'),
+      maxChatDarkPixelRatio: maxFrameRatio(frames, 'chatDarkPixelRatio')
+    }
+  }
+}
+
+export async function analyzeChatBoxArtifact(
+  filePath,
+  {
+    ffmpegPath = 'ffmpeg',
+    rect,
+    sampleWidth = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleWidth,
+    sampleHeight = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleHeight,
+    sampleFps = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleFps
+  }
+) {
+  const rgb = await decodeRgbSamples(filePath, { ffmpegPath, sampleWidth, sampleHeight, sampleFps })
+  const metrics = measureChatBoxArtifactRgb(rgb, { width: sampleWidth, height: sampleHeight, rect })
+  return { file: filePath, rect, ...evaluateChatBoxArtifactMetrics(metrics) }
+}
+
 export function formatCommentHighlightArtifactSummary(report) {
   const observations = report?.observations ?? {}
   const metrics = report?.metrics ?? {}
@@ -530,6 +699,19 @@ function isHighlightCardDarkPixel(red, green, blue) {
     Math.max(red, green, blue) <= 55 &&
     Math.max(red, green, blue) - Math.min(red, green, blue) <= 18
   )
+}
+
+/** YouTube's red mark (the box's leading icon for the fake chatter): not the
+ * highlight marker (its green is 82), the test pattern's pink line, or the
+ * avatar and emote. */
+export function isChatBoxIconPixel(red, green, blue) {
+  return red >= 200 && green <= 50 && blue <= 110 && red - green >= 150
+}
+
+/** The box's glass (rgba(16, 16, 18, 0.78)) over whatever the picture shows:
+ * at most 0.22 × 255 + 12.5 ≈ 69 in any channel before compression. */
+export function isChatBoxGlassPixel(red, green, blue) {
+  return Math.max(red, green, blue) <= 90
 }
 
 function isHighlightCardTextPixel(red, green, blue) {

@@ -68,8 +68,8 @@ mod tests {
     fn vaapi_level_arg_strips_only_the_dot_zero_labels() {
         for (label, _, _) in H264_HIGH_LEVELS {
             let arg = h264_vaapi_level_arg(label);
-            if label.ends_with(".0") {
-                assert_eq!(arg, &label[..label.len() - 2], "{label}");
+            if let Some(stripped) = label.strip_suffix(".0") {
+                assert_eq!(arg, stripped, "{label}");
             } else {
                 assert_eq!(arg, label, "{label}");
             }
@@ -104,6 +104,14 @@ mod tests {
         assert_eq!(
             h264_high_level_label(2160, 3840, 30),
             h264_high_level_label(3840, 2160, 30)
+        );
+        // 9:16 keeps the chosen size (verticalTwinVideo): the 720p and 540p
+        // twins must tag the same level as the rungs they turn on their side.
+        assert_eq!(h264_high_level_label(720, 1280, 30), Some("3.1"));
+        assert_eq!(h264_high_level_label(1280, 720, 30), Some("3.1"));
+        assert_eq!(
+            h264_high_level_label(540, 960, 30),
+            h264_high_level_label(960, 540, 30)
         );
     }
 

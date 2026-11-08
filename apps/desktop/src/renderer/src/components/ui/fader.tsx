@@ -1,5 +1,10 @@
 'use client'
 
+// Forked from audiocn (MIT, https://audiocn.dev) fader; Videorc's changes:
+// the range is the chrome fill, the default thumb a chrome bead on the knob's
+// hairline rim, the console thumb a rounded-chip cap, and the value, its
+// editor and Reset sit on rounded-row. Everything else is upstream's.
+
 import { mergeProps } from '@base-ui/react/merge-props'
 import { Slider as SliderPrimitive } from '@base-ui/react/slider'
 import { useRender } from '@base-ui/react/use-render'
@@ -131,7 +136,7 @@ export const FaderRange = ({ className, style, ...props }: ComponentProps<'div'>
   return (
     <div
       className={cn(
-        'bg-primary absolute rounded-full',
+        'chrome-fill absolute rounded-full',
         orientation === 'horizontal'
           ? 'inset-y-0 left-(--fader-range-start) w-(--fader-range-size)'
           : 'inset-x-0 bottom-(--fader-range-start) h-(--fader-range-size)',
@@ -151,7 +156,7 @@ export const FaderRange = ({ className, style, ...props }: ComponentProps<'div'>
 }
 
 const thumbVariants = cva(
-  'bg-background ring-foreground/15 hover:ring-ring/30 focus-visible:ring-ring/40 data-dragging:ring-ring/30 block shrink-0 shadow-sm ring-1 outline-hidden transition-[box-shadow] hover:ring-4 focus-visible:ring-4 data-disabled:pointer-events-none data-dragging:ring-4',
+  'hover:ring-ring/30 focus-visible:ring-ring/40 data-dragging:ring-ring/30 block shrink-0 ring-1 outline-hidden transition-[box-shadow] hover:ring-4 focus-visible:ring-4 data-disabled:pointer-events-none data-dragging:ring-4',
   {
     compoundVariants: [
       {
@@ -177,8 +182,9 @@ const thumbVariants = cva(
         vertical: ''
       },
       variant: {
-        console: 'border-border rounded-chip border',
-        default: 'size-(--fader-thumb-size) rounded-full'
+        console: 'bg-background ring-foreground/15 border-border rounded-chip border shadow-sm',
+        // Videorc's knob: a chrome bead on its hairline rim.
+        default: 'chrome-bead ring-knob-ring size-(--fader-thumb-size) rounded-full'
       }
     }
   }
@@ -305,7 +311,7 @@ export const FaderValue = ({ editable = false, className, style, ...props }: Fad
       <input
         aria-label="Value in dB"
         className={cn(
-          'bg-background focus-visible:ring-ring/30 h-6 w-[calc(var(--fader-value-width)+0.75rem)] rounded-row border px-[calc(0.375rem-1px)] text-end font-mono text-xs tabular-nums outline-none focus-visible:ring-3',
+          'bg-background focus-visible:ring-ring/30 rounded-row h-6 w-[calc(var(--fader-value-width)+0.75rem)] border px-[calc(0.375rem-1px)] text-end font-mono text-xs tabular-nums outline-none focus-visible:ring-3',
           className
         )}
         data-slot="fader-value-input"
@@ -331,7 +337,7 @@ export const FaderValue = ({ editable = false, className, style, ...props }: Fad
     return (
       <button
         className={cn(
-          'text-muted-foreground hover:bg-muted focus-visible:ring-ring/30 h-6 w-[calc(var(--fader-value-width)+0.75rem)] shrink-0 rounded-row text-end font-mono text-xs tabular-nums outline-none focus-visible:ring-3',
+          'text-muted-foreground hover:bg-muted focus-visible:ring-ring/30 rounded-row h-6 w-[calc(var(--fader-value-width)+0.75rem)] shrink-0 text-end font-mono text-xs tabular-nums outline-none focus-visible:ring-3',
           'px-1.5',
           className
         )}
@@ -377,7 +383,7 @@ export const FaderReset = ({ render, className, children, ...props }: FaderReset
         'aria-label': 'Reset',
         children: children ?? 'Reset',
         className: cn(
-          'text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-ring/30 inline-flex h-6 items-center rounded-row px-1.5 text-xs outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-0',
+          'text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-ring/30 rounded-row inline-flex h-6 items-center px-1.5 text-xs outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-0',
           className
         ),
         disabled: disabled || !modified,

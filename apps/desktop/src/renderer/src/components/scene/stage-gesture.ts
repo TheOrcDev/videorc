@@ -2,25 +2,42 @@ import type { Scene } from '@/lib/backend'
 import type { TransformCommitResult } from '@/lib/scene-transform-commit'
 export type { TransformCommitResult } from '@/lib/scene-transform-commit'
 import {
+  cropGhost,
   moveGhost,
   resizeGhost,
+  roundCropForCommit,
   roundRectForCommit,
   type GhostResult,
   type SnapTargets,
+  type StageCrop,
   type StageHandleId,
   type StageRect
 } from './stage-transform'
 
-export type StageCommit = (sourceId: string, rect: StageRect) => Promise<TransformCommitResult>
+/** One released gesture's commit: the box, and an ⌥-drag crop's crop with it. */
+export type StageCommit = (
+  sourceId: string,
+  patch: StageRect & Partial<StageCrop>
+) => Promise<TransformCommitResult>
 export const sameStageRect = (a: StageRect, b: StageRect): boolean =>
   (['x', 'y', 'width', 'height'] as const).every((key) => Math.abs(a[key] - b[key]) < 0.000001)
 
 type Magnet = { target: number; edge: number }
+/** A magnet catches the box this close to its snapped position (CSS px)... */
+const SNAP_ACQUIRE_PX = 5
+/** ...and lets go once the pointer pulls it this far away. */
+const SNAP_RELEASE_PX = 9
 /** Per-axis magnet ownership. Breaking away/releasing Alt rebases the grab offset. */
 class SnapAxis {
   private magnet: Magnet | null = null
   private offset = 0
-  private released: Magnet | null = null
+  /** Where the box was when its magnet let go. Every snapped position within
+   * the release distance of it counts as that same magnet until the box is
+   * out of their reach: a second target beside the first would otherwise
+   * catch the box the moment the first let go, and the two would trade it
+   * back and forth while the pointer moved on (a banner sitting centred,
+   * its right edge a few pixels from another item's left edge, never moved). */
+  private releasedAt: number | null = null
   private enabled: boolean
   private last: number
   constructor(position: number, enabled: boolean) {
@@ -36,34 +53,37 @@ class SnapAxis {
   ): { position: number; target?: number } {
     if (enabled !== this.enabled) {
       this.offset = this.last - raw
-      this.released = this.magnet
+      this.releasedAt = this.magnet ? this.last : null
       this.magnet = null
       this.enabled = enabled
     }
     let position = raw + this.offset
     if (enabled && this.magnet) {
       const fixed = this.magnet.target - this.magnet.edge * size
-      if (Math.abs(position - fixed) * pixels <= 9)
+      if (Math.abs(position - fixed) * pixels <= SNAP_RELEASE_PX)
         return { position: (this.last = fixed), target: this.magnet.target }
       // Absorb the release distance rather than jumping by the magnet radius.
       this.offset = this.last - raw
       position = this.last
-      this.released = this.magnet
+      this.releasedAt = this.last
       this.magnet = null
       return { position }
     }
     if (enabled) {
       if (
-        this.released &&
-        Math.abs(position + this.released.edge * size - this.released.target) * pixels > 9
+        this.releasedAt !== null &&
+        Math.abs(position - this.releasedAt) * pixels > SNAP_RELEASE_PX + SNAP_ACQUIRE_PX
       )
-        this.released = null
+        this.releasedAt = null
+      const releasedAt = this.releasedAt
       let best: { target: number; edge: number; distance: number } | null = null
       for (const target of targets)
         for (const edge of [0, 0.5, 1]) {
-          if (this.released?.target === target && this.released.edge === edge) continue
-          const distance = Math.abs(position + edge * size - target) * pixels
-          if (distance <= 5 && (!best || distance < best.distance))
+          const snapped = target - edge * size
+          if (releasedAt !== null && Math.abs(snapped - releasedAt) * pixels <= SNAP_RELEASE_PX)
+            continue
+          const distance = Math.abs(position - snapped) * pixels
+          if (distance <= SNAP_ACQUIRE_PX && (!best || distance < best.distance))
             best = { target, edge, distance }
         }
       if (best) {
@@ -79,8 +99,11 @@ class SnapAxis {
 /** Mutable only for one pointer ownership interval; never stores canonical scene state. */
 export class StageGesture {
   rect: StageRect
+  /** An ⌥-drag crop's crop so far (plan 213 G2); null for a move or a resize. */
+  crop: StageCrop | null
   private origin: { x: number; y: number }
   private start: StageRect
+  private cropStart: StageCrop | null
   private shift = false
   private axis: 'x' | 'y' | null = null
   private snapX: SnapAxis
@@ -95,9 +118,12 @@ export class StageGesture {
     private targets: SnapTargets,
     private snap: boolean,
     private locked: boolean,
-    private forced: boolean
+    private forced: boolean,
+    /** The source's crop when ⌥ was down on an edge handle: the gesture crops. */
+    crop: StageCrop | null = null
   ) {
     this.start = this.rect = { ...start }
+    this.crop = this.cropStart = kind === 'move' || !crop ? null : { ...crop }
     this.origin = point
     this.snapX = new SnapAxis(start.x, snap)
     this.snapY = new SnapAxis(start.y, snap)
@@ -108,6 +134,7 @@ export class StageGesture {
   ): GhostResult {
     if (modifiers.shiftKey !== this.shift) {
       this.start = { ...this.rect }
+      this.cropStart = this.crop && { ...this.crop }
       this.origin = point
       this.axis = null
       this.snapX = new SnapAxis(this.rect.x, this.snap && !modifiers.altKey)
@@ -159,6 +186,16 @@ export class StageGesture {
         result.guides.push({ axis: 'x', position: x.target })
       if (y.target !== undefined && result.rect.y === y.position)
         result.guides.push({ axis: 'y', position: y.target })
+    } else if (this.cropStart) {
+      const cropped = cropGhost({
+        start: this.start,
+        crop: this.cropStart,
+        handle: this.kind,
+        dx,
+        dy
+      })
+      this.crop = cropped.crop
+      result = { rect: cropped.rect, guides: cropped.guides }
     } else
       result = resizeGhost({
         start: this.start,
@@ -177,6 +214,7 @@ export class StageGesture {
 export interface StageDraft {
   sourceId: string
   rect: StageRect
+  crop?: StageCrop
   generation: number
 }
 /** Serialize released gestures and retain presentation until canonical props catch up. */
@@ -219,8 +257,13 @@ export class StageEdits {
     this.acknowledged = null
     this.changed()
   }
-  submit(sourceId: string, rect: StageRect): void {
-    const draft = { sourceId, rect: roundRectForCommit(rect), generation: ++this.generation }
+  submit(sourceId: string, rect: StageRect, crop?: StageCrop): void {
+    const draft: StageDraft = {
+      sourceId,
+      rect: roundRectForCommit(rect),
+      ...(crop ? { crop: roundCropForCommit(crop) } : {}),
+      generation: ++this.generation
+    }
     const epoch = this.epoch
     const commit = this.commit
     const sceneId = this.canonical?.id
@@ -230,7 +273,7 @@ export class StageEdits {
       if (epoch !== this.epoch) return
       let result: TransformCommitResult
       try {
-        result = await commit(sourceId, draft.rect)
+        result = await commit(sourceId, { ...draft.rect, ...draft.crop })
       } catch {
         result = { ok: false }
       }

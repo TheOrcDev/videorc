@@ -373,7 +373,13 @@ export function BuddyOnboarding({
   }, [step])
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      // A stray click outside never closes a sheet with typing in it, or one
+      // drawing a Buddy (G-12); Escape and the close button still do.
+      disablePointerDismissal={dirty || creating}
+      open={open}
+      onOpenChange={onOpenChange}
+    >
       <DialogContent
         ref={sheetRef}
         aria-describedby={undefined}
@@ -381,18 +387,10 @@ export function BuddyOnboarding({
         size="xl"
         data-step={step}
         data-testid="buddy-onboarding"
-        onInteractOutside={(event) => {
-          // A stray click outside never closes a sheet with typing in it, or
-          // one drawing a Buddy (G-12); Escape and the close button still do.
-          if (dirty || creating) event.preventDefault()
-        }}
+        // The sheet itself takes the focus (⌘↵ works at once), never the
+        // first tile or card: a focused tile would show its R chip.
+        initialFocus={sheetRef}
         onKeyDown={onKeyDown}
-        onOpenAutoFocus={(event) => {
-          // The sheet itself takes the focus (⌘↵ works at once), never the
-          // first tile or card: a focused tile would show its R chip.
-          event.preventDefault()
-          sheetRef.current?.focus()
-        }}
       >
         <DialogHeader className="shrink-0 gap-2 border-b border-border px-5 pt-4 pb-3.5">
           <div className="flex items-center gap-3 pr-8">

@@ -17,7 +17,7 @@ import { createContext, useContext } from 'react'
 import { BUDDY_TAB_LABEL, isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
 import { isLivestreamViewId } from '@/lib/livestream-tabs'
 import { migrateSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
-import type { WorkspaceNavigation } from '@/lib/workspace-navigation'
+import type { FirstRunSetupRequest, WorkspaceNavigation } from '@/lib/workspace-navigation'
 
 // The Setup pages, listed under the sidebar's "Setup" label: one click away, but
 // they are FULL pages — studio content renders only on the Studio tab (user decision
@@ -166,6 +166,13 @@ export function readWorkspaceNavigation(detail: unknown): WorkspaceNavigation | 
   }
   if (tab === 'library') return typeof sessionId === 'string' ? { tab, sessionId } : { tab }
   return isWorkspaceTab(tab) ? { tab } : null
+}
+
+/** The replay request behind `openFirstRunSetup` (plan 203 S5): an unknown page returns to Settings. */
+export function readFirstRunSetupRequest(detail: unknown): FirstRunSetupRequest {
+  const returnTo =
+    detail && typeof detail === 'object' ? (detail as Record<string, unknown>).returnTo : undefined
+  return { returnTo: isWorkspaceTab(returnTo) ? returnTo : 'settings' }
 }
 
 type WorkspaceNavValue = {

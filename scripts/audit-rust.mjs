@@ -6,6 +6,17 @@ import { fileURLToPath } from 'node:url'
 
 const advisoryDatabaseUrl = 'https://github.com/RustSec/advisory-db.git'
 
+// Informational "unmaintained" notices only, never a vulnerability. Each entry
+// names the dependency that pulls it in, so it can be dropped once that moves.
+export const acceptedUnmaintainedAdvisories = [
+  // zvariant, zbus_names and zvariant_derive were folded into zbus 6. They reach
+  // us only through ashpd 0.13 (Linux screencast portal), which still depends on
+  // zbus 5. Remove these once an ashpd release on zbus 6 is adopted.
+  { id: 'RUSTSEC-2026-0370', crate: 'zvariant', via: 'ashpd 0.13 -> zbus 5' },
+  { id: 'RUSTSEC-2026-0371', crate: 'zbus_names', via: 'ashpd 0.13 -> zbus 5' },
+  { id: 'RUSTSEC-2026-0372', crate: 'zvariant_derive', via: 'ashpd 0.13 -> zbus 5' }
+]
+
 export function rustAuditCommands({ databasePath, databaseExists }) {
   const refresh = databaseExists
     ? ['git', ['-C', databasePath, 'pull', '--ff-only', '--quiet']]
@@ -15,7 +26,18 @@ export function rustAuditCommands({ databasePath, databaseExists }) {
   return [
     refresh,
     ['cargo', ['fetch', '--locked']],
-    ['cargo', ['audit', '--db', databasePath, '--no-fetch', '--deny', 'warnings']]
+    [
+      'cargo',
+      [
+        'audit',
+        '--db',
+        databasePath,
+        '--no-fetch',
+        '--deny',
+        'warnings',
+        ...acceptedUnmaintainedAdvisories.flatMap(({ id }) => ['--ignore', id])
+      ]
+    ]
   ]
 }
 

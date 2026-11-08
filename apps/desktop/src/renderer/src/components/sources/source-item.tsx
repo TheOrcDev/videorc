@@ -86,84 +86,97 @@ export function SourceItem({
 
   return (
     <Collapsible
-      asChild
       open={more ? moreOpen : false}
+      render={
+        <section
+          aria-labelledby={titleId}
+          className={cn('group/source-item flex flex-col', className)}
+          data-disabled={disabled || undefined}
+          data-slot="source-item"
+          data-source={id}
+          {...props}
+        />
+      }
       onOpenChange={(open) => {
         setMoreOpen(open)
         writeMoreOpen(id, open)
       }}
     >
-      <section
-        aria-labelledby={titleId}
-        className={cn('group/source-item flex flex-col', className)}
-        data-disabled={disabled || undefined}
-        data-slot="source-item"
-        data-source={id}
-        {...props}
+      {/* With More, the whole header row opens it (plan 213 A3): the
+          chevron's button stretches over the row, so the chevron stays the
+          one labelled trigger. The source's control is positioned above it;
+          the tag and the chip are not, so a click on them opens More too. */}
+      <ListRow
+        className={cn('h-auto min-h-10 py-1.5', more && 'relative')}
+        interactive={Boolean(more)}
+        icon={
+          <Icon
+            className="size-4 text-muted-foreground group-data-[disabled]/source-item:text-subtle"
+            weight="duotone"
+          />
+        }
+        title={
+          <span
+            className="group-data-[disabled]/source-item:text-muted-foreground"
+            data-slot="source-item-title"
+            id={titleId}
+          >
+            {title}
+          </span>
+        }
+        alias={tag}
       >
-        <ListRow
-          className="h-auto min-h-10 py-1.5"
-          icon={
-            <Icon
-              className="size-4 text-muted-foreground group-data-[disabled]/source-item:text-subtle"
-              weight="duotone"
-            />
-          }
-          title={
-            <span
-              className="group-data-[disabled]/source-item:text-muted-foreground"
-              data-slot="source-item-title"
-              id={titleId}
-            >
-              {title}
-            </span>
-          }
-          alias={tag}
-        >
-          {status ? <SourceStatusChip status={status} /> : null}
-          {control}
-          {more ? (
-            <CollapsibleTrigger asChild>
+        {status ? <SourceStatusChip status={status} /> : null}
+        {control ? (
+          <span className="relative flex shrink-0 items-center" data-slot="source-item-control">
+            {control}
+          </span>
+        ) : null}
+        {more ? (
+          <CollapsibleTrigger
+            render={
               <Button
                 aria-controls={moreId}
                 aria-label={moreLabel ?? `More ${title} settings`}
-                className="text-muted-foreground"
+                // Not positioned itself, so its ::after spans the header row.
+                // The row's hover is the cue; the chevron doesn't light alone.
+                className="static text-muted-foreground after:absolute after:inset-0 hover:bg-transparent dark:hover:bg-transparent"
                 size="icon-xs"
                 type="button"
                 variant="ghost"
-              >
-                <ChevronDownIcon
-                  className={cn('transition-transform duration-150', moreOpen && 'rotate-180')}
-                />
-              </Button>
-            </CollapsibleTrigger>
-          ) : null}
-        </ListRow>
-        {children || status?.hint ? (
-          <div
-            className={cn('flex min-w-0 flex-col gap-2 pr-3 pb-3 pl-10.5', bodyClassName)}
-            data-slot="source-item-body"
+              />
+            }
           >
-            {children}
-            {/* What to do about the chip, in words: it used to hide in a
+            <ChevronDownIcon
+              className={cn('transition-transform duration-150', moreOpen && 'rotate-180')}
+            />
+          </CollapsibleTrigger>
+        ) : null}
+      </ListRow>
+      {children || status?.hint ? (
+        <div
+          className={cn('flex min-w-0 flex-col gap-2 pr-3 pb-3 pl-10.5', bodyClassName)}
+          data-slot="source-item-body"
+        >
+          {children}
+          {/* What to do about the chip, in words: it used to hide in a
                 tooltip only (plan 174 C-10). */}
-            {status?.hint ? (
-              <p className="text-xs text-foreground" data-slot="source-status-hint" role="status">
-                {status.hint}
-              </p>
-            ) : null}
-          </div>
-        ) : null}
-        {more ? (
-          <CollapsibleContent
-            className="flex min-w-0 flex-col gap-3 border-t border-border py-3 pr-3 pl-10.5"
-            data-testid="source-item-more"
-            id={moreId}
-          >
-            {more}
-          </CollapsibleContent>
-        ) : null}
-      </section>
+          {status?.hint ? (
+            <p className="text-xs text-foreground" data-slot="source-status-hint" role="status">
+              {status.hint}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+      {more ? (
+        <CollapsibleContent
+          className="flex min-w-0 flex-col gap-3 border-t border-border py-3 pr-3 pl-10.5"
+          data-testid="source-item-more"
+          id={moreId}
+        >
+          {more}
+        </CollapsibleContent>
+      ) : null}
     </Collapsible>
   )
 }
@@ -199,17 +212,19 @@ export function SourceControlRow({
         <span className={cn(valueClass, 'inline-flex')} data-slot="source-control-value">
           {reset ? (
             <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  className="-mr-2 px-2 font-mono text-muted-foreground tabular-nums hover:text-foreground"
-                  size="xs"
-                  type="button"
-                  variant="ghost"
-                  onClick={reset.onReset}
-                >
-                  {value}
-                  <span className="sr-only">. {reset.label}</span>
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button
+                    className="-mr-2 px-2 font-mono text-muted-foreground tabular-nums hover:text-foreground"
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                    onClick={reset.onReset}
+                  />
+                }
+              >
+                {value}
+                <span className="sr-only">. {reset.label}</span>
               </TooltipTrigger>
               <TooltipContent>{reset.label}</TooltipContent>
             </Tooltip>

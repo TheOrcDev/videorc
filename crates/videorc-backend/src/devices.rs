@@ -141,10 +141,15 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
                         // Mirror the microphone rule: the FFmpeg fallback rows are
                         // a safety net for when native discovery returns nothing,
                         // not duplicate picker entries beside every native camera.
+                        // Plan 214 A5: Videorc Camera is never a source of itself.
                         if !native_camera_rows_present
                             && !device.name.to_lowercase().contains("capture screen")
+                            && !crate::virtual_camera::is_videorc_camera_ffmpeg_name(&device.name)
                         {
                             devices.push(Device {
+                                app: None,
+                                window_title: None,
+                                display_uuid: None,
                                 id: format!("camera:avfoundation:{}", device.index),
                                 name: format!("FFmpeg fallback - {}", device.name),
                                 kind: DeviceKind::Camera,
@@ -230,6 +235,9 @@ fn unsupported_device_list() -> DeviceList {
 
     devices.extend([
         Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
             id: "screen:unsupported-platform".to_string(),
             name: "Primary Display".to_string(),
             kind: DeviceKind::Screen,
@@ -239,6 +247,9 @@ fn unsupported_device_list() -> DeviceList {
             height: None,
         },
         Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
             id: "window:unsupported-platform".to_string(),
             name: "Window Capture".to_string(),
             kind: DeviceKind::Window,
@@ -254,6 +265,7 @@ fn unsupported_device_list() -> DeviceList {
     DeviceList { devices, warnings }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn preview_ready_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
     devices
         .into_iter()
@@ -278,6 +290,7 @@ fn preview_ready_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_screen_devices(
     av_devices: &[AvFoundationDevice],
     screen_capture_permission_required: bool,
@@ -289,6 +302,9 @@ fn avfoundation_screen_devices(
                 && device.name.to_lowercase().contains("capture screen")
         })
         .map(|device| Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
             id: format!("screen:avfoundation:{}", device.index),
             name: device.name.clone(),
             kind: DeviceKind::Screen,
@@ -310,8 +326,12 @@ fn avfoundation_screen_devices(
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn missing_avfoundation_screen_device() -> Device {
     Device {
+        app: None,
+        window_title: None,
+        display_uuid: None,
         id: "screen:avfoundation-missing".to_string(),
         name: "Primary Display".to_string(),
         kind: DeviceKind::Screen,
@@ -325,8 +345,12 @@ fn missing_avfoundation_screen_device() -> Device {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_probe_failed_screen_device() -> Device {
     Device {
+        app: None,
+        window_title: None,
+        display_uuid: None,
         id: "screen:probe-failed".to_string(),
         name: "Primary Display".to_string(),
         kind: DeviceKind::Screen,
@@ -463,6 +487,9 @@ fn system_audio_device_for(support: SystemAudioSupport) -> Device {
         ),
     };
     Device {
+        app: None,
+        window_title: None,
+        display_uuid: None,
         id: SYSTEM_AUDIO_DEVICE_ID.to_string(),
         name: "System audio".to_string(),
         kind: DeviceKind::SystemAudio,
@@ -531,8 +558,14 @@ pub async fn find_avfoundation_camera_index(ffmpeg_path: &str, camera_name: &str
         .filter(|device| {
             device.kind == AvFoundationDeviceKind::Video
                 && !device.name.to_lowercase().contains("capture screen")
+                // Plan 214 A5: a saved id naming Videorc Camera resolves to
+                // nothing; never a silent substitute.
+                && !crate::virtual_camera::is_videorc_camera_ffmpeg_name(&device.name)
         })
         .collect::<Vec<_>>();
+    if crate::virtual_camera::is_videorc_camera_ffmpeg_name(camera_name) {
+        return None;
+    }
 
     video_devices
         .iter()
@@ -565,11 +598,34 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
         .and_then(crate::linux_pulse_audio::parse_linux_pulse_microphone_id)
     {
         let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
-        return run_ffmpeg_volume_meter(
-            &ffmpeg_path,
-            crate::linux_pulse_audio::pulse_meter_args(&source_name),
-        )
-        .await;
+        // Retest 154 (C4): an unplugged source says so; the check itself is
+        // pinned, so it never measures the default (built-in) microphone.
+        #[cfg(target_os = "linux")]
+        {
+            let lister = ffmpeg_path.clone();
+            let listing = tokio::task::spawn_blocking(move || {
+                crate::linux_pulse_audio::linux_pulse_sources_blocking(&lister)
+            })
+            .await
+            .ok()
+            .flatten();
+            if crate::linux_pulse_audio::pulse_source_missing(listing.as_deref(), &source_name) {
+                return AudioMeterResult {
+                    status: AudioMeterStatus::Unavailable,
+                    level: None,
+                    peak_db: None,
+                    mean_db: None,
+                    message: Some(
+                        crate::linux_pulse_audio::pulse_source_not_connected_message(&source_name),
+                    ),
+                };
+            }
+        }
+        let mut command = Command::new(&ffmpeg_path);
+        command
+            .envs(crate::linux_pulse_audio::pulse_pinned_source_env())
+            .args(crate::linux_pulse_audio::pulse_meter_args(&source_name));
+        return run_ffmpeg_volume_meter_command(&ffmpeg_path, command).await;
     }
 
     if !cfg!(target_os = "macos") {
@@ -598,6 +654,7 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
         return sample_native_audio_meter(
             device_id,
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: params.microphone_gain_db,
                 muted: params.microphone_muted,
             },
@@ -645,10 +702,15 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
 /// Runs a bounded FFmpeg `volumedetect` capture and maps its levels.
 async fn run_ffmpeg_volume_meter(ffmpeg_path: &str, args: Vec<String>) -> AudioMeterResult {
     let mut command = Command::new(ffmpeg_path);
-    command
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.args(&args);
+    run_ffmpeg_volume_meter_command(ffmpeg_path, command).await
+}
+
+async fn run_ffmpeg_volume_meter_command(
+    ffmpeg_path: &str,
+    mut command: Command,
+) -> AudioMeterResult {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let output = timeout(Duration::from_secs(6), output_owned_tokio(&mut command)).await;
     let output = match output {
@@ -730,6 +792,7 @@ pub async fn sample_native_audio_meters(
     params: AudioMeterProbeParams,
 ) -> AudioMeterDeviceProbeResult {
     let settings = AudioProcessingSettings {
+        noise_suppression: Default::default(),
         gain_db: params.microphone_gain_db,
         muted: params.microphone_muted,
     };
@@ -905,6 +968,7 @@ fn db_to_level(db: f64) -> f64 {
 // available doubled every microphone in the picker and made a broken
 // "Fallback - X" row the fresh-profile default, so they are listed only when
 // no native CoreAudio input can be selected at all.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_microphone_picker_devices(
     av_devices: &[AvFoundationDevice],
     native_microphone_available: bool,
@@ -919,6 +983,7 @@ fn avfoundation_microphone_picker_devices(
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
     // The capture worker and meter only open stable UID identities. An
     // index-only row (FFmpeg without the Videorc AVF identity patch) can never
@@ -937,6 +1002,9 @@ fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
         ),
     };
     Device {
+        app: None,
+        window_title: None,
+        display_uuid: None,
         id,
         name: device.name.clone(),
         kind: DeviceKind::Microphone,
@@ -1269,6 +1337,9 @@ mod tests {
     fn native_screen_and_window_sources_are_selectable_for_preview() {
         let devices = preview_ready_native_capture_devices(vec![
             Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit:1".to_string(),
                 name: "Display 1".to_string(),
                 kind: DeviceKind::Screen,
@@ -1278,6 +1349,9 @@ mod tests {
                 height: None,
             },
             Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: "window:screencapturekit:42".to_string(),
                 name: "Editor".to_string(),
                 kind: DeviceKind::Window,
@@ -1287,6 +1361,9 @@ mod tests {
                 height: None,
             },
             Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: "camera:native".to_string(),
                 name: "Camera".to_string(),
                 kind: DeviceKind::Camera,
@@ -1314,6 +1391,9 @@ mod tests {
         let devices = windows_device_list_from_parts(
             crate::screen_capture::NativeCaptureSources {
                 devices: vec![Device {
+                    app: None,
+                    window_title: None,
+                    display_uuid: None,
                     id: "screen:dxgi:0000000000000001:0".to_string(),
                     name: "Display 1".to_string(),
                     kind: DeviceKind::Screen,
@@ -1326,6 +1406,9 @@ mod tests {
             },
             crate::camera_capture::NativeCameraDevices {
                 devices: vec![Device {
+                    app: None,
+                    window_title: None,
+                    display_uuid: None,
                     id: "camera:windows-dshow:5553422043616d657261".to_string(),
                     name: "USB Camera".to_string(),
                     kind: DeviceKind::Camera,
@@ -1337,6 +1420,9 @@ mod tests {
                 warnings: vec!["camera warning".to_string()],
             },
             vec![Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: "microphone:windows-dshow:4d6963726f70686f6e65204172726179".to_string(),
                 name: "Microphone Array".to_string(),
                 kind: DeviceKind::Microphone,
@@ -1534,6 +1620,9 @@ mod tests {
     fn native_second_display_maps_to_second_avfoundation_capture_screen() {
         let native_capture_devices = vec![
             Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit:111".to_string(),
                 name: "Display 1".to_string(),
                 kind: DeviceKind::Screen,
@@ -1543,6 +1632,9 @@ mod tests {
                 height: None,
             },
             Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit:222".to_string(),
                 name: "Display 2".to_string(),
                 kind: DeviceKind::Screen,

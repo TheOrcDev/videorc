@@ -1,10 +1,22 @@
+import { isAbsolute } from 'node:path'
+
 import type { BackendConnection } from '../shared/backend'
 
-type BackendBootstrap = BackendConnection & { adminToken: string }
+type BackendBootstrap = BackendConnection & { adminToken: string; managedAssetRoots?: unknown }
+
+/** The backend's own Screens and Banners folders (release test 146, plan 0005). */
+export type ManagedAssetRoots = {
+  screens: string
+  banners: string
+  /** The soundboard's folder (release test 147, plan 0002); absent from an older backend. */
+  sounds?: string
+}
 
 export type ParsedBackendBootstrap = {
   renderer: BackendConnection
   admin: BackendConnection
+  /** Main-only: never part of a connection, log line or renderer payload. */
+  managedAssetRoots: ManagedAssetRoots | null
 }
 
 export type BackendProcessOwnership = {
@@ -43,8 +55,24 @@ export function parseBackendBootstrap(value: unknown): ParsedBackendBootstrap {
   }
   return {
     renderer: { ...common, token: bootstrap.token },
-    admin: { ...common, token: bootstrap.adminToken }
+    admin: { ...common, token: bootstrap.adminToken },
+    managedAssetRoots: parseManagedAssetRoots(bootstrap.managedAssetRoots)
   }
+}
+
+// An absent or malformed value only costs the fallback to userData; it never
+// rejects the backend.
+function parseManagedAssetRoots(value: unknown): ManagedAssetRoots | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const { screens, banners } = value as Record<string, unknown>
+  if (typeof screens !== 'string' || typeof banners !== 'string') return null
+  if (!isAbsolute(screens) || !isAbsolute(banners)) return null
+  // Sounds joined later (release test 147, plan 0002): a missing or relative
+  // one only drops that root, so sounds alone fall back to userData.
+  const { sounds } = value as Record<string, unknown>
+  return typeof sounds === 'string' && isAbsolute(sounds)
+    ? { screens, banners, sounds }
+    : { screens, banners }
 }
 
 /** The only backend bootstrap shape allowed in logs/smoke markers/preload. */

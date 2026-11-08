@@ -99,6 +99,10 @@ describe('ShortcutKeys', () => {
     expect(KBD_ON_FILLED_BUTTON).toContain(
       '[[data-slot=button][data-variant=destructive]_&]:text-current'
     )
+    // The record LED (plan 208 D8) is a filled button too.
+    expect(KBD_ON_FILLED_BUTTON).toContain(
+      '[[data-slot=button][data-variant=record]_&]:text-current'
+    )
   })
 })
 

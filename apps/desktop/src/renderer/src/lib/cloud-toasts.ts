@@ -49,6 +49,12 @@ export function cloudFallbackMessage(
       return `Videorc Cloud is off right now. ${direct}.`
     case 'not-entitled':
       return `${CLOUD_PREMIUM_REASON} ${direct}.`
+    // Plan 222 D5: the first nodes carry up to 1080p60.
+    case 'cloud-quality':
+      return `Videorc Cloud carries up to 1080p60 for now. ${direct}.`
+    // Plan 222 D6: a remembered show the web could not be asked about.
+    case 'cloud-unchecked':
+      return `Videorc couldn't check your last cloud show. ${direct}.`
   }
 }
 

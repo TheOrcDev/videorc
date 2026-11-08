@@ -1,6 +1,7 @@
 import { appPlatform, revealInFileManagerLabel } from '@/lib/platform'
+import { systemAccessActionLabel } from '@/lib/system-access-view'
 import { platformCopy } from '@/lib/platform-copy'
-import type { SystemAccessAction, SystemAccessState } from '@/lib/system-access'
+import type { SystemAccessAction, SystemAccessState, SystemAccessRow } from '@/lib/system-access'
 
 // Plan 174 S3.8 (C-8, C-14): what the Sources page says about a missing
 // permission. One curated alert per permission, each with the one action that
@@ -28,6 +29,7 @@ export interface MediaPermissionInput {
   action: SystemAccessAction
   /** Someone chose this source. No alert for a camera nobody chose. */
   chosen: boolean
+  detail?: string
 }
 
 const PANE_NAMES: Record<SourcePermissionId, string> = {
@@ -61,23 +63,25 @@ function mediaAlert(
   platform: string | undefined,
   targetName: string
 ): SourcePermissionAlert | null {
-  const missing = input.state === 'first-use' || input.state === 'not-granted'
+  const missing =
+    input.state === 'first-use' || input.state === 'not-granted' || input.state === 'waiting'
   if (!missing || !input.chosen || input.action === null) return null
   const noun = id === 'camera' ? 'camera' : 'microphone'
   const os = appPlatform(platform)
   const description =
-    input.action === 'request-media-access'
+    input.detail ||
+    (input.action === 'request-media-access'
       ? `${platformCopy(platform).osName} asks once. Choose Allow.`
       : os === 'win32'
         ? // Windows lists desktop apps under one switch, never by name (plan 174 S3.17).
           `In ${privacyPath(platform, id)}, turn on access and “Let desktop apps access your ${noun}”.`
-        : `Turn on ${targetName} in ${privacyPath(platform, id)}.`
+        : `Turn on ${targetName} in ${privacyPath(platform, id)}.`)
   return {
     id,
     title: `${PANE_NAMES[id]} permission is required for ${targetName}.`,
     description,
     actionLabel:
-      input.action === 'request-media-access' ? 'Allow access…' : openPermissionSettingsLabel(id),
+      input.action === 'request-media-access' ? 'Allow…' : openPermissionSettingsLabel(id),
     revealLabel: null
   }
 }
@@ -91,22 +95,38 @@ function mediaAlert(
  */
 export function sourcePermissionAlerts(input: {
   platform: string | undefined
-  /** Who the grant belongs to: the capture helper, or Videorc. */
+  /** The name listed by the OS, from runtimeInfo.permissionTargetName. */
   targetName: string
   screenRecording: boolean
+  screen?: { row: SystemAccessRow; action: SystemAccessAction }
   camera: MediaPermissionInput
   microphone: MediaPermissionInput
 }): SourcePermissionAlert[] {
   const { platform, targetName } = input
   const alerts: SourcePermissionAlert[] = []
-  if (input.screenRecording) {
+  const screen = input.screen
+  if (screen) {
+    const actionLabel = systemAccessActionLabel(screen.action, platform)
+    if (!screen.row.checking && actionLabel) {
+      alerts.push({
+        id: 'screen-recording',
+        title:
+          screen.row.state === 'needs-relaunch'
+            ? 'Reopen Videorc to record your screen.'
+            : `Screen Recording permission is required for ${targetName}.`,
+        description:
+          screen.row.detail || `${platformCopy(platform).osName} asks once. Choose Allow.`,
+        actionLabel,
+        revealLabel: null
+      })
+    }
+  } else if (input.screenRecording) {
     alerts.push({
       id: 'screen-recording',
       title: `Screen Recording permission is required for ${targetName}.`,
-      // macOS reads the grant once per launch, so the fix ends with a relaunch.
-      description: `Turn on ${targetName} in ${privacyPath(platform, 'screen-recording')}, then quit and reopen Videorc.`,
+      description: `Turn on ${targetName} in ${privacyPath(platform, 'screen-recording')}, then come back here.`,
       actionLabel: openPermissionSettingsLabel('screen-recording'),
-      revealLabel: showHelperLabel(platform)
+      revealLabel: null
     })
   }
   for (const id of ['camera', 'microphone'] as const) {

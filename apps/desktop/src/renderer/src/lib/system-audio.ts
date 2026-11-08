@@ -1,6 +1,6 @@
 import { toast } from '@/lib/toast'
 
-import type { Device, DeviceList, DeviceStatus } from '@/lib/backend'
+import type { Device, DeviceList, DeviceStatus, ReplayBufferState } from '@/lib/backend'
 import type { SystemAudioIssue } from '@/lib/system-audio-session'
 import { platformCopy } from '@/lib/platform-copy'
 
@@ -27,15 +27,43 @@ export function systemAudioDevice(deviceList: DeviceList): Device | undefined {
   )
 }
 
+/** An Available device for the rows to draw before the first device list. */
+const MAC_STAND_IN: Pick<Device, 'status'> = Object.freeze({ status: 'available' })
+
+/**
+ * The device the System audio rows draw. A Mac always lists it (Available,
+ * or waiting on the Screen Recording grant), so until the first device list
+ * arrives the rows stand in an Available one: the row is there from launch
+ * with the Microphone's instead of popping in seconds later. Elsewhere it can
+ * be missing for good (Linux, Windows before build 20348), so those rows wait.
+ */
+export function systemAudioRowDevice(
+  deviceList: DeviceList,
+  platform: string | undefined
+): Pick<Device, 'status'> | undefined {
+  return (
+    systemAudioDevice(deviceList) ??
+    (deviceList.devices.length === 0 && platform === 'darwin' ? MAC_STAND_IN : undefined)
+  )
+}
+
 export interface SystemAudioSwitchInput {
   device: Pick<Device, 'status'> | undefined
   /** captureConfig.audio.systemAudioEnabled: what the user asked for. */
   requested: boolean
+  /** A recording or livestream owns transport; a Clips ring does not. */
   sessionActive: boolean
+  /** A recording, livestream or Clips ring has a running audio bus. */
+  audioBusActive: boolean
   /** From `confirmedSystemAudioMix` for the active session. */
   confirmed: boolean | null
   /** The newest system-audio health issue for the active session. */
   issue: SystemAudioIssue | null
+  /**
+   * The running session is still opening the capture it started with
+   * (`systemAudioJoining`): its unmixed status is not the switch turning Off.
+   */
+  joining: boolean
 }
 
 export interface SystemAudioSwitchView {
@@ -48,7 +76,7 @@ export interface SystemAudioSwitchView {
   pending: 'on' | 'off' | null
   /** Shown only while it still explains the state (requested On, not mixed). */
   issue: SystemAudioIssue | null
-  /** The level meter: only while a session mixes system audio. */
+  /** The level meter: only while a running audio bus mixes system audio. */
   meter: boolean
   /** Short state text beside the switch. */
   stateLabel: string
@@ -75,7 +103,7 @@ export function systemAudioSwitchView(input: SystemAudioSwitchInput): SystemAudi
     return { ...hidden, visible: true, permissionRequired: true }
   }
 
-  if (!input.sessionActive) {
+  if (!input.audioBusActive) {
     return {
       ...hidden,
       visible: true,
@@ -97,6 +125,13 @@ export function systemAudioSwitchView(input: SystemAudioSwitchInput): SystemAudi
     }
   }
 
+  // A session that starts (a Clips ring at launch, a recording) mixes the
+  // microphone for a moment before its capture opens. The switch stays On
+  // and the meter rests until the level comes, so the row never blinks Off.
+  if (input.joining && input.requested && input.confirmed === false) {
+    return { ...hidden, visible: true, checked: true, disabled: false, stateLabel: 'On' }
+  }
+
   const mixed = input.confirmed ?? input.requested
   const pending =
     input.confirmed === null || input.confirmed === input.requested
@@ -114,6 +149,24 @@ export function systemAudioSwitchView(input: SystemAudioSwitchInput): SystemAudi
     stateLabel:
       pending === 'on' ? 'Turning on…' : pending === 'off' ? 'Turning off…' : mixed ? 'On' : 'Off'
   }
+}
+
+/** Plan 201 D6: when a resting System audio level moves, on Sources and the Studio. */
+export const SYSTEM_AUDIO_IDLE_LINE = 'Level shows while you record, go live, or keep Clips on.'
+
+/**
+ * Plan 201: explain an idle level only when Clips is off or failed. An armed
+ * ring that is off for a moment is starting or restarting, so keep the slot
+ * quiet until its bus returns. A starting ring never gets the off message.
+ */
+export function systemAudioIdleReason(input: {
+  audioBusActive: boolean
+  clipsArmed: boolean
+  clipsState: ReplayBufferState
+  checked: boolean
+}): 'clips-off' | null {
+  if (!input.checked || input.audioBusActive || input.clipsState === 'starting') return null
+  return !input.clipsArmed || input.clipsState === 'error' ? 'clips-off' : null
 }
 
 /**

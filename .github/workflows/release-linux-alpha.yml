@@ -14,6 +14,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   candidate:
@@ -73,6 +74,16 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy --no-self-update
           rustup default stable
 
+      - name: Cache cargo build
+        # Same pin as the Windows candidate. linux.yml already caches this on
+        # every main push; the Alpha candidate was rebuilding debug+release
+        # from a cold target/ (~15-21 min of the 20-30 min job).
+        uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97
+        with:
+          shared-key: release-linux-package-v1
+          cache-workspace-crates: true
+          cache-on-failure: false
+
       - name: Install Linux packaging dependencies
         # pkg-config, clang, libpipewire-0.3-dev, and libspa-0.2-dev match
         # linux.yml so libspa-sys / pipewire can compile.
@@ -94,18 +105,69 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Cache pinned Linux FFmpeg
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            vendor/ffmpeg/_build
+            vendor/ffmpeg/linux-x64
+          key: linux-ffmpeg-${{ hashFiles('vendor/ffmpeg/linux-pin.json') }}
+
       - name: Test Linux FFmpeg policy
         run: node --test scripts/lib/ffmpeg-linux-pin.test.mjs
 
       - name: Fetch and verify pinned Linux FFmpeg
         run: node scripts/fetch-ffmpeg-linux.mjs
 
-      - name: Run Linux unit and clippy gates
+      - name: Reuse same-commit Linux CI rust gates when they already passed
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: node scripts/reuse-release-ci-gates.mjs --spec linux-rust
+
+      - name: Run Linux clippy gate
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
         run: |
           set -euo pipefail
-          cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
-          cargo test -p videorc-backend
-          pnpm test:scripts
+          run_clippy() {
+            cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
+          }
+          if run_clippy; then
+            exit 0
+          fi
+          status=$?
+          if [ "${status}" -ne 137 ] && [ "${status}" -ne 143 ]; then
+            exit "${status}"
+          fi
+          echo "clippy was killed (exit ${status}); retrying once with one rustc job"
+          CARGO_BUILD_JOBS=1 run_clippy
+
+      - name: Run Linux unit gate
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+        run: |
+          set -euo pipefail
+          run_tests() {
+            cargo test -p videorc-backend
+          }
+          if run_tests; then
+            exit 0
+          fi
+          status=$?
+          if [ "${status}" -ne 137 ] && [ "${status}" -ne 143 ]; then
+            exit "${status}"
+          fi
+          echo "cargo test was killed (exit ${status}); retrying once with one rustc job"
+          CARGO_BUILD_JOBS=1 run_tests
+
+      - name: Run script tests
+        run: pnpm test:scripts
 
       - name: Preflight Linux Alpha candidate
         env:

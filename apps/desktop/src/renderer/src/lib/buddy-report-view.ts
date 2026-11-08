@@ -4,6 +4,7 @@ import type {
   CohostAlertKind,
   CohostReportChat,
   CohostReportCommands,
+  CohostReportGreetingSkips,
   CohostReportPayload,
   CohostReportPost,
   CohostReportQuestion,
@@ -12,6 +13,7 @@ import type {
   SessionSummary,
   StreamPlatform
 } from './backend'
+import { buddyDisplayName } from './buddy-auto-chat-view'
 import { cohostAskersLabel } from './cohost-view'
 import { dayLabel, durationMsLabel } from './format'
 import { CHAT_PLATFORM_LABELS } from './live-chat-view'
@@ -36,14 +38,10 @@ export const BUDDY_REPORT_UNTITLED = 'Untitled stream'
 export const BUDDY_REPORT_EMPTY_TITLE = 'No stream reports yet'
 
 /**
- * The backend names an unnamed session after its start, "Session 2026-10-02
- * 14:55" (`session_title` in recording.rs). The report's picker already names
- * the stream by that time, so the heading repeats it only for a real title
- * (plan 150, D10).
+ * The report's picker already names the stream by its start, so the heading
+ * repeats the title only for a real one (plan 150, D10).
  */
-export function isAutoSessionTitle(title: string): boolean {
-  return /^Session \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(title.trim())
-}
+export { isAutoSessionTitle } from './format'
 
 /** Rows a list shows before "Show all". */
 export const BUDDY_REPORT_LIST_CAP = 5
@@ -164,6 +162,33 @@ export interface BuddyReportPostRow {
   result: 'sent' | 'partial' | 'failed'
   resultLabel: string
   at: string | null
+  /** Plan 192 S2.2: who wrote a greeting, "AI" or "Line"; null when the
+   * report doesn't say (other posts, older reports). */
+  source: string | null
+}
+
+/**
+ * One line the Buddy said in its bubble on stream (plan 211 D11): written
+ * when it showed, automatic or from the Say box. Same row as a post, without
+ * platforms or a result: nothing went to chat.
+ */
+export interface BuddyReportSaidRow {
+  id: string
+  trigger: string
+  text: string
+  at: string | null
+  /** Greetings only: "AI" or "Line"; null when the report doesn't say. */
+  source: string | null
+}
+
+/** Plan 192 D7: the greetings Buddy skipped, and why, in plain words. */
+export interface BuddyReportGreetingSkipsView {
+  /** How many were skipped, all reasons together ("3"). Held greetings
+   * are not counted: they wait their turn and go out later. */
+  total: string
+  /** "Greetings skipped: 3 had no line. 2 greetings waited their turn."
+   * The reasons in a fixed order, each only when it happened. */
+  sentence: string
 }
 
 export type BuddyReportView =
@@ -186,8 +211,12 @@ export type BuddyReportView =
       alerts: BuddyReportAlertRow[]
       /** Plan 140 S3: null when no voice command was counted (or Buddy was off). */
       commands: BuddyReportCommandsView | null
+      /** Plan 211 D11: what the Buddy said in its bubble, oldest first. */
+      said: BuddyReportSaidRow[]
       /** Plan 164 D10: what the Buddy posted as you, oldest first. */
       posts: BuddyReportPostRow[]
+      /** Plan 192 D7: null when every greeting went out (or Buddy was off). */
+      greetingSkips: BuddyReportGreetingSkipsView | null
     }
 
 export interface BuddyReportViewInput {
@@ -197,6 +226,8 @@ export interface BuddyReportViewInput {
   session: Pick<SessionSummary, 'id' | 'title' | 'startedAt' | 'durationMs'> | null
   /** Buddy Live's stored switch, for what the Buddy-off note asks for. */
   buddyOn: boolean
+  /** The streamer's name for Buddy, for the skip line; absent, "Buddy". */
+  name?: string | null
 }
 
 // --- Questions ---------------------------------------------------------------
@@ -416,12 +447,69 @@ export function reportCommands(
   }
 }
 
+// --- Greetings skipped (plan 192 D7, plan 211 D9) -------------------------------
+
+/** Each reason as a clause, in the wire's order. */
+const GREETING_SKIP_CLAUSES: ReadonlyArray<
+  [keyof CohostReportGreetingSkips, (count: string, one: boolean, name: string) => string]
+> = [
+  ['noLine', (count) => `${count} had no line`],
+  // "{name} talks: Off" (plan 211 D1), or an older stream's "Chat posting: Off".
+  ['modeOff', (count, _one, name) => `${count} came while ${name} was set to Off`],
+  ['stale', (count, one) => `${count} ${one ? 'was' : 'were'} too old to greet`],
+  ['deduped', (count, one) => `${count} ${one ? 'was' : 'were'} already greeted`],
+  ['destinationFailed', (count) => `${count} couldn't be sent`],
+  ['youtubePaused', (count) => `${count} came while YouTube chat was paused`],
+  // Plan 211 D9: Bubble, with the Buddy on no output, so nobody would see it.
+  ['noBubble', (count, _one, name) => `${count} came while ${name} wasn't on stream`]
+]
+
+/**
+ * The non-zero reasons as one plain line, null when there are none. Neither
+ * said nor posted ("skipped"), so the line reads true for Bubble and Suggest
+ * alike, and for older reports.
+ */
+export function reportGreetingSkips(
+  skipped: CohostReportGreetingSkips | undefined,
+  name?: string | null
+): BuddyReportGreetingSkipsView | null {
+  if (!skipped) return null
+  const who = buddyDisplayName(name)
+  const counts = GREETING_SKIP_CLAUSES.map(([key, clause]) => ({
+    count: Math.max(0, Math.round(skipped[key] ?? 0)),
+    clause
+  })).filter((entry) => entry.count > 0)
+  // A held greeting waited for the limits and went out later (or in a
+  // collapsed burst), so it is said apart from the ones skipped.
+  const held = Math.max(0, Math.round(skipped.held ?? 0))
+  if (counts.length === 0 && held === 0) return null
+  const sentences: string[] = []
+  if (counts.length > 0) {
+    const reasons = counts.map(({ count, clause }) =>
+      clause(formatReportCount(count), count === 1, who)
+    )
+    sentences.push(`Greetings skipped: ${reasons.join(', ')}.`)
+  }
+  if (held > 0) {
+    sentences.push(
+      held === 1
+        ? '1 greeting waited its turn.'
+        : `${formatReportCount(held)} greetings waited their turn.`
+    )
+  }
+  return {
+    total: formatReportCount(counts.reduce((sum, entry) => sum + entry.count, 0)),
+    sentence: sentences.join(' ')
+  }
+}
+
 // --- The card ------------------------------------------------------------------
 
 export function buddyReportView({
   payload,
   session,
-  buddyOn
+  buddyOn,
+  name
 }: BuddyReportViewInput): BuddyReportView {
   if (!payload) return { kind: 'empty', message: BUDDY_REPORT_EMPTY }
   const report = payload.report
@@ -454,7 +542,9 @@ export function buddyReportView({
       promises: [],
       alerts: [],
       commands: null,
-      posts: []
+      said: [],
+      posts: [],
+      greetingSkips: null
     }
   }
   return {
@@ -485,6 +575,14 @@ export function buddyReportView({
       at: streamOffsetLabel(alert.firstSeenAt, startedAt)
     })),
     commands: reportCommands(report.commands),
+    // An older report has no `said`: nothing to show, never an error.
+    said: (report.said ?? []).map((line) => ({
+      id: line.id,
+      trigger: POST_TRIGGER_LABELS[line.trigger],
+      text: line.text,
+      at: streamOffsetLabel(line.at, startedAt),
+      source: line.source ? POST_SOURCE_LABELS[line.source] : null
+    })),
     posts: (report.posts ?? []).map((post) => ({
       id: post.id,
       trigger: POST_TRIGGER_LABELS[post.trigger],
@@ -492,9 +590,17 @@ export function buddyReportView({
       platforms: uniquePlatforms(post.destinations),
       result: post.result,
       resultLabel: POST_RESULT_LABELS[post.result],
-      at: streamOffsetLabel(post.at, startedAt)
-    }))
+      at: streamOffsetLabel(post.at, startedAt),
+      source: post.source ? POST_SOURCE_LABELS[post.source] : null
+    })),
+    greetingSkips: reportGreetingSkips(report.greetings.skipped, name)
   }
+}
+
+/** Plan 192 S2.2: a small neutral tag on a greeting. */
+const POST_SOURCE_LABELS: Record<NonNullable<CohostReportPost['source']>, string> = {
+  ai: 'AI',
+  line: 'Line'
 }
 
 const POST_TRIGGER_LABELS: Record<CohostReportPost['trigger'], string> = {

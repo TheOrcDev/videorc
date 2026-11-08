@@ -1,5 +1,11 @@
-import type { CameraTransform, LayoutSettings, SceneSource } from '@/lib/backend'
-import { layoutPresetOrientation, type LayoutOrientation } from '@/lib/capture'
+import type {
+  CameraTransform,
+  LayoutSettings,
+  SceneSource,
+  SceneSourceKind,
+  SourceTransformOverride
+} from '@/lib/backend'
+import { layoutPresetOrientation, normalizeSourceCrop, type LayoutOrientation } from '@/lib/capture'
 
 // Freeform memory (plan 174, C-4). Choosing a preset scene leaves Freeform
 // and clears its per-source overrides, so one stray click used to lose an
@@ -29,20 +35,73 @@ function transformOf(source: Pick<SceneSource, 'transform'>): CameraTransform {
   return { x, y, width, height }
 }
 
+/** Only the screen side crops (plan 213 G2): the camera frames itself with
+ * zoom and pan, and the test pattern is drawn at the canvas size. */
+export function sourceCroppable(kind: SceneSourceKind): boolean {
+  return kind === 'screen' || kind === 'window'
+}
+
+/** A source as Freeform saves it: its box, and the screen's crop with it. */
+export function sourceOverrideOf(
+  source: Pick<SceneSource, 'kind' | 'transform'>
+): SourceTransformOverride {
+  const box = transformOf(source)
+  return sourceCroppable(source.kind) ? { ...box, ...normalizeSourceCrop(source.transform) } : box
+}
+
+/**
+ * Where a source with no Freeform memory starts: its box as Freeform should
+ * store it, or null for the frame the scene draws it with now. Plan 216 B6
+ * (D2): a screen on Fit with a known size starts at its PICTURE, the box
+ * the stage shows, so its handles sit on the picture from the first
+ * moment and nothing moves on entry.
+ */
+export type FreeformEntryBox = (
+  source: Pick<SceneSource, 'id' | 'transform'>
+) => CameraTransform | null
+
 /**
  * The overrides Freeform starts from: the remembered placement of every
- * source the scene still has, and where the scene draws it now for a source
- * with no memory (so nothing visibly moves).
+ * source the scene still has, and for a source with no memory its entry
+ * box (plan 216 B6) or where the scene draws it now, so nothing visibly
+ * moves.
  */
 export function freeformEntryOverrides(
   memory: FreeformMemory,
   orientation: LayoutOrientation,
-  sources: readonly Pick<SceneSource, 'id' | 'transform'>[]
+  sources: readonly Pick<SceneSource, 'id' | 'transform'>[],
+  entryBox: FreeformEntryBox = () => null
 ): FreeformOverrides {
   const remembered = memory[orientation] ?? {}
   return Object.fromEntries(
-    sources.map((source) => [source.id, remembered[source.id] ?? transformOf(source)])
+    sources.map((source) => [
+      source.id,
+      remembered[source.id] ?? entryBox(source) ?? transformOf(source)
+    ])
   )
+}
+
+/**
+ * The layout patch that enters Freeform (plan 174, C-4): the arrangement a
+ * preset last replaced in this orientation, and where the scene draws every
+ * other source now, so nothing visibly moves. The Scene page's Freeform
+ * button, its "Make freeform" hint and an agent's move off a preset (plan
+ * 209 D22) all send this one patch.
+ */
+export function freeformEntryPatch(
+  orientation: LayoutOrientation,
+  sources: readonly Pick<SceneSource, 'id' | 'transform'>[],
+  entryBox?: FreeformEntryBox
+): Pick<LayoutSettings, 'arrangementMode' | 'sourceTransformOverrides'> {
+  return {
+    arrangementMode: 'freeform',
+    sourceTransformOverrides: freeformEntryOverrides(
+      rememberedFreeform(),
+      orientation,
+      sources,
+      entryBox
+    )
+  }
 }
 
 // One memory per window for the app's lifetime: the provider notes a Freeform

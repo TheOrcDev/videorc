@@ -21,10 +21,12 @@ import {
 } from './schedule-actions.mjs'
 import { STATE_FILE, TICK_LOCK_FILE, readState, writeState } from './schedule-state.mjs'
 import { validateScheduleTable } from './schedule-table.mjs'
-import { reportSince, runTick } from './schedule-tick.mjs'
+import { parseLinuxBootTime, readBootTime, reportSince, runTick } from './schedule-tick.mjs'
 
-// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
-const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
 
 const MADRID = 'Europe/Madrid'
 const POLICY = Object.freeze({
@@ -143,7 +145,7 @@ test('policy problems, enabled false and schedule.enabled false end the tick qui
 
 test(
   'a due run slot runs once, is recorded, logged and not run again on the next tick',
-  macOnly,
+  posixOnly,
   async () => {
     const dir = await freshDir()
     await seed(dir, { days: { '2026-10-12': { 'update-check': { status: 'passed' } } } })
@@ -601,6 +603,70 @@ test('small parsers: boot time, install record, log pruning', async () => {
   await writeFile(join(dir, 'logs', 'schedule.log'), '')
   assert.deepEqual(await pruneLogs(dir, '2026-10-12'), ['schedule-2026-08-01.log'])
 })
+
+// Plan 179: what the kernel prints on a Linux box (trimmed).
+const PROC_STAT = [
+  'cpu  10132153 290696 3084719 46828483 16683 0 25195 0 0 0',
+  'cpu0 1393280 32966 572056 13343292 6130 0 17875 0 0 0',
+  'cpu1 1335812 30121 401883 13382735 2187 0 2433 0 0 0',
+  'intr 199292311 57 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 31 0',
+  'ctxt 1990473440',
+  'btime 1760239860',
+  'processes 2915420',
+  'procs_running 2',
+  'procs_blocked 0',
+  'softirq 74580225 0 18217040 2 6211383 1081 0 3214 21064853 1013 29081639',
+  ''
+].join('\n')
+
+test(
+  'plan 179: boot time comes from /proc/stat btime on Linux and kern.boottime on macOS',
+  posixOnly,
+  async () => {
+    assert.equal(parseLinuxBootTime(PROC_STAT), 1_760_239_860)
+    assert.equal(typeof parseLinuxBootTime(PROC_STAT), typeof parseBootTime('{ sec = 1 }'))
+    assert.equal(parseLinuxBootTime('cpu 1 2 3\nctxt 9\n'), null)
+    assert.equal(parseLinuxBootTime('xbtime 12\n'), null)
+    assert.equal(parseLinuxBootTime(''), null)
+
+    const noExec = async () => {
+      throw new Error('Linux never runs sysctl')
+    }
+    const reads = []
+    const linux = await readBootTime({
+      platform: 'linux',
+      exec: noExec,
+      readFile: async (path) => {
+        reads.push(path)
+        return PROC_STAT
+      }
+    })
+    assert.equal(linux, 1_760_239_860)
+    assert.deepEqual(reads, ['/proc/stat'])
+    const unreadable = await readBootTime({
+      platform: 'linux',
+      exec: noExec,
+      readFile: async () => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+      }
+    })
+    assert.equal(unreadable, null)
+
+    const execs = []
+    const mac = await readBootTime({
+      platform: 'darwin',
+      exec: async (command, args) => {
+        execs.push([command, ...args])
+        return { stdout: '{ sec = 1760000000, usec = 12345 } Mon Oct 12 03:31:00 2026\n' }
+      },
+      readFile: async () => {
+        throw new Error('macOS never reads /proc/stat')
+      }
+    })
+    assert.equal(mac, 1_760_000_000)
+    assert.deepEqual(execs, [['/usr/sbin/sysctl', '-n', 'kern.boottime']])
+  }
+)
 
 test('a corrupt state file stops the schedule loudly', async () => {
   const dir = await freshDir()

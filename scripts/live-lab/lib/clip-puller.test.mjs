@@ -17,8 +17,10 @@ import {
   ytDlpUrlArgs
 } from './clip-puller.mjs'
 
-// The live lab runs on macOS only (launchd, pf, codesign, POSIX paths and modes).
-const macOnly = { skip: process.platform === 'win32' && 'the live lab runs on macOS only' }
+// The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
+const posixOnly = {
+  skip: process.platform === 'win32' && 'the live lab runs on macOS and Linux only'
+}
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const HLS =
@@ -163,7 +165,7 @@ test('analyzeClip uses the recording analyzer + A/V sync and tolerates no flash 
 
 test(
   'clean clip: analysis JSON kept 0600, media deleted, signed URL never stored',
-  macOnly,
+  posixOnly,
   async () => {
     await withDir(async (dir) => {
       const { runner, calls } = fakeRunner()

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Post a short release announcement to the Videorc Discord channel.
 //
-// Runs at the END of the release process (after the feed is verified) so
-// followers see what the update brings. The message is intentionally SHORT:
-// the release title + up to a few highlights from the changelog entry — the
-// full notes live on the website.
+// Runs at the END of the release process (after that platform is publicly
+// live) so followers see what the update brings. The message is intentionally
+// SHORT: the release title + up to a few highlights from the changelog
+// entry — the full notes live on the website. Alpha entries name the
+// platform and channel and link to the matching download page.
 //
 //   node scripts/notify-discord-release.mjs [releaseId] [--dry-run]
 //
@@ -26,6 +27,7 @@ const WEBHOOK_ENV = 'VIDEORC_DISCORD_RELEASE_WEBHOOK'
 const MAX_HIGHLIGHTS = 4
 const WINDOWS_ALPHA_DOWNLOAD_URL = 'https://www.videorc.com/download/windows'
 const DOWNLOAD_CHOOSER_URL = 'https://www.videorc.com/download'
+const PLATFORM_LABELS = { macos: 'macOS', windows: 'Windows', linux: 'Linux' }
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
 /** Strip inline markdown emphasis/links so a highlight reads clean in Discord. */
@@ -39,12 +41,11 @@ function stripInline(text) {
 /** Build the short Discord message from a changelog entry. */
 export function buildDiscordReleaseMessage(entry) {
   const platforms = entry.platforms ?? ['macos']
-  const isWindowsAlpha = entry.channel === 'alpha' && platforms.includes('windows')
-  const isWindowsOnly = platforms.length === 1 && platforms[0] === 'windows'
-  const version = isWindowsAlpha
+  const isAlpha = entry.channel === 'alpha'
+  const version = isAlpha
     ? formatReleaseVersion(entry.version)
     : entry.version.replace(/-beta\.\d+$/, '')
-  const audience = isWindowsAlpha ? ` for ${formatPlatforms(platforms)}` : ''
+  const audience = isAlpha ? ` for ${formatPlatforms(platforms)}` : ''
   const highlights = entry.highlights
     .slice(0, MAX_HIGHLIGHTS)
     .map((item) => `• ${stripInline(item)}`)
@@ -52,19 +53,25 @@ export function buildDiscordReleaseMessage(entry) {
   if (entry.highlights.length > MAX_HIGHLIGHTS) {
     lines.push('', '…and more.')
   }
-  lines.push(
-    '',
-    isWindowsAlpha
-      ? isWindowsOnly
-        ? `Download the Windows Alpha: ${WINDOWS_ALPHA_DOWNLOAD_URL}`
-        : `Choose your Alpha download: ${DOWNLOAD_CHOOSER_URL}`
-      : 'Update from Settings → About, or it applies on next launch.'
-  )
+  const downloadLine = isAlpha ? alphaDownloadLine(platforms) : null
+  if (downloadLine) {
+    lines.push('', downloadLine)
+  }
   return lines.join('\n')
 }
 
 function formatPlatforms(platforms) {
-  return platforms.map((platform) => (platform === 'macos' ? 'macOS' : 'Windows')).join(' and ')
+  return platforms.map((platform) => PLATFORM_LABELS[platform] ?? platform).join(' and ')
+}
+
+function alphaDownloadLine(platforms) {
+  if (platforms.length === 1 && platforms[0] === 'windows') {
+    return `Download the Windows Alpha: ${WINDOWS_ALPHA_DOWNLOAD_URL}`
+  }
+  if (platforms.length === 1 && platforms[0] === 'linux') {
+    return `Download the Linux Alpha: ${DOWNLOAD_CHOOSER_URL}`
+  }
+  return `Choose your Alpha download: ${DOWNLOAD_CHOOSER_URL}`
 }
 
 function formatReleaseVersion(version) {

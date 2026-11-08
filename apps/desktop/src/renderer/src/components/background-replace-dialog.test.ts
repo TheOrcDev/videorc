@@ -4,12 +4,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BackgroundAssetsProvider } from '@/hooks/use-background-assets'
-import {
-  applySlot,
-  createDefaultRegistry,
-  createImportedAsset,
-  type BackgroundAssetRegistry
-} from '@/lib/background-assets'
+import { createDefaultRegistry, type BackgroundAssetRegistry } from '@/lib/background-assets'
+import { applySlot, createImportedAsset } from '@/lib/background-library'
 import { STORAGE_KEYS } from '@/lib/capture'
 import { AssetsTab } from '@/components/tabs/assets-tab'
 import { BackgroundReplaceDialog, radioStep } from './background-replace-dialog'
@@ -24,6 +20,7 @@ const mocked = vi.hoisted(() => ({
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
 vi.mock('@/lib/toast', () => ({ toast: mocked.toast }))
 vi.mock('@/components/takeover-screens-section', () => ({ TakeoverScreensSection: () => null }))
+vi.mock('@/components/banners-section', () => ({ BannersSection: () => null }))
 
 const imported = createImportedAsset({
   id: 'imported-1',

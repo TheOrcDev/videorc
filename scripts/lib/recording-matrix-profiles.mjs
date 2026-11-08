@@ -37,7 +37,12 @@ export const RECORDING_MATRIX_PROFILES = [
   { label: 'vertical-4K30', width: 2160, height: 3840, fps: 30, bitrateKbps: 30000 },
   { label: 'floor-360p24', width: 640, height: 360, fps: 24, bitrateKbps: 2000 },
   { label: 'vertical-1080p60', width: 1080, height: 1920, fps: 60, bitrateKbps: 12000 },
-  { label: 'vertical-1440p60', width: 1440, height: 2560, fps: 60, bitrateKbps: 16000 }
+  { label: 'vertical-1440p60', width: 1440, height: 2560, fps: 60, bitrateKbps: 16000 },
+  // Portrait twins of the performance-check floor rungs: 9:16 keeps the size
+  // the user chose (verticalTwinVideo in capture.ts), so 720p30 records
+  // 720x1280 and 540p30 records 540x960 as Custom.
+  { label: 'vertical-720p30', width: 720, height: 1280, fps: 30, bitrateKbps: 4000 },
+  { label: 'vertical-540p30', width: 540, height: 960, fps: 30, bitrateKbps: 2500 }
 ]
 
 export function selectRecordingMatrixProfiles(matrixOnly) {

@@ -60,6 +60,53 @@ const waitFor = async (predicate, description) => {
     `Timed out: ${description}; last error: ${lastError}; last state: ${JSON.stringify(lastState)}`
   )
 }
+// Save is off while a scene commit is in flight, and on Linux the Clips ring
+// re-arms (and commits) after a source change, so a save can land in that
+// window: wait for Save like a user would and name each refusal. save()
+// writes the library and returns at once; the list reaches the smoke state on
+// a later render, so one read can miss it or show the old entry (ogre,
+// 2026-11-06).
+const saveScene = async (name, updateId) => {
+  const args = [name, updateId]
+    .filter((value) => value !== undefined)
+    .map((value) => JSON.stringify(value))
+  const before = (await state()).scenes.find((scene) => scene.id === updateId)?.updatedAt
+  const started = Date.now()
+  for (;;) {
+    const attempt = await evaluate(`
+      const hook = window.__videorcSmokeScenePresets;
+      const current = hook.state();
+      const saved = hook.save(${args.join(', ')});
+      const d = current.diagnostics ?? {};
+      return { saved, canSave: current.canSave, pendingId: current.pendingId,
+        pendingLayout: current.pendingLayout, replay: d.replay?.state ?? null,
+        replayStartInFlight: d.replay?.startInFlight ?? null,
+        visualTransactionPending: d.visualTransactionPending ?? null,
+        sourceDeviceSwitchPending: d.sourceDeviceSwitchPending ?? null,
+        layoutIntentAwaitingProof: d.layoutIntentAwaitingProof ?? null,
+        sceneGesturePending: d.sceneGesturePending ?? null,
+        confirmedSceneRevision: d.confirmedSceneRevision ?? null,
+        backendSceneRevision: d.backendSceneRevision ?? null };
+    `)
+    if (attempt.saved === true) break
+    if (attempt.canSave && attempt.layoutIntentAwaitingProof === null) {
+      throw new Error(`Save refused with Save on: ${name}: ${JSON.stringify(attempt)}`)
+    }
+    console.log(`[scene-presets] ${name}: Save was off, waiting: ${JSON.stringify(attempt)}`)
+    if (Date.now() - started > timeoutMs) throw new Error(`Save stayed off: ${name}`)
+    await waitFor((current) => current.canSave, `Save on for ${name}`)
+  }
+  const saved = (current) =>
+    current.scenes.find(
+      (scene) =>
+        scene.name === name &&
+        (updateId === undefined || scene.id === updateId) &&
+        scene.updatedAt !== before
+    )
+  const scene = saved(await waitFor((current) => Boolean(saved(current)), `saved scene ${name}`))
+  console.log(`[scene-presets] ${name} listed ${Date.now() - started} ms after save`)
+  return scene
+}
 const assertCameraOff = (current, description) => {
   assert.equal(current.visual.sources.cameraOff, true, `${description}: Camera Off intent missing`)
   assert.equal(current.visual.sources.cameraId, undefined, `${description}: camera reactivated`)
@@ -130,8 +177,7 @@ try {
     'first background'
   )
   assertCameraOff(await chooseCameraOff(), 'before saving A')
-  assert.equal(await evaluate(`return window.__videorcSmokeScenePresets.save('Smoke A')`), true)
-  const first = (await state()).scenes.find((scene) => scene.name === 'Smoke A')
+  const first = await saveScene('Smoke A')
   assert.equal(first.visual.sources.cameraOff, true)
   await requestSmokeCommand(smoke, 'select-camera-device', { settleMs: 500 }, { timeoutMs })
   await waitFor(
@@ -141,22 +187,31 @@ try {
       Boolean(current.visual.sources.cameraId),
     'Camera On before saving B'
   )
+  // Plan 210 D3: a framing or background edit made while Smoke A is on
+  // saves into A. Choosing a layout from Layouts leaves A first, the way a
+  // user starts a new look, so B's look is its own and A keeps the one it
+  // was saved with. The camera pick above never leaves or rewrites A.
   await evaluate(
-    `window.__videorcSmokeScenePresets.background('bg-02'); window.__videorcSmokeScenePresets.layout({cameraZoom: 175}); return true`
+    `window.__videorcSmokeScenePresets.layout({layoutPreset: 'screen-only', cameraZoom: 175}); return true`
   )
-  // Apply the background after the layout settles to exercise independent user edits.
   await waitFor(
-    (current) => current.canSave && current.visual.layout.cameraZoom === 175,
+    (current) =>
+      current.canSave && current.activeId === null && current.visual.layout.cameraZoom === 175,
     'second framing'
   )
+  // Apply the background after the layout settles to exercise independent user edits.
   await evaluate(`window.__videorcSmokeScenePresets.background('bg-02'); return true`)
   await waitFor(
     (current) => current.canSave && current.visual.background?.assetId === 'builtin-bg-02',
     'second background'
   )
-  assert.equal(await evaluate(`return window.__videorcSmokeScenePresets.save('Smoke B')`), true)
-  let second = (await state()).scenes.find((scene) => scene.name === 'Smoke B')
+  let second = await saveScene('Smoke B')
   assert.equal(second.visual.sources.cameraOff, false)
+  assert.deepEqual(
+    (await state()).scenes.find((scene) => scene.id === first.id)?.visual,
+    first.visual,
+    "B's edits left Smoke A as it was saved"
+  )
   assert.equal(
     await evaluate(
       `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(first.id)})`
@@ -182,13 +237,7 @@ try {
   // Update B with explicit Off so both encoded backgrounds also exercise Off
   // through the live apply and final stop, without changing audio ownership.
   assertCameraOff(await chooseCameraOff(), 'before updating B')
-  assert.equal(
-    await evaluate(
-      `return window.__videorcSmokeScenePresets.save('Smoke B', ${JSON.stringify(second.id)})`
-    ),
-    true
-  )
-  second = (await state()).scenes.find((scene) => scene.id === second.id)
+  second = await saveScene('Smoke B', second.id)
   assert.equal(second.visual.sources.cameraOff, true)
   try {
     await requestSmokeCommand(
@@ -241,10 +290,16 @@ try {
     false
   )
   assert.equal((await state()).activeId, first.id)
+  // Plan 210 D3: an edit made while a saved scene is on saves into it, so
+  // the checkpoint is never "modified" and the library carries the edit.
   await evaluate(`window.__videorcSmokeScenePresets.layout({cameraZoom: 145}); return true`)
   await waitFor(
-    (current) => current.canSave && current.modified && current.visual.layout.cameraZoom === 145,
-    'modified working checkpoint'
+    (current) =>
+      current.canSave &&
+      !current.modified &&
+      current.visual.layout.cameraZoom === 145 &&
+      current.scenes.find((scene) => scene.id === first.id)?.visual.layout.cameraZoom === 145,
+    'auto-saved working checkpoint'
   )
   await evaluate(`window.__videorcSmokeScenePresets.removeBackground('bg-03'); return true`)
   await waitFor(
@@ -359,13 +414,7 @@ try {
     'camera-only without background asset'
   )
   const selectedCameraId = (await state()).visual.sources.cameraId
-  assert.equal(
-    await evaluate(`return window.__videorcSmokeScenePresets.save('Visible camera control')`),
-    true
-  )
-  const visibleCamera = (await state()).scenes.find(
-    (scene) => scene.name === 'Visible camera control'
-  )
+  const visibleCamera = await saveScene('Visible camera control')
   const setCameraVisible = async (visible) => {
     const scene = await request(ws, timeoutMs, 'scene.get')
     const camera = scene.sources.find((source) => source.kind === 'camera')
@@ -375,9 +424,10 @@ try {
       const select = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === ${JSON.stringify('Select ')} + ${JSON.stringify(camera.name)});
       if (!select || select.disabled) throw new Error('Camera inspector selection unavailable');
       select.click();
+      // The id is on the Switch's hidden checkbox input (Base UI).
       const toggle = await waitFor(${JSON.stringify('[id="source-visible-' + camera.id + '"]')});
       if (toggle.disabled) throw new Error('Camera visibility control unavailable');
-      if ((toggle.getAttribute('aria-checked') === 'true') !== ${visible}) toggle.click();
+      if (toggle.checked !== ${visible}) toggle.click();
       return true;
     `)
     const confirmed = await waitFor(
@@ -392,30 +442,45 @@ try {
     assert.equal(confirmed.visual.sources.cameraOff, false, 'Visibility became Camera Off')
     return confirmed
   }
-  assert.equal((await setCameraVisible(false)).modified, true)
+  // Plan 210 D3: hiding the camera saves into the scene on stream.
+  const autoSavedHidden = await setCameraVisible(false)
+  assert.equal(autoSavedHidden.modified, false)
   assert.equal(
-    await evaluate(
-      `return window.__videorcSmokeScenePresets.save('Hidden camera', ${JSON.stringify(visibleCamera.id)})`
-    ),
-    true
+    autoSavedHidden.scenes.find((scene) => scene.id === visibleCamera.id).visual.layout
+      .sourceVisibility.camera,
+    false
   )
-  const hiddenCamera = (await state()).scenes.find((scene) => scene.id === visibleCamera.id)
+  const hiddenCamera = await saveScene('Hidden camera', visibleCamera.id)
   assert.equal(hiddenCamera.visual.layout.sourceVisibility.camera, false)
   await evaluate(`window.__videorcSmokeScenePresets.layout({cameraZoom: 110}); return true`)
   await waitFor(
     (current) =>
       current.canSave &&
-      current.modified &&
+      !current.modified &&
       current.visual.layout.cameraZoom === 110 &&
-      !current.visual.layout.sourceVisibility.camera,
-    'hidden camera Save-as framing'
+      !current.visual.layout.sourceVisibility.camera &&
+      current.scenes.find((scene) => scene.id === visibleCamera.id)?.visual.layout.cameraZoom ===
+        110,
+    'hidden camera framing saved into the scene'
   )
-  assert.equal(
-    await evaluate(`return window.__videorcSmokeScenePresets.save('Hidden camera copy')`),
-    true
+  const hiddenCopy = await saveScene('Hidden camera copy')
+  // Plan 210 D3: leave the copy first (a layout leaves a saved scene), so
+  // showing the camera saves into no scene and both stay hidden for the
+  // live apply below.
+  await evaluate(
+    `window.__videorcSmokeScenePresets.layout({layoutPreset: 'camera-only'}); return true`
   )
-  const hiddenCopy = (await state()).scenes.find((scene) => scene.name === 'Hidden camera copy')
-  assert.equal((await setCameraVisible(true)).modified, true)
+  await waitFor(
+    (current) => current.canSave && current.activeId === null && !current.pendingLayout,
+    'left the hidden copy'
+  )
+  const shown = await setCameraVisible(true)
+  assert.equal(shown.modified, false)
+  for (const id of [hiddenCopy.id, hiddenCamera.id])
+    assert.equal(
+      shown.scenes.find((scene) => scene.id === id).visual.layout.sourceVisibility.camera,
+      false
+    )
   assert.equal(
     await evaluate(
       `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(hiddenCamera.id)})`

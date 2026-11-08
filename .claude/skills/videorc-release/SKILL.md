@@ -5,17 +5,22 @@ description: Cut and publish coordinated Videorc desktop releases for the signed
 
 # Videorc release
 
-Ship one new numeric desktop version on both supported tracks:
+Ship one new numeric desktop version on the supported tracks:
 
 - macOS arm64 Beta: `<version>-beta.<N>`;
-- Windows 11 x64 Alpha: `<version>-alpha.1`.
+- Windows 11 x64 Alpha: `<version>-alpha.1`;
+- Linux x64 Alpha candidate: the same `<version>-alpha.1` (public download
+  still owed; announce only when that download is public).
 
-Target both platforms unless the user explicitly requests a platform-only
+Target macOS and Windows unless the user explicitly requests a platform-only
 release. Do not silently skip Windows because macOS can be released locally.
+Linux may run in parallel; it is not required for coordinated-release
+completion.
 
-Before acting, read both sources of truth in full:
+Before acting, read these sources of truth in full:
 
-- `docs/releases/release-runbook.md` for macOS, shared versioning, and rollback;
+- `docs/releases/release-runbook.md` for macOS, shared versioning, Linux
+  Alpha candidate notes, and rollback;
 - `docs/releases/windows-alpha-runbook.md` for Windows signing, candidate,
   physical acceptance, pilot, public promotion, and rollback.
 
@@ -64,6 +69,9 @@ runbooks' detailed gates.
   unless the runbook explicitly restores that requirement.
 - Verify the Developer ID identity `Uros Miric (C2PA37RB58)` is available in the
   keychain, or provide the documented `CSC_LINK` alternative.
+- Load `VIDEORC_MACOS_PROFILE_APP` from `~/.videorc-release.env` (plan 214,
+  Videorc Camera, the one profile; see the section below). If the file still
+  has `VIDEORC_MACOS_PROFILE_CAMERA`, remove that line: the preflight fails on it.
 - Load `VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*`
   and `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` from `~/.videorc-release.env`
   (whichever origins are still configured). The upload publishes to **every
@@ -123,6 +131,11 @@ pnpm package:backend:macos && pnpm ffmpeg:build:macos \
   && pnpm release:manifest:macos \
   && pnpm release:validate:macos
 ```
+
+`package:backend:macos` waits while Videorc is streaming live on this Mac: a
+release build started mid-stream on 2026-11-04 took the CPU the owner's stream
+needed. Never skip the wait with `VIDEORC_BUILD_WHILE_LIVE=1` unless the owner
+asks; report that the build is waiting for the stream to end.
 
 This local path intentionally bypasses `release:preflight:macos`, whose
 `CSC_LINK` requirement does not apply to the keychain identity. Do not bypass
@@ -241,7 +254,37 @@ Never rebuild between acceptance and either promotion. Never substitute CI,
 VM-only, file-size, branch URL, or mutable-tag evidence for the exact physical
 record.
 
-## 5. Verify the coordinated production release
+## 5. Store the Linux Alpha candidate
+
+Linux is a third, candidate-only Alpha track. It is not required for a
+coordinated macOS+Windows completion. Follow the Linux section in
+`docs/releases/release-runbook.md` and `docs/distribution.md`. Public
+download, `promote-linux-alpha.yml`, and the videorc-web button are still
+owed; never treat a private candidate as shipped.
+
+1. Reuse the prepared `<version>-alpha.1` changelog entry (include `linux`
+   in `platforms`) rather than bumping the numeric version again.
+2. From current protected `main`, dispatch:
+
+   ```sh
+   gh workflow run release-linux-alpha.yml --ref main \
+     -f release_id=<version>-alpha.1
+   ```
+
+3. Record the workflow URL, AppImage SHA-256, candidate prefix, and any
+   owner waiver. Keep the candidate private.
+4. If the step changes `VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY` (or any
+   other videorc-web production env), apply it with `pnpm release:web:redeploy`
+   and record its `web-production: PASS` output. Never `vercel deploy --prod`
+   from a videorc-web checkout and never redeploy whatever production serves
+   now: on 2026-11-05..07 that shipped 2026-10-10 web code and broke X chat for
+   every desktop.
+
+When the Linux download is actually public, preview then send its Discord
+announcement (see section 6). Hold that post until then. Never print
+`VIDEORC_DISCORD_RELEASE_WEBHOOK`.
+
+## 6. Verify the coordinated production release
 
 - Verify the signed-in Windows download returns the accepted installer and
   visible SHA-256.
@@ -251,15 +294,55 @@ record.
   downloaded SHA-256.
 - Verify the macOS DMG, checksum, `latest-mac.yml`, zip, and blockmap still point
   to the macOS release prepared above.
-- Authorize the web Windows `public` state only after those checks pass, deploy,
-  and rerun the two-platform smoke matrix.
+- Authorize the web Windows `public` state only after those checks pass, deploy
+  with `pnpm release:web:redeploy`, and rerun the two-platform smoke matrix.
+- Before recording the release, `pnpm release:web:check` must print
+  `web-production: PASS` (production serves the GitHub build of videorc-web
+  `main`).
 - Update `docs/releases/<version>.md` with both platform outcomes, workflow and
   evidence links, rollback status, and any explicitly incomplete external gate.
 - Render/send announcements from the exact platform changelog entry only after
-  that platform is live. Preview with
+  that platform is publicly live. Preview with
   `pnpm release:notify:discord <releaseId> --dry-run`, then send with
-  `pnpm release:notify:discord <releaseId>`. Hold all Windows announcements
-  until public promotion.
+  `pnpm release:notify:discord <releaseId>`. Hold the Windows post until
+  public promotion. Hold the Linux post until its download is public. If one
+  Alpha entry names both Windows and Linux, send that post only when every
+  named platform is publicly live. Never print
+  `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
+
+## Videorc Camera (plan 214)
+
+- **Secret:** `VIDEORC_MACOS_PROFILE_APP`, the one Developer ID provisioning
+  profile, for the app (base64 in GitHub, base64 or a path in
+  `~/.videorc-release.env`; the owner's copy is
+  `~/.videorc-signing/videorc-app.provisionprofile`). The extension embeds no
+  profile (spike P0a). `release:preflight:macos` fails without it, and fails
+  on the retired `VIDEORC_MACOS_PROFILE_CAMERA` when it is still set.
+- **Renewal:** the profile embeds the Developer ID Application certificate,
+  which expires 2027-02-01; renewing the certificate (`CSC_LINK`, the keychain
+  identity) means regenerating the profile too, or the packaging hook stops
+  with "does not embed the Developer ID Application certificate signing this
+  build". The recipe (a development-signed `xcodebuild archive` with
+  `-allowProvisioningUpdates -allowProvisioningDeviceRegistration`, then
+  `xcodebuild -exportArchive` with method `developer-id`, which creates the
+  profile) is in `docs/releases/macos-signing.md`, "Renewal". The hook also
+  warns 30 days before the profile's own date and refuses an expired one.
+- **Approval:** the user approves the extension in System Settings → General
+  → Login Items & Extensions → Camera Extensions (macOS 15 to 26); an update
+  replaces it without re-approval or a reboot.
+- **The validator's lines:** `release:validate:macos` adds the
+  `Videorc Camera extension ...` checks (bundle identifier, package type SYSX,
+  mach service, usage description, signature, exactly sandbox + app group,
+  embeds no profile), `app embedded profile (Videorc Camera)`,
+  `one embedded profile, in the app only`,
+  `system extension entitlements (app)`, and one
+  `inherit entitlements only (...)` line per other executable (bare tools,
+  helpers, crashpad, ShipIt). A build log that says `Videorc Camera skipped`
+  is not a release.
+- **Rollback:** a build without the profile never passes validation. Never
+  unset the secret to ship without the camera; that is a reviewed PR that
+  removes the hook, the entitlements split and the validator checks together.
+  A shipped camera problem rolls forward with a higher version.
 
 ## Hard-won rules
 

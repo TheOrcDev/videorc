@@ -912,6 +912,7 @@ fn normalize_item(
         details: event_details(&item.snippet, message_type),
         reply: None,
         first_message: false,
+        first_in_session: false,
         author_affiliation: None,
         author_verified: None,
     })
@@ -1454,6 +1455,16 @@ pub async fn run_youtube_chat_connector(
             }
         }
     }
+}
+
+#[cfg(test)]
+fn test_quota_state() -> AppState {
+    AppState::new(
+        "test".into(),
+        1234,
+        tokio::sync::broadcast::channel(64).0,
+        crate::storage::Database::open_in_memory_for_tests(),
+    )
 }
 
 #[cfg(test)]
@@ -2918,14 +2929,4 @@ mod tests {
             ProviderDeleteOutcome::Failed(_)
         ));
     }
-}
-
-#[cfg(test)]
-fn test_quota_state() -> AppState {
-    AppState::new(
-        "test".into(),
-        1234,
-        tokio::sync::broadcast::channel(64).0,
-        crate::storage::Database::open_in_memory_for_tests(),
-    )
 }

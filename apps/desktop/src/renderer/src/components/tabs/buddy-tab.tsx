@@ -36,6 +36,8 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
 import { BUDDY_POSTS_PROMISE, buddyDisplayName } from '@/lib/buddy-auto-chat-view'
+import { buddyPictureUrl } from '@/lib/buddy-picture'
+import { lockAlertAction } from '@/lib/lock-view'
 import { useCleanCut } from '@/hooks/use-clean-cut'
 import { BuddyLookClientProvider } from '@/hooks/use-buddy-look'
 import {
@@ -220,14 +222,17 @@ function BuddyUnlockAlert({
   if (!view.unlock) return null
   const premium = view.unlock.action?.kind === 'view-premium'
   const reason = premium && freeNote ? `${view.unlock.reason} ${freeNote}` : view.unlock.reason
-  return <LockAlert action={view.unlock.action} data-testid={testId} reason={reason} />
+  return (
+    <LockAlert action={lockAlertAction(view.unlock.action)} data-testid={testId} reason={reason} />
+  )
 }
 
 /**
  * The Chat tab (plan 150): Greetings (plan 164 S-D5, free) and Replies
  * beside Moderation. When Buddy is locked, one alert above both columns says
  * why and every Premium field under it is disabled (D7), the same reason
- * Live shows; the greetings stay editable.
+ * Live shows; the greetings stay editable, all but their AI switch (plan
+ * 192 D3).
  */
 function BuddyChatTab(): ReactElement {
   const locked = useBuddyLive().unlock !== null
@@ -240,7 +245,7 @@ function BuddyChatTab(): ReactElement {
       ) : null}
       <ConfigGrid className={CONFIG_GRID_PAIR}>
         <div className="flex flex-col">
-          <BuddyGreetingsSection />
+          <BuddyGreetingsSection locked={locked} />
           <BuddyRepliesSection locked={locked} />
         </div>
         <BuddyModerationSection locked={locked} />
@@ -286,7 +291,7 @@ function BuddyProfileStatus(): ReactElement {
       data-slot="buddy-profile-status"
     >
       <div className="flex flex-wrap items-center gap-3" data-slot="buddy-live-status-block">
-        <BuddyEmblem size="lg" />
+        <BuddyEmblem picture={buddyPictureUrl(cohostSettings?.persona)} size="lg" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span
             className="truncate text-sm font-medium text-foreground"
@@ -457,7 +462,11 @@ function CloudAiSection(): ReactElement {
               </ul>
               <p className="text-xs text-muted-foreground">{CLOUD_AI_KEEPS}</p>
             </div>
-            <Switch checked={aiConsent} id="buddy-cloud-ai" onCheckedChange={setAiConsent} />
+            <Switch
+              checked={aiConsent}
+              id="buddy-cloud-ai"
+              onCheckedChange={(consent) => setAiConsent(consent)}
+            />
           </div>
         </Field>
       </FieldGroup>

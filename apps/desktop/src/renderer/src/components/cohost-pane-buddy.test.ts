@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BuddyIdentity, BuddySayFooter } from '@/components/cohost-pane'
+import { buddyOffOutputsNotice } from '@/lib/buddy-output-notice'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { BuddyPetPreviewHandle, BuddyPetPreviewProps } from '@/components/buddy-pet-preview'
 import type { CohostWindowBuddy } from '@/lib/backend'
@@ -183,35 +184,53 @@ describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', ()
     expect(onSay).toHaveBeenCalledTimes(3)
   })
 
-  it('says when a Say also posts to chat, and counts against the chat cap (plan 174 F-6)', async () => {
-    await render(buddy(), { onSay: vi.fn(), sayPostsToChat: true, sayChatCap: 5 })
-    expect(sayInput().getAttribute('placeholder')).toBe('Say something on stream and in chat')
-    const note = container.querySelector('[data-slot="buddy-say-posts"]')
-    expect(note?.textContent).toBe('Also posts to chat as you · 0/5')
-    expect(sayInput().getAttribute('aria-describedby')).toBe('buddy-say-posts')
-    await type(sayInput(), 'too long')
-    expect(
-      container.querySelector('[data-slot="buddy-say-posts"]')?.getAttribute('data-over-cap')
-    ).toBe('true')
+  it('speaks in the bubble only, in every mode: never a word about chat (plan 211 D2)', async () => {
     await render(buddy(), { onSay: vi.fn() })
     expect(sayInput().getAttribute('placeholder')).toBe('Say something on stream')
+    expect(sayInput().hasAttribute('aria-describedby')).toBe(false)
     expect(container.querySelector('[data-slot="buddy-say-posts"]')).toBeNull()
+    const footer = container.querySelector('[data-slot="buddy-footer"]')?.textContent ?? ''
+    expect(footer).not.toMatch(/chat/i)
+    expect(footer).not.toContain('posts')
   })
 
   it('relays the switch and disables it without a handler', async () => {
     const onShowOnStreamChange = vi.fn()
     await render(buddy({ showOnStream: false }), { onShowOnStreamChange })
-    const toggle = container.querySelector<HTMLButtonElement>(
-      '[data-testid="buddy-show-on-stream"]'
-    )!
+    const toggle = container.querySelector<HTMLElement>('[data-testid="buddy-show-on-stream"]')!
     expect(toggle.getAttribute('aria-checked')).toBe('false')
     await act(async () => toggle.click())
     expect(onShowOnStreamChange).toHaveBeenCalledWith(true)
     await render(buddy())
     expect(
-      container.querySelector<HTMLButtonElement>('[data-testid="buddy-show-on-stream"]')?.disabled
+      container
+        .querySelector<HTMLElement>('[data-testid="buddy-show-on-stream"]')
+        ?.hasAttribute('data-disabled')
     ).toBe(true)
     expect(sayInput().disabled).toBe(true)
+  })
+
+  it('says in words when the Buddy is on no output, with the switch one click away', async () => {
+    const onShowOnStreamChange = vi.fn()
+    const offOutputsNotice = buddyOffOutputsNotice({
+      enabled: true,
+      onAir: true,
+      showOnStream: false,
+      showInRecording: false,
+      name: 'Grum'
+    })
+    await render(buddy({ showOnStream: false }), { offOutputsNotice, onShowOnStreamChange })
+    const notice = container.querySelector<HTMLElement>('[data-testid="buddy-off-outputs"]')!
+    expect(notice.textContent).toContain("Grum isn't on stream.")
+    expect(notice.textContent).toContain("Viewers can't see it")
+    const show = [...notice.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show on stream'
+    )!
+    await act(async () => show.click())
+    expect(onShowOnStreamChange).toHaveBeenCalledWith(true)
+    // Nothing without a notice: the footer is the same as before.
+    await render(buddy({ showOnStream: true }), { onShowOnStreamChange })
+    expect(container.querySelector('[data-testid="buddy-off-outputs"]')).toBeNull()
   })
 })
 

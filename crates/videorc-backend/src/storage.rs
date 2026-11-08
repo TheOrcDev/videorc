@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::banners::{
+    BannerUpdate, NewBanner, REFUSAL_FOUR_SHOWING, REFUSAL_TOO_MANY, banner_image_file_name,
+    banner_thumbnail_file_name,
+};
 use crate::diagnostics::permission_pane_for_log;
 use crate::live_chat::{
     CommentsSendOperation, CommentsSendOperationPhase, LiveChatAuthorVerified,
@@ -21,16 +25,23 @@ use crate::live_chat::{
     MembershipKind, SubscriptionKind,
 };
 use crate::live_chat_moderation::{ModerationOperation, ModerationPhase};
+use crate::overlay_layout::OverlayRect;
 use crate::process_job::output_owned_std_with_timeout;
 use crate::protocol::{
-    AiArtifact, AiArtifactKind, AiArtifactStatus, CleanCutEdl, CleanCutJob, CleanCutJobState,
-    CleanCutMode, CohostReportChatPlatformCount, CohostSessionReport, DiagnosticStats, HealthEvent,
-    HealthLevel, LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings,
-    SessionAiArtifactsPage, SessionHealthEventsPage, SessionListItem, SessionListPage,
-    SessionLogEntry, SessionLogsPage, SessionStorageTotals, SessionSummary, SourceSelection,
+    AiArtifact, AiArtifactKind, AiArtifactStatus, Banner, CleanCutEdl, CleanCutJob,
+    CleanCutJobState, CleanCutMode, CohostReportChatPlatformCount, CohostSessionReport,
+    DiagnosticStats, HealthEvent, HealthLevel, LayoutSettings, NoiseCleanupJob,
+    NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage, SessionHealthEventsPage,
+    SessionListItem, SessionListPage, SessionLogEntry, SessionLogsPage, SessionStorageTotals,
+    SessionSummary, Sound, SoundMode, SoundboardSettingsParams, SoundboardState, SourceSelection,
     StreamScreen, StreamScreenStatus,
 };
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
+use crate::sound_store::{
+    NewSound, REFUSAL_SOUND_TOO_MANY, REFUSAL_SOUNDS_TOTAL_TOO_LONG, SOUND_MAX_COUNT,
+    SOUND_TOTAL_MAX_DURATION_MS, SoundSettings, SoundUpdate, lowest_free_hotkey, sound_file_name,
+    starter_hotkey,
+};
 use crate::streaming::{
     PlatformAccount, PlatformAccountStatus, StreamMetadataDraft, StreamPlatform,
     UpsertPlatformAccount, default_stream_metadata_draft, normalize_stream_metadata_draft,
@@ -80,6 +91,20 @@ pub struct SessionTiming {
 }
 
 const PERFORMANCE_CHECK_PROCESSING_KIND: &str = "performance-check";
+
+/// Plan 200 C1/C3: the take facts an MP4 export stamps into the file.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Mp4ExportTakeRow {
+    /// RFC 3339 take start (Combined's, copied onto the separate files).
+    pub started_at: String,
+    /// False for imports, duplicates and processed copies: their timing
+    /// and start are not a Videorc capture's.
+    pub captured_by_videorc: bool,
+    /// The take's configured integer frame rate.
+    pub fps: Option<u32>,
+    /// Markers live on the Combined session; separate files read them there.
+    pub marker_session_id: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct NewSession {
@@ -228,7 +253,19 @@ pub struct PendingRecordingFinalization {
     pub duration_ms: Option<i64>,
     pub diagnostics_json: String,
     pub keep_original_mkv: bool,
+    /// An interrupted take being recovered: its MKV is kept whatever the
+    /// keep-original setting says.
+    pub interrupted_take: bool,
 }
+
+/// How long after its start an interrupted take is still recovered
+/// automatically. Older failed rows keep the manual Export MP4 action, so the
+/// first launch of this version never re-exports a whole history.
+pub const INTERRUPTED_TAKE_RECOVERY_WINDOW: chrono::Duration = chrono::Duration::days(7);
+
+/// A capture file smaller than this holds no media worth recovering (a start
+/// that failed before the first cluster).
+pub const INTERRUPTED_TAKE_MIN_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -678,7 +715,7 @@ pub struct SessionFileObjectIdentity {
     created_unix_nanos: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SessionFileBoundIdentity {
     pub content_identity: SessionFileIdentity,
     pub object_identity: SessionFileObjectIdentity,
@@ -750,7 +787,9 @@ fn pending_session_deletion_from_records(
     let mut blocked_paths = Vec::new();
     for record in records {
         match deletion_path_state(&record)? {
-            DeletionPathState::Missing => {}
+            DeletionPathState::Missing => {
+                remove_empty_session_deletion_quarantine_directory(&record)
+            }
             DeletionPathState::Ready(path) => paths.push(path),
             DeletionPathState::Blocked(path) => blocked_paths.push(path),
         }
@@ -1390,10 +1429,21 @@ fn deletion_path_state(record: &SessionDeletionPathRecord) -> Result<DeletionPat
         None => {}
     }
 
+    match std::fs::symlink_metadata(original_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DeletionPathState::Missing);
+        }
+        _ => {}
+    }
+    if !ensure_session_deletion_quarantine_directory(original_path, quarantine_path)? {
+        return Ok(DeletionPathState::Blocked(record.original_path.clone()));
+    }
+
     // Move first, verify second. Checking the original path and then renaming
     // it lets a replacement race into the checked name and be sent to Trash.
     match crate::session_ops::rename_session_file_no_replace(original_path, quarantine_path) {
         Ok(()) => {
+            crate::session_ops::sync_session_file_parent(original_path)?;
             crate::session_ops::sync_session_file_parent(quarantine_path)?;
             match capture_session_file_bound_identity(quarantine_path)? {
                 Some(actual)
@@ -1463,12 +1513,93 @@ fn deletion_path_state(record: &SessionDeletionPathRecord) -> Result<DeletionPat
     }
 }
 
+const SESSION_DELETION_QUARANTINE_PREFIX: &str = ".videorc-trash-";
+
+/// The quarantine keeps the recording's own file name inside a private hidden
+/// folder beside it, so the system Trash (and Restore/Put Back) shows the real
+/// `videorc-session-….mp4` instead of a nameless hidden file.
 fn session_deletion_quarantine_path(
     original_path: &Path,
     operation_id: &str,
     index: usize,
 ) -> PathBuf {
-    original_path.with_file_name(format!(".videorc-trash-{operation_id}-{index}"))
+    let directory = original_path.with_file_name(format!(
+        "{SESSION_DELETION_QUARANTINE_PREFIX}{operation_id}-{index}"
+    ));
+    match original_path.file_name() {
+        Some(name) => directory.join(name),
+        None => directory,
+    }
+}
+
+/// The private quarantine folder of a current-format record, `None` for a
+/// legacy tombstone whose quarantine is a hidden file beside the original.
+fn session_deletion_quarantine_directory<'a>(
+    original_path: &Path,
+    quarantine_path: &'a Path,
+) -> Option<&'a Path> {
+    let directory = quarantine_path.parent()?;
+    let is_private = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(SESSION_DELETION_QUARANTINE_PREFIX));
+    (is_private && directory.parent() == original_path.parent()).then_some(directory)
+}
+
+/// Creates the private quarantine folder before the move. `false` means the
+/// name is taken by a link, so the file stays where it is instead of
+/// following it out of the recordings folder. A plain file at the name is an
+/// error, so the deletion stays retryable: Unix already fails opening the
+/// quarantine path under it (`ENOTDIR`), but Windows reports that as not
+/// found and reaches this check.
+fn ensure_session_deletion_quarantine_directory(
+    original_path: &Path,
+    quarantine_path: &Path,
+) -> Result<bool> {
+    let Some(directory) = session_deletion_quarantine_directory(original_path, quarantine_path)
+    else {
+        return Ok(true);
+    };
+    match std::fs::create_dir(directory) {
+        Ok(()) => crate::session_ops::sync_session_file_parent(directory)?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Could not create deletion quarantine {}",
+                    directory.display()
+                )
+            });
+        }
+    }
+    let file_type = std::fs::symlink_metadata(directory)
+        .with_context(|| {
+            format!(
+                "Could not inspect deletion quarantine {}",
+                directory.display()
+            )
+        })?
+        .file_type();
+    if file_type.is_file() {
+        bail!(
+            "Deletion quarantine {} is a file, not a folder",
+            directory.display()
+        );
+    }
+    Ok(file_type.is_dir())
+}
+
+/// Best effort: once its file is gone (trashed or renamed back), the empty
+/// private quarantine folder goes too. A non-empty folder is left alone.
+fn remove_empty_session_deletion_quarantine_directory(record: &SessionDeletionPathRecord) {
+    let Some(quarantine_path) = record.quarantine_path.as_deref().map(Path::new) else {
+        return;
+    };
+    if let Some(directory) =
+        session_deletion_quarantine_directory(Path::new(&record.original_path), quarantine_path)
+    {
+        let _ = std::fs::remove_dir(directory);
+    }
 }
 
 fn distinct_nonempty_paths<const N: usize>(paths: [Option<String>; N]) -> Vec<String> {
@@ -1481,6 +1612,7 @@ fn distinct_nonempty_paths<const N: usize>(paths: [Option<String>; N]) -> Vec<St
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(unused_variables))]
 fn sync_directory(directory: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -1495,6 +1627,29 @@ fn sync_directory(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Plan 191: journal in WAL mode. In SQLite's default rollback mode every
+/// autocommit write creates, fsyncs and deletes a `-journal` file on top of
+/// fsyncing the database, all while holding the one connection mutex every
+/// other database user waits on. WAL appends each commit to `-wal` instead.
+/// Durability is unchanged: `synchronous` stays at its default FULL, which
+/// fsyncs the WAL on every commit. A filesystem that refuses WAL keeps the
+/// rollback journal, which still works, so this never fails the open. Call it
+/// right after opening, before `migrate()` and outside any transaction.
+fn enable_write_ahead_log(conn: &Connection, path: &Path) {
+    match conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0)) {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
+        Ok(mode) => tracing::warn!(
+            path = %path.display(),
+            journal_mode = %mode,
+            "SQLite refused WAL journaling; keeping the rollback journal"
+        ),
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            "Could not switch SQLite to WAL journaling; keeping the rollback journal: {error}"
+        ),
+    }
+}
+
 impl Database {
     pub fn open_default() -> Result<Self> {
         let path = default_database_path();
@@ -1505,6 +1660,7 @@ impl Database {
 
         let conn = Connection::open(&path)
             .with_context(|| format!("Could not open SQLite database {}", path.display()))?;
+        enable_write_ahead_log(&conn, &path);
         let database = Self {
             conn: Arc::new(Mutex::new(conn)),
             path,
@@ -1528,8 +1684,10 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        let conn = Connection::open(path).unwrap();
+        enable_write_ahead_log(&conn, path);
         let database = Self {
-            conn: Arc::new(Mutex::new(Connection::open(path).unwrap())),
+            conn: Arc::new(Mutex::new(conn)),
             path: path.to_path_buf(),
         };
         database.migrate().unwrap();
@@ -1538,6 +1696,13 @@ impl Database {
 
     pub fn path(&self) -> &PathBuf {
         &self.path
+    }
+
+    /// One key per opened database, shared by its clones. Tests run in one
+    /// process on parallel threads, so a scratch path for an in-memory
+    /// database keyed on the process id alone is shared by every test.
+    pub fn instance_key(&self) -> usize {
+        Arc::as_ptr(&self.conn) as usize
     }
 
     pub fn create_session(&self, session: &NewSession) -> Result<()> {
@@ -1685,6 +1850,7 @@ impl Database {
                 output_directory: None,
                 ffmpeg_path: None,
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 video: crate::protocol::VideoSettings {
                     preset: crate::protocol::VideoPreset::StreamSafe1080p30,
                     width: 1920,
@@ -1742,6 +1908,15 @@ impl Database {
         finalization: &SessionFinalization,
         clear_mp4_path_if_matches: Option<&str>,
     ) -> Result<()> {
+        // Plan 200 C6: the stored size is the published MP4's, not the MKV's.
+        // Stat before taking the connection (a slow volume never holds it).
+        let published_mp4_size = finalization
+            .mp4_path
+            .as_deref()
+            .filter(|path| clear_mp4_path_if_matches != Some(*path))
+            .and_then(|path| std::fs::metadata(path).ok())
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len() as i64);
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
         let updated = transaction.execute(
@@ -1753,9 +1928,11 @@ impl Database {
                      ELSE COALESCE(?4, mp4_path)
                  END,
                  duration_ms = COALESCE(?5, duration_ms),
-                 diagnostics_json = ?6,
+                 diagnostics_json = CASE WHEN recording_role IN ('screen', 'camera')
+                    THEN json_patch(COALESCE(diagnostics_json, '{}'), ?6) ELSE ?6 END,
                  finalization_state = COALESCE(?8, finalization_state),
-                 finalization_error = CASE WHEN ?8 IS NULL THEN finalization_error ELSE ?9 END
+                 finalization_error = CASE WHEN ?8 IS NULL THEN finalization_error ELSE ?9 END,
+                 file_size_bytes = COALESCE(?10, file_size_bytes)
              WHERE id = ?1",
             params![
                 finalization.session_id,
@@ -1767,6 +1944,7 @@ impl Database {
                 clear_mp4_path_if_matches,
                 finalization.finalization_state,
                 finalization.finalization_error,
+                published_mp4_size,
             ],
         )?;
         if updated != 1 {
@@ -2360,15 +2538,116 @@ impl Database {
     /// pipeline (F-014/F-017). Flip them to failed so the Library stops
     /// claiming a recording is in flight.
     pub fn reconcile_orphaned_sessions(&self) -> Result<usize> {
+        // A crashed capture is failed, but its partial media remains usable.
+        // Only a persisted private directory identity authorizes binding a
+        // growing capture file; never infer ownership from a filename suffix.
+        let captures = {
+            let conn = self.lock()?;
+            let mut statement = conn.prepare("SELECT id, output_path, output_json FROM sessions WHERE (status IN ('running', 'failed') OR finalization_state IN ('finalizing', 'failed')) AND recording_role IN ('screen', 'camera')")?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, path, json) in captures {
+            let recovery = (|| -> Result<()> {
+                let json: serde_json::Value = serde_json::from_str(&json)?;
+                let mut path = path.map(PathBuf::from);
+                if path.as_ref().is_some_and(|path| !path.exists())
+                    && let Some(destination) = json
+                        .get("sourceIsoPublicationPath")
+                        .and_then(serde_json::Value::as_str)
+                    && let Some(identity) = json.get("sourceIsoOwnership").cloned()
+                {
+                    let expected: SessionFileBoundIdentity = serde_json::from_value(identity)?;
+                    let destination = Path::new(destination);
+                    if capture_session_file_bound_identity(destination)?.as_ref() == Some(&expected)
+                    {
+                        self.set_source_iso_capture_path(&id, destination)?;
+                        path = Some(destination.to_path_buf());
+                    }
+                }
+                let directory = json
+                    .get("sourceIsoCaptureDirectory")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from);
+                let expected: Option<SessionFileObjectIdentity> = json
+                    .get("sourceIsoCaptureDirectoryIdentity")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?;
+                if let (Some(path), Some(directory), Some(expected)) = (path, directory, expected)
+                    && path.parent() == Some(directory.as_path())
+                    && capture_session_directory_object_identity(&directory)?.as_ref()
+                        == Some(&expected)
+                    && path.is_file()
+                    && json.get("sourceIsoOwnership").is_none()
+                {
+                    self.bind_source_iso_capture(&id, &path)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = recovery {
+                tracing::warn!(session_id = %id, %error, "Could not verify interrupted ISO capture; retaining failed reservation");
+            }
+        }
         let conn = self.lock()?;
         let updated = conn.execute(
+            // Plan 200 C6: an interrupted Screen/Camera row whose capture is
+            // bound to its owned file stays `completed` (its partial media is
+            // the recording, offered for Export MP4); unverified ones fail.
             "UPDATE sessions
-             SET status = 'failed',
-                 ended_at = COALESCE(ended_at, ?1)
+             SET status = CASE WHEN recording_role IN ('screen', 'camera')
+                        AND output_path IS NOT NULL
+                        AND json_extract(output_json, '$.sourceIsoOwnership') IS NOT NULL
+                    THEN 'completed' ELSE 'failed' END,
+                 ended_at = COALESCE(ended_at, ?1),
+                 finalization_state = CASE WHEN recording_role IN ('screen', 'camera') THEN 'failed' ELSE finalization_state END,
+                 finalization_error = CASE WHEN recording_role IN ('screen', 'camera')
+                    THEN COALESCE(finalization_error, 'Recording was interrupted; partial media is available for recovery.')
+                    ELSE finalization_error END
              WHERE status = 'running'",
             params![Utc::now().to_rfc3339()],
         )?;
         Ok(updated)
+    }
+
+    /// Plan 200 C6: the distinct folders holding media of sessions started at
+    /// or after `since` (RFC 3339), for the startup repair-temp sweep.
+    pub fn session_media_directories_since(&self, since: &str) -> Result<Vec<PathBuf>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT output_path, mp4_path FROM sessions
+             WHERE started_at >= ?1 AND (output_path IS NOT NULL OR mp4_path IS NOT NULL)",
+        )?;
+        let rows = statement
+            .query_map(params![since], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut seen = HashSet::new();
+        let mut directories = Vec::new();
+        for path in rows
+            .into_iter()
+            .flat_map(|(output, mp4)| [output, mp4])
+            .flatten()
+        {
+            if let Some(parent) = Path::new(&path).parent()
+                && !parent.as_os_str().is_empty()
+                && seen.insert(parent.to_path_buf())
+            {
+                directories.push(parent.to_path_buf());
+            }
+        }
+        Ok(directories)
     }
 
     pub fn session_recording_path(&self, session_id: &str) -> Result<Option<String>> {
@@ -2404,12 +2683,304 @@ impl Database {
         Ok(())
     }
 
+    /// Plan 157: tags a row as one file of a take.
+    pub fn set_session_take_role(
+        &self,
+        session_id: &str,
+        take_id: &str,
+        recording_role: &str,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE sessions SET take_id = ?2, recording_role = ?3 WHERE id = ?1",
+            params![session_id, take_id, recording_role],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn set_source_iso_capture_path(&self, session_id: &str, path: &Path) -> Result<()> {
+        let parent = path.parent().context("ISO capture directory")?;
+        let private_capture = parent
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".videorc-iso-"));
+        let identity = private_capture
+            .then(|| capture_session_directory_object_identity(parent))
+            .transpose()?
+            .flatten();
+        let updated = self.lock()?.execute(
+            "UPDATE sessions SET output_path = ?2, output_json = CASE WHEN ?3 IS NOT NULL
+                THEN json_set(output_json, '$.sourceIsoCaptureDirectory', ?3, '$.sourceIsoCaptureDirectoryIdentity', json(?4))
+                ELSE output_json END
+             WHERE id = ?1 AND recording_role IN ('screen', 'camera')",
+            params![session_id, path.display().to_string(), private_capture.then(|| parent.display().to_string()),
+                identity.map(|identity| serde_json::to_string(&identity)).transpose()?],
+        )?;
+        anyhow::ensure!(updated == 1, "Missing ISO reservation {session_id}");
+        Ok(())
+    }
+
+    pub(crate) fn bind_source_iso_capture(&self, session_id: &str, path: &Path) -> Result<()> {
+        let ownership =
+            capture_session_file_bound_identity(path)?.context("ISO capture file is missing")?;
+        self.lock()?.execute(
+            "UPDATE sessions SET output_json = json_set(output_json, '$.sourceIsoOwnership', json(?2)) WHERE id = ?1",
+            params![session_id, serde_json::to_string(&ownership)?],
+        )?;
+        Ok(())
+    }
+
+    /// `Some(None)` is an ISO lacking validated ownership, never permission to
+    /// adopt a file currently occupying its path. Non-ISO rows return `None`.
+    pub(crate) fn source_iso_recovery_ownership(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Option<SessionFileBoundIdentity>>> {
+        let row: Option<(Option<String>, String)> = self
+            .lock()?
+            .query_row(
+                "SELECT recording_role, output_json FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((Some(role), json)) if matches!(role.as_str(), "screen" | "camera") => {
+                let json: serde_json::Value = serde_json::from_str(&json)?;
+                Ok(Some(
+                    json.get("sourceIsoOwnership")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()?,
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Plan 200 C1/C3: what an MP4 export needs to know about the take behind
+    /// a session. `None` for a missing row. Separate files are rows of their
+    /// own (`<take_id>-<role>`) that copied `started_at` from Combined, so all
+    /// files of one take report the same start.
+    pub(crate) fn mp4_export_take_row(&self, session_id: &str) -> Result<Option<Mp4ExportTakeRow>> {
+        let row: Option<(String, String, String, Option<String>, bool)> = self
+            .lock()?
+            .query_row(
+                "SELECT started_at, mode, output_json, take_id,
+                        derived_from_session_id IS NOT NULL OR processing_kind IS NOT NULL
+                 FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((started_at, mode, output_json, take_id, derived)) = row else {
+            return Ok(None);
+        };
+        let output: serde_json::Value = serde_json::from_str(&output_json)?;
+        Ok(Some(Mp4ExportTakeRow {
+            started_at,
+            captured_by_videorc: mode != "imported" && !derived,
+            fps: output
+                .get("video")
+                .and_then(|video| video.get("fps"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|fps| u32::try_from(fps).ok()),
+            marker_session_id: take_id.unwrap_or_else(|| session_id.to_string()),
+        }))
+    }
+
+    pub(crate) fn source_iso_recording_expectations(
+        &self,
+        session_id: &str,
+    ) -> Result<(Option<f64>, bool)> {
+        let (output, diagnostics): (String, String) = self.lock()?.query_row(
+            "SELECT output_json, COALESCE(diagnostics_json, '{}') FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let output: serde_json::Value = serde_json::from_str(&output)?;
+        let diagnostics: serde_json::Value = serde_json::from_str(&diagnostics)?;
+        Ok((
+            output
+                .get("video")
+                .and_then(|video| video.get("fps"))
+                .and_then(serde_json::Value::as_f64),
+            diagnostics
+                .get("sourceIsoExpectedAudio")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verify_source_iso_capture_ownership(
+        &self,
+        session_id: &str,
+        path: &Path,
+    ) -> Result<()> {
+        if let Some(expected) = self.source_iso_recovery_ownership(session_id)? {
+            anyhow::ensure!(
+                expected.is_some(),
+                "ISO capture has no verified ownership; recovery cannot adopt its current path"
+            );
+            anyhow::ensure!(
+                capture_session_file_bound_identity(path)? == expected,
+                "ISO capture was replaced; recovery cannot adopt its current path"
+            );
+        }
+        Ok(())
+    }
+
+    /// Reserve every take member atomically before any ISO muxer can write.
+    pub fn reserve_source_iso_sessions(
+        &self,
+        take_id: &str,
+        roles: &[(&str, &str, String)],
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let tagged = transaction.execute(
+            "UPDATE sessions SET take_id = ?1, recording_role = 'combined' WHERE id = ?1 AND status = 'running'",
+            params![take_id],
+        )?;
+        if tagged != 1 {
+            bail!("No running Combined session for take {take_id}");
+        }
+        for (role, suffix, output_path) in roles {
+            let id = format!("{take_id}-{role}");
+            transaction.execute(
+                "INSERT INTO sessions (id, title, started_at, status, mode, output_path, container,
+                 sources_json, layout_json, output_json, take_id, recording_role)
+                 SELECT ?2, title || ': ' || ?3, started_at, 'running', mode, NULL, 'mkv',
+                 sources_json, layout_json, json_set(output_json, '$.sourceIsoPublicationPath', ?4), ?1, ?5 FROM sessions WHERE id = ?1",
+                params![take_id, id, suffix, output_path, role],
+            )?;
+            transaction.execute(
+                "INSERT INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2)",
+                params![id, serde_json::to_string(&SessionChatTotals::empty(&id))?],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_uncommitted_source_iso_sessions(&self, take_id: &str) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        // Release test 146, plan 0003: a reservation that never bound a
+        // capture has no media to recover, so it must not list as a failed
+        // "MP4 failed" recording. Only those rows go; anything that opened a
+        // capture keeps today's recovery path.
+        let unbound =
+            "take_id = ?1 AND recording_role IN ('screen', 'camera') AND status = 'running'
+             AND output_path IS NULL
+             AND json_extract(output_json, '$.sourceIsoOwnership') IS NULL
+             AND json_extract(output_json, '$.sourceIsoCaptureDirectory') IS NULL";
+        transaction.execute(
+            &format!(
+                "DELETE FROM session_chat_totals WHERE session_id IN (SELECT id FROM sessions WHERE {unbound})"
+            ),
+            params![take_id],
+        )?;
+        transaction.execute(
+            &format!("DELETE FROM sessions WHERE {unbound}"),
+            params![take_id],
+        )?;
+        transaction.execute(
+            "UPDATE sessions SET status = 'failed', ended_at = ?2, finalization_state = 'failed',
+             finalization_error = 'Session startup did not commit; any partial media was retained for recovery.'
+             WHERE take_id = ?1 AND recording_role IN ('screen', 'camera') AND status = 'running'",
+            params![take_id, Utc::now().to_rfc3339()],
+        )?;
+        // With no role sibling left, the Combined row is an ordinary refused
+        // start, not a "combined take".
+        transaction.execute(
+            "UPDATE sessions SET take_id = NULL, recording_role = NULL
+             WHERE id = ?1 AND recording_role = 'combined'
+             AND NOT EXISTS (SELECT 1 FROM sessions WHERE take_id = ?1 AND recording_role IN ('screen', 'camera'))",
+            params![take_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Plan 157: inserts one ISO sibling row beside the Combined row, copying
+    /// the take's mode, sources, layout and output settings from it. The row
+    /// is born terminal (`completed`/`failed`) because its muxer has already
+    /// exited; the MP4 export then runs as an ordinary finalization job.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_source_iso_session(
+        &self,
+        combined_session_id: &str,
+        iso_session_id: &str,
+        recording_role: &str,
+        title_suffix: &str,
+        output_path: &str,
+        ended_at: &str,
+        duration_ms: Option<i64>,
+        status: &str,
+        finalization_state: &str,
+        finalization_error: Option<&str>,
+    ) -> Result<()> {
+        let file_size_bytes = std::fs::metadata(output_path)
+            .ok()
+            .map(|metadata| metadata.len() as i64);
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let inserted = transaction.execute(
+            "INSERT INTO sessions
+                (id, title, started_at, ended_at, status, mode, output_path, mp4_path,
+                 stream_preset, container, duration_ms, sources_json, layout_json, output_json,
+                 diagnostics_json, file_size_bytes, finalization_state, finalization_error,
+                 take_id, recording_role)
+             SELECT ?2, title || ': ' || ?4, started_at, ?6, ?8, mode, ?5, NULL,
+                    NULL, 'mkv', COALESCE(?7, duration_ms), sources_json, layout_json, output_json,
+                    NULL, ?11, ?9, ?10, ?1, ?3
+             FROM sessions WHERE id = ?1",
+            params![
+                combined_session_id,
+                iso_session_id,
+                recording_role,
+                title_suffix,
+                output_path,
+                ended_at,
+                duration_ms,
+                status,
+                finalization_state,
+                finalization_error,
+                file_size_bytes,
+            ],
+        )?;
+        if inserted != 1 {
+            bail!(
+                "Combined session {combined_session_id} was not found for its {recording_role} row"
+            );
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2)",
+            params![
+                iso_session_id,
+                serde_json::to_string(&SessionChatTotals::empty(iso_session_id))?
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Sessions whose MP4 export was interrupted (backend exit mid-job).
     pub fn sessions_pending_finalization(&self) -> Result<Vec<PendingRecordingFinalization>> {
         let conn = self.lock()?;
         let mut statement = conn.prepare(
             "SELECT id, output_path, ended_at, duration_ms, COALESCE(diagnostics_json, '{}'),
-                    output_json
+                    output_json, interruption_recovery IS 'pending'
              FROM sessions
              WHERE finalization_state = 'finalizing'
              ORDER BY started_at ASC",
@@ -2427,10 +2998,113 @@ impl Database {
                 duration_ms: row.get(3)?,
                 diagnostics_json: row.get(4)?,
                 keep_original_mkv,
+                interrupted_take: row.get(6)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(anyhow::Error::from)
+    }
+
+    /// Interrupted takes: recording rows that ended `failed` (a crash, a
+    /// killed backend, a power loss, a capture that died mid-take) with their
+    /// capture MKV still on disk and no MP4. Each one with media is claimed
+    /// for recovery (`finalization_state = 'finalizing'`, so
+    /// [`Self::sessions_pending_finalization`] picks it up, and
+    /// `interruption_recovery = 'pending'`); one without media is marked
+    /// `none` and never looked at again. Returns the claimed ids.
+    ///
+    /// Only rows started at or after `since` qualify, and `only_session`
+    /// narrows the scan to one row (the take that just failed).
+    pub fn claim_interrupted_takes(
+        &self,
+        since: &str,
+        only_session: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let candidates = {
+            let conn = self.lock()?;
+            let mut statement = conn.prepare(
+                "SELECT id, output_path FROM sessions
+                 WHERE status = 'failed'
+                   AND finalization_state IS NULL
+                   AND interruption_recovery IS NULL
+                   AND mp4_path IS NULL
+                   AND output_path IS NOT NULL
+                   AND lower(output_path) LIKE '%.mkv'
+                   AND library_hidden = 0
+                   AND derived_from_session_id IS NULL
+                   AND processing_kind IS NULL
+                   AND (recording_role IS NULL OR recording_role = 'combined')
+                   AND started_at >= ?1
+                   AND (?2 IS NULL OR id = ?2)
+                 ORDER BY started_at DESC",
+            )?;
+            statement
+                .query_map(params![since, only_session], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        // Filesystem metadata never runs under the SQLite mutex.
+        let candidates = candidates
+            .into_iter()
+            .map(|(id, path)| {
+                let has_media = std::fs::metadata(&path).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.len() >= INTERRUPTED_TAKE_MIN_BYTES
+                });
+                (id, has_media)
+            })
+            .collect::<Vec<_>>();
+        let conn = self.lock()?;
+        let mut claimed = Vec::new();
+        for (id, has_media) in candidates {
+            let updated = if has_media {
+                conn.execute(
+                    "UPDATE sessions
+                     SET finalization_state = 'finalizing', finalization_error = NULL,
+                         interruption_recovery = 'pending'
+                     WHERE id = ?1 AND status = 'failed' AND finalization_state IS NULL
+                       AND interruption_recovery IS NULL",
+                    params![id],
+                )?
+            } else {
+                conn.execute(
+                    "UPDATE sessions SET interruption_recovery = 'none'
+                     WHERE id = ?1 AND interruption_recovery IS NULL",
+                    params![id],
+                )?;
+                0
+            };
+            if updated == 1 {
+                claimed.push(id);
+            }
+        }
+        Ok(claimed)
+    }
+
+    /// Settles a pending interrupted-take recovery. Returns the new value
+    /// (`recovered` | `failed`), or `None` when the row was not being
+    /// recovered (an ordinary finalization).
+    pub fn settle_interruption_recovery(
+        &self,
+        session_id: &str,
+        recovered: bool,
+    ) -> Result<Option<&'static str>> {
+        let value = if recovered {
+            crate::recording_finalization::INTERRUPTION_RECOVERY_RECOVERED
+        } else {
+            crate::recording_finalization::INTERRUPTION_RECOVERY_FAILED
+        };
+        // The finalization commit writes `completed`; a recovery that made no
+        // MP4 leaves the take as failed as it was before.
+        let conn = self.lock()?;
+        let updated = conn.execute(
+            "UPDATE sessions
+             SET interruption_recovery = ?2,
+                 status = CASE WHEN ?3 THEN status ELSE 'failed' END
+             WHERE id = ?1 AND interruption_recovery = 'pending'",
+            params![session_id, value, recovered],
+        )?;
+        Ok((updated == 1).then_some(value))
     }
 
     pub fn session_finalization_snapshot(&self, session_id: &str) -> Result<SessionFinalization> {
@@ -4383,30 +5057,19 @@ impl Database {
         Ok(sessions)
     }
 
-    /// Return one bounded Library page with a fixed SQL statement count.
-    /// Histories are represented only by counts/ready-kind summaries and are
-    /// loaded through their dedicated detail endpoints when a row is opened.
-    pub fn list_session_items_page(
-        &self,
-        cursor: Option<&str>,
-        requested_limit: usize,
-    ) -> Result<SessionListPage> {
-        let limit = requested_limit.clamp(1, 200);
-        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(201);
-        let (cursor_started_at, cursor_id) = cursor
-            .map(parse_session_list_cursor)
-            .transpose()?
-            .map(|(started_at, id)| (Some(started_at), Some(id)))
-            .unwrap_or((None, None));
-
-        let conn = self.lock()?;
-        let mut statement = conn.prepare(
-            "WITH
+    /// The one statement behind [`Self::list_session_items_page`]: `?1`/`?2`
+    /// are the cursor's `started_at`/`id` (NULL on the first page), `?3` the
+    /// page size plus one. Every history CTE makes `page_sessions` the left
+    /// table of a CROSS JOIN, which SQLite never reorders: the page stays the
+    /// outer loop, so each count is an index search for the page's own rows
+    /// instead of a scan of the user's whole history (plan 191).
+    const SESSION_LIST_PAGE_SQL: &str = "WITH
                 page_sessions AS (
                     SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                            stream_preset, container, duration_ms, layout_json, file_size_bytes,
                            derived_from_session_id, source_title, processing_kind,
-                           finalization_state, finalization_error, sources_json
+                           finalization_state, finalization_error, sources_json,
+                           take_id, recording_role, interruption_recovery
                     FROM sessions
                     WHERE library_hidden = 0
                       AND (
@@ -4419,14 +5082,14 @@ impl Database {
                 ),
                 health_counts AS (
                     SELECT health_events.session_id, COUNT(*) AS count
-                    FROM health_events
-                    JOIN page_sessions ON page_sessions.id = health_events.session_id
+                    FROM page_sessions
+                    CROSS JOIN health_events ON page_sessions.id = health_events.session_id
                     GROUP BY health_events.session_id
                 ),
                 log_counts AS (
                     SELECT session_logs.session_id, COUNT(*) AS count
-                    FROM session_logs
-                    JOIN page_sessions ON page_sessions.id = session_logs.session_id
+                    FROM page_sessions
+                    CROSS JOIN session_logs ON page_sessions.id = session_logs.session_id
                     GROUP BY session_logs.session_id
                 ),
                 artifact_summaries AS (
@@ -4438,14 +5101,14 @@ impl Database {
                                END
                            )
                                AS ready_kinds
-                    FROM ai_artifacts
-                    JOIN page_sessions ON page_sessions.id = ai_artifacts.session_id
+                    FROM page_sessions
+                    CROSS JOIN ai_artifacts ON page_sessions.id = ai_artifacts.session_id
                     GROUP BY ai_artifacts.session_id
                 ),
                 comment_counts AS (
                     SELECT live_chat_messages.session_id, COUNT(*) AS count
-                    FROM live_chat_messages
-                    JOIN page_sessions ON page_sessions.id = live_chat_messages.session_id
+                    FROM page_sessions
+                    CROSS JOIN live_chat_messages ON page_sessions.id = live_chat_messages.session_id
                     GROUP BY live_chat_messages.session_id
                 ),
                 quality_candidate_values AS (
@@ -4511,7 +5174,7 @@ impl Database {
                                ELSE 0
                            END AS gate_status_valid
                     FROM page_sessions
-                    JOIN repair_jobs
+                    CROSS JOIN repair_jobs
                       ON repair_jobs.file_path = page_sessions.output_path
                       OR repair_jobs.file_path = page_sessions.mp4_path
                     WHERE repair_jobs.status IN ('completed', 'running')
@@ -4541,8 +5204,8 @@ impl Database {
                                    ORDER BY clean_cut_jobs.updated_at DESC,
                                             clean_cut_jobs.id DESC
                                ) AS rank
-                        FROM clean_cut_jobs
-                        JOIN page_sessions
+                        FROM page_sessions
+                        CROSS JOIN clean_cut_jobs
                           ON page_sessions.id = clean_cut_jobs.output_session_id
                     ) WHERE rank = 1
                 )
@@ -4559,7 +5222,9 @@ impl Database {
                     COALESCE(comment_counts.count, 0),
                     page_sessions.finalization_state, page_sessions.finalization_error,
                     clean_cut_outputs.source_session_id, clean_cut_outputs.mode,
-                    page_sessions.sources_json
+                    page_sessions.sources_json,
+                    page_sessions.take_id, page_sessions.recording_role,
+                    page_sessions.interruption_recovery
              FROM page_sessions
              LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
              LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
@@ -4570,8 +5235,26 @@ impl Database {
                    AND quality_candidates.rank = 1
              LEFT JOIN clean_cut_outputs
                     ON clean_cut_outputs.output_session_id = page_sessions.id
-             ORDER BY page_sessions.started_at DESC, page_sessions.id DESC",
-        )?;
+             ORDER BY page_sessions.started_at DESC, page_sessions.id DESC";
+
+    /// Return one bounded Library page with a fixed SQL statement count.
+    /// Histories are represented only by counts/ready-kind summaries and are
+    /// loaded through their dedicated detail endpoints when a row is opened.
+    pub fn list_session_items_page(
+        &self,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionListPage> {
+        let limit = requested_limit.clamp(1, 200);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(201);
+        let (cursor_started_at, cursor_id) = cursor
+            .map(parse_session_list_cursor)
+            .transpose()?
+            .map(|(started_at, id)| (Some(started_at), Some(id)))
+            .unwrap_or((None, None));
+
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(Self::SESSION_LIST_PAGE_SQL)?;
 
         let rows =
             statement.query_map(params![cursor_started_at, cursor_id, query_limit], |row| {
@@ -4634,6 +5317,11 @@ impl Database {
                         ),
                     finalization_progress_percent: None,
                     finalization_error: row.get(23)?,
+                    take_id: row.get(27)?,
+                    recording_role: row.get(28)?,
+                    interruption_recovery: row
+                        .get::<_, Option<String>>(29)?
+                        .filter(|value| matches!(value.as_str(), "recovered" | "failed")),
                 })
             })?;
         let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -5188,6 +5876,7 @@ impl Database {
         for preparation in &mut preparations {
             let SessionDeletionPreparation::New {
                 operation_id,
+                session_id,
                 mp4_path,
                 output_path,
                 path_records,
@@ -5196,11 +5885,39 @@ impl Database {
             else {
                 continue;
             };
-            *path_records = distinct_nonempty_paths([mp4_path.clone(), output_path.clone()])
+            let expected_capture = self.source_iso_recovery_ownership(session_id)?;
+            let mut media_paths = distinct_nonempty_paths([mp4_path.clone(), output_path.clone()]);
+            // Plan 200 C6: a repair's backup goes with its recording (and only
+            // then; orphaned backups are never deleted automatically, D6).
+            let backups = media_paths
+                .iter()
+                .filter_map(|path| crate::repair::backup_path_for(Path::new(path)))
+                .filter(|backup| {
+                    std::fs::symlink_metadata(backup)
+                        .is_ok_and(|metadata| metadata.file_type().is_file())
+                })
+                .map(|backup| backup.display().to_string())
+                .collect::<Vec<_>>();
+            for backup in backups {
+                if !media_paths.contains(&backup) {
+                    media_paths.push(backup);
+                }
+            }
+            *path_records = media_paths
                 .into_iter()
                 .enumerate()
                 .map(|(index, path)| {
                     let ownership = capture_identity(Path::new(&path))?;
+                    if output_path.as_deref() == Some(path.as_str())
+                        && let Some(expected) = expected_capture.as_ref()
+                        && ownership.is_some()
+                    {
+                        anyhow::ensure!(
+                            expected.is_some() && &ownership == expected,
+                            "ISO capture was replaced; deletion cannot adopt its current path"
+                        );
+                    }
+
                     Ok(SessionDeletionPathRecord {
                         original_path: path.clone(),
                         quarantine_path: Some(
@@ -5410,6 +6127,10 @@ impl Database {
             .with_context(|| format!("Delete operation {operation_id} was not found."))?
         };
         let expected_records = parse_session_deletion_path_records(&paths_json)?;
+        let expected_paths_for_cleanup = expected_records
+            .iter()
+            .map(|record| record.original_path.clone())
+            .collect::<Vec<_>>();
         let expected = expected_records
             .iter()
             .flat_map(|record| {
@@ -5435,7 +6156,9 @@ impl Database {
             // when Trash reported an error, a now-missing path is complete;
             // any present or uninspectable path remains retryable.
             match inspect_path(&record)? {
-                DeletionPathState::Missing => {}
+                DeletionPathState::Missing => {
+                    remove_empty_session_deletion_quarantine_directory(&record)
+                }
                 DeletionPathState::Ready(path) | DeletionPathState::Blocked(path) => {
                     pending_paths.push(path);
                     pending_records.push(record);
@@ -5491,6 +6214,13 @@ impl Database {
             false
         };
         transaction.commit()?;
+        if deleted {
+            // Plan 200 C6: a separate file's private capture folder goes with
+            // its row once nothing is left in it.
+            for record in &expected_paths_for_cleanup {
+                crate::source_iso::remove_empty_capture_directory(Path::new(record));
+            }
+        }
         Ok(SessionDeletionCompletion {
             session_id,
             deleted,
@@ -5615,8 +6345,8 @@ impl Database {
     pub fn insert_clip_mark(&self, mark: &crate::protocol::ClipMark) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO clip_marks (id, session_id, at_seconds, source, phrase, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO clip_marks (id, session_id, at_seconds, source, phrase, created_at, lookback_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 mark.id,
                 mark.session_id,
@@ -5624,6 +6354,7 @@ impl Database {
                 clip_mark_source_label(mark.source),
                 mark.phrase,
                 mark.created_at,
+                mark.lookback_seconds,
             ],
         )?;
         Ok(())
@@ -5633,7 +6364,7 @@ impl Database {
     pub fn list_clip_marks(&self, session_id: &str) -> Result<Vec<crate::protocol::ClipMark>> {
         let conn = self.lock()?;
         let mut statement = conn.prepare(
-            "SELECT id, session_id, at_seconds, source, phrase, created_at
+            "SELECT id, session_id, at_seconds, source, phrase, created_at, lookback_seconds
              FROM clip_marks WHERE session_id = ?1 AND mark_kind = 'clip'
              ORDER BY at_seconds ASC, created_at ASC, id ASC",
         )?;
@@ -5650,6 +6381,7 @@ impl Database {
                 },
                 phrase: row.get(4)?,
                 created_at: row.get(5)?,
+                lookback_seconds: row.get(6)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -5717,6 +6449,34 @@ impl Database {
         post: crate::protocol::CohostReportPost,
     ) -> Result<bool> {
         self.upsert_cohost_report(&CohostSessionReport::post_only(session_id, post))
+    }
+
+    /// Plan 211 D11: fold one line Buddy said in its bubble into the
+    /// session's report as it shows, the same way posts land. Same
+    /// session-row rule as `upsert_cohost_report`: `false` when the session
+    /// row is gone.
+    pub fn append_cohost_report_said(
+        &self,
+        session_id: &str,
+        said: crate::protocol::CohostReportSaid,
+    ) -> Result<bool> {
+        self.upsert_cohost_report(&CohostSessionReport::said_only(session_id, said))
+    }
+
+    /// Plan 192 D7: add greeting skip counts to the session's report as they
+    /// happen, the same way posts land. Nothing is written for empty counts.
+    pub fn append_cohost_report_greeting_skips(
+        &self,
+        session_id: &str,
+        skipped: crate::protocol::CohostReportGreetingsSkipped,
+        at: &str,
+    ) -> Result<bool> {
+        if skipped.is_empty() {
+            return Ok(true);
+        }
+        self.upsert_cohost_report(&CohostSessionReport::greeting_skips_only(
+            session_id, skipped, at,
+        ))
     }
 
     /// The saved Buddy report of a session; `None` when there is none or it
@@ -5911,6 +6671,13 @@ impl Database {
              ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
             params![key, serde_json::to_string(value)?, Utc::now().to_rfc3339()],
         )?;
+        Ok(())
+    }
+
+    /// Removes one app setting; a missing key is not an error.
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
         Ok(())
     }
 
@@ -6450,6 +7217,471 @@ impl Database {
         self.list_stream_screens()
     }
 
+    // --- Banners (plan 186) ------------------------------------------------
+
+    /// Every banner in Assets order, which is also the drawing order.
+    pub(crate) fn list_banners(&self) -> Result<Vec<Banner>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {BANNER_COLUMNS} FROM banners ORDER BY sort_order ASC, created_at ASC"
+        ))?;
+        let rows = stmt.query_map([], banner_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn banner_by_id(&self, id: &str) -> Result<Banner> {
+        let conn = self.lock()?;
+        banner_by_id_locked(&conn, id)
+    }
+
+    pub(crate) fn count_banners(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM banners", [], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Inserts an imported banner last in Assets order: hidden, both
+    /// "Appears in" switches on, opacity 1.0, no timer. The count cap is
+    /// checked again inside the transaction so two imports can never exceed
+    /// it, and a refusal rolls back.
+    pub(crate) fn insert_banner(&self, new: NewBanner, max_count: usize) -> Result<Banner> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM banners", [], |row| row.get(0))?;
+        if usize::try_from(count).unwrap_or(usize::MAX) >= max_count {
+            bail!(REFUSAL_TOO_MANY);
+        }
+        let next_order: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM banners",
+            [],
+            |row| row.get(0),
+        )?;
+        let banner = Banner {
+            image_file: banner_image_file_name(&new.id),
+            thumbnail_file: banner_thumbnail_file_name(&new.id),
+            id: new.id,
+            name: new.name,
+            width: new.width,
+            height: new.height,
+            has_alpha: new.has_alpha,
+            sort_order: next_order,
+            shown: false,
+            horizontal: new.horizontal,
+            vertical: new.vertical,
+            show_on_stream: true,
+            show_in_recording: true,
+            opacity: 1.0,
+            hide_after_sec: None,
+            repeat_every_min: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        transaction.execute(
+            "INSERT INTO banners (
+                id, name, image_file, thumbnail_file, width, height, has_alpha, sort_order,
+                shown, horizontal_json, vertical_json, show_on_stream, show_in_recording,
+                opacity, hide_after_sec, repeat_every_min, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                banner.id,
+                banner.name,
+                banner.image_file,
+                banner.thumbnail_file,
+                banner.width,
+                banner.height,
+                banner.has_alpha,
+                banner.sort_order,
+                banner.shown,
+                serde_json::to_string(&banner.horizontal)?,
+                serde_json::to_string(&banner.vertical)?,
+                banner.show_on_stream,
+                banner.show_in_recording,
+                banner.opacity,
+                banner.hide_after_sec,
+                banner.repeat_every_min,
+                banner.created_at,
+                banner.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(banner)
+    }
+
+    /// Applies a validated `banners.update`. A field left `None` keeps its
+    /// stored value; `Some(None)` on a timer turns that timer off.
+    pub(crate) fn update_banner(&self, id: &str, update: BannerUpdate) -> Result<Banner> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let mut banner = banner_by_id_locked(&transaction, id)?;
+        if let Some(name) = update.name {
+            banner.name = name;
+        }
+        if let Some(rect) = update.horizontal {
+            banner.horizontal = rect;
+        }
+        if let Some(rect) = update.vertical {
+            banner.vertical = rect;
+        }
+        if let Some(value) = update.show_on_stream {
+            banner.show_on_stream = value;
+        }
+        if let Some(value) = update.show_in_recording {
+            banner.show_in_recording = value;
+        }
+        if let Some(value) = update.opacity {
+            banner.opacity = value;
+        }
+        if let Some(value) = update.hide_after_sec {
+            banner.hide_after_sec = value;
+        }
+        if let Some(value) = update.repeat_every_min {
+            banner.repeat_every_min = value;
+        }
+        banner.updated_at = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE banners SET name = ?2, horizontal_json = ?3, vertical_json = ?4,
+                    show_on_stream = ?5, show_in_recording = ?6, opacity = ?7,
+                    hide_after_sec = ?8, repeat_every_min = ?9, updated_at = ?10
+             WHERE id = ?1",
+            params![
+                banner.id,
+                banner.name,
+                serde_json::to_string(&banner.horizontal)?,
+                serde_json::to_string(&banner.vertical)?,
+                banner.show_on_stream,
+                banner.show_in_recording,
+                banner.opacity,
+                banner.hide_after_sec,
+                banner.repeat_every_min,
+                banner.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(banner)
+    }
+
+    /// `ids` is the new Assets order and must name every banner exactly once.
+    pub(crate) fn reorder_banners(&self, ids: &[String]) -> Result<Vec<Banner>> {
+        let conn = self.lock()?;
+        let existing_ids = {
+            let mut stmt = conn.prepare("SELECT id FROM banners")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let existing = existing_ids.iter().collect::<HashSet<_>>();
+        let requested = ids.iter().collect::<HashSet<_>>();
+        if existing.len() != requested.len()
+            || existing_ids.len() != ids.len()
+            || existing != requested
+        {
+            bail!("Banner reorder must include every banner exactly once.");
+        }
+
+        let updated_at = Utc::now().to_rfc3339();
+        for (index, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE banners SET sort_order = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, index as i64, updated_at],
+            )?;
+        }
+
+        drop(conn);
+        self.list_banners()
+    }
+
+    /// The row only. `banners::delete_banner` owns the session refusal, the
+    /// path guard and the files, and calls this once SQLite may commit.
+    pub(crate) fn delete_banner_row(&self, id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute("DELETE FROM banners WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            bail!("Banner not found.");
+        }
+        Ok(())
+    }
+
+    /// Show a banner, idempotently, under the cap of `max_shown` showing at
+    /// once. The cap is enforced here, in the backend, not only in the UI.
+    pub(crate) fn show_banner(&self, id: &str, max_shown: usize) -> Result<Banner> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let mut banner = banner_by_id_locked(&transaction, id)?;
+        if banner.shown {
+            return Ok(banner);
+        }
+        let shown: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM banners WHERE shown = 1", [], |row| {
+                row.get(0)
+            })?;
+        if usize::try_from(shown).unwrap_or(usize::MAX) >= max_shown {
+            bail!(REFUSAL_FOUR_SHOWING);
+        }
+        banner.shown = true;
+        banner.updated_at = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE banners SET shown = 1, updated_at = ?2 WHERE id = ?1",
+            params![banner.id, banner.updated_at],
+        )?;
+        transaction.commit()?;
+        Ok(banner)
+    }
+
+    pub(crate) fn hide_banner(&self, id: &str) -> Result<Banner> {
+        let conn = self.lock()?;
+        let mut banner = banner_by_id_locked(&conn, id)?;
+        if banner.shown {
+            banner.shown = false;
+            banner.updated_at = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE banners SET shown = 0, updated_at = ?2 WHERE id = ?1",
+                params![banner.id, banner.updated_at],
+            )?;
+        }
+        Ok(banner)
+    }
+
+    pub(crate) fn hide_all_banners(&self) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE banners SET shown = 0, updated_at = ?1 WHERE shown = 1",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    // --- Sounds (plan 189) ---------------------------------------------------
+
+    pub(crate) fn sound_by_id(&self, id: &str) -> Result<Sound> {
+        let conn = self.lock()?;
+        sound_by_id_locked(&conn, id)
+    }
+
+    /// The sound seeded from a starter slug, if the streamer still has it.
+    pub(crate) fn sound_by_starter(&self, slug: &str) -> Result<Option<Sound>> {
+        let conn = self.lock()?;
+        sound_by_starter_locked(&conn, slug)
+    }
+
+    pub(crate) fn count_sounds(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM sounds", [], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// Every sound's duration added up (D8: 5 minutes in all).
+    pub(crate) fn total_sound_duration_ms(&self) -> Result<u64> {
+        let conn = self.lock()?;
+        total_sound_duration_ms_locked(&conn)
+    }
+
+    /// Inserts an imported sound last in board order with its key: a user
+    /// import takes the lowest free key 1-9, a starter its manifest key when
+    /// free, else none. Both caps (D8) are checked again inside the
+    /// transaction so two imports can never exceed them. A starter whose slug
+    /// is already present returns the existing sound, so a rerun of the seed
+    /// never duplicates.
+    pub(crate) fn insert_sound(&self, new: NewSound) -> Result<Sound> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        if let Some(slug) = new.starter.as_deref()
+            && let Some(existing) = sound_by_starter_locked(&transaction, slug)?
+        {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        let count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM sounds", [], |row| row.get(0))?;
+        if usize::try_from(count).unwrap_or(usize::MAX) >= SOUND_MAX_COUNT {
+            bail!(REFUSAL_SOUND_TOO_MANY);
+        }
+        let total = total_sound_duration_ms_locked(&transaction)?;
+        if total.saturating_add(u64::from(new.duration_ms)) > SOUND_TOTAL_MAX_DURATION_MS {
+            bail!(REFUSAL_SOUNDS_TOTAL_TOO_LONG);
+        }
+        let next_order: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM sounds",
+            [],
+            |row| row.get(0),
+        )?;
+        let taken = {
+            let mut stmt =
+                transaction.prepare("SELECT hotkey FROM sounds WHERE hotkey IS NOT NULL")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let hotkey = if new.starter.is_some() {
+            starter_hotkey(new.hotkey.as_deref(), &taken)
+        } else {
+            lowest_free_hotkey(&taken)
+        };
+        let sound = Sound {
+            file: sound_file_name(&new.id),
+            id: new.id,
+            name: new.name,
+            duration_ms: new.duration_ms,
+            loudness_lufs: new.loudness_lufs,
+            level_db: new.level_db,
+            volume_db: 0,
+            mode: SoundMode::OneShot,
+            hotkey,
+            starter: new.starter,
+            sort_order: next_order,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        transaction.execute(
+            "INSERT INTO sounds (
+                id, name, file, duration_ms, loudness_lufs, level_db, volume_db, mode,
+                hotkey, starter, sort_order, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                sound.id,
+                sound.name,
+                sound.file,
+                sound.duration_ms,
+                sound.loudness_lufs,
+                sound.level_db,
+                sound.volume_db,
+                sound_mode_to_db(sound.mode),
+                sound.hotkey,
+                sound.starter,
+                sound.sort_order,
+                sound.created_at,
+                sound.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(sound)
+    }
+
+    /// Applies a validated `sounds.update`. A field left `None` keeps its
+    /// value; a key another sound holds moves to this one.
+    pub(crate) fn update_sound(&self, id: &str, update: SoundUpdate) -> Result<Sound> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let mut sound = sound_by_id_locked(&transaction, id)?;
+        if let Some(name) = update.name {
+            sound.name = name;
+        }
+        if let Some(volume_db) = update.volume_db {
+            sound.volume_db = volume_db;
+        }
+        if let Some(mode) = update.mode {
+            sound.mode = mode;
+        }
+        sound.updated_at = Utc::now().to_rfc3339();
+        if let Some(hotkey) = update.hotkey {
+            if let Some(key) = hotkey.as_deref() {
+                transaction.execute(
+                    "UPDATE sounds SET hotkey = NULL, updated_at = ?2 WHERE hotkey = ?1 AND id != ?3",
+                    params![key, sound.updated_at, sound.id],
+                )?;
+            }
+            sound.hotkey = hotkey;
+        }
+        transaction.execute(
+            "UPDATE sounds SET name = ?2, volume_db = ?3, mode = ?4, hotkey = ?5, updated_at = ?6
+             WHERE id = ?1",
+            params![
+                sound.id,
+                sound.name,
+                sound.volume_db,
+                sound_mode_to_db(sound.mode),
+                sound.hotkey,
+                sound.updated_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(sound)
+    }
+
+    /// `ids` is the new board order and must name every sound exactly once.
+    pub(crate) fn reorder_sounds(&self, ids: &[String]) -> Result<Vec<Sound>> {
+        let conn = self.lock()?;
+        let existing_ids = {
+            let mut stmt = conn.prepare("SELECT id FROM sounds")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let existing = existing_ids.iter().collect::<HashSet<_>>();
+        let requested = ids.iter().collect::<HashSet<_>>();
+        if existing.len() != requested.len()
+            || existing_ids.len() != ids.len()
+            || existing != requested
+        {
+            bail!("Sound reorder must include every sound exactly once.");
+        }
+        let updated_at = Utc::now().to_rfc3339();
+        for (index, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE sounds SET sort_order = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, index as i64, updated_at],
+            )?;
+        }
+        list_sounds_locked(&conn)
+    }
+
+    /// The row only. `sound_store::delete_sound` owns the voices, the path
+    /// guard and the file, and calls this once SQLite may commit.
+    pub(crate) fn delete_sound_row(&self, id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute("DELETE FROM sounds WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            bail!("Sound not found.");
+        }
+        Ok(())
+    }
+
+    /// The one-row `sound_settings` table.
+    pub(crate) fn sound_settings(&self) -> Result<SoundSettings> {
+        let conn = self.lock()?;
+        sound_settings_locked(&conn)
+    }
+
+    /// Applies a validated `sounds.settings`: only the fields present change.
+    pub(crate) fn update_sound_settings(
+        &self,
+        params: &SoundboardSettingsParams,
+    ) -> Result<SoundSettings> {
+        let conn = self.lock()?;
+        let mut settings = sound_settings_locked(&conn)?;
+        if let Some(volume_db) = params.volume_db {
+            settings.volume_db = volume_db;
+        }
+        if let Some(monitor) = params.monitor {
+            settings.monitor = monitor;
+        }
+        if let Some(seeded) = params.starters_seeded {
+            settings.starters_seeded = seeded;
+        }
+        conn.execute(
+            "UPDATE sound_settings SET volume_db = ?1, monitor = ?2, starters_seeded = ?3
+             WHERE id = 1",
+            params![
+                settings.volume_db,
+                settings.monitor,
+                settings.starters_seeded
+            ],
+        )?;
+        Ok(settings)
+    }
+
+    /// `sounds.list` and `sounds.changed`: the sounds and the settings in one
+    /// read.
+    pub(crate) fn soundboard_state(&self) -> Result<SoundboardState> {
+        let conn = self.lock()?;
+        let settings = sound_settings_locked(&conn)?;
+        Ok(SoundboardState {
+            sounds: list_sounds_locked(&conn)?,
+            volume_db: settings.volume_db,
+            monitor: settings.monitor,
+            starters_seeded: settings.starters_seeded,
+        })
+    }
+
     pub(crate) fn active_stream_screen_selection(&self) -> Result<ActiveStreamScreenSelection> {
         let conn = self.lock()?;
         let Some(screen_id) = self.active_screen_id_locked(&conn)? else {
@@ -6738,7 +7970,7 @@ impl Database {
         Ok(())
     }
 
-    fn screen_assets_dir(&self) -> PathBuf {
+    pub(crate) fn screen_assets_dir(&self) -> PathBuf {
         if let Some(parent) = self
             .path
             .parent()
@@ -6748,6 +7980,37 @@ impl Database {
         }
 
         std::env::temp_dir().join("videorc-screens")
+    }
+
+    /// The managed `Banners` directory beside `Screens` (plan 186). Only
+    /// basenames reach the renderer; main's `videorc-asset://banner/<file>`
+    /// resolver and the compositor join them onto this root.
+    pub(crate) fn banner_assets_dir(&self) -> PathBuf {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            return parent.join("Banners");
+        }
+
+        std::env::temp_dir().join("videorc-banners")
+    }
+
+    /// The managed `Sounds` directory beside `Screens` and `Banners` (plan
+    /// 189). Only basenames reach the renderer; main's
+    /// `videorc-asset://sound/<file>` resolver and the player join them onto
+    /// this root.
+    pub(crate) fn sound_assets_dir(&self) -> PathBuf {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            return parent.join("Sounds");
+        }
+
+        std::env::temp_dir().join("videorc-sounds")
     }
 
     #[cfg(test)]
@@ -6913,6 +8176,55 @@ impl Database {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS banners (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                image_file TEXT NOT NULL,
+                thumbnail_file TEXT NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                has_alpha INTEGER NOT NULL,
+                sort_order INTEGER NOT NULL,
+                shown INTEGER NOT NULL,
+                horizontal_json TEXT NOT NULL,
+                vertical_json TEXT NOT NULL,
+                show_on_stream INTEGER NOT NULL,
+                show_in_recording INTEGER NOT NULL,
+                opacity REAL NOT NULL,
+                hide_after_sec INTEGER,
+                repeat_every_min INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sounds (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                file TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                loudness_lufs REAL NOT NULL,
+                level_db REAL NOT NULL,
+                volume_db INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                hotkey TEXT,
+                starter TEXT,
+                sort_order INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS sounds_hotkey
+                ON sounds(hotkey) WHERE hotkey IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS sounds_starter
+                ON sounds(starter) WHERE starter IS NOT NULL;
+            CREATE TABLE IF NOT EXISTS sound_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                volume_db INTEGER NOT NULL,
+                monitor INTEGER NOT NULL,
+                starters_seeded INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO sound_settings (id, volume_db, monitor, starters_seeded)
+                VALUES (1, 0, 1, 0);
+
             CREATE TABLE IF NOT EXISTS platform_accounts (
                 id TEXT PRIMARY KEY,
                 platform TEXT NOT NULL UNIQUE,
@@ -7041,6 +8353,9 @@ impl Database {
             ("create_payload_hash", "create_payload_hash TEXT"),
             ("revision", "revision INTEGER NOT NULL DEFAULT 0"),
             ("deleted_at", "deleted_at TEXT"),
+            // Plan 199 D8: a clip mark's press length (30 or 60). NULL is
+            // every mark made before it, which reads as 30 s.
+            ("lookback_seconds", "lookback_seconds INTEGER"),
         ] {
             ensure_column(&conn, "clip_marks", column, definition)?;
         }
@@ -7151,6 +8466,23 @@ impl Database {
             "finalization_error",
             "finalization_error TEXT",
         )?;
+        // Plan 157: separate source recordings. Every file of one take shares
+        // `take_id` (the Combined session's id); `recording_role` names the
+        // file (`combined`, `screen`, `camera`). Both NULL on ordinary rows.
+        ensure_column(&conn, "sessions", "take_id", "take_id TEXT")?;
+        // An interrupted take's automatic recovery: `pending` | `recovered` |
+        // `failed` | `none`. NULL on every row Videorc did not stop mid-take.
+        ensure_column(
+            &conn,
+            "sessions",
+            "interruption_recovery",
+            "interruption_recovery TEXT",
+        )?;
+        ensure_column(&conn, "sessions", "recording_role", "recording_role TEXT")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_take_id ON sessions(take_id)",
+            [],
+        )?;
         ensure_column(
             &conn,
             "noise_cleanup_jobs",
@@ -7251,6 +8583,14 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_clean_cut_source_mode_created
                 ON clean_cut_jobs(source_session_id, mode, created_at DESC, id DESC);",
         )?;
+        // Library page (plan 191): its quality and Clean cut joins search these
+        // by the page's own paths and session ids instead of reading every job.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_repair_jobs_file_path
+                ON repair_jobs(file_path, status);
+             CREATE INDEX IF NOT EXISTS idx_clean_cut_jobs_output_session
+                ON clean_cut_jobs(output_session_id, updated_at DESC, id DESC);",
+        )?;
         // Plan 119 S13: the render's staging and final paths. A column on
         // Clean cut's own table, never a new `session_file_operations` kind:
         // older readers name their columns and never see it.
@@ -7267,7 +8607,122 @@ impl Database {
             "pipeline_reported_audio_loss",
             "pipeline_reported_audio_loss INTEGER NOT NULL DEFAULT 0",
         )?;
+        // Plan 209 S2: every agent action, who made it and how it ended.
+        // Capped at AGENT_ACTIVITY_MAX_ROWS rows or AGENT_ACTIVITY_MAX_DAYS
+        // days by `prune_agent_activity`. A new table only; older backends
+        // ignore it.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_activity (
+                id TEXT PRIMARY KEY,
+                at TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                message TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_activity_at ON agent_activity(at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_agent_activity_agent_at
+                ON agent_activity(agent_id, at DESC, id DESC);",
+        )?;
         Ok(())
+    }
+
+    // --- Agent activity (plan 209) -------------------------------------------
+
+    /// Insert one activity row, then keep the table inside its caps.
+    pub(crate) fn insert_agent_activity(&self, entry: &AgentActivityEntry) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO agent_activity (id, at, agent_id, agent_name, tool, summary, outcome, message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.id,
+                entry.at,
+                entry.agent_id,
+                entry.agent_name,
+                entry.tool,
+                entry.summary,
+                entry.outcome.as_str(),
+                entry.message,
+            ],
+        )?;
+        prune_agent_activity_locked(&conn, Utc::now())
+    }
+
+    /// A Studio call that ended unanswered, then answered late (plan 209
+    /// review fix 1): its row takes the answer's outcome and sentence.
+    pub(crate) fn update_agent_activity_outcome(
+        &self,
+        id: &str,
+        outcome: AgentActivityOutcome,
+        message: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE agent_activity SET outcome = ?2, message = ?3 WHERE id = ?1",
+            params![id, outcome.as_str(), message],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// The newest rows first, optionally one agent's, at most `limit`.
+    pub(crate) fn list_agent_activity(
+        &self,
+        limit: usize,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<AgentActivityEntry>> {
+        let conn = self.lock()?;
+        let limit = i64::try_from(limit.clamp(1, AGENT_ACTIVITY_MAX_ROWS)).unwrap_or(100);
+        let mut rows = Vec::new();
+        let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<AgentActivityEntry> {
+            let outcome: String = row.get(6)?;
+            Ok(AgentActivityEntry {
+                id: row.get(0)?,
+                at: row.get(1)?,
+                agent_id: row.get(2)?,
+                agent_name: row.get(3)?,
+                tool: row.get(4)?,
+                summary: row.get(5)?,
+                outcome: AgentActivityOutcome::parse(&outcome),
+                message: row.get(7)?,
+            })
+        };
+        match agent_id {
+            Some(agent_id) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, at, agent_id, agent_name, tool, summary, outcome, message
+                     FROM agent_activity WHERE agent_id = ?1
+                     ORDER BY at DESC, id DESC LIMIT ?2",
+                )?;
+                for row in stmt.query_map(params![agent_id, limit], map)? {
+                    rows.push(row?);
+                }
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, at, agent_id, agent_name, tool, summary, outcome, message
+                     FROM agent_activity ORDER BY at DESC, id DESC LIMIT ?1",
+                )?;
+                for row in stmt.query_map(params![limit], map)? {
+                    rows.push(row?);
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prune_agent_activity_for_test(&self, now: chrono::DateTime<Utc>) -> Result<()> {
+        let conn = self.lock()?;
+        prune_agent_activity_locked(&conn, now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_activity_count(&self) -> Result<i64> {
+        let conn = self.lock()?;
+        Ok(conn.query_row("SELECT COUNT(*) FROM agent_activity", [], |row| row.get(0))?)
     }
 
     /// Inserts or replaces a persisted repair job so it survives an app restart.
@@ -7416,9 +8871,19 @@ impl Database {
     }
 
     pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SQLite connection lock was poisoned"))
+        // A panic on another thread while it held the connection must not
+        // turn every later database call into a permanent error for the rest
+        // of the process (chat persistence terminal, session rows unwritable).
+        // rusqlite rolls an open transaction back when its guard drops, so the
+        // connection behind a poisoned lock is still consistent.
+        // Clearing the flag makes one panic one warning, not one per query.
+        Ok(self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "[storage] SQLite connection lock was poisoned by a panic; recovering the connection"
+            );
+            self.conn.clear_poison();
+            poisoned.into_inner()
+        }))
     }
 }
 
@@ -7433,6 +8898,144 @@ fn stream_screen_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StreamScr
         status: serde_json::from_str(&status_json).unwrap_or(StreamScreenStatus::Missing),
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+    })
+}
+
+/// The `banners` columns in `banner_from_row` order.
+const BANNER_COLUMNS: &str = "id, name, image_file, thumbnail_file, width, height, has_alpha, \
+     sort_order, shown, horizontal_json, vertical_json, show_on_stream, show_in_recording, \
+     opacity, hide_after_sec, repeat_every_min, created_at, updated_at";
+
+/// The `sounds` columns in `sound_from_row` order (plan 189).
+const SOUND_COLUMNS: &str = "id, name, file, duration_ms, loudness_lufs, level_db, volume_db, \
+     mode, hotkey, starter, sort_order, created_at, updated_at";
+
+/// The wire string of a mode (`oneShot`), the form the `mode` column holds.
+fn sound_mode_to_db(mode: SoundMode) -> String {
+    serde_json::to_value(mode)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "oneShot".to_string())
+}
+
+fn sound_mode_from_db(value: &str) -> SoundMode {
+    serde_json::from_value(serde_json::Value::String(value.to_string())).unwrap_or_default()
+}
+
+fn list_sounds_locked(conn: &Connection) -> Result<Vec<Sound>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SOUND_COLUMNS} FROM sounds ORDER BY sort_order ASC, created_at ASC"
+    ))?;
+    let rows = stmt.query_map([], sound_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn sound_by_id_locked(conn: &Connection, id: &str) -> Result<Sound> {
+    conn.query_row(
+        &format!("SELECT {SOUND_COLUMNS} FROM sounds WHERE id = ?1"),
+        params![id],
+        sound_from_row,
+    )
+    .optional()?
+    .context("Sound not found.")
+}
+
+fn sound_by_starter_locked(conn: &Connection, slug: &str) -> Result<Option<Sound>> {
+    conn.query_row(
+        &format!("SELECT {SOUND_COLUMNS} FROM sounds WHERE starter = ?1"),
+        params![slug],
+        sound_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn total_sound_duration_ms_locked(conn: &Connection) -> Result<u64> {
+    let total: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(duration_ms), 0) FROM sounds",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(u64::try_from(total).unwrap_or(0))
+}
+
+fn sound_settings_locked(conn: &Connection) -> Result<SoundSettings> {
+    conn.query_row(
+        "SELECT volume_db, monitor, starters_seeded FROM sound_settings WHERE id = 1",
+        [],
+        |row| {
+            Ok(SoundSettings {
+                volume_db: row.get(0)?,
+                monitor: row.get(1)?,
+                starters_seeded: row.get(2)?,
+            })
+        },
+    )
+    .optional()?
+    .context("Sound settings row is missing.")
+}
+
+fn sound_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sound> {
+    let mode: String = row.get(7)?;
+    Ok(Sound {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        file: row.get(2)?,
+        duration_ms: row.get(3)?,
+        loudness_lufs: row.get(4)?,
+        level_db: row.get(5)?,
+        volume_db: row.get(6)?,
+        mode: sound_mode_from_db(&mode),
+        hotkey: row.get(8)?,
+        starter: row.get(9)?,
+        sort_order: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn banner_by_id_locked(conn: &Connection, id: &str) -> Result<Banner> {
+    conn.query_row(
+        &format!("SELECT {BANNER_COLUMNS} FROM banners WHERE id = ?1"),
+        params![id],
+        banner_from_row,
+    )
+    .optional()?
+    .context("Banner not found.")
+}
+
+fn banner_rect_from_json(json: &str, index: usize) -> rusqlite::Result<OverlayRect> {
+    serde_json::from_str(json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
+fn banner_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Banner> {
+    let horizontal_json: String = row.get(9)?;
+    let vertical_json: String = row.get(10)?;
+    Ok(Banner {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        image_file: row.get(2)?,
+        thumbnail_file: row.get(3)?,
+        width: row.get(4)?,
+        height: row.get(5)?,
+        has_alpha: row.get(6)?,
+        sort_order: row.get(7)?,
+        shown: row.get(8)?,
+        horizontal: banner_rect_from_json(&horizontal_json, 9)?,
+        vertical: banner_rect_from_json(&vertical_json, 10)?,
+        show_on_stream: row.get(11)?,
+        show_in_recording: row.get(12)?,
+        opacity: row.get(13)?,
+        hide_after_sec: row.get(14)?,
+        repeat_every_min: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 
@@ -7537,7 +9140,7 @@ fn resolve_managed_screen_image_path(root: &Path, screen_id: &str, path: &Path) 
     Ok(canonical)
 }
 
-fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
@@ -7903,6 +9506,7 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
             .get::<_, Option<String>>(19)?
             .and_then(|json| serde_json::from_str(&json).ok()),
         first_message: row.get::<_, Option<bool>>(20)?.unwrap_or(false),
+        first_in_session: false,
         author_affiliation: row
             .get::<_, Option<String>>(21)?
             .and_then(|json| serde_json::from_str(&json).ok()),
@@ -7971,7 +9575,10 @@ fn chat_moderation_operation_from_row(
         provider_message_id: row.get(5)?,
         author_name: row.get(6)?,
         excerpt: row.get(7)?,
-        source: json_column(row, 8)?,
+        // Plan 209 review fix 20: a source this build doesn't know (one a
+        // newer Videorc wrote) reads as `manual` instead of failing the row.
+        source: serde_json::from_str(&row.get::<_, String>(8)?)
+            .unwrap_or(crate::live_chat_moderation::ModerationSource::Manual),
         reason: row.get(9)?,
         phase: json_column(row, 10)?,
         confirm_mode: json_column(row, 11)?,
@@ -8351,6 +9958,70 @@ fn clip_mark_source_label(source: crate::protocol::ClipMarkSource) -> &'static s
     }
 }
 
+/// Plan 209 S2: the activity list keeps 1,000 rows or 30 days, whichever
+/// is smaller.
+pub(crate) const AGENT_ACTIVITY_MAX_ROWS: usize = 1_000;
+pub(crate) const AGENT_ACTIVITY_MAX_DAYS: i64 = 30;
+
+/// How an agent action ended. The wire word is the Settings list's word.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentActivityOutcome {
+    Ok,
+    Refused,
+    Failed,
+    Timeout,
+}
+
+impl AgentActivityOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
+            Self::Timeout => "timeout",
+        }
+    }
+
+    fn parse(text: &str) -> Self {
+        match text {
+            "ok" => Self::Ok,
+            "refused" => Self::Refused,
+            "timeout" => Self::Timeout,
+            _ => Self::Failed,
+        }
+    }
+}
+
+/// One row of the agents' Activity list (plan 209 S2): who did what, when,
+/// and how it ended. `summary` is a short rendering of the arguments, never
+/// a secret (tool arguments carry none by design).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivityEntry {
+    pub id: String,
+    pub at: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub tool: String,
+    pub summary: String,
+    pub outcome: AgentActivityOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+fn prune_agent_activity_locked(conn: &Connection, now: chrono::DateTime<Utc>) -> Result<()> {
+    let cutoff = (now - chrono::Duration::days(AGENT_ACTIVITY_MAX_DAYS)).to_rfc3339();
+    conn.execute("DELETE FROM agent_activity WHERE at < ?1", params![cutoff])?;
+    conn.execute(
+        "DELETE FROM agent_activity WHERE id NOT IN (
+            SELECT id FROM agent_activity ORDER BY at DESC, id DESC LIMIT ?1
+        )",
+        params![i64::try_from(AGENT_ACTIVITY_MAX_ROWS).unwrap_or(1_000)],
+    )?;
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -8482,7 +10153,7 @@ fn optimize_screen_image(
             "1",
         ])
         .arg("-i")
-        .arg(source_path)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(source_path))
         .arg("-filter_complex")
         .arg(filter)
         .arg("-map")
@@ -8490,7 +10161,7 @@ fn optimize_screen_image(
         .arg("-frames:v")
         .arg("1")
         .args(["-threads", "1"])
-        .arg(destination_path);
+        .arg(crate::ffmpeg::ffmpeg_path_arg(destination_path));
     let output = output_owned_std_with_timeout(&mut command, SCREEN_IMAGE_OPTIMIZER_TIMEOUT)
         .with_context(|| {
             format!(
@@ -8536,6 +10207,194 @@ fn title_case_word(word: &str) -> String {
     match chars.next() {
         Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str().to_lowercase()),
         None => String::new(),
+    }
+}
+
+impl Database {
+    pub fn scheduled_events(&self) -> Result<Vec<crate::scheduled_streams::ScheduledStreamEvent>> {
+        let conn = self.lock()?;
+        let mut statement =
+            conn.prepare("SELECT payload FROM scheduled_stream_events ORDER BY start_utc, id")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    pub fn scheduled_event(
+        &self,
+        id: &str,
+    ) -> Result<crate::scheduled_streams::ScheduledStreamEvent> {
+        let payload: String = self
+            .lock()?
+            .query_row(
+                "SELECT payload FROM scheduled_stream_events WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .context("Scheduled event was not found.")?;
+        Ok(serde_json::from_str(&payload)?)
+    }
+
+    pub fn scheduled_operation(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::scheduled_streams::ScheduleOperation>> {
+        let payload: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT payload FROM scheduled_stream_operations WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        payload
+            .map(|json| Ok(serde_json::from_str(&json)?))
+            .transpose()
+    }
+
+    /// Reserve an intent atomically before provider I/O. The operation UUID also
+    /// deduplicates requests after a renderer timeout or process restart.
+    pub fn begin_scheduled_operation(
+        &self,
+        mut event: crate::scheduled_streams::ScheduledStreamEvent,
+        mutation: &crate::scheduled_streams::Mutation,
+        action: &str,
+    ) -> Result<(
+        crate::scheduled_streams::ScheduledStreamEvent,
+        crate::scheduled_streams::ScheduleOperation,
+        bool,
+    )> {
+        use crate::scheduled_streams::ScheduleOperation;
+        Uuid::parse_str(&mutation.operation_id).context("Invalid operation UUID.")?;
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let prior: Option<String> = tx
+            .query_row(
+                "SELECT payload FROM scheduled_stream_operations WHERE id=?1",
+                [&mutation.operation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(prior) = prior {
+            let operation: ScheduleOperation = serde_json::from_str(&prior)?;
+            if operation.event_id != event.id
+                || operation.action != action
+                || operation.fingerprint
+                    != crate::scheduled_streams::mutation_fingerprint(mutation)?
+            {
+                bail!("Operation UUID belongs to another intent.");
+            }
+            let current: String = tx.query_row(
+                "SELECT payload FROM scheduled_stream_events WHERE id=?1",
+                [&event.id],
+                |r| r.get(0),
+            )?;
+            return Ok((serde_json::from_str(&current)?, operation, false));
+        }
+        let current: Option<(u64, Option<String>, String)> = tx
+            .query_row(
+                "SELECT revision, lease, payload FROM scheduled_stream_events WHERE id=?1",
+                [&event.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        match current {
+            Some((revision, lease, payload)) => {
+                if revision != mutation.expected_revision {
+                    bail!("Event changed. Reload before editing.");
+                }
+                if lease.is_some() {
+                    bail!("Another operation owns this event. Refresh its progress.");
+                }
+                let old: crate::scheduled_streams::ScheduledStreamEvent =
+                    serde_json::from_str(&payload)?;
+                if old.account_id != event.account_id {
+                    bail!("An event cannot move to another channel.");
+                }
+                if old.schema_version != 1 {
+                    bail!("This event uses a newer schema. Update Videorc.");
+                }
+            }
+            None if mutation.expected_revision == 0 && action == "saveDraft" => (),
+            None => bail!("Scheduled event was not found."),
+        }
+        event.revision = mutation.expected_revision + 1;
+        event.updated_at = Utc::now().to_rfc3339();
+        event.operation_state = "pending".into();
+        event.error = None;
+        let operation = ScheduleOperation {
+            id: mutation.operation_id.clone(),
+            event_id: event.id.clone(),
+            action: action.into(),
+            fingerprint: crate::scheduled_streams::mutation_fingerprint(mutation)?,
+            state: "pending".into(),
+            stage: "reserved".into(),
+            result: None,
+            error: None,
+            created_at: event.updated_at.clone(),
+        };
+        tx.execute("INSERT INTO scheduled_stream_events(id,provider,account_id,provider_event_id,start_utc,revision,lifecycle,lease,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET provider_event_id=excluded.provider_event_id,start_utc=excluded.start_utc,revision=excluded.revision,lifecycle=excluded.lifecycle,lease=excluded.lease,payload=excluded.payload",
+            params![event.id,event.provider,event.account_id,event.provider_event_id,event.start_utc,event.revision,event.lifecycle,operation.id,serde_json::to_string(&event)?])?;
+        tx.execute("INSERT INTO scheduled_stream_operations(id,event_id,state,payload) VALUES(?1,?2,?3,?4)", params![operation.id,operation.event_id,operation.state,serde_json::to_string(&operation)?])?;
+        tx.commit()?;
+        Ok((event, operation, true))
+    }
+
+    /// Checkpoint each provider resource ID before the next request. A journal
+    /// lease is never a mutex held over network I/O.
+    pub fn checkpoint_scheduled_operation(
+        &self,
+        event: &crate::scheduled_streams::ScheduledStreamEvent,
+        operation: &crate::scheduled_streams::ScheduleOperation,
+        done: bool,
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute("UPDATE scheduled_stream_events SET provider_event_id=?1,start_utc=?2,revision=?3,lifecycle=?4,lease=?5,payload=?6 WHERE id=?7 AND lease=?8",
+            params![event.provider_event_id,event.start_utc,event.revision,event.lifecycle,if done {None} else {Some(&operation.id)},serde_json::to_string(event)?,event.id,operation.id])?;
+        if changed != 1 {
+            bail!("Event operation no longer owns its lease.");
+        }
+        tx.execute(
+            "UPDATE scheduled_stream_operations SET state=?1,payload=?2 WHERE id=?3",
+            params![
+                operation.state,
+                serde_json::to_string(operation)?,
+                operation.id
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Called once during startup. Lost responses require reconciliation; never
+    /// replay a create just because the renderer disconnected.
+    pub fn recover_scheduled_operations_after_restart(&self) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let pending: Vec<(String, String, String)> = {
+            let mut statement = tx.prepare("SELECT e.payload,o.payload,o.id FROM scheduled_stream_events e JOIN scheduled_stream_operations o ON e.lease=o.id")?;
+            statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (payload, journal, id) in pending {
+            let mut event: crate::scheduled_streams::ScheduledStreamEvent =
+                serde_json::from_str(&payload)?;
+            let mut operation: crate::scheduled_streams::ScheduleOperation =
+                serde_json::from_str(&journal)?;
+            event.operation_state = "needs-reconciliation".into();
+            operation.state = "needs-reconciliation".into();
+            tx.execute(
+                "UPDATE scheduled_stream_events SET lease=NULL,payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&event)?, event.id],
+            )?;
+            tx.execute(
+                "UPDATE scheduled_stream_operations SET state=?1,payload=?2 WHERE id=?3",
+                params![operation.state, serde_json::to_string(&operation)?, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -9293,6 +11152,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use crate::test_temp_dir::TestTempDir;
+
     use crate::live_chat::{
         CommentsSendOperation, CommentsSendOperationPhase, DestinationDelivery,
         DestinationDeliveryPhase, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
@@ -9418,17 +11279,14 @@ mod tests {
         }
     }
 
-    fn file_database() -> (Database, PathBuf) {
-        let directory =
-            std::env::temp_dir().join(format!("videorc-storage-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).unwrap();
+    /// The guard comes first so it drops after the database (Windows cannot
+    /// remove a folder holding an open SQLite file).
+    fn file_database() -> (TestTempDir, Database, PathBuf) {
+        let directory = TestTempDir::new("storage-test");
         let path = directory.join("videorc.sqlite3");
-        let database = Database {
-            conn: Arc::new(Mutex::new(Connection::open(&path).unwrap())),
-            path: path.clone(),
-        };
-        database.migrate().unwrap();
-        (database, path)
+        // The app's open path, WAL journaling included (plan 191).
+        let database = Database::open_file_for_tests(&path);
+        (directory, database, path)
     }
 
     fn create_owned_mp4_staging_directory(
@@ -9544,22 +11402,45 @@ mod tests {
         assert_file_object_identity_survives_write_and_rename();
     }
 
-    fn temp_screen_image(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("videorc-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn temp_screen_image(name: &str) -> (TestTempDir, PathBuf) {
+        let dir = TestTempDir::new("test");
         let path = dir.join(name);
         std::fs::write(&path, b"not a real image").unwrap();
-        path
+        (dir, path)
     }
 
     fn import_stub_screen(database: &Database, name: &str) -> StreamScreen {
-        let path = temp_screen_image(name);
+        let (_dir, path) = temp_screen_image(name);
         database
             .import_screen_image_with_optimizer(path.to_str().unwrap(), |_, destination| {
                 std::fs::write(destination, b"optimized").unwrap();
                 Ok(())
             })
             .unwrap()
+    }
+
+    #[test]
+    fn a_poisoned_connection_lock_recovers_instead_of_failing_forever() {
+        let database = Database::open_in_memory_for_tests();
+        let poisoner = database.clone();
+        let panicked = std::thread::spawn(move || {
+            let _guard = poisoner.lock().expect("fresh lock");
+            panic!("a panic while holding the SQLite connection");
+        })
+        .join();
+        assert!(panicked.is_err());
+
+        // The next caller gets the connection back; chat persistence and the
+        // session rows must not stay broken for the rest of the process.
+        let guard = database.lock().expect("the lock recovers after a panic");
+        let one: i64 = guard.query_row("SELECT 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(one, 1);
+        drop(guard);
+        // Recovered once: later callers neither see the poison nor warn again.
+        assert!(!database.conn.is_poisoned());
+        database
+            .create_session(&sample_session("after-panic"))
+            .unwrap();
     }
 
     #[test]
@@ -9607,6 +11488,7 @@ mod tests {
             ended_at: ended_at.to_string(),
             segments: 1,
             posts: Vec::new(),
+            said: Vec::new(),
             stream_title: Some("Rust night".to_string()),
             messages_seen: 10,
             shown_on_stream: 1,
@@ -9728,6 +11610,134 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM cohost_reports", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    /// Plan 192 D7: skip counts fold into the session's report as they
+    /// happen, add up, and survive the stop-time report's merge.
+    #[test]
+    fn greeting_skips_fold_into_the_session_report_as_they_happen() {
+        use crate::protocol::CohostReportGreetingsSkipped;
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        let at = "2026-10-04T10:00:00Z";
+        assert!(
+            database
+                .append_cohost_report_greeting_skips(
+                    "s-1",
+                    CohostReportGreetingsSkipped {
+                        held: 2,
+                        ..CohostReportGreetingsSkipped::default()
+                    },
+                    at,
+                )
+                .unwrap()
+        );
+        assert!(
+            database
+                .append_cohost_report_greeting_skips(
+                    "s-1",
+                    CohostReportGreetingsSkipped {
+                        held: 1,
+                        no_line: 1,
+                        ..CohostReportGreetingsSkipped::default()
+                    },
+                    at,
+                )
+                .unwrap()
+        );
+        let report = database.get_cohost_report("s-1").unwrap().unwrap();
+        let expected = CohostReportGreetingsSkipped {
+            held: 3,
+            no_line: 1,
+            ..CohostReportGreetingsSkipped::default()
+        };
+        assert_eq!(report.greetings.skipped, Some(expected));
+        assert_eq!(report.segments, 0);
+        // The stop-time report folds in without clobbering them.
+        let stop = sample_cohost_report("s-1", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(database.upsert_cohost_report(&stop).unwrap());
+        let merged = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(merged.greetings.skipped, Some(expected));
+        assert_eq!(merged.greetings.first_timers, 3);
+        assert_eq!(merged.segments, 1);
+        // Empty counts write nothing, and a missing session is skipped.
+        assert!(
+            database
+                .append_cohost_report_greeting_skips(
+                    "nope",
+                    CohostReportGreetingsSkipped::default(),
+                    at
+                )
+                .unwrap()
+        );
+        assert_eq!(database.get_cohost_report("nope").unwrap(), None);
+        assert!(
+            !database
+                .append_cohost_report_greeting_skips("nope", expected, at)
+                .unwrap()
+        );
+    }
+
+    /// Plan 211 D11: lines Buddy said in its bubble fold into the session's
+    /// report as they show, oldest first, capped at 200 (the oldest go),
+    /// kept once per id, survive the stop-time merge, and a report saved
+    /// without `said` reads and writes unchanged.
+    #[test]
+    fn said_lines_fold_into_the_session_report_as_they_show_and_cap_at_two_hundred() {
+        use crate::protocol::{COHOST_REPORT_SAID_CAP, CohostReportPostSource, CohostReportSaid};
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        let said = |n: usize| CohostReportSaid {
+            id: format!("utt-{n}"),
+            at: format!("2026-10-04T10:{:02}:{:02}Z", n / 60, n % 60),
+            trigger: crate::cohost::CohostUtteranceTriggerKind::Greeting,
+            text: format!("Welcome, Fan{n}!"),
+            source: n.is_multiple_of(2).then_some(CohostReportPostSource::Line),
+        };
+        for n in 0..=COHOST_REPORT_SAID_CAP {
+            assert!(database.append_cohost_report_said("s-1", said(n)).unwrap());
+        }
+        let report = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(report.said.len(), COHOST_REPORT_SAID_CAP);
+        assert_eq!(report.said[0].id, "utt-1", "the oldest went");
+        assert_eq!(
+            report.said.last().unwrap().id,
+            format!("utt-{COHOST_REPORT_SAID_CAP}")
+        );
+        assert_eq!(report.said[1].source, Some(CohostReportPostSource::Line));
+        assert_eq!(report.segments, 0);
+        assert!(report.posts.is_empty(), "a said line is not a post");
+        // The same line twice is kept once.
+        assert!(
+            database
+                .append_cohost_report_said("s-1", said(COHOST_REPORT_SAID_CAP))
+                .unwrap()
+        );
+        assert_eq!(
+            database
+                .get_cohost_report("s-1")
+                .unwrap()
+                .unwrap()
+                .said
+                .len(),
+            COHOST_REPORT_SAID_CAP
+        );
+        // The stop-time report folds in without clobbering them.
+        let stop = sample_cohost_report("s-1", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(database.upsert_cohost_report(&stop).unwrap());
+        let merged = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(merged.said.len(), COHOST_REPORT_SAID_CAP);
+        assert_eq!(merged.said[0].id, "utt-1");
+        assert_eq!(merged.segments, 1);
+        // A report saved before `said` reads unchanged and writes no `said`.
+        let stored = serde_json::to_value(&stop).unwrap();
+        assert!(stored.get("said").is_none(), "empty is omitted");
+        let read = CohostSessionReport::from_stored_json(&stored.to_string()).unwrap();
+        assert!(read.said.is_empty());
+        assert_eq!(serde_json::to_value(&read).unwrap(), stored);
+        // A missing session is skipped, not an error.
+        assert!(!database.append_cohost_report_said("nope", said(1)).unwrap());
+        assert_eq!(database.get_cohost_report("nope").unwrap(), None);
     }
 
     #[test]
@@ -9866,6 +11876,7 @@ mod tests {
             source,
             phrase: (source == ClipMarkSource::Voice).then(|| "clip that".to_string()),
             created_at: "2026-09-27T10:00:00Z".to_string(),
+            lookback_seconds: None,
         };
         database
             .insert_clip_mark(&mark("m-2", "s-1", 754.2, ClipMarkSource::Manual))
@@ -9876,6 +11887,13 @@ mod tests {
         database
             .insert_clip_mark(&mark("m-3", "s-2", 5.0, ClipMarkSource::Voice))
             .unwrap();
+        // Plan 199 D8: a 1-min press keeps its length.
+        database
+            .insert_clip_mark(&ClipMark {
+                lookback_seconds: Some(60),
+                ..mark("m-5", "s-1", 900.0, ClipMarkSource::Manual)
+            })
+            .unwrap();
 
         let marks = database.list_clip_marks("s-1").unwrap();
         assert_eq!(
@@ -9883,12 +11901,16 @@ mod tests {
                 .iter()
                 .map(|mark| mark.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["m-1", "m-2"]
+            vec!["m-1", "m-2", "m-5"]
         );
         assert_eq!(marks[0].source, ClipMarkSource::Voice);
         assert_eq!(marks[0].phrase.as_deref(), Some("clip that"));
         assert_eq!(marks[1].source, ClipMarkSource::Manual);
         assert_eq!(marks[1].phrase, None);
+        // A NULL length (every mark made before plan 199) reads as None.
+        assert_eq!(marks[0].lookback_seconds, None);
+        assert_eq!(marks[1].lookback_seconds, None);
+        assert_eq!(marks[2].lookback_seconds, Some(60));
         assert!(database.list_clip_marks("missing").unwrap().is_empty());
 
         // A mark needs its session row; deleting the session takes its marks.
@@ -9903,6 +11925,394 @@ mod tests {
             .execute("DELETE FROM sessions WHERE id = 's-2'", [])
             .unwrap();
         assert!(database.list_clip_marks("s-2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_iso_sibling_rows_copy_the_take_and_list_their_role() {
+        // Plan 157: the ISO rows are born beside the Combined row, inherit its
+        // sources/layout/output, and the page query surfaces take + role so
+        // the Library can group the three files.
+        let database = test_database();
+        database.create_session(&sample_session("take-1")).unwrap();
+        database
+            .set_session_take_role("take-1", "take-1", "combined")
+            .unwrap();
+        database
+            .create_source_iso_session(
+                "take-1",
+                "take-1-screen",
+                "screen",
+                "Screen",
+                "/tmp/videorc-test-screen.mkv",
+                "2026-05-31T00:10:00Z",
+                Some(600_000),
+                "completed",
+                "finalizing",
+                None,
+            )
+            .unwrap();
+        database
+            .create_source_iso_session(
+                "take-1",
+                "take-1-camera",
+                "camera",
+                "Camera",
+                "/tmp/videorc-test-camera.mkv",
+                "2026-05-31T00:10:00Z",
+                Some(600_000),
+                "failed",
+                "failed",
+                Some("muxer exited 1"),
+            )
+            .unwrap();
+        assert!(
+            database
+                .create_source_iso_session(
+                    "missing",
+                    "missing-screen",
+                    "screen",
+                    "Screen",
+                    "/tmp/none.mkv",
+                    "2026-05-31T00:10:00Z",
+                    None,
+                    "completed",
+                    "finalizing",
+                    None,
+                )
+                .is_err(),
+            "an ISO row without its Combined row is a bug, not a silent orphan"
+        );
+
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(page.items.len(), 3);
+        let by_id = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap_or_else(|| panic!("{id} must list"))
+        };
+        let combined = by_id("take-1");
+        assert_eq!(combined.take_id.as_deref(), Some("take-1"));
+        assert_eq!(combined.recording_role.as_deref(), Some("combined"));
+        let screen = by_id("take-1-screen");
+        assert_eq!(screen.take_id.as_deref(), Some("take-1"));
+        assert_eq!(screen.recording_role.as_deref(), Some("screen"));
+        assert_eq!(screen.title, "Test session: Screen");
+        assert_eq!(screen.mode, combined.mode);
+        assert_eq!(screen.started_at, combined.started_at);
+        assert_eq!(screen.ended_at.as_deref(), Some("2026-05-31T00:10:00Z"));
+        assert_eq!(screen.duration_ms, Some(600_000));
+        assert_eq!(
+            screen.output_path.as_deref(),
+            Some("/tmp/videorc-test-screen.mkv")
+        );
+        assert_eq!(screen.container.as_deref(), Some("mkv"));
+        assert_eq!(screen.status, "completed");
+        let camera = by_id("take-1-camera");
+        assert_eq!(camera.recording_role.as_deref(), Some("camera"));
+        assert_eq!(camera.status, "failed");
+        assert_eq!(camera.finalization_error.as_deref(), Some("muxer exited 1"));
+        assert!(
+            database
+                .session_chat_totals("take-1-screen")
+                .unwrap()
+                .is_some(),
+            "every row owns a chat-totals record"
+        );
+    }
+
+    #[test]
+    fn a_take_refused_before_any_iso_media_leaves_one_ordinary_failed_row() {
+        // Release test 146, plan 0003: a Separate source take refused before
+        // its writers opened listed three failed rows ("combined take" plus
+        // two red "MP4 failed" with no file). Role reservations that never
+        // bound a capture go away; the Combined row is an ordinary refused
+        // start again.
+        let database = Database::open_in_memory_for_tests();
+        database
+            .create_session(&sample_session("take-refused"))
+            .unwrap();
+        database
+            .reserve_source_iso_sessions(
+                "take-refused",
+                &[
+                    ("screen", "Screen", "/tmp/take-refused-screen.mkv".into()),
+                    ("camera", "Camera", "/tmp/take-refused-camera.mkv".into()),
+                ],
+            )
+            .unwrap();
+        database
+            .fail_uncommitted_source_iso_sessions("take-refused")
+            .unwrap();
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["take-refused"]
+        );
+        assert_eq!(page.items[0].take_id, None);
+        assert_eq!(page.items[0].recording_role, None);
+        assert!(
+            database
+                .session_chat_totals("take-refused-screen")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_take_failed_after_an_iso_capture_opened_keeps_that_row_for_recovery() {
+        let dir = std::env::temp_dir().join(format!("videorc-iso-bound-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = Database::open_file_for_tests(&dir.join("take.sqlite3"));
+        database
+            .create_session(&sample_session("take-bound"))
+            .unwrap();
+        database
+            .reserve_source_iso_sessions(
+                "take-bound",
+                &[
+                    (
+                        "screen",
+                        "Screen",
+                        dir.join("screen.mkv").display().to_string(),
+                    ),
+                    (
+                        "camera",
+                        "Camera",
+                        dir.join("camera.mkv").display().to_string(),
+                    ),
+                ],
+            )
+            .unwrap();
+        let capture = dir.join("screen.mkv");
+        std::fs::write(&capture, b"partial").unwrap();
+        database
+            .set_source_iso_capture_path("take-bound-screen", &capture)
+            .unwrap();
+        database
+            .fail_uncommitted_source_iso_sessions("take-bound")
+            .unwrap();
+        let page = database.list_session_items_page(None, 10).unwrap();
+        let mut ids = page
+            .items
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, vec!["take-bound", "take-bound-screen"]);
+        let screen = page
+            .items
+            .iter()
+            .find(|row| row.id == "take-bound-screen")
+            .unwrap();
+        assert_eq!(screen.status, "failed");
+        assert_eq!(screen.take_id.as_deref(), Some("take-bound"));
+        let combined = page
+            .items
+            .iter()
+            .find(|row| row.id == "take-bound")
+            .unwrap();
+        assert_eq!(combined.recording_role.as_deref(), Some("combined"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_iso_reservations_survive_restart_and_reconcile_once() {
+        let dir = TestTempDir::new("iso-restart");
+        let path = dir.join("take.sqlite3");
+        {
+            let database = Database::open_file_for_tests(&path);
+            database
+                .create_session(&sample_session("take-restart"))
+                .unwrap();
+            database
+                .reserve_source_iso_sessions(
+                    "take-restart",
+                    &[
+                        (
+                            "screen",
+                            "Screen",
+                            dir.join("screen.mkv").display().to_string(),
+                        ),
+                        (
+                            "camera",
+                            "Camera",
+                            dir.join("camera.mkv").display().to_string(),
+                        ),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(
+                database
+                    .list_session_items_page(None, 10)
+                    .unwrap()
+                    .items
+                    .len(),
+                3
+            );
+        }
+        let database = Database::open_file_for_tests(&path);
+        assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 3);
+        assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 0);
+        let page = database.list_session_items_page(None, 10).unwrap();
+        for row in &page.items {
+            assert_eq!(row.take_id.as_deref(), Some("take-restart"));
+            if row.recording_role.as_deref() != Some("combined") {
+                assert_eq!(
+                    row.finalization_state,
+                    Some(crate::protocol::RecordingFinalizationState::Failed)
+                );
+                assert!(
+                    row.finalization_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("interrupted")
+                );
+            }
+        }
+        assert!(
+            database.sessions_pending_finalization().unwrap().is_empty(),
+            "interrupted captures must not silently export as success"
+        );
+    }
+
+    #[test]
+    fn source_iso_publication_recovery_preserves_identity_and_refuses_replacements() {
+        for (after_publish, already_failed) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let dir = std::env::temp_dir().join(format!("videorc-iso-publish-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let private = dir.join(".videorc-iso-owned");
+            std::fs::create_dir(&private).unwrap();
+            let capture = private.join("screen.mkv");
+            let public = dir.join("screen.mkv");
+            let database = Database::open_file_for_tests(&dir.join("test.sqlite"));
+            database
+                .create_session(&sample_session("take-publish"))
+                .unwrap();
+            database
+                .reserve_source_iso_sessions(
+                    "take-publish",
+                    &[("screen", "Screen", public.display().to_string())],
+                )
+                .unwrap();
+            assert!(
+                database
+                    .session_recording_path("take-publish-screen")
+                    .unwrap()
+                    .is_none()
+            );
+            database
+                .set_source_iso_capture_path("take-publish-screen", &capture)
+                .unwrap();
+            std::fs::write(&capture, b"owned growing capture").unwrap();
+            if after_publish {
+                database
+                    .bind_source_iso_capture("take-publish-screen", &capture)
+                    .unwrap();
+                let identity = capture_session_file_bound_identity(&capture)
+                    .unwrap()
+                    .unwrap();
+                crate::session_ops::publish_identity_bound_session_file(
+                    &capture, &public, &identity,
+                )
+                .unwrap();
+                // Crash immediately after rename, before the row's path update.
+                if already_failed {
+                    database.lock().unwrap().execute_batch("CREATE TRIGGER reject_iso_path BEFORE UPDATE OF output_path ON sessions BEGIN SELECT RAISE(ABORT, 'injected post-publication write failure'); END;").unwrap();
+                    assert!(
+                        database
+                            .set_source_iso_capture_path("take-publish-screen", &public)
+                            .is_err()
+                    );
+                    database
+                        .lock()
+                        .unwrap()
+                        .execute_batch("DROP TRIGGER reject_iso_path;")
+                        .unwrap();
+                }
+            }
+            if already_failed {
+                database
+                    .fail_uncommitted_source_iso_sessions("take-publish")
+                    .unwrap();
+            }
+            drop(database);
+            let database = Database::open_file_for_tests(&dir.join("test.sqlite"));
+            database.reconcile_orphaned_sessions().unwrap();
+            assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 0);
+            let recovered = if after_publish { &public } else { &capture };
+            assert_eq!(
+                database
+                    .session_recording_path("take-publish-screen")
+                    .unwrap()
+                    .as_deref(),
+                Some(recovered.to_str().unwrap())
+            );
+            database
+                .verify_source_iso_capture_ownership("take-publish-screen", recovered)
+                .unwrap();
+            if !already_failed {
+                // Plan 200 C6: owned partial media is offered for Export MP4.
+                let status: String = database
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT status FROM sessions WHERE id = 'take-publish-screen'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(status, "completed");
+            }
+            std::fs::rename(recovered, dir.join("original.mkv")).unwrap();
+            std::fs::write(recovered, b"foreign replacement").unwrap();
+            assert!(
+                database
+                    .verify_source_iso_capture_ownership("take-publish-screen", recovered)
+                    .is_err()
+            );
+            assert!(
+                database
+                    .prepare_session_deletions(&["take-publish-screen".into()])
+                    .is_err()
+            );
+            database.reconcile_orphaned_sessions().unwrap();
+            assert!(
+                database
+                    .verify_source_iso_capture_ownership("take-publish-screen", recovered)
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(recovered).unwrap(), b"foreign replacement");
+            drop(database);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn source_iso_reservation_transaction_rolls_back_on_duplicate_role() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("take-rollback"))
+            .unwrap();
+        assert!(
+            database
+                .reserve_source_iso_sessions(
+                    "take-rollback",
+                    &[
+                        ("screen", "Screen", "/tmp/a.mkv".into()),
+                        ("screen", "Screen", "/tmp/b.mkv".into()),
+                    ]
+                )
+                .is_err()
+        );
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].take_id, None);
     }
 
     fn sample_session(id: &str) -> NewSession {
@@ -9939,9 +12349,11 @@ mod tests {
                 side_by_side_split: SideBySideSplit::SeventyThirty,
                 side_by_side_camera_side: SideBySideCameraSide::Right,
                 vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+                horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
                 arrangement_mode: crate::protocol::ArrangementMode::Preset,
                 source_transform_overrides: std::collections::BTreeMap::new(),
                 source_visibility: Default::default(),
+                camera_look: Default::default(),
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -9950,6 +12362,7 @@ mod tests {
             },
             output: OutputSettings {
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 record_enabled: true,
                 stream_enabled: false,
                 output_directory: None,
@@ -10004,6 +12417,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            first_in_session: false,
             author_affiliation: None,
             author_verified: None,
         }
@@ -10039,6 +12453,151 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_takes_with_media_are_claimed_once_and_settled() {
+        let dir = std::env::temp_dir().join(format!("videorc-interrupted-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = Database::open_in_memory_for_tests();
+        let row = |id: &str, file: Option<(&str, u64)>| {
+            let mut session = sample_session(id);
+            session.started_at = "2026-10-27T10:00:00+00:00".to_string();
+            let path = dir.join(format!("{id}.mkv"));
+            if let Some((_, len)) = file {
+                std::fs::write(&path, vec![0u8; len as usize]).unwrap();
+            }
+            session.output_path = Some(path.display().to_string());
+            database.create_session(&session).unwrap();
+        };
+        // Killed backend / power loss: still `running` until the boot reconcile.
+        row("crashed", Some(("crashed", INTERRUPTED_TAKE_MIN_BYTES)));
+        // The capture died mid-take; the row is already `failed`.
+        row("died", Some(("died", 2 * INTERRUPTED_TAKE_MIN_BYTES)));
+        database
+            .finish_session("died", "failed", None, None, Some(89_599))
+            .unwrap();
+        // A start that failed before the first cluster: nothing to recover.
+        row("empty", Some(("empty", 512)));
+        row("missing", None);
+        // Finished normally: never touched.
+        row("done", Some(("done", INTERRUPTED_TAKE_MIN_BYTES)));
+        database
+            .finish_session("done", "completed", None, None, Some(1_000))
+            .unwrap();
+        // Outside the recovery window.
+        let mut old = sample_session("old");
+        let old_path = dir.join("old.mkv");
+        std::fs::write(&old_path, vec![0u8; INTERRUPTED_TAKE_MIN_BYTES as usize]).unwrap();
+        old.output_path = Some(old_path.display().to_string());
+        old.started_at = "2026-01-01T00:00:00+00:00".to_string();
+        database.create_session(&old).unwrap();
+        // A separate Screen file keeps its own interrupted-capture flow.
+        row(
+            "take-screen",
+            Some(("take-screen", INTERRUPTED_TAKE_MIN_BYTES)),
+        );
+        database
+            .set_session_take_role("take-screen", "take", "screen")
+            .unwrap();
+        database.reconcile_orphaned_sessions().unwrap();
+
+        let since = "2026-10-20T00:00:00+00:00";
+        let mut claimed = database.claim_interrupted_takes(since, None).unwrap();
+        claimed.sort();
+        assert_eq!(claimed, vec!["crashed".to_string(), "died".to_string()]);
+        // Claimed rows are what the startup finalization resume picks up.
+        let mut pending = database
+            .sessions_pending_finalization()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.session_id, row.interrupted_take))
+            .collect::<Vec<_>>();
+        pending.sort();
+        assert_eq!(
+            pending,
+            vec![("crashed".to_string(), true), ("died".to_string(), true)]
+        );
+        // A second scan (the next launch) claims nothing again.
+        assert!(
+            database
+                .claim_interrupted_takes(since, None)
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(
+            database
+                .settle_interruption_recovery("crashed", true)
+                .unwrap(),
+            Some("recovered")
+        );
+        assert_eq!(
+            database
+                .settle_interruption_recovery("died", false)
+                .unwrap(),
+            Some("failed")
+        );
+        // An ordinary finalization has nothing to settle.
+        assert_eq!(
+            database.settle_interruption_recovery("done", true).unwrap(),
+            None
+        );
+        let page = database.list_session_items_page(None, 20).unwrap();
+        let recovery = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap()
+                .interruption_recovery
+                .clone()
+        };
+        assert_eq!(recovery("crashed").as_deref(), Some("recovered"));
+        assert_eq!(recovery("died").as_deref(), Some("failed"));
+        let status = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap()
+                .status
+                .clone()
+        };
+        assert_eq!(status("died"), "failed", "a failed recovery stays failed");
+        // `none` is bookkeeping, never shown.
+        assert_eq!(recovery("empty"), None);
+        assert_eq!(recovery("missing"), None);
+        assert_eq!(recovery("done"), None);
+        assert_eq!(recovery("old"), None);
+        assert_eq!(recovery("take-screen"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claiming_one_interrupted_take_leaves_the_others() {
+        let dir = std::env::temp_dir().join(format!("videorc-interrupted-one-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = Database::open_in_memory_for_tests();
+        for id in ["a", "b"] {
+            let mut session = sample_session(id);
+            session.started_at = "2026-10-27T10:00:00+00:00".to_string();
+            let path = dir.join(format!("{id}.mkv"));
+            std::fs::write(&path, vec![0u8; INTERRUPTED_TAKE_MIN_BYTES as usize]).unwrap();
+            session.output_path = Some(path.display().to_string());
+            database.create_session(&session).unwrap();
+            database
+                .finish_session(id, "failed", None, None, None)
+                .unwrap();
+        }
+        let since = "2026-10-20T00:00:00+00:00";
+        assert_eq!(
+            database.claim_interrupted_takes(since, Some("b")).unwrap(),
+            vec!["b".to_string()]
+        );
+        assert_eq!(
+            database.claim_interrupted_takes(since, None).unwrap(),
+            vec!["a".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn default_database_path_uses_the_platform_application_data_location() {
         let path = default_database_path();
         let rendered = path.display().to_string();
@@ -10050,6 +12609,77 @@ mod tests {
         assert!(rendered.contains("Videorc"));
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert!(rendered.contains(".videorc"));
+    }
+
+    #[test]
+    fn database_file_journals_in_wal_and_keeps_full_sync() {
+        // Plan 191: faster commits, identical durability.
+        let directory =
+            std::env::temp_dir().join(format!("videorc-wal-mode-test-{}", uuid::Uuid::new_v4()));
+        let database = Database::open_file_for_tests(&directory.join("videorc.sqlite3"));
+        database
+            .add_health_event(None, HealthLevel::Info, "wal-probe", "An autocommit write.")
+            .unwrap();
+
+        {
+            let conn = database.lock().unwrap();
+            let journal_mode: String = conn
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal_mode, "wal");
+            let synchronous: i64 = conn
+                .pragma_query_value(None, "synchronous", |row| row.get(0))
+                .unwrap();
+            assert_eq!(synchronous, 2, "durability stays at synchronous=FULL");
+        }
+        assert!(
+            directory.join("videorc.sqlite3-wal").exists(),
+            "commits append to the -wal sidecar"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn wal_database_keeps_committed_rows_across_a_reopen() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-wal-reopen-test-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("videorc.sqlite3");
+        let database = Database::open_file_for_tests(&path);
+        database
+            .create_session(&sample_session("session-wal-reopen"))
+            .unwrap();
+        let event = database
+            .add_health_event(
+                Some("session-wal-reopen"),
+                HealthLevel::Warn,
+                "wal-reopen",
+                "Written before the reopen.",
+            )
+            .unwrap();
+        drop(database);
+
+        // WAL lives in the file header: a connection that never asks for it,
+        // like an older app build, still opens this database in WAL.
+        let raw = Connection::open(&path).unwrap();
+        let journal_mode: String = raw
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        drop(raw);
+
+        let reopened = Database::open_file_for_tests(&path);
+        let sessions = reopened.list_sessions(10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "session-wal-reopen");
+        let events = reopened.list_health_events("session-wal-reopen").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, event.id);
+        assert_eq!(events[0].message, "Written before the reopen.");
+
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -10072,9 +12702,11 @@ mod tests {
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+            horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
+            camera_look: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,
@@ -10090,6 +12722,7 @@ mod tests {
         };
         let output = OutputSettings {
             keep_original_mkv: false,
+            separate_source_recordings: None,
             record_enabled: true,
             stream_enabled: true,
             output_directory: None,
@@ -10253,6 +12886,125 @@ mod tests {
             .lock()
             .unwrap()
             .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+    }
+
+    #[test]
+    fn session_list_page_searches_each_history_from_the_page_instead_of_scanning_it() {
+        // Plan 191: every history the page counts is an index search driven
+        // by the page's own rows. A scan reads the user's whole history on
+        // every Library page.
+        use crate::protocol::CleanCutMode;
+        use crate::repair::{GateStatus, QualityExpectations};
+
+        let database = test_database();
+        let expectations = QualityExpectations {
+            intended_fps: Some(30.0),
+            expect_audio: true,
+            pipeline_reported_freezes: false,
+            pipeline_reported_audio_loss: false,
+        };
+        for index in 0..3 {
+            let session_id = format!("session-{index}");
+            let output_path = format!("/tmp/videorc-plan-191-{index}.mkv");
+            let mut session = sample_session(&session_id);
+            session.started_at = format!("2026-06-01T00:00:0{index}Z");
+            session.output_path = Some(output_path.clone());
+            database.create_session(&session).unwrap();
+            database
+                .add_health_event(
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "fixture-health",
+                    "Fixture health event.",
+                )
+                .unwrap();
+            database
+                .add_session_log(
+                    &session_id,
+                    HealthLevel::Info,
+                    "fixture-log",
+                    "Fixture session log.",
+                    None,
+                )
+                .unwrap();
+            let mut repair = RepairJob::pending(
+                format!("repair-{index}"),
+                output_path.clone(),
+                &expectations,
+                "t0".to_string(),
+            );
+            repair.complete_with_gate(
+                &GateStatus::Ready {
+                    path: output_path,
+                    sampled: false,
+                },
+                "t1".to_string(),
+            );
+            database.upsert_repair_job(&repair).unwrap();
+        }
+        assert!(matches!(
+            database
+                .create_clean_cut_job("session-0", CleanCutMode::Clean)
+                .unwrap(),
+            CleanCutJobCreation::Created(_)
+        ));
+
+        let page = database.list_session_items_page(None, 50).unwrap();
+        assert_eq!(page.items.len(), 3);
+        for item in &page.items {
+            assert_eq!(item.health_event_count, 1);
+            assert_eq!(item.session_log_count, 1);
+            assert!(matches!(
+                item.quality_status,
+                Some(GateStatus::Ready { .. })
+            ));
+        }
+
+        let conn = database.conn.lock().unwrap();
+        let mut statement = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                Database::SESSION_LIST_PAGE_SQL
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(params![None::<&str>, None::<&str>, 51_i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let plan_text = plan.join("\n");
+        for table in [
+            "health_events",
+            "session_logs",
+            "ai_artifacts",
+            "live_chat_messages",
+            "repair_jobs",
+            "clean_cut_jobs",
+        ] {
+            let scan = format!("SCAN {table}");
+            let search = format!("SEARCH {table} USING ");
+            assert!(
+                !plan.iter().any(|detail| detail.starts_with(&scan)),
+                "a page must never scan all of {table}:\n{plan_text}"
+            );
+            // An automatic index is built by reading the whole table.
+            assert!(
+                plan.iter()
+                    .any(|detail| detail.starts_with(&search) && !detail.contains("AUTOMATIC")),
+                "{table} must be searched through a stored index:\n{plan_text}"
+            );
+        }
+        for search in [
+            "SEARCH repair_jobs USING INDEX idx_repair_jobs_file_path",
+            "SEARCH clean_cut_jobs USING INDEX idx_clean_cut_jobs_output_session",
+        ] {
+            assert!(
+                plan.iter().any(|detail| detail.starts_with(search)),
+                "expected `{search}`:\n{plan_text}"
+            );
+        }
     }
 
     #[test]
@@ -11578,7 +14330,7 @@ mod tests {
 
     #[test]
     fn startup_replays_a_persisted_finalization_recovery() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         database
             .create_session(&sample_session("session-recovery"))
             .unwrap();
@@ -11621,7 +14373,7 @@ mod tests {
 
     #[test]
     fn startup_replays_write_ahead_intent_before_mp4_export_as_owned_mkv() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -11669,7 +14421,7 @@ mod tests {
 
     #[test]
     fn startup_cleans_owned_mp4_directory_after_crash_before_ffmpeg_writes() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let preferred_mp4 = directory.join("recording.mp4");
@@ -11725,7 +14477,7 @@ mod tests {
 
     #[test]
     fn startup_cleans_owned_mp4_directory_after_crash_during_ffmpeg_write() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let preferred_mp4 = directory.join("recording.mp4");
@@ -11784,7 +14536,7 @@ mod tests {
 
     #[test]
     fn startup_retires_journaled_mp4_candidate_collision_without_touching_candidate() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let candidate = directory.join("recording.mp4");
@@ -11853,7 +14605,7 @@ mod tests {
 
     #[test]
     fn startup_adopts_published_mp4_through_owned_directory_then_cleans_workspace() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let published = directory.join("recording.mp4");
@@ -11928,7 +14680,7 @@ mod tests {
 
     #[test]
     fn startup_rehomes_and_adopts_identity_matched_mp4_when_original_workspace_is_missing() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let published = directory.join("recording.mp4");
@@ -12011,7 +14763,7 @@ mod tests {
 
     #[test]
     fn startup_rehomes_but_never_adopts_replaced_mp4_when_original_workspace_is_missing() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let published = directory.join("recording.mp4");
@@ -12087,7 +14839,7 @@ mod tests {
 
     #[test]
     fn startup_retains_replaced_staging_directory_and_candidate_then_retires_recovery() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let candidate = directory.join("recording.mp4");
@@ -12165,7 +14917,7 @@ mod tests {
 
     #[test]
     fn startup_discards_object_bound_partial_mp4_after_interrupted_export() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -12226,7 +14978,7 @@ mod tests {
 
     #[test]
     fn startup_retains_replaced_partial_mp4_and_its_recovery_record() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -12284,7 +15036,7 @@ mod tests {
 
     #[test]
     fn startup_adopts_identity_matched_mp4_published_before_db_commit() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -12342,7 +15094,7 @@ mod tests {
 
     #[test]
     fn startup_publishes_identity_matched_mp4_staged_before_a_crash() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -12395,7 +15147,7 @@ mod tests {
 
     #[test]
     fn startup_restores_a_raced_staging_replacement_instead_of_adopting_it() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -12451,7 +15203,7 @@ mod tests {
 
     #[test]
     fn startup_falls_back_to_mkv_without_adopting_or_deleting_a_replaced_mp4() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -12504,7 +15256,7 @@ mod tests {
 
     #[test]
     fn startup_clears_committed_mp4_path_after_rejecting_replacement() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let fixture = create_committed_mp4_recovery_fixture(
             &database,
@@ -12536,7 +15288,7 @@ mod tests {
 
     #[test]
     fn startup_clears_committed_mp4_path_after_published_file_disappears() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let fixture = create_committed_mp4_recovery_fixture(
             &database,
@@ -12564,7 +15316,7 @@ mod tests {
 
     #[test]
     fn stale_recovery_never_clears_a_newer_committed_mp4_path() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let fixture = create_committed_mp4_recovery_fixture(
             &database,
@@ -12611,7 +15363,7 @@ mod tests {
 
     #[test]
     fn startup_never_deletes_a_replacement_at_the_finalized_mkv_path() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -12664,7 +15416,7 @@ mod tests {
 
     #[test]
     fn startup_never_deletes_same_content_replacement_at_finalized_mkv_path() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let replacement = directory.join("replacement.mkv");
@@ -12744,7 +15496,7 @@ mod tests {
 
     #[test]
     fn legacy_recovery_persists_generated_mkv_cleanup_path_before_the_move() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -12824,7 +15576,7 @@ mod tests {
 
     #[test]
     fn startup_cleans_object_bound_copy_interrupted_before_content_binding() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".interrupted.partial");
         let final_path = directory.join("interrupted.mp4");
@@ -12864,7 +15616,7 @@ mod tests {
 
     #[test]
     fn startup_quarantines_unbound_copy_without_path_only_deletion() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".unbound.partial");
         let final_path = directory.join("unbound.mp4");
@@ -12895,7 +15647,7 @@ mod tests {
 
     #[test]
     fn cancellation_reloads_identity_bound_operation_before_cleanup() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".cancel.partial");
         let final_path = directory.join("cancel.mp4");
@@ -12936,7 +15688,7 @@ mod tests {
 
     #[test]
     fn startup_discards_an_unowned_published_library_file() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".orphan.partial");
         let final_path = directory.join("orphan.mp4");
@@ -12966,7 +15718,7 @@ mod tests {
 
     #[test]
     fn startup_never_removes_a_raced_external_destination() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".raced.partial");
         let final_path = directory.join("raced.mp4");
@@ -12997,7 +15749,7 @@ mod tests {
 
     #[test]
     fn startup_never_cleans_up_a_replacement_installed_after_publication() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".published.partial");
         let final_path = directory.join("published.mp4");
@@ -13029,7 +15781,7 @@ mod tests {
 
     #[test]
     fn startup_discards_an_owned_row_instead_of_adopting_a_replacement() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".owned-replaced.partial");
         let final_path = directory.join("owned-replaced.mp4");
@@ -13066,7 +15818,7 @@ mod tests {
 
     #[test]
     fn startup_publishes_staged_library_bytes_for_an_owned_row() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".owned.partial");
         let final_path = directory.join("owned.mp4");
@@ -13099,7 +15851,7 @@ mod tests {
 
     #[test]
     fn startup_publishes_object_bound_library_bytes_after_mtime_drift() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".owned-mtime.partial");
         let final_path = directory.join("owned-mtime.mp4");
@@ -13148,7 +15900,7 @@ mod tests {
 
     #[test]
     fn startup_never_adopts_a_raced_library_staging_replacement() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".owned-raced.partial");
         let final_path = directory.join("owned-raced.mp4");
@@ -13179,7 +15931,7 @@ mod tests {
 
     #[test]
     fn startup_keeps_a_completed_library_row_and_clears_its_journal() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".done.partial");
         let final_path = directory.join("done.mp4");
@@ -13211,7 +15963,7 @@ mod tests {
 
     #[test]
     fn startup_never_adopts_a_same_sample_replacement_for_a_completed_row() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".same-sample.partial");
         let replacement = directory.join("same-sample-replacement.mp4");
@@ -13290,8 +16042,154 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_recording_also_deletes_its_repair_backup() {
+        let (_dir, database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let mp4 = directory.join("recording.mp4");
+        std::fs::write(&mp4, b"repaired recording").unwrap();
+        let backup = crate::repair::backup_path_for(&mp4).unwrap();
+        std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        std::fs::write(&backup, b"original before repair").unwrap();
+        // Another recording's backup in the same folder is not touched.
+        let other_backup = backup.with_file_name("other.mp4");
+        std::fs::write(&other_backup, b"someone else's backup").unwrap();
+        let mut session = sample_session("delete-backup");
+        session.output_path = Some(mp4.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session(
+                "delete-backup",
+                "completed",
+                None,
+                Some(mp4.display().to_string()),
+                None,
+            )
+            .unwrap();
+
+        let operations = database
+            .prepare_session_deletions(&["delete-backup".to_string()])
+            .unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0].paths.len(),
+            2,
+            "the recording and its backup: {:?}",
+            operations[0].paths
+        );
+        assert!(!mp4.exists());
+        assert!(
+            !backup.exists(),
+            "the backup is quarantined with the recording"
+        );
+        let quarantined_backup = operations[0]
+            .paths
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.parent().and_then(Path::parent) == backup.parent())
+            .expect("the backup's quarantine sits in the backup folder");
+        assert_eq!(
+            std::fs::read(&quarantined_backup).unwrap(),
+            b"original before repair"
+        );
+        // Electron moves both to the Trash.
+        for path in &operations[0].paths {
+            std::fs::remove_file(path).unwrap();
+        }
+        let completion = database
+            .complete_session_deletion(&operations[0].operation_id, &[])
+            .unwrap();
+        assert!(completion.deleted);
+        assert_eq!(
+            std::fs::read(&other_backup).unwrap(),
+            b"someone else's backup"
+        );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_stopped_early_separate_file_removes_its_empty_private_folder() {
+        let (_dir, database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let hidden = directory.join(".videorc-iso-delete-test");
+        std::fs::create_dir(&hidden).unwrap();
+        let mkv = hidden.join("take-camera.mkv");
+        std::fs::write(&mkv, b"stopped early").unwrap();
+        let mut session = sample_session("delete-iso-folder");
+        session.output_path = Some(mkv.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session("delete-iso-folder", "completed", None, None, None)
+            .unwrap();
+
+        let operations = database
+            .prepare_session_deletions(&["delete-iso-folder".to_string()])
+            .unwrap();
+        for path in &operations[0].paths {
+            std::fs::remove_file(path).unwrap();
+        }
+        assert!(hidden.exists(), "the folder waits for the row");
+        let completion = database
+            .complete_session_deletion(&operations[0].operation_id, &[])
+            .unwrap();
+        assert!(completion.deleted);
+        assert!(
+            !hidden.exists(),
+            "the empty private folder goes with the row"
+        );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_stored_size_is_the_published_mp4s_after_an_export() {
+        let (_dir, database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let mkv = directory.join("take.mkv");
+        let mp4 = directory.join("take.mp4");
+        std::fs::write(&mkv, vec![0_u8; 4096]).unwrap();
+        std::fs::write(&mp4, vec![0_u8; 1500]).unwrap();
+        let mut session = sample_session("size-after-export");
+        session.output_path = Some(mkv.display().to_string());
+        database.create_session(&session).unwrap();
+        // The Library listed the MKV while it exported.
+        database
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET file_size_bytes = 4096 WHERE id = 'size-after-export'",
+                [],
+            )
+            .unwrap();
+        let finalization = SessionFinalization::new(
+            "size-after-export",
+            "completed",
+            Some("2026-10-26T10:00:00Z".to_string()),
+            Some(mp4.display().to_string()),
+            Some(1_000),
+            &crate::diagnostics::idle_diagnostics(),
+        )
+        .unwrap();
+        database
+            .finalize_session_with_diagnostics(&finalization)
+            .unwrap();
+        let stored: Option<i64> = database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT file_size_bytes FROM sessions WHERE id = 'size-after-export'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, Some(1500));
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn two_phase_session_delete_hides_then_retries_failed_trash_paths() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let media_path = directory.join("recording.mkv");
         std::fs::write(&media_path, b"recording").unwrap();
@@ -13380,7 +16278,7 @@ mod tests {
 
     #[test]
     fn delete_quarantine_never_trashes_a_replacement_at_the_original_path() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let media_path = directory.join("replacement.mp4");
         std::fs::write(&media_path, b"original recording").unwrap();
@@ -13544,7 +16442,7 @@ mod tests {
 
     #[test]
     fn delete_quarantine_restores_a_mismatch_instead_of_trashing_it() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let media_path = directory.join("quarantine-replaced.mp4");
         std::fs::write(&media_path, b"owned recording").unwrap();
@@ -13570,10 +16468,233 @@ mod tests {
             .unwrap();
         assert!(completion.deleted);
         assert!(!quarantine.exists());
+        assert!(!quarantine.parent().unwrap().exists());
         assert_eq!(
             std::fs::read(&media_path).unwrap(),
             b"unrelated quarantine replacement"
         );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_path_keeps_the_recording_file_name() {
+        let original = Path::new("/recordings/videorc-session-2026-10-29.mp4");
+        let quarantine = session_deletion_quarantine_path(original, "op-id", 1);
+
+        assert_eq!(
+            quarantine,
+            Path::new("/recordings/.videorc-trash-op-id-1/videorc-session-2026-10-29.mp4")
+        );
+        assert_eq!(quarantine.file_name(), original.file_name());
+        assert_eq!(quarantine.extension().unwrap(), "mp4");
+        assert_eq!(
+            session_deletion_quarantine_directory(original, &quarantine),
+            Some(Path::new("/recordings/.videorc-trash-op-id-1"))
+        );
+        // A legacy tombstone's hidden file beside the recording has no
+        // private folder, so cleanup never touches the recordings folder.
+        assert_eq!(
+            session_deletion_quarantine_directory(
+                original,
+                Path::new("/recordings/.videorc-trash-op-id-1")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn delete_quarantine_moves_files_under_their_names_and_completion_removes_the_folders() {
+        let (_dir, database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let mp4 = directory.join("videorc-session-named.mp4");
+        let mkv = directory.join("videorc-session-named.mkv");
+        std::fs::write(&mp4, b"exported recording").unwrap();
+        std::fs::write(&mkv, b"capture recording").unwrap();
+        let mut session = sample_session("named-delete");
+        session.output_path = Some(mkv.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session(
+                "named-delete",
+                "completed",
+                None,
+                Some(mp4.display().to_string()),
+                None,
+            )
+            .unwrap();
+
+        let operation = database
+            .prepare_session_deletions(&["named-delete".to_string()])
+            .unwrap()
+            .remove(0);
+        assert!(!mp4.exists() && !mkv.exists());
+        let resolved = database.pending_session_deletions().unwrap().remove(0);
+        assert_eq!(resolved.paths, operation.paths);
+        assert!(resolved.blocked_paths.is_empty());
+        let mut names = Vec::new();
+        for path in resolved.paths.iter().map(PathBuf::from) {
+            let folder = path.parent().unwrap();
+            assert_eq!(folder.parent().unwrap(), directory);
+            assert!(
+                folder
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(".videorc-trash-")
+            );
+            names.push(path.file_name().unwrap().to_str().unwrap().to_string());
+        }
+        names.sort();
+        assert_eq!(
+            names,
+            ["videorc-session-named.mkv", "videorc-session-named.mp4"]
+        );
+        assert_eq!(
+            std::fs::read(
+                resolved
+                    .paths
+                    .iter()
+                    .find(|path| path.ends_with(".mp4"))
+                    .unwrap()
+            )
+            .unwrap(),
+            b"exported recording"
+        );
+
+        // Electron moves both to the Trash.
+        for path in &resolved.paths {
+            std::fs::remove_file(path).unwrap();
+        }
+        let completion = database
+            .complete_session_deletion(&operation.operation_id, &[])
+            .unwrap();
+        assert!(completion.deleted);
+        for path in resolved.paths.iter().map(PathBuf::from) {
+            assert!(!path.parent().unwrap().exists(), "{}", path.display());
+        }
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_folder_restores_a_replacement_to_its_name() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-delete-folder-replacement-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let original = directory.join("videorc-session-replaced.mp4");
+        let quarantine = session_deletion_quarantine_path(&original, "op", 0);
+        std::fs::write(&original, b"owned recording").unwrap();
+        let record = SessionDeletionPathRecord {
+            original_path: original.display().to_string(),
+            quarantine_path: Some(quarantine.display().to_string()),
+            identity: capture_session_file_identity(&original).unwrap(),
+            object_identity: capture_session_file_object_identity(&original).unwrap(),
+        };
+        std::fs::remove_file(&original).unwrap();
+        std::fs::write(&original, b"replacement before quarantine").unwrap();
+
+        // The replacement is moved first, fails verification, and goes back.
+        assert_eq!(
+            deletion_path_state(&record).unwrap(),
+            DeletionPathState::Missing
+        );
+        assert!(!quarantine.exists());
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            b"replacement before quarantine"
+        );
+        remove_empty_session_deletion_quarantine_directory(&record);
+        assert!(!quarantine.parent().unwrap().exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_folder_that_is_not_a_directory_never_moves_the_file() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-delete-folder-taken-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let original = directory.join("videorc-session-taken.mp4");
+        let quarantine = session_deletion_quarantine_path(&original, "op", 0);
+        std::fs::write(&original, b"owned recording").unwrap();
+        let record = SessionDeletionPathRecord {
+            original_path: original.display().to_string(),
+            quarantine_path: Some(quarantine.display().to_string()),
+            identity: capture_session_file_identity(&original).unwrap(),
+            object_identity: capture_session_file_object_identity(&original).unwrap(),
+        };
+
+        // A file at the folder name fails closed and stays retryable.
+        std::fs::write(quarantine.parent().unwrap(), b"not a folder").unwrap();
+        assert!(deletion_path_state(&record).is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"owned recording");
+        remove_empty_session_deletion_quarantine_directory(&record);
+        assert_eq!(
+            std::fs::read(quarantine.parent().unwrap()).unwrap(),
+            b"not a folder"
+        );
+        std::fs::remove_file(quarantine.parent().unwrap()).unwrap();
+
+        // A link at the folder name never carries the file out of the folder.
+        #[cfg(unix)]
+        {
+            let elsewhere = directory.join("elsewhere");
+            std::fs::create_dir(&elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, quarantine.parent().unwrap()).unwrap();
+            assert_eq!(
+                deletion_path_state(&record).unwrap(),
+                DeletionPathState::Blocked(original.display().to_string())
+            );
+            assert_eq!(std::fs::read(&original).unwrap(), b"owned recording");
+            assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_folder_survives_a_restart_before_and_after_the_move() {
+        let (_dir, database, database_path) = file_database();
+        let directory = database_path.parent().unwrap().to_path_buf();
+        let media_path = directory.join("videorc-session-restart.mp4");
+        std::fs::write(&media_path, b"owned recording").unwrap();
+        let mut session = sample_session("restart-delete");
+        session.output_path = Some(media_path.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session("restart-delete", "completed", None, None, None)
+            .unwrap();
+        let operation = database
+            .prepare_session_deletions(&["restart-delete".to_string()])
+            .unwrap()
+            .remove(0);
+        let quarantine = PathBuf::from(&operation.paths[0]);
+        assert_eq!(quarantine.file_name(), media_path.file_name());
+
+        // A crash after the tombstone but before the move: the file is still
+        // at its name and the private folder does not exist yet.
+        crate::session_ops::rename_session_file_no_replace(&quarantine, &media_path).unwrap();
+        std::fs::remove_dir(quarantine.parent().unwrap()).unwrap();
+        drop(database);
+        let database = Database::open_file_for_tests(&database_path);
+        let recovered = database.reconcile_session_deletions().unwrap();
+        assert_eq!(recovered.pending, 1);
+        assert!(!media_path.exists());
+        assert_eq!(std::fs::read(&quarantine).unwrap(), b"owned recording");
+
+        // A crash after the move: the next launch resolves the inner path.
+        drop(database);
+        let database = Database::open_file_for_tests(&database_path);
+        let resolved = database.pending_session_deletions().unwrap().remove(0);
+        assert_eq!(resolved.paths, vec![quarantine.display().to_string()]);
+        assert!(resolved.blocked_paths.is_empty());
+        std::fs::remove_file(&quarantine).unwrap();
+        let recovered = database.reconcile_session_deletions().unwrap();
+        assert_eq!(recovered.completed, 1);
+        assert!(!quarantine.parent().unwrap().exists());
+        assert!(database.pending_session_deletions().unwrap().is_empty());
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -13611,6 +16732,7 @@ mod tests {
         older_output_job.complete_with_gate(
             &GateStatus::Ready {
                 path: "/tmp/videorc-test.mkv".to_string(),
+                sampled: false,
             },
             "t1".to_string(),
         );
@@ -13625,6 +16747,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Frozen video segment detected.".to_string()],
                 needs_attention: false,
+                sampled: false,
             },
             "t2".to_string(),
         );
@@ -13638,6 +16761,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Frozen video segment detected.".to_string()],
                 needs_attention: false,
+                sampled: false,
             })
         );
         let page = database.list_session_items_page(None, 1).unwrap();
@@ -13654,6 +16778,7 @@ mod tests {
             path: "/tmp/videorc-test.mp4".to_string(),
             reasons: vec!["Only 8fps observed while live.".to_string()],
             needs_attention: false,
+            sampled: false,
         })
         .ok();
         database.upsert_repair_job(&running_fast_gate).unwrap();
@@ -13665,6 +16790,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Only 8fps observed while live.".to_string()],
                 needs_attention: false,
+                sampled: false,
             })
         );
         let page = database.list_session_items_page(None, 1).unwrap();
@@ -13694,6 +16820,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Only 8fps observed while live.".to_string()],
                 needs_attention: false,
+                sampled: false,
             })
         );
         let page = database.list_session_items_page(None, 1).unwrap();
@@ -13815,6 +16942,7 @@ mod tests {
                     path: "/tmp/videorc-test.mp4".to_string(),
                     reasons: vec!["Only 8fps observed while live.".to_string()],
                     needs_attention: false,
+                    sampled: false,
                 }),
                 "legacy fallback for {label}"
             );
@@ -13855,6 +16983,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Only 8fps observed while live.".to_string()],
                 needs_attention: false,
+                sampled: false,
             })
         );
         let page = database.list_session_items_page(None, 1).unwrap();
@@ -13909,7 +17038,7 @@ mod tests {
 
     #[test]
     fn blocked_screen_optimizer_does_not_block_session_finalization_commit() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         database
             .create_session(&sample_session("finalize-during-screen-import"))
             .unwrap();
@@ -13959,7 +17088,7 @@ mod tests {
 
     #[test]
     fn blocked_session_delete_identity_probe_does_not_block_finalization_commit() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let media_path = database_path.parent().unwrap().join("delete-probe.mkv");
         std::fs::write(&media_path, b"recording").unwrap();
         let mut deleting = sample_session("delete-probe");
@@ -14020,7 +17149,7 @@ mod tests {
 
     #[test]
     fn blocked_session_delete_completion_probe_does_not_block_finalization_commit() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let media_path = database_path.parent().unwrap().join("delete-complete.mkv");
         std::fs::write(&media_path, b"recording").unwrap();
         let mut deleting = sample_session("delete-complete");
@@ -14089,7 +17218,7 @@ mod tests {
     #[test]
     fn imported_screen_images_reject_unsupported_formats() {
         let database = test_database();
-        let path = temp_screen_image("notes.txt");
+        let (_dir, path) = temp_screen_image("notes.txt");
 
         let error = database
             .import_screen_image_with_optimizer(path.to_str().unwrap(), |_, _| {
@@ -14170,7 +17299,7 @@ mod tests {
 
     #[test]
     fn persisted_screen_path_outside_managed_root_is_pathless_missing_everywhere() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let screen = import_stub_screen(&database, "break.png");
         let outside = database_path.parent().unwrap().join("outside-screen.png");
         std::fs::write(&outside, b"must survive").unwrap();
@@ -14208,7 +17337,7 @@ mod tests {
 
     #[test]
     fn persisted_screen_nonregular_target_is_missing_and_never_removed() {
-        let (database, _) = file_database();
+        let (_dir, database, _) = file_database();
         let screen = import_stub_screen(&database, "break.png");
         let managed_path = PathBuf::from(&screen.image_path);
         std::fs::remove_file(&managed_path).unwrap();
@@ -14229,7 +17358,7 @@ mod tests {
     fn persisted_screen_symlink_and_managed_root_symlink_are_rejected() {
         use std::os::unix::fs::symlink;
 
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let screen = import_stub_screen(&database, "break.png");
         let managed_path = PathBuf::from(&screen.image_path);
         let outside = database_path.parent().unwrap().join("outside.png");
@@ -14906,193 +18035,5 @@ mod tests {
         let incomplete = database.incomplete_repair_jobs().unwrap();
         assert_eq!(incomplete.len(), 1);
         assert_eq!(incomplete[0].id, "job-running");
-    }
-}
-
-impl Database {
-    pub fn scheduled_events(&self) -> Result<Vec<crate::scheduled_streams::ScheduledStreamEvent>> {
-        let conn = self.lock()?;
-        let mut statement =
-            conn.prepare("SELECT payload FROM scheduled_stream_events ORDER BY start_utc, id")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
-    }
-
-    pub fn scheduled_event(
-        &self,
-        id: &str,
-    ) -> Result<crate::scheduled_streams::ScheduledStreamEvent> {
-        let payload: String = self
-            .lock()?
-            .query_row(
-                "SELECT payload FROM scheduled_stream_events WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .context("Scheduled event was not found.")?;
-        Ok(serde_json::from_str(&payload)?)
-    }
-
-    pub fn scheduled_operation(
-        &self,
-        id: &str,
-    ) -> Result<Option<crate::scheduled_streams::ScheduleOperation>> {
-        let payload: Option<String> = self
-            .lock()?
-            .query_row(
-                "SELECT payload FROM scheduled_stream_operations WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        payload
-            .map(|json| Ok(serde_json::from_str(&json)?))
-            .transpose()
-    }
-
-    /// Reserve an intent atomically before provider I/O. The operation UUID also
-    /// deduplicates requests after a renderer timeout or process restart.
-    pub fn begin_scheduled_operation(
-        &self,
-        mut event: crate::scheduled_streams::ScheduledStreamEvent,
-        mutation: &crate::scheduled_streams::Mutation,
-        action: &str,
-    ) -> Result<(
-        crate::scheduled_streams::ScheduledStreamEvent,
-        crate::scheduled_streams::ScheduleOperation,
-        bool,
-    )> {
-        use crate::scheduled_streams::ScheduleOperation;
-        Uuid::parse_str(&mutation.operation_id).context("Invalid operation UUID.")?;
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        let prior: Option<String> = tx
-            .query_row(
-                "SELECT payload FROM scheduled_stream_operations WHERE id=?1",
-                [&mutation.operation_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(prior) = prior {
-            let operation: ScheduleOperation = serde_json::from_str(&prior)?;
-            if operation.event_id != event.id
-                || operation.action != action
-                || operation.fingerprint
-                    != crate::scheduled_streams::mutation_fingerprint(mutation)?
-            {
-                bail!("Operation UUID belongs to another intent.");
-            }
-            let current: String = tx.query_row(
-                "SELECT payload FROM scheduled_stream_events WHERE id=?1",
-                [&event.id],
-                |r| r.get(0),
-            )?;
-            return Ok((serde_json::from_str(&current)?, operation, false));
-        }
-        let current: Option<(u64, Option<String>, String)> = tx
-            .query_row(
-                "SELECT revision, lease, payload FROM scheduled_stream_events WHERE id=?1",
-                [&event.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        match current {
-            Some((revision, lease, payload)) => {
-                if revision != mutation.expected_revision {
-                    bail!("Event changed. Reload before editing.");
-                }
-                if lease.is_some() {
-                    bail!("Another operation owns this event. Refresh its progress.");
-                }
-                let old: crate::scheduled_streams::ScheduledStreamEvent =
-                    serde_json::from_str(&payload)?;
-                if old.account_id != event.account_id {
-                    bail!("An event cannot move to another channel.");
-                }
-                if old.schema_version != 1 {
-                    bail!("This event uses a newer schema. Update Videorc.");
-                }
-            }
-            None if mutation.expected_revision == 0 && action == "saveDraft" => (),
-            None => bail!("Scheduled event was not found."),
-        }
-        event.revision = mutation.expected_revision + 1;
-        event.updated_at = Utc::now().to_rfc3339();
-        event.operation_state = "pending".into();
-        event.error = None;
-        let operation = ScheduleOperation {
-            id: mutation.operation_id.clone(),
-            event_id: event.id.clone(),
-            action: action.into(),
-            fingerprint: crate::scheduled_streams::mutation_fingerprint(mutation)?,
-            state: "pending".into(),
-            stage: "reserved".into(),
-            result: None,
-            error: None,
-            created_at: event.updated_at.clone(),
-        };
-        tx.execute("INSERT INTO scheduled_stream_events(id,provider,account_id,provider_event_id,start_utc,revision,lifecycle,lease,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET provider_event_id=excluded.provider_event_id,start_utc=excluded.start_utc,revision=excluded.revision,lifecycle=excluded.lifecycle,lease=excluded.lease,payload=excluded.payload",
-            params![event.id,event.provider,event.account_id,event.provider_event_id,event.start_utc,event.revision,event.lifecycle,operation.id,serde_json::to_string(&event)?])?;
-        tx.execute("INSERT INTO scheduled_stream_operations(id,event_id,state,payload) VALUES(?1,?2,?3,?4)", params![operation.id,operation.event_id,operation.state,serde_json::to_string(&operation)?])?;
-        tx.commit()?;
-        Ok((event, operation, true))
-    }
-
-    /// Checkpoint each provider resource ID before the next request. A journal
-    /// lease is never a mutex held over network I/O.
-    pub fn checkpoint_scheduled_operation(
-        &self,
-        event: &crate::scheduled_streams::ScheduledStreamEvent,
-        operation: &crate::scheduled_streams::ScheduleOperation,
-        done: bool,
-    ) -> Result<()> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        let changed = tx.execute("UPDATE scheduled_stream_events SET provider_event_id=?1,start_utc=?2,revision=?3,lifecycle=?4,lease=?5,payload=?6 WHERE id=?7 AND lease=?8",
-            params![event.provider_event_id,event.start_utc,event.revision,event.lifecycle,if done {None} else {Some(&operation.id)},serde_json::to_string(event)?,event.id,operation.id])?;
-        if changed != 1 {
-            bail!("Event operation no longer owns its lease.");
-        }
-        tx.execute(
-            "UPDATE scheduled_stream_operations SET state=?1,payload=?2 WHERE id=?3",
-            params![
-                operation.state,
-                serde_json::to_string(operation)?,
-                operation.id
-            ],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Called once during startup. Lost responses require reconciliation; never
-    /// replay a create just because the renderer disconnected.
-    pub fn recover_scheduled_operations_after_restart(&self) -> Result<()> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        let pending: Vec<(String, String, String)> = {
-            let mut statement = tx.prepare("SELECT e.payload,o.payload,o.id FROM scheduled_stream_events e JOIN scheduled_stream_operations o ON e.lease=o.id")?;
-            statement
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<std::result::Result<_, _>>()?
-        };
-        for (payload, journal, id) in pending {
-            let mut event: crate::scheduled_streams::ScheduledStreamEvent =
-                serde_json::from_str(&payload)?;
-            let mut operation: crate::scheduled_streams::ScheduleOperation =
-                serde_json::from_str(&journal)?;
-            event.operation_state = "needs-reconciliation".into();
-            operation.state = "needs-reconciliation".into();
-            tx.execute(
-                "UPDATE scheduled_stream_events SET lease=NULL,payload=?1 WHERE id=?2",
-                params![serde_json::to_string(&event)?, event.id],
-            )?;
-            tx.execute(
-                "UPDATE scheduled_stream_operations SET state=?1,payload=?2 WHERE id=?3",
-                params![operation.state, serde_json::to_string(&operation)?, id],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
     }
 }

@@ -7,8 +7,9 @@ import { SourcesAudioMixer } from '@/components/sources/sources-audio-mixer'
 import { VideoSources } from '@/components/sources/video-sources'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCore, useStudioPreview } from '@/hooks/use-studio'
 import { sourcesPageDescription } from '@/lib/platform-copy'
+import { screenShareNeedsAsking } from '@/lib/screen-share-recovery'
 
 // The single home for every capture device (UI rewrite plan V1/V2,
 // 2026-06-10). Plan 173 rebuilt it as the Config-grid page `page.tsx` names:
@@ -18,7 +19,8 @@ import { sourcesPageDescription } from '@/lib/platform-copy'
 // blocks a source leads the page: one alert per missing permission (plan 174
 // S3.8).
 export function SourcesTab(): ReactElement {
-  const { refreshDevices, runtimeInfo } = useStudioCore()
+  const { captureConfig, refreshDevices, refreshPreview, runtimeInfo } = useStudioCore()
+  const { previewScreenStatus } = useStudioPreview()
   const [refreshing, setRefreshing] = useState(false)
 
   return (
@@ -26,26 +28,35 @@ export function SourcesTab(): ReactElement {
       <PageHeader
         action={
           <Tooltip>
-            <TooltipTrigger asChild>
-              {/* The words stay exactly "Refresh": smoke-scene-presets finds the
-                  button by them, and waits for it to come back enabled. */}
-              <Button
-                disabled={refreshing}
-                variant="outline"
-                onClick={() => {
-                  setRefreshing(true)
-                  // Devices and media access only (plan 174 C-32), and never an
-                  // answer from a read that started before the click: a camera
-                  // plugged in a moment ago must show up.
-                  void refreshDevices().finally(() => setRefreshing(false))
-                }}
-              >
-                <SyncIcon
-                  className={refreshing ? 'animate-spin' : undefined}
-                  data-icon="inline-start"
+            {/* The words stay exactly "Refresh": smoke-scene-presets finds the
+                button by them, and waits for it to come back enabled. */}
+            <TooltipTrigger
+              render={
+                <Button
+                  disabled={refreshing}
+                  variant="outline"
+                  onClick={() => {
+                    setRefreshing(true)
+                    // Devices and media access only (plan 174 C-32), and never an
+                    // answer from a read that started before the click: a camera
+                    // plugged in a moment ago must show up. A Linux share
+                    // dialog that ended without a share is asked again.
+                    const askAgain = screenShareNeedsAsking({
+                      selectedId: captureConfig.sources.windowId ?? captureConfig.sources.screenId,
+                      state: previewScreenStatus.state
+                    })
+                    void refreshDevices()
+                      .then(() => (askAgain ? refreshPreview() : undefined))
+                      .finally(() => setRefreshing(false))
+                  }}
                 />
-                {refreshing ? 'Refreshing…' : 'Refresh'}
-              </Button>
+              }
+            >
+              <SyncIcon
+                className={refreshing ? 'animate-spin' : undefined}
+                data-icon="inline-start"
+              />
+              {refreshing ? 'Refreshing…' : 'Refresh'}
             </TooltipTrigger>
             <TooltipContent>
               Look again for screens, windows, cameras and microphones

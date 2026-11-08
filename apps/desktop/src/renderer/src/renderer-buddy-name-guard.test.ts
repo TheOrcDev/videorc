@@ -145,7 +145,63 @@ const GOLEM_ALLOWED: readonly Allowed[] = [
   },
   ...['src/lib/buddy-library-view.test.ts', 'src/lib/buddy-pet-creator-nav.test.ts'].map(
     (file) => ({ file, text: 'A mossy golem', reason: GOLEM_EXAMPLE })
-  )
+  ),
+  // Custom Buddy picture (#1213): the default slot is still the stone golem art.
+  {
+    file: 'src/components/buddy-emblem.tsx',
+    text: 'keeps the golem.',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/components/icons.tsx',
+    text: 'swaps the golem for the streamer',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/components/icons.tsx',
+    text: 'keeps the golem.',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/components/own-buddy-icon.tsx',
+    text: 'in place of the golem once',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/components/own-buddy-icon.tsx',
+    text: 'a picture, the golem',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/components/sidebar.test.ts',
+    text: 'and the golem until there is one',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/components/sidebar.tsx',
+    text: 'not the golem.',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/components/tabs/buddy-tab.test.ts',
+    text: 'not the golem',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/lib/buddy-picture.test.ts',
+    text: 'null for the golem:',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/lib/buddy-picture.ts',
+    text: 'the official golem, settings',
+    reason: CREATURE_ART
+  },
+  {
+    file: 'src/lib/buddy-picture.ts',
+    text: '* golem. Safe for the eager shell',
+    reason: CREATURE_ART
+  }
 ]
 
 /**

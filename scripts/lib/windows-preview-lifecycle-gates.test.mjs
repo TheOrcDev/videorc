@@ -67,15 +67,18 @@ test('preview lifecycle mode parsing is strict and mutually exclusive', () => {
   assert.throws(() => parseWindowsPreviewLifecycleMode(['--unknown'], {}), /Unknown/)
 })
 
-test('D3D11 lifecycle state requires the canonical triple, liveness, and no proof host', () => {
+test('D3D11 lifecycle state requires the canonical triple, liveness, and no visible proof host', () => {
   assert.deepEqual(windowsPreviewLifecycleOpenFailures(d3dState(), 'windows-d3d11'), [])
+  const hiddenProof = d3dState()
+  hiddenProof.surface = { exists: true, visible: false }
+  assert.deepEqual(windowsPreviewLifecycleOpenFailures(hiddenProof, 'windows-d3d11'), [])
   for (const mutate of [
     (state) => (state.surfaceStatus.transport = 'native-surface'),
     (state) => (state.surfaceStatus.backing = 'cametal-layer'),
     (state) => (state.surfaceStatus.nativePreviewHostKind = 'proof-surface'),
     (state) => (state.surfaceStatus.firstFrameContract = 'pending'),
     (state) => (state.surfaceStatus.sourcePixelsPresent = false),
-    (state) => (state.surface.exists = true),
+    (state) => (state.surface = { exists: true, visible: true }),
     (state) => (state.framePollingSuppressedFlag = false)
   ]) {
     const state = d3dState()

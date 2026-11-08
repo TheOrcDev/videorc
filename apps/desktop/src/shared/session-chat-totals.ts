@@ -10,6 +10,7 @@ import {
   stringSchema,
   unionSchema
 } from './runtime-schema'
+import { STREAM_PLATFORMS } from './stream-platforms'
 
 const count = numberSchema({ integer: true, min: 0, max: Number.MAX_SAFE_INTEGER })
 export const sessionChatIdentifierSchema = stringSchema({ minLength: 1, maxLength: 4096 })
@@ -26,10 +27,9 @@ const shape = unionSchema([
       supporters: count,
       bits: count,
       raids: count,
-      platforms: arraySchema(
-        enumSchema(['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom']),
-        { maxLength: 7 }
-      ),
+      platforms: arraySchema(enumSchema(STREAM_PLATFORMS), {
+        maxLength: STREAM_PLATFORMS.length
+      }),
       tips: arraySchema(
         objectSchema(
           { currency: stringSchema({ maxLength: 64 }), amountMicros: count },

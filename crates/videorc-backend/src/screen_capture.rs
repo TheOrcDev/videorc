@@ -1,11 +1,15 @@
 use std::time::Duration;
 
-use crate::protocol::{Device, DeviceKind, DeviceStatus};
+use crate::protocol::{
+    AppWindowUnavailableReason, Device, DeviceKind, DeviceStatus, ResolveAppWindowParams,
+    ResolveAppWindowResult,
+};
 
 const SCREEN_CAPTUREKIT_PREFIX: &str = "screen:screencapturekit:";
 const WINDOW_CAPTUREKIT_PREFIX: &str = "window:screencapturekit:";
 const WINDOWS_DXGI_SCREEN_PREFIX: &str = "screen:dxgi:";
 const WINDOWS_GDIGRAB_DESKTOP_ID: &str = "screen:gdigrab:desktop";
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Whether native capture callbacks provide a continuous cadence signal that
@@ -26,6 +30,76 @@ impl ScreenCaptureCallbackCadence {
     }
 }
 
+/// Plan 219 S1: where a picked ScreenCaptureKit window is right now, from
+/// one window-server lookup (no ScreenCaptureKit discovery round trip).
+///
+/// ScreenCaptureKit's on-screen list (the one capture starts from) drops a
+/// window the moment it is minimized, its app is hidden, or it sits on
+/// another desktop; the window server still lists it, without the on-screen
+/// mark. A window that is not listed at all was closed or its app quit.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WindowPresence {
+    /// Listed and on screen: a capture of it delivers frames.
+    OnScreen { name: String },
+    /// Listed but not on screen (minimized, hidden app, another desktop):
+    /// a running stream goes silent and resumes by itself on restore; a new
+    /// stream starts but never delivers a complete frame.
+    OffScreen { name: String },
+    /// Not listed by the window server: closed, or its app quit.
+    Gone,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl WindowPresence {
+    /// What the streamer sees when a start (Record, Go Live, a scene) finds
+    /// the picked window only out of sight.
+    /// The name is the window's app and title, the way Sources lists it.
+    pub(crate) fn out_of_sight_start_message(name: &str) -> String {
+        format!("{name} is minimized, hidden or on another desktop. Bring it back, then try again.")
+    }
+
+    /// What the streamer sees when the picked window was closed.
+    pub(crate) fn closed_message() -> String {
+        "The window you picked was closed. Pick it again in Sources.".to_string()
+    }
+
+    /// The health notice while a captured window is out of sight (plan 219
+    /// S1): the picture holds its last frame and comes back on its own.
+    pub(crate) fn out_of_sight_paused_message(name: &str) -> String {
+        format!(
+            "{name} is minimized, hidden or on another desktop. The picture is paused until it's back."
+        )
+    }
+
+    /// The health notice when the window is back and frames flow again.
+    pub(crate) fn back_message(name: &str) -> String {
+        format!("{name} is back. The picture is moving again.")
+    }
+}
+
+/// The name Sources shows for a window: "App - Title", or whichever half the
+/// window server knows, or "The window" when it knows neither.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn window_presence_name(owner: Option<&str>, title: Option<&str>) -> String {
+    let owner = owner.map(str::trim).filter(|value| !value.is_empty());
+    let title = title.map(str::trim).filter(|value| !value.is_empty());
+    match (owner, title) {
+        (Some(owner), Some(title)) => format!("{owner} - {title}"),
+        (Some(owner), None) => owner.to_string(),
+        (None, Some(title)) => title.to_string(),
+        (None, None) => "The window".to_string(),
+    }
+}
+
+/// Plan 219 S1: presence of one ScreenCaptureKit window id. macOS only; the
+/// other platforms have no equivalent trap (their window lists are not
+/// filtered by visibility) and keep their behaviour.
+#[cfg(target_os = "macos")]
+pub(crate) fn window_presence(window_id: u32) -> WindowPresence {
+    macos::window_presence(window_id)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowsDxgiSourceId {
     pub adapter_luid: u64,
@@ -36,6 +110,220 @@ pub struct WindowsDxgiSourceId {
 pub struct NativeCaptureSources {
     pub devices: Vec<Device>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppPreviewsParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPreview {
+    bundle_id: String,
+    name: String,
+    pid: i32,
+    window_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    front_window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    front_window_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    picture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
+}
+
+pub fn app_previews(params: AppPreviewsParams) -> Result<Vec<AppPreview>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::app_previews(params)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = params;
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn preview_size(width: u32, height: u32, max_width: Option<u32>) -> (u32, u32) {
+    let max_width = max_width.unwrap_or(320).clamp(160, 640);
+    let target_width = width.max(1).min(max_width);
+    (
+        target_width,
+        ((height as f64 * target_width as f64 / width.max(1) as f64).round() as u32).max(1),
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn preview_data_url(bytes: &[u8]) -> Option<String> {
+    use base64::Engine;
+    if bytes.len().div_ceil(3) * 4 + 23 > 2_000_000 {
+        return None;
+    }
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn build_app_previews(windows: &[AppWindow], host_pid: i32) -> Vec<AppPreview> {
+    // Filter before grouping/selection: development Electron apps can share a
+    // bundle id with our host, so filtering only the group seed is insufficient.
+    let windows: Vec<_> = windows
+        .iter()
+        .filter(|w| {
+            w.pid != host_pid
+                && w.pid != std::process::id() as i32
+                && w.bundle_id != "dev.theorcdev.videorc"
+        })
+        .cloned()
+        .collect();
+    let mut apps = Vec::new();
+    for w in &windows {
+        if w.bundle_id.is_empty()
+            || w.protected
+            || is_foreign_session_window_app(Some(&w.app_name))
+            || w.layer != 0
+            || w.width < 400
+            || w.height < 300
+            || apps.iter().any(|a: &AppPreview| a.bundle_id == w.bundle_id)
+        {
+            continue;
+        }
+        let params = ResolveAppWindowParams {
+            bundle_id: w.bundle_id.clone(),
+            prefer_window_id: None,
+            min_width: None,
+            min_height: None,
+        };
+        let (front_window_id, front_window_title) = match select_app_window(&params, true, &windows)
+        {
+            ResolveAppWindowResult::Found {
+                window_id, title, ..
+            } => (Some(window_id), Some(title)),
+            _ => (None, None),
+        };
+        let window_count = windows
+            .iter()
+            .filter(|other| {
+                other.bundle_id == w.bundle_id
+                    && !other.protected
+                    && other.layer == 0
+                    && other.width >= 400
+                    && other.height >= 300
+            })
+            .count();
+        apps.push(AppPreview {
+            bundle_id: w.bundle_id.clone(),
+            name: w.app_name.clone(),
+            pid: w.pid,
+            window_count,
+            front_window_id,
+            front_window_title,
+            picture: None,
+            width: None,
+            height: None,
+        });
+    }
+    apps.truncate(512);
+    apps
+}
+
+/// Plain metadata in front-to-back order; independent of ScreenCaptureKit.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone)]
+struct AppWindow {
+    pid: i32,
+    id: u32,
+    bundle_id: String,
+    app_name: String,
+    title: String,
+    width: u32,
+    height: u32,
+    layer: isize,
+    on_screen: bool,
+    protected: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn select_app_window(
+    params: &ResolveAppWindowParams,
+    running: bool,
+    windows: &[AppWindow],
+) -> ResolveAppWindowResult {
+    use AppWindowUnavailableReason::*;
+    let eligible: Vec<_> = windows
+        .iter()
+        .filter(|w| {
+            w.bundle_id == params.bundle_id
+                && !w.protected
+                && !is_foreign_session_window_app(Some(&w.app_name))
+                && w.layer == 0
+                && w.width >= params.min_width.unwrap_or(400)
+                && w.height >= params.min_height.unwrap_or(300)
+        })
+        .collect();
+    let preferred = params
+        .prefer_window_id
+        .as_deref()
+        .and_then(parse_screencapturekit_window_id);
+    let selected = eligible
+        .iter()
+        .find(|w| w.on_screen && Some(w.id) == preferred)
+        .or_else(|| eligible.iter().find(|w| w.on_screen));
+    if let Some(w) = selected {
+        ResolveAppWindowResult::Found {
+            ok: true,
+            window_id: format!("{WINDOW_CAPTUREKIT_PREFIX}{}", w.id),
+            title: w.title.clone(),
+            width: w.width,
+            height: w.height,
+        }
+    } else {
+        ResolveAppWindowResult::Unavailable {
+            ok: false,
+            reason: if !running {
+                NotRunning
+            } else if eligible.iter().any(|w| !w.on_screen) {
+                Minimized
+            } else {
+                NoWindow
+            },
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn is_protected_notes_window(app: &crate::protocol::DeviceApp, title: &str, host_pid: i32) -> bool {
+    title == "Notes"
+        && (app.bundle_id == "dev.theorcdev.videorc"
+            || app.name == "Videorc"
+            || app.pid == host_pid)
+}
+
+/// App scenes are macOS-only. Other platforms report not-running.
+pub fn resolve_app_window(
+    params: &ResolveAppWindowParams,
+) -> Result<ResolveAppWindowResult, String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::resolve_app_window(params)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = params;
+        Ok(ResolveAppWindowResult::Unavailable {
+            ok: false,
+            reason: AppWindowUnavailableReason::NotRunning,
+        })
+    }
 }
 
 pub fn parse_screencapturekit_display_id(id: &str) -> Option<u32> {
@@ -74,6 +362,31 @@ pub fn list_native_capture_sources() -> NativeCaptureSources {
 #[cfg(target_os = "windows")]
 pub fn list_native_capture_sources() -> NativeCaptureSources {
     windows_native::list_native_capture_sources()
+}
+
+/// Native pixel size of a DXGI output. The backend is not DPI aware, so a
+/// scaled display's `DesktopCoordinates` read in logical pixels (1280x720 for
+/// 1920x1080 at 150%), while Desktop Duplication and WGC hand back
+/// native-resolution textures. The D3D11 capture pool sized from the logical
+/// size failed its copy contract and the session fell back.
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_dxgi_output_native_dimensions(
+    output_desc: &windows::Win32::Graphics::Dxgi::DXGI_OUTPUT_DESC,
+) -> (Option<u32>, Option<u32>) {
+    windows_native::dxgi_output_native_dimensions(output_desc)
+}
+
+/// The current display mode is never DPI-virtualized, so it wins whenever it
+/// is readable; the desktop rectangle is the fallback.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_output_native_dimensions(
+    current_mode: Option<(u32, u32)>,
+    desktop: (Option<u32>, Option<u32>),
+) -> (Option<u32>, Option<u32>) {
+    match current_mode {
+        Some((width, height)) if width > 0 && height > 0 => (Some(width), Some(height)),
+        _ => desktop,
+    }
 }
 
 /// Stable material for invalidating Windows GPU capability verdicts when the
@@ -178,6 +491,9 @@ fn windows_adapter_driver_identity_material(
 #[cfg(target_os = "windows")]
 fn windows_gdigrab_desktop_device() -> Device {
     Device {
+        app: None,
+        window_title: None,
+        display_uuid: None,
         id: WINDOWS_GDIGRAB_DESKTOP_ID.to_string(),
         name: "Desktop".to_string(),
         kind: DeviceKind::Screen,
@@ -191,6 +507,7 @@ fn windows_gdigrab_desktop_device() -> Device {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn permission_or_unavailable(error: &str) -> DeviceStatus {
     let normalized = error.to_lowercase();
     if normalized.contains("permission")
@@ -204,6 +521,7 @@ fn permission_or_unavailable(error: &str) -> DeviceStatus {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn should_include_window_metadata(
     is_on_screen: bool,
     layer: isize,
@@ -224,20 +542,86 @@ fn should_include_window_metadata(
             || app_name.is_some_and(|value| !value.is_empty()))
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) fn is_foreign_session_window_app(app_name: Option<&str>) -> bool {
     app_name.is_some_and(|value| value.eq_ignore_ascii_case("loginwindow"))
+}
+
+/// A display's name in the source picker (plan 213 F1): the name macOS gives
+/// it and its pixel size, so two displays can be told apart. `Display N`
+/// stands in when macOS gives no name; a display that mirrors another says so.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn display_device_name(
+    ordinal: usize,
+    system_name: Option<&str>,
+    pixel_size: (u32, u32),
+    mirrors_another: bool,
+) -> String {
+    let name = system_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| format!("Display {ordinal}"), str::to_string);
+    let (width, height) = pixel_size;
+    let size = if width > 0 && height > 0 {
+        format!(" · {width} × {height}")
+    } else {
+        String::new()
+    };
+    let mirrored = if mirrors_another { " · mirrored" } else { "" };
+    format!("{name}{size}{mirrored}")
+}
+
+/// What macOS says of one display (plan 213 F3), for the support bundle.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayFacts {
+    pub id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its rectangle in points, in the global display space.
+    pub frame: DisplayFrame,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    /// Pixels per point.
+    pub scale: f64,
+    pub main: bool,
+    /// The display it mirrors, when it mirrors one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirrors: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct DisplayFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Every display the system has online (plan 213 F3). Blocks for up to the
+/// display-name wait, so async callers run it off the runtime.
+#[cfg(target_os = "macos")]
+pub fn display_facts() -> Vec<DisplayFacts> {
+    macos::display_facts()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn display_facts() -> Vec<DisplayFacts> {
+    Vec::new()
 }
 
 #[cfg(target_os = "windows")]
 mod windows_native {
     use super::*;
     use windows::Win32::Foundation::{LUID, RECT};
-    use windows::Win32::Graphics::Direct3D11::ID3D11Device;
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIAdapter1,
-        IDXGIFactory1,
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, DXGI_OUTPUT_DESC,
+        IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
     };
-    use windows::core::Interface;
+    use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
+    use windows::core::{Interface, PCWSTR};
 
     pub fn list_native_capture_sources() -> NativeCaptureSources {
         match list_dxgi_displays() {
@@ -277,7 +661,9 @@ mod windows_native {
             if description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
                 continue;
             }
-            let driver_version = unsafe { adapter.CheckInterfaceSupport(&ID3D11Device::IID) }
+            // ID3D11Device is unsupported here (DXGI_ERROR_UNSUPPORTED); see
+            // recording::query_windows_graphics_adapter_driver_identity.
+            let driver_version = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }
                 .map_err(windows_error_code)?;
             identities.push(WindowsAdapterDriverIdentity {
                 adapter_luid: adapter_luid_u64(description.AdapterLuid),
@@ -333,8 +719,11 @@ mod windows_native {
             let output_desc = unsafe { output.GetDesc()? };
             let output_name = utf16_z(&output_desc.DeviceName)
                 .unwrap_or_else(|| format!("DXGI output {output_index}"));
-            let (width, height) = rect_dimensions(output_desc.DesktopCoordinates);
+            let (width, height) = dxgi_output_native_dimensions(&output_desc);
             devices.push(Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: windows_dxgi_screen_device_id(adapter_luid, output_index),
                 name: format!("Display {}", devices.len() + 1),
                 kind: DeviceKind::Screen,
@@ -350,6 +739,30 @@ mod windows_native {
         }
 
         Ok(())
+    }
+
+    pub(super) fn dxgi_output_native_dimensions(
+        output_desc: &DXGI_OUTPUT_DESC,
+    ) -> (Option<u32>, Option<u32>) {
+        let mut mode = DEVMODEW {
+            dmSize: u16::try_from(std::mem::size_of::<DEVMODEW>()).unwrap_or(u16::MAX),
+            ..Default::default()
+        };
+        // SAFETY: DeviceName is DXGI's NUL-terminated GDI device name and the
+        // DEVMODEW is initialized local storage with dmSize set.
+        let current_mode = unsafe {
+            EnumDisplaySettingsW(
+                PCWSTR(output_desc.DeviceName.as_ptr()),
+                ENUM_CURRENT_SETTINGS,
+                &mut mode,
+            )
+        }
+        .as_bool()
+        .then_some((mode.dmPelsWidth, mode.dmPelsHeight));
+        super::windows_output_native_dimensions(
+            current_mode,
+            rect_dimensions(output_desc.DesktopCoordinates),
+        )
     }
 
     fn adapter_luid_u64(luid: LUID) -> u64 {
@@ -392,30 +805,444 @@ fn utf16_z(value: &[u16]) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-mod macos {
+pub(crate) mod macos {
     use super::*;
     use block2::RcBlock;
     // Scoped here (not at the top of the file) so the Windows arm never sees
     // an unused import — PR #59 deleted the top-level `use std::sync::mpsc`
     // as apparently-unused and broke the macOS build.
+    use dispatch2::DispatchQueue;
+    use objc2::MainThreadMarker;
+    use objc2::rc::autoreleasepool;
+    use objc2_app_kit::NSScreen;
+    use objc2_core_foundation::{CFRetained, CFUUID};
     use objc2_core_graphics::{
-        CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayMode, CGPreflightScreenCaptureAccess,
-        CGRequestScreenCaptureAccess,
+        CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMirrorsDisplay,
+        CGDisplayMode, CGError, CGGetOnlineDisplayList, CGMainDisplayID,
+        CGPreflightScreenCaptureAccess,
     };
-    use objc2_foundation::{NSError, NSString};
+    use objc2_foundation::{NSError, NSNumber, NSString, ns_string};
     use objc2_screen_capture_kit::{SCShareableContent, SCWindow};
+    use std::collections::HashMap;
+    use std::ptr::NonNull;
     use std::sync::mpsc;
 
-    enum ShareableContentResult {
-        Devices(Vec<Device>),
-        Error(String),
+    use objc2::rc::Retained;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    /// How long a listing waits for AppKit's display names (plan 213 F1).
+    const DISPLAY_NAMES_TIMEOUT: Duration = Duration::from_millis(500);
+
+    #[link(name = "ColorSync", kind = "framework")]
+    unsafe extern "C" {
+        fn CGDisplayCreateUUIDFromDisplayID(display: CGDirectDisplayID) -> Option<NonNull<CFUUID>>;
+    }
+
+    /// The display's UUID (plan 213 F1): its identity across a reconnect,
+    /// which may hand it a new display id.
+    pub(crate) fn display_uuid(display_id: CGDirectDisplayID) -> Option<String> {
+        // SAFETY: the caller owns the returned CFUUID; null for no display.
+        let uuid = unsafe { CGDisplayCreateUUIDFromDisplayID(display_id) }?;
+        let uuid = unsafe { CFRetained::from_raw(uuid) };
+        let bytes = uuid.uuid_bytes();
+        let uuid = uuid::Uuid::from_bytes([
+            bytes.byte0,
+            bytes.byte1,
+            bytes.byte2,
+            bytes.byte3,
+            bytes.byte4,
+            bytes.byte5,
+            bytes.byte6,
+            bytes.byte7,
+            bytes.byte8,
+            bytes.byte9,
+            bytes.byte10,
+            bytes.byte11,
+            bytes.byte12,
+            bytes.byte13,
+            bytes.byte14,
+            bytes.byte15,
+        ]);
+        Some(format!("{:X}", uuid.hyphenated()))
+    }
+
+    /// The name macOS gives each display (`NSScreen.localizedName`), by
+    /// display id (plan 213 F1). AppKit answers on the main thread, whose run
+    /// loop the backend keeps turning (main.rs); where nothing turns it the
+    /// wait times out and the names fall back to `Display N`.
+    pub(crate) fn display_names() -> HashMap<CGDirectDisplayID, String> {
+        if let Some(mtm) = MainThreadMarker::new() {
+            return screen_names(mtm);
+        }
+        let (tx, rx) = mpsc::channel();
+        DispatchQueue::main().exec_async(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                let _ = tx.send(screen_names(mtm));
+            }
+        });
+        rx.recv_timeout(DISPLAY_NAMES_TIMEOUT).unwrap_or_default()
+    }
+
+    /// Every display macOS has online (plan 213 F3), mirrored ones included.
+    pub(crate) fn display_facts() -> Vec<DisplayFacts> {
+        let mut ids: [CGDirectDisplayID; 32] = [0; 32];
+        let mut count = 0_u32;
+        // SAFETY: the list holds `ids.len()` ids and the count is one u32.
+        let listed =
+            unsafe { CGGetOnlineDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) };
+        if listed != CGError::Success {
+            return Vec::new();
+        }
+        let names = display_names();
+        let main = CGMainDisplayID();
+        ids.iter()
+            .take(count as usize)
+            .map(|&id| {
+                let bounds = CGDisplayBounds(id);
+                let (pixel_width, pixel_height) = display_capture_dimensions(
+                    id,
+                    bounds.size.width.max(0.0) as u32,
+                    bounds.size.height.max(0.0) as u32,
+                );
+                let mirrors = CGDisplayMirrorsDisplay(id);
+                DisplayFacts {
+                    id,
+                    uuid: display_uuid(id),
+                    name: names.get(&id).cloned(),
+                    frame: DisplayFrame {
+                        x: bounds.origin.x,
+                        y: bounds.origin.y,
+                        width: bounds.size.width,
+                        height: bounds.size.height,
+                    },
+                    pixel_width,
+                    pixel_height,
+                    scale: if bounds.size.width > 0.0 {
+                        f64::from(pixel_width) / bounds.size.width
+                    } else {
+                        0.0
+                    },
+                    main: id == main,
+                    mirrors: (mirrors != 0).then_some(mirrors),
+                }
+            })
+            .collect()
+    }
+
+    fn screen_names(mtm: MainThreadMarker) -> HashMap<CGDirectDisplayID, String> {
+        autoreleasepool(|_| {
+            NSScreen::screens(mtm)
+                .iter()
+                .filter_map(|screen| {
+                    let number = screen
+                        .deviceDescription()
+                        .objectForKey(ns_string!("NSScreenNumber"))?
+                        .downcast::<NSNumber>()
+                        .ok()?;
+                    Some((
+                        number.unsignedIntValue(),
+                        screen.localizedName().to_string(),
+                    ))
+                })
+                .collect()
+        })
+    }
+
+    // SCK content is an immutable discovery snapshot. Access is serialized by
+    // the cache lock; retaining keeps it alive beyond its completion callback.
+    #[derive(Clone)]
+    struct Content(Retained<SCShareableContent>);
+    unsafe impl Send for Content {}
+    static CONTENT: OnceLock<Mutex<Option<(Instant, Content)>>> = OnceLock::new();
+
+    fn load_shareable_content() -> Result<Content, String> {
+        let mut cache = CONTENT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some((at, content)) = cache.as_ref()
+            && at.elapsed() < Duration::from_secs(1)
+        {
+            return Ok(content.clone());
+        }
+        *cache = None;
+        if !screen_capture_access_granted() {
+            return Err(screen_capture_permission_message());
+        }
+        for attempt in 0..2 {
+            let (tx, rx) = mpsc::channel();
+            let handler = RcBlock::new(
+                move |content: *mut SCShareableContent, error: *mut NSError| {
+                    let result = if !error.is_null() {
+                        Err(error_description(error))
+                    } else {
+                        unsafe { Retained::retain(content) }
+                            .map(Content)
+                            .ok_or_else(|| {
+                                "ScreenCaptureKit returned no shareable content.".to_string()
+                            })
+                    };
+                    let _ = tx.send(result);
+                },
+            );
+            unsafe {
+                SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(true, false, &handler);
+            }
+            match rx.recv_timeout(SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT) {
+                Ok(Ok(content)) => {
+                    *cache = Some((Instant::now(), content.clone()));
+                    return Ok(content);
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_) if attempt == 0 => continue,
+                Err(_) => {
+                    return Err(
+                        "ScreenCaptureKit discovery timed out after two attempts.".to_string()
+                    );
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    /// Plan 210 S3: the discovery snapshot the listing or the resolver loaded
+    /// within the last second, for a capture swap that follows them; `None`
+    /// makes the caller load its own.
+    pub(crate) fn recent_shareable_content() -> Option<Retained<SCShareableContent>> {
+        let cache = CONTENT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        cache
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(1))
+            .map(|(_, content)| content.0.clone())
+    }
+
+    pub fn resolve_app_window(
+        params: &ResolveAppWindowParams,
+    ) -> Result<ResolveAppWindowResult, String> {
+        let content = load_shareable_content()?;
+        let running = unsafe { content.0.applications() }
+            .iter()
+            .any(|a| unsafe { a.bundleIdentifier() }.to_string() == params.bundle_id);
+        let windows = ordered_app_windows(&content)?;
+        Ok(select_app_window(params, running, &windows))
+    }
+
+    /// One `CGWindowListCopyWindowInfo(kCGWindowListOptionAll)` pass. The
+    /// on-screen-only and including-window options both drop a minimized or
+    /// hidden window (probed 2026-11-06), so the whole list is scanned for
+    /// the id; it is a few hundred small dictionaries.
+    pub(crate) fn window_presence(window_id: u32) -> WindowPresence {
+        use objc2::runtime::AnyObject;
+        use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
+        use objc2_foundation::NSDictionary;
+        let Some(list) = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, 0) else {
+            // The window server answered nothing: treat the window as out of
+            // sight rather than closed, so nothing is torn down on a hiccup.
+            return WindowPresence::OffScreen {
+                name: "The window".to_string(),
+            };
+        };
+        for index in 0..list.count() {
+            // CFDictionary/NSDictionary are toll-free bridged. The values are
+            // NSNumber (kCGWindowNumber, kCGWindowIsOnscreen) and NSString
+            // (kCGWindowOwnerName, kCGWindowName).
+            let dict = unsafe {
+                &*(list.value_at_index(index) as *const NSDictionary<NSString, AnyObject>)
+            };
+            let number = dict
+                .objectForKey(ns_string!("kCGWindowNumber"))
+                .and_then(|value| value.downcast::<NSNumber>().ok())
+                .map(|value| value.unsignedIntValue());
+            if number != Some(window_id) {
+                continue;
+            }
+            let owner = dict
+                .objectForKey(ns_string!("kCGWindowOwnerName"))
+                .and_then(|value| value.downcast::<NSString>().ok())
+                .map(|value| value.to_string());
+            let title = dict
+                .objectForKey(ns_string!("kCGWindowName"))
+                .and_then(|value| value.downcast::<NSString>().ok())
+                .map(|value| value.to_string());
+            let name = window_presence_name(owner.as_deref(), title.as_deref());
+            // The key is present (true) only while the window is on screen.
+            let on_screen = dict
+                .objectForKey(ns_string!("kCGWindowIsOnscreen"))
+                .and_then(|value| value.downcast::<NSNumber>().ok())
+                .is_some_and(|value| value.boolValue());
+            return if on_screen {
+                WindowPresence::OnScreen { name }
+            } else {
+                WindowPresence::OffScreen { name }
+            };
+        }
+        WindowPresence::Gone
+    }
+
+    fn ordered_app_windows(content: &Content) -> Result<Vec<AppWindow>, String> {
+        // CGWindowListCopyWindowInfo supplies documented front-to-back order;
+        // SCShareableContent.windows does not promise a z-order.
+        use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
+        use objc2_foundation::{NSDictionary, NSNumber};
+        let order = CGWindowListCopyWindowInfo(CGWindowListOption::OptionOnScreenOnly, 0)
+            .ok_or_else(|| "Could not read on-screen window order.".to_string())?;
+        let mut ids = Vec::new();
+        for i in 0..order.count() {
+            // CFDictionary/NSDictionary are toll-free bridged. CG's documented
+            // kCGWindowNumber value is an NSNumber.
+            let dict =
+                unsafe { &*(order.value_at_index(i) as *const NSDictionary<NSString, NSNumber>) };
+            if let Some(id) = dict.objectForKey(&NSString::from_str("kCGWindowNumber")) {
+                ids.push(id.unsignedIntValue());
+            }
+        }
+        let mut windows: Vec<_> = unsafe { content.0.windows() }
+            .iter()
+            .filter_map(|w| {
+                let app = window_application(&w)?;
+                let frame = unsafe { w.frame() };
+                let title = window_title(&w).unwrap_or_default();
+                Some(AppWindow {
+                    pid: app.pid,
+                    id: unsafe { w.windowID() },
+                    protected: is_protected_notes_window(&app, &title, unsafe { libc::getppid() }),
+                    bundle_id: app.bundle_id,
+                    app_name: app.name,
+                    title,
+                    width: frame.size.width.max(0.0) as u32,
+                    height: frame.size.height.max(0.0) as u32,
+                    layer: unsafe { w.windowLayer() },
+                    on_screen: unsafe { w.isOnScreen() } && ids.contains(&unsafe { w.windowID() }),
+                })
+            })
+            .collect();
+        windows.sort_by_key(|w| ids.iter().position(|id| *id == w.id).unwrap_or(usize::MAX));
+        Ok(windows)
+    }
+
+    pub fn app_previews(params: AppPreviewsParams) -> Result<Vec<AppPreview>, String> {
+        use objc2::{AnyThread, msg_send, runtime::AnyClass};
+        use objc2_screen_capture_kit::{SCContentFilter, SCStreamConfiguration};
+        let content = load_shareable_content()?;
+        let windows = ordered_app_windows(&content)?;
+        let mut apps = build_app_previews(&windows, unsafe { libc::getppid() });
+        // The class does not exist before macOS 14. Never send a newer selector there.
+        let Some(manager) = AnyClass::get(c"SCScreenshotManager") else {
+            return Ok(apps);
+        };
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        let mut pending = Vec::new();
+        for (index, app) in apps.iter().enumerate() {
+            let Some(id) = app
+                .front_window_id
+                .as_deref()
+                .and_then(parse_screencapturekit_window_id)
+            else {
+                continue;
+            };
+            let Some(window) = (unsafe { content.0.windows() })
+                .iter()
+                .find(|w| unsafe { w.windowID() } == id)
+            else {
+                continue;
+            };
+            let frame = unsafe { window.frame() };
+            let (width, height) = preview_size(
+                frame.size.width.max(1.0) as u32,
+                frame.size.height.max(1.0) as u32,
+                params.max_width,
+            );
+            let (tx, rx) = mpsc::channel();
+            let handler = RcBlock::new(
+                move |image: *mut objc2_core_graphics::CGImage, error: *mut NSError| {
+                    // Encode inside the completion: the borrowed CGImage lives only for this call.
+                    let result = if image.is_null() || !error.is_null() {
+                        None
+                    } else {
+                        unsafe { screenshot_jpeg(image) }.and_then(|bytes| preview_data_url(&bytes))
+                    };
+                    let _ = tx.send(result);
+                },
+            );
+            unsafe {
+                let filter = SCContentFilter::initWithDesktopIndependentWindow(
+                    SCContentFilter::alloc(),
+                    &window,
+                );
+                let config = SCStreamConfiguration::new();
+                config.setWidth(width as usize);
+                config.setHeight(height as usize);
+                config.setShowsCursor(false);
+                let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: &*config, completionHandler: &*handler];
+            }
+            pending.push((index, width, height, rx));
+        }
+        for (index, width, height, rx) in pending {
+            if let Ok(Some(picture)) =
+                rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                apps[index].picture = Some(picture);
+                apps[index].width = Some(width);
+                apps[index].height = Some(height);
+            }
+        }
+        Ok(apps)
+    }
+
+    unsafe fn screenshot_jpeg(image: *mut objc2_core_graphics::CGImage) -> Option<Vec<u8>> {
+        use objc2::{
+            msg_send,
+            runtime::{AnyClass, AnyObject},
+        };
+        use objc2_foundation::{NSDictionary, NSNumber};
+        unsafe {
+            let class = AnyClass::get(c"NSBitmapImageRep")?;
+            let allocated: objc2::rc::Allocated<AnyObject> = msg_send![class, alloc];
+            let bitmap: Option<Retained<AnyObject>> = msg_send![allocated, initWithCGImage: image];
+            let bitmap = bitmap?;
+            let properties = NSDictionary::from_slices(
+                &[&*NSString::from_str("NSImageCompressionFactor")],
+                &[&*NSNumber::new_f64(0.7)],
+            );
+            let data: Option<Retained<AnyObject>> =
+                msg_send![&*bitmap, representationUsingType: 3usize, properties: &*properties];
+            let data = data?;
+            let length: usize = msg_send![&*data, length];
+            if length == 0 || length > 1_500_000 {
+                return None;
+            }
+            let bytes: *const std::ffi::c_void = msg_send![&*data, bytes];
+            Some(std::slice::from_raw_parts(bytes.cast::<u8>(), length).to_vec())
+        }
+    }
+
+    fn window_application(window: &SCWindow) -> Option<crate::protocol::DeviceApp> {
+        let application = unsafe { window.owningApplication()? };
+        let bundle_id = unsafe { application.bundleIdentifier() };
+        let name = unsafe { application.applicationName() };
+        Some(crate::protocol::DeviceApp {
+            bundle_id: ns_string_to_string(&bundle_id)?,
+            name: ns_string_to_string(&name)?,
+            pid: unsafe { application.processID() },
+        })
     }
 
     pub fn list_native_capture_sources() -> NativeCaptureSources {
         if !screen_capture_access_granted() {
+            *CONTENT
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = None;
             return NativeCaptureSources {
                 devices: vec![
                     Device {
+                        app: None,
+                        window_title: None,
+                        display_uuid: None,
                         id: "screen:screencapturekit-permission".to_string(),
                         name: "Primary Display".to_string(),
                         kind: DeviceKind::Screen,
@@ -425,6 +1252,9 @@ mod macos {
                         height: None,
                     },
                     Device {
+                        app: None,
+                        window_title: None,
+                        display_uuid: None,
                         id: "window:screencapturekit-permission".to_string(),
                         name: "Window Capture".to_string(),
                         kind: DeviceKind::Window,
@@ -438,43 +1268,19 @@ mod macos {
             };
         }
 
-        let (tx, rx) = mpsc::channel();
-        let handler = RcBlock::new(
-            move |content: *mut SCShareableContent, error: *mut NSError| {
-                let result = if !error.is_null() {
-                    ShareableContentResult::Error(error_description(error))
-                } else if content.is_null() {
-                    ShareableContentResult::Error(
-                        "ScreenCaptureKit returned no shareable content.".to_string(),
-                    )
-                } else {
-                    // SAFETY: ScreenCaptureKit owns the content object for this callback. We copy the
-                    // display/window metadata before the callback returns and do not retain references.
-                    ShareableContentResult::Devices(unsafe {
-                        devices_from_shareable_content(&*content)
-                    })
-                };
-                let _ = tx.send(result);
-            },
-        );
-
-        // SAFETY: The block stays alive while we wait for the completion callback below.
-        unsafe {
-            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
-                true, true, &handler,
-            );
-        }
-
-        match rx.recv_timeout(SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT) {
-            Ok(ShareableContentResult::Devices(devices)) => NativeCaptureSources {
-                devices,
+        match load_shareable_content() {
+            Ok(content) => NativeCaptureSources {
+                devices: unsafe { devices_from_shareable_content(&content.0) },
                 warnings: Vec::new(),
             },
-            Ok(ShareableContentResult::Error(error)) => {
+            Err(error) => {
                 let status = permission_or_unavailable(&error);
                 NativeCaptureSources {
                     devices: vec![
                         Device {
+                            app: None,
+                            window_title: None,
+                            display_uuid: None,
                             id: "screen:screencapturekit-unavailable".to_string(),
                             name: "Primary Display".to_string(),
                             kind: DeviceKind::Screen,
@@ -486,6 +1292,9 @@ mod macos {
                             height: None,
                         },
                         Device {
+                            app: None,
+                            window_title: None,
+                            display_uuid: None,
                             id: "window:screencapturekit-unavailable".to_string(),
                             name: "Window Capture".to_string(),
                             kind: DeviceKind::Window,
@@ -500,43 +1309,15 @@ mod macos {
                     warnings: vec![format!("ScreenCaptureKit source discovery failed: {error}")],
                 }
             }
-            Err(_) => NativeCaptureSources {
-                devices: vec![
-                    Device {
-                        id: "screen:screencapturekit-timeout".to_string(),
-                        name: "Primary Display".to_string(),
-                        kind: DeviceKind::Screen,
-                        status: DeviceStatus::Unavailable,
-                        detail: Some(
-                            "ScreenCaptureKit display discovery timed out after Screen Recording permission preflight passed."
-                                .to_string(),
-                        ),
-                        width: None,
-                        height: None,
-                    },
-                    Device {
-                        id: "window:screencapturekit-timeout".to_string(),
-                        name: "Window Capture".to_string(),
-                        kind: DeviceKind::Window,
-                        status: DeviceStatus::Unavailable,
-                        detail: Some(
-                            "ScreenCaptureKit window discovery timed out after Screen Recording permission preflight passed."
-                                .to_string(),
-                        ),
-                        width: None,
-                        height: None,
-                    },
-                ],
-                warnings: vec![
-                    "ScreenCaptureKit source discovery timed out after Screen Recording permission preflight passed."
-                        .to_string(),
-                ],
-            },
         }
     }
 
+    // Preflight only (plan 203 S2). Device listing runs on every launch and
+    // every refresh; a request here raised macOS's own Screen Recording
+    // prompt before Videorc had explained anything. The in-place request now
+    // lives in the app (`system:request-screen-access`), behind a button.
     fn screen_capture_access_granted() -> bool {
-        CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
+        CGPreflightScreenCaptureAccess()
     }
 
     fn screen_capture_permission_message() -> String {
@@ -551,6 +1332,11 @@ mod macos {
     unsafe fn devices_from_shareable_content(content: &SCShareableContent) -> Vec<Device> {
         let mut devices = Vec::new();
         let displays = unsafe { content.displays() };
+        let names = if displays.count() > 0 {
+            display_names()
+        } else {
+            HashMap::new()
+        };
         for index in 0..displays.count() {
             let display = displays.objectAtIndex(index);
             let display_id = unsafe { display.displayID() };
@@ -565,8 +1351,16 @@ mod macos {
                 capture_height,
             );
             devices.push(Device {
+                app: None,
+                window_title: None,
+                display_uuid: display_uuid(display_id),
                 id: format!("{SCREEN_CAPTUREKIT_PREFIX}{display_id}"),
-                name: format!("Display {}", index + 1),
+                name: super::display_device_name(
+                    index + 1,
+                    names.get(&display_id).map(String::as_str),
+                    (capture_width, capture_height),
+                    CGDisplayMirrorsDisplay(display_id) != 0,
+                ),
                 kind: DeviceKind::Screen,
                 status: DeviceStatus::Available,
                 detail: Some(format!(
@@ -598,6 +1392,9 @@ mod macos {
             };
 
             devices.push(Device {
+                app: window_application(&window),
+                window_title: window_title(&window),
+                display_uuid: None,
                 id: format!("{WINDOW_CAPTUREKIT_PREFIX}{window_id}"),
                 name,
                 kind: DeviceKind::Window,
@@ -613,6 +1410,9 @@ mod macos {
             .any(|device| device.kind == DeviceKind::Screen)
         {
             devices.push(Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit-missing".to_string(),
                 name: "Primary Display".to_string(),
                 kind: DeviceKind::Screen,
@@ -631,6 +1431,9 @@ mod macos {
             .any(|device| device.kind == DeviceKind::Window)
         {
             devices.push(Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
                 id: "window:screencapturekit-missing".to_string(),
                 name: "Window Capture".to_string(),
                 kind: DeviceKind::Window,
@@ -650,6 +1453,13 @@ mod macos {
         let title = window_title(window);
         let app_name = window_application_name(window);
 
+        if let Some(app) = window_application(window)
+            && is_protected_notes_window(&app, title.as_deref().unwrap_or_default(), unsafe {
+                libc::getppid()
+            })
+        {
+            return false;
+        }
         super::should_include_window_metadata(
             is_on_screen,
             layer,
@@ -751,6 +1561,321 @@ mod tests {
     use super::*;
 
     #[test]
+    fn window_presence_copy_names_the_window_and_never_an_id() {
+        let name = window_presence_name(Some("Fixture Alpha"), Some("Alpha"));
+        assert_eq!(name, "Fixture Alpha - Alpha");
+        assert_eq!(window_presence_name(Some(" Notes "), None), "Notes");
+        assert_eq!(window_presence_name(None, Some("Untitled")), "Untitled");
+        assert_eq!(window_presence_name(None, Some("  ")), "The window");
+        let record = WindowPresence::out_of_sight_start_message(&name);
+        assert_eq!(
+            record,
+            "Fixture Alpha - Alpha is minimized, hidden or on another desktop. Bring it back, then try again."
+        );
+        assert_eq!(
+            WindowPresence::closed_message(),
+            "The window you picked was closed. Pick it again in Sources."
+        );
+        assert_eq!(
+            WindowPresence::out_of_sight_paused_message(&name),
+            "Fixture Alpha - Alpha is minimized, hidden or on another desktop. The picture is paused until it's back."
+        );
+        assert_eq!(
+            WindowPresence::back_message(&name),
+            "Fixture Alpha - Alpha is back. The picture is moving again."
+        );
+        for copy in [
+            record,
+            WindowPresence::closed_message(),
+            WindowPresence::out_of_sight_paused_message(&name),
+        ] {
+            assert!(!copy.contains("screencapturekit"), "{copy}");
+            assert!(!copy.contains("SourceMissing"), "{copy}");
+            assert!(!copy.contains("ScreenCaptureKit"), "{copy}");
+        }
+    }
+
+    #[test]
+    fn app_previews_group_count_front_and_exclusions() {
+        let mut hidden = app_window(1);
+        hidden.on_screen = false;
+        let mut own = app_window(3);
+        own.pid = 42;
+        let mut notes = app_window(4);
+        notes.protected = true;
+        let mut palette = app_window(5);
+        palette.layer = 1;
+        let mut tiny = app_window(6);
+        tiny.width = 399;
+        let mut login = app_window(7);
+        login.app_name = "loginwindow".into();
+        login.bundle_id = "login.app".into();
+        let apps = build_app_previews(
+            &[
+                own,
+                hidden.clone(),
+                app_window(2),
+                notes,
+                palette,
+                tiny,
+                login,
+            ],
+            42,
+        );
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].window_count, 2);
+        assert_eq!(
+            apps[0].front_window_id.as_deref(),
+            Some("window:screencapturekit:2")
+        );
+        assert_eq!(apps[0].front_window_title.as_deref(), Some("Window 2"));
+        let minimized = build_app_previews(&[hidden], 42);
+        assert_eq!(
+            serde_json::to_value(&minimized[0]).unwrap(),
+            serde_json::json!({"bundleId":"test.app", "name":"App", "pid":12345,"windowCount":1})
+        );
+        assert_eq!(
+            serde_json::to_value(AppPreviewsParams::default()).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn app_previews_scale_and_data_url_budget() {
+        assert_eq!(preview_size(1920, 1080, None), (320, 180));
+        assert_eq!(preview_size(800, 600, Some(1)), (160, 120));
+        assert_eq!(preview_size(800, 600, Some(900)), (640, 480));
+        assert_eq!(preview_size(200, 400, None), (200, 400));
+        assert_eq!(preview_size(0, 0, None), (1, 1));
+        assert_eq!(
+            preview_data_url(&[0xff, 0xd8, 0xff]).unwrap(),
+            "data:image/jpeg;base64,/9j/"
+        );
+        assert!(preview_data_url(&vec![0; 1_500_000]).is_none());
+        assert!(preview_data_url(&vec![0; 1_499_980]).unwrap().len() <= 2_000_000);
+    }
+
+    fn app_window(id: u32) -> AppWindow {
+        AppWindow {
+            id,
+            pid: 12345,
+            bundle_id: "test.app".into(),
+            app_name: "App".into(),
+            title: format!("Window {id}"),
+            width: 800,
+            height: 600,
+            layer: 0,
+            on_screen: true,
+            protected: false,
+        }
+    }
+
+    fn resolve_params() -> ResolveAppWindowParams {
+        ResolveAppWindowParams {
+            bundle_id: "test.app".into(),
+            prefer_window_id: None,
+            min_width: None,
+            min_height: None,
+        }
+    }
+
+    #[test]
+    fn app_window_selection_z_order_floor_and_preference() {
+        let mut params = resolve_params();
+        let mut small = app_window(1);
+        small.width = 399;
+        let mut palette = app_window(2);
+        palette.layer = 1;
+        let windows = vec![small, palette, app_window(3), app_window(4)];
+        let selected_id = |p: &ResolveAppWindowParams| match select_app_window(p, true, &windows) {
+            ResolveAppWindowResult::Found { window_id, .. } => window_id,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(selected_id(&params), "window:screencapturekit:3");
+        params.prefer_window_id = Some("window:screencapturekit:4".into());
+        assert_eq!(selected_id(&params), "window:screencapturekit:4");
+        for id in [1, 2, 99] {
+            params.prefer_window_id = Some(format!("window:screencapturekit:{id}"));
+            assert_eq!(selected_id(&params), "window:screencapturekit:3");
+        }
+        params.min_width = Some(399);
+        params.min_height = Some(600);
+        assert_eq!(selected_id(&params), "window:screencapturekit:1");
+    }
+
+    #[test]
+    fn app_window_selection_reasons_and_exclusions() {
+        let params = resolve_params();
+        let unavailable = |running, windows: &[AppWindow], reason| {
+            assert_eq!(
+                select_app_window(&params, running, windows),
+                ResolveAppWindowResult::Unavailable { ok: false, reason }
+            )
+        };
+        unavailable(false, &[], AppWindowUnavailableReason::NotRunning);
+        unavailable(true, &[], AppWindowUnavailableReason::NoWindow);
+        let mut hidden = app_window(1);
+        hidden.on_screen = false;
+        unavailable(
+            true,
+            &[hidden.clone()],
+            AppWindowUnavailableReason::Minimized,
+        );
+        let mut protected = app_window(2);
+        protected.protected = true;
+        let mut login = app_window(3);
+        login.app_name = "loginwindow".into();
+        unavailable(
+            true,
+            &[protected, login],
+            AppWindowUnavailableReason::NoWindow,
+        );
+        let mut foreign = app_window(4);
+        foreign.bundle_id = "other.app".into();
+        unavailable(true, &[foreign], AppWindowUnavailableReason::NoWindow);
+        let mut params = params.clone();
+        params.prefer_window_id = Some("window:screencapturekit:1".into());
+        assert!(
+            matches!(select_app_window(&params, true, &[hidden, app_window(5)]), ResolveAppWindowResult::Found { window_id, .. } if window_id == "window:screencapturekit:5")
+        );
+        let mut short = app_window(6);
+        short.height = 299;
+        unavailable(true, &[short], AppWindowUnavailableReason::NoWindow);
+    }
+
+    #[test]
+    fn app_window_notes_exclusion_identifies_the_host_without_hiding_other_apps() {
+        use crate::protocol::DeviceApp;
+        let mut app = DeviceApp {
+            bundle_id: "com.github.Electron".into(),
+            name: "Electron".into(),
+            pid: 42,
+        };
+        assert!(is_protected_notes_window(&app, "Notes", 42));
+        assert!(!is_protected_notes_window(&app, "Notes", 43));
+        app.bundle_id = "dev.theorcdev.videorc".into();
+        assert!(is_protected_notes_window(&app, "Notes", 43));
+        assert!(!is_protected_notes_window(&app, "Editor", 42));
+    }
+
+    #[test]
+    fn app_window_device_serialization_omits_absent_metadata() {
+        let mut device = Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
+            id: "screen:test".into(),
+            name: "Screen".into(),
+            kind: DeviceKind::Screen,
+            status: DeviceStatus::Available,
+            detail: None,
+            width: None,
+            height: None,
+        };
+        assert_eq!(
+            serde_json::to_value(resolve_params()).unwrap(),
+            serde_json::json!({"bundleId":"test.app"})
+        );
+        assert_eq!(
+            serde_json::to_value(select_app_window(&resolve_params(), false, &[])).unwrap(),
+            serde_json::json!({"ok": false, "reason": "not-running"})
+        );
+        let absent = serde_json::to_value(&device).unwrap();
+        assert_eq!(
+            absent,
+            serde_json::json!({"id":"screen:test", "name":"Screen", "kind":"screen", "status":"available"})
+        );
+        device.app = Some(crate::protocol::DeviceApp {
+            bundle_id: "test.app".into(),
+            name: "App".into(),
+            pid: 42,
+        });
+        device.window_title = Some("Editor".into());
+        device.display_uuid = Some("37D8832A-2D66-02CA-B9F7-8F30A301B230".into());
+        let present = serde_json::to_value(device).unwrap();
+        assert_eq!(
+            present["app"],
+            serde_json::json!({"bundleId":"test.app", "name":"App", "pid":42})
+        );
+        assert_eq!(present["windowTitle"], "Editor");
+        assert_eq!(
+            present["displayUuid"],
+            "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+        );
+        assert_eq!(
+            serde_json::to_value(select_app_window(&resolve_params(), true, &[app_window(7)]))
+                .unwrap(),
+            serde_json::json!({"ok":true,"windowId":"window:screencapturekit:7","title":"Window 7","width":800,"height":600})
+        );
+    }
+
+    #[test]
+    fn displays_are_named_as_macos_names_them_with_their_pixel_size() {
+        assert_eq!(
+            display_device_name(1, Some("LG ULTRAWIDE"), (3440, 1440), false),
+            "LG ULTRAWIDE · 3440 × 1440"
+        );
+        // Two of the same monitor keep the numbers macOS gives them.
+        assert_eq!(
+            display_device_name(2, Some(" DELL U2720Q (2) "), (3840, 2160), false),
+            "DELL U2720Q (2) · 3840 × 2160"
+        );
+        assert_eq!(
+            display_device_name(1, Some("Built-in Retina Display"), (3024, 1964), true),
+            "Built-in Retina Display · 3024 × 1964 · mirrored"
+        );
+    }
+
+    #[test]
+    fn a_display_macos_gives_no_name_falls_back_to_its_place() {
+        // AppKit did not answer in time, or no screen carried this id.
+        assert_eq!(
+            display_device_name(2, None, (1920, 1080), false),
+            "Display 2 · 1920 × 1080"
+        );
+        assert_eq!(
+            display_device_name(3, Some("   "), (2560, 1440), true),
+            "Display 3 · 2560 × 1440 · mirrored"
+        );
+        // No size to give: the name alone.
+        assert_eq!(
+            display_device_name(1, Some("Projector"), (0, 0), false),
+            "Projector"
+        );
+        assert_eq!(display_device_name(4, None, (1920, 0), false), "Display 4");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_display_uuid_reads_as_macos_writes_it() {
+        let main = objc2_core_graphics::CGMainDisplayID();
+        // A headless host may have no display to name.
+        if let Some(uuid) = macos::display_uuid(main) {
+            assert_eq!(uuid.len(), 36);
+            assert_eq!(uuid, uuid.to_uppercase());
+            assert!(uuid::Uuid::parse_str(&uuid).is_ok());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_online_display_reports_its_facts_plan_213_f3() {
+        let facts = display_facts();
+        // A headless host may have no display online.
+        assert!(facts.iter().filter(|display| display.main).count() <= 1);
+        for display in &facts {
+            assert!(
+                display.pixel_width > 0 && display.pixel_height > 0,
+                "{display:?}"
+            );
+            assert!(display.frame.width > 0.0 && display.frame.height > 0.0);
+            assert!(display.scale > 0.0, "{display:?}");
+            assert_eq!(display.uuid, macos::display_uuid(display.id));
+            assert_ne!(display.mirrors, Some(display.id));
+        }
+    }
+
+    #[test]
     fn parses_screencapturekit_source_ids() {
         assert_eq!(
             parse_screencapturekit_display_id("screen:screencapturekit:2"),
@@ -767,6 +1892,24 @@ mod tests {
         assert_eq!(
             parse_screencapturekit_window_id("screen:screencapturekit:2"),
             None
+        );
+    }
+
+    #[test]
+    fn windows_output_dimensions_prefer_the_unscaled_display_mode() {
+        // Field UHD 620 laptop at 150%: DesktopCoordinates read 1280x720 in
+        // the DPI-unaware backend; Desktop Duplication delivered 1920x1080.
+        assert_eq!(
+            windows_output_native_dimensions(Some((1920, 1080)), (Some(1280), Some(720))),
+            (Some(1920), Some(1080))
+        );
+        assert_eq!(
+            windows_output_native_dimensions(None, (Some(1280), Some(720))),
+            (Some(1280), Some(720))
+        );
+        assert_eq!(
+            windows_output_native_dimensions(Some((0, 1080)), (Some(1920), Some(1080))),
+            (Some(1920), Some(1080))
         );
     }
 

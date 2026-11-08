@@ -10,13 +10,11 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import {
-  backgroundAssetDisplayUrl,
   slotAsset,
-  slotDisplayStatus,
-  slotName,
   type BackgroundAsset,
   type BackgroundAssetRegistry
 } from '@/lib/background-assets'
+import { backgroundAssetDisplayUrl, slotDisplayStatus, slotName } from '@/lib/background-library'
 
 // "Replace which background?" (plan 174, C-2 and D14). Every fresh profile has
 // all ten slots filled with presets, so Import used to fail with "All preset

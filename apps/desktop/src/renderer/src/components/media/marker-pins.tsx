@@ -85,8 +85,13 @@ export function MarkerPins({
   )
 }
 
-/** The 24 px hit area, centred on the pin's time. */
-const PIN_CLASS = 'pointer-events-auto absolute top-1/2 -translate-x-1/2 -translate-y-1/2'
+/**
+ * The 24 px hit area, centred on the pin's time. Pins closer than that merge,
+ * so two can touch: no compact-button spill (plan 213 A4), or one would take
+ * its neighbour's clicks.
+ */
+const PIN_CLASS =
+  'pointer-events-auto absolute top-1/2 -translate-x-1/2 -translate-y-1/2 before:hidden'
 
 /** The 2 px tick a pin draws; a chooser's is twice as wide. */
 function PinTick({ several = false }: { several?: boolean }): ReactElement {
@@ -109,19 +114,21 @@ function MarkerPin({
   const marker = group.markers[0]
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          aria-label={`${markerName(marker)} · ${markerTime(marker.atSeconds)}`}
-          className={PIN_CLASS}
-          data-testid="marker-pin"
-          size="icon-xs"
-          style={{ left: markerPinLeft(group.fraction) }}
-          type="button"
-          variant="ghost"
-          onClick={() => onSelect(marker)}
-        >
-          <PinTick />
-        </Button>
+      <TooltipTrigger
+        render={
+          <Button
+            aria-label={`${markerName(marker)} · ${markerTime(marker.atSeconds)}`}
+            className={PIN_CLASS}
+            data-testid="marker-pin"
+            size="icon-xs"
+            style={{ left: markerPinLeft(group.fraction) }}
+            type="button"
+            variant="ghost"
+            onClick={() => onSelect(marker)}
+          />
+        }
+      >
+        <PinTick />
       </TooltipTrigger>
       <TooltipContent>
         {markerTime(marker.atSeconds)} · {markerName(marker)}
@@ -140,23 +147,25 @@ function MarkerPinChooser({
   const first = group.markers[0]
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          aria-label={`${group.markers.length} markers near ${markerTime(first.atSeconds)}`}
-          className={PIN_CLASS}
-          data-testid="marker-pin"
-          size="icon-xs"
-          style={{ left: markerPinLeft(group.fraction) }}
-          type="button"
-          variant="ghost"
-        >
-          <PinTick several />
-        </Button>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            aria-label={`${group.markers.length} markers near ${markerTime(first.atSeconds)}`}
+            className={PIN_CLASS}
+            data-testid="marker-pin"
+            size="icon-xs"
+            style={{ left: markerPinLeft(group.fraction) }}
+            type="button"
+            variant="ghost"
+          />
+        }
+      >
+        <PinTick several />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="center" side="top">
         <DropdownMenuGroup>
           {group.markers.map((marker) => (
-            <DropdownMenuItem key={marker.id} onSelect={() => onSelect(marker)}>
+            <DropdownMenuItem key={marker.id} onClick={() => onSelect(marker)}>
               <span className="text-muted-foreground tabular-nums">
                 {markerTime(marker.atSeconds)}
               </span>

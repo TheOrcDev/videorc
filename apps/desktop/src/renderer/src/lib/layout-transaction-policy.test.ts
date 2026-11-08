@@ -7,6 +7,7 @@ import {
   layoutTransactionFailureReconciliation,
   layoutTransactionFailureDisposition,
   layoutTransactionProofDisposition,
+  layoutTransactionSourcesFromScene,
   layoutTransactionUnprovenSeverity,
   liveBackgroundCommitDecision,
   NativePreviewPresentationProofError,
@@ -279,7 +280,8 @@ describe('layout transaction policy', () => {
         sceneEditMode: false,
         recordingState: 'idle',
         startRequestPending: false,
-        stopRequestPending: false
+        stopRequestPending: false,
+        performanceCheckRunning: false
       })
     ).toBe(true)
     expect(
@@ -288,7 +290,8 @@ describe('layout transaction policy', () => {
         sceneEditMode: false,
         recordingState: 'starting',
         startRequestPending: false,
-        stopRequestPending: false
+        stopRequestPending: false,
+        performanceCheckRunning: false
       })
     ).toBe(false)
   })
@@ -300,8 +303,68 @@ describe('layout transaction policy', () => {
         sceneEditMode: false,
         recordingState: 'idle',
         startRequestPending: true,
-        stopRequestPending: false
+        stopRequestPending: false,
+        performanceCheckRunning: false
       })
     ).toBe(false)
+  })
+
+  it('holds an idle reload while a performance check runs its hidden sessions', () => {
+    // First launch: setup starts the check, launch settles the capture config,
+    // and the backend refused the reload ("superseded by session startup"),
+    // which the Studio showed as "Videorc hit a problem".
+    expect(
+      shouldReloadSceneFromCaptureConfig({
+        connected: true,
+        sceneEditMode: false,
+        recordingState: 'idle',
+        startRequestPending: false,
+        stopRequestPending: false,
+        performanceCheckRunning: true
+      })
+    ).toBe(false)
+  })
+})
+
+describe('layoutTransactionSourcesFromScene (plan 212)', () => {
+  const current = {
+    cameraId: 'cam-1',
+    cameraName: 'FaceTime',
+    screenId: 'screen-1',
+    screenName: 'Display 1',
+    testPattern: false
+  }
+  const scene = [
+    { kind: 'camera', deviceId: 'cam-1', name: 'FaceTime' },
+    { kind: 'test-pattern', name: 'Test pattern' }
+  ]
+
+  it('adopts a test-pattern source in the dev app', () => {
+    expect(layoutTransactionSourcesFromScene(current, scene, { packaged: false })).toEqual({
+      cameraId: 'cam-1',
+      cameraName: 'FaceTime',
+      screenId: undefined,
+      screenName: 'Display 1',
+      windowId: undefined,
+      testPattern: true
+    })
+  })
+
+  it('ignores a test-pattern source in the packaged app and keeps the screen', () => {
+    expect(layoutTransactionSourcesFromScene(current, scene, { packaged: true })).toEqual(current)
+    expect(
+      layoutTransactionSourcesFromScene(
+        current,
+        [{ kind: 'screen', deviceId: 'screen-2', name: 'Display 2' }],
+        { packaged: true }
+      )
+    ).toEqual({
+      ...current,
+      screenId: 'screen-2',
+      screenName: 'Display 2',
+      windowId: undefined,
+      windowName: undefined,
+      testPattern: false
+    })
   })
 })

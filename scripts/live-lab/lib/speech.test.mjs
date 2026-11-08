@@ -35,6 +35,7 @@ function fakeRunner(responses = {}) {
 test('renderPhrase runs say -o with the text after --', async () => {
   const { runner, calls } = fakeRunner()
   const result = await renderPhrase('-r Buddy, show the last comment', '/tmp/p.aiff', {
+    platform: 'darwin',
     runner,
     voice: 'Samantha',
     rate: 180
@@ -60,10 +61,10 @@ test('renderPhrase runs say -o with the text after --', async () => {
 test('renderPhrase surfaces a say failure and refuses empty text', async () => {
   const { runner } = fakeRunner({ say: { code: 1, stdout: '', stderr: 'Voice not found' } })
   await assert.rejects(
-    renderPhrase('hello', '/tmp/x.aiff', { runner }),
+    renderPhrase('hello', '/tmp/x.aiff', { platform: 'darwin', runner }),
     /say exited 1: Voice not found/
   )
-  await assert.rejects(renderPhrase('  ', '/tmp/x.aiff', { runner }), /empty/)
+  await assert.rejects(renderPhrase('  ', '/tmp/x.aiff', { platform: 'darwin', runner }), /empty/)
 })
 
 test('parses the AudioToolbox device list, names with commas included', () => {
@@ -91,6 +92,7 @@ test('playPhrase plays to the device index in real time and logs the play', asyn
   const times = [new Date('2026-10-12T10:00:00.000Z'), new Date('2026-10-12T10:00:02.100Z')]
   const logged = []
   const record = await playPhrase({
+    platform: 'darwin',
     file: '/srv/lab/runs/x/phrases/highlight-last.aiff',
     phraseId: 'highlight-last',
     text: 'Buddy, show the last comment',
@@ -120,6 +122,7 @@ test('playPhrase appends NDJSON to a log file and skips the lookup with deviceIn
   const logPath = join(dir, 'speech.ndjson')
   const { runner, calls } = fakeRunner()
   await playPhrase({
+    platform: 'darwin',
     file: 'a.aiff',
     phraseId: 'a',
     text: 'one',
@@ -128,6 +131,7 @@ test('playPhrase appends NDJSON to a log file and skips the lookup with deviceIn
     log: logPath
   })
   await playPhrase({
+    platform: 'darwin',
     file: 'b.aiff',
     phraseId: 'b',
     text: 'two',
@@ -152,10 +156,10 @@ test('playPhrase fails loudly when playback fails', async () => {
     ffmpeg: { code: 1, stdout: '', stderr: 'Could not write header' }
   })
   await assert.rejects(
-    playPhrase({ file: 'a.aiff', deviceIndex: 2, runner }),
+    playPhrase({ platform: 'darwin', file: 'a.aiff', deviceIndex: 2, runner }),
     /ffmpeg playback exited 1: Could not write header/
   )
-  await assert.rejects(playPhrase({ runner }), /rendered file/)
+  await assert.rejects(playPhrase({ platform: 'darwin', runner }), /rendered file/)
 })
 
 test('speech is scheduled clear of the 10 s sync pulses', () => {

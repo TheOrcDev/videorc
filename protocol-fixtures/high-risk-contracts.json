@@ -1,5 +1,46 @@
 {
   "schemaVersion": 2,
+  "microphoneNoiseSuppression": {
+    "audioSettings": {
+      "microphoneNoiseSuppression": "rnnoise",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneSyncOffsetMs": 0,
+      "systemAudioEnabled": false,
+      "systemAudioGainDb": -6
+    },
+    "legacyAudioSettings": { "microphoneGainDb": 0, "microphoneMuted": false },
+    "update": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneNoiseSuppression": "rnnoise",
+      "systemAudioEnabled": true
+    },
+    "legacyUpdate": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 3,
+      "microphoneMuted": true
+    },
+    "applied": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneNoiseSuppression": "rnnoise",
+      "applied": true
+    },
+    "unavailable": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneNoiseSuppression": "rnnoise",
+      "applied": false,
+      "reasonCode": "microphone-noise-suppression-unavailable",
+      "confirmedMicrophoneGainDb": 0,
+      "confirmedMicrophoneMuted": false,
+      "confirmedMicrophoneNoiseSuppression": "off"
+    }
+  },
   "accountPlans": {
     "capabilitiesMax": {
       "entitlement": {
@@ -171,7 +212,10 @@
       "clipHeight": 500.0,
       "visible": true,
       "orderAboveWindowId": 4242,
-      "elevated": false
+      "elevated": false,
+      "hostX": 20.5,
+      "hostY": 12.25,
+      "hostHeight": 900.0
     },
     "normalized": {
       "screenX": 120.5,
@@ -186,7 +230,10 @@
       "clipHeight": 500.0,
       "visible": true,
       "orderAboveWindowId": 4242,
-      "elevated": false
+      "elevated": false,
+      "hostX": 20.5,
+      "hostY": 12.25,
+      "hostHeight": 900.0
     },
     "legacyWire": {
       "screenX": 0.0,
@@ -203,6 +250,7 @@
       "scaleFactor": 1.0
     }
   },
+  "cameraLook": { "brightness": 0.05, "contrast": 1.1, "saturation": 0.8 },
   "layout": {
     "legacyWire": {
       "cameraCorner": "bottom-right",
@@ -233,8 +281,50 @@
       "sideBySideSplit": "70-30",
       "sideBySideCameraSide": "right",
       "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
       "arrangementMode": "preset",
       "sourceTransformOverrides": {},
+      "sourceVisibility": {
+        "camera": true,
+        "capture": true
+      }
+    },
+    "freeformCrop": {
+      "layoutPreset": "screen-only",
+      "cameraTransformMode": "preset",
+      "cameraTransform": null,
+      "cameraCorner": "bottom-right",
+      "cameraSize": "medium",
+      "cameraShape": "rectangle",
+      "cameraCornerRadiusPct": 12,
+      "cameraAspect": "source",
+      "cameraChromaKeyEnabled": false,
+      "cameraChromaKeyColor": "#00FF00",
+      "cameraChromaKeySimilarityPct": 40,
+      "cameraChromaKeySmoothnessPct": 8,
+      "cameraChromaKeySpillPct": 10,
+      "cameraMargin": 32,
+      "cameraFit": "fill",
+      "cameraMirror": false,
+      "cameraZoom": 100,
+      "cameraOffsetX": 0,
+      "cameraOffsetY": 0,
+      "sideBySideSplit": "70-30",
+      "sideBySideCameraSide": "right",
+      "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
+      "arrangementMode": "freeform",
+      "sourceTransformOverrides": {
+        "source:base": {
+          "x": 0.1,
+          "y": 0.05,
+          "width": 0.8,
+          "height": 0.8,
+          "cropLeft": 0.25,
+          "cropBottom": 0.125
+        },
+        "source:camera": { "x": 0.7, "y": 0.6, "width": 0.25, "height": 0.3 }
+      },
       "sourceVisibility": {
         "camera": true,
         "capture": true
@@ -313,7 +403,13 @@
           }
         ]
       },
-      "durationMs": 12345
+      "durationMs": 12345,
+      "acceptsLiveSceneEdits": true
+    },
+    "fixedSceneWire": {
+      "state": "recording",
+      "sessionId": "session-legacy-graph",
+      "acceptsLiveSceneEdits": false
     },
     "minimalWire": {
       "state": "idle"
@@ -727,6 +823,7 @@
         "libraryAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51"
       },
       "autoChat": {
+        "talk": "suggest",
         "mode": "suggest",
         "greetings": {
           "enabled": true,
@@ -740,7 +837,17 @@
               "enabled": true,
               "reaction": "proud"
             }
-          ]
+          ],
+          "ai": true,
+          "welcomes": {
+            "firstTime": { "enabled": true, "state": "talk" },
+            "returning": {
+              "enabled": true,
+              "text": "Yo {name}, back again!",
+              "state": "laugh",
+              "reaction": "wave"
+            }
+          }
         },
         "answers": { "enabled": true, "cooldownSeconds": 30 },
         "banter": { "enabled": false, "cooldownSeconds": 240 }
@@ -768,9 +875,18 @@
         "reactions": {}
       },
       "autoChat": {
+        "talk": "bubble",
         "mode": "off",
-        "greetings": { "enabled": false, "templates": [] },
-        "answers": { "enabled": false, "cooldownSeconds": 20 },
+        "greetings": {
+          "enabled": true,
+          "templates": [],
+          "ai": true,
+          "welcomes": {
+            "firstTime": { "enabled": true, "state": "talk" },
+            "returning": { "enabled": true, "state": "talk" }
+          }
+        },
+        "answers": { "enabled": true, "cooldownSeconds": 20 },
         "banter": { "enabled": false, "cooldownSeconds": 240 }
       }
     },
@@ -1135,9 +1251,53 @@
           "byVoice": 0,
           "byChat": 0,
           "onStream": 0,
-          "manual": 0
+          "manual": 0,
+          "skipped": { "noLine": 1, "held": 4, "youtubePaused": 2, "noBubble": 3 }
         },
-        "recap": { "offered": 0, "drafted": 0, "dismissed": 0 }
+        "recap": { "offered": 0, "drafted": 0, "dismissed": 0 },
+        "posts": [
+          {
+            "id": "utt-1-fixture",
+            "at": "2026-08-22T10:05:00Z",
+            "trigger": "greeting",
+            "text": "Fresh blood! Viewer joins the horde.",
+            "destinations": ["twitch"],
+            "result": "sent",
+            "source": "ai"
+          },
+          {
+            "id": "utt-2-fixture",
+            "at": "2026-08-22T10:06:00Z",
+            "trigger": "greeting",
+            "text": "Welcome, Viewer! Thanks for the follow.",
+            "destinations": ["twitch"],
+            "result": "sent",
+            "source": "line"
+          },
+          {
+            "id": "utt-3-fixture",
+            "at": "2026-08-22T10:07:00Z",
+            "trigger": "manual",
+            "text": "hello",
+            "destinations": ["twitch"],
+            "result": "sent"
+          }
+        ],
+        "said": [
+          {
+            "id": "utt-4-fixture",
+            "at": "2026-08-22T10:08:00Z",
+            "trigger": "greeting",
+            "text": "Welcome, Ada!",
+            "source": "line"
+          },
+          {
+            "id": "utt-5-fixture",
+            "at": "2026-08-22T10:09:00Z",
+            "trigger": "manual",
+            "text": "Hello horde"
+          }
+        ]
       },
       "moments": [
         {
@@ -1354,6 +1514,8 @@
       "reason": "recording-off"
     },
     "listParams": { "sessionId": "session-fixture" },
+    "markParams": {},
+    "markParamsLong": { "seconds": 60 },
     "marks": [
       {
         "id": "mark-fixture-1",
@@ -1369,6 +1531,15 @@
         "atSeconds": 754.2,
         "source": "manual",
         "createdAt": "2026-09-27T10:12:34Z"
+      },
+      {
+        "id": "mark-fixture-3",
+        "sessionId": "session-fixture",
+        "atSeconds": 900.5,
+        "source": "voice",
+        "phrase": "clip the last minute",
+        "createdAt": "2026-09-27T10:15:00Z",
+        "lookbackSeconds": 60
       }
     ]
   },
@@ -1670,6 +1841,12 @@
         "vertical": { "x": 0.608889, "y": 0.6, "w": 0.32, "h": 0.18 },
         "showOnStream": false,
         "showInRecording": false
+      },
+      "chat": {
+        "horizontal": { "x": 0.0225, "y": 0.04, "w": 0.3, "h": 0.44 },
+        "vertical": { "x": 0.071111, "y": 0.08, "w": 0.8, "h": 0.3 },
+        "showOnStream": false,
+        "showInRecording": false
       }
     },
     "placed": {
@@ -1690,6 +1867,12 @@
         "vertical": { "x": 0.6, "y": 0.6, "w": 0.32, "h": 0.18 },
         "showOnStream": false,
         "showInRecording": true
+      },
+      "chat": {
+        "horizontal": { "x": 0.65, "y": 0.1, "w": 0.3, "h": 0.5 },
+        "vertical": { "x": 0.1, "y": 0.1, "w": 0.8, "h": 0.3 },
+        "showOnStream": true,
+        "showInRecording": false
       }
     }
   },
@@ -1790,32 +1973,43 @@
       }
     },
     "statusNone": { "creation": null },
-    "identityParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "reference": { "kind": "persona-idle" } },
+    "identityParams": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "reference": { "kind": "persona-idle" }
+    },
     "identityUploadParams": {
       "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
       "reference": { "kind": "upload", "imageBase64": "iVBORw0KGgo=" }
     },
-    "sheetParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "kind": "gaze", "row": "level", "redo": true },
+    "sheetParams": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "kind": "gaze",
+      "row": "level",
+      "redo": true
+    },
     "pilotParams": {
       "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
       "kind": "pilot",
       "redo": false,
       "notes": {
-          "palette": ["stone grey", "moss green"],
-          "materials": ["granite"],
-          "proportions": "Short legs, a heavy round body and a small head.",
-          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
-        }
+        "palette": ["stone grey", "moss green"],
+        "materials": ["granite"],
+        "proportions": "Short legs, a heavy round body and a small head.",
+        "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+      }
     },
     "buildParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90" },
     "saveParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "name": "Pebble" },
     "accepted": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "sheet": "gaze-level" },
-    "identityRead": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "notes": {
-          "palette": ["stone grey", "moss green"],
-          "materials": ["granite"],
-          "proportions": "Short legs, a heavy round body and a small head.",
-          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
-        } },
+    "identityRead": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "notes": {
+        "palette": ["stone grey", "moss green"],
+        "materials": ["granite"],
+        "proportions": "Short legs, a heavy round body and a small head.",
+        "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+      }
+    },
     "sheetGenerated": {
       "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
       "sheet": "gaze-level",
@@ -1856,9 +2050,21 @@
       "cellSize": 640,
       "gazeCount": 25,
       "reactions": [
-        "laugh", "surprised", "wink", "kiss", "blink", "sleep",
-        "worried", "annoyed", "proud", "confused", "excited", "calm",
-        "talk-a", "talk-b", "wave"
+        "laugh",
+        "surprised",
+        "wink",
+        "kiss",
+        "blink",
+        "sleep",
+        "worried",
+        "annoyed",
+        "proud",
+        "confused",
+        "excited",
+        "calm",
+        "talk-a",
+        "talk-b",
+        "wave"
       ],
       "source": "videorc-creator",
       "hasTalk": true
@@ -1879,7 +2085,11 @@
     "redoParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "state": "laugh" },
     "requestIdParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
     "accepted": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
-    "progressWorking": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "state": "idle", "phase": "working" },
+    "progressWorking": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "state": "idle",
+      "phase": "working"
+    },
     "progressDone": {
       "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
       "state": "talk",
@@ -1914,7 +2124,11 @@
         },
         "failed": {}
       },
-      "running": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "kind": "redo", "state": "think" }
+      "running": {
+        "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+        "kind": "redo",
+        "state": "think"
+      }
     },
     "statusNone": {},
     "libraryDraft": {
@@ -2031,7 +2245,10 @@
       "serverActiveAvatarId": "official:pirate",
       "limit": 30,
       "busy": { "kind": "use", "avatarId": "official:pirate" },
-      "error": { "code": "network", "message": "Could not reach Videorc. Check your connection and try again." }
+      "error": {
+        "code": "network",
+        "message": "Could not reach Videorc. Check your connection and try again."
+      }
     },
     "localOnly": {
       "signedIn": true,
@@ -2099,6 +2316,158 @@
     "deleteParams": { "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" },
     "accepted": { "accepted": true }
   },
+  "replay": {
+    "params": { "seconds": 30 },
+    "paramsAuto": { "seconds": 30, "auto": true },
+    "replayOnlyStatus": {
+      "state": "recording",
+      "sessionId": "replay-session-fixture",
+      "startedAt": "2026-10-12T18:30:00Z",
+      "pipeline": {
+        "container": "mkv",
+        "finalization": "none",
+        "stages": [{ "stage": "capture", "state": "running" }]
+      },
+      "replayOnly": true
+    },
+    "stateOn": {
+      "state": "on",
+      "sessionId": "replay-session-fixture",
+      "seconds": 30,
+      "bufferedSeconds": 12.5,
+      "replayOnly": true,
+      "segmentFiles": 8
+    },
+    "stateOff": { "state": "off", "seconds": 30, "bufferedSeconds": 0.0 },
+    "stateError": {
+      "state": "error",
+      "seconds": 30,
+      "bufferedSeconds": 0.0,
+      "reason": "The session ended before you stopped it, so clips are off."
+    },
+    "saveAccepted": {
+      "saveId": "save-fixture",
+      "sessionId": "replay-session-fixture",
+      "queued": true,
+      "seconds": 60
+    },
+    "saveAcceptedMinimal": {
+      "saveId": "save-fixture",
+      "sessionId": "replay-session-fixture",
+      "seconds": 30
+    },
+    "saveParams": {},
+    "saveParamsLong": { "seconds": 60 },
+    "savedEvent": {
+      "saveId": "save-fixture",
+      "sessionId": "replay-session-fixture",
+      "replaySessionId": "replay-row-fixture",
+      "path": "Clips/Clip 2026-10-12 18-30-05.mp4",
+      "seconds": 30,
+      "coveredSeconds": 30.03,
+      "complete": true,
+      "source": "manual"
+    },
+    "saveFailedEvent": {
+      "saveId": "save-fixture",
+      "sessionId": "replay-session-fixture",
+      "reason": "probe",
+      "message": "The replay could not be checked after it was written."
+    }
+  },
+  "banner": {
+    "minimal": {
+      "id": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b",
+      "name": "Sponsor",
+      "imageFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.png",
+      "thumbnailFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.thumb.png",
+      "width": 2400,
+      "height": 400,
+      "hasAlpha": true,
+      "sortOrder": 0,
+      "shown": true,
+      "horizontal": { "x": 0.2, "y": 0.782222, "w": 0.6, "h": 0.177778 },
+      "vertical": { "x": 0.071111, "y": 0.699583, "w": 0.857778, "h": 0.080417 },
+      "showOnStream": true,
+      "showInRecording": false,
+      "opacity": 0.85,
+      "createdAt": "2026-10-20T18:00:00Z",
+      "updatedAt": "2026-10-20T18:05:00Z"
+    },
+    "withTimer": {
+      "id": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b",
+      "name": "Sponsor",
+      "imageFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.png",
+      "thumbnailFile": "5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.thumb.png",
+      "width": 2400,
+      "height": 400,
+      "hasAlpha": true,
+      "sortOrder": 0,
+      "shown": true,
+      "horizontal": { "x": 0.2, "y": 0.782222, "w": 0.6, "h": 0.177778 },
+      "vertical": { "x": 0.071111, "y": 0.699583, "w": 0.857778, "h": 0.080417 },
+      "showOnStream": true,
+      "showInRecording": false,
+      "opacity": 0.85,
+      "hideAfterSec": 30,
+      "repeatEveryMin": 15,
+      "createdAt": "2026-10-20T18:00:00Z",
+      "updatedAt": "2026-10-20T18:05:00Z"
+    }
+  },
+  "sound": {
+    "minimal": {
+      "id": "0b7f3c2e-91d4-4a6b-8e25-6c1d9a0f4b37",
+      "name": "Gong",
+      "file": "0b7f3c2e-91d4-4a6b-8e25-6c1d9a0f4b37.wav",
+      "durationMs": 2850,
+      "loudnessLufs": -24.6,
+      "levelDb": 6.6,
+      "volumeDb": -3,
+      "mode": "toggle",
+      "sortOrder": 12,
+      "createdAt": "2026-10-23T09:00:00Z",
+      "updatedAt": "2026-10-23T09:05:00Z"
+    },
+    "starter": {
+      "id": "7d2a9e41-3c58-4f0b-b6a1-58e3c0d7f912",
+      "name": "Airhorn",
+      "file": "7d2a9e41-3c58-4f0b-b6a1-58e3c0d7f912.wav",
+      "durationMs": 1610,
+      "loudnessLufs": -15.3,
+      "levelDb": -2.7,
+      "volumeDb": 0,
+      "mode": "oneShot",
+      "hotkey": "1",
+      "starter": "airhorn",
+      "sortOrder": 0,
+      "createdAt": "2026-10-23T09:00:00Z",
+      "updatedAt": "2026-10-23T09:00:00Z"
+    },
+    "state": { "volumeDb": 0, "monitor": true, "startersSeeded": true },
+    "playback": {
+      "voices": [
+        {
+          "voiceId": "v-1",
+          "soundId": "7d2a9e41-3c58-4f0b-b6a1-58e3c0d7f912",
+          "startedAtMs": 1792746000123,
+          "durationMs": 1610,
+          "loop": false,
+          "onAir": true
+        },
+        {
+          "voiceId": "v-2",
+          "soundId": "0b7f3c2e-91d4-4a6b-8e25-6c1d9a0f4b37",
+          "startedAtMs": 1792746000456,
+          "durationMs": 2850,
+          "loop": true,
+          "onAir": false
+        }
+      ]
+    },
+    "pressStopped": { "onAir": true },
+    "playbackWithoutSounds": { "voices": [], "sessionWithoutSounds": true }
+  },
   "cloud": {
     "statusHold": {
       "phase": "hold",
@@ -2149,7 +2518,8 @@
       ],
       "liveSeconds": 2400,
       "directFallbackAvailable": false,
-      "restart": { "at": "2026-10-16T12:39:58.000Z", "destinationsResent": true }
+      "restart": { "at": "2026-10-16T12:39:58.000Z", "destinationsResent": true },
+      "allowancePast": { "seconds": 720 }
     },
     "statusOff": {
       "phase": "off",
@@ -2187,7 +2557,10 @@
           "reason": "too-slow",
           "message": "ffmpeg exited 0",
           "timeToLiveMs": 2300,
-          "uploads": [{ "orientation": "horizontal", "targetKbps": 6000, "measuredKbps": 2100 }]
+          "uploads": [{ "orientation": "horizontal", "targetKbps": 6000, "measuredKbps": 2100 }],
+          "nodeId": "eu-hel-1",
+          "region": "eu",
+          "handshakeMs": 48
         }
       }
     },

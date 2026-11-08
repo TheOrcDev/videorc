@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 // Performance check over the REAL backend WS: run the ladder on this machine,
 // then prove the benchmark sessions were invisible — no recording.status /
@@ -173,10 +174,17 @@ try {
   if (socket) {
     socket.close()
   }
-  if (backend && backend.exitCode === null) {
+  if (backend && backend.exitCode === null && backend.signalCode === null) {
+    // Windows refuses to unlink the database while the backend still holds
+    // it open, so reap the owned child (bounded) before removing its state.
+    const exited = new Promise((resolve) => backend.once('exit', resolve))
     backend.kill('SIGTERM')
+    await withTimeout(exited, 10000, 'backend exit').catch(() => {
+      backend.kill('SIGKILL')
+      return withTimeout(exited, 5000, 'backend kill')
+    })
   }
-  await rm(stateRoot, { recursive: true, force: true })
+  await removeProfileDir(stateRoot, { label: 'performance-check' })
 }
 
 function withTimeout(promise, ms, label) {

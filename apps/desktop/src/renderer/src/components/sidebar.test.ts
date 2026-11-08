@@ -13,6 +13,9 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 vi.mock('@/components/account-menu', () => ({ AccountMenu: () => null }))
 vi.mock('@/components/theme-toggle', () => ({ ThemeToggle: () => null }))
 const updater = vi.hoisted(() => ({ status: { phase: 'idle' } as Record<string, unknown> }))
+// The Buddy row reads the persona for its picture (OwnBuddyIcon).
+const studio = vi.hoisted(() => ({ core: { cohostSettings: null } as Record<string, unknown> }))
+vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => studio.core }))
 vi.mock('@/hooks/use-updater', () => ({
   useUpdater: () => ({
     status: updater.status,
@@ -111,6 +114,20 @@ describe('sidebar zones (plan 174 D8)', () => {
     expect(bottom).toBeGreaterThan(markup.indexOf('data-videorc-tab-trigger="library"'))
     expect(markup.indexOf('data-videorc-tab-trigger="settings"')).toBeGreaterThan(bottom)
     expect(markup).not.toContain('data-videorc-tab-trigger="diagnostics"')
+  })
+
+  it("wears the streamer's own Buddy on the Buddy row, and the golem until there is one", () => {
+    const buddyRow = (markup: string): string =>
+      /<button[^>]*data-videorc-tab-trigger="ai"[^>]*>.*?<\/button>/s.exec(markup)?.[0] ?? ''
+
+    studio.core = { cohostSettings: null }
+    expect(buddyRow(renderSidebar())).toMatch(/<image href="[^"]*buddy-emblem-64/)
+
+    studio.core = { cohostSettings: { persona: { images: { idle: 'p1/idle-0a1b2c3d.png' } } } }
+    const own = buddyRow(renderSidebar())
+    expect(own).toContain('<image href="videorc-asset://buddy/p1/idle-0a1b2c3d.png"')
+    expect(own).not.toContain('buddy-emblem-64')
+    studio.core = { cohostSettings: null }
   })
 
   it('shows the live dot and clock on the Studio row while a session runs', () => {

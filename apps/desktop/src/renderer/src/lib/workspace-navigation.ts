@@ -60,3 +60,22 @@ function workspaceNavigation(tab: WorkspaceTab, subTab: string | undefined): Wor
       return { tab }
   }
 }
+
+// Plan 203 S5/S6: "Run setup again…" (Settings → General, ⌘K) replays
+// first-run setup over the workspace. The shell shows the same screen in
+// replay mode: the first-run record is not written, and Continue or Skip for
+// now return to `returnTo` (Settings unless the caller says otherwise).
+export const FIRST_RUN_SETUP_OPEN_EVENT = 'videorc:open-first-run-setup'
+
+export interface FirstRunSetupRequest {
+  returnTo: WorkspaceTab
+}
+
+/** Opens first-run setup again; Continue or Skip for now return to `returnTo` (Settings by default). */
+export function openFirstRunSetup(options: { returnTo?: WorkspaceTab } = {}): void {
+  window.dispatchEvent(
+    new CustomEvent<FirstRunSetupRequest>(FIRST_RUN_SETUP_OPEN_EVENT, {
+      detail: { returnTo: options.returnTo ?? 'settings' }
+    })
+  )
+}

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const sonner = vi.hoisted(() => {
   const base = vi.fn()
@@ -15,10 +15,12 @@ const sonner = vi.hoisted(() => {
 vi.mock('sonner', () => ({ toast: sonner }))
 
 import {
+  COPY_ERROR_LABEL,
   SUPPORT_BUNDLE_LABEL,
   TOAST_DETAILS_SAVED,
   TOAST_WITH_DESCRIPTION_MS,
   defaultToastDuration,
+  errorToastCopyText,
   guardToastText,
   registerSupportBundleExport,
   toast
@@ -74,7 +76,8 @@ describe('toast wrapper', () => {
     toast.error('Could not complete YouTube on YouTube.', { description: OWNER_STOP_BODY })
     expect(sonner.error).toHaveBeenCalledWith('Could not complete YouTube on YouTube.', {
       description: TOAST_DETAILS_SAVED,
-      duration: TOAST_WITH_DESCRIPTION_MS
+      duration: TOAST_WITH_DESCRIPTION_MS,
+      action: expect.objectContaining({ label: COPY_ERROR_LABEL })
     })
     toast.warning(CONNECT_BODY, { id: 'x' })
     const [title, options] = sonner.warning.mock.calls[0] as [string, { id: string }]
@@ -176,5 +179,92 @@ describe('toast durations by shape (plan 174 S2.4)', () => {
       duration: 12_000,
       action: expect.objectContaining({ label: 'Play' })
     })
+  })
+})
+
+describe('error toasts offer Copy', () => {
+  type Button = { label: string; onClick: () => void }
+  const writeText = vi.fn<(text: string) => Promise<void>>()
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    writeText.mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('copies what the toast says and the raw text the guard withheld', async () => {
+    toast.error("Couldn't end the YouTube broadcast", { description: OWNER_STOP_BODY })
+    const [, options] = sonner.error.mock.calls[0] as [string, { action: Button }]
+    expect(options.action.label).toBe(COPY_ERROR_LABEL)
+    options.action.onClick()
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledOnce())
+    expect(writeText).toHaveBeenCalledWith(
+      `Couldn't end the YouTube broadcast\n${TOAST_DETAILS_SAVED}\nDetails: ${OWNER_STOP_BODY}`
+    )
+  })
+
+  it('keeps sonner’s timing: Copy alone never keeps an error up', () => {
+    toast.error('Recording failed')
+    expect(sonner.error).toHaveBeenCalledWith('Recording failed', {
+      action: expect.objectContaining({ label: COPY_ERROR_LABEL })
+    })
+  })
+
+  it('sits beside a toast’s own action, and only on errors', () => {
+    const own = { label: 'Retry', onClick: vi.fn() }
+    toast.error('Upload failed', { action: own })
+    expect(sonner.error.mock.calls[0][1]).toMatchObject({
+      action: own,
+      cancel: { label: COPY_ERROR_LABEL },
+      duration: Infinity
+    })
+    toast.warning('Degraded')
+    expect(sonner.warning).toHaveBeenCalledWith('Degraded')
+  })
+
+  it('still offers Copy when the toast’s two slots are its own', async () => {
+    const library = { label: 'Open in Library', onClick: vi.fn() }
+    const folder = { label: 'Show in folder', onClick: vi.fn() }
+    toast.error('Recording stopped unexpectedly', {
+      id: 'recording-stopped',
+      description: 'Encoder bridge stopped.',
+      action: library,
+      cancel: folder,
+      duration: Infinity
+    })
+    const [, options] = sonner.error.mock.calls[0] as [string, Record<string, unknown>]
+    expect(options).toMatchObject({ action: library, cancel: folder, id: 'recording-stopped' })
+    // The description keeps its words and gains the Copy button.
+    const description = options.description as {
+      props: { children: [string, string, { props: Record<string, unknown> }] }
+    }
+    const [words, , button] = description.props.children
+    expect(words).toBe('Encoder bridge stopped.')
+    expect(button.props.children).toBe(COPY_ERROR_LABEL)
+    ;(button.props.onClick as () => void)()
+    await vi.waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        'Recording stopped unexpectedly\nEncoder bridge stopped.'
+      )
+    )
+    expect(sonner.dismiss).toHaveBeenCalledWith('recording-stopped')
+  })
+
+  it('says so when the clipboard refuses', async () => {
+    writeText.mockRejectedValue(new Error('denied'))
+    toast.error('Recording failed')
+    const [, options] = sonner.error.mock.calls[0] as [string, { action: Button }]
+    options.action.onClick()
+    await vi.waitFor(() => expect(sonner.error).toHaveBeenCalledWith("Couldn't copy that."))
+  })
+
+  it('builds the copied text from strings only', () => {
+    expect(errorToastCopyText('Title', 'Why.', [])).toBe('Title\nWhy.')
+    expect(errorToastCopyText('Title', undefined, ['raw'])).toBe('Title\nDetails: raw')
+    expect(errorToastCopyText(() => null, undefined, [])).toBe('')
   })
 })

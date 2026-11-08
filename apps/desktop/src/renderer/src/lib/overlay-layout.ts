@@ -1,3 +1,8 @@
+import type { OverlayAuxLeg, OverlaySessionShape } from '../../../shared/preview-program'
+
+export { programShows } from '../../../shared/preview-program'
+export type { OverlayAuxLeg, OverlaySessionShape } from '../../../shared/preview-program'
+
 import {
   OVERLAY_ITEMS,
   OVERLAY_RECT_MIN_SIZE,
@@ -26,14 +31,16 @@ const PORTRAIT_BOTTOM_MARGIN = 0.22
 export const OVERLAY_ITEM_LABELS: Record<OverlayItem, string> = {
   highlight: 'Highlight',
   captions: 'Captions',
-  buddy: 'Buddy'
+  buddy: 'Buddy',
+  chat: 'Chat'
 }
 
 /** How a Go Live sentence names the item mid-sentence (mirrors Rust). */
 const OVERLAY_ITEM_SENTENCE_LABELS: Record<OverlayItem, string> = {
   highlight: 'highlights',
   captions: 'captions',
-  buddy: 'the Buddy'
+  buddy: 'the Buddy',
+  chat: 'chat'
 }
 
 export const OVERLAY_SNAPS: readonly OverlaySnap[] = [
@@ -69,28 +76,83 @@ export function overlayDefaultSize(
       return portrait ? [0.76, 0.14] : [0.92, 0.16]
     case 'buddy':
       return portrait ? [0.32, (0.32 * 9) / 16] : [0.18, (0.18 * 16) / 9]
+    // Plan 215 G: a column five rows tall; the painter wraps each row to it.
+    case 'chat':
+      return portrait ? [0.8, 0.3] : [0.3, 0.44]
   }
 }
 
-/** The rect a snap preset produces for an item on an orientation (mirrors Rust). */
+/**
+ * The canvas's 3×3 grid of places (plan 209 D22). The inspector's five snaps
+ * are five of them; an agent's `move_on_scene` names any of the nine.
+ */
+export type OverlayPlace =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'middle-left'
+  | 'center'
+  | 'middle-right'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right'
+
+export const OVERLAY_PLACES: readonly OverlayPlace[] = [
+  'top-left',
+  'top-center',
+  'top-right',
+  'middle-left',
+  'center',
+  'middle-right',
+  'bottom-left',
+  'bottom-center',
+  'bottom-right'
+]
+
+/**
+ * Where a `w` × `h` item's top-left corner sits at a place, inside the
+ * overlay margins: 4 % of the height on a landscape canvas, the portrait
+ * safe area (8 % top, 22 % bottom, plan 077) on a portrait one. A middle row
+ * is centred between the top and bottom margins; the centre column is the
+ * canvas's centre. Unrounded: the snaps round (or clamp) their own way.
+ */
+export function overlayPlaceOrigin(
+  place: OverlayPlace,
+  orientation: OverlayOrientation,
+  w: number,
+  h: number
+): { x: number; y: number } {
+  const portrait = orientation === 'vertical'
+  const side = portrait ? PORTRAIT_SIDE_MARGIN : LANDSCAPE_SIDE_MARGIN
+  const top = portrait ? PORTRAIT_TOP_MARGIN : LANDSCAPE_EDGE_MARGIN
+  const bottom = portrait ? PORTRAIT_BOTTOM_MARGIN : LANDSCAPE_EDGE_MARGIN
+  const x = place.endsWith('-left') ? side : place.endsWith('-right') ? 1 - side - w : (1 - w) / 2
+  const y = place.startsWith('top-')
+    ? top
+    : place.startsWith('bottom-')
+      ? 1 - bottom - h
+      : top + (1 - top - bottom - h) / 2
+  return { x, y }
+}
+
+/** A `[w, h]` item at a place on an orientation, rounded as a snap writes it. */
+export function overlayPlaceRect(
+  place: OverlayPlace,
+  orientation: OverlayOrientation,
+  [w, h]: readonly [number, number]
+): OverlayRect {
+  const { x, y } = overlayPlaceOrigin(place, orientation, w, h)
+  return { x: round6(Math.max(0, x)), y: round6(Math.max(0, y)), w: round6(w), h: round6(h) }
+}
+
+/** The rect a snap preset produces for an item on an orientation (mirrors Rust):
+ * the item's default size at that place. */
 export function overlaySnapRect(
   item: OverlayItem,
   orientation: OverlayOrientation,
   snap: OverlaySnap
 ): OverlayRect {
-  const [w, h] = overlayDefaultSize(item, orientation)
-  const portrait = orientation === 'vertical'
-  const side = portrait ? PORTRAIT_SIDE_MARGIN : LANDSCAPE_SIDE_MARGIN
-  const top = portrait ? PORTRAIT_TOP_MARGIN : LANDSCAPE_EDGE_MARGIN
-  const bottom = portrait ? PORTRAIT_BOTTOM_MARGIN : LANDSCAPE_EDGE_MARGIN
-  const x =
-    snap === 'top-left' || snap === 'bottom-left'
-      ? side
-      : snap === 'top-right' || snap === 'bottom-right'
-        ? 1 - side - w
-        : (1 - w) / 2
-  const y = snap === 'top-left' || snap === 'top-right' ? top : 1 - bottom - h
-  return { x: round6(Math.max(0, x)), y: round6(Math.max(0, y)), w: round6(w), h: round6(h) }
+  return overlayPlaceRect(snap, orientation, overlayDefaultSize(item, orientation))
 }
 
 /** The corner menu in Stream Manager maps onto the four corner snaps. */
@@ -112,18 +174,22 @@ function snappedItem(
   }
 }
 
-/** Mirrors `OverlayLayout::default()`; pinned by the shared fixture. */
+/** Mirrors `OverlayLayout::default()`; pinned by the shared fixture. The chat
+ * box (plan 215 D5) ships top-left and off for both outputs: it shows
+ * viewers' names, so the streamer turns it on. */
 export const DEFAULT_OVERLAY_LAYOUT: OverlayLayout = {
   highlight: snappedItem('highlight', 'bottom-left', true, true),
   captions: snappedItem('captions', 'bottom-center', false, false),
-  buddy: snappedItem('buddy', 'bottom-right', false, false)
+  buddy: snappedItem('buddy', 'bottom-right', false, false),
+  chat: snappedItem('chat', 'top-left', false, false)
 }
 
 export function cloneOverlayLayout(layout: OverlayLayout): OverlayLayout {
   return {
     highlight: { ...layout.highlight },
     captions: { ...layout.captions },
-    buddy: { ...layout.buddy }
+    buddy: { ...layout.buddy },
+    chat: { ...layout.chat }
   }
 }
 
@@ -178,18 +244,10 @@ export function overlayOrientationForCanvas(width: number, height: number): Over
 
 // --- Leg plan (D12) ----------------------------------------------------------
 
-export type OverlayAuxLeg = 'none' | 'stream' | 'vertical-simulcast'
-
 export interface OverlayLegPlan {
   primary: boolean
   aux: boolean
   needsSplit: boolean
-}
-
-export interface OverlaySessionShape {
-  recordEnabled: boolean
-  streamEnabled: boolean
-  auxLeg: OverlayAuxLeg
 }
 
 /** The one leg plan for every overlay item; the table lives in Rust's doc. */
