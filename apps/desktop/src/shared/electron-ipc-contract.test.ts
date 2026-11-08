@@ -91,7 +91,9 @@ describe('Electron IPC contract', () => {
     // (the person card's calls, relayed to the Studio).
     // 167: plan 225 D12 adds the Community Export… folder and Import… file
     // pickers (capabilities, never paths).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(167)
+    // 169: plan 224 C-G4 adds the talk-show display sources and the media
+    // grant (talk-show:display-sources, talk-show:media-grant).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(169)
     expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(167)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>

@@ -167,6 +167,11 @@ import {
   cloudRestartToast,
   cloudShowCapToast
 } from '@/lib/cloud-toasts'
+import {
+  NO_TALK_SHOW,
+  useTalkShowRoomController,
+  type TalkShowContextValue
+} from '@/hooks/use-talk-show-room'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
 
@@ -2017,6 +2022,12 @@ export interface StudioCloudContextValue {
    * `cloud.state` (`CloudStatus.test`); this only starts it.
    */
   runCloudTest: (outputs: CloudTestOutput[]) => Promise<void>
+  /**
+   * Plan 224: the talk show's room from the renderer's side (C-G4): the
+   * LiveKit connection and its tracks, and every move the Guests tab and the
+   * Show stage make. Idle outside a room.
+   */
+  talkShow: TalkShowContextValue
 }
 
 const NO_CLOUD: StudioCloudContextValue = {
@@ -2025,7 +2036,8 @@ const NO_CLOUD: StudioCloudContextValue = {
   refreshCloudAllowance: async () => {},
   endCloudShow: async () => {},
   resumeCloudShow: async () => false,
-  runCloudTest: async () => {}
+  runCloudTest: async () => {},
+  talkShow: NO_TALK_SHOW
 }
 
 /** Which start RPC a session start sends (plan 184 C5b). */
@@ -4608,6 +4620,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     latestLayoutTransactionCommitRef.current = null
   }, [client])
+  // Plan 224 C-G5: the lifecycle probe scripts a room open and close with
+  // no LiveKit behind it, to prove the Preview hides and comes back.
+  const [smokeTalkShowRoomOpen, setSmokeTalkShowRoomOpen] = useState(false)
   // Smoke-only: isolated smoke profiles persist no camera selection, so
   // camera-dependent layout presets would always be disabled under gates.
   // DEV-gated like the synthetic-source toggle; driven by the
@@ -4617,6 +4632,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     const smokeWindow = window as Window & {
+      __videorcSmokeSetTalkShowRoomOpen?: (open: boolean) => boolean
       __videorcSmokeSelectFirstCamera?: () => string | null
       __videorcSmokeSelectFirstScreen?: (
         sourceId?: string
@@ -4647,6 +4663,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       setReplayArmedRef.current(armed)
       return true
+    }
+    smokeWindow.__videorcSmokeSetTalkShowRoomOpen = (open: boolean): boolean => {
+      setSmokeTalkShowRoomOpen(open)
+      return open
     }
     smokeWindow.__videorcSmokeSelectFirstCamera = (): string | null => {
       const camera = deviceList.devices.find(
@@ -12478,6 +12498,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void openPreviewWindow()
   }, [closePreviewWindow, firstRunSetupOpen, openPreviewWindow, previewWindow.open])
 
+  // Plan 224 D7 (C-G5): the native Preview shows the backend's program, which
+  // is not the show while the room is open; the Show stage replaces it. The
+  // docked slot and the detached window close when the room opens and come
+  // back when it closes, only if the room closed them (the first-run rule
+  // above; the dock reporter sees one unmount and one mount).
+  const talkShowRoomOpen = cloudStatus?.room?.phase === 'open' || smokeTalkShowRoomOpen
+  const reopenPreviewAfterRoomRef = useRef(false)
+  useEffect(() => {
+    if (talkShowRoomOpen) {
+      if (!previewWindow.open) return
+      reopenPreviewAfterRoomRef.current = true
+      void closePreviewWindow()
+      return
+    }
+    if (!reopenPreviewAfterRoomRef.current) return
+    reopenPreviewAfterRoomRef.current = false
+    void openPreviewWindow()
+  }, [closePreviewWindow, openPreviewWindow, previewWindow.open, talkShowRoomOpen])
+
   const setPreviewWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     const next = await window.videorc?.setPreviewWindowAlwaysOnTop?.(alwaysOnTop)
     if (next) {
@@ -16682,6 +16721,49 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     startBlockedReasonFor,
     startRequestPending
   ])
+  // Plan 224 C-G4: the room from the renderer's side. The camera comes back
+  // through the same path the Studio starts it with, once the backend
+  // returned it (D6).
+  const talkShowOutputs = useCallback((): CloudTestOutput[] => {
+    const video = streamOutputVideoSettings(
+      captureConfigRef.current.video,
+      captureConfigRef.current.streamEnabled ? captureConfigRef.current.streaming : undefined
+    )
+    return [
+      {
+        orientation: 'horizontal',
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        videoKbps: video.bitrateKbps
+      }
+    ]
+  }, [])
+  const talkShowHostShape = useCallback(
+    (): 'rounded' | 'circle' =>
+      captureConfigRef.current.layout.cameraShape === 'circle' ? 'circle' : 'rounded',
+    []
+  )
+  const talkShowCameraReturned = useCallback(() => {
+    nativePreviewCameraKeyRef.current = null
+    void ensureNativePreviewCamera()
+  }, [ensureNativePreviewCamera])
+  const talkShowError = useCallback((error: unknown, action: string) => {
+    toastUserError(error, { action, object: 'the room' }, { id: CLOUD_TOAST_ID })
+  }, [])
+  const talkShow = useTalkShowRoomController({
+    client,
+    cloudStatus,
+    commitCloudStatus,
+    cameraId: captureConfig.sources.cameraId ?? null,
+    microphoneId: captureConfig.sources.microphoneId ?? null,
+    devices: deviceList.devices,
+    outputs: talkShowOutputs,
+    hostShape: talkShowHostShape,
+    onCameraReturned: talkShowCameraReturned,
+    onError: talkShowError,
+    previewReplacedOverride: smokeTalkShowRoomOpen
+  })
   const cloudValue = useMemo<StudioCloudContextValue>(
     () => ({
       cloudStatus,
@@ -16689,7 +16771,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshCloudAllowance,
       resumeCloudShow,
       runCloudTest,
-      setCloudSettings
+      setCloudSettings,
+      talkShow
     }),
     [
       cloudStatus,
@@ -16697,7 +16780,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshCloudAllowance,
       resumeCloudShow,
       runCloudTest,
-      setCloudSettings
+      setCloudSettings,
+      talkShow
     ]
   )
 

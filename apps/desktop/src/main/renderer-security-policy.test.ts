@@ -214,6 +214,26 @@ describe('renderer security policy', () => {
     expect(request({ mediaTypes: ['unknown'] })).toBe(false)
     expect(request({ mediaTypes: undefined })).toBe(false)
     expect(request({ mediaTypes: [] })).toBe(false)
+    // Plan 224 C-G4: camera video only under a talk-show grant, for the main
+    // renderer only, and never 'unknown'; the grant ends with the room.
+    expect(registry.setTalkShowMediaGrant(2, { video: true, screenSourceId: null })).toBe(false)
+    expect(registry.setTalkShowMediaGrant(1, { video: true, screenSourceId: null })).toBe(true)
+    expect(request({ mediaTypes: ['video'] })).toBe(true)
+    expect(request({ mediaTypes: ['audio', 'video'] })).toBe(true)
+    expect(request({ mediaTypes: ['unknown'] })).toBe(false)
+    expect(request({ senderId: 2, frameUrl: trustedCommentsUrl, mediaTypes: ['video'] })).toBe(
+      false
+    )
+    expect(request({ permission: 'display-capture', mediaTypes: undefined })).toBe(false)
+    // The named screen source is taken once.
+    expect(registry.setTalkShowMediaGrant(1, { video: true, screenSourceId: 'screen:1:0' })).toBe(
+      true
+    )
+    expect(registry.takeTalkShowScreenSource(1)).toBe('screen:1:0')
+    expect(registry.takeTalkShowScreenSource(1)).toBeNull()
+    expect(registry.setTalkShowMediaGrant(1, { video: false, screenSourceId: null })).toBe(true)
+    expect(request({ mediaTypes: ['video'] })).toBe(false)
+    expect(registry.talkShowMediaGrant(1)).toBeNull()
     for (const permission of [
       'clipboard-read',
       'display-capture',

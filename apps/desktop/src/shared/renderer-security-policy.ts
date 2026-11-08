@@ -105,6 +105,9 @@ export const IPC_INVOKE_ROLES = {
   'obs:read-stream-key': MAIN_ONLY,
   // The Stream Manager's status bar offers Open Preview (plan 055, decision 4).
   'preview-window:open': MAIN_AND_COMMENTS,
+  // Plan 224 C-G4: the host's screen share and camera grant (the Studio only).
+  'talk-show:display-sources': MAIN_ONLY,
+  'talk-show:media-grant': MAIN_ONLY,
   'preview-window:close': MAIN_ONLY,
   'preview-window:toggle': MAIN_ONLY,
   'preview-window:get-state': MAIN_ONLY,
@@ -319,8 +322,46 @@ export interface RendererInvokeIdentity {
  * Main-process authority for renderer identities. The role comes from the
  * BrowserWindow that main created, never from renderer-controlled content.
  */
+/** Plan 224 C-G4: what a renderer's web media may do while its room is open. */
+export interface TalkShowMediaGrantRecord {
+  video: boolean
+  screenSourceId: string | null
+}
+
 export class RendererSecurityRegistry {
   readonly #renderers = new Map<number, RegisteredRenderer>()
+  readonly #talkShowMediaGrants = new Map<number, TalkShowMediaGrantRecord>()
+
+  /** The grant for one renderer: `video` for camera `media`, the source for
+   * one `getDisplayMedia`. Only a registered main renderer may hold one. */
+  setTalkShowMediaGrant(senderId: number, grant: TalkShowMediaGrantRecord): boolean {
+    if (this.role(senderId) !== 'main') {
+      return false
+    }
+    if (!grant.video) {
+      this.#talkShowMediaGrants.delete(senderId)
+      return true
+    }
+    this.#talkShowMediaGrants.set(senderId, {
+      video: true,
+      screenSourceId: grant.screenSourceId
+    })
+    return true
+  }
+
+  talkShowMediaGrant(senderId: number): TalkShowMediaGrantRecord | null {
+    return this.#talkShowMediaGrants.get(senderId) ?? null
+  }
+
+  /** The named source is answered once: the next `getDisplayMedia` takes it. */
+  takeTalkShowScreenSource(senderId: number): string | null {
+    const grant = this.#talkShowMediaGrants.get(senderId)
+    if (!grant?.screenSourceId) {
+      return null
+    }
+    this.#talkShowMediaGrants.set(senderId, { video: grant.video, screenSourceId: null })
+    return grant.screenSourceId
+  }
 
   register(senderId: number, role: RendererRole): void {
     this.#renderers.set(senderId, { role, trustedDocuments: new Set() })
@@ -328,6 +369,7 @@ export class RendererSecurityRegistry {
 
   unregister(senderId: number): void {
     this.#renderers.delete(senderId)
+    this.#talkShowMediaGrants.delete(senderId)
   }
 
   trustDocument(senderId: number, rawUrl: string): void {

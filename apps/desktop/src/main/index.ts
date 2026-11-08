@@ -587,7 +587,27 @@ import {
   sanitizedChildProcessEnvironment,
   scrubReleaseAuthorityEnvironment
 } from './release-authority-env'
-import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
+import { rendererSecurityRegistry, secureIpcHandle, sendElectronEvent } from './secure-ipc'
+import { setTalkShowDisplaySourceResolver } from './web-contents-security'
+
+/** Plan 224 C-G4: the grant as the renderer sends it, or null. */
+function talkShowMediaGrantFromIpc(
+  value: unknown
+): { video: boolean; screenSourceId: string | null } | null {
+  if (typeof value !== 'object' || value === null) return null
+  const { video, screenSourceId } = value as { video?: unknown; screenSourceId?: unknown }
+  if (typeof video !== 'boolean') return null
+  if (screenSourceId !== null && screenSourceId !== undefined) {
+    if (
+      typeof screenSourceId !== 'string' ||
+      screenSourceId.length > 256 ||
+      !/^(screen|window):[0-9]+:[0-9]+$/.test(screenSourceId)
+    ) {
+      return null
+    }
+  }
+  return { video, screenSourceId: typeof screenSourceId === 'string' ? screenSourceId : null }
+}
 import type { ElectronEventChannel, ElectronIpcEventMap } from '../shared/electron-ipc-contract'
 import {
   installRendererSessionPermissions,
@@ -17378,6 +17398,46 @@ app.whenReady().then(async () => {
   secureIpcHandle('app:set-native-theme', (_event, theme: string) => applyNativeTheme(theme))
   secureIpcHandle('preview-window:open', () => openPreviewWindow())
   secureIpcHandle('preview-window:close', () => closePreviewWindow())
+  // Plan 224 C-G4: the host's screen share and camera grant. The sources
+  // list only while the room's grant is held; the grant itself is the
+  // registry's, keyed by the renderer that asked.
+  secureIpcHandle('talk-show:display-sources', async (event) => {
+    if (!rendererSecurityRegistry.talkShowMediaGrant(event.sender.id)?.video) {
+      return []
+    }
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 320, height: 180 },
+      fetchWindowIcons: false
+    })
+    return sources.map((source) => ({
+      id: source.id,
+      name: source.name,
+      kind: source.id.startsWith('screen:') ? ('screen' as const) : ('window' as const),
+      thumbnailDataUrl: source.thumbnail.isEmpty() ? null : source.thumbnail.toDataURL()
+    }))
+  })
+  secureIpcHandle('talk-show:media-grant', (event, grant: unknown) => {
+    const record = talkShowMediaGrantFromIpc(grant)
+    if (!record) {
+      return false
+    }
+    return rendererSecurityRegistry.setTalkShowMediaGrant(event.sender.id, record)
+  })
+  setTalkShowDisplaySourceResolver(async (request) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return null
+    const senderId = mainWindow.webContents.id
+    if (!request.frame || !rendererSecurityRegistry.documentTrusted(senderId, request.frame.url)) {
+      return null
+    }
+    const sourceId = rendererSecurityRegistry.takeTalkShowScreenSource(senderId)
+    if (!sourceId) return null
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 0, height: 0 }
+    })
+    return sources.find((source) => source.id === sourceId) ?? null
+  })
   secureIpcHandle('preview-window:toggle', () => togglePreviewWindow())
   secureIpcHandle('preview-window:get-state', () => previewWindowState())
   secureIpcHandle(
