@@ -4945,6 +4945,45 @@ const cohostReportSaidSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// Plan 225 D15: the report's Community block; every object strict, every
+// optional field absent, never null.
+const cohostReportCommunityPersonSchema = objectSchema(
+  {
+    name: stringSchema({ maxLength: 500 }),
+    platform: streamPlatformSchema,
+    platforms: optionalSchema(
+      arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length })
+    ),
+    streams: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+const cohostReportCommunityMilestoneSchema = objectSchema(
+  {
+    name: stringSchema({ maxLength: 500 }),
+    platform: streamPlatformSchema,
+    milestone: viewerMilestoneSchema
+  },
+  { allowUnknown: false }
+)
+const cohostReportCommunitySchema = objectSchema(
+  {
+    regularsBack: nonNegativeInteger,
+    regulars: optionalSchema(arraySchema(cohostReportCommunityPersonSchema, { maxLength: 10 })),
+    newRegulars: nonNegativeInteger,
+    comebacks: nonNegativeInteger,
+    firstTimers: nonNegativeInteger,
+    firstTimersStayed: nonNegativeInteger,
+    milestones: optionalSchema(
+      arraySchema(cohostReportCommunityMilestoneSchema, { maxLength: 20 })
+    ),
+    linksMade: nonNegativeInteger,
+    memoriesLearned: nonNegativeInteger,
+    optOuts: nonNegativeInteger,
+    summary: optionalSchema(stringSchema({ maxLength: 280 }))
+  },
+  { allowUnknown: false }
+)
 const cohostSessionReportSchema = objectSchema(
   {
     version: literalSchema(1),
@@ -4963,7 +5002,8 @@ const cohostSessionReportSchema = objectSchema(
     recap: cohostReportRecapSchema,
     commands: optionalSchema(cohostReportCommandsSchema),
     posts: optionalSchema(arraySchema(cohostReportPostSchema, { maxLength: 200 })),
-    said: optionalSchema(arraySchema(cohostReportSaidSchema, { maxLength: 200 }))
+    said: optionalSchema(arraySchema(cohostReportSaidSchema, { maxLength: 200 })),
+    community: optionalSchema(cohostReportCommunitySchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSessionReport>

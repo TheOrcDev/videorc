@@ -1153,3 +1153,59 @@ fn export_and_import_round_trip_and_a_tombstone_wins() {
     assert_eq!(merged, 1);
     assert_eq!(person_of(&other, StreamPlatform::Twitch, "t1").messages, 2);
 }
+
+#[test]
+fn a_stream_counts_its_first_timers_and_those_who_stayed_forty_minutes() {
+    let database = Database::open_in_memory_for_tests();
+    // Ada chatted before; Bo and Kim are new in s2; Kim stays 45 minutes.
+    stream_with(
+        &database,
+        "s1",
+        day(2026, 10, 1),
+        &[(StreamPlatform::Twitch, "t1", "Ada")],
+    );
+    let start = day(2026, 10, 8);
+    stream_with(
+        &database,
+        "s2",
+        start,
+        &[
+            (StreamPlatform::Twitch, "t1", "Ada"),
+            (StreamPlatform::Twitch, "t2", "Bo"),
+            (StreamPlatform::Kick, "k3", "Kim"),
+        ],
+    );
+    let later = start + chrono::Duration::minutes(45);
+    database
+        .community_record_batch(
+            &[facts(&chat(
+                "s2",
+                StreamPlatform::Kick,
+                "k3",
+                "Kim",
+                9,
+                later,
+            ))],
+            later,
+        )
+        .unwrap();
+    // Bo's second message 10 minutes in: not stayed.
+    let soon = start + chrono::Duration::minutes(10);
+    database
+        .community_record_batch(
+            &[facts(&chat(
+                "s2",
+                StreamPlatform::Twitch,
+                "t2",
+                "Bo",
+                10,
+                soon,
+            ))],
+            soon,
+        )
+        .unwrap();
+    assert_eq!(database.community_session_first_timers("s2").unwrap(), (2, 1));
+    // s1's only chatter was a first-timer there; an unknown stream has none.
+    assert_eq!(database.community_session_first_timers("s1").unwrap(), (1, 0));
+    assert_eq!(database.community_session_first_timers("nope").unwrap(), (0, 0));
+}

@@ -8237,6 +8237,50 @@ export interface CohostSessionReport {
    * too), oldest first, at most 200; absent while empty and in older reports.
    */
   said?: CohostReportSaid[]
+  /**
+   * Plan 225 D15: who came, from the community store, written when the chat
+   * session ends; absent while empty and in older reports.
+   */
+  community?: CohostReportCommunity
+}
+
+/** Plan 225 D15: one regular a report names. */
+export interface CohostReportCommunityPerson {
+  name: string
+  platform: StreamPlatform
+  /** Linked platforms, only when two or more. */
+  platforms?: StreamPlatform[]
+  /** Streams chatted in, including this one. */
+  streams: number
+}
+
+/** Plan 225 D15: one milestone celebrated this stream. */
+export interface CohostReportCommunityMilestone {
+  name: string
+  platform: StreamPlatform
+  milestone: ViewerMilestone
+}
+
+/**
+ * Plan 225 D15: the report's Community block. Counts are free and local;
+ * `summary` is Premium (the memory pass) and absent until it runs. Opt-outs
+ * are counted, never named.
+ */
+export interface CohostReportCommunity {
+  regularsBack: number
+  /** Most streams first, at most 10. */
+  regulars?: CohostReportCommunityPerson[]
+  newRegulars: number
+  comebacks: number
+  firstTimers: number
+  /** First-timers whose first and last message were 40+ minutes apart. */
+  firstTimersStayed: number
+  milestones?: CohostReportCommunityMilestone[]
+  linksMade: number
+  memoriesLearned: number
+  optOuts: number
+  /** Premium: at most 280 characters. */
+  summary?: string
 }
 
 /** Plan 211 D11: one line Buddy said in its bubble on stream, written when it showed. */

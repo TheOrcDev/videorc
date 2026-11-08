@@ -11529,6 +11529,7 @@ mod tests {
             segments: 1,
             posts: Vec::new(),
             said: Vec::new(),
+            community: None,
             stream_title: Some("Rust night".to_string()),
             messages_seen: 10,
             shown_on_stream: 1,

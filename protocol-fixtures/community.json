@@ -294,5 +294,32 @@
         "at": "2026-11-08T18:03:00.000Z"
       }
     ]
+  },
+  "reportCommunity": {
+    "regularsBack": 12,
+    "regulars": [
+      { "name": "Ada", "platform": "twitch", "platforms": ["twitch", "youtube"], "streams": 14 },
+      { "name": "Bo", "platform": "kick", "streams": 9 }
+    ],
+    "newRegulars": 1,
+    "comebacks": 2,
+    "firstTimers": 5,
+    "firstTimersStayed": 3,
+    "milestones": [
+      { "name": "Kim", "platform": "twitch", "milestone": { "kind": "streams", "value": 10 } }
+    ],
+    "linksMade": 1,
+    "memoriesLearned": 0,
+    "optOuts": 1
+  },
+  "minimalReportCommunity": {
+    "regularsBack": 0,
+    "newRegulars": 0,
+    "comebacks": 0,
+    "firstTimers": 1,
+    "firstTimersStayed": 0,
+    "linksMade": 0,
+    "memoriesLearned": 0,
+    "optOuts": 0
   }
 }

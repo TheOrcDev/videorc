@@ -2330,6 +2330,55 @@ impl Database {
         Ok((u32::try_from(file.people.len()).unwrap_or(u32::MAX), merged))
     }
 
+    /// D15: the first-timers of one stream and how many stayed 40 minutes
+    /// or more (first to last message of the stream). A first-timer is a
+    /// person, not a bot or a tombstone, none of whose accounts chatted
+    /// before this stream's first message from them. Returns
+    /// `(first_timers, stayed)`.
+    pub fn community_session_first_timers(&self, session_id: &str) -> Result<(u32, u32)> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "WITH here AS (
+                SELECT accounts.person_id AS person_id,
+                       MIN(attendance.first_message_at) AS first_at,
+                       MAX(attendance.last_message_at) AS last_at
+                FROM community_attendance AS attendance
+                JOIN community_accounts AS accounts
+                  ON accounts.account_key = attendance.account_key
+                JOIN community_people AS people ON people.id = accounts.person_id
+                WHERE attendance.session_id = ?1
+                  AND accounts.status = 'normal'
+                  AND people.status = 'normal'
+                GROUP BY accounts.person_id
+             )
+             SELECT here.first_at, here.last_at FROM here
+             WHERE NOT EXISTS (
+                SELECT 1 FROM community_attendance AS before
+                JOIN community_accounts AS other
+                  ON other.account_key = before.account_key
+                WHERE other.person_id = here.person_id
+                  AND before.session_id != ?1
+                  AND before.first_message_at < here.first_at
+             )",
+        )?;
+        let rows = statement.query_map(params![session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut first_timers = 0u32;
+        let mut stayed = 0u32;
+        for row in rows {
+            let (first_at, last_at) = row?;
+            first_timers = first_timers.saturating_add(1);
+            if let (Some(first), Some(last)) = (parse_at(&first_at), parse_at(&last_at))
+                && last.signed_duration_since(first)
+                    >= chrono::Duration::minutes(crate::community::STAYED_MINUTES)
+            {
+                stayed = stayed.saturating_add(1);
+            }
+        }
+        Ok((first_timers, stayed))
+    }
+
     /// The person a live (never forgotten) account belongs to.
     pub(crate) fn community_account_person(&self, key: &str) -> Result<Option<String>> {
         let conn = self.lock()?;

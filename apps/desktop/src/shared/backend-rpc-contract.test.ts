@@ -3968,6 +3968,8 @@ describe('Know your viewers wire contract (plan 225 A6)', () => {
     listPage: unknown
     listParams: unknown
     state: unknown
+    reportCommunity: unknown
+    minimalReportCommunity: unknown
     rejected: { arrivals: unknown[]; people: unknown[]; linkMade: unknown[] }
   }
 
@@ -4021,6 +4023,56 @@ describe('Know your viewers wire contract (plan 225 A6)', () => {
     expect(validateBackendRpcResult('cohost.community.export', { people: 3, bytes: 1024 })).toEqual(
       { people: 3, bytes: 1024 }
     )
+  })
+
+  it('carries the report Community block (plan 225 D15), absent in older reports', () => {
+    const report = {
+      version: 1,
+      sessionId: 's2',
+      startedAt: '2026-11-08T18:00:00Z',
+      endedAt: '2026-11-08T19:00:00Z',
+      segments: 0,
+      messagesSeen: 0,
+      shownOnStream: 0,
+      questions: {
+        total: 0,
+        markedAnswered: 0,
+        dismissed: 0,
+        replied: 0,
+        answeredOnAir: 0,
+        restored: 0,
+        shownOnStream: 0,
+        items: []
+      },
+      flags: { raised: 0, dismissed: 0, byKind: [], bySeverity: [] },
+      promises: { heard: 0, kept: 0, dismissed: 0, reminded: 0, open: [] },
+      greetings: {
+        firstTimers: 0,
+        firstTimersGreeted: 0,
+        byVoice: 0,
+        byChat: 0,
+        onStream: 0,
+        manual: 0
+      },
+      recap: { offered: 0, drafted: 0, dismissed: 0 }
+    }
+    const payload = (community?: unknown) => ({
+      sessionId: 's2',
+      report: community === undefined ? report : { ...report, community },
+      moments: [],
+      chat: { messages: 0, byPlatform: [] }
+    })
+    for (const community of [undefined, fixture.reportCommunity, fixture.minimalReportCommunity]) {
+      expect(validateBackendRpcResult('cohost.report.get', payload(community))).toEqual(
+        payload(community)
+      )
+    }
+    expect(() =>
+      validateBackendRpcResult(
+        'cohost.report.get',
+        payload({ ...(fixture.minimalReportCommunity as object), summary: null })
+      )
+    ).toThrow()
   })
 
   it('rejects a null optional, an unknown kind or status, a one-name link and a stray field', () => {

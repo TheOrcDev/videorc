@@ -6366,6 +6366,81 @@ pub struct CohostSessionReport {
     /// older reports read unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub said: Vec<CohostReportSaid>,
+    /// Plan 225 D15: who came, from the community store, computed when the
+    /// chat session ends. Omitted while empty, so older reports read
+    /// unchanged and an older app ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<CohostReportCommunity>,
+}
+
+/// The most regulars a report names (D15).
+pub const COHOST_REPORT_COMMUNITY_NAMES_CAP: usize = 10;
+/// The most milestones a report names.
+pub const COHOST_REPORT_COMMUNITY_MILESTONES_CAP: usize = 20;
+
+/// One regular the report names (D15): the name, where they chatted, and
+/// their linked platforms when they have two or more.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommunityPerson {
+    pub name: String,
+    pub platform: crate::streaming::StreamPlatform,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<crate::streaming::StreamPlatform>,
+    /// Streams chatted in, including this one.
+    pub streams: u32,
+}
+
+/// One milestone celebrated this stream (D15).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommunityMilestone {
+    pub name: String,
+    pub platform: crate::streaming::StreamPlatform,
+    pub milestone: crate::community::ViewerMilestone,
+}
+
+/// The report's Community block (plan 225 D15). Every count is free and
+/// local; `summary` is the Premium memory pass's two sentences (F3) and is
+/// absent until then. Opt-outs are counted, never named.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommunity {
+    /// Regulars who chatted this stream.
+    #[serde(default)]
+    pub regulars_back: u32,
+    /// The regulars by name, most streams first, at most 10.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regulars: Vec<CohostReportCommunityPerson>,
+    /// People who became regulars with this stream.
+    #[serde(default)]
+    pub new_regulars: u32,
+    /// People back after 30 days or more.
+    #[serde(default)]
+    pub comebacks: u32,
+    /// People whose first chat was this stream.
+    #[serde(default)]
+    pub first_timers: u32,
+    /// First-timers whose first and last message were 40 minutes or more apart.
+    #[serde(default)]
+    pub first_timers_stayed: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub milestones: Vec<CohostReportCommunityMilestone>,
+    #[serde(default)]
+    pub links_made: u32,
+    #[serde(default)]
+    pub memories_learned: u32,
+    #[serde(default)]
+    pub opt_outs: u32,
+    /// Premium (F3): at most 280 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+impl CohostReportCommunity {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl CohostSessionReport {
@@ -6526,7 +6601,22 @@ impl CohostSessionReport {
         while self.said.len() > COHOST_REPORT_SAID_CAP {
             self.said.remove(0);
         }
+        // Plan 225 D15: the block is computed whole from the store, so the
+        // later computation replaces the earlier one.
+        if later.community.is_some() {
+            self.community = later.community;
+        }
         self
+    }
+
+    /// Plan 225 D15: a report that carries only the Community block, folded
+    /// into the session's report when the chat session ends (like
+    /// `post_only`).
+    pub fn community_only(session_id: &str, community: CohostReportCommunity, at: &str) -> Self {
+        Self {
+            community: Some(community).filter(|community| !community.is_empty()),
+            ..Self::empty(session_id, at)
+        }
     }
 
     /// A report that carries nothing but `post` (plan 164 D10): folded into
@@ -6587,6 +6677,7 @@ impl CohostSessionReport {
             commands: None,
             posts: Vec::new(),
             said: Vec::new(),
+            community: None,
         }
     }
 }

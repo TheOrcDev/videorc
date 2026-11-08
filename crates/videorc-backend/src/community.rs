@@ -48,6 +48,9 @@ pub const NOTE_MAX_CHARS: usize = 300;
 pub const LINK_MADE_TTL: Duration = Duration::from_secs(15 * 60);
 /// `community.list` pages.
 pub const LIST_LIMIT_MAX: usize = 100;
+/// D15: a first-timer "stayed" when their first and last message of the
+/// stream were this many minutes apart or more.
+pub const STAYED_MINUTES: i64 = 40;
 /// The refusal code for a manual link that touches an X account (D4).
 pub const X_SELF_LINK_ONLY: &str = "x-self-link-only";
 
@@ -1037,6 +1040,88 @@ pub fn command_bubble_line(
     }
 }
 
+/// One arrival of a stream, kept in memory for the report (D15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportArrival {
+    pub name: String,
+    pub platform: StreamPlatform,
+    pub arrival: ViewerArrival,
+}
+
+/// The report's Community block (D15) from what the stream saw: its
+/// arrivals (the rows that carried `arrival`), the store's first-timers and
+/// how many stayed, and the links and opt-outs counted live. A "new
+/// regular" is an arrival that is regular on exactly the threshold's
+/// stream, so it became one with this stream.
+pub fn report_community(
+    arrivals: &[ReportArrival],
+    first_timers: u32,
+    first_timers_stayed: u32,
+    links_made: u32,
+    opt_outs: u32,
+    threshold: u32,
+) -> crate::protocol::CohostReportCommunity {
+    use crate::protocol::{
+        COHOST_REPORT_COMMUNITY_MILESTONES_CAP, COHOST_REPORT_COMMUNITY_NAMES_CAP,
+        CohostReportCommunity, CohostReportCommunityMilestone, CohostReportCommunityPerson,
+    };
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    let mut regulars: Vec<&ReportArrival> = arrivals
+        .iter()
+        .filter(|entry| entry.arrival.regular)
+        .collect();
+    let regulars_back = count(regulars.len());
+    let new_regulars = count(
+        regulars
+            .iter()
+            .filter(|entry| entry.arrival.streams == threshold.max(1))
+            .count(),
+    );
+    regulars.sort_by(|a, b| {
+        b.arrival
+            .streams
+            .cmp(&a.arrival.streams)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    CohostReportCommunity {
+        regulars_back,
+        regulars: regulars
+            .into_iter()
+            .take(COHOST_REPORT_COMMUNITY_NAMES_CAP)
+            .map(|entry| CohostReportCommunityPerson {
+                name: entry.name.clone(),
+                platform: entry.platform,
+                platforms: entry.arrival.platforms.clone(),
+                streams: entry.arrival.streams,
+            })
+            .collect(),
+        new_regulars,
+        comebacks: count(
+            arrivals
+                .iter()
+                .filter(|entry| entry.arrival.away_days.is_some())
+                .count(),
+        ),
+        first_timers,
+        first_timers_stayed,
+        milestones: arrivals
+            .iter()
+            .filter_map(|entry| {
+                Some(CohostReportCommunityMilestone {
+                    name: entry.name.clone(),
+                    platform: entry.platform,
+                    milestone: entry.arrival.milestone?,
+                })
+            })
+            .take(COHOST_REPORT_COMMUNITY_MILESTONES_CAP)
+            .collect(),
+        links_made,
+        memories_learned: 0,
+        opt_outs,
+        summary: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1535,6 +1620,13 @@ mod tests {
             };
             assert_eq!(round_trip, wire, "{key}");
         }
+        // Plan 225 D15: the report's Community block, full and minimal.
+        for key in ["reportCommunity", "minimalReportCommunity"] {
+            let wire = fixture[key].clone();
+            let block: crate::protocol::CohostReportCommunity =
+                serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&block).unwrap(), wire, "{key}");
+        }
         let state: CohostState = serde_json::from_value(fixture["state"].clone()).unwrap();
         assert_eq!(state.welcome_back.len(), 1);
         assert_eq!(state.link_made.len(), 1);
@@ -1616,5 +1708,61 @@ mod tests {
             })
         );
         let _ = at("2026-11-08T00:00:00Z");
+    }
+
+    #[test]
+    fn the_report_block_counts_regulars_comebacks_milestones_and_names_the_top_ten() {
+        let arrival = |streams: u32, regular: bool| ViewerArrival {
+            streams,
+            regular,
+            away_days: None,
+            in_a_row: 1,
+            milestone: None,
+            platforms: Vec::new(),
+            since: None,
+        };
+        let mut arrivals: Vec<ReportArrival> = (0..12)
+            .map(|index| ReportArrival {
+                name: format!("R{index:02}"),
+                platform: StreamPlatform::Twitch,
+                arrival: arrival(3 + index, true),
+            })
+            .collect();
+        arrivals.push(ReportArrival {
+            name: "Bo".to_string(),
+            platform: StreamPlatform::Kick,
+            arrival: ViewerArrival {
+                away_days: Some(21 + 9),
+                ..arrival(2, false)
+            },
+        });
+        arrivals.push(ReportArrival {
+            name: "Kim".to_string(),
+            platform: StreamPlatform::Youtube,
+            arrival: ViewerArrival {
+                milestone: Some(ViewerMilestone {
+                    kind: ViewerMilestoneKind::Streams,
+                    value: 10,
+                }),
+                platforms: vec![StreamPlatform::Twitch, StreamPlatform::Youtube],
+                ..arrival(10, true)
+            },
+        });
+        let block = report_community(&arrivals, 5, 3, 1, 2, 3);
+        assert_eq!(block.regulars_back, 13);
+        // R00 has exactly 3 streams: a regular with this stream.
+        assert_eq!(block.new_regulars, 1);
+        assert_eq!(block.comebacks, 1);
+        assert_eq!((block.first_timers, block.first_timers_stayed), (5, 3));
+        assert_eq!((block.links_made, block.opt_outs), (1, 2));
+        assert_eq!(block.regulars.len(), 10);
+        assert_eq!(block.regulars[0].name, "R11");
+        assert!(block.regulars.iter().any(|person| person.name == "Kim"
+            && person.platforms == vec![StreamPlatform::Twitch, StreamPlatform::Youtube]));
+        assert_eq!(block.milestones.len(), 1);
+        assert_eq!(block.milestones[0].name, "Kim");
+        assert!(block.summary.is_none());
+        // Nothing at all: an empty block, which the report omits.
+        assert!(report_community(&[], 0, 0, 0, 0, 3).is_empty());
     }
 }

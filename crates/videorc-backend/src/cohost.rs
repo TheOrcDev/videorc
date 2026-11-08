@@ -3319,6 +3319,9 @@ impl CohostSession {
             // Plan 211 D11: said lines are written as they show
             // (`append_cohost_report_said`); the merge keeps them.
             said: Vec::new(),
+            // Plan 225 D15: the community store writes its block when the
+            // chat session ends (`community_service::session_ended`).
+            community: None,
         }
     }
 

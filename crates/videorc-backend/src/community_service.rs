@@ -31,8 +31,9 @@ use crate::community::{
     CommunityListPage, CommunityListParams, CommunityPathParams, CommunityPerson,
     CommunityPersonIdParams, CommunityPersonParams, CommunitySettings, CommunitySuggestionParams,
     CommunitySummary, CommunityUnlinkParams, CommunityUnlinkResult, CommunityUpdateParams,
-    LINK_MADE_TTL, LinkClaim, LinkOutcome, PendingLinks, ViewerArrival, account_key,
-    command_bubble_line, parse_chat_command, platform_has_identity,
+    LINK_MADE_TTL, LinkClaim, LinkOutcome, PendingLinks, ReportArrival, ViewerArrival,
+    account_key, command_bubble_line, parse_chat_command, platform_has_identity,
+    report_community,
 };
 use crate::community_store::{
     CommunityError, CommunityExportFile, CommunityRowFacts, PRUNED_AT_SETTING_KEY,
@@ -68,7 +69,14 @@ struct SessionCommunity {
     streamer_keys: Option<HashSet<String>>,
     /// D14: a store error is logged once per session.
     store_error_logged: bool,
+    /// D15: what the report's Community block counts, kept as it happens.
+    report_arrivals: Vec<ReportArrival>,
+    links_made: u32,
+    opt_outs: u32,
 }
+
+/// The most arrivals one stream's report keeps in memory.
+const REPORT_ARRIVALS_MAX: usize = 2_000;
 
 #[derive(Default)]
 pub struct CommunityRuntime {
@@ -275,13 +283,80 @@ pub(crate) fn session_started(state: &AppState, session_id: &str, platforms: Vec
 }
 
 /// The chat session ended: pending `!link` words die with it; the lane is
-/// cleared.
+/// cleared; the report's Community block (D15) is written once the
+/// session's detached store writes have landed.
 pub(crate) fn session_ended(state: &AppState) {
-    state.community.lock().session = None;
+    let ended = state.community.lock().session.take();
     let state = state.clone();
     tokio::spawn(async move {
         state.cohost.lock().await.community.clear();
+        if let Some(ended) = ended {
+            write_report_community(&state, ended).await;
+        }
     });
+}
+
+/// How long the report waits for the session's last store writes.
+const REPORT_WRITES_WAIT: Duration = Duration::from_secs(10);
+
+/// D15: fold the Community block into the session's Buddy report. Nothing
+/// is written for a stream nobody came back to and nobody new chatted in.
+async fn write_report_community(state: &AppState, ended: SessionCommunity) {
+    let settings = settings_snapshot(&state.database, &state.community);
+    if !settings.enabled {
+        return;
+    }
+    wait_for_pending_writes(state, REPORT_WRITES_WAIT).await;
+    let database = state.database.clone();
+    let session_id = ended.session_id.clone();
+    let threshold = settings.regular_streams;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let (first_timers, stayed) = database.community_session_first_timers(&session_id)?;
+        let block = report_community(
+            &ended.report_arrivals,
+            first_timers,
+            stayed,
+            ended.links_made,
+            ended.opt_outs,
+            threshold,
+        );
+        if block.is_empty() {
+            return Ok(false);
+        }
+        let report = crate::protocol::CohostSessionReport::community_only(
+            &session_id,
+            block,
+            &Utc::now().to_rfc3339(),
+        );
+        database.upsert_cohost_report(&report)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => state.emit_log(
+            "warn",
+            format!("Community: could not write the report's Community block: {error:#}"),
+        ),
+        Err(error) => state.emit_log(
+            "warn",
+            format!("Community: the report task failed: {error}"),
+        ),
+    }
+}
+
+/// Wait (bounded) until every detached store write has landed.
+async fn wait_for_pending_writes(state: &AppState, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    loop {
+        if state.community.lock().pending_writes == 0 || Instant::now() >= deadline {
+            return;
+        }
+        let _ = tokio::time::timeout(
+            Duration::from_millis(200),
+            state.community.writes_done.notified(),
+        )
+        .await;
+    }
 }
 
 /// B1, D14: the arrival lookup, inside the same blocking read as the
@@ -421,14 +496,26 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
         }
         // "Welcome back" (D11): the arrival rows of this batch.
         let arrivals: Vec<(CohostWelcomeBack, String)> = {
-            let runtime = state.community.lock();
+            let mut runtime = state.community.lock();
             let Some(session) = runtime
                 .session
-                .as_ref()
+                .as_mut()
                 .filter(|session| session.session_id == session_id)
             else {
                 return;
             };
+            // D15: the report counts what the arrival rows said.
+            for message in &messages {
+                if let Some(arrival) = message.arrival.clone()
+                    && session.report_arrivals.len() < REPORT_ARRIVALS_MAX
+                {
+                    session.report_arrivals.push(ReportArrival {
+                        name: message.author_name.trim().to_string(),
+                        platform: message.platform,
+                        arrival,
+                    });
+                }
+            }
             messages
                 .iter()
                 .filter_map(|message| {
@@ -506,6 +593,26 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
     }
 }
 
+/// D15: count something for this session's report.
+fn count_for_report(state: &AppState, session_id: &str, count: impl FnOnce(&mut SessionCommunity)) {
+    let mut runtime = state.community.lock();
+    if let Some(session) = runtime
+        .session
+        .as_mut()
+        .filter(|session| session.session_id == session_id)
+    {
+        count(session);
+    }
+}
+
+/// D15: a link the streamer made while a chat session runs counts in that
+/// session's report.
+fn count_link_for_live_report(state: &AppState) {
+    if let Some(session) = state.community.lock().session.as_mut() {
+        session.links_made = session.links_made.saturating_add(1);
+    }
+}
+
 fn log_store_error_once(state: &AppState, session_id: &str, error: &anyhow::Error) {
     let mut runtime = state.community.lock();
     let log = match runtime.session.as_mut() {
@@ -550,6 +657,9 @@ async fn run_chat_command(
                 Ok(Ok(_)) => {
                     changed = true;
                     line = command_bubble_line(talk, &command, &name, None);
+                    count_for_report(state, session_id, |session| {
+                        session.opt_outs = session.opt_outs.saturating_add(1)
+                    });
                     state.emit_log(
                         "info",
                         format!(
@@ -644,6 +754,9 @@ async fn run_chat_command(
                     {
                         Ok(Ok(kept)) => {
                             changed = true;
+                            count_for_report(state, session_id, |session| {
+                                session.links_made = session.links_made.saturating_add(1)
+                            });
                             line = command_bubble_line(
                                 talk,
                                 &command,
@@ -877,6 +990,7 @@ pub async fn link(
         database.community_link(&a, &b, CommunityLinkKind::Manual, Utc::now())
     })
     .await?;
+    count_link_for_live_report(state);
     emit_changed(state).await;
     person_by_id(state, kept).await
 }
@@ -949,6 +1063,7 @@ pub async fn suggestion_accept(
         database.community_suggestion_accept(&a, &b, Utc::now())
     })
     .await?;
+    count_link_for_live_report(state);
     emit_changed(state).await;
     person_by_id(state, kept).await
 }
@@ -1667,6 +1782,50 @@ mod tests {
             state.cohost.lock().await.snapshot().welcome_back.is_empty(),
             "a dismissed card takes the row off"
         );
+    }
+
+    /// D15: when the chat session ends, its report gains the Community
+    /// block: the first-timers from the store, and nothing about a
+    /// returning non-regular beyond being counted nowhere.
+    #[tokio::test]
+    async fn the_session_end_writes_the_reports_community_block() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let first = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            first,
+            vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
+        )
+        .await;
+        crate::live_chat::stop_live_chat(&state).await;
+        let second = start_session(&state, "s2").await;
+        deliver(
+            &state,
+            second,
+            vec![
+                row("s2", StreamPlatform::Twitch, "ada", "Ada", 2, "back"),
+                row("s2", StreamPlatform::Twitch, "bo", "Bo", 3, "first time"),
+            ],
+        )
+        .await;
+        crate::live_chat::stop_live_chat(&state).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let community = loop {
+            let report = state.database.get_cohost_report("s2").unwrap();
+            if let Some(community) = report.and_then(|report| report.community) {
+                break community;
+            }
+            assert!(Instant::now() < deadline, "the Community block never landed");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(community.first_timers, 1);
+        assert_eq!(community.regulars_back, 0);
+        assert!(community.regulars.is_empty());
+        assert!(community.summary.is_none());
+        // The report reads back as JSON without a null anywhere.
+        let json = serde_json::to_string(&community).unwrap();
+        assert!(!json.contains("null"));
     }
 
     /// B1: the arrival rides the delivery, once per person per stream, for
