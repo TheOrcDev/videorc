@@ -22,8 +22,9 @@
 // as SKIP here.
 //
 // SKIPs: not Windows; no DXGI display (gdigrab refuses Hide screen by
-// design); Desktop Duplication refused this process (0x80070005 from an
-// agent or service session, 0x887A0022, 0x887A0026).
+// design); Desktop Duplication refused this process (0x80070005,
+// 0x887A0022, 0x887A0026); a refused D3D11 media path is a named SKIP
+// while the CPU-bridge legs are still judged.
 //
 // Output: `<out>/hide-screen-windows-summary.json` (every number, per-frame
 // features per output) and one line per output. Exit 1 on any FAIL.

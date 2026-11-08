@@ -95,18 +95,20 @@ Hide screen on every output leg (#1088, plan 210 D8). It covers the primary
 display with a borderless red fixture window for about half a minute once the
 dev app is up, records and
 streams the DXGI display to a loopback RTMP sink with Clips on, hides for four
-seconds, and checks that the recording, the stream, a saved clip and (with a
-camera) the Screen file are frosted and still for the hidden span and live
-again after Show:
+seconds, and checks that the recording, the stream and a saved clip are frosted
+and still for the hidden span and live again after Show:
 
 ```powershell
 pnpm smoke:hide-screen:windows                 # or pnpm smoke:smart-scenes
 pnpm smoke:hide-screen:windows -- --media cpu  # force the CPU compositor bridge
 ```
 
-Run it from your own terminal. Desktop Duplication refuses processes started
-from an agent or service session (`0x80070005`), and the smoke then SKIPs and
-names that code instead of passing.
+The Screen file is a named SKIP: separate source recordings are Mac only.
+When Desktop Duplication refuses the process (`0x80070005`), the session falls
+back to the CPU bridge: those legs are still judged and the D3D11 media path is
+a named SKIP with the code. On the owner's Intel UHD 620 laptop the refusal
+happens from an agent shell and from an ordinary terminal alike, so the D3D11
+path needs a host where `DuplicateOutput` succeeds.
 
 Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):

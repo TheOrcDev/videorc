@@ -10,8 +10,9 @@ export const WINDOWS_DXGI_SCREEN_ID = /^screen:dxgi:[0-9a-f]+:\d+$/i
 
 /**
  * Desktop Duplication refusals that mean "this process may not read the
- * desktop" rather than "Hide screen is broken": E_ACCESSDENIED (an agent or
- * service session, a secure desktop), DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+ * desktop" rather than "Hide screen is broken": E_ACCESSDENIED (a secure desktop, a
+ * service session, and on some hosts every ordinary process: the owner's
+ * Intel UHD 620 laptop refuses an interactive terminal too), DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
  * (another app holds every duplication slot) and DXGI_ERROR_SESSION_DISCONNECTED
  * (a locked or disconnected RDP session).
  */
@@ -84,7 +85,7 @@ export function windowsScreenStartSkip(status) {
   const code = dxgiRefusalCode(status.message)
   if (!code) return null
   return {
-    reason: `DXGI Desktop Duplication refused this process (${code}) with the screen ${status.state}: ${status.message}. Run the smoke from an interactive desktop session (the user's own terminal), not an agent or service session.`,
+    reason: `DXGI Desktop Duplication refused this process (${code}) with the screen ${status.state}: ${status.message}. The smoke needs a host and session where DuplicateOutput succeeds.`,
     flag: `dxgi-refused-${code}`
   }
 }
@@ -116,7 +117,7 @@ export function windowsHideSessionPath(diagnostics) {
     fallbackReason,
     d3d11Skip: code
       ? {
-          reason: `the D3D11 media path fell back because Desktop Duplication refused this process (${code}): ${fallbackReason}. Run the smoke from an interactive desktop session to prove that path.`,
+          reason: `the D3D11 media path fell back because Desktop Duplication refused this process (${code}): ${fallbackReason}. The D3D11 path is unproven on this host; the CPU-bridge legs are still judged.`,
           flag: `d3d11-dxgi-refused-${code}`
         }
       : null

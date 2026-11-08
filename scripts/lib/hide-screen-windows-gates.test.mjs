@@ -72,7 +72,7 @@ test('only Desktop Duplication refusals turn a failed screen start into a SKIP',
     message: 'DXGI Desktop Duplication failed (0x80070005)'
   })
   assert.equal(skip.flag, 'dxgi-refused-0x80070005')
-  assert.match(skip.reason, /interactive desktop/)
+  assert.match(skip.reason, /DuplicateOutput succeeds/)
 })
 
 test('the session path is read from diagnostics.stats', () => {
@@ -166,7 +166,7 @@ test('a D3D11 fallback forced by a Desktop Duplication refusal is a named SKIP',
   })
   assert.equal(refused.path, 'cpu-bridge')
   assert.equal(refused.d3d11Skip.flag, 'd3d11-dxgi-refused-0x80070005')
-  assert.match(refused.d3d11Skip.reason, /interactive desktop/)
+  assert.match(refused.d3d11Skip.reason, /unproven on this host/)
 
   const otherFallback = windowsHideSessionPath({
     windowsD3d11Media: { state: 'fallback', fallbackReason: 'canvas larger than 1080p' }
