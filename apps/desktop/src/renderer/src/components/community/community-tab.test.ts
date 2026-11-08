@@ -16,6 +16,8 @@ const studio = vi.hoisted(() => ({
   gate: { allowed: true } as EntitlementUiGate,
   patch: vi.fn(async () => undefined)
 }))
+const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }))
+vi.mock('@/lib/toast', () => ({ toast: toastMock }))
 
 vi.mock('@/hooks/use-community', () => ({
   useCommunityClient: () => ({
@@ -206,5 +208,77 @@ describe('Buddy → Community (plan 225 D12)', () => {
     )
     await act(async () => confirm?.click())
     expect(client.call).toHaveBeenCalledWith('cohost.community.forgetAll', undefined)
+  })
+
+  // Plan 225 D12: Export… and Import… go through main's pickers and hand the
+  // backend a single-use capability, never a path; a cancelled picker does
+  // nothing, and a finished file is news out of view (one toast).
+  it('exports into a picked folder and imports a picked file, by capability only', async () => {
+    const pickCommunityExportDirectory = vi.fn(async () => ({
+      capabilityId: 'resource:folder',
+      kind: 'output-directory' as const,
+      displayName: 'Exports'
+    }))
+    const pickCommunityImportFile = vi.fn(async () => ({
+      capabilityId: 'resource:file',
+      kind: 'input-file' as const,
+      displayName: 'videorc-community-2026-11-01.json'
+    }))
+    vi.stubGlobal('videorc', { pickCommunityExportDirectory, pickCommunityImportFile })
+    client.call.mockImplementation(async (method: string, params: unknown) => {
+      if (method === 'cohost.community.list') return { people: client.people }
+      if (method === 'cohost.community.suggestions') return { suggestions: client.suggestions }
+      if (method === 'cohost.community.export') {
+        expect(params).toEqual({ outputDirectoryCapability: 'resource:folder' })
+        return { people: 312, bytes: 40_000, fileName: 'videorc-community-2026-11-08.json' }
+      }
+      if (method === 'cohost.community.import') {
+        expect(params).toEqual({ sourceCapability: 'resource:file' })
+        return { people: 12, merged: 3 }
+      }
+      throw new Error(`unexpected ${method}`)
+    })
+    await mount()
+    const exportButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="community-export"]'
+    )
+    const importButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="community-import"]'
+    )
+    expect(exportButton?.disabled).toBe(false)
+    expect(importButton?.disabled).toBe(false)
+
+    await act(async () => exportButton?.click())
+    expect(pickCommunityExportDirectory).toHaveBeenCalledTimes(1)
+    expect(client.call).toHaveBeenCalledWith('cohost.community.export', {
+      outputDirectoryCapability: 'resource:folder'
+    })
+    expect(toastMock.success).toHaveBeenCalledWith(
+      'Exported 312 people to videorc-community-2026-11-08.json',
+      expect.objectContaining({ id: 'community-file' })
+    )
+
+    await act(async () => importButton?.click())
+    expect(pickCommunityImportFile).toHaveBeenCalledTimes(1)
+    expect(client.call).toHaveBeenCalledWith('cohost.community.import', {
+      sourceCapability: 'resource:file'
+    })
+    expect(toastMock.success).toHaveBeenLastCalledWith(
+      'Imported 12 people from videorc-community-2026-11-01.json',
+      expect.objectContaining({
+        description: expect.stringContaining('3 people were already here')
+      })
+    )
+
+    // A cancelled picker: no call, no toast.
+    pickCommunityExportDirectory.mockResolvedValueOnce(null as never)
+    const callsBefore = client.call.mock.calls.length
+    await act(async () => exportButton?.click())
+    expect(client.call.mock.calls.length).toBe(callsBefore)
+    expect(toastMock.error).not.toHaveBeenCalled()
+    // No raw path ever reaches the backend.
+    for (const [, params] of client.call.mock.calls) {
+      expect(JSON.stringify(params ?? {})).not.toMatch(/path|outputDirectory"/)
+    }
   })
 })

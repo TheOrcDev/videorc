@@ -26,13 +26,14 @@ use crate::cohost::{
     CohostUtteranceStatus, CohostUtteranceTrigger, CohostUtteranceTriggerKind,
 };
 use crate::community::{
-    ChatCommand, CohostLinkMade, CohostWelcomeBack, CommunityAccepted, CommunityExportResult,
-    CommunityIdParams, CommunityImportResult, CommunityLinkKind, CommunityLinkParams,
-    CommunityListPage, CommunityListParams, CommunityPathParams, CommunityPerson,
-    CommunityPersonIdParams, CommunityPersonParams, CommunitySettings, CommunitySuggestionParams,
-    CommunitySummary, CommunityUnlinkParams, CommunityUnlinkResult, CommunityUpdateParams,
-    LINK_MADE_TTL, LinkClaim, LinkOutcome, PendingLinks, ReportArrival, ViewerArrival, account_key,
-    command_bubble_line, parse_chat_command, platform_has_identity, report_community,
+    ChatCommand, CohostLinkMade, CohostWelcomeBack, CommunityAccepted, CommunityExportParams,
+    CommunityExportResult, CommunityIdParams, CommunityImportParams, CommunityImportResult,
+    CommunityLinkKind, CommunityLinkParams, CommunityListPage, CommunityListParams,
+    CommunityPerson, CommunityPersonIdParams, CommunityPersonParams, CommunitySettings,
+    CommunitySuggestionParams, CommunitySummary, CommunityUnlinkParams, CommunityUnlinkResult,
+    CommunityUpdateParams, LINK_MADE_TTL, LinkClaim, LinkOutcome, PendingLinks, ReportArrival,
+    ViewerArrival, account_key, command_bubble_line, parse_chat_command, platform_has_identity,
+    report_community,
 };
 use crate::community_store::{
     CommunityError, CommunityExportFile, CommunityRowFacts, PRUNED_AT_SETTING_KEY,
@@ -1220,31 +1221,64 @@ pub(crate) async fn append_note(state: &AppState, person_id: &str, fact: &str) {
     emit_changed(state).await;
 }
 
+/// The name an export gets inside the chosen folder: `videorc-community-
+/// <date>.json`, with a counter once that day's file exists, so an export
+/// never overwrites an earlier one.
+pub(crate) fn export_file_name(directory: &std::path::Path, today: chrono::NaiveDate) -> String {
+    let base = format!("videorc-community-{}", today.format("%Y-%m-%d"));
+    let mut name = format!("{base}.json");
+    let mut counter = 2u32;
+    while directory.join(&name).exists() {
+        name = format!("{base}-{counter}.json");
+        counter = counter.saturating_add(1);
+    }
+    name
+}
+
+/// Export… (D12): the whole store as one JSON file in the folder main's
+/// picker issued (an `output-directory` capability, consumed in `main.rs`;
+/// the renderer never names a path).
 pub async fn export(
     state: &AppState,
-    params: CommunityPathParams,
+    params: CommunityExportParams,
 ) -> Result<CommunityExportResult, CommunityError> {
-    let path = params.path.trim().to_string();
-    if path.is_empty() {
-        return Err(CommunityError::Invalid("path is required.".to_string()));
+    let directory = params.output_directory.trim().to_string();
+    if directory.is_empty() {
+        return Err(CommunityError::Invalid(
+            "outputDirectory is required.".to_string(),
+        ));
     }
     blocking(state, move |database| {
-        let file = database.community_export(Utc::now())?;
+        let now = Utc::now();
+        let directory = std::path::PathBuf::from(directory);
+        if !directory.is_dir() {
+            return Err(CommunityError::Invalid(format!(
+                "{} is not a folder.",
+                directory.display()
+            )));
+        }
+        let file = database.community_export(now)?;
         let json = serde_json::to_vec_pretty(&file)
             .map_err(|error| CommunityError::Storage(error.to_string()))?;
-        std::fs::write(&path, &json)
-            .map_err(|error| CommunityError::Invalid(format!("Could not write {path}: {error}")))?;
+        let file_name = export_file_name(&directory, now.date_naive());
+        let path = directory.join(&file_name);
+        std::fs::write(&path, &json).map_err(|error| {
+            CommunityError::Invalid(format!("Could not write {}: {error}", path.display()))
+        })?;
         Ok(CommunityExportResult {
             people: u32::try_from(file.people.len()).unwrap_or(u32::MAX),
             bytes: json.len() as u64,
+            file_name,
         })
     })
     .await
 }
 
+/// Import… (D12): one export file main's picker issued (an `input-file`
+/// capability, consumed in `main.rs`), merged into the store.
 pub async fn import(
     state: &AppState,
-    params: CommunityPathParams,
+    params: CommunityImportParams,
 ) -> Result<CommunityImportResult, CommunityError> {
     let path = params.path.trim().to_string();
     if path.is_empty() {
@@ -1975,4 +2009,103 @@ mod tests {
                 .all(|m| m.provider_message_id != "fake-7" || m.arrival.is_none())
         );
     }
+
+    /// Plan 225 D12: Export… writes a dated file into the chosen folder
+    /// (never overwriting the day's earlier export), and Import… reads one
+    /// back. The paths here are what `main.rs` hands in after consuming the
+    /// picker's capabilities; a renderer path never reaches these.
+    #[tokio::test]
+    async fn export_writes_a_dated_file_into_the_folder_and_import_reads_it_back() {
+        let state = test_state();
+        let generation = start_session(&state, "session-export").await;
+        deliver(
+            &state,
+            generation,
+            vec![
+                row(
+                    "session-export",
+                    StreamPlatform::Twitch,
+                    "1",
+                    "Ada",
+                    1,
+                    "hi",
+                ),
+                row("session-export", StreamPlatform::Kick, "2", "Bo", 2, "hey"),
+            ],
+        )
+        .await;
+        wait_for_writes(&state).await;
+        let folder =
+            std::env::temp_dir().join(format!("videorc-community-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let first = export(
+            &state,
+            CommunityExportParams {
+                output_directory: folder.display().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.people, 2);
+        assert!(first.file_name.starts_with("videorc-community-"));
+        assert!(first.file_name.ends_with(".json"));
+        assert!(first.bytes > 0);
+        assert!(folder.join(&first.file_name).is_file());
+        let second = export(
+            &state,
+            CommunityExportParams {
+                output_directory: folder.display().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            second.file_name, first.file_name,
+            "never overwrites the day's export"
+        );
+        assert!(second.file_name.ends_with("-2.json"));
+
+        let empty = export(
+            &state,
+            CommunityExportParams {
+                output_directory: String::new(),
+            },
+        )
+        .await;
+        assert!(matches!(empty, Err(CommunityError::Invalid(_))));
+        let not_a_folder = export(
+            &state,
+            CommunityExportParams {
+                output_directory: folder.join(&first.file_name).display().to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(not_a_folder, Err(CommunityError::Invalid(_))));
+
+        // A fresh store reads the file back: both people, nothing merged.
+        let other = test_state();
+        let imported = import(
+            &other,
+            CommunityImportParams {
+                path: folder.join(&first.file_name).display().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(imported.people, 2);
+        assert_eq!(imported.merged, 0);
+        assert_eq!(summary(&other).await.unwrap().people, 2);
+        let garbage = folder.join("not-an-export.json");
+        std::fs::write(&garbage, b"{\"nope\": true}").unwrap();
+        let refused = import(
+            &other,
+            CommunityImportParams {
+                path: garbage.display().to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(refused, Err(CommunityError::Invalid(_))));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
 }

@@ -55,8 +55,11 @@ import {
   personRowContext
 } from '@/lib/community-view'
 import { useCopyText } from '@/lib/copy-text'
+import { plural } from '@/lib/format'
+import { OFFLINE_LOCK_REASON } from '@/lib/lock-reason'
 import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import { platformLabel } from '@/lib/platform-copy'
+import { toast } from '@/lib/toast'
 import { toastUserError } from '@/lib/user-error'
 import { CommunityPreview } from '@/components/community/community-preview'
 
@@ -513,7 +516,71 @@ function CommunitySettingsSection({
   }
   const off = !settings.enabled
   const offReason = 'Turn on Remember my community first.'
-  const fileReason = 'Export and Import arrive with the file picker in a later update.'
+  // Export… and Import… (D12): main's picker hands back a single-use
+  // capability (a folder, a file), never a path, and the backend consumes
+  // it. A cancelled picker does nothing; a finished file is news out of
+  // view, so it toasts.
+  const [fileBusy, setFileBusy] = useState<'export' | 'import' | null>(null)
+  const fileReason = community.ready ? null : OFFLINE_LOCK_REASON
+  const exportCommunity = async (): Promise<void> => {
+    const picked = await window.videorc
+      ?.pickCommunityExportDirectory?.()
+      .catch((error: unknown) => {
+        toastUserError(error, { action: 'choose', object: 'a folder' }, { id: 'community-file' })
+        return null
+      })
+    if (!picked) return
+    setFileBusy('export')
+    try {
+      const result = await community.call('cohost.community.export', {
+        outputDirectoryCapability: picked.capabilityId
+      })
+      toast.success(`Exported ${plural(result.people, 'person', 'people')} to ${result.fileName}`, {
+        id: 'community-file',
+        description: `In ${picked.displayName}. The file is yours: Import… reads it on another computer.`
+      })
+    } catch (error) {
+      toastUserError(
+        error,
+        { action: 'export', object: 'your community' },
+        { id: 'community-file' }
+      )
+    } finally {
+      setFileBusy(null)
+    }
+  }
+  const importCommunity = async (): Promise<void> => {
+    const picked = await window.videorc?.pickCommunityImportFile?.().catch((error: unknown) => {
+      toastUserError(error, { action: 'choose', object: 'a file' }, { id: 'community-file' })
+      return null
+    })
+    if (!picked) return
+    setFileBusy('import')
+    try {
+      const result = await community.call('cohost.community.import', {
+        sourceCapability: picked.capabilityId
+      })
+      toast.success(
+        `Imported ${plural(result.people, 'person', 'people')} from ${picked.displayName}`,
+        {
+          id: 'community-file',
+          description:
+            result.merged > 0
+              ? `${plural(result.merged, 'person was', 'people were')} already here; their streams now count once.`
+              : undefined
+        }
+      )
+      community.bump()
+    } catch (error) {
+      toastUserError(
+        error,
+        { action: 'import', object: picked.displayName },
+        { id: 'community-file' }
+      )
+    } finally {
+      setFileBusy(null)
+    }
+  }
   return (
     <>
       <PanelSection
@@ -658,13 +725,25 @@ function CommunitySettingsSection({
           </div>
           <div className="flex flex-wrap gap-1.5">
             <DisabledReason reason={fileReason}>
-              <Button disabled type="button" variant="outline">
-                Export…
+              <Button
+                data-testid="community-export"
+                disabled={!community.ready || fileBusy !== null}
+                type="button"
+                variant="outline"
+                onClick={() => void exportCommunity()}
+              >
+                {fileBusy === 'export' ? 'Exporting…' : 'Export…'}
               </Button>
             </DisabledReason>
             <DisabledReason reason={fileReason}>
-              <Button disabled type="button" variant="outline">
-                Import…
+              <Button
+                data-testid="community-import"
+                disabled={!community.ready || fileBusy !== null}
+                type="button"
+                variant="outline"
+                onClick={() => void importCommunity()}
+              >
+                {fileBusy === 'import' ? 'Importing…' : 'Import…'}
               </Button>
             </DisabledReason>
             <span className="flex-1" />

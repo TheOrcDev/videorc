@@ -483,9 +483,21 @@ pub struct CommunityIdParams {
     pub id: String,
 }
 
+/// `cohost.community.export`, after main consumed the picker's
+/// `outputDirectoryCapability` into `outputDirectory` (a raw folder from the
+/// renderer is refused; the admin role may pass one).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct CommunityPathParams {
+pub struct CommunityExportParams {
+    pub output_directory: String,
+}
+
+/// `cohost.community.import`, after main consumed the picker's
+/// `sourceCapability` into `path` (a raw path from the renderer is refused;
+/// the admin role may pass one).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunityImportParams {
     pub path: String,
 }
 
@@ -500,6 +512,8 @@ pub struct CommunityAccepted {
 pub struct CommunityExportResult {
     pub people: u32,
     pub bytes: u64,
+    /// The file written into the chosen folder: `videorc-community-<date>.json`.
+    pub file_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

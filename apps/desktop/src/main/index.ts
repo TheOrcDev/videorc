@@ -16066,6 +16066,38 @@ async function pickFilePath(): Promise<ResourceSelection | null> {
   return path ? issueResourceCapability(path, 'input-file') : null
 }
 
+// Plan 225 D12: Community → Settings → Export… picks the folder the export
+// goes into, and Import… one export file. Both come back as single-use
+// capabilities, like every other picker; the backend consumes them.
+async function pickCommunityExportDirectory(): Promise<ResourceSelection | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Export community',
+    buttonLabel: 'Export here',
+    properties: ['openDirectory', 'createDirectory']
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled) return null
+  const path = result.filePaths[0]
+  return path ? issueResourceCapability(path, 'output-directory') : null
+}
+
+async function pickCommunityImportFile(): Promise<ResourceSelection | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Import community',
+    buttonLabel: 'Import',
+    filters: [{ name: 'Videorc community export', extensions: ['json'] }],
+    properties: ['openFile']
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled) return null
+  const path = result.filePaths[0]
+  return path ? issueResourceCapability(path, 'input-file') : null
+}
+
 // --- Managed asset serving (videorc-asset://) ---------------------------------
 // The renderer cannot load raw file:// paths for imported assets: subresource
 // file loads are blocked from the dev server's http origin, which made every
@@ -17286,6 +17318,8 @@ app.whenReady().then(async () => {
   secureIpcHandle('screens:pick-image', () => pickScreenImage())
   secureIpcHandle('banners:pick-image', () => pickBannerImage())
   secureIpcHandle('sounds:pick-files', () => pickSoundFiles())
+  secureIpcHandle('community:pick-export-directory', () => pickCommunityExportDirectory())
+  secureIpcHandle('community:pick-import-file', () => pickCommunityImportFile())
   secureIpcHandle('sounds:starter-list', () => starterSounds())
   secureIpcHandle('sounds:starter-files', (_event, slugs) => starterSoundFiles(slugs))
   secureIpcHandle('system:pick-file', () => pickFilePath())

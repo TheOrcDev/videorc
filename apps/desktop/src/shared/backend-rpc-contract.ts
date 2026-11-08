@@ -70,7 +70,8 @@ import type {
   CommunitySuggestionsPage,
   CommunityListParams,
   CommunityMemory,
-  CommunityPathParams,
+  CommunityExportParams,
+  CommunityImportParams,
   CommunityPerson,
   CommunityPersonIdParams,
   CommunityPersonParams,
@@ -690,8 +691,8 @@ export interface BackendRpcMethodMap {
   'cohost.community.forgetAll': BackendRpcDefinition<undefined, CommunityAccepted>
   'cohost.community.memory.delete': BackendRpcDefinition<CommunityIdParams, CommunityAccepted>
   'cohost.community.wave': BackendRpcDefinition<CommunityPersonIdParams, CommunityAccepted>
-  'cohost.community.export': BackendRpcDefinition<CommunityPathParams, CommunityExportResult>
-  'cohost.community.import': BackendRpcDefinition<CommunityPathParams, CommunityImportResult>
+  'cohost.community.export': BackendRpcDefinition<CommunityExportParams, CommunityExportResult>
+  'cohost.community.import': BackendRpcDefinition<CommunityImportParams, CommunityImportResult>
   // --- end Know your viewers (plan 225) ---
   // --- Agents (plan 209 S2, S3): renderer and admin ---
   'agents.status': BackendRpcDefinition<undefined, AgentsStatus>
@@ -4277,16 +4278,22 @@ const communityIdParamsSchema = objectSchema(
   { id: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CommunityIdParams>
-const communityPathParamsSchema = objectSchema(
-  { path: boundedPath },
+// Plan 225 D12: Export… and Import… name a capability main issued, never a
+// path (the backend refuses a raw one from the renderer).
+const communityExportParamsSchema = objectSchema(
+  { outputDirectoryCapability: boundedString },
   { allowUnknown: false }
-) as RuntimeSchema<CommunityPathParams>
+) as RuntimeSchema<CommunityExportParams>
+const communityImportParamsSchema = objectSchema(
+  { sourceCapability: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityImportParams>
 const communityAcceptedSchema = objectSchema(
   { accepted: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<CommunityAccepted>
 const communityExportResultSchema = objectSchema(
-  { people: nonNegativeInteger, bytes: nonNegativeInteger },
+  { people: nonNegativeInteger, bytes: nonNegativeInteger, fileName: boundedPath },
   { allowUnknown: false }
 ) as RuntimeSchema<CommunityExportResult>
 const communityImportResultSchema = objectSchema(
@@ -6500,11 +6507,11 @@ const runtimeContracts = {
     result: communityAcceptedSchema
   },
   'cohost.community.export': {
-    params: communityPathParamsSchema,
+    params: communityExportParamsSchema,
     result: communityExportResultSchema
   },
   'cohost.community.import': {
-    params: communityPathParamsSchema,
+    params: communityImportParamsSchema,
     result: communityImportResultSchema
   },
   // --- end Know your viewers (plan 225) ---

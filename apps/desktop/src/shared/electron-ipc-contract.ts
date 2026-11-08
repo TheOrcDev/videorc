@@ -130,6 +130,9 @@ export const electronInvokeApiMethods = {
   'sounds:pick-files': 'pickSoundFiles',
   'sounds:starter-list': 'getStarterSounds',
   'sounds:starter-files': 'getStarterSoundFiles',
+  // Plan 225 D12: Community → Settings → Export… / Import…, as capabilities.
+  'community:pick-export-directory': 'pickCommunityExportDirectory',
+  'community:pick-import-file': 'pickCommunityImportFile',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
   'buddy-assets:remove': 'removeBuddyPersona',
@@ -1289,6 +1292,16 @@ const inputFileSelectionSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+/** A picked folder the same way: an `output-directory` capability and its
+ * name, never the path (plan 225 D12, Export…). */
+const outputDirectorySelectionSchema = objectSchema(
+  {
+    capabilityId: boundedIdentifier,
+    kind: literalSchema('output-directory'),
+    displayName: stringSchema({ maxLength: 32_768 })
+  },
+  { allowUnknown: false }
+)
 const videorcAccountSnapshotSchema = objectSchema(
   {
     status: enumSchema(['signed-out', 'signed-in']),
@@ -1971,6 +1984,13 @@ const specificRuntimeInvokeContracts = {
   'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema),
   // Plan 186: no arguments; null on cancel, else an input-file capability.
   'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
+  // Plan 225 D12: no arguments; null on cancel, else one capability of the
+  // right kind (a folder for Export…, a file for Import…), never a path.
+  'community:pick-export-directory': invokeContract(
+    noArgs,
+    nullableSchema(outputDirectorySelectionSchema)
+  ),
+  'community:pick-import-file': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
   // Plan 189: Import sounds… (several files at once, none on cancel), and the
   // starter sounds the main window seeds and restores.
   // Release test 147, plan 0006: the files main couldn't open come back by

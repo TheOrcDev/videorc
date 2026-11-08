@@ -89,8 +89,10 @@ describe('Electron IPC contract', () => {
     // alert card, relayed to the Studio).
     // 165: plan 225 C2 adds comments-window:community and its result push
     // (the person card's calls, relayed to the Studio).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(165)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(165)
+    // 167: plan 225 D12 adds the Community Export… folder and Import… file
+    // pickers (capabilities, never paths).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(167)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(167)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -1191,6 +1193,55 @@ it('preserves and validates queue-loss revisions through delivery IPC mirrors', 
         snapshot: { ...view.snapshot, delivery: { ...view.snapshot.delivery, lossRevision } }
       })
     ).toThrow()
+})
+
+describe('community file pickers IPC (plan 225 D12)', () => {
+  it('take no arguments and return null or exactly one capability of their kind', () => {
+    expect(electronInvokeApiMethods['community:pick-export-directory']).toBe(
+      'pickCommunityExportDirectory'
+    )
+    expect(electronInvokeApiMethods['community:pick-import-file']).toBe('pickCommunityImportFile')
+    for (const channel of [
+      'community:pick-export-directory',
+      'community:pick-import-file'
+    ] as const) {
+      expect(isElectronInvokeChannel(channel)).toBe(true)
+      expect(boundedPassthroughElectronInvokeChannels).not.toContain(channel)
+      expect(validateElectronInvokeArgs(channel, [])).toEqual([])
+      expect(() => validateElectronInvokeArgs(channel, ['/tmp/community.json'])).toThrow()
+      expect(validateElectronInvokeResult(channel, null)).toBeNull()
+    }
+    const folder = { capabilityId: 'cap-1', kind: 'output-directory', displayName: 'Exports' }
+    expect(validateElectronInvokeResult('community:pick-export-directory', folder)).toStrictEqual(
+      folder
+    )
+    expect(() =>
+      validateElectronInvokeResult('community:pick-export-directory', {
+        ...folder,
+        kind: 'input-file'
+      })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('community:pick-export-directory', {
+        ...folder,
+        path: '/tmp/exports'
+      })
+    ).toThrow()
+    const file = { capabilityId: 'cap-2', kind: 'input-file', displayName: 'community.json' }
+    expect(validateElectronInvokeResult('community:pick-import-file', file)).toStrictEqual(file)
+    expect(() =>
+      validateElectronInvokeResult('community:pick-import-file', {
+        ...file,
+        kind: 'output-directory'
+      })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('community:pick-import-file', {
+        ...file,
+        path: '/tmp/community.json'
+      })
+    ).toThrow()
+  })
 })
 
 describe('banner image picker IPC (plan 186)', () => {

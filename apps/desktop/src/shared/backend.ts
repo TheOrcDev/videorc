@@ -5837,6 +5837,12 @@ export interface VideorcApi {
   /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
    * `input-file` capability for `banners.importImage`. */
   pickBannerImage: () => Promise<ResourceSelection | null>
+  /** Community → Settings → Export… (plan 225 D12): the folder the export
+   * goes into, as an `output-directory` capability; null on cancel. */
+  pickCommunityExportDirectory: () => Promise<ResourceSelection | null>
+  /** Community → Settings → Import… (plan 225 D12): one export file, as an
+   * `input-file` capability; null on cancel. */
+  pickCommunityImportFile: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
   checkDirectory: (directoryHandleId: string) => Promise<DirectoryFacts>
@@ -7666,8 +7672,15 @@ export interface CommunityPersonIdParams {
 export interface CommunityIdParams {
   id: string
 }
-export interface CommunityPathParams {
-  path: string
+/** `cohost.community.export`: the folder, as main's picker issued it (an
+ * `output-directory` capability); never a path the renderer names. */
+export interface CommunityExportParams {
+  outputDirectoryCapability: string
+}
+/** `cohost.community.import`: the export file, as main's picker issued it
+ * (an `input-file` capability); never a path the renderer names. */
+export interface CommunityImportParams {
+  sourceCapability: string
 }
 export interface CommunityAccepted {
   accepted: boolean
@@ -7675,6 +7688,8 @@ export interface CommunityAccepted {
 export interface CommunityExportResult {
   people: number
   bytes: number
+  /** The file written into the chosen folder: `videorc-community-<date>.json`. */
+  fileName: string
 }
 export interface CommunityImportResult {
   people: number

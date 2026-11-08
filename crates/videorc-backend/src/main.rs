@@ -9095,6 +9095,38 @@ fn resolve_sound_import_resource(
     resolve_screen_import_resource(state, params, role)
 }
 
+/// Plan 225 D12: Export… writes into the folder main's picker issued as an
+/// `output-directory` capability (`outputDirectoryCapability` →
+/// `outputDirectory`); a raw folder from the renderer is refused, the admin
+/// role may pass one.
+fn resolve_community_export_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    let object = params.as_object_mut().context("params must be an object")?;
+    consume_resource_field(
+        state,
+        object,
+        role,
+        "outputDirectoryCapability",
+        "outputDirectory",
+        resource_authority::ResourceCapabilityKind::OutputDirectory,
+        true,
+    )
+}
+
+/// Plan 225 D12: Import… reads the file main's picker issued as an
+/// `input-file` capability (`sourceCapability` → `path`), like
+/// `sounds.import`; a raw path from the renderer is refused.
+fn resolve_community_import_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    resolve_screen_import_resource(state, params, role)
+}
+
 fn session_deletion_handle(
     operation: &storage::PendingSessionDeletion,
 ) -> protocol::SessionDeletionHandle {
@@ -10392,14 +10424,42 @@ async fn handle_text_message_with_role(
             Ok(params) => community_rpc(command.id, community_service::wave(state, params).await),
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
-        "cohost.community.export" => match serde_json::from_value(command.params) {
-            Ok(params) => community_rpc(command.id, community_service::export(state, params).await),
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "cohost.community.import" => match serde_json::from_value(command.params) {
-            Ok(params) => community_rpc(command.id, community_service::import(state, params).await),
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
+        "cohost.community.export" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_community_export_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value(params_value) {
+                Ok(params) => {
+                    community_rpc(command.id, community_service::export(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.community.import" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_community_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value(params_value) {
+                Ok(params) => {
+                    community_rpc(command.id, community_service::import(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         // --- The stream watchdog (plan 223) ---
         "watchdog.alerts.list" => ServerResponse::ok(command.id, watchdog::alerts_view(state)),
         "watchdog.alert.acknowledge" => {
@@ -22920,6 +22980,60 @@ mod tests {
                 .message
                 .contains("raw outputDirectory is not accepted")
         );
+    }
+
+    /// Plan 225 D12: Export… and Import… take main's single-use capabilities,
+    /// never a path the renderer typed.
+    #[tokio::test]
+    async fn renderer_community_export_and_import_reject_raw_paths() {
+        let state = test_state();
+        let cases = [
+            (
+                "cohost.community.export",
+                serde_json::json!({ "outputDirectory": "/tmp/renderer-chosen-folder" }),
+                "raw outputDirectory is not accepted",
+            ),
+            (
+                "cohost.community.export",
+                serde_json::json!({}),
+                "outputDirectoryCapability is required",
+            ),
+            (
+                "cohost.community.import",
+                serde_json::json!({ "path": "/tmp/renderer-chosen.json" }),
+                "raw path is not accepted",
+            ),
+            (
+                "cohost.community.import",
+                serde_json::json!({}),
+                "sourceCapability is required",
+            ),
+            (
+                "cohost.community.import",
+                serde_json::json!({ "sourceCapability": "resource:not-issued" }),
+                "Resource capability",
+            ),
+        ];
+        for (method, params, expected) in cases {
+            let response = handle_text_message_with_role(
+                &state,
+                &serde_json::json!({ "id": "community-raw", "method": method, "params": params })
+                    .to_string(),
+                BackendRole::Renderer,
+            )
+            .await;
+            assert!(!response.ok, "{method} {params} must be refused");
+            let error = response.error.expect("renderer refusal");
+            assert_eq!(
+                error.code, "resource-capability-rejected",
+                "{method} {params}"
+            );
+            assert!(
+                error.message.contains(expected),
+                "{method} {params}: {}",
+                error.message
+            );
+        }
     }
 
     #[tokio::test]

@@ -4020,9 +4020,41 @@ describe('Know your viewers wire contract (plan 225 A6)', () => {
     expect(validateBackendRpcResult('cohost.community.wave', { accepted: true })).toEqual({
       accepted: true
     })
-    expect(validateBackendRpcResult('cohost.community.export', { people: 3, bytes: 1024 })).toEqual(
-      { people: 3, bytes: 1024 }
-    )
+    // Plan 225 D12: Export… and Import… name main's capabilities, never a path.
+    expect(
+      validateBackendRpcParams('cohost.community.export', {
+        outputDirectoryCapability: 'resource:11111111-1111-4111-8111-111111111111'
+      })
+    ).toEqual({ outputDirectoryCapability: 'resource:11111111-1111-4111-8111-111111111111' })
+    expect(() =>
+      validateBackendRpcParams('cohost.community.export', { outputDirectory: '/tmp/out' })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cohost.community.export', { path: '/tmp/out' })
+    ).toThrow()
+    expect(
+      validateBackendRpcParams('cohost.community.import', { sourceCapability: 'resource:cap' })
+    ).toEqual({ sourceCapability: 'resource:cap' })
+    expect(() =>
+      validateBackendRpcParams('cohost.community.import', { path: '/tmp/community.json' })
+    ).toThrow()
+    expect(
+      validateBackendRpcResult('cohost.community.export', {
+        people: 3,
+        bytes: 1024,
+        fileName: 'videorc-community-2026-11-08.json'
+      })
+    ).toEqual({ people: 3, bytes: 1024, fileName: 'videorc-community-2026-11-08.json' })
+    expect(() =>
+      validateBackendRpcResult('cohost.community.export', { people: 3, bytes: 1024 })
+    ).toThrow()
+    expect(
+      validateBackendRpcResult('cohost.community.export', {
+        people: 3,
+        bytes: 1024,
+        fileName: 'x.json'
+      })
+    ).toEqual({ people: 3, bytes: 1024, fileName: 'x.json' })
   })
 
   it('lists the links that need you (plan 225 D-2)', () => {
