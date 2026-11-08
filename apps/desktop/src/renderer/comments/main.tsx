@@ -15,9 +15,11 @@ import type {
   CohostAutoChatRelayPatch,
   CohostQuestion,
   CohostState,
+  CohostUtteranceMilestone,
   CohostUtteranceState,
   CohostWindowState,
   CommentHighlightAnchor,
+  CommentHighlightCommand,
   CommentHighlightState,
   CommentsSendOperation,
   CommentsViewSnapshot,
@@ -549,13 +551,17 @@ function CommentsWindowApp(): ReactElement {
       .finally(() => flagId(setRemovalAnsweringIds, operation.operationId, false))
   }
 
-  const requestHighlight = (message: LiveChatMessage): void => {
+  const requestHighlight = (
+    message: LiveChatMessage,
+    milestone?: CohostUtteranceMilestone
+  ): void => {
     if (!snapshot.sessionId) return
     const intent = ++highlightIntentRef.current
-    const command = {
+    const command: CommentHighlightCommand = {
       requestId: crypto.randomUUID(),
       sessionId: snapshot.sessionId,
-      messageId: message.id
+      messageId: message.id,
+      ...(milestone ? { milestone } : {})
     }
     setHighlightFailure(null)
     setHighlightApplyingId(message.id)
@@ -909,6 +915,7 @@ function CommentsWindowApp(): ReactElement {
               : undefined
           }
           onHighlight={live ? requestHighlight : undefined}
+          onHighlightMilestone={live ? requestHighlight : undefined}
           onMarkClip={(seconds) => {
             void saveClip(seconds)
               .then((copy) => {

@@ -426,6 +426,7 @@ import type {
   CommentHighlightAnchor,
   CommentHighlightCanvases,
   CommentHighlightCommand,
+  CohostUtteranceMilestone,
   CommentHighlightState,
   CommentsClearCommand,
   CommentsSendCommand,
@@ -3584,8 +3585,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       intent: number,
       // `alwaysSet` re-sends the message that is already live instead of reading
       // the repeat as "un-pin": a corner move re-places the card, and a phone
-      // remote 'show' restarts its lifetime.
-      options?: { alwaysSet?: boolean }
+      // remote 'show' restarts its lifetime. `milestone` (plan 225 B6) draws
+      // the milestone card for the row instead of its text.
+      options?: { alwaysSet?: boolean; milestone?: CohostUtteranceMilestone }
     ): Promise<CommentHighlightState | null> => {
       if (!client) throw offlineError()
       const sessionId = expectedSessionId ?? liveChatSnapshot.sessionId
@@ -3621,14 +3623,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           captureConfig.video,
           captureConfig.streamEnabled ? captureConfig.streaming : undefined
         )
+        const avatarSource = options?.milestone?.avatarUrl ?? message.authorAvatarUrl
         const [avatarUrl, canvases] = await Promise.all([
-          message.authorAvatarUrl
-            ? window.videorc?.cacheChatAvatar?.(message.authorAvatarUrl).catch(() => null)
-            : null,
+          avatarSource ? window.videorc?.cacheChatAvatar?.(avatarSource).catch(() => null) : null,
           client.request<CommentHighlightCanvases>('comments.highlight.canvases').catch(() => null)
         ])
         if (commentHighlightIntentRef.current !== intent) return null
-        const { renderCommentHighlightCards } = await loadCaptionOverlay()
+        const { renderCommentHighlightCards, renderMilestoneCards } = await loadCaptionOverlay()
         if (commentHighlightIntentRef.current !== intent) return null
         // The streamer's placement (plan 164): the card wraps to the rect's
         // width on each canvas and the backend blits it inside that rect.
@@ -3636,12 +3637,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const rect =
           highlightLayout[overlayOrientationForCanvas(streamVideo.width, streamVideo.height)]
         const verticalRect = highlightLayout.vertical
-        const cards = await renderCommentHighlightCards(
-          message,
-          avatarUrl ?? null,
-          { ...streamVideo, rect },
-          canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
-        )
+        const cards = options?.milestone
+          ? await renderMilestoneCards(
+              options.milestone,
+              avatarUrl ?? null,
+              cohostSettingsRef.current?.persona.name ?? null,
+              { ...streamVideo, rect },
+              canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
+            )
+          : await renderCommentHighlightCards(
+              message,
+              avatarUrl ?? null,
+              { ...streamVideo, rect },
+              canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
+            )
         if (!cards) throw new Error("Couldn't render this message for the stream.")
         if (commentHighlightIntentRef.current !== intent) return null
         let state: CommentHighlightState
@@ -3766,7 +3775,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
       void (
         message
-          ? applyCommentHighlight(message, command.sessionId, intent)
+          ? applyCommentHighlight(
+              message,
+              command.sessionId,
+              intent,
+              command.milestone ? { milestone: command.milestone } : undefined
+            )
           : Promise.reject(new Error('The selected live message is no longer available.'))
       )
         .then(async (state) => {
@@ -5604,7 +5618,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     )
     if (!message || !commentCanHighlight(message)) return
     const intent = ++commentHighlightIntentRef.current
-    void applyCommentHighlight(message, undefined, intent, { alwaysSet: true })
+    // Plan 225 B6: a milestone welcome's row goes on as the milestone card.
+    const milestone = cohostState?.utterances?.find(
+      (utterance) => utterance.milestone?.messageId === messageId
+    )?.milestone
+    void applyCommentHighlight(message, undefined, intent, { alwaysSet: true, milestone })
       .then((state) => {
         if (state && commentHighlightIntentRef.current === intent) {
           publishCommentHighlightState(state)
