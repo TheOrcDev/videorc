@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import { normalizeAudioSettings, normalizeLayoutSettings } from '../renderer/src/lib/capture'
 import type {
@@ -8,6 +8,12 @@ import type {
   AudioProcessingUpdateParams,
   AudioProcessingUpdateResult,
   AccountCallbackEnvelope,
+  AiCapabilities,
+  AiCapabilitiesCloud,
+  CloudSettingsPatch,
+  CloudStatus,
+  CloudTestParams,
+  EntitlementsSnapshot,
   CleanCutEdl,
   CleanCutGetResult,
   CleanCutJob,
@@ -114,6 +120,12 @@ interface HighRiskContractFixtures {
     legacyUpdate: AudioProcessingUpdateParams
     applied: AudioProcessingUpdateResult
     unavailable: AudioProcessingUpdateResult
+  }
+  accountPlans: {
+    capabilitiesMax: AiCapabilities
+    cloudPremium: AiCapabilitiesCloud
+    entitlementsMax: EntitlementsSnapshot
+    entitlementsBasic: EntitlementsSnapshot
   }
   sessionChatTotals: {
     params: { sessionId: string }
@@ -297,6 +309,14 @@ interface HighRiskContractFixtures {
     removedOperation: ModerationOperation
     hiddenOperation: ModerationOperation
     removedMessage: LiveChatMessage
+  }
+  cloud: {
+    statusHold: CloudStatus
+    statusOff: CloudStatus
+    statusFallback: CloudStatus
+    statusTest: CloudStatus
+    settingsPatch: CloudSettingsPatch
+    testRunParams: CloudTestParams
   }
 }
 
@@ -486,6 +506,116 @@ describe('shared high-risk protocol fixture', () => {
         }
       })
     ).toThrow()
+  })
+
+  // Plan 185 T4: Max is Premium plus a plan. The capabilities answer gains
+  // optional `plan` and `cloud` blocks; the desktop's own snapshot gains an
+  // optional `plan` beside the tier, and the strict schema admits only the
+  // two plan ids, never a new tier value.
+  it('keeps the plan and cloud blocks optional and the entitlement plan strict (plan 185)', () => {
+    const capabilities = fixtures.accountPlans.capabilitiesMax
+    expect(capabilities.entitlement.tier).toBe('premium')
+    expect(capabilities.plan).toEqual({ id: 'max', name: 'Max' })
+    expect(capabilities.cloud).toEqual({
+      enabled: true,
+      secondsPerMonth: 360000,
+      secondsUsed: 133200,
+      overageSeconds: 0,
+      resetAt: '2026-11-01T00:00:00Z',
+      talkShows: true,
+      guestsOnStage: 5,
+      roomSize: 10,
+      recordingRetentionDays: 30
+    })
+    expectTypeOf(capabilities.plan).toEqualTypeOf<AiCapabilities['plan']>()
+    expectTypeOf(fixtures.accountPlans.cloudPremium).toEqualTypeOf<AiCapabilitiesCloud>()
+    expect(fixtures.accountPlans.cloudPremium.talkShows).toBe(false)
+    expect(fixtures.accountPlans.cloudPremium).not.toHaveProperty('guestsOnStage')
+
+    const max = fixtures.accountPlans.entitlementsMax
+    expect(jsonShape(validateBackendEventPayload('entitlements.updated', max))).toEqual(max)
+    expect(jsonShape(validateBackendRpcResult('entitlements.get', max))).toEqual(max)
+    expect(max.tier).toBe('premium')
+    expect(max.plan).toBe('max')
+
+    const basic = fixtures.accountPlans.entitlementsBasic
+    expect(jsonShape(validateBackendEventPayload('entitlements.updated', basic))).toEqual(basic)
+    expect(basic).not.toHaveProperty('plan')
+
+    // A plan the schema does not know, a null plan, or a plan posing as a
+    // tier are all refused: the renderer never guesses at a tier.
+    expect(() =>
+      validateBackendEventPayload('entitlements.updated', { ...max, plan: 'enterprise' })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('entitlements.updated', { ...max, plan: null })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('entitlements.updated', { ...max, tier: 'max' })
+    ).toThrow()
+  })
+
+  // Plan 184: the whole cloud status rides `cloud.state` and every `cloud.*`
+  // answer. Rust round-trips the same JSON (cloud_show.rs), so a renamed field
+  // or a `null` the schema calls absent fails on one side or the other.
+  it('keeps the Videorc Cloud status identical across languages (plan 184)', () => {
+    const { statusHold, statusOff, statusFallback, statusTest, settingsPatch, testRunParams } =
+      fixtures.cloud
+    for (const status of [statusHold, statusOff, statusFallback, statusTest]) {
+      expect(jsonShape(validateBackendEventPayload('cloud.state', status))).toEqual(status)
+      expect(jsonShape(validateBackendRpcResult('cloud.status', status))).toEqual(status)
+      expect(jsonShape(validateBackendRpcResult('cloud.show.end', status))).toEqual(status)
+      expect(jsonShape(validateBackendRpcResult('cloud.selftest.run', status))).toEqual(status)
+    }
+    expect(jsonShape(validateBackendRpcParams('cloud.settings.set', settingsPatch))).toEqual(
+      settingsPatch
+    )
+    // C6b: the test's params and its block; a reason the schema does not
+    // know is refused like a phase.
+    expect(jsonShape(validateBackendRpcParams('cloud.selftest.run', testRunParams))).toEqual(
+      testRunParams
+    )
+    expect(statusTest.test?.result?.reason).toBe('too-slow')
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusTest,
+        test: { ...statusTest.test, result: { ...statusTest.test?.result, reason: 'sleepy' } }
+      })
+    ).toThrow()
+    // Secret-free: no field of the status could carry a url, token or key
+    // (the test's FFmpeg detail is redacted before it reaches `message`).
+    for (const status of [statusHold, statusTest]) {
+      expect(JSON.stringify(status)).not.toMatch(/rtmps?:|token|vcs1\.|streamKey/)
+    }
+    // A phase or reason the schema does not know is refused, and so is a null
+    // where the wire omits the field.
+    expect(() =>
+      validateBackendEventPayload('cloud.state', { ...statusHold, phase: 'paused' })
+    ).toThrow()
+    expect(statusHold.restart?.destinationsResent).toBe(true)
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusHold,
+        restart: { ...statusHold.restart, destinationsResent: 'yes' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cloud.state', { ...statusHold, sessionId: null })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusFallback,
+        fallback: { ...statusFallback.fallback, reason: 'cloud-sleepy' }
+      })
+    ).toThrow()
+    // Plan 222's additive fields: the two new fallback reasons, the hours
+    // overrun and the test's node facts all pass; nothing else changes.
+    expect(statusHold.allowancePast).toEqual({ seconds: 720 })
+    expect(statusTest.test?.result?.nodeId).toBe('eu-hel-1')
+    for (const reason of ['cloud-quality', 'cloud-unchecked'] as const) {
+      const payload = { ...statusFallback, fallback: { ...statusFallback.fallback, reason } }
+      expect(jsonShape(validateBackendEventPayload('cloud.state', payload))).toEqual(payload)
+    }
   })
 
   it('validates full and defaulted recording status shapes', () => {

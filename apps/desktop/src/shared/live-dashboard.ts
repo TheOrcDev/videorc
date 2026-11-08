@@ -1,5 +1,7 @@
 import type {
   AudienceSnapshot,
+  CloudPhase,
+  CloudStatus,
   RecordingStatus,
   StreamHealth,
   StreamPlatform,
@@ -31,7 +33,24 @@ export interface LiveDashboardState {
   /** Destination failures and recoveries this session, oldest first (S5). */
   destinationEvents: DestinationEvent[]
   chatTotals?: SessionChatTotals | null
+  /** The Videorc Cloud show carrying this session (plan 184 C7). */
+  cloud?: LiveDashboardCloud | null
   updatedAt: string
+}
+
+/** A cloud show's phase while it carries a session: never `off`. */
+export type LiveDashboardCloudPhase = Exclude<CloudPhase, 'off'>
+
+export interface LiveDashboardCloud {
+  phase: LiveDashboardCloudPhase
+  /** While viewers see Be right back: seconds before the stream ends (D12). */
+  holdRemainingSeconds?: number
+  /**
+   * The upload as the cloud measures it, summed over the connected feeds. The
+   * bitrate when this computer's FFmpeg can't count one (the raw path's tee
+   * reports `bitrate=N/A`).
+   */
+  feedKbps?: number
 }
 
 export type LiveDashboardSessionState = 'off-air' | 'recording' | 'live'
@@ -98,6 +117,7 @@ export function emptyLiveDashboardState(updatedAt: string): LiveDashboardState {
     targets: [],
     destinationEvents: [],
     chatTotals: null,
+    cloud: null,
     updatedAt
   }
 }
@@ -260,6 +280,63 @@ export function reduceDashboardChatTotals(
   return { ...state, chatTotals: totals, updatedAt: now }
 }
 
+const CLOUD_PHASES: ReadonlySet<string> = new Set<LiveDashboardCloudPhase>([
+  'connecting',
+  'live',
+  'hold',
+  'resuming',
+  'ending',
+  'failed'
+])
+
+/**
+ * The cloud show as it carries `sessionId` (plan 184 C7), or null: a status
+ * for another session, for none, or with the cloud off carries nothing. The
+ * Studio's Session section and the Livestream page read the same view the
+ * Stream Manager's dashboard keeps.
+ */
+export function dashboardCloudFromStatus(
+  status: CloudStatus,
+  sessionId: string | null
+): LiveDashboardCloud | null {
+  const carries =
+    status.sessionId !== undefined &&
+    sessionId !== null &&
+    status.sessionId === sessionId &&
+    CLOUD_PHASES.has(status.phase)
+  if (!carries) return null
+  const remaining = status.hold?.active ? status.hold.remainingSeconds : undefined
+  const feedKbps = (status.feeds ?? [])
+    .filter((feed) => feed.connected)
+    .reduce((sum, feed) => sum + (feed.kbps ?? 0), 0)
+  return {
+    phase: status.phase as LiveDashboardCloudPhase,
+    ...(typeof remaining === 'number' ? { holdRemainingSeconds: remaining } : {}),
+    ...(feedKbps > 0 ? { feedKbps } : {})
+  }
+}
+
+/**
+ * `cloud.state` (plan 184 C7): the show while it carries this session. A
+ * status for another session, or none, clears it; the session never comes
+ * from here.
+ */
+export function reduceDashboardCloud(
+  state: LiveDashboardState,
+  status: CloudStatus,
+  now: string
+): LiveDashboardState {
+  const cloud = dashboardCloudFromStatus(status, state.sessionId)
+  const previous = state.cloud ?? null
+  if (
+    previous?.phase === cloud?.phase &&
+    previous?.holdRemainingSeconds === cloud?.holdRemainingSeconds &&
+    previous?.feedKbps === cloud?.feedKbps
+  )
+    return state
+  return { ...state, cloud, updatedAt: now }
+}
+
 export function reduceDashboardHealth(
   state: LiveDashboardState,
   health: StreamHealth,
@@ -378,6 +455,19 @@ export function normalizeLiveDashboardState(value: unknown): LiveDashboardState 
     } catch {
       return null
     }
+  }
+  if (state.cloud !== undefined && state.cloud !== null) {
+    const cloud = state.cloud
+    if (
+      typeof cloud !== 'object' ||
+      !CLOUD_PHASES.has(cloud.phase) ||
+      (cloud.holdRemainingSeconds !== undefined &&
+        (typeof cloud.holdRemainingSeconds !== 'number' ||
+          !Number.isFinite(cloud.holdRemainingSeconds))) ||
+      (cloud.feedKbps !== undefined &&
+        (typeof cloud.feedKbps !== 'number' || !Number.isFinite(cloud.feedKbps)))
+    )
+      return null
   }
   return state as LiveDashboardState
 }

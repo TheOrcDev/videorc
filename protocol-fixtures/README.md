@@ -5,7 +5,12 @@ the Rust backend and TypeScript desktop tests. It covers the protocol shapes mos
 likely to cause silent cross-process failures: native preview placement, scene and
 layout data, recording/compositor status nullability, desktop account authorization
 (including its main-owned retry deadline),
-and Library comment pagination/deletion (including the terminal page shape).
+Library comment pagination/deletion (including the terminal page shape), and the
+account plan blocks (`accountPlans`, plan 185 T4): a Max `/api/ai/capabilities`
+answer with its optional `plan` and `cloud` blocks, the Premium `cloud` block
+(also the `GET /api/cloud/allowance` answer), and the desktop's own
+`EntitlementsSnapshot` with and without `plan`. `plan` is never a tier value and
+an absent option is an absent key, never `null`.
 
 The JSON is the authoritative example. A wire-shape change must update the fixture
 and keep both test suites green:
