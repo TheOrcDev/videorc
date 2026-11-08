@@ -2564,7 +2564,8 @@
         "sessionId": "8c1d9f40-6a62-4f0c-9d7d-1f7a3c2b9e10",
         "message": "Videorc Cloud is full right now."
       },
-      "directFallbackAvailable": false
+      "directFallbackAvailable": false,
+      "announce": true
     },
     "statusTest": {
       "phase": "off",

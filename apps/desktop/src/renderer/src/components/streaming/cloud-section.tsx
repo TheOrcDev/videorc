@@ -16,16 +16,18 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
-import { cloudTestOutputs } from '@/lib/cloud-test-outputs'
+import { cloudTestOutputs, cloudUploadPlan } from '@/lib/cloud-test-outputs'
+import { CLOUD_SECTION_FOCUS_EVENT, takeCloudSectionFocus } from '@/lib/cloud-toasts'
 import {
-  CLOUD_NOT_YET_REASON,
   CLOUD_PREMIUM_REASON,
   cloudSectionState,
+  cloudSwitchLines,
   cloudTestBlockedReason,
   cloudTestRowLines,
   cloudTestRunning,
   formatHoldLimit
 } from '@/lib/cloud-view'
+import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 import { VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
 
 // The Livestream page's Videorc Cloud section (plan 184 C6). Stream settings
@@ -45,6 +47,22 @@ export function CloudSection(): ReactElement | null {
   const { captureConfig, isSessionActive, screens } = useStudioCore()
   const section = cloudSectionState(cloudStatus)
   const kind = section?.kind
+
+  // Plan 222 U1: "Open Livestream" on the "Videorc Cloud is on" notice
+  // brings this section into view, on mount or on an open page.
+  useEffect(() => {
+    const focus = (): void => {
+      if (!takeCloudSectionFocus()) return
+      requestAnimationFrame(() =>
+        document
+          .querySelector('[data-testid="cloud-section"]')
+          ?.scrollIntoView({ behavior: smoothScrollBehavior(), block: 'start' })
+      )
+    }
+    focus()
+    globalThis.addEventListener(CLOUD_SECTION_FOCUS_EVENT, focus)
+    return () => globalThis.removeEventListener(CLOUD_SECTION_FOCUS_EVENT, focus)
+  }, [])
 
   // Fresh hours when the page opens (and when the account becomes entitled);
   // the backend keeps them current during a show.
@@ -68,8 +86,11 @@ export function CloudSection(): ReactElement | null {
   const testRunning = cloudTestRunning(cloudStatus.test)
   const testBlocked = available ? cloudTestBlockedReason(cloudStatus, isSessionActive) : null
   const testLines = cloudTestRowLines(cloudStatus.test)
+  // Plan 222 U2, U4: the hours and what goes up, or where Go Live goes.
+  const switchLines = cloudSwitchLines(cloudStatus, section, cloudUploadPlan(captureConfig))
   return (
     <PanelSection
+      data-testid="cloud-section"
       description="Your stream stays on air if this computer drops."
       title="Videorc Cloud"
     >
@@ -79,12 +100,20 @@ export function CloudSection(): ReactElement | null {
           reason={CLOUD_PREMIUM_REASON}
         />
       ) : section.kind === 'unavailable' ? (
-        <LockAlert reason={CLOUD_NOT_YET_REASON} />
+        <LockAlert reason={section.reason} />
       ) : null}
       <FieldGroup variant="grouped">
         <SettingsRow
           data-testid="cloud-stream-through"
-          description={available ? section.hours : null}
+          description={
+            switchLines.length > 0
+              ? switchLines.map((line) => (
+                  <span className="block" key={line}>
+                    {line}
+                  </span>
+                ))
+              : null
+          }
           label="Stream through Videorc Cloud"
         >
           <Switch

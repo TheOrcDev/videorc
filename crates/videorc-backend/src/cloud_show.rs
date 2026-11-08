@@ -58,6 +58,12 @@ pub const CLOUD_SETTINGS_KEY: &str = "cloud.settings";
 /// desktop holds or last held without seeing it end (`null` when none). Not a
 /// secret: the id names the show, and its token and ingest key are never kept.
 pub const CLOUD_OPEN_SHOW_KEY: &str = "cloud.openShow";
+/// Plan 222 U1: the backend-private `app_settings` row listing the accounts
+/// that saw "Videorc Cloud is on" (a SHA-256 prefix of the account's name,
+/// never the name), so the notice shows once per account on this computer.
+pub const CLOUD_ANNOUNCED_KEY: &str = "cloud.announced";
+/// The most accounts the list keeps; the oldest drops first.
+const CLOUD_ANNOUNCED_MAX: usize = 32;
 pub const CLOUD_STATE_EVENT: &str = "cloud.state";
 /// The label of the swapped target and of the physical cloud leg (C3).
 pub const CLOUD_TARGET_LABEL: &str = "Videorc Cloud";
@@ -389,6 +395,12 @@ pub struct CloudStatus {
     /// or holding; absent otherwise and from an older runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<CloudProgram>,
+    /// Plan 222 U1: `true` once, while this account is entitled and has not
+    /// seen "Videorc Cloud is on" on this computer; absent otherwise. The
+    /// renderer shows the notice outside a session and answers with
+    /// `cloud.announce.seen`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announce: Option<bool>,
 }
 
 /// `cloud.show.reconnectDestination { targetId }` (plan 223 C3).
@@ -1204,6 +1216,74 @@ pub struct CloudShowRuntime {
     feed_down_since: Option<tokio::time::Instant>,
     /// The last lost report the web kept, so it is not repeated at once.
     lost_reported_at: Option<tokio::time::Instant>,
+    /// Plan 222 U5: the runner's `live_seconds` when the cached allowance
+    /// was last replaced, so the minutes on air since then add to its
+    /// `secondsUsed`. `None` until a runner reports after the replacement.
+    allowance_live_mark: Option<u64>,
+    /// Plan 222 U1: this account has not seen "Videorc Cloud is on" here.
+    announce_due: bool,
+}
+
+/// Plan 222 U5 (plan 184 D18): seconds on air past the month's cloud hours,
+/// or `None` while within them. The cached allowance counts what the web had
+/// metered when it arrived; the runner's clock adds the time since (`mark`).
+/// The web's `secondsUsed` already includes any overage (its meter).
+pub fn allowance_past_seconds(
+    allowance: Option<&AiCapabilitiesCloud>,
+    live_seconds: u64,
+    mark: u64,
+) -> Option<u64> {
+    let allowance = allowance?;
+    if allowance.seconds_per_month == 0 {
+        return None;
+    }
+    let used = allowance
+        .seconds_used
+        .saturating_add(live_seconds.saturating_sub(mark));
+    let past = used.saturating_sub(allowance.seconds_per_month);
+    (past > 0).then_some(past)
+}
+
+/// Plan 222 U1: the key `CLOUD_ANNOUNCED_KEY` lists for an account: a
+/// SHA-256 prefix of its username (else its email), so the settings table
+/// never holds the name. `None` for an account without either.
+pub fn announce_account_key(username: Option<&str>, email: Option<&str>) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let name = username
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .or_else(|| email.map(str::trim).filter(|email| !email.is_empty()))?;
+    let digest = Sha256::digest(name.to_lowercase().as_bytes());
+    Some(
+        digest[..12]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+/// The accounts that saw the notice, or none (nothing saved, or a row that
+/// does not parse): never a startup failure.
+pub fn load_announced(database: &crate::storage::Database) -> Vec<String> {
+    match database.load_setting::<Vec<String>>(CLOUD_ANNOUNCED_KEY) {
+        Ok(Some(keys)) => keys,
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::warn!("Could not load the Videorc Cloud notice list: {error:#}");
+            Vec::new()
+        }
+    }
+}
+
+/// `seen` with `key` added at the end, the oldest dropped past the cap.
+pub fn announced_with(mut seen: Vec<String>, key: &str) -> Vec<String> {
+    seen.retain(|entry| entry != key);
+    seen.push(key.to_string());
+    if seen.len() > CLOUD_ANNOUNCED_MAX {
+        let extra = seen.len() - CLOUD_ANNOUNCED_MAX;
+        seen.drain(..extra);
+    }
+    seen
 }
 
 pub type CloudShowSlot = Arc<StdMutex<CloudShowRuntime>>;
@@ -1251,6 +1331,30 @@ fn lock(slot: &CloudShowSlot) -> std::sync::MutexGuard<'_, CloudShowRuntime> {
 }
 
 impl CloudShowRuntime {
+    /// Replace the cached allowance (plan 222 U5): the runner's clock from
+    /// here on adds to its `secondsUsed`.
+    fn replace_allowance(&mut self, allowance: Option<AiCapabilitiesCloud>) {
+        self.entitlement.cloud = allowance;
+        self.allowance_live_mark = self.runner.as_ref().map(|runner| runner.live_seconds);
+    }
+
+    /// A runner state arrived: the first after an allowance replacement
+    /// marks where its clock stood.
+    fn set_runner(&mut self, state: RunnerState) {
+        if self.allowance_live_mark.is_none() {
+            self.allowance_live_mark = Some(state.live_seconds);
+        }
+        self.runner = Some(state);
+    }
+
+    /// Plan 222 U1: whether this account still has "Videorc Cloud is on" to
+    /// see here. Returns whether the status changed.
+    pub fn set_announce_due(&mut self, due: bool) -> bool {
+        let before = self.status().announce;
+        self.announce_due = due;
+        before != self.status().announce
+    }
+
     pub fn phase(&self) -> CloudPhase {
         if self.failed.is_some() {
             return CloudPhase::Failed;
@@ -1336,8 +1440,20 @@ impl CloudShowRuntime {
                 .is_some_and(|failed| failed.direct_fallback),
             test: self.test.clone(),
             restart: self.restart.clone(),
-            allowance_past: None,
+            allowance_past: self
+                .show
+                .as_ref()
+                .and(runner)
+                .and_then(|runner| {
+                    allowance_past_seconds(
+                        self.entitlement.cloud.as_ref(),
+                        runner.live_seconds,
+                        self.allowance_live_mark.unwrap_or(runner.live_seconds),
+                    )
+                })
+                .map(|seconds| CloudAllowancePast { seconds }),
             program: runner.and_then(|runner| runner.program),
+            announce: (self.announce_due && self.entitlement.entitled()).then_some(true),
         }
     }
 
@@ -1456,6 +1572,7 @@ impl CloudShowRuntime {
     fn clear_show(&mut self, end_reason: Option<String>) {
         self.show = None;
         self.runner = None;
+        self.allowance_live_mark = None;
         self.restart = None;
         self.ending = false;
         self.end_reason = end_reason;
@@ -1688,7 +1805,7 @@ fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
         let generation = runtime.bump_generation();
         runtime.control_tx = Some(tx.clone());
         runtime.connected = true;
-        runtime.runner = Some(welcome);
+        runtime.set_runner(welcome);
         generation
     };
     let task = ControlLoop {
@@ -2072,7 +2189,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 self.resend_hold_image = Some(png);
                 self.hold_image_sent_on_socket = true;
             }
-            runtime.runner = Some(state);
+            runtime.set_runner(state);
             runtime.connected = true;
             (session, legs)
         };
@@ -2281,6 +2398,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             let fed_by_session = runtime.feeding_session().is_some();
             runtime.show = None;
             runtime.runner = None;
+            runtime.allowance_live_mark = None;
             runtime.restart = None;
             runtime.ending = false;
             runtime.failed = Some(FailedShow {
@@ -2423,7 +2541,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let mut runtime = lock(&self.slot);
             let next = CloudEntitlement { plan, cloud };
             let changed = runtime.entitlement != next;
-            runtime.entitlement = next;
+            if changed {
+                runtime.entitlement.plan = next.plan;
+                runtime.replace_allowance(next.cloud);
+            }
             changed
         };
         if changed {
@@ -2611,7 +2732,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         };
         if let Some(allowance) = created.allowance.clone() {
             let mut runtime = lock(&self.slot);
-            runtime.entitlement.cloud = Some(allowance);
+            runtime.replace_allowance(Some(allowance));
         }
         let show_id = created.show.id.clone();
         let ingest = created.ingest.clone();
@@ -3145,7 +3266,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             .map_err(anyhow::Error::new)?;
         {
             let mut runtime = lock(&self.slot);
-            runtime.entitlement.cloud = Some(allowance);
+            runtime.replace_allowance(Some(allowance));
         }
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
@@ -3653,7 +3774,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
             Err(error) => return Some(test_result_from_api_error(error, self.uploads())),
         };
         if let Some(allowance) = created.allowance.clone() {
-            lock(&self.context.slot).entitlement.cloud = Some(allowance);
+            lock(&self.context.slot).replace_allowance(Some(allowance));
         }
         let show_id = created.show.id.clone();
         // From here the show ends whatever happens below.
@@ -5166,6 +5287,128 @@ mod tests {
         assert_eq!(
             runtime.status().program.unwrap().audio_silent_seconds,
             Some(25)
+        );
+    }
+
+    fn cloud_hours(per_month: u64, used: u64) -> AiCapabilitiesCloud {
+        AiCapabilitiesCloud {
+            enabled: true,
+            seconds_per_month: per_month,
+            seconds_used: used,
+            ..AiCapabilitiesCloud::default()
+        }
+    }
+
+    fn runner_at(live_seconds: u64) -> RunnerState {
+        serde_json::from_value(json!({ "phase": "live", "liveSeconds": live_seconds })).unwrap()
+    }
+
+    /// Plan 222 U5 (plan 184 D18): the time past the month's hours is the
+    /// web's meter plus the runner's clock since the meter arrived.
+    #[test]
+    fn allowance_past_counts_the_runner_clock_since_the_allowance_arrived() {
+        let hours = cloud_hours(3600, 3000);
+        assert_eq!(allowance_past_seconds(Some(&hours), 500, 0), None);
+        assert_eq!(allowance_past_seconds(Some(&hours), 600, 0), None);
+        assert_eq!(allowance_past_seconds(Some(&hours), 1320, 0), Some(720));
+        // The meter already counted the first 1000 s of this show.
+        assert_eq!(allowance_past_seconds(Some(&hours), 1320, 1000), None);
+        // A clock behind its mark (a restarted runner) adds nothing.
+        assert_eq!(allowance_past_seconds(Some(&hours), 10, 1000), None);
+        // Over already: the web's secondsUsed includes the overage.
+        assert_eq!(
+            allowance_past_seconds(Some(&cloud_hours(3600, 4000)), 0, 0),
+            Some(400)
+        );
+        assert_eq!(
+            allowance_past_seconds(Some(&cloud_hours(0, 10)), 50, 0),
+            None
+        );
+        assert_eq!(allowance_past_seconds(None, 50, 0), None);
+    }
+
+    #[test]
+    fn a_show_past_its_hours_reports_how_far_and_a_new_allowance_moves_the_mark() {
+        let mut runtime = CloudShowRuntime {
+            show: Some(ActiveShow {
+                record: created().show,
+                control: created().control,
+                ingest: None,
+                session_id: Some("session-1".to_string()),
+                destinations: Vec::new(),
+                handed_over: true,
+                hold_image_png_base64: None,
+                resuming: false,
+            }),
+            ..Default::default()
+        };
+        runtime.replace_allowance(Some(cloud_hours(3600, 3000)));
+        runtime.set_runner(runner_at(0));
+        assert_eq!(runtime.status().allowance_past, None);
+        runtime.set_runner(runner_at(1320));
+        assert_eq!(
+            runtime.status().allowance_past,
+            Some(CloudAllowancePast { seconds: 720 })
+        );
+        // The web metered the same minutes: the new allowance replaces the
+        // runner's share, never doubles it.
+        runtime.replace_allowance(Some(cloud_hours(3600, 4320)));
+        assert_eq!(
+            runtime.status().allowance_past,
+            Some(CloudAllowancePast { seconds: 720 })
+        );
+        runtime.set_runner(runner_at(1380));
+        assert_eq!(
+            runtime.status().allowance_past,
+            Some(CloudAllowancePast { seconds: 780 })
+        );
+        // No show, nothing past; the next show starts a fresh mark.
+        runtime.clear_show(None);
+        assert_eq!(runtime.status().allowance_past, None);
+        assert_eq!(runtime.allowance_live_mark, None);
+    }
+
+    /// Plan 222 U1: "Videorc Cloud is on" once per account on this computer.
+    #[test]
+    fn the_cloud_notice_is_due_once_per_entitled_account() {
+        let key = announce_account_key(Some("Streamer"), None).unwrap();
+        assert_eq!(key.len(), 24);
+        assert!(!key.contains("streamer"));
+        assert_eq!(
+            announce_account_key(Some(" streamer "), None).as_deref(),
+            Some(key.as_str())
+        );
+        assert_eq!(
+            announce_account_key(None, Some("a@b.test")),
+            announce_account_key(Some(""), Some("a@b.test"))
+        );
+        assert_eq!(announce_account_key(None, None), None);
+
+        let mut seen = announced_with(Vec::new(), &key);
+        seen = announced_with(seen, &key);
+        assert_eq!(seen, vec![key.clone()]);
+        for index in 0..40 {
+            seen = announced_with(seen, &format!("k{index}"));
+        }
+        assert_eq!(seen.len(), CLOUD_ANNOUNCED_MAX);
+        assert!(!seen.contains(&key), "the oldest drops first");
+
+        let mut runtime = CloudShowRuntime::default();
+        assert!(
+            !runtime.set_announce_due(true),
+            "not entitled: nothing to say"
+        );
+        assert_eq!(runtime.status().announce, None);
+        runtime.entitlement.cloud = Some(cloud_hours(3600, 0));
+        assert_eq!(runtime.status().announce, Some(true));
+        assert!(runtime.set_announce_due(false));
+        assert_eq!(runtime.status().announce, None);
+        // Absent on the wire, never `false` (the serde-null trap).
+        assert!(
+            serde_json::to_value(runtime.status())
+                .unwrap()
+                .get("announce")
+                .is_none()
         );
     }
 

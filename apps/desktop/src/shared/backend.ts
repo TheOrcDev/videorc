@@ -5359,6 +5359,8 @@ export interface CloudStatus {
   allowancePast?: { seconds: number }
   /** Plan 223 C3: the runner's program measurements while the show is live or holding. */
   program?: CloudProgram
+  /** Plan 222 U1: "Videorc Cloud is on" is due for this account; absent once seen. */
+  announce?: boolean
 }
 
 /** The runner's `program` block (plan 223 C1): what leaves our servers, as numbers. */

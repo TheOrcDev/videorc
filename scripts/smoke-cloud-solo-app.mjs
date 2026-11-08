@@ -442,7 +442,15 @@ try {
   //     smoke RPCs off, so no caller may name another), with the same
   //     certificate check as the feed. The by-eye captures take the row idle,
   //     while the push runs and with the result.
-  if (shots) await shots.capture('idle')
+  if (shots) {
+    await shots.capture('idle')
+    // Plan 222 U1, U2: the section with the switch's hours and upload line
+    // (and the once-per-account notice when it is still up).
+    await shots.page('section', smoke, {
+      tab: 'streaming',
+      waitFor: '[data-testid="cloud-section"]'
+    })
+  }
   const testRequestedAtMs = Date.now()
   const testStarted = await request(backend, timeoutMs, 'cloud.selftest.run', {
     outputs: [{ orientation: 'horizontal', width: 1280, height: 720, fps: 30, videoKbps: 4000 }]
@@ -802,6 +810,17 @@ try {
   const holdSeen = firstPhase(watcher.states, cutAtMs, 'hold')
   log(`[drop 1] runner holds ${((holdSeen - cutAtMs) / 1000).toFixed(2)} s after the cut`)
   await waitFor(() => latestCloudPhase(collected) === 'hold', 15_000, 'the desktop to show Hold')
+  // Plan 222 U6, state 1: the feed is gone and the desktop is up.
+  if (shots) {
+    await shots.page('studio-hold', launch.smoke, {
+      tab: 'studio',
+      waitFor: '[data-testid="session-destinations-summary"]'
+    })
+    await shots.page('livestream-hold', launch.smoke, {
+      tab: 'streaming',
+      waitFor: '[data-testid="technical-details"]'
+    })
+  }
   await sleep(Math.max(0, feedCutMs - (Date.now() - cutAtMs)))
   assertReceiversConnected(receivers, 'during the feed cut')
   const restoreAtMs = Date.now()
@@ -1046,6 +1065,13 @@ try {
       'the relaunched desktop to find the show resumable'
     )
     const resumableAtMs = Date.now()
+    // Plan 222 U6, state 2: the desktop relaunched (the Resume notice).
+    if (shots) {
+      await shots.page('studio-resume', launch.smoke, {
+        tab: 'studio',
+        waitFor: '[data-testid="cloud-resume-notice"]'
+      })
+    }
     log(
       `[drop 2] relaunched desktop sees the show as resumable ${((resumableAtMs - relaunchAtMs) / 1000).toFixed(1)} s after launch (phase ${resumable.phase}, hold ${resumable.hold?.remainingSeconds ?? '?'} s left, entitled ${resumable.entitled})`
     )
@@ -2389,15 +2415,20 @@ function summarizeWeb(state) {
  */
 async function prepareCloudSectionShots(smoke) {
   mkdirSync(shotsDir, { recursive: true })
-  const devtools = await waitFor(
-    () =>
-      appLines
-        .map((line) => /DevTools listening on (ws:\/\/\S+)/.exec(line)?.[1])
-        .findLast(Boolean),
-    10_000,
-    'the DevTools url in the app log (VIDEORC_REMOTE_DEBUG_PORT)'
-  )
-  const { host } = new URL(devtools.replace('ws://', 'http://'))
+  const devtoolsHost = async () => {
+    const devtools = await waitFor(
+      () =>
+        appLines
+          .map((line) => /DevTools listening on (ws:\/\/\S+)/.exec(line)?.[1])
+          .findLast(Boolean),
+      10_000,
+      'the DevTools url in the app log (VIDEORC_REMOTE_DEBUG_PORT)'
+    )
+    return new URL(devtools.replace('ws://', 'http://')).host
+  }
+  // A relaunch (drop 2) logs a new DevTools url: each page shot reads the
+  // newest one.
+  let host = await devtoolsHost()
   await cdpEvaluate(
     host,
     `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
@@ -2431,6 +2462,47 @@ async function prepareCloudSectionShots(smoke) {
   }
   return {
     files,
+    /**
+     * Plan 222 U2, U6: a whole page in both themes, opened through the
+     * launch's own smoke channel: `cloud-<stage>-<theme>.png`. `scrollTo`
+     * brings the part under review into view.
+     */
+    async page(stage, smokeNow, { tab, waitFor: waitSelector, scrollTo }) {
+      host = await devtoolsHost()
+      await waitFor(
+        async () =>
+          (await cdpEvaluate(
+            host,
+            `document.readyState === 'complete' && Boolean(document.querySelector('[aria-label="Toggle color theme"]'))`
+          ).catch(() => false)) || null,
+        30_000,
+        'the renderer ready for a screenshot'
+      )
+      await requestSmokeCommand(
+        smokeNow,
+        'open-tab',
+        { tab, waitFor: waitSelector },
+        { timeoutMs: 30_000 }
+      )
+      for (const wanted of ['dark', 'light']) {
+        await setTheme(wanted)
+        await cdpEvaluate(
+          host,
+          `document.querySelector(${JSON.stringify(scrollTo ?? waitSelector)})?.scrollIntoView({ block: 'start' }); 'ok'`
+        )
+        await sleep(300)
+        const shot = await cdpCall(host, 'Page.captureScreenshot', { format: 'png' })
+        const file = join(shotsDir, `cloud-${stage}-${wanted}.png`)
+        writeFileSync(file, Buffer.from(shot.data, 'base64'))
+        files[`${stage}-${wanted}`] = file
+        const text = await cdpEvaluate(
+          host,
+          `document.querySelector(${JSON.stringify(scrollTo ?? waitSelector)})?.innerText ?? ''`
+        )
+        log(`[shots] ${stage} ${wanted}: ${file} (${JSON.stringify(text.slice(0, 400))})`)
+      }
+      await setTheme('dark')
+    },
     async capture(stage) {
       for (const wanted of ['dark', 'light']) {
         await setTheme(wanted)

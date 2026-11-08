@@ -524,6 +524,8 @@ export interface BackendRpcMethodMap {
   'cloud.status': BackendRpcDefinition<undefined, CloudStatus>
   'cloud.settings.set': BackendRpcDefinition<CloudSettingsPatch, CloudStatus>
   'cloud.allowance.refresh': BackendRpcDefinition<undefined, CloudStatus>
+  /** Plan 222 U1: "Videorc Cloud is on" showed; never again for this account. */
+  'cloud.announce.seen': BackendRpcDefinition<undefined, CloudStatus>
   /** C5: the same start as `session.start`, bound to the show that is live. */
   'cloud.show.resume': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'cloud.show.end': BackendRpcDefinition<undefined, CloudStatus>
@@ -5774,7 +5776,9 @@ const cloudStatusSchema = objectSchema(
       objectSchema({ seconds: nonNegativeInteger }, { allowUnknown: false })
     ),
     // Plan 223 C3: the runner's program block, every field optional.
-    program: optionalSchema(cloudProgramSchema)
+    program: optionalSchema(cloudProgramSchema),
+    // Plan 222 U1: "Videorc Cloud is on" is due for this account (true or absent).
+    announce: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudStatus>
@@ -6244,6 +6248,7 @@ const runtimeContracts = {
   'cloud.status': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.settings.set': { params: cloudSettingsPatchSchema, result: cloudStatusSchema },
   'cloud.allowance.refresh': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.announce.seen': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.show.resume': { params: sessionStartParamsSchema, result: recordingStatusSchema },
   'cloud.show.end': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.show.reconnectDestination': {

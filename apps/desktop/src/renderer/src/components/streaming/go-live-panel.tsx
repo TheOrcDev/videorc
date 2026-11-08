@@ -63,7 +63,11 @@ import {
   type RecentStreamDrops,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
-import { cloudHealthySummary, cloudStreamReading } from '@/lib/live-session-view'
+import {
+  cloudDestinationCount,
+  cloudHealthySummary,
+  cloudStreamReading
+} from '@/lib/live-session-view'
 
 import {
   dashboardCloudFromStatus,
@@ -543,7 +547,11 @@ export function TechnicalDetails({
   const summary = liveOutputActive
     ? (cloudStreamReading(cloud) ??
       (attribution === 'healthy'
-        ? cloudHealthySummary(cloud, [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)])
+        ? cloudHealthySummary(
+            cloud,
+            [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)],
+            cloudDestinationCount(streamTargets)
+          )
         : liveProblemLabel(attribution)))
     : null
   const outputs = streamOutputs(providerPlan)

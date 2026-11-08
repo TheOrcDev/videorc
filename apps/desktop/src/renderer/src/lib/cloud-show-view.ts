@@ -33,7 +33,13 @@ export function cloudResumeNotice(
   return { detail, title: "You're still live through Videorc Cloud." }
 }
 
-/** C4: the Go Live button while the session starts through the cloud. */
+/**
+ * C4: the Go Live button while the session starts through the cloud: the
+ * switch is on for an entitled account, or a show is still live on our
+ * servers, which Go Live feeds whatever the switch or rollout says (plan 222
+ * U4).
+ */
 export function goesThroughCloud(status: CloudStatus | null): boolean {
+  if (status?.show?.resumable) return true
   return Boolean(status?.entitled && status.settings.enabled)
 }

@@ -611,6 +611,13 @@ describe('shared high-risk protocol fixture', () => {
     // Plan 222's additive fields: the two new fallback reasons, the hours
     // overrun and the test's node facts all pass; nothing else changes.
     expect(statusHold.allowancePast).toEqual({ seconds: 720 })
+    // Plan 222 U1: the notice flag is `true` or absent, never `false` or null.
+    expect(statusFallback.announce).toBe(true)
+    expect(statusHold.announce).toBeUndefined()
+    expect(() =>
+      validateBackendEventPayload('cloud.state', { ...statusFallback, announce: null })
+    ).toThrow()
+    expect(jsonShape(validateBackendRpcResult('cloud.announce.seen', statusOff))).toEqual(statusOff)
     expect(statusTest.test?.result?.nodeId).toBe('eu-hel-1')
     for (const reason of ['cloud-quality', 'cloud-unchecked'] as const) {
       const payload = { ...statusFallback, fallback: { ...statusFallback.fallback, reason } }

@@ -161,11 +161,14 @@ import {
 } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import {
+  CLOUD_ANNOUNCE_TOAST,
   CLOUD_TOAST_ID,
+  cloudAllowancePastToast,
   cloudFallbackToast,
   cloudLostToast,
   cloudRestartToast,
-  cloudShowCapToast
+  cloudShowCapToast,
+  requestCloudSectionFocus
 } from '@/lib/cloud-toasts'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
@@ -5363,6 +5366,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
     const cap = cloudShowCapToast(previous, next)
     if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
+    // Plan 222 U5: past the month's hours is news, never a cut (D18).
+    const past = cloudAllowancePastToast(previous, next)
+    if (past) toast.info(past.title, { id: CLOUD_TOAST_ID, description: past.description })
   }, [])
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
@@ -13095,6 +13101,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const isSessionActive =
     sessionOwnsTransport(recording) || startRequestPending || stopRequestPending
   const transportSessionActive = isSessionActive
+
+  // Plan 222 U1: "Videorc Cloud is on", once per account, never during a
+  // session; the backend forgets it for this account once it showed.
+  const cloudAnnounceShownRef = useRef(false)
+  const cloudAnnounceDue = cloudStatus?.announce === true
+  useEffect(() => {
+    if (!client || !cloudAnnounceDue || isSessionActive || cloudAnnounceShownRef.current) return
+    cloudAnnounceShownRef.current = true
+    toast.info(CLOUD_ANNOUNCE_TOAST.title, {
+      id: CLOUD_TOAST_ID,
+      description: CLOUD_ANNOUNCE_TOAST.description,
+      action: {
+        label: 'Open Livestream',
+        onClick: () => {
+          requestCloudSectionFocus()
+          openWorkspaceTab('live', 'setup')
+        }
+      }
+    })
+    void client
+      .requestTyped('cloud.announce.seen')
+      .then(commitCloudStatus)
+      .catch(() => {
+        // Shown once in this run either way; the next launch asks again.
+      })
+  }, [client, cloudAnnounceDue, commitCloudStatus, isSessionActive])
   // Plan 215 D1: the Scene page unlocks a source's position and size only
   // once the session says a commit reaches its picture.
   const acceptsLiveSceneEdits = recording.acceptsLiveSceneEdits ?? null

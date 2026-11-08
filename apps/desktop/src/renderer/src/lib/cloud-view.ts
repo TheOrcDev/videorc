@@ -5,7 +5,8 @@ import type {
   CloudTestStatus,
   CloudTestUpload
 } from './backend'
-import { CLOUD_PREMIUM_REASON, formatCloudResetDate } from './cloud-toasts'
+import type { CloudUploadPlan } from './cloud-test-outputs'
+import { CLOUD_PREMIUM_REASON, formatCloudCountdown, formatCloudResetDate } from './cloud-toasts'
 import { formatBitrate } from './format-video'
 
 // What the renderer says about Videorc Cloud (plan 184 C4 to C7), derived
@@ -28,6 +29,20 @@ export { CLOUD_PREMIUM_REASON }
 export const CLOUD_NOT_YET_REASON =
   "Videorc Cloud isn't on for your account yet. Go Live streams directly from this computer."
 
+/** The switch off: where the next Go Live goes (plan 222 U4). */
+export const CLOUD_DIRECT_LINE = 'Go Live streams directly from this computer.'
+
+/**
+ * A show this computer isn't feeding is still live on our servers, whatever
+ * the switch or the rollout says now (plan 222 U4): Go Live feeds it.
+ */
+export const CLOUD_SHOW_HELD_LINE = 'A show is live through Videorc Cloud. Go Live feeds it.'
+
+/** A show is live through the cloud with no local session feeding it. */
+export function cloudShowHeld(status: CloudStatus | null): boolean {
+  return Boolean(status?.show?.resumable)
+}
+
 function hoursOrMinutes(seconds: number): string {
   if (seconds >= 3600) {
     const hours = Math.floor(seconds / 3600)
@@ -41,11 +56,22 @@ function hoursOrMinutes(seconds: number): string {
  * "37 of 100 cloud hours left · resets Nov 1". Under an hour left counts
  * minutes; past the allowance it says so plainly, with no charge (D6).
  */
-export function cloudHoursLine(allowance: AiCapabilitiesCloud | undefined): string | null {
+export function cloudHoursLine(
+  allowance: AiCapabilitiesCloud | undefined,
+  pastSeconds?: number
+): string | null {
   if (!allowance || allowance.secondsPerMonth <= 0) return null
   const total = hoursOrMinutes(allowance.secondsPerMonth)
   const reset = formatCloudResetDate(allowance.resetAt)
   const suffix = reset ? ` · resets ${reset}` : ''
+  // Plan 222 U5: a show running past the hours says how far; it keeps going.
+  if (pastSeconds !== undefined && pastSeconds > 0) {
+    const of =
+      allowance.secondsPerMonth >= 3600
+        ? String(Math.floor(allowance.secondsPerMonth / 3600))
+        : total
+    return `Cloud hours: 0 of ${of} left · past by ${formatCloudCountdown(pastSeconds)}${suffix}`
+  }
   if (allowance.overageSeconds > 0) {
     return `${hoursOrMinutes(allowance.overageSeconds)} over this month's ${total}, no charge${suffix}`
   }
@@ -67,17 +93,68 @@ export function formatHoldLimit(seconds: number): string {
 
 export type CloudSectionState =
   | { kind: 'upsell' }
-  | { kind: 'unavailable' }
+  | { kind: 'unavailable'; reason: string }
   | { kind: 'available'; hours: string | null }
 
 /** What the Livestream page's Videorc Cloud section shows (C6). */
 export function cloudSectionState(status: CloudStatus | null): CloudSectionState | null {
   if (!status) return null
-  if (status.entitled) return { hours: cloudHoursLine(status.allowance), kind: 'available' }
+  if (status.entitled) {
+    return {
+      hours: cloudHoursLine(status.allowance, status.allowancePast?.seconds),
+      kind: 'available'
+    }
+  }
   // A paid plan whose cloud isn't on yet (the rollout switch, the cohort):
-  // say so plainly rather than selling the plan it already has.
-  if (status.plan) return { kind: 'unavailable' }
+  // say so plainly rather than selling the plan it already has. A show the
+  // cloud still holds is fed by Go Live whatever the rollout says (U4).
+  if (status.plan) {
+    return {
+      kind: 'unavailable',
+      reason: cloudShowHeld(status)
+        ? `Videorc Cloud isn't on for your account right now. ${CLOUD_SHOW_HELD_LINE}`
+        : CLOUD_NOT_YET_REASON
+    }
+  }
   return { kind: 'upsell' }
+}
+
+/** "6 Mbps", "10.5 Mbps": an upload figure. */
+function mbps(kbps: number): string {
+  return formatBitrate(kbps)
+}
+
+/**
+ * Plan 222 U2, U3: what going through the cloud uploads, against streaming
+ * directly. Numbers only, never a selling line: "Uploads once. 6 Mbps for 3
+ * destinations; direct would be 18 Mbps.", "Uploads once. 6 Mbps." with one
+ * destination, and twice with both orientations.
+ */
+export function cloudUploadLine(plan: CloudUploadPlan | null): string | null {
+  if (!plan || plan.feedsKbps.length === 0) return null
+  const cloudKbps = plan.feedsKbps.reduce((sum, kbps) => sum + kbps, 0)
+  const lead =
+    plan.feedsKbps.length === 1 ? 'Uploads once.' : 'Uploads twice, once per orientation.'
+  if (plan.destinations <= plan.feedsKbps.length || plan.directKbps <= cloudKbps) {
+    return `${lead} ${mbps(cloudKbps)}.`
+  }
+  return `${lead} ${mbps(cloudKbps)} for ${plan.destinations} destinations; direct would be ${mbps(plan.directKbps)}.`
+}
+
+/**
+ * The switch row's lines (plan 222 U2, U4): on, the hours and the upload;
+ * off, where Go Live goes: a held show it feeds, else this computer.
+ */
+export function cloudSwitchLines(
+  status: CloudStatus,
+  section: CloudSectionState,
+  upload: CloudUploadPlan | null
+): string[] {
+  if (section.kind !== 'available') return []
+  if (!status.settings.enabled) {
+    return [cloudShowHeld(status) ? CLOUD_SHOW_HELD_LINE : CLOUD_DIRECT_LINE]
+  }
+  return [section.hours, cloudUploadLine(upload)].filter((line): line is string => Boolean(line))
 }
 
 // --- Test cloud (C6b) ---

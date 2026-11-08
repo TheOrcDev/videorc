@@ -5825,6 +5825,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "agent.intent.ack"
         | "remote.intent"
         | "cloud.settings.set"
+        // Plan 222 U1: the "Videorc Cloud is on" notice was shown.
+        | "cloud.announce.seen"
         // Plan 184 C6b: the test runs on its own task and reports through
         // `cloud.state`; the RPC only starts it.
         | "cloud.selftest.run"
@@ -11429,6 +11431,12 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "cloud.announce.seen" => match cloud_show_announce_seen(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => {
+                ServerResponse::error(command.id, "cloud-settings-invalid", error.to_string())
+            }
+        },
         "cloud.allowance.refresh" => {
             let Some(bearer) = account::stored_session_token() else {
                 return ServerResponse::error(
@@ -14918,6 +14926,53 @@ fn cloud_show_set_settings(
     Ok(status)
 }
 
+/// Plan 222 U1: the signed-in account's key in the notice list, or `None`
+/// while signed out.
+async fn cloud_announce_account_key(state: &AppState) -> Option<String> {
+    let session = state.account_session.lock().await;
+    let account = account::current_account(session.as_ref());
+    cloud_show::announce_account_key(account.username.as_deref(), account.email.as_deref())
+}
+
+/// Plan 222 U1: after the entitlement refresh, whether this account still
+/// has "Videorc Cloud is on" to see on this computer.
+async fn cloud_show_refresh_announce(state: &AppState) {
+    let key = cloud_announce_account_key(state).await;
+    let due = key.is_some_and(|key| !cloud_show::load_announced(&state.database).contains(&key));
+    let status = {
+        let mut runtime = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime.set_announce_due(due).then(|| runtime.status())
+    };
+    if let Some(status) = status {
+        state.emit_event(cloud_show::CLOUD_STATE_EVENT, &status);
+    }
+}
+
+/// `cloud.announce.seen` (plan 222 U1): the notice showed; never again for
+/// this account here.
+async fn cloud_show_announce_seen(state: &AppState) -> Result<cloud_show::CloudStatus> {
+    if let Some(key) = cloud_announce_account_key(state).await {
+        let next = cloud_show::announced_with(cloud_show::load_announced(&state.database), &key);
+        state
+            .database
+            .save_setting(cloud_show::CLOUD_ANNOUNCED_KEY, &next)
+            .context("Could not save the Videorc Cloud notice.")?;
+    }
+    let status = {
+        let mut runtime = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime.set_announce_due(false);
+        runtime.status()
+    };
+    state.emit_event(cloud_show::CLOUD_STATE_EVENT, &status);
+    Ok(status)
+}
+
 /// After a stop: end the show the stopped session fed. With no session id
 /// (an older status), the show with a feeding session is the one that stopped.
 async fn cloud_show_session_stopped(state: &AppState, session_id: Option<&str>) {
@@ -15348,6 +15403,7 @@ async fn refresh_account_entitlements(state: &AppState) {
     drop(transition);
     if let Some((plan, cloud)) = cloud_block {
         cloud_show_hydrate(state, plan, cloud);
+        cloud_show_refresh_announce(state).await;
     }
     if let Some(enabled) = command_parser {
         cohost::set_command_parser_capability(state, enabled).await;

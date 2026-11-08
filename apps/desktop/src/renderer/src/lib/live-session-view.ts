@@ -6,6 +6,7 @@
 
 import type { StreamTargetRuntime, WatchdogAlert } from '@/lib/backend'
 import { formatCloudCountdown } from './cloud-toasts'
+import { plural } from './format'
 import { watchdogChipLabel } from './watchdog-rank'
 import { cloudPhaseLabel, destinationStateLabel } from './state-labels'
 import { liveProblemLabel, type StreamHealthAttribution } from './stream-health-attribution'
@@ -36,12 +37,31 @@ export function cloudStreamReading(cloud: LiveDashboardCloud | null | undefined)
   return null
 }
 
-/** "Cloud · 6 Mbps": the healthy reading names the way the stream goes out. */
+/**
+ * The healthy reading names the way the stream goes out. Direct: "6 Mbps ·
+ * 60 fps". Through the cloud (plan 222 U2), what this computer uploads and
+ * where the cloud sends it: "Cloud · 6 Mbps up · 3 destinations".
+ */
 export function cloudHealthySummary(
   cloud: LiveDashboardCloud | null | undefined,
-  parts: readonly (string | null | undefined)[]
+  parts: readonly (string | null | undefined)[],
+  destinations?: number
 ): string {
-  return [cloud ? 'Cloud' : null, ...parts].filter(Boolean).join(' · ')
+  if (!cloud) return parts.filter(Boolean).join(' · ')
+  const [bitrate] = parts
+  return [
+    'Cloud',
+    bitrate ? `${bitrate} up` : null,
+    destinations ? plural(destinations, 'destination') : null
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+/** The platforms a cloud show sends to: every runtime row but the feed legs. */
+export function cloudDestinationCount(targets: readonly StreamTargetRuntime[]): number {
+  return targets.filter((target) => !isCloudFeedTarget(target) && target.state !== 'not-configured')
+    .length
 }
 
 export type LiveDestinationProblem = {

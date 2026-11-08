@@ -47,3 +47,43 @@ export function cloudTestOutputs(config: CaptureConfig): CloudTestOutput[] {
   }
   return outputs
 }
+
+/**
+ * What going through Videorc Cloud uploads against streaming directly
+ * (plan 222 U2, U3), from the enabled destinations and their bitrates:
+ * through the cloud, one feed per orientation in use, at the shape a show
+ * is created with; directly, every destination's own stream. Video bitrates
+ * only, like Test. Null with no destination enabled.
+ */
+export type CloudUploadPlan = {
+  /** The cloud's feeds, one per orientation in use: horizontal first. */
+  feedsKbps: number[]
+  /** The same destinations streamed directly from this computer. */
+  directKbps: number
+  destinations: number
+}
+
+export function cloudUploadPlan(config: CaptureConfig): CloudUploadPlan | null {
+  const streaming = config.streaming
+  const enabled = streaming.targets.filter(
+    (target) => target.enabled && streaming.enabledTargetIds.includes(target.id)
+  )
+  if (enabled.length === 0) return null
+  const horizontal = enabled.filter((target) => target.outputOrientation !== 'vertical')
+  const vertical = enabled.filter((target) => target.outputOrientation === 'vertical')
+  const outputs = cloudTestOutputs(config)
+  const horizontalFeed = outputs.find((output) => output.orientation === 'horizontal')
+  const verticalFeed = outputs.find((output) => output.orientation === 'vertical')
+  const feedsKbps: number[] = []
+  if (horizontal.length > 0 && horizontalFeed) feedsKbps.push(horizontalFeed.videoKbps)
+  if (vertical.length > 0 && verticalFeed) feedsKbps.push(verticalFeed.videoKbps)
+  if (feedsKbps.length === 0) return null
+  const directKbps =
+    horizontal.reduce(
+      (sum, target) =>
+        sum + streamOutputVideoForTarget(config.video, streaming, target).bitrateKbps,
+      0
+    ) +
+    vertical.length * (verticalFeed?.videoKbps ?? 0)
+  return { feedsKbps, directKbps, destinations: enabled.length }
+}

@@ -7,13 +7,19 @@ import {
   cloudFallbackToast,
   cloudLostToast,
   cloudRestartToast,
+  cloudAllowancePastToast,
   cloudShowCapToast,
   formatCloudResetDate
 } from './cloud-toasts'
 import {
+  CLOUD_DIRECT_LINE,
+  CLOUD_NOT_YET_REASON,
+  CLOUD_SHOW_HELD_LINE,
   CLOUD_TEST_DESCRIPTION,
   cloudHoursLine,
   cloudSectionState,
+  cloudSwitchLines,
+  cloudUploadLine,
   cloudTestBlockedReason,
   cloudTestLine,
   cloudTestResultLine,
@@ -190,12 +196,102 @@ describe('cloud copy (plan 184)', () => {
     expect(goesThroughCloud(null)).toBe(false)
   })
 
+  // Plan 222 U4: a show still live on our servers is what Go Live feeds,
+  // whatever the switch or the rollout says now.
+  it('says a held show is what Go Live feeds, with the cloud off', () => {
+    const held = { id: 'sh_1', nodeId: 'eu-hel-1', resumable: true }
+    const off = { ...status().settings, enabled: false }
+    expect(goesThroughCloud(status({ settings: off, show: held }))).toBe(true)
+    expect(goesThroughCloud(status({ entitled: false, show: held }))).toBe(true)
+    // A show this computer feeds is not held: the session owns the button.
+    expect(goesThroughCloud(status({ settings: off, show: { ...held, resumable: false } }))).toBe(
+      false
+    )
+
+    const rolledBack = status({ entitled: false, show: held })
+    expect(cloudSectionState(rolledBack)).toEqual({
+      kind: 'unavailable',
+      reason: `Videorc Cloud isn't on for your account right now. ${CLOUD_SHOW_HELD_LINE}`
+    })
+    expect(CLOUD_SHOW_HELD_LINE).toBe('A show is live through Videorc Cloud. Go Live feeds it.')
+
+    const switchedOff = status({ settings: off })
+    expect(cloudSwitchLines(switchedOff, cloudSectionState(switchedOff)!, null)).toEqual([
+      CLOUD_DIRECT_LINE
+    ])
+    expect(CLOUD_DIRECT_LINE).toBe('Go Live streams directly from this computer.')
+    const heldOff = status({ settings: off, show: held })
+    expect(cloudSwitchLines(heldOff, cloudSectionState(heldOff)!, null)).toEqual([
+      CLOUD_SHOW_HELD_LINE
+    ])
+    // Locked: the LockAlert speaks, the row says nothing.
+    expect(cloudSwitchLines(rolledBack, cloudSectionState(rolledBack)!, null)).toEqual([])
+  })
+
+  // Plan 222 U2, U3: numbers, never a selling line.
+  it('says what going through the cloud uploads against streaming directly', () => {
+    expect(cloudUploadLine({ feedsKbps: [6000], directKbps: 6000, destinations: 1 })).toBe(
+      'Uploads once. 6 Mbps.'
+    )
+    expect(cloudUploadLine({ feedsKbps: [6000], directKbps: 18_000, destinations: 3 })).toBe(
+      'Uploads once. 6 Mbps for 3 destinations; direct would be 18 Mbps.'
+    )
+    expect(cloudUploadLine({ feedsKbps: [6000, 4500], directKbps: 16_500, destinations: 3 })).toBe(
+      'Uploads twice, once per orientation. 10.5 Mbps for 3 destinations; direct would be 16.5 Mbps.'
+    )
+    expect(cloudUploadLine({ feedsKbps: [6000, 4500], directKbps: 10_500, destinations: 2 })).toBe(
+      'Uploads twice, once per orientation. 10.5 Mbps.'
+    )
+    expect(cloudUploadLine(null)).toBeNull()
+    const on = status()
+    expect(
+      cloudSwitchLines(on, cloudSectionState(on)!, {
+        feedsKbps: [6000],
+        directKbps: 18_000,
+        destinations: 3
+      })
+    ).toEqual([
+      '9 of 10 cloud hours left · resets Nov 1',
+      'Uploads once. 6 Mbps for 3 destinations; direct would be 18 Mbps.'
+    ])
+  })
+
+  // Plan 222 U5 (plan 184 D18): hours running out never cuts a show.
+  it('says once per show that it runs past the hours, and the section says how far', () => {
+    const show = { id: 'sh_1', nodeId: 'eu-hel-1', resumable: false }
+    const past = status({
+      phase: 'live',
+      show,
+      allowancePast: { seconds: 720 },
+      allowance: {
+        ...status().allowance!,
+        secondsUsed: 36_720,
+        resetAt: '2026-12-01T00:00:00.000Z'
+      }
+    })
+    expect(cloudAllowancePastToast(status({ phase: 'live', show }), past)).toEqual({
+      title: "You're 12 min past this month's cloud hours",
+      description: 'The show keeps going.'
+    })
+    expect(cloudAllowancePastToast(past, { ...past, allowancePast: { seconds: 780 } })).toBeNull()
+    expect(cloudAllowancePastToast(past, { ...past, show: { ...show, id: 'sh_2' } })).not.toBeNull()
+    expect(cloudAllowancePastToast(null, status())).toBeNull()
+    expect(cloudSectionState(past)).toEqual({
+      hours: 'Cloud hours: 0 of 10 left · past by 12 min · resets Dec 1',
+      kind: 'available'
+    })
+    expect(cloudHoursLine(past.allowance, 0)).not.toMatch(/past by/)
+  })
+
   it('shows the section, the not-yet line, or the plain upsell', () => {
     expect(cloudSectionState(status())).toEqual({
       hours: '9 of 10 cloud hours left · resets Nov 1',
       kind: 'available'
     })
-    expect(cloudSectionState(status({ entitled: false }))).toEqual({ kind: 'unavailable' })
+    expect(cloudSectionState(status({ entitled: false }))).toEqual({
+      kind: 'unavailable',
+      reason: CLOUD_NOT_YET_REASON
+    })
     expect(cloudSectionState(status({ entitled: false, plan: undefined }))).toEqual({
       kind: 'upsell'
     })

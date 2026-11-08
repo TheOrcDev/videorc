@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { DiagnosticStats, StreamTargetRuntime } from '@/lib/backend'
 import {
+  cloudDestinationCount,
   cloudHealthySummary,
   cloudStreamReading,
   liveDestinationProblem,
@@ -106,11 +107,23 @@ describe('streamHealthFact', () => {
   })
 
   it('names the way out in the healthy summary: "Cloud · 6 Mbps"', () => {
-    expect(cloudHealthySummary({ phase: 'live' }, ['6 Mbps', '60 fps'])).toBe(
-      'Cloud · 6 Mbps · 60 fps'
+    // Plan 222 U2: the upload and where the cloud sends it.
+    expect(cloudHealthySummary({ phase: 'live' }, ['6 Mbps', '60 fps'], 3)).toBe(
+      'Cloud · 6 Mbps up · 3 destinations'
+    )
+    expect(cloudHealthySummary({ phase: 'live' }, ['6 Mbps', '60 fps'], 1)).toBe(
+      'Cloud · 6 Mbps up · 1 destination'
     )
     expect(cloudHealthySummary({ phase: 'live' }, [undefined, null])).toBe('Cloud')
-    expect(cloudHealthySummary(null, ['6 Mbps'])).toBe('6 Mbps')
+    expect(cloudHealthySummary(null, ['6 Mbps', '60 fps'], 3)).toBe('6 Mbps · 60 fps')
+    expect(
+      cloudDestinationCount([
+        target('live', 'YouTube'),
+        target('live', 'Twitch'),
+        { ...target('live', 'Videorc Cloud'), targetId: 'videorc-cloud-horizontal' },
+        target('not-configured', 'Kick')
+      ])
+    ).toBe(2)
   })
 })
 

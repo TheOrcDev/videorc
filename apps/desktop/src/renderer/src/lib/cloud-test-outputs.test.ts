@@ -7,7 +7,7 @@ import {
   streamOutputVideoForTarget,
   streamOutputVideoSettings
 } from './capture'
-import { cloudTestOutputs } from './cloud-test-outputs'
+import { cloudTestOutputs, cloudUploadPlan } from './cloud-test-outputs'
 
 // Plan 184 C6b: the test pushes the shape a show would be created with.
 
@@ -92,5 +92,38 @@ describe('cloudTestOutputs (plan 184 C6b)', () => {
     expect(cloudTestOutputs(notStreaming).map((output) => output.orientation)).toEqual([
       'horizontal'
     ])
+  })
+})
+
+// Plan 222 U2, U3: the upload through the cloud against streaming directly.
+describe('cloudUploadPlan (plan 222 U2, U3)', () => {
+  it('has nothing to say with no destination enabled', () => {
+    expect(cloudUploadPlan(config([]))).toBeNull()
+  })
+
+  it('uploads one feed for one or three horizontal destinations', () => {
+    const one = config([target('a')])
+    const kbps = streamOutputVideoSettings(one.video, one.streaming).bitrateKbps
+    expect(cloudUploadPlan(one)).toEqual({ feedsKbps: [kbps], directKbps: kbps, destinations: 1 })
+    const three = config([target('a'), target('b'), target('c')])
+    const each = three.streaming.targets.map(
+      (entry) => streamOutputVideoForTarget(three.video, three.streaming, entry).bitrateKbps
+    )
+    const plan = cloudUploadPlan(three)!
+    expect(plan.feedsKbps).toEqual([Math.min(...each)])
+    expect(plan.directKbps).toBe(each.reduce((sum, value) => sum + value, 0))
+    expect(plan.destinations).toBe(3)
+  })
+
+  it('uploads one feed per orientation with a vertical destination', () => {
+    const dual = config([target('a'), target('b'), target('v', { outputOrientation: 'vertical' })])
+    const outputs = cloudTestOutputs(dual)
+    const vertical = outputs.find((output) => output.orientation === 'vertical')!
+    expect(vertical).toBeDefined()
+    const plan = cloudUploadPlan(dual)!
+    expect(plan.feedsKbps).toHaveLength(2)
+    expect(plan.feedsKbps[1]).toBe(vertical.videoKbps)
+    expect(plan.destinations).toBe(3)
+    expect(plan.directKbps).toBeGreaterThan(plan.feedsKbps[0]! + plan.feedsKbps[1]!)
   })
 })
