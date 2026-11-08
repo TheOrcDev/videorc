@@ -597,7 +597,8 @@ async function runPremiumScenario(profile) {
     cancelled: 1,
     expired: 1,
     failed: 0,
-    notFound: 0
+    // Plan 225 B5: the wave at an unknown name (A2b) is a not-found command.
+    notFound: 1
   }
   expect(
     latest?.sessionId === sessionId &&
