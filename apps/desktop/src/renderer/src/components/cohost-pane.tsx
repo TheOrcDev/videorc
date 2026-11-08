@@ -10,6 +10,7 @@ import {
   type ReactNode
 } from 'react'
 
+import { ArrivalChip } from '@/components/arrival-chip'
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import type { BuddyPetPreviewHandle } from '@/components/buddy-pet-preview'
 import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
@@ -35,6 +36,7 @@ import type {
   CohostSayHi,
   CohostState,
   CohostUtteranceState,
+  CohostWelcomeBack,
   CohostWindowBuddy
 } from '@/lib/backend'
 import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
@@ -120,6 +122,7 @@ export function CohostPane({
   onRecapDismiss,
   onRecapDraft,
   onSayHiGreeted,
+  onWelcomeBackWave,
   onJumpToMessage,
   onEnableConsent,
   onUpgrade
@@ -154,6 +157,11 @@ export function CohostPane({
   onRecapDraft?: () => void
   /** "Say hi" (plan 068 D9): the streamer greeted this first-timer. */
   onSayHiGreeted?: (entry: CohostSayHi) => void
+  /**
+   * "Welcome back" (plan 225 D11): wave at a returning person. Free, so the
+   * list shows whatever Buddy Live's state; the wave is bubble-only.
+   */
+  onWelcomeBackWave?: (entry: CohostWelcomeBack) => void
   onJumpToMessage?: (messageId: string) => void
   onEnableConsent?: () => void
   onUpgrade?: (url: string) => void
@@ -183,6 +191,7 @@ export function CohostPane({
   const spotlightQuestionId = activeCohostSpotlight(state, nowMs)?.questionId ?? null
   const promises = state?.promises ?? []
   const sayHi = state?.sayHi ?? []
+  const welcomeBack = state?.welcomeBack ?? []
   const recap = activeCohostRecap(state, nowMs)
   const topic = state?.topic?.trim() || null
   // Viewers saying something is broken. A persistent chip, never a toast: it
@@ -196,12 +205,22 @@ export function CohostPane({
   // slow tick keeps them honest without re-rendering the message list
   // underneath.
   const recapPresent = state?.recap !== undefined
-  const sayHiCount = sayHi.length
+  const sayHiCount = sayHi.length + welcomeBack.length
   useEffect(() => {
     if (rows.length === 0 && alertCount === 0 && !recapPresent && sayHiCount === 0) return
     const timer = setInterval(() => setNowMs(Date.now()), 30_000)
     return () => clearInterval(timer)
   }, [alertCount, recapPresent, rows.length, sayHiCount])
+  // Welcomes are free (plan 225 D6): the list shows under any notice too.
+  const welcomeBackList =
+    welcomeBack.length > 0 ? (
+      <CohostWelcomeBackList
+        disabled={actionPending}
+        items={welcomeBack}
+        nowMs={nowMs}
+        onWave={onWelcomeBackWave}
+      />
+    ) : null
 
   // The header status element takes you here: scroll into view, focus the list.
   useEffect(() => {
@@ -232,23 +251,26 @@ export function CohostPane({
   // action, or the cloud-AI disclosure with its one action.
   if (mode.kind === 'upsell') {
     return (
-      <div className="shrink-0 p-2" data-slot="cohost-notice">
-        <Alert data-testid="cohost-upsell" variant="locked">
-          <AlertTitle>{mode.reason}</AlertTitle>
-          {mode.upgradeUrl && onUpgrade ? (
-            <AlertAction>
-              <Button
-                size="xs"
-                type="button"
-                variant="outline"
-                onClick={() => onUpgrade(mode.upgradeUrl as string)}
-              >
-                View Premium
-              </Button>
-            </AlertAction>
-          ) : null}
-        </Alert>
-      </div>
+      <>
+        <div className="shrink-0 p-2" data-slot="cohost-notice">
+          <Alert data-testid="cohost-upsell" variant="locked">
+            <AlertTitle>{mode.reason}</AlertTitle>
+            {mode.upgradeUrl && onUpgrade ? (
+              <AlertAction>
+                <Button
+                  size="xs"
+                  type="button"
+                  variant="outline"
+                  onClick={() => onUpgrade(mode.upgradeUrl as string)}
+                >
+                  View Premium
+                </Button>
+              </AlertAction>
+            ) : null}
+          </Alert>
+        </div>
+        {welcomeBackList}
+      </>
     )
   }
 
@@ -278,12 +300,14 @@ export function CohostPane({
             ) : null}
           </Alert>
         </div>
+        {welcomeBackList}
       </>
     )
   }
 
   // Buddy Live off: the header's switch already says so (plan 174 S3.14a).
-  if (mode.kind === 'disabled') return null
+  // "Welcome back" is free and stays.
+  if (mode.kind === 'disabled') return welcomeBackList
 
   // The failed tick in the server's own words. The engine clears `detail` the
   // moment it listens again, so a stale detail is never shown.
@@ -468,6 +492,7 @@ export function CohostPane({
           onGreeted={onSayHiGreeted}
         />
       ) : null}
+      {welcomeBackList}
       {promises.length > 0 ? (
         <CohostPromises
           disabled={actionPending}
@@ -1072,6 +1097,72 @@ function CohostSayHiList({
               onClick={() => onGreeted?.(entry)}
             >
               Greeted
+            </Button>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Returning people not welcomed yet (plan 225 D11), under "Say hi": the
+ * same row shape and 15-minute stay, with the arrival chip and a Wave
+ * button. A row leaves when the person was waved at or welcomed by the
+ * bubble; a Suggest welcome card keeps it until the card is posted or
+ * dismissed (owner call, 2026-11-08). Nothing here posts to chat.
+ */
+function CohostWelcomeBackList({
+  items,
+  nowMs,
+  disabled,
+  onWave
+}: {
+  items: readonly CohostWelcomeBack[]
+  nowMs: number
+  disabled: boolean
+  onWave?: (entry: CohostWelcomeBack) => void
+}): ReactElement {
+  return (
+    <div data-slot="cohost-welcome-back">
+      <Separator />
+      <HoverHint hint="Back in your chat. Wave and Buddy waves on stream; nothing goes to chat.">
+        <p className="px-2 pt-1.5 pb-0.5 text-[11px] font-semibold text-subtle">Welcome back</p>
+      </HoverHint>
+      {items.map((entry) => {
+        const age = cohostAgeLabel(entry.firstSeenAt, nowMs)
+        return (
+          <div
+            key={entry.personId}
+            className="flex h-7 min-w-0 items-center gap-1.5 px-2 text-xs"
+            data-person-id={entry.personId}
+            data-slot="cohost-welcome-back-row"
+          >
+            <ChatPlatformIcon platform={entry.platform} />
+            <span className="min-w-0 flex-1 truncate text-foreground" title={entry.name}>
+              {entry.name}
+            </span>
+            <ArrivalChip arrival={entry.arrival} className={cn('shrink-0', PANE_NARROW_HIDDEN)} />
+            {age ? (
+              <span
+                className={cn(
+                  'shrink-0 text-[11px] text-muted-foreground tabular-nums',
+                  PANE_NARROW_HIDDEN
+                )}
+              >
+                {age}
+              </span>
+            ) : null}
+            <Button
+              className="shrink-0"
+              data-testid="cohost-welcome-back-wave"
+              disabled={disabled || !onWave}
+              size="xs"
+              type="button"
+              variant="ghost"
+              onClick={() => onWave?.(entry)}
+            >
+              Wave
             </Button>
           </div>
         )

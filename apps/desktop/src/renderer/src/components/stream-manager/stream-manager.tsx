@@ -37,6 +37,11 @@ import type { BuddyPetPreviewHandle } from '@/components/buddy-pet-preview'
 import { BuddyCardsArea } from '@/components/stream-manager/buddy-cards-area'
 import { BuddyChatControls } from '@/components/stream-manager/buddy-chat-controls'
 import {
+  LinkMadeCards,
+  linkMadeId,
+  linkMadeTitle
+} from '@/components/stream-manager/link-made-cards'
+import {
   BuddyUtteranceCards,
   openProposedUtterances
 } from '@/components/stream-manager/buddy-utterance-cards'
@@ -572,11 +577,18 @@ export function StreamManager({
         (utterance) => utterance.id
       )
     : NO_IDS
+  // Plan 225 D4 b: the viewers' `!link` cards, minus the ones kept here.
+  const [keptLinks, setKeptLinks] = useState<ReadonlySet<string>>(() => new Set())
+  const [linkBusyId, setLinkBusyId] = useState<string | null>(null)
+  const linkCards = live
+    ? (cohostState?.linkMade ?? []).filter((link) => !keptLinks.has(linkMadeId(link)))
+    : []
   const buddyCardsActive =
     removalPane.active ||
     commandStrip !== null ||
     commandCardId !== '' ||
-    proposedUtteranceIds.length > 0
+    proposedUtteranceIds.length > 0 ||
+    (communityCall !== undefined && linkCards.length > 0)
   useEffect(() => {
     const timer = setInterval(
       () => setNowMs(Date.now()),
@@ -982,7 +994,10 @@ export function StreamManager({
     ...proposedUtteranceIds.map((id) => ({
       id,
       label: `${buddyName ?? 'Buddy'} wants to post, it expires soon`
-    }))
+    })),
+    ...(communityCall
+      ? linkCards.map((link) => ({ id: linkMadeId(link), label: linkMadeTitle(link) }))
+      : [])
   ]
   const recentUtterances =
     live &&
@@ -1057,6 +1072,26 @@ export function StreamManager({
           pane is on screen (plan 174 S0.2). */}
       <BuddyCardsArea active={buddyCardsActive || recentUtterances} cards={cardNotices}>
         <CommandStrip view={commandStrip} />
+        {communityCall ? (
+          <LinkMadeCards
+            busyId={linkBusyId}
+            links={linkCards}
+            onKeep={(link) => setKeptLinks((current) => new Set(current).add(linkMadeId(link)))}
+            onUndo={(link) => {
+              const id = linkMadeId(link)
+              setLinkBusyId(id)
+              communityCall('cohost.community.unlink', { accountKey: link.accountKey })
+                .catch((error: unknown) =>
+                  toastUserError(
+                    error,
+                    { action: 'undo', object: 'the link' },
+                    { id: 'community-link-undo' }
+                  )
+                )
+                .finally(() => setLinkBusyId(null))
+            }}
+          />
+        ) : null}
         {onAnswerCommand ? (
           <CommandCards
             chooser={commandChooser}
@@ -1142,6 +1177,20 @@ export function StreamManager({
           onPromiseDismiss={onCohostPromiseDismiss}
           onPromiseDone={onCohostPromiseDone}
           onSayHiGreeted={onCohostAuthorGreeted}
+          onWelcomeBackWave={
+            communityCall
+              ? (entry) => {
+                  communityCall('cohost.community.wave', { personId: entry.personId }).catch(
+                    (error: unknown) =>
+                      toastUserError(
+                        error,
+                        { action: 'wave at', object: entry.name },
+                        { id: 'community-wave' }
+                      )
+                  )
+                }
+              : undefined
+          }
           onRecapDismiss={onCohostRecapDismiss}
           onRecapDraft={
             onCohostRecapDraft
