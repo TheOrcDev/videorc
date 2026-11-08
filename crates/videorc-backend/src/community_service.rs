@@ -1418,12 +1418,23 @@ mod tests {
                 snapshot.auto_chat_sends, 0,
                 "{talk:?}: nothing reached chat"
             );
+            // A community line never enters the lane's cards (it has no
+            // send path); the lane's own greeting card in Suggest mode is
+            // the streamer's to post, as before.
             assert!(
                 snapshot
                     .utterances
                     .iter()
+                    .filter(|u| u.trigger.kind == CohostUtteranceTriggerKind::Community)
                     .all(|u| u.destination_ids.is_empty()),
                 "{talk:?}: no community line names a chat destination"
+            );
+            assert!(
+                snapshot
+                    .utterances
+                    .iter()
+                    .all(|u| !u.text.contains("forgotten you")),
+                "{talk:?}: a community line is never a card"
             );
             // Later chat from the forgotten account changes nothing.
             deliver(
