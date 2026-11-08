@@ -39,10 +39,16 @@ moved: re-read Phase R.
 
 ## Status
 
-- **Status**: EXECUTING 2026-11-08. Phase R is committed on `plan-222-r`
-  (R1 to R5; R6 unpushed). Phase P is committed on `plan-222-cloud-on-main`
-  through P8; P9's gates and P-land follow (the executor's report names what
-  ran and what is owed).
+- **Status**: EXECUTING 2026-11-08.
+  - Phase R: `plan-222-r` `aad92eb60`.
+  - Phase P: `plan-222-cloud-on-main` `ce05fb46e`.
+  - P-land: merged into #727.
+  - P9 gates: green except three (plan 221 Progress):
+    - the renderer budget (an owner call);
+    - `smart-scenes` p95 (inherited host load);
+    - `recording-studio` steps 12 to 44, not run under the disk floor.
+  - P10 web (#85) and P11 runner (#1): done.
+  - Next: Phase L, U and Y on #727.
 - **Priority**: P1. The owner's pick 1 and 2 of five on 2026-11-08 ("the
   stream never drops", "upload once, stream everywhere"). Umbrella: plan 221.
 - **Effort**: XL. About 5 to 7 weeks of agent work in sequence, plus waits
