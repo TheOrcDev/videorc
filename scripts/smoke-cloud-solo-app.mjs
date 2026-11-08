@@ -112,6 +112,18 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //      platform), the runner's platform legs must stay live, and its output
 //      must stay at the show's settings: the receivers' files are checked
 //      for the show's size and frame rate.
+//  11. VIDEORC_CLOUD_SOLO_NODE_DEATH=1 (plan 222 L3, D7): instead of the
+//      computer dying, the node dies. The runner, the agent and MediaMTX
+//      get SIGKILL, the feed proxy refuses the feed, and a listener on the
+//      agent's port accepts and never answers (a node off the network: a
+//      black hole, so every connect and the web's health probe sit in their
+//      timeouts). The desktop's control socket is gone and its feed leg is
+//      down; 20 s on, with `current` still live, it reports the show lost,
+//      the fake web asks the node's health (8 s, no answer) and ends the
+//      show node-unreachable, and the desktop offers direct within 30 s with
+//      one toast. The fake web must count exactly one lost call, direct must
+//      be offered only after the web's end, and Stop then Go Live must
+//      stream directly to fresh receivers on the same ports.
 //
 // Why a proxy and not a killed process: the plan says "kill the stream
 // encoder", but on macOS the stream legs are fifo outputs of the one FFmpeg
@@ -133,6 +145,14 @@ const rollbackWhileDead = process.env.VIDEORC_CLOUD_SOLO_ROLLBACK === '1'
 // for two legs, for one.
 const thinUplinkKbps = Math.max(0, Number(process.env.VIDEORC_CLOUD_SOLO_THIN_UPLINK_KBPS ?? 0))
 const thinUplinkWaitMs = Number(process.env.VIDEORC_CLOUD_SOLO_THIN_UPLINK_WAIT_MS ?? 150_000)
+// Plan 222 L3: the node dies in place of the computer (header, 11).
+const nodeDeath = process.env.VIDEORC_CLOUD_SOLO_NODE_DEATH === '1'
+if (nodeDeath && thinUplinkKbps > 0) {
+  console.error(
+    'VIDEORC_CLOUD_SOLO_NODE_DEATH and VIDEORC_CLOUD_SOLO_THIN_UPLINK_KBPS are separate runs.'
+  )
+  process.exit(2)
+}
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 1_500)
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
@@ -178,10 +198,12 @@ const report = {
   cloudTest: null,
   testCap: null,
   thinUplink: null,
+  nodeDeath: null,
   secretLeaks: []
 }
 let web = null
 let proxy = null
+let blackHole = null
 let watcher = null
 let launched = null
 let backend = null
@@ -312,36 +334,13 @@ try {
       streamKey,
       serverUrl: `rtmp://127.0.0.1:${port}/live`,
       recvPath,
+      // `cloud`: fed by the runner; `direct`: the node-death variant's legs
+      // from this computer after the lost show.
+      phase: 'cloud',
       firstBytesAtMs: null,
       exitedAtMs: null
     }
-    target.child = startChild(
-      name,
-      ffmpegPath,
-      [
-        '-y',
-        '-nostdin',
-        '-hide_banner',
-        // Evidence when a receiver never sees the publisher's EOF: the
-        // connection lines live at info; the per-second stats stay out.
-        '-nostats',
-        '-loglevel',
-        'level+info',
-        '-listen',
-        '1',
-        '-i',
-        `${target.serverUrl}/${streamKey}`,
-        '-c',
-        'copy',
-        '-f',
-        'flv',
-        recvPath
-      ],
-      { logName: `${name}.log` }
-    )
-    target.child.process.once('exit', () => {
-      target.exitedAtMs = Date.now()
-    })
+    spawnReceiver(target)
     receivers.push(target)
   }
   await sleep(listenerBindMs)
@@ -710,9 +709,162 @@ try {
   await sleep(afterResumeMs)
   assertReceiversConnected(receivers, 'after the feed cut resume')
 
+  // 11'. Plan 222 L3 (D7): the node dies, in place of the computer. The
+  //      runner, the agent and MediaMTX get SIGKILL, the feed proxy refuses
+  //      the feed, and the agent's port becomes a black hole. Direct is
+  //      offered only after the web ends the show, within 30 s, once.
+  let nodeDeathAtMs = null
+  if (nodeDeath) {
+    nodeDeathAtMs = Date.now()
+    try {
+      // This run's own runner pid from the node's registry, never a scan.
+      process.kill(runnerPid, 'SIGKILL')
+    } catch {
+      // Already gone.
+    }
+    agent.process.kill('SIGKILL')
+    mediamtx.process.kill('SIGKILL')
+    proxy.cut()
+    blackHole = await startBlackHole(ports.agent)
+    log(
+      '[node death] the runner, the agent and MediaMTX are gone; the feed is refused and the agent port is a black hole'
+    )
+    const receiversClosedAfterDeath = await waitFor(
+      () => receivers.every((receiver) => receiver.child.process.exitCode !== null) || null,
+      20_000,
+      "the receivers' connections to close after the node died"
+    )
+      .then(() => true)
+      .catch(() => false)
+    const offered = await waitFor(
+      () =>
+        collected.cloudStates.find(
+          (entry) => entry.atMs >= nodeDeathAtMs && entry.status?.directFallbackAvailable === true
+        ) ?? null,
+      45_000,
+      'the desktop to offer direct after the lost show'
+    ).catch(() => null)
+    const offeredAtMs = offered?.atMs ?? null
+    const lostCalls = web.state.calls.filter(
+      (call) => call.method === 'POST' && call.path === `/api/cloud/shows/${showId}/lost`
+    )
+    const lostReports = web.state.lostReports.filter((entry) => entry.showId === showId)
+    const endedReport = lostReports.find((entry) => entry.outcome === 'ended')
+    const lostAnsweredAtMs = endedReport?.answeredAt ? Date.parse(endedReport.answeredAt) : null
+    let lostToasts = 0
+    let previouslyOffered = false
+    for (const entry of collected.cloudStates) {
+      const offeredNow = entry.status?.directFallbackAvailable === true
+      if (offeredNow && !previouslyOffered) lostToasts += 1
+      previouslyOffered = offeredNow
+    }
+    // The black hole has done its work: the next create must fail fast.
+    await blackHole.close()
+    blackHole = null
+    report.nodeDeath = {
+      at: new Date(nodeDeathAtMs).toISOString(),
+      receiversClosedAfterDeath,
+      directOfferedAfterSeconds:
+        offeredAtMs !== null ? secondsBetween(nodeDeathAtMs, offeredAtMs) : null,
+      maxDirectSeconds: 30,
+      phase: offered?.status?.phase ?? null,
+      endReason: offered?.status?.endReason ?? null,
+      message: offered?.status?.message ?? null,
+      lostCalls: lostCalls.length,
+      lostReports: lostReports.map((entry) => ({
+        outcome: entry.outcome,
+        probe: entry.probe,
+        probeMs: entry.probeMs,
+        feedFailedSeconds: entry.feedFailedSeconds,
+        controlLost: entry.controlLost
+      })),
+      offeredAfterWebEnded:
+        offeredAtMs !== null && lostAnsweredAtMs !== null && offeredAtMs >= lostAnsweredAtMs,
+      lostToasts,
+      feedLegDown: collected.health.some(
+        (event) =>
+          event.atMs >= nodeDeathAtMs &&
+          (event.code === 'stream-target-reconnecting' || event.code === 'stream-target-failed')
+      ),
+      directGoLive: null,
+      directReceiversGotBytes: null,
+      fallbackReason: null
+    }
+    log(
+      `[node death] direct offered ${report.nodeDeath.directOfferedAfterSeconds ?? 'never'} s after the death (phase ${report.nodeDeath.phase}, end ${report.nodeDeath.endReason}); lost calls ${lostCalls.length} (${lostReports.map((entry) => `${entry.outcome} after a ${entry.probeMs ?? '?'} ms probe`).join('; ') || 'none'}); toasts ${lostToasts}; receivers closed ${receiversClosedAfterDeath}`
+    )
+
+    // Stop, then go live again: directly, to fresh receivers on the same
+    // ports (the old ones exited with the runner).
+    const stoppedLost = await request(backend, timeoutMs, 'session.stop', {})
+    sessionActive = false
+    log(`[node death] Stop returned (${stoppedLost.state}); going live again`)
+    for (const receiver of [...receivers]) {
+      if (receiver.phase !== 'cloud') continue
+      const direct = {
+        ...receiver,
+        name: `${receiver.name}-direct`,
+        recvPath: join(outputDirectory, `${receiver.name}-direct.flv`),
+        phase: 'direct',
+        firstBytesAtMs: null,
+        exitedAtMs: null,
+        child: null
+      }
+      rmSync(direct.recvPath, { force: true })
+      spawnReceiver(direct)
+      receivers.push(direct)
+    }
+    await sleep(listenerBindMs)
+    // The output-directory capability is single-use: a fresh one per start.
+    authorization = await requestSmokeCommand(
+      smoke,
+      'authorize-smoke-resource',
+      { kind: 'output-directory', path: outputDirectory },
+      { timeoutMs }
+    )
+    const direct = await request(
+      backend,
+      timeoutMs,
+      'session.start',
+      sessionParams(authorization.capabilityId)
+    )
+    if (direct.state !== 'recording') {
+      throw new Error(`Go Live after the lost show did not start: ${JSON.stringify(direct)}`)
+    }
+    sessionActive = true
+    const directUrl = String(direct.streamUrl ?? '')
+    report.nodeDeath.directGoLive =
+      !/videorc-cloud|rtmps:\/\/(localhost|127\.0\.0\.1):/.test(directUrl) &&
+      receivers.some(
+        (receiver) =>
+          receiver.phase === 'direct' && directUrl.includes(`127.0.0.1:${receiver.port}`)
+      )
+    const fallback = await waitForCloudStatus(
+      backend,
+      (status) => status.fallback?.sessionId === direct.sessionId,
+      20_000,
+      'the direct Go Live to say why it streamed directly'
+    ).catch(() => null)
+    report.nodeDeath.fallbackReason = fallback?.fallback?.reason ?? null
+    report.nodeDeath.directReceiversGotBytes = await waitFor(
+      () =>
+        receivers
+          .filter((receiver) => receiver.phase === 'direct')
+          .every((receiver) => receiver.firstBytesAtMs !== null) || null,
+      20_000,
+      'the direct receivers to take bytes'
+    )
+      .then(() => true)
+      .catch(() => false)
+    log(
+      `[node death] session ${direct.sessionId} streams directly: ${report.nodeDeath.directGoLive} (fallback ${report.nodeDeath.fallbackReason ?? 'none'}); direct receivers taking bytes ${report.nodeDeath.directReceiversGotBytes}`
+    )
+    await sleep(afterResumeMs)
+  }
+
   // 11. Drop 2: the computer dies. SIGKILL to the dev app's whole process
   //     group (the one the launcher created), so nothing says goodbye.
-  if (!skipDeath) {
+  if (!skipDeath && !nodeDeath) {
     const killAtMs = Date.now()
     await killAppHard(launched)
     launched = null
@@ -953,22 +1105,28 @@ try {
   const stopMs = Date.now() - stopRequestedAtMs
   sessionActive = false
   log(`Stop returned in ${stopMs} ms (${stopped.state})`)
-  const webEndCalled = await waitFor(
-    () =>
-      web.state.calls.some(
-        (call) =>
-          call.method === 'POST' &&
-          call.path === `/api/cloud/shows/${showId}/end` &&
-          call.status === 200
-      ) || null,
-    10_000,
-    'the web end call'
-  ).catch(() => false)
-  const showEndedOnNode = await waitFor(
-    () => registryShowEnded(agentStateDir, showId) || null,
-    20_000,
-    'the node registry to list the show as ended'
-  ).catch(() => false)
+  // After a node death the show ended through the lost route and the node
+  // is gone: neither the end call nor the registry can say anything.
+  const webEndCalled = nodeDeath
+    ? null
+    : await waitFor(
+        () =>
+          web.state.calls.some(
+            (call) =>
+              call.method === 'POST' &&
+              call.path === `/api/cloud/shows/${showId}/end` &&
+              call.status === 200
+          ) || null,
+        10_000,
+        'the web end call'
+      ).catch(() => false)
+  const showEndedOnNode = nodeDeath
+    ? null
+    : await waitFor(
+        () => registryShowEnded(agentStateDir, showId) || null,
+        20_000,
+        'the node registry to list the show as ended'
+      ).catch(() => false)
   const runnerExited = await waitFor(
     () => !pidAlive(runnerPid) || null,
     20_000,
@@ -1049,11 +1207,16 @@ try {
       holdMs: report.drops[0]?.holdMs ?? null
     })
     const fileZeroMs = receiver.firstBytesAtMs - (anchor?.offsetSeconds ?? 0) * 1000
+    // A cloud receiver's connection lasts until Stop, or until the node died
+    // (L3); a direct receiver (L3) is this computer's own leg and sees no hold.
+    const connectedUntilMs =
+      receiver.phase === 'direct' ? stopRequestedAtMs : (nodeDeathAtMs ?? stopRequestedAtMs)
     const holds = []
-    for (const [index, drop] of report.drops.entries()) {
+    const judgedDrops = receiver.phase === 'direct' ? [] : report.drops
+    for (const [index, drop] of judgedDrops.entries()) {
       // The thin-uplink phase (11b) may hold the runner while the feed
       // overflows: the last drop's "nothing freezes after" ends where it starts.
-      const nextCutMs = report.drops[index + 1]?.cutMs ?? thinStartMs ?? endMs
+      const nextCutMs = report.drops[index + 1]?.cutMs ?? thinStartMs ?? nodeDeathAtMs ?? endMs
       const verdict = evaluateHoldOnReceiver({
         freezes,
         fileStartMs: fileZeroMs,
@@ -1074,16 +1237,17 @@ try {
       }
       holds.push({ kind: drop.kind, ...verdict, card })
     }
-    const expectedSeconds = (stopRequestedAtMs - receiver.firstBytesAtMs) / 1000
+    const expectedSeconds = (connectedUntilMs - receiver.firstBytesAtMs) / 1000
     report.receivers.push({
       name: receiver.name,
+      phase: receiver.phase,
       file: receiver.recvPath,
       bytes: fileSize(receiver.recvPath),
       firstBytesAt: receiver.firstBytesAtMs
         ? new Date(receiver.firstBytesAtMs).toISOString()
         : null,
       exitedAt: receiver.exitedAtMs ? new Date(receiver.exitedAtMs).toISOString() : null,
-      stayedConnected: receiver.exitedAtMs === null || receiver.exitedAtMs >= stopRequestedAtMs,
+      stayedConnected: receiver.exitedAtMs === null || receiver.exitedAtMs >= connectedUntilMs,
       exitedAfterStop: receiver.exitedAtMs !== null,
       ...probe,
       minDurationSeconds: Math.round(expectedSeconds * 0.8 * 10) / 10,
@@ -1143,6 +1307,9 @@ try {
       (drop2
         ? `the dead computer's show held in ${drop2.timeToHoldSeconds} s and resumed ${drop2.timeToResumeSeconds} s after Resume; `
         : 'the computer-dies drop was skipped; ') +
+      (report.nodeDeath
+        ? `the dead node's show was ended by the web after ${report.nodeDeath.lostCalls} lost call(s) and direct was offered ${report.nodeDeath.directOfferedAfterSeconds} s after the death, then Go Live streamed directly; `
+        : '') +
       (report.thinUplink
         ? `under a ${report.thinUplink.capKbps} kbps uplink the stream bitrate stepped down to ${report.thinUplink.bitrateKbps} of ${report.thinUplink.chosenBitrateKbps} kbps after ${report.thinUplink.loweredAfterSeconds} s with ${report.thinUplink.overflowEvents} overflow event(s) naming the feed; `
         : '') +
@@ -1861,6 +2028,73 @@ function startFeedProxy({ listenPort, targetPort }) {
   })
 }
 
+/** One fake platform: a one-shot RTMP server recording what it gets. */
+function spawnReceiver(target) {
+  target.child = startChild(
+    target.name,
+    ffmpegPath,
+    [
+      '-y',
+      '-nostdin',
+      '-hide_banner',
+      // Evidence when a receiver never sees the publisher's EOF: the
+      // connection lines live at info; the per-second stats stay out.
+      '-nostats',
+      '-loglevel',
+      'level+info',
+      '-listen',
+      '1',
+      '-i',
+      `${target.serverUrl}/${target.streamKey}`,
+      '-c',
+      'copy',
+      '-f',
+      'flv',
+      target.recvPath
+    ],
+    { logName: `${target.name}.log` }
+  )
+  target.child.process.once('exit', () => {
+    target.exitedAtMs = Date.now()
+  })
+}
+
+/**
+ * A node off the network (plan 222 L3): a listener on the dead agent's port
+ * that accepts every connection and never answers, so the desktop's control
+ * reconnects and the web's health probe sit in their timeouts instead of
+ * hearing "connection refused". The port is free once the agent died; the
+ * bind retries briefly for the kernel to release it.
+ */
+function startBlackHole(port) {
+  const sockets = new Set()
+  const server = createNetServer((socket) => {
+    sockets.add(socket)
+    socket.on('error', () => {})
+    socket.on('close', () => sockets.delete(socket))
+  })
+  return new Promise((resolveListen, rejectListen) => {
+    let attempts = 0
+    server.on('error', (error) => {
+      if (error.code === 'EADDRINUSE' && attempts < 50) {
+        attempts += 1
+        setTimeout(() => server.listen(port, '127.0.0.1'), 100)
+        return
+      }
+      rejectListen(error)
+    })
+    server.once('listening', () =>
+      resolveListen({
+        close() {
+          for (const socket of sockets) socket.destroy()
+          return new Promise((resolveClose) => server.close(() => resolveClose()))
+        }
+      })
+    )
+    server.listen(port, '127.0.0.1')
+  })
+}
+
 // --- Artifacts -----------------------------------------------------------------------
 
 async function probeMedia(filePath) {
@@ -1974,6 +2208,7 @@ function summarizeWeb(state) {
     endShowsSent: state.endShowsSent,
     droppedSrt: state.droppedSrt,
     agentCalls: state.agentCalls,
+    lostReports: state.lostReports,
     shows: [...state.shows.values()].map((show) => ({
       id: show.id,
       kind: show.kind,
@@ -2178,6 +2413,7 @@ async function cleanup() {
   for (const entry of [...children].reverse()) {
     await stopChild(entry)
   }
+  if (blackHole) await blackHole.close().catch(() => {})
   if (proxy) await proxy.close().catch(() => {})
   if (web) await web.close().catch(() => {})
 }

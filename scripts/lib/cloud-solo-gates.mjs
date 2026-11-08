@@ -19,6 +19,8 @@ export const HOLD_CARD_SETTLE_SECONDS = 1.3
 export const MAX_TEST_TIME_TO_LIVE_SECONDS = 20
 /** C6b: the web caps a test show at this long on the node (`maxShowSeconds`). */
 export const TEST_SHOW_CAP_SECONDS = 30
+/** Plan 222 D7: a lost show's direct offer, from the node's death. */
+export const MAX_LOST_SHOW_DIRECT_SECONDS = 30
 
 /**
  * The H.264 encoder for the smoke's own direct publishes (the capped test
@@ -368,6 +370,47 @@ export function evaluateCloudSoloReport(report) {
   }
   if (Array.isArray(report.secretLeaks) && report.secretLeaks.length > 0) {
     failures.push(`a secret reached the renderer events: ${report.secretLeaks.join(', ')}`)
+  }
+  // Plan 222 L3 (D7): the node died. The web ended the show on this
+  // computer's one report, direct was offered within 30 s and only after
+  // that end, the toast came once, and the next Go Live streamed directly.
+  if (report.nodeDeath) {
+    const death = report.nodeDeath
+    if (death.receiversClosedAfterDeath !== true) {
+      failures.push('node death: a receiver kept its connection after the runner was killed')
+    }
+    const limit = death.maxDirectSeconds ?? MAX_LOST_SHOW_DIRECT_SECONDS
+    if (!Number.isFinite(death.directOfferedAfterSeconds)) {
+      failures.push('node death: the desktop never offered direct after the lost show')
+    } else if (death.directOfferedAfterSeconds > limit) {
+      failures.push(
+        `node death: direct was offered ${death.directOfferedAfterSeconds} s after the node died (limit ${limit} s)`
+      )
+    }
+    if (death.lostCalls !== 1) {
+      failures.push(`node death: the web counted ${death.lostCalls ?? 0} lost call(s), not one`)
+    }
+    if (death.endReason !== 'node-unreachable') {
+      failures.push(
+        `node death: the show ended ${death.endReason ?? 'without a reason'}, not node-unreachable`
+      )
+    }
+    if (death.lostToasts !== 1) {
+      failures.push(
+        `node death: the lost toast was offered ${death.lostToasts ?? 0} time(s), not once`
+      )
+    }
+    if (death.offeredAfterWebEnded !== true) {
+      failures.push(
+        'node death: direct was offered before the web ended the show (two publishers could share a key)'
+      )
+    }
+    if (death.directGoLive !== true) {
+      failures.push('node death: the Go Live after the lost show did not stream directly')
+    }
+    if (death.directReceiversGotBytes !== true) {
+      failures.push('node death: a receiver got nothing from the direct stream')
+    }
   }
   // Plan 222 L2: the feed under plan 218. Under a cap the stream bitrate
   // steps down, the overflow names the connection and the feed (never a

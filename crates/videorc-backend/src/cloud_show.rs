@@ -78,6 +78,14 @@ const END_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Reconnect backoff after the socket drops: the runner keeps the show, so
 /// patience costs nothing; the cap keeps a flapping network from hammering.
 const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 2, 4, 8, 15];
+/// Plan 222 D7 (L3): with the control socket gone, a feed leg down this long
+/// while the web still lists the show live is a lost show, reported to the
+/// web, which asks the node's health and ends the show `node-unreachable`
+/// only when the node does not answer. Direct legs open only on that answer.
+pub const LOST_SHOW_FEED_DOWN: Duration = Duration::from_secs(20);
+/// A report the web kept (the node answered, or the web could not ask) is
+/// not repeated before this: the hold covers a feed that is the broken side.
+const LOST_SHOW_REPORT_COOLDOWN: Duration = Duration::from_secs(60);
 /// The hold image sent to the runner, PNG, at most this many bytes.
 const HOLD_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const CLOSE_CODE_BAD_TOKEN: u16 = 4401;
@@ -532,9 +540,18 @@ pub struct ShowRecord {
     /// Plan 222 Wire shape (O5): the node's region, `eu` or `us`.
     #[serde(default)]
     pub region: Option<String>,
+    /// Why an ended show ended (`node-unreachable` from the lost route,
+    /// `host-ended`, …); absent while it is open.
+    #[serde(default)]
+    pub end_reason: Option<String>,
 }
 
 impl ShowRecord {
+    /// The web lists the show as over.
+    pub fn is_ended(&self) -> bool {
+        self.status == "ended"
+    }
+
     /// A Test cloud's show (C6b): never resumable, and never worth keeping
     /// open for a show or another test.
     pub fn is_test(&self) -> bool {
@@ -601,6 +618,27 @@ pub struct CurrentShowResponse {
     pub control: Option<ShowControl>,
     #[serde(default)]
     pub ingest: Option<Vec<ShowIngest>>,
+}
+
+/// `POST /api/cloud/shows/:id/lost` (plan 222 Wire shape, D7): what this
+/// computer saw. Every field optional on the wire; the web only logs them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LostShowReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_failed_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_lost: Option<bool>,
+}
+
+/// The lost route's answer: the show after the web asked the node, open
+/// (`live`, `hold`, …) or ended with its `endReason`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LostShowResponse {
+    pub show: ShowRecord,
 }
 
 /// The web's `{ error: { code, message } }` envelope, classified.
@@ -733,6 +771,13 @@ pub trait CloudWebApi: Send + Sync + 'static {
         &self,
         bearer: &str,
     ) -> impl Future<Output = std::result::Result<AiCapabilitiesCloud, CloudApiError>> + Send;
+    /// Plan 222 D7: this computer lost its show; the web asks the node.
+    fn report_lost_show(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        report: &LostShowReport,
+    ) -> impl Future<Output = std::result::Result<LostShowResponse, CloudApiError>> + Send;
 }
 
 // --- Wire: the control socket -------------------------------------------------
@@ -1106,6 +1151,12 @@ pub struct CloudShowRuntime {
     show_seen: Option<String>,
     /// `remembered_show` as last handed to the `remember` hook.
     remembered_persisted: Option<String>,
+    /// Plan 222 D7: when this computer's own feed leg to the show went down
+    /// (reconnecting or failed), while a session feeds it; `None` while it
+    /// is up. Set by the session's FFmpeg monitor (`note_feed_leg`).
+    feed_down_since: Option<tokio::time::Instant>,
+    /// The last lost report the web kept, so it is not repeated at once.
+    lost_reported_at: Option<tokio::time::Instant>,
 }
 
 pub type CloudShowSlot = Arc<StdMutex<CloudShowRuntime>>;
@@ -1296,7 +1347,28 @@ impl CloudShowRuntime {
         self.generation += 1;
         self.control_tx = None;
         self.connected = false;
+        self.feed_down_since = None;
+        self.lost_reported_at = None;
         self.generation
+    }
+
+    /// How long this computer's feed to the show has been down, while a
+    /// session feeds it; `None` while it is up or nothing feeds the show.
+    pub fn feed_down_for(&self, now: tokio::time::Instant) -> Option<Duration> {
+        self.feeding_session()?;
+        self.feed_down_since
+            .map(|since| now.saturating_duration_since(since))
+    }
+
+    /// Plan 222 D7: when the lost report is due, given the feed clock and
+    /// the last report the web kept; `None` while the feed is up.
+    fn lost_report_due_at(&self) -> Option<tokio::time::Instant> {
+        self.feeding_session()?;
+        let feed_due = self.feed_down_since? + LOST_SHOW_FEED_DOWN;
+        Some(match self.lost_reported_at {
+            Some(reported) => feed_due.max(reported + LOST_SHOW_REPORT_COOLDOWN),
+            None => feed_due,
+        })
     }
 
     fn clear_show(&mut self, end_reason: Option<String>) {
@@ -1358,6 +1430,24 @@ pub fn launch_check_due(runtime: &CloudShowRuntime, signed_in: bool) -> bool {
         && (runtime.may_own_a_show()
             || runtime.entitlement.has_cloud_plan()
             || runtime.remembered_show.is_some())
+}
+
+/// Plan 222 D7: the session's own FFmpeg monitor reports its cloud feed leg
+/// down (reconnecting or failed) or up again. Only the session feeding the
+/// show moves the clock; a repeat while down keeps the first instant.
+pub fn note_feed_leg(slot: &CloudShowSlot, session_id: &str, down: bool) {
+    let mut runtime = lock(slot);
+    if runtime.feeding_session().as_deref() != Some(session_id) {
+        return;
+    }
+    if down {
+        if runtime.feed_down_since.is_none() {
+            runtime.feed_down_since = Some(tokio::time::Instant::now());
+        }
+    } else {
+        runtime.feed_down_since = None;
+        runtime.lost_reported_at = None;
+    }
 }
 
 /// Hands a session id and the runner's legs to the session's leg model.
@@ -1635,6 +1725,24 @@ enum LoopExit {
     Ended(Option<String>),
     /// The web confirmed the show gone while the socket was down.
     Gone,
+    /// Plan 222 D7: this computer reported the show lost and the web ended
+    /// it (`node-unreachable` when the node did not answer).
+    Lost(String),
+}
+
+/// What one reconnect round produced: a connect attempt's answer, or the
+/// lost report coming due while the attempt was still in flight.
+enum ReconnectRound<T> {
+    Attempt(std::result::Result<(T, RunnerState), HelloFailure>),
+    LostDue,
+}
+
+/// Sleeps until `deadline`; never wakes without one.
+async fn until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
@@ -1685,6 +1793,16 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             LoopExit::Gone => {
                 if self.current() {
                     self.mark_gone("show-gone", "Videorc Cloud no longer has this show.");
+                }
+            }
+            LoopExit::Lost(end_reason) => {
+                if self.current() {
+                    let message = if end_reason == "node-unreachable" {
+                        "Videorc Cloud lost your show: its server stopped answering."
+                    } else {
+                        "Videorc Cloud no longer has this show."
+                    };
+                    self.mark_gone(&end_reason, message);
                 }
             }
         }
@@ -1924,11 +2042,36 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         let mut attempt = 0usize;
         loop {
             let wait = RECONNECT_BACKOFF_SECONDS[attempt.min(RECONNECT_BACKOFF_SECONDS.len() - 1)];
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+            // Plan 222 D7: the lost report is on its own clock. A connect to
+            // a node that fell off the network sits in its timeout for 8 s,
+            // so the report would otherwise wait for the attempt to fail.
+            let round = {
+                let connector = self.context.connector.as_ref();
+                let control = &self.control;
+                let lost_due = lock(&self.context.slot).lost_report_due_at();
+                tokio::select! {
+                    result = async {
+                        tokio::time::sleep(Duration::from_secs(wait)).await;
+                        connect_and_hello(connector, control).await
+                    } => ReconnectRound::Attempt(result),
+                    _ = until(lost_due) => ReconnectRound::LostDue,
+                }
+            };
             if !self.current() {
                 return Err(LoopExit::Superseded);
             }
-            match connect_and_hello(self.context.connector.as_ref(), &self.control).await {
+            let result = match round {
+                ReconnectRound::LostDue => {
+                    if let Some(exit) = self.report_lost_show().await {
+                        return Err(exit);
+                    }
+                    // Kept, or unknown: the next round starts its backoff
+                    // over, with the cooldown holding the next report.
+                    continue;
+                }
+                ReconnectRound::Attempt(result) => result,
+            };
+            match result {
                 Ok((transport, welcome)) => {
                     self.restart_seen_on_socket = false;
                     self.resend = None;
@@ -1978,6 +2121,67 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     .unwrap_or(true),
             ),
             Err(_) => None,
+        }
+    }
+
+    /// Plan 222 D7: the control socket is gone and this computer's feed has
+    /// been down for `LOST_SHOW_FEED_DOWN`. Ask the web whether the show is
+    /// still live (gone: the old rule); if it is, report it lost, and go
+    /// direct only when the web ends it. A kept show (the node answered the
+    /// web, or the web could not ask) and a report the web could not take
+    /// both keep the show: the hold covers a feed that is the broken side.
+    async fn report_lost_show(&mut self) -> Option<LoopExit> {
+        let now = tokio::time::Instant::now();
+        let feed_down = lock(&self.context.slot).feed_down_for(now)?;
+        {
+            lock(&self.context.slot).lost_reported_at = Some(now);
+        }
+        match self.confirm_show_gone().await {
+            Some(true) => return Some(LoopExit::Gone),
+            Some(false) => {}
+            // The web unreachable: unknown, never direct.
+            None => return None,
+        }
+        let report = LostShowReport {
+            at: Some(now_rfc3339()),
+            feed_failed_seconds: Some(feed_down.as_secs()),
+            control_lost: Some(true),
+        };
+        match self
+            .context
+            .web
+            .report_lost_show(&self.bearer, &self.show_id, &report)
+            .await
+        {
+            Ok(answer) if answer.show.id != self.show_id => {
+                tracing::info!(
+                    "Videorc Cloud answered the lost report with another show; this one is gone"
+                );
+                Some(LoopExit::Gone)
+            }
+            Ok(answer) if answer.show.is_ended() => {
+                let end_reason = answer
+                    .show
+                    .end_reason
+                    .unwrap_or_else(|| "node-unreachable".to_string());
+                tracing::warn!(
+                    show = %self.show_id,
+                    %end_reason,
+                    feed_down_seconds = feed_down.as_secs(),
+                    "Videorc Cloud ended the show this computer reported lost"
+                );
+                Some(LoopExit::Lost(end_reason))
+            }
+            Ok(_) => {
+                tracing::info!(
+                    "Videorc Cloud kept the show this computer reported lost (its node answered); still reconnecting"
+                );
+                None
+            }
+            Err(error) => {
+                tracing::info!("Videorc Cloud could not take the lost report: {error}");
+                None
+            }
         }
     }
 
@@ -2164,22 +2368,33 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 unconfirmed,
             )
         };
-        if decision != GoLiveDecision::Cloud {
-            // C2, whatever the cloud switch, the rollout or the hours say
-            // (lane 3 F2): while a show the runner holds may still have these
-            // platforms, Go Live feeds that show (C5b) and never opens direct
-            // legs beside it, two publishers on one key.
-            if unconfirmed && let Some(bearer) = bearer.as_deref() {
-                match self.web.current_show(bearer).await {
-                    Ok(current) => {
-                        self.hold_current_show(bearer, current).await?;
-                        resumable = lock(&self.slot).resumable_show_id();
-                    }
-                    Err(error) => tracing::info!(
+        // C2, whatever the cloud switch, the rollout or the hours say (lane
+        // 3 F2): while a show the runner holds may still have these
+        // platforms, Go Live feeds that show (C5b) and never opens direct
+        // legs beside it, two publishers on one key. A show this computer
+        // remembers but does not hold is asked about first; when the web
+        // cannot say (plan 222 D6), Go Live streams directly with
+        // `cloud-unchecked`, once, and the show stays remembered.
+        if unconfirmed && let Some(bearer) = bearer.as_deref() {
+            match self.web.current_show(bearer).await {
+                Ok(current) => {
+                    self.hold_current_show(bearer, current).await?;
+                    resumable = lock(&self.slot).resumable_show_id();
+                }
+                Err(error) => {
+                    tracing::info!(
                         "Videorc Cloud could not be asked about the show this computer remembers; Go Live streams directly: {error}"
-                    ),
+                    );
+                    self.record_fallback(
+                        session_id,
+                        CloudFallbackReason::CloudUnchecked,
+                        Some(error.to_string()),
+                    );
+                    return Ok(PrepareOutcome::Direct);
                 }
             }
+        }
+        if decision != GoLiveDecision::Cloud {
             if let Some(show_id) = resumable.as_deref() {
                 let Some(bearer) = bearer.as_deref() else {
                     bail!("Sign in to Videorc to resume the stream.");
@@ -3545,6 +3760,7 @@ mod tests {
                 created_at: Some("2026-10-16T10:00:00Z".to_string()),
                 expires_at: Some("2026-10-16T22:30:00Z".to_string()),
                 region: None,
+                end_reason: None,
             },
             ingest: vec![ShowIngest {
                 orientation: StreamOutputOrientation::Horizontal,
@@ -3614,6 +3830,11 @@ mod tests {
         create_kinds: StdMutex<Vec<String>>,
         end_calls: StdMutex<Vec<String>>,
         current_calls: AtomicUsize,
+        /// Answers for the lost reports, in order (plan 222 D7); empty means
+        /// the web could not be reached.
+        lost: StdMutex<VecDeque<std::result::Result<LostShowResponse, CloudApiError>>>,
+        /// Every lost report sent: the show id and the body.
+        lost_calls: StdMutex<Vec<(String, LostShowReport)>>,
     }
 
     impl CloudWebApi for FakeWeb {
@@ -3665,6 +3886,23 @@ mod tests {
                 seconds_used: 600,
                 ..AiCapabilitiesCloud::default()
             })
+        }
+
+        async fn report_lost_show(
+            &self,
+            _bearer: &str,
+            show_id: &str,
+            report: &LostShowReport,
+        ) -> std::result::Result<LostShowResponse, CloudApiError> {
+            self.lost_calls
+                .lock()
+                .unwrap()
+                .push((show_id.to_string(), report.clone()));
+            self.lost
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Err(CloudApiError::NodeUnreachable))
         }
     }
 
@@ -3754,7 +3992,12 @@ mod tests {
 
     impl FakeConnector {
         async fn accept(&self) -> FakeServer {
-            for _ in 0..10_000 {
+            self.accept_within(10).await
+        }
+
+        /// The next socket the desktop opens, within `seconds` of paused time.
+        async fn accept_within(&self, seconds: u64) -> FakeServer {
+            for _ in 0..(seconds * 1000) {
                 if let Some(server) = self.servers.lock().unwrap().pop_front() {
                     return server;
                 }
@@ -3909,6 +4152,17 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         panic!("the condition never held in 30 s of paused time");
+    }
+
+    /// `wait_until` with its own budget of paused seconds.
+    async fn wait_until_within(seconds: u64, mut done: impl FnMut() -> bool) {
+        for _ in 0..(seconds * 1000) {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("the condition never held in {seconds} s of paused time");
     }
 
     async fn wait_for_phase(slot: &CloudShowSlot, phase: CloudPhase) {
@@ -5873,6 +6127,279 @@ mod tests {
             lock(&harness.context.slot).remembered_show(),
             Some("sh_abc")
         );
+        // Plan 222 D6: it says so once ("Videorc couldn't check your last
+        // cloud show"), whatever the cloud switch or the plan say.
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(
+            status.fallback.as_ref().map(|fallback| fallback.reason),
+            Some(CloudFallbackReason::CloudUnchecked)
+        );
+        assert_eq!(status.fallback.unwrap().session_id, "session-d");
+    }
+
+    // Plan 222 D6: an entitled account that remembers a show it does not
+    // hold, with videorc.com unreachable, streams directly with the
+    // `cloud-unchecked` reason and creates nothing: the create would only
+    // fail the same way, and the words must name the unchecked show.
+    #[tokio::test(start_paused = true)]
+    async fn a_remembered_show_the_web_cannot_be_asked_about_streams_directly_unchecked() {
+        let harness = harness_remembering(true, Some("sh_abc"));
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-u",
+                Some("bearer".to_string()),
+                Vec::new(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        assert_eq!(harness.context.web.current_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(
+            status.fallback.as_ref().map(|fallback| fallback.reason),
+            Some(CloudFallbackReason::CloudUnchecked)
+        );
+        assert_eq!(status.phase, CloudPhase::Off);
+        assert_eq!(
+            lock(&harness.context.slot).remembered_show(),
+            Some("sh_abc")
+        );
+    }
+
+    /// The web as it answers the lost route: the show, ended or kept.
+    fn lost_answer(status: &str, end_reason: Option<&str>) -> LostShowResponse {
+        LostShowResponse {
+            show: ShowRecord {
+                status: status.to_string(),
+                end_reason: end_reason.map(str::to_string),
+                ..created().show
+            },
+        }
+    }
+
+    // Plan 222 D7 (L3): the control socket is gone and this computer's feed
+    // leg has been down for 20 s while the web still lists the show live.
+    // Then, and not before, the show is reported lost. A kept show (the
+    // node answered the web) keeps the desktop reconnecting under the hold,
+    // and the report is not repeated for a minute; direct legs open only
+    // when the web ends the show, with the web's reason.
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_show_is_reported_after_twenty_seconds_and_direct_opens_only_when_the_web_ends_it()
+     {
+        let harness = harness(true);
+        let server = live_show(&harness).await;
+        // The node fell off the network: every connect is refused, and the
+        // web, asked, keeps saying the show is live.
+        server.drop_socket();
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .extend(std::iter::repeat_n(None, 40));
+        for _ in 0..40 {
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(Ok(held_current(&created())));
+        }
+        wait_for_phase(&harness.context.slot, CloudPhase::Connecting).await;
+        // The feed leg goes down two seconds later.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        note_feed_leg(&harness.context.slot, "session-1", true);
+        // The web has been asked (attempts 1 to 3: 3, 7 and 15 s) and said
+        // live each time; nothing was reported, the feed is not 20 s down.
+        wait_until(|| harness.context.web.current_calls.load(Ordering::SeqCst) >= 3).await;
+        assert!(harness.context.web.lost_calls.lock().unwrap().is_empty());
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Connecting);
+
+        // 20 s after the feed went down: the report, from inside the backoff.
+        harness
+            .context
+            .web
+            .lost
+            .lock()
+            .unwrap()
+            .push_back(Ok(lost_answer("live", None)));
+        wait_until(|| harness.context.web.lost_calls.lock().unwrap().len() == 1).await;
+        {
+            let calls = harness.context.web.lost_calls.lock().unwrap();
+            let (show_id, report) = &calls[0];
+            assert_eq!(show_id, "sh_abc");
+            assert_eq!(report.control_lost, Some(true));
+            assert!(
+                report
+                    .feed_failed_seconds
+                    .is_some_and(|seconds| (20..=22).contains(&seconds))
+            );
+            assert!(report.at.is_some());
+            let printed = serde_json::to_string(report).unwrap();
+            assert!(printed.contains("\"controlLost\":true"), "{printed}");
+            assert!(printed.contains("\"feedFailedSeconds\":"), "{printed}");
+        }
+        // Kept: the node answered the web. Still Connecting, never direct.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Connecting);
+        assert!(!status.direct_fallback_available);
+        assert!(status.show.is_some());
+        // Not reported again within the minute.
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        assert_eq!(harness.context.web.lost_calls.lock().unwrap().len(), 1);
+
+        // The second report, a minute on: the node did not answer, the web
+        // ended the show. Now, and only now, Failed with direct offered.
+        harness
+            .context
+            .web
+            .lost
+            .lock()
+            .unwrap()
+            .push_back(Ok(lost_answer("ended", Some("node-unreachable"))));
+        wait_until_within(40, || {
+            harness.context.web.lost_calls.lock().unwrap().len() == 2
+        })
+        .await;
+        wait_for_phase(&harness.context.slot, CloudPhase::Failed).await;
+        let status = lock(&harness.context.slot).status();
+        assert!(status.direct_fallback_available);
+        assert_eq!(status.end_reason.as_deref(), Some("node-unreachable"));
+        assert_eq!(status.show, None);
+        assert!(status.message.unwrap().contains("lost your show"));
+        assert_eq!(harness.context.web.lost_calls.lock().unwrap().len(), 2);
+        // The stop settles it: Off, and nothing to end on the web.
+        harness
+            .context
+            .on_session_stopped("session-1", Some("bearer".to_string()))
+            .await;
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+    }
+
+    // Plan 222 D7: a node that fell off the network answers nothing, so a
+    // connect sits in its timeout. The report runs on its own clock, from
+    // inside that attempt: about 20 s after the feed went down, not after
+    // the attempt gave up.
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_report_interrupts_a_connect_that_hangs_and_lands_at_twenty_seconds() {
+        let harness = harness(true);
+        let server = live_show(&harness).await;
+        let connects_before = harness.context.connector.connects.load(Ordering::SeqCst);
+        server.drop_socket();
+        // Every reconnect connects and then hears nothing (the black hole).
+        for _ in 0..4 {
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(Ok(held_current(&created())));
+        }
+        harness
+            .context
+            .web
+            .lost
+            .lock()
+            .unwrap()
+            .push_back(Ok(lost_answer("ended", Some("node-unreachable"))));
+        wait_for_phase(&harness.context.slot, CloudPhase::Connecting).await;
+        let feed_down_at = tokio::time::Instant::now();
+        note_feed_leg(&harness.context.slot, "session-1", true);
+        wait_until_within(40, || {
+            harness.context.web.lost_calls.lock().unwrap().len() == 1
+        })
+        .await;
+        let reported_after = feed_down_at.elapsed();
+        assert!(
+            reported_after >= LOST_SHOW_FEED_DOWN
+                && reported_after < LOST_SHOW_FEED_DOWN + Duration::from_secs(2),
+            "reported {reported_after:?} after the feed went down"
+        );
+        // One hanging attempt was in flight; the welcome timeout (20 s from
+        // 1 s in) had not fired.
+        assert_eq!(
+            harness.context.connector.connects.load(Ordering::SeqCst),
+            connects_before + 1
+        );
+        wait_for_phase(&harness.context.slot, CloudPhase::Failed).await;
+        let status = lock(&harness.context.slot).status();
+        assert!(status.direct_fallback_available);
+        assert_eq!(status.end_reason.as_deref(), Some("node-unreachable"));
+    }
+
+    // Plan 222 D7: a report the web cannot take keeps the show (unknown is
+    // never direct), and a feed that comes back clears the clock: nothing
+    // more is reported, and the socket's own reconnect carries on.
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_report_the_web_cannot_take_keeps_the_show_and_a_feed_back_up_clears_the_clock()
+    {
+        let harness = harness(true);
+        let server = live_show(&harness).await;
+        server.drop_socket();
+        // Refused for as long as this test keeps the socket down.
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .extend(std::iter::repeat_n(None, 40));
+        for _ in 0..40 {
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(Ok(held_current(&created())));
+        }
+        wait_for_phase(&harness.context.slot, CloudPhase::Connecting).await;
+        note_feed_leg(&harness.context.slot, "session-1", true);
+        // The lost queue is empty: the web cannot take the report.
+        wait_until(|| harness.context.web.lost_calls.lock().unwrap().len() == 1).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Connecting);
+        assert!(!status.direct_fallback_available);
+        // The feed comes back: the clock clears, and nothing is reported
+        // again however long the socket stays down.
+        note_feed_leg(&harness.context.slot, "session-1", false);
+        assert_eq!(
+            lock(&harness.context.slot).feed_down_for(tokio::time::Instant::now()),
+            None
+        );
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(harness.context.web.lost_calls.lock().unwrap().len(), 1);
+        // Another session's monitor never moves this show's clock.
+        note_feed_leg(&harness.context.slot, "session-other", true);
+        assert_eq!(
+            lock(&harness.context.slot).feed_down_for(tokio::time::Instant::now()),
+            None
+        );
+        // The node is back: the next attempt (within the 15 s backoff)
+        // connects and is welcomed.
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .clear();
+        let mut reconnected = harness.context.connector.accept_within(20).await;
+        assert_eq!(reconnected.next_frame().await["t"], "hello");
+        reconnected.send(welcome_with_legs("live"));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+        assert_eq!(harness.context.web.lost_calls.lock().unwrap().len(), 1);
     }
 
     /// A hand-over that failed while the web could not confirm the show's

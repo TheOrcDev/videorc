@@ -324,6 +324,58 @@ describe('cloud solo gates: the run verdict', () => {
     assert.deepEqual(evaluateCloudSoloReport(withoutTest), [])
   })
 
+  // Plan 222 L3 (D7): the node-death variant's block, judged beside the rest.
+  it('judges the lost show after a node death (plan 222 L3)', () => {
+    const death = () => ({
+      receiversClosedAfterDeath: true,
+      directOfferedAfterSeconds: 28.6,
+      maxDirectSeconds: 30,
+      endReason: 'node-unreachable',
+      lostCalls: 1,
+      lostToasts: 1,
+      offeredAfterWebEnded: true,
+      directGoLive: true,
+      directReceiversGotBytes: true
+    })
+    const clean = passing()
+    clean.nodeDeath = death()
+    // The cloud receivers exited with the node, the direct ones after Stop.
+    clean.receivers.push({ ...receiver('receiver-1-direct'), phase: 'direct', holds: [] })
+    assert.deepEqual(evaluateCloudSoloReport(clean), [])
+
+    const broken = passing()
+    broken.nodeDeath = {
+      ...death(),
+      receiversClosedAfterDeath: false,
+      directOfferedAfterSeconds: 41,
+      endReason: 'show-gone',
+      lostCalls: 2,
+      lostToasts: 0,
+      offeredAfterWebEnded: false,
+      directGoLive: false,
+      directReceiversGotBytes: false
+    }
+    const failures = evaluateCloudSoloReport(broken)
+    for (const needle of [
+      'kept its connection',
+      '41 s after the node died',
+      '2 lost call(s)',
+      'show-gone, not node-unreachable',
+      '0 time(s), not once',
+      'before the web ended',
+      'did not stream directly',
+      'got nothing from the direct stream'
+    ]) {
+      assert.ok(
+        failures.some((line) => line.includes(needle)),
+        `${needle}: ${failures.join('\n')}`
+      )
+    }
+    const never = passing()
+    never.nodeDeath = { ...death(), directOfferedAfterSeconds: null }
+    assert.ok(evaluateCloudSoloReport(never).some((line) => line.includes('never offered direct')))
+  })
+
   // Plan 222 L2: the thin-uplink variant's block, judged beside the rest.
   it('judges the feed under a thin uplink (plan 222 L2)', () => {
     const thin = () => ({

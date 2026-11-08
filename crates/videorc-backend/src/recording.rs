@@ -29086,6 +29086,27 @@ async fn publish_stream_leg_update(
     {
         return;
     }
+    // Plan 222 D7: the cloud feed leg's own clock. Down (reconnecting or
+    // failed) and up again reach the show's runtime, which reports the show
+    // lost once the control socket is gone too and the feed stayed down.
+    match &update {
+        StreamLegUpdate::Reconnecting { position, .. }
+        | StreamLegUpdate::Failed { position, .. }
+        | StreamLegUpdate::Resumed { position } => {
+            let cloud_feed = stream_targets_snapshot_value(targets)
+                .targets
+                .get(*position)
+                .is_some_and(|target| is_cloud_feed_target(&target.target_id));
+            if cloud_feed {
+                crate::cloud_show::note_feed_leg(
+                    &state.cloud_show,
+                    session_id,
+                    !matches!(update, StreamLegUpdate::Resumed { .. }),
+                );
+            }
+        }
+        _ => {}
+    }
     match update {
         StreamLegUpdate::Reconnecting { position, reason } => {
             let transition = transition_stream_target(

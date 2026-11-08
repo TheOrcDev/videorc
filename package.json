@@ -295,6 +295,7 @@
     "smoke:discord-announce": "node scripts/smoke-discord-announce-app.mjs",
     "smoke:cloud-solo": "node scripts/smoke-cloud-solo-app.mjs",
     "smoke:cloud-solo:thin-uplink": "node scripts/run-with-env.mjs VIDEORC_CLOUD_SOLO_THIN_UPLINK_KBPS=3500 -- node scripts/smoke-cloud-solo-app.mjs",
+    "smoke:cloud-solo:node-death": "node scripts/run-with-env.mjs VIDEORC_CLOUD_SOLO_NODE_DEATH=1 -- node scripts/smoke-cloud-solo-app.mjs",
     "smoke:packaged": "node scripts/smoke-packaged-app.mjs",
     "smoke:packaged:bundled": "node scripts/smoke-packaged-app.mjs --require-bundled-ffmpeg",
     "smoke:packaged:native-preview": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_SMOKE_PACKAGED_APP=1 VIDEORC_EXPECT_NATIVE_METAL_PREVIEW=1 -- node scripts/smoke-preview-surface-app.mjs",

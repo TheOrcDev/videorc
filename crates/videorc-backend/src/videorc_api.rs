@@ -22,6 +22,8 @@ pub(crate) const AI_CAPABILITIES_REQUEST_TIMEOUT: std::time::Duration =
 /// the node, so the create gets more room than the rest.
 pub(crate) const CLOUD_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) const CLOUD_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// The lost route asks the node's health for up to 8 s before it answers.
+pub(crate) const CLOUD_LOST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Co-host ticks are synchronous and small, but the server fans one tick out
 /// across a model ladder: a slow-but-alive gateway needs headroom beyond the
@@ -3196,6 +3198,25 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
             self.http.get(self.endpoint(path)).bearer_auth(bearer),
             path,
             CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn report_lost_show(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        report: &crate::cloud_show::LostShowReport,
+    ) -> std::result::Result<crate::cloud_show::LostShowResponse, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/lost");
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(report),
+            &path,
+            CLOUD_LOST_TIMEOUT,
         )
         .await
     }
