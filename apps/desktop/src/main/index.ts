@@ -13304,11 +13304,20 @@ async function runSmokePreviewMotionCommand(
         true
       )) as { x: number; y: number } | null
       if (!item) return { copied: false, reason: 'Copy link is not in an open menu.' }
+      // The evidence behind a refused copy (plan 225 C4 met one): whether
+      // the document had focus, whether the menu survived the click, and
+      // the renderer's own `[copy]` line.
+      const consoleLines: string[] = []
+      const onConsole = (details: { message: string }): void => {
+        if (details.message.includes('[copy]')) consoleLines.push(details.message)
+      }
+      window.webContents.on('console-message', onConsole)
       const previous = clipboard.readText()
       const marker = `videorc-probe-${randomUUID()}`
       clipboard.writeText(marker)
       try {
         window.focus()
+        const focused = await window.webContents.executeJavaScript('document.hasFocus()', true)
         for (const type of ['mouseDown', 'mouseUp'] as const) {
           window.webContents.sendInputEvent({
             type,
@@ -13323,8 +13332,19 @@ async function runSmokePreviewMotionCommand(
           await new Promise((resolve) => setTimeout(resolve, 50))
           text = clipboard.readText()
         }
-        return { copied: text !== marker, text: text === marker ? null : text }
+        const menuOpen = await window.webContents.executeJavaScript(
+          `Boolean(document.querySelector('[data-testid="comment-link-menu"]'))`,
+          true
+        )
+        return {
+          copied: text !== marker,
+          text: text === marker ? null : text,
+          focused,
+          menuOpen,
+          console: consoleLines
+        }
       } finally {
+        window.webContents.off('console-message', onConsole)
         clipboard.writeText(previous)
       }
     }

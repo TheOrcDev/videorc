@@ -71,13 +71,6 @@ import {
   SendIcon,
   TerminalIcon
 } from '@/components/icons'
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuLabel,
-  ContextMenuTrigger
-} from '@/components/ui/context-menu'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { X_SELF_LINK_REASON, chatRowPerson } from '@/lib/community-view'
 import { Badge } from '@/components/ui/badge'
@@ -278,6 +271,9 @@ export function ChatPane({
     mentions: false,
     search: ''
   })
+  // Plan 225 D11: the row a right-click asked about, and the pointer it
+  // came from; the menu is the list's sibling (ChatPersonMenu).
+  const [personMenu, setPersonMenu] = useState<ChatPersonMenuTarget | null>(null)
   // One prefill stream for the composer: the window's (Buddy Reply, Thank in
   // chat) and a row's ⋯ Reply, in the order they were asked for.
   const [composerPrefill, setComposerPrefill] = useState<ChatPrefill | null>(null)
@@ -597,11 +593,31 @@ export function ChatPane({
               />
             )
           ) : (
-            <ChatPersonMenu messages={shown} onPersonAction={onPersonAction}>
+            <>
               <ol
                 aria-label="Chat messages"
                 className="relative w-full"
                 style={{ height: virtualizer.getTotalSize() }}
+                onContextMenu={
+                  onPersonAction
+                    ? (event) => {
+                        const element = event.target instanceof Element ? event.target : null
+                        // A link keeps its own menu (Open link, Copy link).
+                        if (element?.closest('[data-slot="comment-link"]')) return
+                        event.preventDefault()
+                        const id = element
+                          ?.closest('[data-message-id]')
+                          ?.getAttribute('data-message-id')
+                        const message = id ? (shown.find((entry) => entry.id === id) ?? null) : null
+                        // Nobody to ask about (the streamer, a system line): no menu.
+                        setPersonMenu(
+                          message && chatRowPerson(message)
+                            ? { message, x: event.clientX, y: event.clientY }
+                            : null
+                        )
+                      }
+                    : undefined
+                }
                 onFocusCapture={(event) => {
                   // A click or a Tab onto a row makes it the active one.
                   const id = event.target
@@ -661,7 +677,12 @@ export function ChatPane({
                   )
                 })}
               </ol>
-            </ChatPersonMenu>
+              <ChatPersonMenu
+                target={personMenu}
+                onClose={() => setPersonMenu(null)}
+                onPersonAction={onPersonAction}
+              />
+            </>
           )}
         </ScrollArea>
         {/* Whenever the list is not on the newest message, one way back. */}
@@ -1341,77 +1362,90 @@ function OffAir({
 
 export type ChatPersonAction = 'about' | 'same-person' | 'mark-bot'
 
+/** The row a right-click asked about, and the pointer it came from. */
+interface ChatPersonMenuTarget {
+  message: LiveChatMessage
+  x: number
+  y: number
+}
+
 /**
  * The chat list's one right-click menu (plan 225 D11): About, Same person
- * as… and Mark as bot for the viewer whose row was right-clicked. A link
- * keeps its own menu (Open link, Copy link): its trigger stops the event
- * before it reaches this one. A row with no person (the streamer, a system
- * line) gets no menu.
+ * as… and Mark as bot for the viewer whose row was right-clicked. A menu
+ * opened at the pointer and rendered beside the list, never a Base UI
+ * ContextMenu wrapping the list: Base UI reads the nearest menu context, so
+ * a menu around the list made every link's own menu (Open link, Copy link)
+ * and every row's ⋯ a nested submenu of this one, and Copy link's click no
+ * longer reached the clipboard (probe:comments-window, 2026-11-08). The
+ * list's handler decides who gets a menu: a row with no person (the
+ * streamer, a system line) gets none.
  */
 function ChatPersonMenu({
-  messages,
-  onPersonAction,
-  children
+  target,
+  onClose,
+  onPersonAction
 }: {
-  messages: readonly LiveChatMessage[]
+  target: ChatPersonMenuTarget | null
+  onClose: () => void
   onPersonAction?: (action: ChatPersonAction, message: LiveChatMessage) => void
-  children: ReactElement
-}): ReactElement {
-  const [target, setTarget] = useState<LiveChatMessage | null>(null)
-  if (!onPersonAction) return children
-  const person = target ? chatRowPerson(target) : null
+}): ReactElement | null {
+  const anchor = useMemo(
+    () =>
+      target
+        ? {
+            getBoundingClientRect: () =>
+              DOMRect.fromRect({ x: target.x, y: target.y, width: 0, height: 0 })
+          }
+        : null,
+    [target]
+  )
+  if (!onPersonAction) return null
+  const message = target?.message ?? null
+  const person = message ? chatRowPerson(message) : null
   return (
-    <ContextMenu
+    <DropdownMenu
+      open={message !== null && person !== null}
       onOpenChange={(open) => {
-        if (!open) setTarget(null)
+        if (!open) onClose()
       }}
     >
-      <ContextMenuTrigger
-        render={children}
-        onContextMenuCapture={(event) => {
-          const element = event.target instanceof Element ? event.target : null
-          if (element?.closest('[data-slot="comment-link"]')) return
-          const id = element?.closest('[data-message-id]')?.getAttribute('data-message-id')
-          const message = id ? (messages.find((entry) => entry.id === id) ?? null) : null
-          if (!message || !chatRowPerson(message)) {
-            // Nobody to ask about: no menu at all.
-            event.stopPropagation()
-            event.preventDefault()
-            setTarget(null)
-            return
-          }
-          setTarget(message)
-        }}
-      />
-      <ContextMenuContent className="w-56" data-testid="comment-person-menu">
-        {target && person ? (
+      <DropdownMenuContent
+        align="start"
+        alignOffset={4}
+        anchor={anchor}
+        className="w-56"
+        data-testid="comment-person-menu"
+        side="right"
+        sideOffset={0}
+      >
+        {message && person ? (
           <>
-            <ContextMenuLabel className="truncate font-normal text-subtle">
+            <DropdownMenuLabel className="truncate font-normal text-subtle">
               {person.name}
-            </ContextMenuLabel>
-            <ContextMenuItem onClick={() => onPersonAction('about', target)}>
+            </DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => onPersonAction('about', message)}>
               <AccountIcon aria-hidden />
               About {person.name}
-            </ContextMenuItem>
+            </DropdownMenuItem>
             <DisabledReason
               focusable={false}
-              reason={target.platform === 'x' ? X_SELF_LINK_REASON : null}
+              reason={message.platform === 'x' ? X_SELF_LINK_REASON : null}
             >
-              <ContextMenuItem
-                disabled={target.platform === 'x'}
-                onClick={() => onPersonAction('same-person', target)}
+              <DropdownMenuItem
+                disabled={message.platform === 'x'}
+                onClick={() => onPersonAction('same-person', message)}
               >
                 <LinkIcon aria-hidden />
                 Same person as…
-              </ContextMenuItem>
+              </DropdownMenuItem>
             </DisabledReason>
-            <ContextMenuItem onClick={() => onPersonAction('mark-bot', target)}>
+            <DropdownMenuItem onClick={() => onPersonAction('mark-bot', message)}>
               <TerminalIcon aria-hidden />
               Mark as bot
-            </ContextMenuItem>
+            </DropdownMenuItem>
           </>
         ) : null}
-      </ContextMenuContent>
-    </ContextMenu>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }

@@ -112,9 +112,13 @@ export default function PersonCardHost({
             align="start"
             anchor={anchor ?? undefined}
             aria-label={`About ${request?.target.name ?? ''}`}
-            // Never taller than the room the window leaves: the card scrolls.
-            // (less the collision padding Base UI keeps from the edge).
+            // Never taller than the room the window leaves (less the
+            // collision padding Base UI keeps from the edge): the card
+            // scrolls. And it keeps the row's side, shifted up to fit, instead
+            // of flipping above a row near the middle and running off the top
+            // (the probe saw a card at y -98 at 800 px).
             className="max-h-[calc(var(--available-height)-0.75rem)] w-80 overflow-y-auto"
+            collisionAvoidance={{ side: 'shift', align: 'shift' }}
             data-testid="person-card-popover"
             side="bottom"
           >
