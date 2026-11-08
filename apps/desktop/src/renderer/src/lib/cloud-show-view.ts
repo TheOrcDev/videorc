@@ -27,6 +27,15 @@ export function cloudResumeNotice(
   if (status.phase === 'off' || status.phase === 'ending' || status.phase === 'failed') {
     return null
   }
+  // Plan 224 C-G8: a talk show's guests keep talking; Resume rejoins the room.
+  if (status.show.kind === 'talk') {
+    return {
+      detail: status.hold?.active
+        ? 'Your guests are still on. Viewers see Be right back until you resume.'
+        : 'Your guests are still on.',
+      title: "You're still live through Videorc Cloud."
+    }
+  }
   const remaining = status.hold?.remainingSeconds
   const detail =
     status.hold?.active && typeof remaining === 'number'

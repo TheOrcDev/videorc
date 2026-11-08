@@ -310,18 +310,26 @@ function CloudResumeSlot({
   /** Arms the latency clock, like the Record and Go Live clicks. */
   onResumeClick: () => void
 }): ReactElement | null {
-  const { cloudStatus, resumeCloudShow } = useStudioCloud()
+  const { cloudStatus, resumeCloudShow, talkShow } = useStudioCloud()
   const notice = cloudResumeNotice(cloudStatus, active)
   if (!notice) return null
+  // Plan 224 C-G8: a talk show's Resume rejoins the room (no local session,
+  // so no local source can block it); a solo show's is the start below.
+  const talk = cloudStatus?.show?.kind === 'talk'
+  const resumeBlockedReason = talk ? null : blockedReason
   return (
     <Suspense fallback={null}>
       <CloudResumeNotice
-        blockedReason={blockedReason}
+        blockedReason={resumeBlockedReason}
         notice={notice}
         pending={pending}
         onResume={() => {
-          if (pending || blockedReason) return
+          if (pending || resumeBlockedReason) return
           onResumeClick()
+          if (talk) {
+            void talkShow.resumeRoom()
+            return
+          }
           void resumeCloudShow()
         }}
       />
