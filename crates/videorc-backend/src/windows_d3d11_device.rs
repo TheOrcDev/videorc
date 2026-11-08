@@ -4468,11 +4468,14 @@ mod runtime {
                             Err(error) => {
                                 // Issue #906: on a hybrid-graphics laptop the
                                 // panel is enumerated under the GPU the session
-                                // runs on, but another GPU drives it, and
-                                // DuplicateOutput refuses. Windows Graphics
-                                // Capture reads the same monitor through the
-                                // desktop compositor on the same device, so the
-                                // compositor and encoder keep their adapter.
+                                // runs on, most likely while another GPU drives
+                                // it, and DuplicateOutput refuses. Windows
+                                // Graphics Capture reads the same monitor
+                                // through the desktop compositor on the same
+                                // device, so the compositor and encoder keep
+                                // their adapter. If WGC cannot open either, the
+                                // error names both failures and the caller
+                                // falls back as before.
                                 let Some(fallback_plan) =
                                     plan.wgc_cursor_embedded_fallback(&error)
                                 else {

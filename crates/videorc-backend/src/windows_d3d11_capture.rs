@@ -71,8 +71,10 @@ pub(crate) enum WindowsD3d11CaptureFallbackReason {
     OutputUnavailable,
     DesktopDuplicationUnavailable,
     /// `IDXGIOutput1::DuplicateOutput` answered `DXGI_ERROR_UNSUPPORTED` on a
-    /// host with more than one hardware GPU: the output is enumerated under
-    /// the session's adapter but another GPU drives it (hybrid graphics).
+    /// host with more than one hardware GPU. The likely cause is hybrid
+    /// graphics (the output is enumerated under the session's adapter while
+    /// another GPU drives it), but the HRESULT does not prove it: Windows also
+    /// returns it for desktop modes Desktop Duplication does not support.
     DesktopDuplicationCrossAdapter,
     DesktopDuplicationAccessLost,
     DeviceLost,
@@ -141,15 +143,19 @@ impl fmt::Display for WindowsD3d11CaptureError {
 
 impl std::error::Error for WindowsD3d11CaptureError {}
 
-/// `DXGI_ERROR_UNSUPPORTED`, the HRESULT `IDXGIOutput1::DuplicateOutput`
-/// returns when the calling device's adapter does not drive the output.
+/// `DXGI_ERROR_UNSUPPORTED`, which `IDXGIOutput1::DuplicateOutput` returns
+/// when it does not support the current desktop mode or scenario, including
+/// a calling device whose adapter does not drive the output.
 pub(crate) const DXGI_ERROR_UNSUPPORTED_HRESULT: u32 = 0x887A_0004;
 
-/// Names why `DuplicateOutput` failed at creation. `DXGI_ERROR_UNSUPPORTED` on
-/// a host with two or more hardware adapters is the hybrid-graphics case
-/// (issue #906: a ThinkPad lists its panel under the MX550 while the Iris Xe
-/// scans it out). On a single-GPU host the same HRESULT stays a plain
-/// unavailability, so the caller does not try a route that cannot help.
+/// Names why `DuplicateOutput` failed at creation. This is a heuristic.
+/// `DXGI_ERROR_UNSUPPORTED` on a host with two or more hardware adapters is
+/// most likely the hybrid-graphics case (issue #906: a ThinkPad lists its
+/// panel under the MX550, most likely because the Iris Xe scans it out), but
+/// the HRESULT does not say which GPU drives the panel, and an unsupported
+/// desktop mode returns the same code. Either way Windows Graphics Capture is
+/// worth trying, and a WGC failure is still reported. On a single-GPU host
+/// the same HRESULT stays a plain unavailability.
 pub(crate) const fn duplication_create_fallback_reason(
     hresult: u32,
     hardware_adapters: usize,
@@ -1795,10 +1801,10 @@ mod runtime {
                 duplication_create_fallback_reason(error.code().0 as u32, hardware_adapters);
             let detail = match reason {
                 WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter => format!(
-                    "IDXGIOutput1::DuplicateOutput failed: {error}; the output is enumerated under the session's adapter but another of this host's {hardware_adapters} hardware GPUs drives it (hybrid graphics)"
+                    "IDXGIOutput1::DuplicateOutput failed: {error}; this host has {hardware_adapters} hardware GPUs, so another GPU most likely drives this output (hybrid graphics), though an unsupported desktop mode returns the same error"
                 ),
                 _ => format!(
-                    "IDXGIOutput1::DuplicateOutput failed: {error}; this host reports {hardware_adapters} hardware GPU(s), so Desktop Duplication itself is unsupported here"
+                    "IDXGIOutput1::DuplicateOutput failed: {error}; this host reports {hardware_adapters} hardware GPU(s), so Desktop Duplication does not support the current desktop mode or scenario"
                 ),
             };
             return WindowsD3d11CaptureError::new(reason, detail);
