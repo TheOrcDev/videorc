@@ -65,6 +65,7 @@ import type {
   BuddyOverlaySnapshot,
   CaptionsUpdate,
   CaptureRecoveryStatus,
+  CloudStatus,
   CohostSettings,
   CohostSettingsPatch,
   CohostState,
@@ -124,11 +125,13 @@ import {
   useStudioBanners,
   useStudioCaptions,
   useStudioChat,
+  useStudioCloud,
   useStudioCore,
   useStudioDiagnostics,
   useStudioRecording,
   useStudioReplay,
   useStudioShell,
+  type StudioCloudContextValue,
   type StudioCoreContextValue,
   type StudioRecordingContextValue
 } from './use-studio'
@@ -467,6 +470,8 @@ class StudioBackend {
   terminalRecordingStatusOnMethod: string | null = null
   terminalRecordingStatusOnMethodEmitted = false
   youtubePrepareCount = 0
+  /** Plan 184: what `cloud.status` answers; null is an older backend with no cloud. */
+  cloudStatus: CloudStatus | null = null
   youtubeCompleteFailuresRemaining = 0
   /** Plan 094: `complete` refused by the backend's quota breaker (coded). */
   youtubeCompleteQuotaFailuresRemaining = 0
@@ -1594,6 +1599,32 @@ class StudioBackend {
           ...(this.recordingReplayOnly ? { replayOnly: true } : {})
         }
       }
+      case 'cloud.status':
+        if (!this.cloudStatus) {
+          throw new Error('This backend has no cloud.')
+        }
+        return this.cloudStatus
+      // Plan 184 C5b: the same start as `session.start`, bound to the live
+      // cloud show; the backend reports the show fed again.
+      case 'cloud.show.resume':
+        if (!this.cloudStatus?.show?.resumable) {
+          throw new Error('There is no Videorc Cloud show to resume.')
+        }
+        this.recordingState = 'recording'
+        this.confirmedSources = { ...(params.sources as SourceSelection) }
+        this.cloudStatus = {
+          ...this.cloudStatus,
+          phase: 'resuming',
+          sessionId: 'cloud-resume-session',
+          show: { ...this.cloudStatus.show, resumable: false }
+        }
+        return {
+          state: 'recording',
+          sessionId: 'cloud-resume-session',
+          startedAt: now,
+          streamUrl: 'rtmps://localhost:1936/live/***',
+          message: 'Running both session.'
+        }
       case 'session.stop':
         this.recordingState = 'idle'
         this.recordingReplayOnly = false
@@ -1767,6 +1798,7 @@ type StudioObservation = {
   banners: ReturnType<typeof useStudioBanners>
   captions: ReturnType<typeof useStudioCaptions>
   chat: ReturnType<typeof useStudioChat>
+  cloud: StudioCloudContextValue
   core: StudioCoreContextValue
   diagnostics: ReturnType<typeof useStudioDiagnostics>
   recording: StudioRecordingContextValue
@@ -1786,13 +1818,14 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
   const banners = useStudioBanners()
   const captions = useStudioCaptions()
   const chat = useStudioChat()
+  const cloud = useStudioCloud()
   const core = useStudioCore()
   const diagnostics = useStudioDiagnostics()
   const recording = useStudioRecording()
   const replay = useStudioReplay()
   useEffect(
-    () => observe({ audio, banners, captions, chat, core, diagnostics, recording, replay }),
-    [audio, banners, captions, chat, core, diagnostics, observe, recording, replay]
+    () => observe({ audio, banners, captions, chat, cloud, core, diagnostics, recording, replay }),
+    [audio, banners, captions, chat, cloud, core, diagnostics, observe, recording, replay]
   )
   return null
 }
@@ -1842,6 +1875,20 @@ function youtubeOauthStreamCaptureConfig(): CaptureConfig {
           : target
       )
     }
+  }
+}
+
+/** Plan 184 C5: a show live on the runner with no local feed, as `cloud.status` answers. */
+function resumableCloudStatus(): CloudStatus {
+  return {
+    phase: 'hold',
+    entitled: true,
+    plan: 'max',
+    settings: { enabled: true, holdMaxSeconds: 1800, holdMaxChoices: [300, 900, 1800, 3600] },
+    show: { id: 'sh_test', nodeId: 'local-1', resumable: true },
+    connected: true,
+    hold: { active: true, reason: 'feed-lost', remainingSeconds: 1500 },
+    directFallbackAvailable: false
   }
 }
 
@@ -5760,6 +5807,72 @@ describe('real StudioProvider lifecycle', () => {
       await latest().core.stopSession()
     })
     await waitForObservation(() => latest().recording.recording.state === 'idle')
+  })
+
+  // Plan 184 C5b: the Resume notice feeds the live cloud show again and sets
+  // nothing up on a platform. The runner holds the legs (the live YouTube
+  // broadcast among them), so Resume never opens the Go Live dialog, never
+  // runs the preflight or the metadata update, and never prepares a broadcast;
+  // the start goes to `cloud.show.resume` with the saved destinations as rows,
+  // a YouTube sign-in without a key included.
+  it('resumes the cloud show through cloud.show.resume with no platform setup', async () => {
+    const backend = new StudioBackend()
+    backend.cloudStatus = resumableCloudStatus()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify(youtubeOauthStreamCaptureConfig())
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest().cloud.cloudStatus?.show?.resumable === true)
+    backend.commands.length = 0
+    vi.clearAllMocks()
+
+    let resumed!: Promise<boolean>
+    await act(async () => {
+      resumed = latest().cloud.resumeCloudShow()
+    })
+    await waitForObservation(() =>
+      backend.commands.some((command) => command.method === 'cloud.show.resume')
+    )
+    expect(await resumed).toBe(true)
+    const methods = backend.commands.map((command) => command.method)
+    expect(methods).not.toContain('session.start')
+    expect(methods).not.toContain('streamTargets.youtube.prepare')
+    expect(methods).not.toContain('streamTargets.confirmation.validate')
+    expect(methods).not.toContain('streamTargets.metadata.update')
+    expect(methods).not.toContain('platformAccounts.validate')
+    expect(methods).not.toContain('streamTargets.youtube.transition')
+    expect(latest().core.goLiveConfirmationOpen).toBe(false)
+    const resume = backend.commands.find((command) => command.method === 'cloud.show.resume')
+    expect(resume?.params).toMatchObject({
+      output: { streamEnabled: true },
+      streaming: {
+        enabled: true,
+        targets: expect.arrayContaining([
+          expect.objectContaining({ id: 'youtube', authMode: 'oauth', enabled: true })
+        ])
+      }
+    })
+    await waitForObservation(
+      () => latest().recording.recording.sessionId === 'cloud-resume-session'
+    )
+    expect(latest().recording.recording.state).toBe('recording')
+    expect(toastSpies.error).not.toHaveBeenCalled()
   })
 
   // Plan 174 S3.1 (D2): main holds a quit or a main-window close while on air

@@ -26,7 +26,7 @@ import {
   isSignOutDisabled,
   isSignedIn
 } from '@/lib/account'
-import type { EntitlementTier } from '@/lib/backend'
+import type { EntitlementPlan, EntitlementTier } from '@/lib/backend'
 import { VIDEORC_WEB_LINKS, openVideorcWebLink } from '@/lib/videorc-web-links'
 import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 
@@ -37,6 +37,7 @@ import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 // words it shows (A-21). No platform accounts appear here, and no username is
 // fabricated.
 export function AccountMenu({
+  plan = null,
   tier,
   statusTone,
   statusLabel,
@@ -46,6 +47,8 @@ export function AccountMenu({
   onOpenHealth,
   onOpenSettings
 }: {
+  /** `max` labels the account Max (plan 185 T4). */
+  plan?: EntitlementPlan | null
   tier: EntitlementTier | null
   statusTone: StatusDotTone
   statusLabel: string
@@ -60,7 +63,7 @@ export function AccountMenu({
   const { account, signIn, openAccount, signOut } = useVideorcAccount()
   const signedIn = isSignedIn(account)
   const displayName = accountDisplayName(account)
-  const tierLabel = entitlementTierLabel(tier)
+  const tierLabel = entitlementTierLabel(tier, plan)
   const signOutLocked = isSignOutDisabled(account, live)
   const [open, setOpen] = useState(false)
 

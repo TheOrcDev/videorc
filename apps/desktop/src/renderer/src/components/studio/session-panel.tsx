@@ -30,6 +30,7 @@ import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import {
   useStudioChat,
+  useStudioCloud,
   useStudioCore,
   useStudioDiagnostics,
   useStudioRecording,
@@ -39,6 +40,10 @@ import { cohostPresenceView } from '@/lib/cohost-presence'
 import { activeCohostAlerts, cohostAlertLabel } from '@/lib/cohost-view'
 import { providerStreamOutputPlanOptions, streamOutputVideosForTargets } from '@/lib/capture'
 import { liveDestinationsView, streamHealthFact } from '@/lib/live-session-view'
+import {
+  dashboardCloudFromStatus,
+  type LiveDashboardCloud
+} from '../../../../shared/live-dashboard'
 import { sessionOutputSummary } from '@/lib/session-output-video'
 import { classifyStreamHealthAttribution } from '@/lib/stream-health-attribution'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
@@ -494,6 +499,17 @@ function FactRow({
   )
 }
 
+/**
+ * The Videorc Cloud show carrying this session, or null (plan 184 C7): the
+ * same view the Stream Manager's dashboard keeps, from the status the
+ * backend emits.
+ */
+function useSessionCloud(): LiveDashboardCloud | null {
+  const { cloudStatus } = useStudioCloud()
+  const { recording } = useStudioRecording()
+  return cloudStatus ? dashboardCloudFromStatus(cloudStatus, recording.sessionId ?? null) : null
+}
+
 /** A status dot's words: the row's text, or lit on the screen. */
 const dotClassName = (look: StudioLook): string =>
   look === 'lcd' ? LCD_STATUS_DOT : 'text-sm text-foreground'
@@ -511,7 +527,9 @@ export function LiveDestinationRows({
 }): ReactElement | null {
   const { streamTargets } = useStudioCore()
   const { openStudioPanel } = useWorkspaceNav()
-  const view = liveDestinationsView(streamTargets)
+  // Plan 184 C7: through Videorc Cloud the feed legs fold into one row.
+  const cloud = useSessionCloud()
+  const view = liveDestinationsView(streamTargets, cloud)
   if (!view) {
     return null
   }
@@ -565,8 +583,15 @@ export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook })
   const { streamTargets } = useStudioCore()
   const { diagnosticStats, recentStreamDrops, streamHealth } = useStudioDiagnostics()
   const { setActive } = useWorkspaceNav()
+  const cloud = useSessionCloud()
   const fact = streamHealthFact(
-    classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets, recentStreamDrops)
+    classifyStreamHealthAttribution(
+      diagnosticStats,
+      streamHealth,
+      streamTargets,
+      recentStreamDrops
+    ),
+    cloud
   )
   return (
     <FactRow

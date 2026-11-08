@@ -1,3 +1,4 @@
+import { CloudSection } from './cloud-section'
 import { StreamQualityControl } from './stream-quality-control'
 import { withStreamQuality } from '@/lib/output-quality'
 import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
@@ -11,8 +12,10 @@ import { Button } from '@/components/ui/button'
 import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
+  useStudioCloud,
   useStudioCore,
   useStudioDiagnostics,
+  useStudioRecording,
   type StreamOutputTopologyPreflight
 } from '@/hooks/use-studio'
 import type {
@@ -54,6 +57,12 @@ import {
   type RecentStreamDrops,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
+import { cloudHealthySummary, cloudStreamReading } from '@/lib/live-session-view'
+
+import {
+  dashboardCloudFromStatus,
+  type LiveDashboardCloud
+} from '../../../../shared/live-dashboard'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -88,6 +97,12 @@ export function GoLivePanel({
     streamTargets
   } = useStudioCore()
   const { diagnosticStats, recentStreamDrops, streamHealth } = useStudioDiagnostics()
+  const { cloudStatus } = useStudioCloud()
+  const { recording } = useStudioRecording()
+  // Plan 184 C7: the cloud show carrying this session, for the health rows.
+  const cloud = cloudStatus
+    ? dashboardCloudFromStatus(cloudStatus, recording.sessionId ?? null)
+    : null
   const streaming = captureConfig.streaming
   // No separate stream encoder on this computer: the session records at the
   // stream's profile, so show that instead of the Output setting.
@@ -156,7 +171,9 @@ export function GoLivePanel({
           }}
         />
       </PanelSection>
+      <CloudSection />
       <ReadyToGoLive
+        cloud={cloud}
         accountByPlatform={accountByPlatform}
         captions={
           captureConfig.captions.enabled
@@ -180,6 +197,7 @@ export function GoLivePanel({
         onRetry={refreshStreamOutputTopology}
       />
       <TechnicalDetails
+        cloud={cloud}
         diagnosticStats={diagnosticStats}
         liveOutputActive={liveOutputActive}
         preflight={streamOutputTopologyPreflight}
@@ -226,6 +244,7 @@ export function ReadyToGoLive({
   recordingVideo,
   preflight,
   liveOutputActive,
+  cloud = null,
   diagnosticStats,
   recentStreamDrops,
   streamHealth,
@@ -234,6 +253,8 @@ export function ReadyToGoLive({
   onRetry
 }: {
   targets: StreamTargetSettings[]
+  /** The Videorc Cloud show carrying the session, if any (plan 184 C7). */
+  cloud?: LiveDashboardCloud | null
   accountByPlatform: ReadonlyMap<StreamPlatform, PlatformAccount>
   /**
    * Live captions, when on: the output rule a livestream would break (plan
@@ -311,6 +332,7 @@ export function ReadyToGoLive({
       ) : null}
       {liveOutputActive ? (
         <LiveStreamRow
+          cloud={cloud}
           diagnosticStats={diagnosticStats}
           recentStreamDrops={recentStreamDrops}
           streamHealth={streamHealth}
@@ -423,11 +445,13 @@ function StreamCheckRow({
 
 /** While live: quiet when healthy, the problem in a few words when not. */
 function LiveStreamRow({
+  cloud = null,
   diagnosticStats,
   recentStreamDrops,
   streamHealth,
   streamTargets
 }: {
+  cloud?: LiveDashboardCloud | null
   diagnosticStats: DiagnosticStats
   recentStreamDrops: RecentStreamDrops
   streamHealth: StreamHealth | null
@@ -439,10 +463,12 @@ function LiveStreamRow({
     streamTargets,
     recentStreamDrops
   )
-  const healthy = attribution === 'healthy'
+  // Plan 184 C7: while the cloud holds or resumes the show, that is the word.
+  const cloudReading = cloudStreamReading(cloud)
+  const healthy = attribution === 'healthy' && !cloudReading
   return (
     <ChecklistRow
-      detail={healthy ? 'Healthy' : liveProblemLabel(attribution)}
+      detail={cloudReading ?? (healthy ? 'Healthy' : liveProblemLabel(attribution))}
       // The problem's whole sentence on hover and on focus (plan 174 S1.10).
       detailHint={streamHealthDescription(attribution, true, { state: 'not-requested' })}
       label="Stream"
@@ -452,6 +478,7 @@ function LiveStreamRow({
 }
 
 export function TechnicalDetails({
+  cloud = null,
   diagnosticStats,
   liveOutputActive,
   preflight,
@@ -460,6 +487,8 @@ export function TechnicalDetails({
   streamHealth,
   streamTargets
 }: {
+  /** The Videorc Cloud show carrying the session, if any (plan 184 C7). */
+  cloud?: LiveDashboardCloud | null
   diagnosticStats: DiagnosticStats
   liveOutputActive: boolean
   preflight: StreamOutputTopologyPreflight
@@ -497,12 +526,16 @@ export function TechnicalDetails({
   const coalescedFrames = diagnosticStats.encoderBridgeSeparateOutputEncodersActive
     ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
     : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
-  const bitrate = streamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps
+  // Through the cloud, the cloud's own measure of the upload when FFmpeg
+  // can't count one (the raw path's tee says `bitrate=N/A`; plan 184 C7).
+  const bitrate =
+    streamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps ?? cloud?.feedKbps
   const loweredBitrate = formatLoweredBitrate(diagnosticStats.streamDelivery)
   const summary = liveOutputActive
-    ? attribution === 'healthy'
-      ? [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)].filter(Boolean).join(' · ')
-      : liveProblemLabel(attribution)
+    ? (cloudStreamReading(cloud) ??
+      (attribution === 'healthy'
+        ? cloudHealthySummary(cloud, [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)])
+        : liveProblemLabel(attribution)))
     : null
   const outputs = streamOutputs(providerPlan)
 

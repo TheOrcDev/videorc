@@ -23,12 +23,14 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
+  useStudioCloud,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
   useStudioRecordingState
 } from '@/hooks/use-studio'
 import { areEnabledStreamTargetsStartReady } from '@/lib/capture'
+import { cloudResumeNotice } from '@/lib/cloud-show-view'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { shouldIgnoreGoLiveAction } from '@/lib/go-live-flow'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
@@ -62,6 +64,10 @@ const AudioSection = lazy(async () => ({
 // own chunk; the page holds only the gate (`lib/studio-chat.ts`).
 const StudioChatSection = lazy(async () => ({
   default: (await import('@/components/studio/studio-chat')).StudioChatSection
+}))
+// Rare (a cloud show this computer stopped feeding): its own chunk.
+const CloudResumeNotice = lazy(async () => ({
+  default: (await import('@/components/studio/cloud-resume-notice')).CloudResumeNotice
 }))
 
 export function StudioTab(): ReactElement {
@@ -241,6 +247,12 @@ export function StudioTab(): ReactElement {
         </div>
 
         <aside aria-label="Session inspector" className={STUDIO_INSPECTOR}>
+          <CloudResumeSlot
+            active={active}
+            blockedReason={liveStreamBlockedReason}
+            pending={startsBusy}
+            onResumeClick={() => noteRecordClick('start')}
+          />
           <InspectorSession
             active={active}
             live={sessionIsLive(recording)}
@@ -277,6 +289,43 @@ export function StudioTab(): ReactElement {
         </aside>
       </div>
     </div>
+  )
+}
+
+/**
+ * Plan 184 C5: "You're still live through Videorc Cloud." above Session. Its
+ * own component, so the cloud's status ticks during a show re-render only it.
+ * Resume is the provider's own start (C5b): bound to the live show, with no
+ * dialog and nothing set up on a platform. Never Go Live.
+ */
+function CloudResumeSlot({
+  active,
+  blockedReason,
+  pending,
+  onResumeClick
+}: {
+  active: boolean
+  blockedReason: string | null
+  pending: boolean
+  /** Arms the latency clock, like the Record and Go Live clicks. */
+  onResumeClick: () => void
+}): ReactElement | null {
+  const { cloudStatus, resumeCloudShow } = useStudioCloud()
+  const notice = cloudResumeNotice(cloudStatus, active)
+  if (!notice) return null
+  return (
+    <Suspense fallback={null}>
+      <CloudResumeNotice
+        blockedReason={blockedReason}
+        notice={notice}
+        pending={pending}
+        onResume={() => {
+          if (pending || blockedReason) return
+          onResumeClick()
+          void resumeCloudShow()
+        }}
+      />
+    </Suspense>
   )
 }
 

@@ -32,6 +32,10 @@ describe('account display', () => {
     expect(entitlementTierLabel('basic')).toBe('Basic')
     expect(entitlementTierLabel('developer')).toBe('Developer')
     expect(entitlementTierLabel('premium')).toBe('Premium')
+    // Max is Premium plus a plan (plan 185 D2); a stray plan never names Basic Max.
+    expect(entitlementTierLabel('premium', 'max')).toBe('Max')
+    expect(entitlementTierLabel('premium', 'premium')).toBe('Premium')
+    expect(entitlementTierLabel('basic', 'max')).toBe('Basic')
     expect(entitlementTierLabel(null)).toBe('Basic')
     expect(entitlementTierLabel(undefined)).toBe('Basic')
   })
