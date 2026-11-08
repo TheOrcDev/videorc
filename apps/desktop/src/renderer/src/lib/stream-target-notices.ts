@@ -27,7 +27,23 @@ export function otherDestinationsOnAir(
   targets: readonly Pick<StreamTargetRuntime, 'targetId' | 'state'>[],
   targetId: string
 ): number {
-  return targets.filter((target) => target.targetId !== targetId && target.state === 'live').length
+  return targets.filter(
+    (target) =>
+      target.targetId !== targetId && target.state === 'live' && !isCloudFeedTarget(target)
+  ).length
+}
+
+/**
+ * Plan 222 U6: this computer's feed to Videorc Cloud is no destination.
+ * While it is down the cloud holds the show, so every viewer sees Be right
+ * back (plan 184 "When things break": "Reconnecting to Videorc Cloud").
+ */
+const CLOUD_FEED_DOWN = 'Viewers see Be right back until this computer reconnects.'
+
+/** recording.rs `CLOUD_FEED_TARGET_PREFIX` (as `live-session-view.ts`, kept
+ * out of this eager module's imports). */
+function isCloudFeedTarget(target: Pick<StreamTargetRuntime, 'targetId'>): boolean {
+  return target.targetId.startsWith('videorc-cloud-')
 }
 
 /** A destination going on air after one of these states is "{X} is back". */
@@ -52,6 +68,18 @@ export function streamTargetNotices(
     const leg = `stream-target:${target.targetId}`
     const label = destinationLabel(target.label)
     const others = otherDestinationsLine(otherDestinationsOnAir(targets, target.targetId))
+    if (
+      isCloudFeedTarget(target) &&
+      (target.state === 'reconnecting' || target.state === 'failed')
+    ) {
+      notices.push({
+        key: leg,
+        kind: 'warning',
+        title: 'Reconnecting to Videorc Cloud',
+        description: CLOUD_FEED_DOWN
+      })
+      continue
+    }
     switch (target.state) {
       case 'failed':
         notices.push({
