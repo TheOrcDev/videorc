@@ -86,6 +86,10 @@ pub const LOST_SHOW_FEED_DOWN: Duration = Duration::from_secs(20);
 /// A report the web kept (the node answered, or the web could not ask) is
 /// not repeated before this: the hold covers a feed that is the broken side.
 const LOST_SHOW_REPORT_COOLDOWN: Duration = Duration::from_secs(60);
+/// Plan 222 D5 (L4): the first nodes carry up to 1080p60; above it a session
+/// streams directly with `cloud-quality`, and no show is created.
+pub const CLOUD_MAX_OUTPUT_PIXELS: u32 = 1920 * 1080;
+pub const CLOUD_MAX_OUTPUT_FPS: u32 = 60;
 /// The hold image sent to the runner, PNG, at most this many bytes.
 const HOLD_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const CLOSE_CODE_BAD_TOKEN: u16 = 4401;
@@ -1505,6 +1509,13 @@ pub fn decide_go_live(runtime: &CloudShowRuntime, signed_in: bool) -> GoLiveDeci
     GoLiveDecision::Cloud
 }
 
+/// Plan 222 D5: the first nodes re-encode on CPU and carry up to 1080p60.
+/// Pixels, not a side: a vertical 1080x1920 is 1080p and goes through.
+pub fn output_above_cloud_limit(output: &ShowOutputSpec) -> bool {
+    output.width.saturating_mul(output.height) > CLOUD_MAX_OUTPUT_PIXELS
+        || output.fps > CLOUD_MAX_OUTPUT_FPS
+}
+
 // --- The session seam (C3 calls these) ---------------------------------------
 
 /// What `recording.rs` needs to swap the targets: the show and its ingest.
@@ -2454,6 +2465,25 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         }
 
+        // Plan 222 D5 (L4): above 1080p60 the first nodes do not carry the
+        // show; direct keeps the quality, and no show is created.
+        if let Some(output) = outputs
+            .iter()
+            .find(|output| output_above_cloud_limit(output))
+        {
+            self.record_fallback(
+                session_id,
+                CloudFallbackReason::CloudQuality,
+                Some(format!(
+                    "the {} output is {}x{} at {} fps; Videorc Cloud carries up to 1080p60 for now",
+                    orientation_id(output.orientation),
+                    output.width,
+                    output.height,
+                    output.fps
+                )),
+            );
+            return Ok(PrepareOutcome::Direct);
+        }
         let request = CreateShowRequest {
             kind: "solo".to_string(),
             outputs,
@@ -6169,6 +6199,58 @@ mod tests {
             lock(&harness.context.slot).remembered_show(),
             Some("sh_abc")
         );
+    }
+
+    // Plan 222 D5 (L4): a stream quality above 1080p60 streams directly with
+    // `cloud-quality`, before any show is created or any node is asked.
+    #[tokio::test(start_paused = true)]
+    async fn a_4k_stream_quality_streams_directly_with_its_reason_and_creates_no_show() {
+        let harness = harness(true);
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created()));
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-4k",
+                Some("bearer".to_string()),
+                vec![ShowOutputSpec {
+                    orientation: StreamOutputOrientation::Horizontal,
+                    width: 3840,
+                    height: 2160,
+                    fps: 30,
+                    video_kbps: 20_000,
+                    audio_kbps: 160,
+                }],
+                destinations(),
+                None,
+            )
+            .await
+            .expect("the quality limit is a fallback, never a failed start");
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        let status = lock(&harness.context.slot).status();
+        let fallback = status.fallback.expect("the reason is kept for the toast");
+        assert_eq!(fallback.reason, CloudFallbackReason::CloudQuality);
+        assert_eq!(fallback.session_id, "session-4k");
+        assert!(fallback.message.unwrap().contains("1080p60"));
+        assert_eq!(status.phase, CloudPhase::Off);
+        assert_eq!(status.show, None);
+
+        let spec = |width, height, fps| ShowOutputSpec {
+            orientation: StreamOutputOrientation::Horizontal,
+            width,
+            height,
+            fps,
+            video_kbps: 6000,
+            audio_kbps: 160,
+        };
+        assert!(!output_above_cloud_limit(&spec(1920, 1080, 60)));
+        assert!(!output_above_cloud_limit(&spec(1080, 1920, 30)));
+        assert!(!output_above_cloud_limit(&spec(1280, 720, 30)));
+        assert!(output_above_cloud_limit(&spec(3840, 2160, 30)));
+        assert!(output_above_cloud_limit(&spec(2560, 1440, 30)));
+        assert!(output_above_cloud_limit(&spec(1920, 1080, 120)));
     }
 
     /// The web as it answers the lost route: the show, ended or kept.
