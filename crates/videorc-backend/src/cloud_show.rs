@@ -5612,9 +5612,17 @@ mod tests {
             .as_mut()
             .unwrap()
             .seconds_per_month = 0;
+        // A paid plan is asked even without cloud hours (`may_own_a_show`,
+        // `5bd26a89a`): the plan may have changed under a show that is still
+        // live on its node. Only a Basic account with no plan is never asked.
+        assert!(
+            launch_check_due(&runtime, true),
+            "a paid plan without cloud hours could still own a show"
+        );
+        runtime.entitlement.plan = None;
         assert!(
             !launch_check_due(&runtime, true),
-            "a plan without cloud hours"
+            "no plan and no cloud hours: nothing to ask about"
         );
         runtime.entitlement.cloud.as_mut().unwrap().enabled = true;
         assert!(launch_check_due(&runtime, true));
