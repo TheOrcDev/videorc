@@ -382,8 +382,27 @@ impl PartialEq for PreviewCameraStartRegistration {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewCameraStartWait {
+    /// Reply once the persistent transition supervisor owns the admitted
+    /// generation. Live, failed and every later state reach the client as
+    /// `preview.camera.status` events. `session.start` still drains that
+    /// supervisor through `source_transition_fence`, not through this reply.
+    Admitted,
     Bounded,
     TransitionComplete,
+}
+
+/// The wait behind the public `preview.camera.start` command (issue #1068).
+/// The command sits on the ordered WebSocket lane, so every later ordered
+/// command used to wait out the whole native open: about 2–4 s for a
+/// DirectShow camera on Windows. Windows replies at admission instead. macOS
+/// and Linux keep the bounded wait: their `permission-needed` result is
+/// discovered by the supervisor and the renderer reports it from the reply.
+const fn public_camera_start_wait() -> PreviewCameraStartWait {
+    if cfg!(target_os = "windows") {
+        PreviewCameraStartWait::Admitted
+    } else {
+        PreviewCameraStartWait::Bounded
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -928,7 +947,7 @@ pub async fn start_preview_camera(
     state: AppState,
     params: PreviewCameraStartParams,
 ) -> PreviewCameraStatus {
-    start_preview_camera_with_owner(state, params, None, None, PreviewCameraStartWait::Bounded)
+    start_preview_camera_with_owner(state, params, None, None, public_camera_start_wait())
         .await
         .status
 }
@@ -1159,6 +1178,8 @@ async fn start_preview_camera_with_owner(
                 admitted_starting_identity.clone(),
             );
             let status = match wait {
+                // The joined generation's own supervisor publishes its result.
+                PreviewCameraStartWait::Admitted => preview_camera_status(&state).await,
                 PreviewCameraStartWait::Bounded => wait_for_camera_start(&state, &start_key).await,
                 PreviewCameraStartWait::TransitionComplete => {
                     transition_completion.wait().await;
@@ -1232,6 +1253,13 @@ async fn start_preview_camera_with_owner(
     signal_camera_layout_admission(&mut admission_ready, admitted_starting_identity.clone());
     PreviewCameraLayoutStart {
         status: match wait {
+            PreviewCameraStartWait::Admitted => {
+                // Dropping the handle detaches the supervisor; it keeps the
+                // generation, the explicit-mutation lease and the source
+                // transition guard until the camera is live or has failed.
+                drop(completion);
+                preview_camera_status(&state).await
+            }
             PreviewCameraStartWait::Bounded => {
                 wait_for_camera_transition_response(&state, completion, &lease).await
             }
@@ -7531,6 +7559,80 @@ mod tests {
         }
         drop(held_transition);
         transition_wait.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admitted_camera_start_replies_before_the_native_open_and_keeps_the_fence() {
+        // Issue #1068: the public start replies once its generation is owned,
+        // so the ordered command lane is not held for the native open. The
+        // supervisor still owns the generation and the source transition fence
+        // that `session.start` drains.
+        let state = test_state();
+        #[cfg(target_os = "windows")]
+        {
+            state.preview_camera.lock().await.test_dshow_inventory = Some(
+                "[dshow] \"abc\" (video)\n[dshow]   Alternative name \"@device_pnp_test_abc\"\n"
+                    .into(),
+            );
+        }
+        let video = test_video();
+        let layout = test_layout(false);
+        let camera_id = "camera:avfoundation-native:616263";
+        let held_transition = acquire_preview_camera_transition(&state).await;
+        let generation_before = state.preview_camera.lock().await.start_generation;
+
+        let replied_at = tokio::time::Instant::now();
+        let result = start_preview_camera_with_owner(
+            state.clone(),
+            test_camera_params(Some(camera_id), &layout, &video),
+            None,
+            None,
+            PreviewCameraStartWait::Admitted,
+        )
+        .await;
+        assert_eq!(
+            replied_at.elapsed(),
+            Duration::ZERO,
+            "the admitted reply must not wait on the held native transition"
+        );
+        assert_eq!(result.status.state, PreviewCameraState::Starting);
+        assert_eq!(result.status.camera_id.as_deref(), Some(camera_id));
+        {
+            let slot = state.preview_camera.lock().await;
+            assert_ne!(slot.start_generation, generation_before);
+            assert_eq!(
+                slot.starting.as_ref().map(|key| &key.source_key),
+                Some(&SourceKey::camera(camera_id)),
+                "the supervisor, not the reply, owns the starting generation"
+            );
+        }
+        let transition_snapshot = state.source_transition_fence.observe();
+        let mut transition_wait = Box::pin(transition_snapshot.wait());
+        assert!(
+            futures_util::poll!(&mut transition_wait).is_pending(),
+            "an early reply must not release the source transition session.start drains"
+        );
+
+        {
+            let mut slot = state.preview_camera.lock().await;
+            slot.disconnected = None;
+            slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
+            slot.starting = None;
+            slot.starting_transition_completion = None;
+            slot.starting_layout_intent_id = None;
+        }
+        drop(held_transition);
+        transition_wait.await;
+    }
+
+    #[test]
+    fn only_windows_replies_to_a_public_camera_start_at_admission() {
+        let expected = if cfg!(target_os = "windows") {
+            PreviewCameraStartWait::Admitted
+        } else {
+            PreviewCameraStartWait::Bounded
+        };
+        assert_eq!(public_camera_start_wait(), expected);
     }
 
     #[tokio::test(start_paused = true)]
