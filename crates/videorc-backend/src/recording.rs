@@ -39537,7 +39537,35 @@ mod tests {
         }
 
         /// The ring tail every builder must end its replay output with.
+        /// On the raw path with a file, the ring is a tee slave
+        /// (`[f=segment:...]`) instead of a bare `-f segment` output.
         fn assert_ring_output(args: &[String]) {
+            let expected_tee = ring_tee_leg();
+            if let Some(tee_index) = args.iter().position(|arg| arg.contains(&expected_tee)) {
+                // Stream tees put `-use_fifo` / `-fifo_options` between
+                // `-f tee` and the spec; record-only is `-f tee <spec>`.
+                let tee_f = args[..tee_index]
+                    .iter()
+                    .rposition(|arg| arg == "-f")
+                    .expect("-f tee precedes the ring slave");
+                assert_eq!(args[tee_f + 1], "tee", "{args:?}");
+                // The ring shares the file's encode, AAC, and `-shortest`.
+                let ring_start = args[..tee_f].iter().rposition(|arg| arg == "-map").unwrap();
+                let ring = &args[ring_start..tee_f];
+                assert!(
+                    ring.contains(&"aac".to_string()),
+                    "ring audio is AAC: {ring:?}"
+                );
+                // Shared with the file: record AAC is 256k, stream AAC is 160k.
+                assert!(
+                    matches!(arg_value(ring, "-b:a"), Some("256k") | Some("160k")),
+                    "tee-shared AAC bitrate: {ring:?}"
+                );
+                assert_eq!(arg_value(ring, "-ar"), Some("48000"));
+                assert!(ring.contains(&"-shortest".to_string()));
+                return;
+            }
+
             let segment = position(args, "segment");
             assert_eq!(args[segment - 1], "-f");
             // The ring ends with its file pattern; a preview or stream output
@@ -39949,10 +39977,12 @@ mod tests {
                         .filter(|(_, arg)| *arg == "-shortest")
                         .map(|(index, _)| index)
                         .collect::<Vec<_>>();
-                    // The primary output and the ring; an encoded bridge that
-                    // streams adds one output per target.
+                    // A separate `-f segment` ring is its own `-shortest`
+                    // output; a tee-embedded ring shares the file's. An
+                    // encoded bridge that streams adds one output per target.
+                    let ring_is_tee = args.iter().any(|arg| arg.contains("[f=segment:"));
                     assert!(
-                        shortest.len() >= 2,
+                        shortest.len() >= if ring_is_tee { 1 } else { 2 },
                         "primary and ring outputs, {video_output:?} streaming={streaming}: {args:?}"
                     );
                     for index in shortest {
