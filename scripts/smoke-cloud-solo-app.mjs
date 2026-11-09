@@ -124,6 +124,16 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //      one toast. The fake web must count exactly one lost call, direct must
 //      be offered only after the web's end, and Stop then Go Live must
 //      stream directly to fresh receivers on the same ports.
+//  12. VIDEORC_CLOUD_SOLO_VERTICAL=1 (plan 222 U3): dual orientation. The
+//      session arms the vertical simulcast leg (`vertical-camera-bottom`,
+//      720x1280) and a third, vertical-bound destination joins the two
+//      platforms, so the desktop feeds the runner twice (`videorc-cloud-
+//      horizontal` and `videorc-cloud-vertical`) and the runner's second
+//      output group pushes the portrait program to a third receiver. Both
+//      feeds must be connected at Go Live, hold together through each drop
+//      and both come back after each resume; the vertical receiver must take
+//      a 720x1280 picture with its hold card, and every receiver keeps one
+//      connection.
 //
 // Why a proxy and not a killed process: the plan says "kill the stream
 // encoder", but on macOS the stream legs are fifo outputs of the one FFmpeg
@@ -148,6 +158,9 @@ const thinUplinkWaitMs = Number(process.env.VIDEORC_CLOUD_SOLO_THIN_UPLINK_WAIT_
 // Plan 222 L3: the node dies in place of the computer (header, 11).
 const watchdogScenario = process.env.VIDEORC_CLOUD_SOLO_WATCHDOG === '1'
 const nodeDeath = process.env.VIDEORC_CLOUD_SOLO_NODE_DEATH === '1'
+// Plan 222 U3: dual orientation (header, 12): a vertical feed and receiver.
+const vertical = process.env.VIDEORC_CLOUD_SOLO_VERTICAL === '1'
+const verticalCanvas = { width: 720, height: 1280 }
 if (nodeDeath && thinUplinkKbps > 0) {
   console.error(
     'VIDEORC_CLOUD_SOLO_NODE_DEATH and VIDEORC_CLOUD_SOLO_THIN_UPLINK_KBPS are separate runs.'
@@ -169,7 +182,8 @@ const reportPath = join(outputDirectory, 'cloud-solo-report.json')
 const sessionToken = `cloud-solo-session-${Math.random().toString(36).slice(2)}`
 const nodeId = 'local-1'
 // Platform keys with a marker the leak scan looks for in logs and events.
-const receiverKeys = ['solo-a', 'solo-b'].map(
+const receiverNames = vertical ? ['solo-a', 'solo-b', 'solo-v'] : ['solo-a', 'solo-b']
+const receiverKeys = receiverNames.map(
   (name) => `${name}-SECRET-${Math.random().toString(36).slice(2, 10)}`
 )
 const cloudDir = resolve(process.env.VIDEORC_CLOUD_DIR ?? join(repoRoot, '..', 'videorc-cloud'))
@@ -240,7 +254,7 @@ try {
     // MediaMTX's SRT listener (C1b; UDP). The node takes SRT by default and
     // hands its address to the desktop; this desktop still feeds RTMPS.
     srt: await freeUdpPort(),
-    receivers: [await freePort(), await freePort()]
+    receivers: await Promise.all(receiverNames.map(() => freePort()))
   }
   const runnerPorts = await freePortRange(4)
   log(
@@ -327,9 +341,10 @@ try {
     // receiver opens its output, which would read as bytes from the start.
     rmSync(recvPath, { force: true })
     const streamKey = receiverKeys[index]
+    const isVertical = receiverNames[index] === 'solo-v'
     const target = {
-      id: ['solo-a', 'solo-b'][index],
-      label: ['Fake platform A', 'Fake platform B'][index],
+      id: receiverNames[index],
+      label: ['Fake platform A', 'Fake platform B', 'Fake platform V'][index],
       name,
       port,
       streamKey,
@@ -338,6 +353,11 @@ try {
       // `cloud`: fed by the runner; `direct`: the node-death variant's legs
       // from this computer after the lost show.
       phase: 'cloud',
+      // Plan 222 U3: the third platform takes the vertical program.
+      outputOrientation: isVertical ? 'vertical' : 'horizontal',
+      expectedSize: isVertical
+        ? verticalCanvas
+        : { width: thinUplinkKbps > 0 ? 1920 : 1280, height: thinUplinkKbps > 0 ? 1080 : 720 },
       firstBytesAtMs: null,
       exitedAtMs: null
     }
@@ -647,6 +667,20 @@ try {
     20_000,
     'both receivers to take bytes'
   )
+  if (vertical) {
+    // U3: the runner reads both feeds, and the desktop's two feed legs are live.
+    await waitFor(() => feedsConnected(watcher) === 2 || null, 20_000, 'both feeds to be connected')
+    await waitFor(
+      () =>
+        ['videorc-cloud-horizontal', 'videorc-cloud-vertical'].every(
+          (id) => latestTargets(collected)?.find((entry) => entry.targetId === id)?.state === 'live'
+        ) || null,
+      20_000,
+      'both feed legs to read live on the desktop'
+    )
+    report.vertical = { feedsAtLive: feedsConnected(watcher), feedsAfterDrops: [] }
+    log('[vertical] both feeds connected and both feed legs live')
+  }
   const runnerPid = await waitFor(
     () => readRunnerPid(agentStateDir, showId),
     10_000,
@@ -869,6 +903,31 @@ try {
   log(
     `[drop 1] hold ${drop1.timeToHoldSeconds} s, back live ${drop1.timeToResumeSeconds} s after the network came back (desktop: hold ${drop1.desktopTimeToHoldSeconds} s, live ${drop1.desktopTimeToLiveSeconds} s)`
   )
+  if (vertical) {
+    // U3: both feeds came back, and the vertical leg too.
+    const feedsBack = await waitFor(
+      () => (feedsConnected(watcher) === 2 ? 2 : null),
+      30_000,
+      'both feeds to be connected again after the feed cut'
+    ).catch(() => feedsConnected(watcher))
+    const verticalLeg = await waitFor(
+      () =>
+        latestTargets(collected)?.find((entry) => entry.targetId === 'videorc-cloud-vertical')
+          ?.state === 'live' || null,
+      20_000,
+      'the vertical feed leg to read live again'
+    )
+      .then(() => true)
+      .catch(() => false)
+    report.vertical.feedsAfterDrops.push({
+      kind: drop1.kind,
+      feeds: feedsBack,
+      verticalLegLive: verticalLeg
+    })
+    log(
+      `[vertical] after the feed cut: ${feedsBack} feeds connected, vertical leg live ${verticalLeg}`
+    )
+  }
   await sleep(afterResumeMs)
   assertReceiversConnected(receivers, 'after the feed cut resume')
 
@@ -1148,6 +1207,30 @@ try {
         : null
     }
     report.drops.push(drop2)
+    if (vertical) {
+      const feedsBack = await waitFor(
+        () => (feedsConnected(watcher) === 2 ? 2 : null),
+        30_000,
+        'both feeds to be connected again after the resume'
+      ).catch(() => feedsConnected(watcher))
+      const verticalLeg = await waitFor(
+        () =>
+          latestTargets(collected)?.find((entry) => entry.targetId === 'videorc-cloud-vertical')
+            ?.state === 'live' || null,
+        20_000,
+        'the vertical feed leg to read live after the resume'
+      )
+        .then(() => true)
+        .catch(() => false)
+      report.vertical.feedsAfterDrops.push({
+        kind: drop2.kind,
+        feeds: feedsBack,
+        verticalLegLive: verticalLeg
+      })
+      log(
+        `[vertical] after the resume: ${feedsBack} feeds connected, vertical leg live ${verticalLeg}`
+      )
+    }
     log(
       `[drop 2] hold ${drop2.timeToHoldSeconds} s after the death, back live ${drop2.timeToResumeSeconds} s after Resume; shows created on the web: ${drop2.showsCreated}; destinations.set after the Resume: ${drop2.destinationsSetAfterResume}`
     )
@@ -1421,6 +1504,9 @@ try {
       stayedConnected: receiver.exitedAtMs === null || receiver.exitedAtMs >= connectedUntilMs,
       exitedAfterStop: receiver.exitedAtMs !== null,
       ...probe,
+      // Plan 222 U3: the vertical receiver takes the portrait program.
+      orientation: receiver.outputOrientation,
+      expectedSize: receiver.expectedSize,
       minDurationSeconds: Math.round(expectedSeconds * 0.8 * 10) / 10,
       gaps,
       clockAnchor: anchor,
@@ -1483,6 +1569,9 @@ try {
         : '') +
       (report.thinUplink
         ? `under a ${report.thinUplink.capKbps} kbps uplink the stream bitrate stepped down to ${report.thinUplink.bitrateKbps} of ${report.thinUplink.chosenBitrateKbps} kbps after ${report.thinUplink.loweredAfterSeconds} s with ${report.thinUplink.overflowEvents} overflow event(s) naming the feed; `
+        : '') +
+      (report.vertical
+        ? `both feeds held through every drop (${report.vertical.feedsAfterDrops.map((entry) => `${entry.kind}: ${entry.feeds} feeds`).join(', ')}) and the vertical receiver took ${verticalCanvas.width}x${verticalCanvas.height}; `
         : '') +
       `largest receiver gap ${Math.max(...report.receivers.map((receiver) => receiver.gaps.maxGapSeconds))} s. Report: ${reportPath}`
   )
@@ -1690,13 +1779,41 @@ function sessionParams(outputDirectoryCapability) {
         streamKey: receiver.streamKey,
         streamKeyPresent: true,
         authMode: 'manual-rtmp',
+        ...(receiver.outputOrientation === 'vertical' ? { outputOrientation: 'vertical' } : {}),
         createdAt: timestamp,
         updatedAt: timestamp
       })),
       defaultOutputPreset: video.preset,
       defaultBitrateKbps: video.bitrateKbps,
       enabledTargetIds: platforms.map((receiver) => receiver.id)
-    }
+    },
+    // Plan 222 U3: the vertical simulcast leg, its own portrait canvas and
+    // scene (the multistream smoke's shape), fed to the runner as the
+    // second orientation.
+    ...(vertical
+      ? {
+          simulcast: {
+            layout: {
+              layoutPreset: 'vertical-camera-bottom',
+              cameraTransformMode: 'preset',
+              cameraTransform: null,
+              cameraCorner: 'bottom-right',
+              cameraSize: 'medium',
+              cameraShape: 'rectangle',
+              cameraMargin: 32,
+              cameraFit: 'fill',
+              cameraMirror: false,
+              cameraZoom: 100,
+              cameraOffsetX: 0,
+              cameraOffsetY: 0,
+              sideBySideSplit: '70-30',
+              sideBySideCameraSide: 'right',
+              verticalScreenFraming: 'fit'
+            },
+            video: { ...video, ...verticalCanvas }
+          }
+        }
+      : {})
   }
 }
 
@@ -1760,6 +1877,9 @@ function startShowWatcher({ url, token }) {
         phase: state.phase,
         endReason: state.endReason ?? null,
         feedUp: Array.isArray(state.feeds) && state.feeds.some((feed) => feed.connected),
+        feedsUp: Array.isArray(state.feeds)
+          ? state.feeds.filter((feed) => feed.connected).length
+          : 0,
         legs: Array.isArray(state.legs)
           ? state.legs.map((leg) => `${leg.id}:${leg.state}`).join(',')
           : '',
@@ -1788,6 +1908,11 @@ function startShowWatcher({ url, token }) {
 
 function firstPhase(states, afterMs, phase) {
   return states.find((state) => state.atMs >= afterMs && state.phase === phase)?.atMs ?? null
+}
+
+/** How many of the runner's feeds are connected in its latest state (U3). */
+function feedsConnected(watch) {
+  return watch?.states.at(-1)?.feedsUp ?? 0
 }
 
 // --- The test show's cap (C6b) -----------------------------------------------------

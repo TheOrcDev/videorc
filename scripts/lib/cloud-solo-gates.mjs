@@ -330,6 +330,17 @@ export function evaluateCloudSoloReport(report) {
         `${name}: ${receiver.durationSeconds} s recorded, expected at least ${receiver.minDurationSeconds} s`
       )
     }
+    // Plan 222 U3: the vertical receiver takes the portrait program, never
+    // the horizontal one (the 2026-09-21 incident shape), and each
+    // horizontal receiver its own size.
+    if (receiver.expectedSize && receiver.video?.codec) {
+      const { width, height } = receiver.expectedSize
+      if (receiver.video.width !== width || receiver.video.height !== height) {
+        failures.push(
+          `${name}: received ${receiver.video.width}x${receiver.video.height}, expected ${width}x${height}`
+        )
+      }
+    }
     for (const hold of receiver.holds ?? []) {
       if (!hold.pass) failures.push(`${name} ${hold.kind}: ${hold.reason}`)
       if (hold.card && !hold.card.isHoldCard) {
@@ -349,6 +360,29 @@ export function evaluateCloudSoloReport(report) {
   }
   if (report.platformRowsLive === false) {
     failures.push("the runner's platform leg states never reached the desktop as live")
+  }
+  // Plan 222 U3: both feeds live at Go Live, both back after every drop,
+  // and the vertical feed leg live again each time.
+  if (report.vertical) {
+    if (report.vertical.feedsAtLive !== 2) {
+      failures.push(
+        `vertical: ${report.vertical.feedsAtLive} feed(s) connected at Go Live, expected 2`
+      )
+    }
+    for (const entry of report.vertical.feedsAfterDrops ?? []) {
+      if (entry.feeds !== 2) {
+        failures.push(`vertical: ${entry.feeds} feed(s) connected after ${entry.kind}, expected 2`)
+      }
+      if (entry.verticalLegLive !== true) {
+        failures.push(`vertical: the vertical feed leg never read live again after ${entry.kind}`)
+      }
+    }
+    if ((report.vertical.feedsAfterDrops ?? []).length < (report.drops ?? []).length) {
+      failures.push('vertical: a drop was not checked for both feeds')
+    }
+    if (!(report.receivers ?? []).some((receiver) => receiver.orientation === 'vertical')) {
+      failures.push('vertical: no vertical receiver in the report')
+    }
   }
   // C1c: FFmpeg itself must prove the feed checks the node's certificate.
   if (report.tls) {

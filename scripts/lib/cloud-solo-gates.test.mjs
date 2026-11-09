@@ -15,6 +15,70 @@ import {
   sortedGapStats
 } from './cloud-solo-gates.mjs'
 
+describe('cloud solo gates: dual orientation (plan 222 U3)', () => {
+  function receiver(overrides = {}) {
+    return {
+      name: 'receiver-v',
+      video: { codec: 'h264', width: 720, height: 1280 },
+      audio: { codec: 'aac' },
+      stayedConnected: true,
+      exitedAfterStop: true,
+      gaps: { maxGapSeconds: 0.1 },
+      holds: [],
+      ...overrides
+    }
+  }
+  const drop = {
+    kind: 'feed-cut',
+    timeToHoldSeconds: 2,
+    timeToResumeSeconds: 3,
+    desktopSawHold: true,
+    desktopSawLive: true
+  }
+
+  it('wants both feeds at Go Live and after every drop, and the portrait size on the vertical receiver', () => {
+    const good = {
+      drops: [drop],
+      receivers: [
+        receiver({
+          name: 'receiver-1',
+          orientation: 'horizontal',
+          expectedSize: { width: 1280, height: 720 },
+          video: { codec: 'h264', width: 1280, height: 720 }
+        }),
+        receiver({
+          name: 'receiver-2',
+          orientation: 'horizontal',
+          expectedSize: { width: 1280, height: 720 },
+          video: { codec: 'h264', width: 1280, height: 720 }
+        }),
+        receiver({ orientation: 'vertical', expectedSize: { width: 720, height: 1280 } })
+      ],
+      vertical: {
+        feedsAtLive: 2,
+        feedsAfterDrops: [{ kind: 'feed-cut', feeds: 2, verticalLegLive: true }]
+      }
+    }
+    assert.deepEqual(evaluateCloudSoloReport(good), [])
+    const landscapeOnVertical = structuredClone(good)
+    landscapeOnVertical.receivers[2].video = { codec: 'h264', width: 1280, height: 720 }
+    assert.ok(
+      evaluateCloudSoloReport(landscapeOnVertical).some((failure) =>
+        failure.includes('received 1280x720, expected 720x1280')
+      )
+    )
+    const oneFeed = structuredClone(good)
+    oneFeed.vertical.feedsAtLive = 1
+    oneFeed.vertical.feedsAfterDrops[0].feeds = 1
+    oneFeed.vertical.feedsAfterDrops[0].verticalLegLive = false
+    const failures = evaluateCloudSoloReport(oneFeed)
+    assert.equal(failures.filter((failure) => failure.startsWith('vertical:')).length, 3)
+    const unchecked = structuredClone(good)
+    unchecked.vertical.feedsAfterDrops = []
+    assert.ok(evaluateCloudSoloReport(unchecked).some((failure) => failure.includes('not checked')))
+  })
+})
+
 describe('cloud solo gates: the feed certificate probe (C1c)', () => {
   // FFmpeg 8.1 (OpenSSL) at level+debug against MediaMTX 1.21.2 with no
   // catch-all path, as the runner's dev/mediamtx.yml.tpl has it since C1b.
