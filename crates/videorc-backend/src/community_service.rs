@@ -290,6 +290,26 @@ impl CommunityLane {
         before != self.link_made.len()
     }
 
+    /// F2: a `!forgetme` or "Forget Ada…": the person's "Welcome back" row
+    /// and any "Linked … Undo" card naming the person or the account leave
+    /// at once, not at the end of their window.
+    pub(crate) fn note_forgotten(
+        &mut self,
+        person_id: Option<&str>,
+        account_key: Option<&str>,
+    ) -> bool {
+        let before = (self.welcome_back.len(), self.link_made.len());
+        self.welcome_back.retain(|(waiting, _, _)| {
+            Some(waiting.person_id.as_str()) != person_id
+                && Some(waiting.author_key.as_str()) != account_key
+        });
+        self.link_made.retain(|(link, _)| {
+            Some(link.person_id.as_str()) != person_id
+                && Some(link.account_key.as_str()) != account_key
+        });
+        before != (self.welcome_back.len(), self.link_made.len())
+    }
+
     pub(crate) fn welcome_back(&self, now: Instant) -> Vec<CohostWelcomeBack> {
         self.welcome_back
             .iter()
@@ -640,6 +660,11 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
                             && session.report_arrivals.len() < REPORT_ARRIVALS_MAX
                         {
                             session.report_arrivals.push(ReportArrival {
+                                account_key: message
+                                    .author_id
+                                    .as_deref()
+                                    .map(|author_id| account_key(message.platform, author_id))
+                                    .unwrap_or_default(),
                                 name: message.author_name.trim().to_string(),
                                 platform: message.platform,
                                 arrival,
@@ -739,6 +764,58 @@ fn count_for_report(state: &AppState, session_id: &str, count: impl FnOnce(&mut 
     }
 }
 
+/// F2: a forgotten account or person leaves the stream in progress too:
+/// their arrival rows leave the report's Community block before it is
+/// written, their "Welcome back" row and any "Linked … Undo" card leave
+/// the pane at once, and the lookup's key → person mapping forgets them.
+/// `session_id` names the session (`None`: the running one); the account
+/// key or the person id, whichever the caller knows.
+async fn drop_forgotten(
+    state: &AppState,
+    session_id: Option<&str>,
+    account_key: Option<&str>,
+    person_id: Option<&str>,
+) {
+    let person_id: Option<String> = {
+        let mut runtime = state.community.lock();
+        let session = match session_id {
+            Some(session_id) => runtime.session_mut(session_id),
+            None => runtime.session.as_mut(),
+        };
+        match session {
+            Some(session) => {
+                let person_id = person_id.map(str::to_string).or_else(|| {
+                    account_key.and_then(|key| session.people_by_key.get(key).cloned())
+                });
+                let keys: HashSet<String> = session
+                    .people_by_key
+                    .iter()
+                    .filter(|(key, person)| {
+                        Some(key.as_str()) == account_key
+                            || person_id.as_deref() == Some(person.as_str())
+                    })
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                session.report_arrivals.retain(|arrival| {
+                    !keys.contains(&arrival.account_key)
+                        && Some(arrival.account_key.as_str()) != account_key
+                });
+                session.people_by_key.retain(|key, _| !keys.contains(key));
+                person_id
+            }
+            None => person_id.map(str::to_string),
+        }
+    };
+    let mut engine = state.cohost.lock().await;
+    let left = engine
+        .community
+        .note_forgotten(person_id.as_deref(), account_key);
+    drop(engine);
+    if left {
+        publish_cohost_state(state).await;
+    }
+}
+
 /// D15: a link the streamer made while a chat session runs counts in that
 /// session's report.
 fn count_link_for_live_report(state: &AppState) {
@@ -794,6 +871,7 @@ async fn run_chat_command(
                     count_for_report(state, session_id, |session| {
                         session.opt_outs = session.opt_outs.saturating_add(1)
                     });
+                    drop_forgotten(state, Some(session_id), Some(key), None).await;
                     state.emit_log(
                         "info",
                         format!(
@@ -1232,12 +1310,8 @@ pub async fn forget(
         database.community_forget_person(&id, Utc::now())
     })
     .await?;
-    let mut engine = state.cohost.lock().await;
-    let row_left = engine.community.note_waved(&person_id);
-    drop(engine);
-    if row_left {
-        publish_cohost_state(state).await;
-    }
+    // F2: the pane and the report in progress forget them too.
+    drop_forgotten(state, None, None, Some(&person_id)).await;
     emit_changed(state).await;
     Ok(CommunityAccepted { accepted: true })
 }
@@ -1245,7 +1319,7 @@ pub async fn forget(
 pub async fn forget_all(state: &AppState) -> Result<CommunityAccepted, CommunityError> {
     blocking(state, move |database| {
         database
-            .community_forget_all()
+            .community_forget_all(Utc::now())
             .map_err(CommunityError::from)
     })
     .await?;
@@ -1255,6 +1329,8 @@ pub async fn forget_all(state: &AppState) -> Result<CommunityAccepted, Community
             session.arrived.clear();
             session.people_by_key.clear();
             session.links.clear();
+            // F2: the report in progress names nobody either.
+            session.report_arrivals.clear();
         }
     }
     state.cohost.lock().await.community.clear();
@@ -3454,6 +3530,87 @@ mod tests {
         let split = person_at(&state, StreamPlatform::Kick, "9");
         assert_eq!(split.memories.len(), 1);
         assert_eq!(split.memories[0].text, "Streams on Kick at night");
+    }
+
+    /// The review of 2026-11-09, F2: a `!forgetme` leaves no trace in the
+    /// stream in progress either. Ada is a regular on her third stream (a
+    /// "Welcome back" row and a report arrival) and has just linked her
+    /// YouTube account (a "Linked … Undo" card); her `!forgetme` from
+    /// Twitch takes the row, the card and the arrival out at once, so the
+    /// report counts the opt-out and names nobody.
+    #[tokio::test]
+    async fn a_forgetme_drops_the_welcome_back_row_the_link_card_and_the_report_arrival() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        for session_id in ["s1", "s2"] {
+            let generation = start_session(&state, session_id).await;
+            deliver(
+                &state,
+                generation,
+                vec![row(session_id, StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
+            )
+            .await;
+            crate::live_chat::stop_live_chat(&state).await;
+            session_settled(&state, session_id).await;
+        }
+        let third = start_session(&state, "s3").await;
+        deliver(
+            &state,
+            third,
+            vec![
+                row("s3", StreamPlatform::Twitch, "ada", "Ada", 2, "back"),
+                row("s3", StreamPlatform::Youtube, "UCada", "ada_dev", 3, "hi"),
+                row("s3", StreamPlatform::Twitch, "ada", "Ada", 4, "!link pixel42"),
+                row(
+                    "s3",
+                    StreamPlatform::Youtube,
+                    "UCada",
+                    "ada_dev",
+                    5,
+                    "!link pixel42",
+                ),
+            ],
+        )
+        .await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert_eq!(snapshot.welcome_back.len(), 1, "Ada is back");
+        assert_eq!(snapshot.link_made.len(), 1, "the card is up");
+        deliver(
+            &state,
+            third,
+            vec![row("s3", StreamPlatform::Twitch, "ada", "Ada", 6, "!forgetme")],
+        )
+        .await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert!(snapshot.welcome_back.is_empty(), "the row left with her");
+        assert!(snapshot.link_made.is_empty(), "the card left with her");
+        assert!(
+            state.community.lock().session.as_ref().unwrap().report_arrivals.is_empty(),
+            "her arrival left the report"
+        );
+        assert_eq!(
+            state.database.community_account_person("twitch:ada").unwrap(),
+            None
+        );
+        crate::live_chat::stop_live_chat(&state).await;
+        let community = report_block(&state, "s3").await;
+        assert_eq!(community.opt_outs, 1);
+        assert_eq!(community.regulars_back, 0);
+        assert!(community.regulars.is_empty(), "{:?}", community.regulars);
+        // The person's link event went with the account.
+        let person = state
+            .database
+            .community_person(
+                &CommunityPersonParams {
+                    platform: Some(StreamPlatform::Youtube),
+                    author_id: Some("UCada".to_string()),
+                    ..Default::default()
+                },
+                Utc::now(),
+                3,
+            )
+            .unwrap();
+        assert!(person.link_events.is_empty(), "{:?}", person.link_events);
     }
 
     /// The smoke's fake Twitch lane: six rows from three authors (`seq % 3`),

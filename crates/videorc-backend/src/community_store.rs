@@ -662,8 +662,8 @@ fn person_history_locked(conn: &Connection, person: &PersonRow) -> Result<Person
 
 /// Recompute a person's stored counts and newest name from its accounts
 /// and attendance (D1, D2). A person with no live account left is deleted
-/// with its memories, note and link events' target (the events stay as
-/// history on the kept side).
+/// with its memories, note and link events (F2: a forgotten person leaves
+/// no trace; the kept side of a split keeps its own events).
 fn refresh_person_locked(conn: &Connection, person_id: &str) -> Result<()> {
     let Some(person) = person_locked(conn, person_id)? else {
         return Ok(());
@@ -706,10 +706,62 @@ fn delete_person_locked(conn: &Connection, person_id: &str) -> Result<()> {
         params![person_id],
     )?;
     conn.execute(
+        "DELETE FROM community_link_events WHERE person_id = ?1",
+        params![person_id],
+    )?;
+    conn.execute(
         "DELETE FROM community_people WHERE id = ?1",
         params![person_id],
     )?;
     Ok(())
+}
+
+/// F2: take forgotten names out of past Buddy reports' Community blocks
+/// (the regulars named and the milestones celebrated). `gone` lists
+/// `(name, platform)` pairs; `None` scrubs every name ("Forget
+/// everyone"). The counts stay: the report counts opt-outs, never names
+/// them (D13). Returns how many reports changed.
+fn scrub_report_names_locked(
+    conn: &Connection,
+    gone: Option<&[(String, StreamPlatform)]>,
+    now: DateTime<Utc>,
+) -> Result<u32> {
+    let mut statement = conn.prepare("SELECT session_id, report_json FROM cohost_reports")?;
+    let rows: Vec<(String, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let matches = |name: &str, platform: StreamPlatform| match gone {
+        None => true,
+        Some(gone) => gone
+            .iter()
+            .any(|(gone_name, gone_platform)| *gone_platform == platform && gone_name == name),
+    };
+    let mut scrubbed = 0u32;
+    for (session_id, json) in rows {
+        let Some(mut report) = crate::protocol::CohostSessionReport::from_stored_json(&json)
+        else {
+            continue;
+        };
+        let Some(community) = report.community.as_mut() else {
+            continue;
+        };
+        let before = (community.regulars.len(), community.milestones.len());
+        community
+            .regulars
+            .retain(|person| !matches(&person.name, person.platform));
+        community
+            .milestones
+            .retain(|milestone| !matches(&milestone.name, milestone.platform));
+        if before == (community.regulars.len(), community.milestones.len()) {
+            continue;
+        }
+        conn.execute(
+            "UPDATE cohost_reports SET report_json = ?2, updated_at = ?3 WHERE session_id = ?1",
+            params![session_id, serde_json::to_string(&report)?, iso(now)],
+        )?;
+        scrubbed = scrubbed.saturating_add(1);
+    }
+    Ok(scrubbed)
 }
 
 fn insert_person_locked(
@@ -1747,6 +1799,12 @@ impl Database {
         };
         let name = account.name.clone();
         forget_account_locked(&transaction, &account, now)?;
+        // F2: past reports named them as a regular or a milestone.
+        scrub_report_names_locked(
+            &transaction,
+            Some(&[(name.clone(), account.platform)]),
+            now,
+        )?;
         transaction.commit()?;
         Ok((!name.is_empty()).then_some(name))
     }
@@ -1773,19 +1831,26 @@ impl Database {
         if person_locked(&transaction, person_id)?.is_none() {
             return Err(CommunityError::NotFound);
         }
-        for account in live_accounts_locked(&transaction, person_id)? {
-            forget_account_locked(&transaction, &account, now)?;
+        let accounts = live_accounts_locked(&transaction, person_id)?;
+        let gone: Vec<(String, StreamPlatform)> = accounts
+            .iter()
+            .map(|account| (account.name.clone(), account.platform))
+            .collect();
+        for account in &accounts {
+            forget_account_locked(&transaction, account, now)?;
         }
         delete_person_locked(&transaction, person_id)?;
+        scrub_report_names_locked(&transaction, Some(&gone), now)?;
         transaction.commit()?;
         Ok(())
     }
 
     /// "Forget everyone…" (D13): the whole store, tombstones included (a
     /// viewer who typed `!forgetme` is forgotten either way).
-    pub fn community_forget_all(&self) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute_batch(
+    pub fn community_forget_all(&self, now: DateTime<Utc>) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        transaction.execute_batch(
             "DELETE FROM community_attendance;
              DELETE FROM community_memories;
              DELETE FROM community_memory_jobs;
@@ -1795,6 +1860,9 @@ impl Database {
              DELETE FROM community_people;
              DELETE FROM community_streams;",
         )?;
+        // F2: every name in every past report's Community block goes too.
+        scrub_report_names_locked(&transaction, None, now)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -2051,6 +2119,10 @@ impl Database {
                 params![account.account_key],
             )?;
             transaction.execute(
+                "DELETE FROM community_link_events WHERE account_key = ?1",
+                params![account.account_key],
+            )?;
+            transaction.execute(
                 "DELETE FROM community_accounts WHERE account_key = ?1",
                 params![account.account_key],
             )?;
@@ -2082,6 +2154,10 @@ impl Database {
         )?;
         transaction.execute(
             "DELETE FROM community_memories WHERE person_id NOT IN (SELECT id FROM community_people)",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM community_link_events WHERE person_id NOT IN (SELECT id FROM community_people)",
             [],
         )?;
         transaction.commit()?;
@@ -2728,6 +2804,11 @@ fn forget_account_locked(
     )?;
     conn.execute(
         "DELETE FROM community_suggestions WHERE account_a = ?1 OR account_b = ?1",
+        params![account.account_key],
+    )?;
+    // F2: who linked this account, and when, goes with it.
+    conn.execute(
+        "DELETE FROM community_link_events WHERE account_key = ?1",
         params![account.account_key],
     )?;
     conn.execute(

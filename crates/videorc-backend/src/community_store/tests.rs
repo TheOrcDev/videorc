@@ -801,7 +801,7 @@ fn forgetme_leaves_a_tombstone_that_later_chat_never_revives_until_rememberme() 
     assert!(gone.id.is_empty());
     assert!(gone.note.is_empty());
     // Forget everyone: nothing is left, tombstones included.
-    database.community_forget_all().unwrap();
+    database.community_forget_all(day(2026, 10, 17)).unwrap();
     assert_eq!(database.community_account_status("twitch:t1"), None);
     assert_eq!(
         database
@@ -1308,4 +1308,158 @@ fn memories_and_the_note_ride_the_arrival_only_with_remember_on() {
         8,
         "at most eight in all"
     );
+}
+
+/// The review of 2026-11-09, F2: a forget leaves no trace. The account's
+/// link events go with it (forget, the person's deletion and the prune),
+/// and the names in past reports' Community blocks are scrubbed, while the
+/// counts stay (the report counts opt-outs, never names them, D13).
+#[test]
+fn a_forget_takes_the_link_events_and_the_past_reports_names_with_it() {
+    use crate::protocol::{
+        CohostReportCommunity, CohostReportCommunityMilestone, CohostReportCommunityPerson,
+        CohostSessionReport,
+    };
+    let database = Database::open_in_memory_for_tests();
+    stream_with(
+        &database,
+        "s1",
+        day(2026, 10, 1),
+        &[
+            (StreamPlatform::Twitch, "t1", "Ada"),
+            (StreamPlatform::Kick, "k1", "Ada"),
+            (StreamPlatform::Twitch, "t2", "Bo"),
+        ],
+    );
+    let twitch = person_of(&database, StreamPlatform::Twitch, "t1");
+    let kick = person_of(&database, StreamPlatform::Kick, "k1");
+    let kept = database
+        .community_link(
+            &twitch.id,
+            &kick.id,
+            CommunityLinkKind::Manual,
+            day(2026, 10, 2),
+        )
+        .unwrap();
+    assert_eq!(
+        person_of(&database, StreamPlatform::Twitch, "t1")
+            .link_events
+            .len(),
+        1
+    );
+    // A past report names Ada (Twitch) as a regular and Bo's milestone.
+    database.ensure_fake_live_chat_session("s1").unwrap();
+    let block = CohostReportCommunity {
+        regulars_back: 2,
+        regulars: vec![
+            CohostReportCommunityPerson {
+                name: "Ada".to_string(),
+                platform: StreamPlatform::Twitch,
+                platforms: vec![StreamPlatform::Kick, StreamPlatform::Twitch],
+                streams: 5,
+            },
+            CohostReportCommunityPerson {
+                name: "Bo".to_string(),
+                platform: StreamPlatform::Twitch,
+                platforms: Vec::new(),
+                streams: 4,
+            },
+        ],
+        milestones: vec![CohostReportCommunityMilestone {
+            name: "Bo".to_string(),
+            platform: StreamPlatform::Twitch,
+            milestone: ViewerMilestone {
+                kind: ViewerMilestoneKind::Streams,
+                value: 5,
+            },
+        }],
+        ..Default::default()
+    };
+    database
+        .upsert_cohost_report(&CohostSessionReport::community_only(
+            "s1",
+            block,
+            &day(2026, 10, 1).to_rfc3339(),
+        ))
+        .unwrap();
+    // `!forgetme` from the Kick account: its link event goes; the report
+    // still names Ada on Twitch (a different account) and Bo.
+    database
+        .community_forget_account("kick:k1", day(2026, 10, 3))
+        .unwrap();
+    let ada = person_of(&database, StreamPlatform::Twitch, "t1");
+    assert_eq!(ada.id, kept);
+    assert!(
+        ada.link_events.is_empty(),
+        "the forgotten account's link event is gone: {:?}",
+        ada.link_events
+    );
+    let report = |database: &Database| {
+        database
+            .get_cohost_report("s1")
+            .unwrap()
+            .unwrap()
+            .community
+            .unwrap()
+    };
+    assert_eq!(report(&database).regulars.len(), 2);
+    // `!forgetme` from the Twitch account: Ada leaves the report by name,
+    // the count stays.
+    database
+        .community_forget_account("twitch:t1", day(2026, 10, 4))
+        .unwrap();
+    let scrubbed = report(&database);
+    assert_eq!(scrubbed.regulars_back, 2, "counts stay");
+    assert_eq!(
+        scrubbed
+            .regulars
+            .iter()
+            .map(|person| person.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Bo"]
+    );
+    assert_eq!(scrubbed.milestones.len(), 1);
+    {
+        let conn = database.lock().unwrap();
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM community_link_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(events, 0, "no link event outlives its person");
+    }
+    // "Forget Bo…" scrubs his milestone and his name too.
+    let bo = person_of(&database, StreamPlatform::Twitch, "t2");
+    database
+        .community_forget_person(&bo.id, day(2026, 10, 5))
+        .unwrap();
+    let scrubbed = report(&database);
+    assert!(scrubbed.regulars.is_empty());
+    assert!(scrubbed.milestones.is_empty());
+    assert_eq!(scrubbed.regulars_back, 2);
+    // The prune takes a pruned person's link events too.
+    stream_with(
+        &database,
+        "s2",
+        day(2025, 1, 1),
+        &[
+            (StreamPlatform::Twitch, "old1", "Old"),
+            (StreamPlatform::Kick, "old2", "Old"),
+        ],
+    );
+    let a = person_of(&database, StreamPlatform::Twitch, "old1");
+    let b = person_of(&database, StreamPlatform::Kick, "old2");
+    database
+        .community_link(&a.id, &b.id, CommunityLinkKind::Manual, day(2025, 1, 2))
+        .unwrap();
+    assert_eq!(database.community_prune(day(2026, 10, 6)).unwrap(), 2);
+    {
+        let conn = database.lock().unwrap();
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM community_link_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(events, 0);
+    }
 }

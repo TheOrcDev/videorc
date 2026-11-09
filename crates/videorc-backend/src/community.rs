@@ -1080,9 +1080,12 @@ pub fn command_bubble_line(
     }
 }
 
-/// One arrival of a stream, kept in memory for the report (D15).
+/// One arrival of a stream, kept in memory for the report (D15). The
+/// account key lets a `!forgetme` take the arrival out again before the
+/// block is written (the review of 2026-11-09, F2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportArrival {
+    pub account_key: String,
     pub name: String,
     pub platform: StreamPlatform,
     pub arrival: ViewerArrival,
@@ -1768,12 +1771,14 @@ mod tests {
         };
         let mut arrivals: Vec<ReportArrival> = (0..12)
             .map(|index| ReportArrival {
+                account_key: format!("twitch:r{index:02}"),
                 name: format!("R{index:02}"),
                 platform: StreamPlatform::Twitch,
                 arrival: arrival(3 + index, true),
             })
             .collect();
         arrivals.push(ReportArrival {
+            account_key: "kick:bo".to_string(),
             name: "Bo".to_string(),
             platform: StreamPlatform::Kick,
             arrival: ViewerArrival {
@@ -1782,6 +1787,7 @@ mod tests {
             },
         });
         arrivals.push(ReportArrival {
+            account_key: "youtube:kim".to_string(),
             name: "Kim".to_string(),
             platform: StreamPlatform::Youtube,
             arrival: ViewerArrival {
