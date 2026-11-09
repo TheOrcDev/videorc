@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 import { HOST, ada, grace, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
 import {
   GUESTS_CLOUD_NOT_YET_REASON,
-  GUESTS_MAX_REASON,
   GUESTS_NOT_YET_REASON,
   GUESTS_PREMIUM_REASON,
   GUESTS_PREMIUM_SEAT_LINE,
@@ -46,7 +45,7 @@ describe('guestsAccess (C-G2, D15)', () => {
     })
   })
 
-  it('sells Max to a plan without talk shows, and says not yet to Max', () => {
+  it('says not yet to any paid plan whose allowance has no talk shows (D15 B)', () => {
     const noTalk = {
       enabled: true,
       secondsPerMonth: 1,
@@ -54,14 +53,35 @@ describe('guestsAccess (C-G2, D15)', () => {
       overageSeconds: 0,
       talkShows: false
     }
-    expect(guestsAccess(talkStatus({ plan: 'premium', allowance: noTalk }))).toMatchObject({
-      reason: GUESTS_MAX_REASON,
-      upsell: true
-    })
-    expect(guestsAccess(talkStatus({ plan: 'max', allowance: noTalk }))).toMatchObject({
-      reason: GUESTS_NOT_YET_REASON,
-      upsell: false
-    })
+    for (const plan of ['premium', 'max'] as const) {
+      expect(guestsAccess(talkStatus({ plan, allowance: noTalk }))).toMatchObject({
+        reason: GUESTS_NOT_YET_REASON,
+        upsell: false
+      })
+    }
+  })
+
+  // Review L1: one lock sentence, D15 B's, in the renderer and the backend
+  // (`cloud_talk.rs` TALK_SHOWS_LOCK_MESSAGE) alike.
+  it("names Premium, the lowest plan with guests, and never Max's old lock", () => {
+    expect(GUESTS_PREMIUM_REASON).toBe('Talk shows with guests come with Videorc Premium.')
+    const reasons = [
+      guestsAccess(talkStatus({ entitled: false, plan: undefined })),
+      guestsAccess(talkStatus({ entitled: false, plan: 'premium' })),
+      guestsAccess(
+        talkStatus({
+          plan: 'premium',
+          allowance: {
+            enabled: true,
+            secondsPerMonth: 1,
+            secondsUsed: 0,
+            overageSeconds: 0,
+            talkShows: false
+          }
+        })
+      )
+    ].map((access) => (access.kind === 'locked' ? access.reason : ''))
+    expect(reasons.join(' ')).not.toContain('Videorc Max')
   })
 
   it('opens for an account with talk shows, and never locks a room this computer holds', () => {

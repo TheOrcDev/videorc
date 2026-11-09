@@ -19,13 +19,15 @@ import { effectiveStageLayout, showStageInput } from '@/lib/talk-show-layout'
 
 // --- Locks (C-G2, D15) -------------------------------------------------------
 
-/** Basic: guests come with a paid plan (D15 B: Premium seats one). */
+/**
+ * D15 B (plan 221 U3): the one lock sentence for talk shows. Premium seats one
+ * guest and Max five, so Basic is sold Premium; the backend's refusal
+ * (`TALK_SHOWS_LOCK_MESSAGE`) and the web's 403 say the same words.
+ */
 export const GUESTS_PREMIUM_REASON = 'Talk shows with guests come with Videorc Premium.'
-/** A plan without talk shows (D15 A, kept for an allowance that says so). */
-export const GUESTS_MAX_REASON = 'Talk shows with guests come with Videorc Max.'
 /** A paid plan whose cloud isn't on yet (the rollout switch, the cohort). */
 export const GUESTS_CLOUD_NOT_YET_REASON = "Videorc Cloud isn't on for your account yet."
-/** Max with talk shows switched off for the account (the rollout). */
+/** A paid plan whose allowance has no talk shows yet (D15 B: the rollout). */
 export const GUESTS_NOT_YET_REASON = "Talk shows aren't on for your account yet."
 /** The backend never answered with the cloud's state (an older backend). */
 export const GUESTS_CLOUD_UNKNOWN_REASON = "Videorc can't check Videorc Cloud right now."
@@ -46,10 +48,10 @@ export function guestsAccess(status: CloudStatus | null): GuestsAccess {
       ? { kind: 'locked', reason: GUESTS_CLOUD_NOT_YET_REASON, upsell: false }
       : { kind: 'locked', reason: GUESTS_PREMIUM_REASON, upsell: true }
   }
+  // D15 B: every paid plan has talk shows, so an allowance without them is
+  // the rollout, never an upsell.
   if (status.allowance && !status.allowance.talkShows) {
-    return status.plan === 'max'
-      ? { kind: 'locked', reason: GUESTS_NOT_YET_REASON, upsell: false }
-      : { kind: 'locked', reason: GUESTS_MAX_REASON, upsell: true }
+    return { kind: 'locked', reason: GUESTS_NOT_YET_REASON, upsell: false }
   }
   return { kind: 'available' }
 }

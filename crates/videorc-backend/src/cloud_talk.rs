@@ -996,6 +996,12 @@ impl CloudShowRuntime {
     }
 }
 
+/// Plan 224 D15 (B, the owner's answer through plan 221 U3): the one lock
+/// sentence for talk shows. Premium seats one guest and Max five, so the
+/// lowest plan with guests is named; the renderer's Guests tab
+/// (`GUESTS_PREMIUM_REASON`) and the web's 403 say the same words.
+pub const TALK_SHOWS_LOCK_MESSAGE: &str = "Talk shows with guests come with Videorc Premium.";
+
 /// `cloud.room.open` refused before anything reaches the web.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomOpenRefusal {
@@ -1022,7 +1028,7 @@ impl std::fmt::Display for RoomOpenRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SignedOut => write!(f, "Sign in to Videorc to open a room."),
-            Self::NotEntitled => write!(f, "Talk shows with guests come with Videorc Max."),
+            Self::NotEntitled => write!(f, "{TALK_SHOWS_LOCK_MESSAGE}"),
             Self::ShowLive => write!(
                 f,
                 "A show is already live through Videorc Cloud. End it first."
@@ -1093,6 +1099,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         };
         let created = match self.web.create_show(&bearer, &request).await {
             Ok(created) => created,
+            // The web's 403 for talk shows reads as the same lock (L1).
+            Err(CloudApiError::NotEntitled) => {
+                let _ = (self.hooks.camera)(CameraHandover::Return).await;
+                return Err(RoomOpenRefusal::NotEntitled.into());
+            }
             Err(error) => {
                 let _ = (self.hooks.camera)(CameraHandover::Return).await;
                 return Err(anyhow::Error::new(error));

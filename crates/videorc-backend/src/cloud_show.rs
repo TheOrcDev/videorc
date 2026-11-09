@@ -5454,6 +5454,51 @@ mod tests {
         );
     }
 
+    /// Review L1: one lock sentence for talk shows, D15 B's, whether this
+    /// computer refuses (no talk shows in the allowance) or the web's 403
+    /// does; the web's refusal gives the camera back.
+    #[tokio::test(start_paused = true)]
+    async fn a_room_refused_for_the_plan_says_d15_bs_one_sentence() {
+        assert_eq!(
+            crate::cloud_talk::TALK_SHOWS_LOCK_MESSAGE,
+            "Talk shows with guests come with Videorc Premium."
+        );
+        let harness = harness(true);
+        let error = harness
+            .context
+            .open_room(Some("bearer".to_string()), room_open_params(), false)
+            .await
+            .expect_err("no talk shows in the allowance");
+        assert_eq!(
+            error.to_string(),
+            crate::cloud_talk::TALK_SHOWS_LOCK_MESSAGE
+        );
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() = Some(Err(CloudApiError::NotEntitled));
+        let error = harness
+            .context
+            .open_room(Some("bearer".to_string()), room_open_params(), false)
+            .await
+            .expect_err("the web refuses the plan");
+        assert_eq!(
+            error
+                .downcast_ref::<crate::cloud_talk::RoomOpenRefusal>()
+                .map(|refusal| refusal.code()),
+            Some("cloud-not-entitled")
+        );
+        assert_eq!(
+            error.to_string(),
+            crate::cloud_talk::TALK_SHOWS_LOCK_MESSAGE
+        );
+        assert_eq!(
+            harness.camera.lock().unwrap().as_slice(),
+            &[
+                crate::cloud_talk::CameraHandover::Lend,
+                crate::cloud_talk::CameraHandover::Return
+            ]
+        );
+    }
+
     /// Plan 224 D6: a take that records the camera refuses the lend, and
     /// nothing reaches the web.
     #[tokio::test(start_paused = true)]
