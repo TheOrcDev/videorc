@@ -24,8 +24,11 @@ jobs:
     if: ${{ needs.scope.result == 'success' && needs.scope.outputs.linux_heavy == 'true' }}
     runs-on: ubuntu-latest
     # Warm-cache Rust tests on this job sit near the old 30m wall; portal
-    # proof-surface PRs were cancelled mid-run. Keep headroom for this suite.
-    timeout-minutes: 45
+    # proof-surface PRs were cancelled mid-run. The Test step compiles with
+    # CARGO_BUILD_JOBS=1 (the runner ran out of memory with more), which
+    # takes 36-44 min on its own, so 45 cancelled a green suite. Keep
+    # headroom for this suite.
+    timeout-minutes: 75
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
