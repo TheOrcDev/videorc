@@ -1,4 +1,8 @@
-use crate::protocol::{Device, DeviceKind, DeviceStatus};
+use crate::protocol::Device;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use crate::protocol::DeviceKind;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use crate::protocol::DeviceStatus;
 
 const NATIVE_CAMERA_PREFIX: &str = "camera:avfoundation-native:";
 
@@ -27,7 +31,7 @@ fn camera_adaptive_registry()
 }
 
 /// Record what a camera start actually negotiated (called on every start).
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub fn record_negotiated_camera_format(camera_id: &str, width: u32, height: u32) {
     let mut registry = camera_adaptive_registry()
         .lock()
@@ -39,7 +43,7 @@ pub fn record_negotiated_camera_format(camera_id: &str, width: u32, height: u32)
 }
 
 /// The ceiling the format chooser must respect for this camera, if armed.
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub fn camera_format_ceiling(camera_id: &str) -> Option<(u32, u32)> {
     camera_adaptive_registry()
         .lock()
@@ -100,6 +104,7 @@ pub struct CameraFormatSummary {
     pub max_fps: f64,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct CameraFormatChoice {
@@ -107,6 +112,7 @@ pub struct CameraFormatChoice {
     pub fallback_reason: Option<String>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub enum NativeCameraPermission {
@@ -193,7 +199,7 @@ pub fn camera_capability_matrix_for_id(
     }
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub fn native_camera_device_id(unique_id: &str) -> String {
     format!("{NATIVE_CAMERA_PREFIX}{}", encode_hex(unique_id.as_bytes()))
 }
@@ -218,7 +224,7 @@ pub(crate) fn windows_dshow_camera_device_id(device_name: &str) -> String {
     )
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub fn camera_permission_status(permission: NativeCameraPermission) -> DeviceStatus {
     match permission {
         NativeCameraPermission::Authorized => DeviceStatus::Available,
@@ -229,7 +235,7 @@ pub fn camera_permission_status(permission: NativeCameraPermission) -> DeviceSta
     }
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub fn choose_camera_format(
     formats: &[CameraFormatSummary],
     target_width: u32,
@@ -286,7 +292,7 @@ pub fn choose_camera_format(
     })
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub fn normalize_camera_formats(mut formats: Vec<CameraFormatSummary>) -> Vec<CameraFormatSummary> {
     formats.retain(|format| {
         format.width > 0
@@ -320,10 +326,10 @@ pub fn normalize_camera_formats(mut formats: Vec<CameraFormatSummary>) -> Vec<Ca
 /// the 4K session upscales it, with only a "closest format" warning to show
 /// for it. One frame of slack costs nothing and matches the renderer's own
 /// FPS_TOLERANCE in camera-format-shortfall.ts.
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 const FPS_TOLERANCE: f64 = 1.0;
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 fn format_supports_fps(format: &CameraFormatSummary, target_fps: f64) -> bool {
     format.min_fps <= target_fps + FPS_TOLERANCE && format.max_fps >= target_fps - FPS_TOLERANCE
 }
@@ -337,6 +343,7 @@ fn format_supports_fps(format: &CameraFormatSummary, target_fps: f64) -> bool {
 /// `minFrameDuration`/`maxFrameDuration` CMTime verbatim when the request
 /// resolves to an endpoint, and may only build its own rational for a value
 /// strictly inside an open range.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub enum CameraFrameRateEndpoint {
@@ -348,6 +355,7 @@ pub enum CameraFrameRateEndpoint {
     Interior,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct CameraFrameRateResolution {
@@ -367,7 +375,7 @@ pub struct CameraFrameRateResolution {
 /// `floor(max) = 30 < ceil(min) = 31`, the empty interval lets `.max(31)`
 /// win, and the device rejects `1/31` with an NSException on every camera
 /// start (the field-logged 31-on-30 and 61-on-60 requests).
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 pub fn resolve_camera_frame_rate(
     requested_fps: u32,
     ranges: &[(f64, f64)],
@@ -405,7 +413,7 @@ pub fn resolve_camera_frame_rate(
     })
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 fn camera_format_pixels(format: &CameraFormatSummary) -> u64 {
     u64::from(format.width) * u64::from(format.height)
 }
@@ -413,7 +421,7 @@ fn camera_format_pixels(format: &CameraFormatSummary) -> u64 {
 /// Orders formats by the largest target-aspect region each one can supply.
 /// That region is `min(w·th, h·tw) / th` wide, so the numerator alone ranks
 /// formats exactly, in whole numbers, for one target.
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 fn camera_format_target_aspect_extent(
     format: &CameraFormatSummary,
     target_width: u32,
@@ -423,6 +431,7 @@ fn camera_format_target_aspect_extent(
         .min(u64::from(format.height) * u64::from(target_width))
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);
@@ -1112,10 +1121,16 @@ mod tests {
             camera_permission_status(NativeCameraPermission::Authorized),
             DeviceStatus::Available
         );
-        assert_eq!(
-            camera_permission_status(NativeCameraPermission::Denied),
-            DeviceStatus::PermissionRequired
-        );
+        for permission in [
+            NativeCameraPermission::NotDetermined,
+            NativeCameraPermission::Denied,
+            NativeCameraPermission::Restricted,
+        ] {
+            assert_eq!(
+                camera_permission_status(permission),
+                DeviceStatus::PermissionRequired
+            );
+        }
         assert_eq!(
             camera_permission_status(NativeCameraPermission::Unknown),
             DeviceStatus::Unavailable

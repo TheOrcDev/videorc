@@ -226,11 +226,10 @@ impl MediaFoundationEncoderConfig {
 
 #[derive(Debug, Clone)]
 pub struct MediaFoundationEncodedFrame {
-    // Describe the access unit; the muxer keys on `pts_100ns` alone today.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // part of the encoded-frame record; callers read pts and bytes
     pub frame_index: u64,
     pub pts_100ns: i64,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // part of the encoded-frame record; callers read pts and bytes
     pub duration_100ns: i64,
     pub bytes: Vec<u8>,
 }
@@ -365,11 +364,9 @@ pub(crate) struct MediaFoundationD3d11EncoderDiagnostics {
     pub(crate) adapter_luid: u64,
     pub(crate) d3d11_aware: bool,
     pub(crate) dxgi_manager_bound: bool,
-    // Counted on the release callback for the encoder status; no consumer
-    // surfaces them yet.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // snapshotted with the rest; no status surface reports it yet
     pub(crate) callback_decode_failures: u64,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // snapshotted with the rest; no status surface reports it yet
     pub(crate) callback_queue_failures: u64,
     pub(crate) ownership: WindowsD3d11EncoderDiagnostics,
 }

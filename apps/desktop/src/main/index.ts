@@ -14884,7 +14884,7 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         }
         throw new Error(
           params.sourceId
-            ? \`ScreenCaptureKit source \${params.sourceId} is not available to select.\`
+            ? \`Screen source \${params.sourceId} is not available to select.\`
             : 'No available ScreenCaptureKit screen/window source to select.'
         );
       }

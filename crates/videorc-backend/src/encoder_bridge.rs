@@ -39,6 +39,7 @@ use crate::diagnostics::{
 #[cfg(any(test, debug_assertions))]
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::FrameHandle;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 #[cfg(target_os = "windows")]
 use crate::preview_camera::PreviewCameraFrameSource;
@@ -60,7 +61,7 @@ use crate::video_toolbox_encoder::{
     VideoToolboxH264Session,
 };
 #[cfg(target_os = "windows")]
-use crate::windows_d3d11_device::{WindowsD3d11EncoderProgress, WindowsD3d11ErrorCode};
+use crate::windows_d3d11_device::WindowsD3d11EncoderProgress;
 #[cfg(target_os = "windows")]
 use crate::windows_d3d11_session::{
     WindowsD3d11EncoderTicketSource, WindowsD3d11EncoderTicketSourceSnapshot,
@@ -211,9 +212,9 @@ const fn windows_d3d11_primary_sequence_is_newer(
 }
 const FIFO_WRITE_PROGRESS_YIELD_BUDGET: u32 = 64;
 const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(target_os = "macos")]
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(target_os = "macos")]
 const VIDEOTOOLBOX_PROBE_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEOTOOLBOX_PROBE";
 
 type CompositorFrameHandle = FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>;
@@ -2375,7 +2376,8 @@ pub(crate) fn test_source_iso_trace_ms(at: Instant) -> f64 {
 /// A compositor frame fed into the encoder FIFO on one tick.
 #[derive(Clone)]
 struct FedCompositorFrame {
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // held to keep the ISO lease alive; only Metal reads it
     iso_lease: Option<Arc<SourceIsoLeasedFrame>>,
     /// Retains the compositor's immutable allocation through FIFO delivery. Raw
     /// output writes these bytes directly instead of copying them into a second
@@ -2777,7 +2779,7 @@ impl EncoderBridgeDrainState {
         downstream_closed
     }
 
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg(any(target_os = "macos", test))]
     fn pending_timeout_is_terminal(
         &self,
         pending_video_toolbox_frames: u64,
@@ -2808,7 +2810,7 @@ impl EncoderBridgeDrainState {
         }
     }
 
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg(target_os = "macos")]
     fn record_video_toolbox_loop_error(
         &mut self,
         terminal_failure: &Arc<StdMutex<Option<String>>>,
@@ -3888,9 +3890,11 @@ struct SyntheticRecordingWriterParams {
     #[cfg(target_os = "windows")]
     d3d11_input: Option<WindowsD3d11EncoderTicketSource>,
     video_output: EncoderBridgeVideoOutput,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     bitrate_kbps: Option<u32>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     mf_input_topology: crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     low_latency: bool,
     diagnostics_tx: watch::Sender<Option<EncoderBridgeWriterEvent>>,
     diagnostics_context: EncoderBridgeDiagnosticsContext,
@@ -3934,12 +3938,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         #[cfg(target_os = "windows")]
         d3d11_input,
         video_output,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         bitrate_kbps,
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            bitrate_kbps: _,
         #[cfg(target_os = "windows")]
         mf_input_topology,
         #[cfg(not(target_os = "windows"))]
             mf_input_topology: _,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         low_latency,
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            low_latency: _,
         diagnostics_tx,
         diagnostics_context,
         video_epoch,
@@ -4169,19 +4179,35 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut raw_video_copied_frames = 0_u64;
     let mut metal_target_copied_frames = 0_u64;
     let mut metal_target_handle_frames = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut zero_copy_frames = 0_u64;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut video_toolbox_probe_frames = 0_u64;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut video_toolbox_probe_bytes = 0_u64;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut video_toolbox_probe_errors = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut video_toolbox_output_frames = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut video_toolbox_output_bytes = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut max_video_toolbox_output_encode_ms: Option<u64> = None;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut pending_video_toolbox_output_frames = 0_u64;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut pending_video_toolbox_fifo_frames = 0_u64;
     let mut pending_raw_fifo_frames = 0_u64;
     let mut pending_raw_fifo_started_at = VecDeque::<Instant>::new();
@@ -4273,7 +4299,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut video_toolbox_fifo_write_times_ms = Vec::with_capacity(128);
     let mut raw_video_fifo_write_times_ms = Vec::with_capacity(128);
     let mut video_toolbox_fifo_enqueue_times_ms = Vec::with_capacity(128);
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut max_video_toolbox_fifo_enqueue_ms: Option<f64> = None;
     let mut writer_loop_times_ms = Vec::with_capacity(128);
     let mut writer_sleep_times_ms = Vec::with_capacity(128);
@@ -7437,7 +7463,7 @@ enum BoundedWriterJoinOutcome {
     Detached,
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(target_os = "macos")]
 fn bounded_writer_join<T>(join: std::thread::JoinHandle<T>) -> BoundedWriterJoinOutcome {
     const WRITER_CLOSE_JOIN_GRACE: Duration = Duration::from_secs(3);
     bounded_writer_join_until(join, Instant::now() + WRITER_CLOSE_JOIN_GRACE)
@@ -7860,7 +7886,7 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
         return;
     }
 
-    while !stop.load(Ordering::Relaxed) {
+    'ticks: while !stop.load(Ordering::Relaxed) {
         if let Some(error) = current_input.terminal_error() {
             match wait_for_windows_d3d11_generation_replacement(
                 &input,
@@ -7980,57 +8006,101 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                 scheduled_windows_d3d11_time_100ns(schedule_index.saturating_sub(1), target_fps);
             let next_pts_100ns = scheduled_windows_d3d11_time_100ns(schedule_index, target_fps);
             let duration_100ns = next_pts_100ns.saturating_sub(pts_100ns).max(1);
-            match current_input.client.submit_encoder_texture(
-                ticket,
-                pts_100ns,
-                duration_100ns,
-                encoder_started_at.elapsed().as_micros() as u64,
-            ) {
-                Ok(progress) => {
-                    last_submitted_sequence = Some(sequence);
-                    input_frames = input_frames.saturating_add(1);
-                    queue_depth = progress.status.pending_frame_count as u64;
-                    if let Err(error) = write_windows_d3d11_encoder_progress(
-                        progress,
-                        &mut fifo,
-                        &mut ts_writer,
-                        &stop,
-                        &mut output_frames,
-                        &mut output_bytes,
-                        &mut fifo_write_times_ms,
-                    ) {
-                        terminal_error = Some(format!(
-                            "{:?} D3D11 Media Foundation output stopped: {error}",
-                            current_input.role
-                        ));
-                        break;
-                    }
-                }
-                Err(failure) => {
-                    if let Some(progress) = failure.progress
-                        && let Err(error) = write_windows_d3d11_encoder_progress(
-                            *progress,
+            // #1075: a refused frame (no input credit yet) used to skip its
+            // tick for good, and a 1080p30 take came up 3% short. The credit
+            // came back 2-13 ms later on the GTX 1650 SUPER, so poll the
+            // encoder and submit the newest frame at this tick's time.
+            let mut submission = (sequence, ticket);
+            let mut refused_since: Option<Instant> = None;
+            loop {
+                let (sequence, ticket) = submission;
+                match current_input.client.submit_encoder_texture(
+                    ticket,
+                    pts_100ns,
+                    duration_100ns,
+                    encoder_started_at.elapsed().as_micros() as u64,
+                ) {
+                    Ok(progress) => {
+                        last_submitted_sequence = Some(sequence);
+                        input_frames = input_frames.saturating_add(1);
+                        queue_depth = progress.status.pending_frame_count as u64;
+                        if let Err(error) = write_windows_d3d11_encoder_progress(
+                            progress,
                             &mut fifo,
                             &mut ts_writer,
                             &stop,
                             &mut output_frames,
                             &mut output_bytes,
                             &mut fifo_write_times_ms,
-                        )
-                    {
-                        terminal_error = Some(format!(
-                            "{:?} D3D11 Media Foundation output stopped: {error}",
-                            current_input.role
-                        ));
+                        ) {
+                            terminal_error = Some(format!(
+                                "{:?} D3D11 Media Foundation output stopped: {error}",
+                                current_input.role
+                            ));
+                            break 'ticks;
+                        }
                         break;
                     }
-                    if matches!(
-                        failure.error.code,
-                        WindowsD3d11ErrorCode::CommandQueueFull
-                            | WindowsD3d11ErrorCode::EncoderBackpressure
-                    ) {
-                        pressure_skips = pressure_skips.saturating_add(1);
-                    } else {
+                    Err(failure) => {
+                        if let Some(progress) = failure.progress
+                            && let Err(error) = write_windows_d3d11_encoder_progress(
+                                *progress,
+                                &mut fifo,
+                                &mut ts_writer,
+                                &stop,
+                                &mut output_frames,
+                                &mut output_bytes,
+                                &mut fifo_write_times_ms,
+                            )
+                        {
+                            terminal_error = Some(format!(
+                                "{:?} D3D11 Media Foundation output stopped: {error}",
+                                current_input.role
+                            ));
+                            break 'ticks;
+                        }
+                        if windows_d3d11_submission_is_backpressure(failure.error.code) {
+                            let refused_at = *refused_since.get_or_insert_with(Instant::now);
+                            if stop.load(Ordering::Relaxed)
+                                || !windows_d3d11_backpressure_retry_allowed(
+                                    refused_at.elapsed(),
+                                    frame_interval,
+                                )
+                            {
+                                pressure_skips = pressure_skips.saturating_add(1);
+                                break;
+                            }
+                            thread::sleep(WINDOWS_D3D11_ENCODER_DRAIN_POLL_INTERVAL);
+                            // A failed poll is the next tick's to recover.
+                            let Ok(progress) =
+                                current_input.client.poll_encoder(current_input.role)
+                            else {
+                                pressure_skips = pressure_skips.saturating_add(1);
+                                break;
+                            };
+                            if let Err(error) = write_windows_d3d11_encoder_progress(
+                                progress,
+                                &mut fifo,
+                                &mut ts_writer,
+                                &stop,
+                                &mut output_frames,
+                                &mut output_bytes,
+                                &mut fifo_write_times_ms,
+                            ) {
+                                terminal_error = Some(format!(
+                                    "{:?} D3D11 Media Foundation output stopped: {error}",
+                                    current_input.role
+                                ));
+                                break 'ticks;
+                            }
+                            // The refused ticket was released; lease the newest frame.
+                            let Some((sequence, _, ticket)) = current_input.latest_ticket() else {
+                                pressure_skips = pressure_skips.saturating_add(1);
+                                break;
+                            };
+                            submission = (sequence, ticket);
+                            continue;
+                        }
                         match wait_for_windows_d3d11_generation_replacement(
                             &input,
                             &current_input,
@@ -8055,9 +8125,9 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                             Err(error) => terminal_error = Some(error),
                         }
                         if terminal_error.is_some() {
-                            break;
+                            break 'ticks;
                         }
-                        continue;
+                        continue 'ticks;
                     }
                 }
             }
@@ -8236,6 +8306,30 @@ fn validate_windows_d3d11_encoder_input(
             input.role
         )),
     }
+}
+
+/// A refusal the D3D11 writer waits out instead of failing over: the encoder
+/// has no input credit yet, or the device worker's queue is momentarily full.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_submission_is_backpressure(
+    code: crate::windows_d3d11_device::WindowsD3d11ErrorCode,
+) -> bool {
+    use crate::windows_d3d11_device::WindowsD3d11ErrorCode;
+    matches!(
+        code,
+        WindowsD3d11ErrorCode::CommandQueueFull | WindowsD3d11ErrorCode::EncoderBackpressure
+    )
+}
+
+/// #1075: how long the D3D11 writer keeps resubmitting a refused tick. One
+/// frame interval: the credit returned within 2-13 ms on NVENC, and a longer
+/// wait would only push the next tick off the schedule instead.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_backpressure_retry_allowed(
+    refused_for: Duration,
+    frame_interval: Duration,
+) -> bool {
+    refused_for < frame_interval
 }
 
 #[cfg(target_os = "windows")]
@@ -8551,12 +8645,12 @@ fn oldest_pending_video_toolbox_frame_age(
         .map(|started_at| started_at.elapsed())
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(target_os = "macos")]
 fn encoder_bridge_video_toolbox_probe_enabled() -> bool {
     parse_video_toolbox_probe_enabled(std::env::var(VIDEOTOOLBOX_PROBE_ENV).ok().as_deref())
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 fn parse_video_toolbox_probe_enabled(value: Option<&str>) -> bool {
     let Some(value) = value else {
         return false;
@@ -10737,6 +10831,36 @@ mod tests {
         assert!(blocker.is_some(), "detached writer must fail admission");
         release_tx.send(()).expect("release the fake writer");
         wait_for_lifecycle_resources_to_clear();
+    }
+
+    #[test]
+    fn a_refused_d3d11_tick_waits_out_a_brief_nvenc_credit_gap_but_never_a_whole_frame() {
+        use crate::windows_d3d11_device::WindowsD3d11ErrorCode;
+
+        // #1075: the refusal used to skip the tick and leave a hole.
+        assert!(windows_d3d11_submission_is_backpressure(
+            WindowsD3d11ErrorCode::EncoderBackpressure
+        ));
+        assert!(windows_d3d11_submission_is_backpressure(
+            WindowsD3d11ErrorCode::CommandQueueFull
+        ));
+        // A broken encoder still goes to generation replacement.
+        assert!(!windows_d3d11_submission_is_backpressure(
+            WindowsD3d11ErrorCode::EncoderUnavailable
+        ));
+
+        // The longest measured credit gap (13 ms) is waited out at 30 and 60 fps.
+        for fps in [30_u32, 60] {
+            let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+            assert!(windows_d3d11_backpressure_retry_allowed(
+                Duration::from_millis(13),
+                interval
+            ));
+            // The next tick is due: stop retrying rather than slip the schedule.
+            assert!(!windows_d3d11_backpressure_retry_allowed(
+                interval, interval
+            ));
+        }
     }
 
     #[test]
@@ -13721,7 +13845,9 @@ mod tests {
         assert!(recording_queue_drop_watch_update(&mut watch, "s2", 2));
     }
 
-    use crate::compositor::{CompositorFrameExportHandle, CompositorPixelFormat};
+    #[cfg(target_os = "macos")]
+    use crate::compositor::CompositorFrameExportHandle;
+    use crate::compositor::CompositorPixelFormat;
     #[cfg(target_os = "macos")]
     use crate::metal_compositor::{GpuSource, GpuSourceKind, MetalSceneCompositor};
 

@@ -4734,14 +4734,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }))
       return camera.id
     }
-    // An explicit source ID pins a display, e.g. one held static by a fixture.
+    // An explicit source ID pins a display, e.g. one held static by a fixture,
+    // on any platform (a Windows DXGI display too); without one, the first
+    // ScreenCaptureKit source.
     smokeWindow.__videorcSmokeSelectFirstScreen = (sourceId) => {
       const source = deviceList.devices.find(
         (device) =>
           (device.kind === 'screen' || device.kind === 'window') &&
           device.status === 'available' &&
-          device.id.includes('screencapturekit') &&
-          (!sourceId || device.id === sourceId)
+          (sourceId ? device.id === sourceId : device.id.includes('screencapturekit'))
       )
       if (!source || (source.kind !== 'screen' && source.kind !== 'window')) {
         return null

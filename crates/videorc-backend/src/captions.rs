@@ -2521,6 +2521,8 @@ impl From<CaptionOverlayPosition> for OverlayPlacement {
 #[derive(Debug, Clone)]
 pub struct CaptionOverlay {
     pub rgba: Arc<Vec<u8>>,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    // Metal and D3D11 upload it
     pub bgra: Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,

@@ -242,6 +242,7 @@
     "smoke:recording-performance": "node scripts/smoke-recording-performance-app.mjs --gate",
     "smoke:scene-presets": "node scripts/smoke-scene-presets-app.mjs",
     "smoke:smart-scenes": "node scripts/smoke-smart-scenes-app.mjs",
+    "smoke:hide-screen:windows": "node scripts/smoke-hide-screen-windows-app.mjs",
     "smoke:virtual-camera": "node scripts/smoke-virtual-camera.mjs",
     "smoke:recording-studio": "node scripts/smoke-recording-studio.mjs",
     "smoke:scene-switch-pixels": "node scripts/smoke-scene-switch-pixels.mjs",
