@@ -144,6 +144,14 @@ describe('session runtime recovery', () => {
     expect(toastSpies.success).toHaveBeenCalledTimes(1)
     expect(toastSpies.warning).toHaveBeenCalledTimes(1)
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    // `unavailable` means X ended the broadcast: X's API gives no playback
+    // URL any more, so there is nothing else to "show".
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'X ended your broadcast',
+      expect.objectContaining({
+        description: expect.stringContaining('Your local recording is unaffected.')
+      })
+    )
   })
 
   it('preserves OAuth callback success and failure notifications in the lazy chunk', () => {
@@ -464,6 +472,30 @@ describe('session audio news (plan 076)', () => {
     )
   })
 
+  it('says the rest of the take is silent when the audio output stops for good', () => {
+    showSessionHealthEvent(healthEvent('audio-output-failed', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Your recording has no sound from here',
+      expect.objectContaining({
+        id: 'audio-output',
+        description: 'audio-output-failed message',
+        duration: Infinity
+      })
+    )
+  })
+
+  it('says the recording stopped when its encoder stops taking frames (2026-11-03 Iris Xe)', () => {
+    showSessionHealthEvent(healthEvent('recording-output-failed', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Your recording stopped',
+      expect.objectContaining({
+        id: 'recording-output',
+        description: 'recording-output-failed message',
+        duration: Infinity
+      })
+    )
+  })
+
   it('replaces a frozen-stream warning with the news that it resumed', () => {
     showSessionHealthEvent(healthEvent('stream-output-stalled'), false)
     expect(toastSpies.warning).toHaveBeenCalledWith(
@@ -578,6 +610,23 @@ describe('session audio news (plan 076)', () => {
     showSessionHealthEvent(healthEvent('screen-capture-restored', 'info'), false)
     expect(toastSpies.success).toHaveBeenCalledWith(
       'Screen capture is back',
+      expect.objectContaining({ id: 'screen-capture' })
+    )
+  })
+
+  it('reports a captured window that is out of sight, and its return, on the screen-capture key', () => {
+    showSessionHealthEvent(healthEvent('screen-window-out-of-sight'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Window out of sight',
+      expect.objectContaining({
+        id: 'screen-capture',
+        duration: 20_000,
+        description: 'screen-window-out-of-sight message'
+      })
+    )
+    showSessionHealthEvent(healthEvent('screen-window-back', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'The window is back',
       expect.objectContaining({ id: 'screen-capture' })
     )
   })

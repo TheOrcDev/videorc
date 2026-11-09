@@ -47,9 +47,14 @@ const streamMs = Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 60000)
 // existing 720p stress profile. The long gate passes 9,000,000ms (150min).
 const verticalSplit = process.env.VIDEORC_SMOKE_SPLIT_4K_VERTICAL === '1'
 const split4k = verticalSplit || process.env.VIDEORC_SMOKE_SPLIT_4K === '1'
+// Linux runs one encode for the recording and the livestream (plan 0016), and
+// the backend refuses a recording below the stream's profile there. Record at
+// the stream's own profile, so the session starts with its shared encode.
 const recordingProfile = split4k
   ? { preset: 'record-4k30', width: 3840, height: 2160, fps: 30, bitrateKbps: 30000 }
-  : { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
+  : process.platform === 'linux'
+    ? { preset: 'custom', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
+    : { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 2500)
 const finalizationTimeoutMs = Number(process.env.VIDEORC_SMOKE_FINALIZATION_TIMEOUT_MS ?? 30000)
 // Network stall profile for the proxied leg in session A.

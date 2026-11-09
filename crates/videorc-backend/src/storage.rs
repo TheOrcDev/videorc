@@ -6674,6 +6674,13 @@ impl Database {
         Ok(())
     }
 
+    /// Removes one app setting; a missing key is not an error.
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn import_screen_image(&self, image_path: &str, ffmpeg_path: &str) -> Result<StreamScreen> {
         self.import_screen_image_with_optimizer(image_path, |source, destination| {
             optimize_screen_image(source, destination, ffmpeg_path)
@@ -12821,10 +12828,15 @@ mod tests {
                 .unwrap();
         }
 
-        database.conn.lock().unwrap().trace_v2(
-            TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(count_session_list_statement),
-        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_session_list_statement),
+            )
+            .unwrap();
         for limit in [1, 20, 200] {
             SESSION_LIST_TRACED_STATEMENTS.store(0, Ordering::Relaxed);
             let started = std::time::Instant::now();
@@ -12878,7 +12890,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                None::<fn(TraceEvent<'_>)>,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -13039,10 +13055,15 @@ mod tests {
         }
 
         SESSION_SIZE_WRITEBACK_STATEMENTS.store(0, Ordering::Relaxed);
-        database.conn.lock().unwrap().trace_v2(
-            TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(count_session_size_writeback_statement),
-        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_session_size_writeback_statement),
+            )
+            .unwrap();
         let page = database
             .list_session_items_page(None, fixtures.len())
             .unwrap();
@@ -13050,7 +13071,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                None::<fn(TraceEvent<'_>)>,
+            )
+            .unwrap();
 
         let expected_total = fixtures
             .iter()

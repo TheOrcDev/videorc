@@ -171,7 +171,7 @@ const TRANSIENT_FIFO_GATES = Object.freeze({
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY
 })
 
-// Hard content on OpenH264 skips frames on overshoot by design
+// Hard content on OpenH264 skips frames on overshoot by design outside Linux
 // (recording-matrix-software-skip.mjs). Only the frame-skipping laws relax;
 // the 2 s keyframe cadence and the A/V stop tail stay gated.
 const SOFTWARE_SKIP_GATES = softwareSkipGates(MATRIX_GATES)
@@ -342,7 +342,8 @@ async function recordCombo({
   const contract = hardContentContract({
     stress,
     hardContent,
-    encodeBackend: bridgeDiagnostics.encodeBackend
+    encodeBackend: bridgeDiagnostics.encodeBackend,
+    platform: process.platform
   })
   const quality = await analyzeRecording(outputPath, {
     ffmpegPath,
@@ -707,8 +708,8 @@ try {
   // 0.9.44 shipped its mid-recording-crash regression through green gates
   // exactly that way. Preview must stay live THROUGH the recording.
   // 1080p60 must hold FULL cadence under noise on the hardware encoders
-  // (proven headroom); OpenH264 skips frames there by design and is held to
-  // SOFTWARE_SKIP_GATES. 4K noise is beyond any real content, so 4K30 runs as
+  // (proven headroom); OpenH264 skips frames there by design outside Linux and
+  // is held to SOFTWARE_SKIP_GATES. 4K noise is beyond any real content, so 4K30 runs as
   // a survival stress combo.
   if (HARD_COMBOS.length > 0) {
     results.push(

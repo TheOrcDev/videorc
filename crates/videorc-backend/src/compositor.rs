@@ -7980,12 +7980,11 @@ fn cpu_live_background_source(
 }
 
 /// Plan 190 S5: stop the Linux live background thread when composition stops
-/// (the idle preview composes no pixels) or the live background leaves.
+/// (the idle preview composes no pixels) or the live background leaves, and
+/// take down its status: a poster status holds no thread (fix plan 0007).
 fn release_cpu_live_background(slot: &mut Option<Box<LiveBackgroundGpuRenderer>>) {
     #[cfg(target_os = "linux")]
-    if let Some(renderer) = slot.as_mut()
-        && renderer.holds_resources()
-    {
+    if let Some(renderer) = slot.as_mut() {
         renderer.release();
     }
     #[cfg(not(target_os = "linux"))]
@@ -8631,7 +8630,7 @@ fn test_trace_source_iso_composition(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn test_take_source_iso_composition_trace() -> Vec<SourceIsoCompositionTiming> {
     std::mem::take(
         &mut *SOURCE_ISO_COMPOSITION_TRACE
@@ -16153,7 +16152,7 @@ mod tests {
         ));
         assert_eq!(circle[3], 0, "top-left corner must be transparent");
         assert_eq!(
-            circle[((1 * 4 + 1) * 4) + 3],
+            circle[((4 + 1) * 4) + 3],
             255,
             "circle center must remain opaque"
         );
@@ -24092,6 +24091,7 @@ mod buddy_sprite_tests {
     /// The S-B5 draw: cell 4 of the 3 x 2 fixture (neighbours on three
     /// sides), 150 px on canvas from 120 px cells, turned 30 degrees and
     /// scaled 1.1 x 0.9 about page-pet's pivot, nudged by (12, -7).
+    #[cfg(target_os = "macos")]
     fn parity_leg() -> BuddyLegFrame {
         let atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
         let buddy_box = [565.0, 285.0, 150.0, 150.0];
@@ -24114,6 +24114,7 @@ mod buddy_sprite_tests {
 
     /// Distance from a canvas point to the quad's outline, and whether the
     /// point is inside.
+    #[cfg(target_os = "macos")]
     fn edge_distance(corners: [[f32; 2]; 4], point: [f32; 2]) -> (f32, bool) {
         // Outline order: top-left, top-right, bottom-right, bottom-left.
         let outline = [corners[0], corners[1], corners[3], corners[2]];
@@ -25919,6 +25920,7 @@ mod program_leg_tests {
 
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 360;
+    #[cfg(target_os = "macos")]
     const PET: [u8; 3] = [230, 40, 40];
 
     fn state_with_scene() -> AppState {
@@ -25964,6 +25966,7 @@ mod program_leg_tests {
     }
 
     /// The pet's box on `canvas`, as an oracle rect around its centre.
+    #[cfg(target_os = "macos")]
     fn pet_rect() -> crate::preview_debug_sample::Rect {
         let [x, y, w, h] = crate::buddy_sprite::buddy_box(
             OverlayLayout::default().buddy.horizontal,
@@ -25978,6 +25981,7 @@ mod program_leg_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn sample(store: &CompositorFrameStore) -> [f64; 3] {
         let value = crate::preview_debug_sample::sample_frame_store(store, &[pet_rect()])
             .expect("the leg published a readable frame");
@@ -25989,6 +25993,7 @@ mod program_leg_tests {
         ]
     }
 
+    #[cfg(target_os = "macos")]
     fn is_pet(rgb: [f64; 3]) -> bool {
         rgb.iter()
             .zip(PET)
@@ -26362,6 +26367,7 @@ mod program_leg_tests {
 
     /// The idle run's configuration a Clips lease parks (a stream-only
     /// Buddy is in the idle program).
+    #[cfg(target_os = "macos")]
     fn idle_config() -> CompositorLoopConfig {
         CompositorLoopConfig {
             target_fps: 30,
@@ -27700,6 +27706,75 @@ mod live_background_cpu_tests {
         assert!(slot.is_none());
         release_cpu_live_background(&mut slot);
         assert!(slot.is_none());
+    }
+
+    /// A Linux renderer with a poster status up, as the forced preflight
+    /// leaves it (no thread, no GPU).
+    #[cfg(target_os = "linux")]
+    fn renderer_showing_the_poster(
+        board: &Arc<LiveBackgroundBoard>,
+    ) -> Option<Box<LiveBackgroundGpuRenderer>> {
+        let now = Instant::now();
+        let mut runtime = None;
+        sync_live_background(&mut runtime, Some(&spec()), now);
+        let input =
+            runtime
+                .unwrap()
+                .frame_input(&background(), board, LiveBackgroundTick::unmeasured(now));
+        let mut renderer = Box::new(LiveBackgroundGpuRenderer::new(Arc::clone(board)));
+        let forced = Some(crate::protocol::LiveBackgroundStillReason::Forced);
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        assert!(!renderer.holds_resources());
+        Some(renderer)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn board_rendering(board: &LiveBackgroundBoard) -> Option<LiveBackgroundRendering> {
+        board.snapshot().0.map(|status| status.rendering)
+    }
+
+    /// Fix plan 0007: when composition stops (the idle Linux preview composes
+    /// nothing) or the run ends, the renderer takes down the status it put
+    /// up; nothing else would, so the idle preview kept the take's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stopped_cpu_live_background_takes_down_its_status() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        // A poster status holds no thread: release still takes it down.
+        let mut slot = renderer_showing_the_poster(&board);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        release_cpu_live_background(&mut slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+        release_cpu_live_background(&mut slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+        // A session's run ends and drops its renderer.
+        let slot = renderer_showing_the_poster(&board);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        drop(slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+    }
+
+    /// The run that replaces an ending one may report first; the ending
+    /// run's renderer leaves that status up.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ending_runs_renderer_leaves_the_next_runs_status_up() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let ending = renderer_showing_the_poster(&board);
+        let next = renderer_showing_the_poster(&board);
+        drop(ending);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        drop(next);
+        assert_eq!(board.snapshot(), (None, 0, 0));
     }
 
     #[cfg(not(target_os = "linux"))]

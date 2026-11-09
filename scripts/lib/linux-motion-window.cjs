@@ -3,7 +3,12 @@
 // desktop makes exact frame repeats the expected output and the analyzer's
 // freeze/repeat gates meaningless (ogre, 2026-09-30).
 //
-// Prints `motion-window-ready` once the first frame is painted.
+// Prints `motion-window-ready` once the first frame is painted, then
+// `motion-window-rate N` every second with the frames painted in it. Paints
+// follow the compositor's frame callbacks, so N is how often the window is
+// presented: with the display off it read 0 while the page still reported
+// itself visible (ogre, 2026-11-07). A session lock over a lit display does
+// not lower it, though the portal then captures the lock screen.
 // Launched by scripts/lib/linux-motion-window.mjs; never part of the app.
 
 const { app, BrowserWindow } = require('electron')
@@ -31,6 +36,11 @@ function paint() {
   requestAnimationFrame(paint)
 }
 requestAnimationFrame(paint)
+let counted = 0
+setInterval(() => {
+  console.log('motion-rate ' + (frame - counted))
+  counted = frame
+}, 1000)
 </script></body></html>`
 
 app.whenReady().then(() => {
@@ -43,6 +53,10 @@ app.whenReady().then(() => {
   })
   window.webContents.on('page-title-updated', (_event, title) => {
     if (title === 'motion-ready') console.log('motion-window-ready')
+  })
+  window.webContents.on('console-message', (event) => {
+    const match = /^motion-rate (\d+)$/.exec(event.message ?? '')
+    if (match) console.log(`motion-window-rate ${match[1]}`)
   })
   window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(page)}`)
 })

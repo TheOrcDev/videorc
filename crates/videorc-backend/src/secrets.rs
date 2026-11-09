@@ -60,6 +60,67 @@ const KICK_TEST_FIXTURE_ACCOUNT_IDS: &[&str] = &[
 /// one backend; cross-process locking is not a real concern here).
 static STORE_CACHE: Mutex<Option<StoreCache>> = Mutex::new(None);
 
+/// What a `secrets::` unit test sees in place of the process environment's
+/// `VIDEORC_SECRET_STORE` and `VIDEORC_SECRETS_PATH`, with a cache of its own.
+///
+/// The environment and [`STORE_CACHE`] are shared by every test in the binary,
+/// and other modules' tests reach the store with no lock of ours (Kick
+/// subscription ids, account sign-in, remote-control pairing). A test that set
+/// the env and then wrote its fixture file let any of them load and cache the
+/// still-empty file under the test's own identity in between, so the test then
+/// read the stale cache; and they in turn wrote into, or failed against, the
+/// test's damaged store. Scoping both to the test's thread removes the race
+/// instead of narrowing it.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct TestStoreScope {
+    store: Option<String>,
+    path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_STORE_SCOPE: std::cell::RefCell<Option<TestStoreScope>> =
+        const { std::cell::RefCell::new(None) };
+    static TEST_STORE_CACHE: std::cell::RefCell<Option<StoreCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` on the store cache: the process-wide one, or in a scoped unit test
+/// that thread's own.
+fn with_store_cache<R>(f: impl FnOnce(&mut Option<StoreCache>) -> R) -> R {
+    #[cfg(test)]
+    if TEST_STORE_SCOPE.with(|scope| scope.borrow().is_some()) {
+        return TEST_STORE_CACHE.with(|cache| f(&mut cache.borrow_mut()));
+    }
+    let mut guard = STORE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+/// `VIDEORC_SECRET_STORE` as the store selection sees it.
+fn requested_secret_store_env() -> Option<String> {
+    #[cfg(test)]
+    if let Some(store) =
+        TEST_STORE_SCOPE.with(|scope| scope.borrow().as_ref().map(|scope| scope.store.clone()))
+    {
+        return store;
+    }
+    std::env::var("VIDEORC_SECRET_STORE").ok()
+}
+
+/// `VIDEORC_SECRETS_PATH` as the store selection sees it.
+fn secrets_path_env() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) =
+        TEST_STORE_SCOPE.with(|scope| scope.borrow().as_ref().map(|scope| scope.path.clone()))
+    {
+        return path;
+    }
+    std::env::var_os("VIDEORC_SECRETS_PATH").map(PathBuf::from)
+}
+
 #[derive(Debug, Clone)]
 struct StoreCache {
     identity: SecretStoreBackendIdentity,
@@ -341,13 +402,14 @@ struct StartupMaintenanceReport {
 }
 
 fn run_startup_maintenance() -> Result<StartupMaintenanceReport> {
-    let mut guard = STORE_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    with_store_cache(run_startup_maintenance_on)
+}
+
+fn run_startup_maintenance_on(cache: &mut Option<StoreCache>) -> Result<StartupMaintenanceReport> {
     let backend = selected_secret_store()?;
     // Only a store that loaded in full may lose its staged copy: after a crash
     // the `.tmp` can be the only readable one.
-    let store = load_cache(&mut guard, &backend)?;
+    let store = load_cache(cache, &backend)?;
     let mut report = StartupMaintenanceReport::default();
     if let Some(path) = backend.path() {
         match remove_stale_temp_file(path) {
@@ -440,7 +502,7 @@ pub fn secret_store_backend_kind() -> &'static str {
 }
 
 fn selected_secret_store() -> Result<SelectedSecretStore> {
-    let requested = std::env::var("VIDEORC_SECRET_STORE").ok();
+    let requested = requested_secret_store_env();
     let kind = select_secret_store_kind(
         requested.as_deref(),
         platform_default_secret_store_kind(),
@@ -501,8 +563,8 @@ fn select_secret_store_kind(
 }
 
 fn secrets_path() -> PathBuf {
-    if let Some(custom) = std::env::var_os("VIDEORC_SECRETS_PATH") {
-        return PathBuf::from(custom);
+    if let Some(custom) = secrets_path_env() {
+        return custom;
     }
     // A unit test that writes a secret without isolating the store must never
     // reach the developer's real one: `cargo test` replaced the real
@@ -754,48 +816,48 @@ pub fn put_secrets(entries: &[(&str, &str)]) -> Result<()> {
 /// Product-account sign-out uses this to advance its durable intent generation
 /// in the same commit that removes the bearer token and cached identity.
 pub fn update_secrets(entries: &[(&str, &str)], removals: &[&str]) -> Result<()> {
-    let mut guard = STORE_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let backend = selected_secret_store()?;
-    let store = load_cache(&mut guard, &backend)?;
-    let mut secrets = store.secrets.clone();
-    for secret_ref in removals {
-        secrets.remove(*secret_ref);
-    }
-    for (secret_ref, value) in entries {
-        secrets.insert((*secret_ref).to_string(), (*value).to_string());
-    }
-    if secrets == store.secrets {
-        return Ok(());
-    }
-    backend.write_all(&secrets)?;
-    store.secrets = secrets;
-    Ok(())
+    with_loaded_store(|backend, store| {
+        let mut secrets = store.secrets.clone();
+        for secret_ref in removals {
+            secrets.remove(*secret_ref);
+        }
+        for (secret_ref, value) in entries {
+            secrets.insert((*secret_ref).to_string(), (*value).to_string());
+        }
+        if secrets == store.secrets {
+            return Ok(());
+        }
+        backend.write_all(&secrets)?;
+        store.secrets = secrets;
+        Ok(())
+    })
 }
 
 pub fn get_secret(secret_ref: &str) -> Result<String> {
-    let mut guard = STORE_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let backend = selected_secret_store()?;
-    let store = load_cache(&mut guard, &backend)?;
-    store
-        .secrets
-        .get(secret_ref)
-        .cloned()
-        .ok_or_else(|| anyhow!("Secret ref {secret_ref} is not stored."))
+    with_loaded_store(|_, store| {
+        store
+            .secrets
+            .get(secret_ref)
+            .cloned()
+            .ok_or_else(|| anyhow!("Secret ref {secret_ref} is not stored."))
+    })
 }
 
 /// Like [`get_secret`], but absence is a normal outcome (`Ok(None)`) instead of
 /// an error — for callers that need to know whether a secret exists at all.
 pub fn try_get_secret(secret_ref: &str) -> Result<Option<String>> {
-    let mut guard = STORE_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let backend = selected_secret_store()?;
-    let store = load_cache(&mut guard, &backend)?;
-    Ok(store.secrets.get(secret_ref).cloned())
+    with_loaded_store(|_, store| Ok(store.secrets.get(secret_ref).cloned()))
+}
+
+/// Selects the store and loads its cache, holding the cache for all of `f`.
+fn with_loaded_store<R>(
+    f: impl FnOnce(&SelectedSecretStore, &mut StoreCache) -> Result<R>,
+) -> Result<R> {
+    with_store_cache(|cache| {
+        let backend = selected_secret_store()?;
+        let store = load_cache(cache, &backend)?;
+        f(&backend, store)
+    })
 }
 
 pub fn delete_secret(secret_ref: &str) -> Result<()> {
@@ -809,39 +871,36 @@ pub fn delete_secrets(secret_refs: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// Points this test thread's store at `store`/`path` (`None` reads as
+    /// unset, whatever the process env holds) with an empty cache of its own.
+    /// Nothing another test does can see or change it; see [`TestStoreScope`].
+    fn scope_secret_store_for_tests(store: Option<&str>, path: Option<&Path>) {
+        TEST_STORE_SCOPE.with(|scope| {
+            *scope.borrow_mut() = Some(TestStoreScope {
+                store: store.map(str::to_string),
+                path: path.map(Path::to_path_buf),
+            });
+        });
+        reset_secret_store_for_tests();
+    }
 
+    /// Drops this thread's cache, as a backend restart would.
     fn reset_secret_store_for_tests() {
-        let mut guard = STORE_CACHE
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = None;
+        TEST_STORE_CACHE.with(|cache| *cache.borrow_mut() = None);
     }
 
     fn clear_secret_store_env_for_tests() {
-        unsafe {
-            std::env::remove_var("VIDEORC_SECRET_STORE");
-            std::env::remove_var("VIDEORC_SECRETS_PATH");
-        }
+        TEST_STORE_SCOPE.with(|scope| *scope.borrow_mut() = None);
         reset_secret_store_for_tests();
     }
 
     #[test]
     fn file_store_roundtrip_and_permissions() {
-        let _guard = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = std::env::temp_dir().join(format!("videorc-secrets-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("videorc-secrets.json");
-        // SAFETY: tests in this module run in one test fn; no parallel env races.
-        unsafe {
-            std::env::set_var("VIDEORC_SECRET_STORE", JSON_FILE_SECRET_STORE_KIND);
-            std::env::set_var("VIDEORC_SECRETS_PATH", &path);
-        }
-        reset_secret_store_for_tests();
+        scope_secret_store_for_tests(Some(JSON_FILE_SECRET_STORE_KIND), Some(&path));
 
         assert!(get_secret("stream-target:twitch:manual-stream-key").is_err());
         assert_eq!(
@@ -938,19 +997,12 @@ mod tests {
 
     #[test]
     fn platform_default_backend_is_selected_without_an_override() {
-        let _guard = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "videorc-secrets-default-test-{}",
             std::process::id()
         ));
         let path = dir.join("videorc-secrets.json");
-        unsafe {
-            std::env::remove_var("VIDEORC_SECRET_STORE");
-            std::env::set_var("VIDEORC_SECRETS_PATH", &path);
-        }
-        reset_secret_store_for_tests();
+        scope_secret_store_for_tests(None, Some(&path));
 
         let diagnostics = secret_store_diagnostics().unwrap();
 
@@ -969,11 +1021,8 @@ mod tests {
 
     #[test]
     fn a_unit_test_without_an_isolated_store_never_reaches_the_real_profile() {
-        let _guard = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // The state every other module's test runs in: nothing set.
-        clear_secret_store_env_for_tests();
+        scope_secret_store_for_tests(None, None);
         let real_store = crate::storage::default_database_path()
             .parent()
             .map(|dir| dir.join("videorc-secrets.json"))
@@ -988,14 +1037,7 @@ mod tests {
 
     #[test]
     fn unsupported_keychain_override_fails_explicitly() {
-        let _guard = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        unsafe {
-            std::env::set_var("VIDEORC_SECRET_STORE", "keychain");
-            std::env::remove_var("VIDEORC_SECRETS_PATH");
-        }
-        reset_secret_store_for_tests();
+        scope_secret_store_for_tests(Some("keychain"), None);
 
         let error = put_secret("platform:x:oauth:refresh", "fixture-token").unwrap_err();
 
@@ -1007,14 +1049,7 @@ mod tests {
 
     #[test]
     fn memory_backend_is_available_for_unit_tests() {
-        let _guard = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        unsafe {
-            std::env::set_var("VIDEORC_SECRET_STORE", MEMORY_TEST_SECRET_STORE_KIND);
-            std::env::remove_var("VIDEORC_SECRETS_PATH");
-        }
-        reset_secret_store_for_tests();
+        scope_secret_store_for_tests(Some(MEMORY_TEST_SECRET_STORE_KIND), None);
 
         assert_eq!(
             secret_store_diagnostics().unwrap(),
@@ -1035,6 +1070,37 @@ mod tests {
         );
 
         clear_secret_store_env_for_tests();
+    }
+
+    /// The interleaving behind the intermittent DPAPI test failure, made
+    /// deterministic: another
+    /// module's test reads the store after this test pointed it at a fixture
+    /// path but before the fixture file exists. It must neither see this
+    /// test's store nor leave a stale cache this test then reads.
+    #[test]
+    fn a_scoped_store_is_invisible_to_and_unaffected_by_other_test_threads() {
+        let dir =
+            std::env::temp_dir().join(format!("videorc-secrets-scope-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("videorc-secrets.json");
+        scope_secret_store_for_tests(Some(JSON_FILE_SECRET_STORE_KIND), Some(&path));
+
+        let other_thread_path = std::thread::spawn(|| {
+            let _ = try_get_secret("account:videorc:session");
+            secret_store_diagnostics().unwrap().path
+        })
+        .join()
+        .unwrap();
+        assert_ne!(other_thread_path, Some(path.clone()));
+
+        let fixture =
+            BTreeMap::from([("account:videorc:session".to_string(), "token".to_string())]);
+        write_json_file(&path, &fixture).unwrap();
+        assert_eq!(get_secret("account:videorc:session").unwrap(), "token");
+
+        clear_secret_store_env_for_tests();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1163,9 +1229,6 @@ mod tests {
 
     #[test]
     fn startup_maintenance_removes_the_stale_copy_and_fixtures_only_after_the_store_loads() {
-        let _guard = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "videorc-secrets-maintenance-test-{}",
             std::process::id()
@@ -1175,11 +1238,7 @@ mod tests {
         let path = dir.join("videorc-secrets.json");
         let temp = store_temp_path(&path);
         assert_eq!(temp, dir.join("videorc-secrets.json.tmp"));
-        unsafe {
-            std::env::set_var("VIDEORC_SECRET_STORE", JSON_FILE_SECRET_STORE_KIND);
-            std::env::set_var("VIDEORC_SECRETS_PATH", &path);
-        }
-        reset_secret_store_for_tests();
+        scope_secret_store_for_tests(Some(JSON_FILE_SECRET_STORE_KIND), Some(&path));
 
         // A store that does not load keeps its staged copy: after a crash it
         // may be the only readable one. Nothing is written either.
@@ -1258,19 +1317,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn dpapi_store_protects_a_plaintext_file_in_place_and_never_wipes_an_unreadable_one() {
-        let _guard = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir =
             std::env::temp_dir().join(format!("videorc-secrets-dpapi-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("videorc-secrets.json");
-        unsafe {
-            std::env::set_var("VIDEORC_SECRET_STORE", DPAPI_SECRET_STORE_KIND);
-            std::env::set_var("VIDEORC_SECRETS_PATH", &path);
-        }
-        reset_secret_store_for_tests();
+        scope_secret_store_for_tests(Some(DPAPI_SECRET_STORE_KIND), Some(&path));
         assert_eq!(
             secret_store_diagnostics().unwrap().kind,
             DPAPI_SECRET_STORE_KIND

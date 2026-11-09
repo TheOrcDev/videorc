@@ -1,7 +1,10 @@
 //! Small X Livestream Scheduling API requests for the scheduler
-//! (`/2/broadcasts/scheduled`). Every call is signed with the user's OAuth
-//! 1.0a token, exactly like instant X Go Live. Non-idempotent POSTs are never
-//! retried; reads retry a bounded number of times.
+//! (`/2/broadcasts/scheduled`) plus the `/2/sources` calls it needs. Every
+//! call is signed with the user's OAuth 1.0a token, exactly like instant X
+//! Go Live. Non-idempotent POSTs are never retried; reads retry a bounded
+//! number of times. Sources are identified by the 19-digit source id; the
+//! stream key is a separate secret read only from the create response or
+//! `GET /2/sources/:id/stream_key`.
 use crate::scheduled_streams::ScheduledStreamEvent;
 use crate::x_live::{self, XLivestreamCredentials, XStreamSource};
 use anyhow::{Context, Result, bail};
@@ -349,73 +352,78 @@ impl XScheduledBroadcasts {
             .await?;
         Ok(payload(&value).clone())
     }
-    /// The live broadcast object (`media_key`, `share_url`, viewer counts).
+    /// The live broadcast object (`media_key`, `share_url`, viewer counts),
+    /// unwrapped from the v2 `data` envelope.
     pub async fn broadcast(&self, id: &str) -> Result<Option<Value>> {
         Ok(self
             .optional(&format!("/2/broadcasts/{id}"))
             .await?
-            .map(|value| {
-                let mut inner = payload(&value).clone();
-                for key in ["share_url", "video_access"] {
-                    if inner.get(key).is_none()
-                        && let Some(outer) = value.get(key)
-                    {
-                        inner[key] = outer.clone();
-                    }
-                }
-                inner
-            }))
+            .map(|value| payload(&value).clone()))
     }
     pub async fn end_broadcast(&self, id: &str) -> Result<()> {
         x_live::end_broadcast(&self.client, &self.credentials, &self.base, id).await
     }
 
+    /// `GET /2/sources/:id`; `None` on 404. `id` must be a source id: a
+    /// stream key is refused locally with the same wording X uses, so it
+    /// never travels in a URL.
     pub async fn source(&self, id: &str) -> Result<Option<XStreamSource>> {
-        let path = format!("/2/users/{}/sources/{id}", self.credentials.user_id);
-        let Some(value) = self.optional(&path).await? else {
+        if !x_live::is_x_source_id(id) {
+            bail!("The `id` value is not a source id.");
+        }
+        let Some(value) = self.optional(&format!("/2/sources/{id}")).await? else {
             return Ok(None);
         };
-        let source = value.get("source").cloned().unwrap_or(value);
         Ok(Some(
-            serde_json::from_value(source).context("X source response unknown")?,
+            serde_json::from_value(value["data"].clone()).context("X source response unknown")?,
         ))
     }
+    /// `GET /2/sources`: every source of the authorized user, without keys.
     pub async fn sources(&self) -> Result<Vec<XStreamSource>> {
+        let value = self
+            .send(Method::GET, self.url("/2/sources", &[])?, None)
+            .await?;
+        serde_json::from_value(value["data"].clone()).context("X sources response unknown")
+    }
+    /// `GET /2/sources/:id/stream_key`: the encoder credential of a source
+    /// Videorc did not just create. Stored, never logged.
+    pub async fn stream_key(&self, id: &str) -> Result<String> {
+        if !x_live::is_x_source_id(id) {
+            bail!("The `id` value is not a source id.");
+        }
         let value = self
             .send(
                 Method::GET,
-                self.url(
-                    &format!("/2/users/{}/sources", self.credentials.user_id),
-                    &[],
-                )?,
+                self.url(&format!("/2/sources/{id}/stream_key"), &[])?,
                 None,
             )
             .await?;
-        serde_json::from_value(value.get("sources").cloned().unwrap_or_else(|| json!([])))
-            .context("X sources response unknown")
+        value["data"]["stream_key"]
+            .as_str()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string)
+            .context("X stream_key response did not include a stream key.")
     }
+    /// `POST /2/sources` (201): the created source, with its `stream_key`.
     pub async fn create_source(&self, name: &str) -> Result<XStreamSource> {
         let region = x_live::get_region(&self.client, &self.credentials, &self.base).await?;
         let value = self
             .send(
                 Method::POST,
-                self.url(
-                    &format!("/2/users/{}/sources", self.credentials.user_id),
-                    &[],
-                )?,
+                self.url("/2/sources", &[])?,
                 Some(json!({ "name": name, "region": region })),
             )
             .await?;
-        let source = value.get("source").cloned().unwrap_or(value);
-        serde_json::from_value(source).context("X source response unknown")
+        serde_json::from_value(value["data"].clone()).context("X source response unknown")
     }
     pub async fn delete_source(&self, id: &str) -> Result<()> {
+        if !x_live::is_x_source_id(id) {
+            bail!("The `id` value is not a source id.");
+        }
         self.send(
             Method::DELETE,
-            self.url(
-                &format!("/2/users/{}/sources/{id}", self.credentials.user_id),
-                &[],
-            )?,
+            self.url(&format!("/2/sources/{id}"), &[])?,
             None,
         )
         .await?;
@@ -512,10 +520,10 @@ mod tests {
         )
         .unwrap();
         event.ingest = Some(ScheduledIngest {
-            source_id: "src123".into(),
-            region: "eu".into(),
+            source_id: "9123456789012345678".into(),
+            region: "us-east-1".into(),
             server_url: "rtmps://ingest/live".into(),
-            stream_key_secret_ref: "platform:x:123:src123:stream-key".into(),
+            stream_key_secret_ref: "platform:x:123:9123456789012345678:stream-key".into(),
         });
         event
     }
@@ -523,7 +531,7 @@ mod tests {
     #[test]
     fn create_body_is_manual_publish_with_an_end_and_string_times() {
         let body = create_body(&event(), Some("777")).unwrap();
-        assert_eq!(body["source_id"], "src123");
+        assert_eq!(body["source_id"], "9123456789012345678");
         assert_eq!(body["manual_publish"], true);
         assert_eq!(body["scheduled_start_ms"], "2051265600000");
         assert_eq!(body["scheduled_end_ms"], "2051271000000");
@@ -555,7 +563,7 @@ mod tests {
         let current = json!({
             "broadcast_id": "1AxRnanzLOrxl",
             "scheduled_broadcast_id": "2075599796786561024",
-            "source_id": "src123",
+            "source_id": "9123456789012345678",
             "chat_option": "1",
             "locale": "es",
             "available_for_replay": true,
@@ -643,6 +651,7 @@ mod tests {
                 .into_response();
         }
         match (method.as_str(), path.as_str()) {
+            ("GET", "/2/region") => axum::Json(json!({"region":"us-east-1"})).into_response(),
             ("POST", "/2/broadcasts/scheduled") => {
                 let body: Value = serde_json::from_slice(&bytes).unwrap();
                 (
@@ -663,9 +672,36 @@ mod tests {
             )
             .into_response(),
             ("GET", "/2/broadcasts/1AxRnanzLOrxl") => axum::Json(
-                json!({"broadcast": {"id":"1AxRnanzLOrxl","media_key":"28_1","state":"RUNNING"},"share_url":"https://x.com/i/broadcasts/1AxRnanzLOrxl"}),
+                json!({"data": {"id":"1AxRnanzLOrxl","broadcast_id":"1AxRnanzLOrxl","media_key":"28_1","state":"RUNNING","share_url":"https://x.com/i/broadcasts/1AxRnanzLOrxl"}}),
             )
             .into_response(),
+            ("GET", "/2/sources") => axum::Json(json!({"data": [
+                {"id":"9123456789012345678","name":"Videorc Scheduled 11111111","region":"us-east-1","rtmps_url":"rtmps://a.live.x.com:443/x","is_stream_active":false,"created_at_ms":"1772029802844"}
+            ], "meta": {"result_count": 1}}))
+            .into_response(),
+            ("GET", "/2/sources/9123456789012345678") => axum::Json(json!({"data":
+                {"id":"9123456789012345678","name":"Videorc Scheduled 11111111","region":"us-east-1","rtmps_url":"rtmps://a.live.x.com:443/x","is_stream_active":true,"created_at_ms":"1772029802844"}
+            }))
+            .into_response(),
+            ("GET", "/2/sources/9123456789012345678/stream_key") => axum::Json(
+                json!({"data": {"id":"9123456789012345678","stream_key":"fixture-stream-key"}}),
+            )
+            .into_response(),
+            ("GET", "/2/sources/9000000000000000000") => {
+                (StatusCode::NOT_FOUND, axum::Json(json!({"type":"https://api.x.com/2/problems/resource-not-found","title":"Not Found","detail":"Source not found.","status":404}))).into_response()
+            }
+            ("POST", "/2/sources") => {
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body.as_object().unwrap().len(), 2, "POST /2/sources takes only name and region");
+                (
+                    StatusCode::CREATED,
+                    axum::Json(json!({"data": {"id":"9123456789012345679","name":body["name"],"region":body["region"],"rtmps_url":"rtmps://a.live.x.com:443/x","stream_key":"created-stream-key","is_stream_active":false,"created_at_ms":"1772029802844"}})),
+                )
+                    .into_response()
+            }
+            ("DELETE", "/2/sources/9123456789012345679") => {
+                axum::Json(json!({"data": {"deleted": true}})).into_response()
+            }
             ("DELETE", "/2/broadcasts/scheduled/1AxRnanzLOrxl") => {
                 axum::Json(json!({"data": {"deleted": true}})).into_response()
             }
@@ -730,6 +766,42 @@ mod tests {
             "https://x.com/i/broadcasts/1AxRnanzLOrxl"
         );
         api.delete("1AxRnanzLOrxl").await.unwrap();
+        // Sources: ids are 19 digits, keys come only from create and the
+        // stream_key route, and a stream key never becomes a path.
+        let sources = api.sources().await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].id, "9123456789012345678");
+        assert_eq!(sources[0].region.as_deref(), Some("us-east-1"));
+        assert!(sources[0].stream_key.is_none());
+        let source = api.source("9123456789012345678").await.unwrap().unwrap();
+        assert!(source.is_stream_active);
+        assert!(source.stream_key.is_none());
+        assert!(api.source("9000000000000000000").await.unwrap().is_none());
+        assert_eq!(
+            api.stream_key("9123456789012345678").await.unwrap(),
+            "fixture-stream-key"
+        );
+        let created = api
+            .create_source("Videorc Scheduled 22222222")
+            .await
+            .unwrap();
+        assert_eq!(created.id, "9123456789012345679");
+        assert_eq!(created.stream_key.as_deref(), Some("created-stream-key"));
+        api.delete_source("9123456789012345679").await.unwrap();
+        for key in ["1hJz9kQ2LmNpRsTuVwXyZ", "", "src1"] {
+            assert!(api.source(key).await.is_err());
+            assert!(api.stream_key(key).await.is_err());
+            assert!(api.delete_source(key).await.is_err());
+        }
+        assert!(
+            fixture
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|(_, path, _)| !path.contains("1hJz9kQ2LmNpRsTuVwXyZ")
+                    && !path.contains("/src1"))
+        );
         let png = {
             let mut buffer = std::io::Cursor::new(Vec::new());
             image::RgbImage::from_pixel(16, 9, image::Rgb([0, 0, 255]))
