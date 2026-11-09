@@ -90,6 +90,7 @@ fn lookup(
             &[(platform, author_id.to_string())],
             &HashSet::new(),
             &mut arrived,
+            &mut None,
             now,
             3,
             false,
@@ -402,6 +403,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
             ],
             &streamer,
             &mut arrived,
+            &mut None,
             now,
             3,
             false,
@@ -439,6 +441,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
                     &[(StreamPlatform::Twitch, "kim".to_string())],
                     &streamer,
                     &mut again,
+                    &mut None,
                     now,
                     3,
                     false,
@@ -485,6 +488,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
             &[(StreamPlatform::Kick, "kimk".to_string())],
             &streamer,
             &mut arrived,
+            &mut None,
             later,
             3,
             false,
@@ -502,6 +506,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
             &[(StreamPlatform::Twitch, "kim".to_string())],
             &streamer,
             &mut arrived,
+            &mut None,
             later,
             3,
             false,
@@ -1294,6 +1299,7 @@ fn memories_and_the_note_ride_the_arrival_only_with_remember_on() {
                 &[(StreamPlatform::Twitch, "1".to_string())],
                 &streamer,
                 &mut arrived,
+                &mut None,
                 day(2026, 11, 8),
                 3,
                 remember,
@@ -1492,5 +1498,108 @@ fn a_forget_takes_the_link_events_and_the_past_reports_names_with_it() {
             })
             .unwrap();
         assert_eq!(events, 0);
+    }
+}
+
+/// The review of 2026-11-09, F4: the arrival lookup rides the delivery
+/// path, so a raid must not cost queries per author. 400 fresh authors,
+/// half of them known from an earlier stream, are looked up with one
+/// statement per table (plus the one-time stream read the session caches),
+/// and the answers are the same as before.
+#[test]
+fn a_raid_of_four_hundred_fresh_authors_costs_one_read_per_table() {
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static STATEMENTS: AtomicUsize = AtomicUsize::new(0);
+    fn count(event: TraceEvent<'_>) {
+        if matches!(event, TraceEvent::Stmt(..)) {
+            STATEMENTS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let database = Database::open_in_memory_for_tests();
+    let known: Vec<(StreamPlatform, String, String)> = (0..200)
+        .map(|index| {
+            (
+                StreamPlatform::Twitch,
+                format!("known{index}"),
+                format!("Known {index}"),
+            )
+        })
+        .collect();
+    let chatters: Vec<(StreamPlatform, &str, &str)> = known
+        .iter()
+        .map(|(platform, id, name)| (*platform, id.as_str(), name.as_str()))
+        .collect();
+    stream_with(&database, "s1", day(2026, 10, 1), &chatters);
+    stream_with(&database, "s2", day(2026, 10, 8), &chatters);
+    database
+        .community_record_stream("s3", day(2026, 10, 15), &[StreamPlatform::Twitch])
+        .unwrap();
+    let mut authors: Vec<(StreamPlatform, String)> = known
+        .iter()
+        .map(|(platform, id, _)| (*platform, id.clone()))
+        .collect();
+    authors.extend((0..200).map(|index| (StreamPlatform::Twitch, format!("new{index}"))));
+    {
+        let conn = database.lock().unwrap();
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count));
+    }
+    let mut arrived = HashSet::new();
+    let mut streams = None;
+    STATEMENTS.store(0, Ordering::SeqCst);
+    let lookups = database
+        .community_lookup_arrivals(
+            "s3",
+            &authors,
+            &HashSet::new(),
+            &mut arrived,
+            &mut streams,
+            day(2026, 10, 15),
+            3,
+            true,
+        )
+        .unwrap();
+    let cold = STATEMENTS.load(Ordering::SeqCst);
+    assert!(
+        cold <= 8,
+        "a raid of 400 cost {cold} statements (streams, accounts, people, live accounts, attendance, memories)"
+    );
+    assert_eq!(lookups.len(), 400);
+    let arrivals = lookups.iter().filter(|l| l.arrival.is_some()).count();
+    assert_eq!(arrivals, 200, "every known person arrived once");
+    assert!(
+        lookups
+            .iter()
+            .filter(|l| l.key.starts_with("twitch:new"))
+            .all(|l| l.person_id.is_none() && l.arrival.is_none())
+    );
+    let one = lookups
+        .iter()
+        .find(|l| l.key == "twitch:known7")
+        .and_then(|l| l.arrival.as_ref())
+        .unwrap();
+    assert_eq!((one.streams, one.in_a_row, one.regular), (3, 3, true));
+    assert_eq!(arrived.len(), 200);
+    assert!(streams.as_ref().is_some_and(|s| s.len() == 3), "cached");
+    // Warm: the streams are cached, and nobody arrives twice.
+    STATEMENTS.store(0, Ordering::SeqCst);
+    let again = database
+        .community_lookup_arrivals(
+            "s3",
+            &authors,
+            &HashSet::new(),
+            &mut arrived,
+            &mut streams,
+            day(2026, 10, 15),
+            3,
+            true,
+        )
+        .unwrap();
+    let warm = STATEMENTS.load(Ordering::SeqCst);
+    assert!(warm <= 6, "warm: {warm}");
+    assert!(again.iter().all(|l| l.arrival.is_none()));
+    {
+        let conn = database.lock().unwrap();
+        conn.trace_v2(TraceEventCodes::empty(), None);
     }
 }

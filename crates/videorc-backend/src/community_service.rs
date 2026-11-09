@@ -75,6 +75,9 @@ struct SessionCommunity {
     people_by_key: HashMap<String, String>,
     links: PendingLinks,
     streamer_keys: Option<HashSet<String>>,
+    /// F4: the known streams, read once per session for the arrival
+    /// lookup's "in a row" (the table is never pruned and grows for ever).
+    known_streams: Option<Vec<crate::community::KnownStream>>,
     /// D14: a store error is logged once per session.
     store_error_logged: bool,
     /// D15: what the report's Community block counts, kept as it happens.
@@ -140,6 +143,10 @@ impl CommunityRuntime {
 pub struct CommunityShared {
     runtime: StdMutex<CommunityRuntime>,
     writes_done: Notify,
+    /// F4: arrival lookups run one at a time (so two batches never give one
+    /// person two arrivals) without holding `runtime` across the store
+    /// read, which the delivery fence's `arrival_reaction_due` also takes.
+    lookup: StdMutex<()>,
 }
 
 pub type CommunitySlot = Arc<CommunityShared>;
@@ -148,6 +155,7 @@ pub fn new_slot() -> CommunitySlot {
     Arc::new(CommunityShared {
         runtime: StdMutex::new(CommunityRuntime::default()),
         writes_done: Notify::new(),
+        lookup: StdMutex::new(()),
     })
 }
 
@@ -520,38 +528,57 @@ pub(crate) fn lookup_arrivals_blocking(
     if !settings.enabled || fresh.is_empty() {
         return (HashMap::new(), None);
     }
-    // The runtime lock is held across the read so two batches never give
-    // one person two arrivals. It is a std mutex inside `spawn_blocking`;
-    // nothing async waits on it, and the store lock is taken inside it, so
-    // nothing may take the runtime lock while holding the store's.
-    let mut runtime = slot.lock();
-    let Some(session) = runtime.session.as_mut() else {
-        return (HashMap::new(), None);
+    // F4: lookups run one at a time (so two batches never give one person
+    // two arrivals), but the runtime lock is taken only to borrow the
+    // session's bookkeeping and to give it back: the store read runs
+    // without it, so the delivery fence's `arrival_reaction_due` never
+    // waits on SQLite. Both are std mutexes inside `spawn_blocking`.
+    let _one_at_a_time = slot
+        .lookup
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (streamer_keys, mut arrived, mut streams) = {
+        let mut runtime = slot.lock();
+        let Some(session) = runtime.session.as_mut() else {
+            return (HashMap::new(), None);
+        };
+        if session.session_id != session_id {
+            return (HashMap::new(), None);
+        }
+        (
+            session.streamer_keys.clone(),
+            std::mem::take(&mut session.arrived),
+            session.known_streams.take(),
+        )
     };
-    if session.session_id != session_id {
-        return (HashMap::new(), None);
-    }
-    let streamer_keys = match session.streamer_keys.clone() {
+    let streamer_keys = match streamer_keys {
         Some(keys) => keys,
-        None => match database.community_streamer_keys() {
-            Ok(keys) => {
-                session.streamer_keys = Some(keys.clone());
-                keys
-            }
-            Err(_) => HashSet::new(),
-        },
+        None => database.community_streamer_keys().unwrap_or_default(),
     };
-    let mut arrived = std::mem::take(&mut session.arrived);
     let looked_up = database.community_lookup_arrivals(
         session_id,
         fresh,
         &streamer_keys,
         &mut arrived,
+        &mut streams,
         now,
         settings.regular_streams,
         settings.remember,
     );
-    session.arrived = arrived;
+    let mut runtime = slot.lock();
+    let Some(session) = runtime
+        .session
+        .as_mut()
+        .filter(|session| session.session_id == session_id)
+    else {
+        // The session ended during the read: its rows go without arrivals.
+        return (HashMap::new(), None);
+    };
+    session.arrived.extend(arrived);
+    session.known_streams = streams;
+    if session.streamer_keys.is_none() {
+        session.streamer_keys = Some(streamer_keys);
+    }
     match looked_up {
         Ok(lookups) => {
             let mut arrivals = HashMap::new();
@@ -1331,6 +1358,8 @@ pub async fn forget_all(state: &AppState) -> Result<CommunityAccepted, Community
             session.links.clear();
             // F2: the report in progress names nobody either.
             session.report_arrivals.clear();
+            // F4: the streams are gone with the store.
+            session.known_streams = None;
         }
     }
     state.cohost.lock().await.community.clear();

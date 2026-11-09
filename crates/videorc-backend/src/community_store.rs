@@ -540,6 +540,60 @@ fn live_accounts_locked(conn: &Connection, person_id: &str) -> Result<Vec<Accoun
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// One `IN (...)` per this many keys (F4): SQLite's bundled variable limit
+/// is far above it, and a raid of 400 fresh authors stays at one read per
+/// table.
+const IN_CHUNK: usize = 500;
+
+fn in_placeholders(count: usize) -> String {
+    (1..=count)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The accounts behind these keys, by key (F4: one query per chunk).
+fn accounts_by_keys_locked(
+    conn: &Connection,
+    keys: &[String],
+) -> Result<HashMap<String, AccountRow>> {
+    let mut out = HashMap::with_capacity(keys.len());
+    for chunk in keys.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM community_accounts WHERE account_key IN ({})",
+            in_placeholders(chunk.len())
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), account_from_row)?;
+        for row in rows {
+            let row = row?;
+            out.insert(row.account_key.clone(), row);
+        }
+    }
+    Ok(out)
+}
+
+/// The live accounts of these people, by person (F4).
+fn live_accounts_by_people_locked(
+    conn: &Connection,
+    person_ids: &[String],
+) -> Result<HashMap<String, Vec<AccountRow>>> {
+    let mut out: HashMap<String, Vec<AccountRow>> = HashMap::with_capacity(person_ids.len());
+    for chunk in person_ids.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM community_accounts
+             WHERE person_id IN ({}) AND status != 'forgotten'
+             ORDER BY first_seen_at ASC, account_key ASC",
+            in_placeholders(chunk.len())
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), account_from_row)?;
+        for row in rows {
+            let row = row?;
+            out.entry(row.person_id.clone()).or_default().push(row);
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone)]
 struct PersonRow {
     id: String,
@@ -552,29 +606,53 @@ struct PersonRow {
     status: CommunityPersonStatus,
 }
 
+const PERSON_COLUMNS: &str =
+    "id, name, avatar_url, best_in_a_row, support_json, milestones_json, note, status";
+
+fn person_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonRow> {
+    let support_json: String = row.get(4)?;
+    let milestones_json: String = row.get(5)?;
+    let status: String = row.get(7)?;
+    Ok(PersonRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        avatar_url: row.get(2)?,
+        best_in_a_row: row.get::<_, i64>(3)?.max(0) as u32,
+        support: serde_json::from_str(&support_json).unwrap_or_default(),
+        milestones: serde_json::from_str(&milestones_json).unwrap_or_default(),
+        note: row.get(6)?,
+        status: CommunityPersonStatus::parse(&status),
+    })
+}
+
 fn person_locked(conn: &Connection, id: &str) -> Result<Option<PersonRow>> {
     Ok(conn
         .query_row(
-            "SELECT id, name, avatar_url, best_in_a_row, support_json, milestones_json, note, status
-             FROM community_people WHERE id = ?1",
+            &format!("SELECT {PERSON_COLUMNS} FROM community_people WHERE id = ?1"),
             params![id],
-            |row| {
-                let support_json: String = row.get(4)?;
-                let milestones_json: String = row.get(5)?;
-                let status: String = row.get(7)?;
-                Ok(PersonRow {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    avatar_url: row.get(2)?,
-                    best_in_a_row: row.get::<_, i64>(3)?.max(0) as u32,
-                    support: serde_json::from_str(&support_json).unwrap_or_default(),
-                    milestones: serde_json::from_str(&milestones_json).unwrap_or_default(),
-                    note: row.get(6)?,
-                    status: CommunityPersonStatus::parse(&status),
-                })
-            },
+            person_from_row,
         )
         .optional()?)
+}
+
+/// The people behind these ids, by id (F4: one query per chunk).
+fn people_by_ids_locked(
+    conn: &Connection,
+    person_ids: &[String],
+) -> Result<HashMap<String, PersonRow>> {
+    let mut out = HashMap::with_capacity(person_ids.len());
+    for chunk in person_ids.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT {PERSON_COLUMNS} FROM community_people WHERE id IN ({})",
+            in_placeholders(chunk.len())
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), person_from_row)?;
+        for row in rows {
+            let row = row?;
+            out.insert(row.id.clone(), row);
+        }
+    }
+    Ok(out)
 }
 
 fn known_streams_locked(conn: &Connection) -> Result<Vec<KnownStream>> {
@@ -607,57 +685,116 @@ fn known_streams_locked(conn: &Connection) -> Result<Vec<KnownStream>> {
 /// time; an attendance row whose stream is unknown uses its own first
 /// message time), messages, first and last chat, celebrated milestones.
 fn person_history_locked(conn: &Connection, person: &PersonRow) -> Result<PersonHistory> {
-    let accounts = live_accounts_locked(conn, &person.id)?;
-    let mut history = PersonHistory {
-        platforms: accounts.iter().map(|account| account.platform).collect(),
-        celebrated: person.milestones.clone(),
-        ..Default::default()
-    };
-    history
-        .platforms
-        .sort_by_key(|platform| stream_platform_id(*platform));
-    history.platforms.dedup();
-    let mut statement = conn.prepare(
-        "SELECT t.session_id, t.first_message_at, t.last_message_at, t.messages, s.started_at
-         FROM community_attendance t
-         JOIN community_accounts a ON a.account_key = t.account_key
-         LEFT JOIN community_streams s ON s.session_id = t.session_id
-         WHERE a.person_id = ?1 AND a.status != 'forgotten'",
-    )?;
-    let rows = statement.query_map(params![person.id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, Option<String>>(4)?,
-        ))
-    })?;
-    for row in rows {
-        let (session_id, first, last, messages, started_at) = row?;
-        let first_at = parse_at(&first);
-        let last_at = parse_at(&last);
-        let started = started_at.as_deref().and_then(parse_at).or(first_at);
-        if let Some(started) = started {
-            history.attended.push((session_id, started));
-        }
-        history.messages = history.messages.saturating_add(messages.max(0) as u64);
-        if let Some(first_at) = first_at {
-            history.first_seen_at = Some(
-                history
-                    .first_seen_at
-                    .map_or(first_at, |seen| seen.min(first_at)),
-            );
-        }
-        if let Some(last_at) = last_at {
-            history.last_seen_at = Some(
-                history
-                    .last_seen_at
-                    .map_or(last_at, |seen| seen.max(last_at)),
-            );
+    Ok(histories_locked(conn, &[person])?
+        .remove(&person.id)
+        .unwrap_or_default())
+}
+
+/// [`person_history_locked`] for many people at once (F4): one read of the
+/// live accounts and one of the attendance, whatever the count. Every
+/// person given gets an entry.
+fn histories_locked(
+    conn: &Connection,
+    people: &[&PersonRow],
+) -> Result<HashMap<String, PersonHistory>> {
+    let ids: Vec<String> = people.iter().map(|person| person.id.clone()).collect();
+    let mut accounts = live_accounts_by_people_locked(conn, &ids)?;
+    let mut histories: HashMap<String, PersonHistory> = HashMap::with_capacity(people.len());
+    for person in people {
+        let accounts = accounts.remove(&person.id).unwrap_or_default();
+        let mut history = PersonHistory {
+            platforms: accounts.iter().map(|account| account.platform).collect(),
+            celebrated: person.milestones.clone(),
+            ..Default::default()
+        };
+        history
+            .platforms
+            .sort_by_key(|platform| stream_platform_id(*platform));
+        history.platforms.dedup();
+        histories.insert(person.id.clone(), history);
+    }
+    for chunk in ids.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT a.person_id, t.session_id, t.first_message_at, t.last_message_at, t.messages, s.started_at
+             FROM community_attendance t
+             JOIN community_accounts a ON a.account_key = t.account_key
+             LEFT JOIN community_streams s ON s.session_id = t.session_id
+             WHERE a.person_id IN ({}) AND a.status != 'forgotten'",
+            in_placeholders(chunk.len())
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (person_id, session_id, first, last, messages, started_at) = row?;
+            let Some(history) = histories.get_mut(&person_id) else {
+                continue;
+            };
+            let first_at = parse_at(&first);
+            let last_at = parse_at(&last);
+            let started = started_at.as_deref().and_then(parse_at).or(first_at);
+            if let Some(started) = started {
+                history.attended.push((session_id, started));
+            }
+            history.messages = history.messages.saturating_add(messages.max(0) as u64);
+            if let Some(first_at) = first_at {
+                history.first_seen_at = Some(
+                    history
+                        .first_seen_at
+                        .map_or(first_at, |seen| seen.min(first_at)),
+                );
+            }
+            if let Some(last_at) = last_at {
+                history.last_seen_at = Some(
+                    history
+                        .last_seen_at
+                        .map_or(last_at, |seen| seen.max(last_at)),
+                );
+            }
         }
     }
-    Ok(history)
+    Ok(histories)
+}
+
+/// The memories of these people, by person, newest first (F4: one read).
+fn memories_by_people_locked(
+    conn: &Connection,
+    person_ids: &[String],
+) -> Result<HashMap<String, Vec<CommunityMemory>>> {
+    let mut out: HashMap<String, Vec<CommunityMemory>> = HashMap::with_capacity(person_ids.len());
+    for chunk in person_ids.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT person_id, id, account_key, text, session_id, created_at, updated_at
+             FROM community_memories WHERE person_id IN ({})
+             ORDER BY updated_at DESC, id ASC",
+            in_placeholders(chunk.len())
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                CommunityMemory {
+                    id: row.get(1)?,
+                    account_key: row.get(2)?,
+                    text: row.get(3)?,
+                    session_id: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (person_id, memory) = row?;
+            out.entry(person_id).or_default().push(memory);
+        }
+    }
+    Ok(out)
 }
 
 /// Recompute a person's stored counts and newest name from its accounts
@@ -1131,11 +1268,14 @@ impl Database {
         Ok(())
     }
 
-    /// The arrival facts of fresh authors (B1, D14): one indexed read per
-    /// account, off the runtime. A returning person gets `arrival`; a
-    /// first-timer, a bot, a forgotten account or the streamer gets none.
-    /// `arrived` holds the people already given an arrival this stream, so a
-    /// two-account person gets one whichever account chats first.
+    /// The arrival facts of fresh authors (B1, D14): one read per table for
+    /// the whole batch, off the runtime (F4: a raid of 400 fresh authors
+    /// costs five statements, not five per author). A returning person gets
+    /// `arrival`; a first-timer, a bot, a forgotten account or the streamer
+    /// gets none. `arrived` holds the people already given an arrival this
+    /// stream, so a two-account person gets one whichever account chats
+    /// first. `streams` caches the known streams for the session: filled
+    /// here on first use, kept by the caller.
     #[allow(clippy::too_many_arguments)]
     pub fn community_lookup_arrivals(
         &self,
@@ -1143,12 +1283,55 @@ impl Database {
         authors: &[(StreamPlatform, String)],
         streamer_keys: &HashSet<String>,
         arrived: &mut HashSet<String>,
+        streams: &mut Option<Vec<KnownStream>>,
         now: DateTime<Utc>,
         threshold: u32,
         remember: bool,
     ) -> Result<Vec<ArrivalLookup>> {
         let conn = self.lock()?;
-        let streams = known_streams_locked(&conn)?;
+        let streams: &Vec<KnownStream> = match streams {
+            Some(streams) => streams,
+            None => streams.insert(known_streams_locked(&conn)?),
+        };
+        let mut wanted: Vec<String> = Vec::with_capacity(authors.len());
+        let mut seen: HashSet<String> = HashSet::with_capacity(authors.len());
+        for (platform, author_id) in authors {
+            if !platform_has_identity(*platform) {
+                continue;
+            }
+            let key = account_key(*platform, author_id);
+            if streamer_keys.contains(&key) || !seen.insert(key.clone()) {
+                continue;
+            }
+            wanted.push(key);
+        }
+        let accounts = accounts_by_keys_locked(&conn, &wanted)?;
+        let person_ids: Vec<String> = accounts
+            .values()
+            .filter(|account| account.status != CommunityPersonStatus::Forgotten)
+            .map(|account| account.person_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let people = people_by_ids_locked(&conn, &person_ids)?;
+        // Only the people who may arrive need their history.
+        let candidates: Vec<&PersonRow> = people
+            .values()
+            .filter(|person| {
+                person.status == CommunityPersonStatus::Normal && !arrived.contains(&person.id)
+            })
+            .collect();
+        let histories = histories_locked(&conn, &candidates)?;
+        let mut memories = if remember {
+            let ids: Vec<String> = candidates.iter().map(|person| person.id.clone()).collect();
+            memories_by_people_locked(&conn, &ids)?
+        } else {
+            HashMap::new()
+        };
+        let current_started_at = streams
+            .iter()
+            .find(|stream| stream.session_id == session_id)
+            .map(|stream| stream.started_at);
         let mut out = Vec::with_capacity(authors.len());
         for (platform, author_id) in authors {
             let key = account_key(*platform, author_id);
@@ -1161,7 +1344,7 @@ impl Database {
                 out.push(lookup);
                 continue;
             }
-            let Some(account) = account_locked(&conn, &key)? else {
+            let Some(account) = accounts.get(&key) else {
                 out.push(lookup);
                 continue;
             };
@@ -1170,7 +1353,7 @@ impl Database {
                 out.push(lookup);
                 continue;
             }
-            let Some(person) = person_locked(&conn, &account.person_id)? else {
+            let Some(person) = people.get(&account.person_id) else {
                 out.push(lookup);
                 continue;
             };
@@ -1179,7 +1362,10 @@ impl Database {
                 out.push(lookup);
                 continue;
             }
-            let before = person_history_locked(&conn, &person)?;
+            let Some(before) = histories.get(&person.id) else {
+                out.push(lookup);
+                continue;
+            };
             let earlier: Vec<&(String, DateTime<Utc>)> = before
                 .attended
                 .iter()
@@ -1192,38 +1378,33 @@ impl Database {
             }
             let mut with_current = before.clone();
             if !with_current.attended.iter().any(|(id, _)| id == session_id) {
-                let started_at = streams
-                    .iter()
-                    .find(|stream| stream.session_id == session_id)
-                    .map_or(now, |stream| stream.started_at);
                 with_current
                     .attended
-                    .push((session_id.to_string(), started_at));
+                    .push((session_id.to_string(), current_started_at.unwrap_or(now)));
             }
-            let mut streams_with_current = streams.clone();
-            if !streams_with_current
-                .iter()
-                .any(|stream| stream.session_id == session_id)
-            {
+            let run = if current_started_at.is_some() {
+                in_a_row(&with_current, streams)
+            } else {
+                let mut streams_with_current = streams.clone();
                 streams_with_current.push(KnownStream {
                     session_id: session_id.to_string(),
                     started_at: now,
                     platforms: with_current.platforms.clone(),
                 });
-            }
+                in_a_row(&with_current, &streams_with_current)
+            };
             let streams_count = with_current.streams();
-            let run = in_a_row(&with_current, &streams_with_current);
             // Regular and milestones count this stream; Back and "since"
             // read the history before it.
             let mut facts = arrival_facts(&with_current, streams_count, run, now, threshold);
-            facts.away_days = away_days(&before, now);
+            facts.away_days = away_days(before, now);
             if remember {
                 // D10: with "Buddy remembers" on, the newest memories and
                 // the streamer's note ride the arrival for one delivery
                 // (never the wire), so the greet and the tick can use them.
-                let mut memories = memories_locked(&conn, &person.id)?;
-                memories.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 facts.memories = memories
+                    .remove(&person.id)
+                    .unwrap_or_default()
                     .into_iter()
                     .take(VIEWER_MEMORIES_MAX)
                     .map(|memory| memory.text)
