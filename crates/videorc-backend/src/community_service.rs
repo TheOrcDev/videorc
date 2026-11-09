@@ -95,6 +95,10 @@ pub struct CommunityRuntime {
     /// lock on the delivery path. `None` until first read.
     settings: Option<CommunitySettings>,
     session: Option<SessionCommunity>,
+    /// Sessions that ended whose last detached batch tasks may still be
+    /// running: they find their session here until its report takes it
+    /// (`session_ended`). A quick stop and restart keeps both apart.
+    ending: Vec<SessionCommunity>,
     pending_writes: usize,
     backfill_running: bool,
     /// `cohost.memory` from the capability read (D10): queued passes run
@@ -106,6 +110,31 @@ pub struct CommunityRuntime {
     /// Tests: every line handed to the bubble, in order.
     #[cfg(test)]
     bubble_lines: Vec<String>,
+}
+
+impl CommunityRuntime {
+    /// The session with this id: the one running, or one that ended and
+    /// still waits for its last writes to land.
+    fn session_mut(&mut self, session_id: &str) -> Option<&mut SessionCommunity> {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.session_id == session_id)
+        {
+            return self.session.as_mut();
+        }
+        self.ending
+            .iter_mut()
+            .find(|session| session.session_id == session_id)
+    }
+
+    fn take_ending(&mut self, session_id: &str) -> Option<SessionCommunity> {
+        let index = self
+            .ending
+            .iter()
+            .position(|session| session.session_id == session_id)?;
+        Some(self.ending.remove(index))
+    }
 }
 
 pub struct CommunityShared {
@@ -330,38 +359,58 @@ pub(crate) fn session_started(state: &AppState, session_id: &str, platforms: Vec
 
 /// The chat session ended: pending `!link` words die with it; the lane is
 /// cleared; the report's Community block (D15) is written once the
-/// session's detached store writes have landed.
+/// session's detached store writes have landed. Until then the session
+/// stays reachable (`ending`): the last delivered batch's task still
+/// counts its arrivals and `!` commands into it, so a stop right after a
+/// delivery loses nothing (the review of 2026-11-09, F1). A new session
+/// may start meanwhile; the two never meet.
 pub(crate) fn session_ended(state: &AppState) {
-    let ended = state.community.lock().session.take();
+    let ended_id = {
+        let mut runtime = state.community.lock();
+        let ended = runtime.session.take();
+        ended.map(|session| {
+            let session_id = session.session_id.clone();
+            runtime.ending.push(session);
+            session_id
+        })
+    };
     state.emit_log(
         "info",
         format!(
             "Community: the chat session ended ({}).",
-            ended
+            ended_id
                 .as_ref()
-                .map_or("no stream was being followed".to_string(), |ended| {
-                    format!("stream {}", ended.session_id)
+                .map_or("no stream was being followed".to_string(), |session_id| {
+                    format!("stream {session_id}")
                 })
         ),
     );
     let state = state.clone();
     tokio::spawn(async move {
         state.cohost.lock().await.community.clear();
-        if let Some(ended) = ended {
-            let session_id = ended.session_id.clone();
-            let consented = ended.consented;
-            state.emit_log(
-                "info",
-                format!("Community: writing the report block for {session_id}."),
-            );
-            write_report_community(&state, ended).await;
-            state.emit_log(
-                "info",
-                format!("Community: the report block for {session_id} is settled."),
-            );
-            // D10: the memory pass, after the report's counts are in.
-            enqueue_memory_pass(&state, &session_id, consented).await;
-        }
+        let Some(session_id) = ended_id else {
+            return;
+        };
+        state.emit_log(
+            "info",
+            format!("Community: writing the report block for {session_id}."),
+        );
+        wait_for_pending_writes(&state, REPORT_WRITES_WAIT).await;
+        state.emit_log(
+            "info",
+            format!("Community: the store writes for {session_id} have landed."),
+        );
+        let Some(ended) = state.community.lock().take_ending(&session_id) else {
+            return;
+        };
+        let consented = ended.consented;
+        write_report_community(&state, ended).await;
+        state.emit_log(
+            "info",
+            format!("Community: the report block for {session_id} is settled."),
+        );
+        // D10: the memory pass, after the report's counts are in.
+        enqueue_memory_pass(&state, &session_id, consented).await;
     });
 }
 
@@ -370,19 +419,12 @@ const REPORT_WRITES_WAIT: Duration = Duration::from_secs(10);
 
 /// D15: fold the Community block into the session's Buddy report. Nothing
 /// is written for a stream nobody came back to and nobody new chatted in.
+/// The caller waited for the session's detached writes (`session_ended`).
 async fn write_report_community(state: &AppState, ended: SessionCommunity) {
     let settings = settings_snapshot(&state.database, &state.community);
     if !settings.enabled {
         return;
     }
-    wait_for_pending_writes(state, REPORT_WRITES_WAIT).await;
-    state.emit_log(
-        "info",
-        format!(
-            "Community: the store writes for {} have landed.",
-            ended.session_id
-        ),
-    );
     let database = state.database.clone();
     let session_id = ended.session_id.clone();
     let saved_session_id = session_id.clone();
@@ -579,48 +621,58 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
                 ),
             }
         }
-        // "Welcome back" (D11): the arrival rows of this batch.
+        // "Welcome back" (D11): the arrival rows of this batch. The session
+        // is the running one, or one that just ended and waits for this
+        // task (F1): its report still counts the batch, while the lane,
+        // cleared at the end, takes no new rows. A session long gone counts
+        // nowhere, and the viewers' commands below run either way.
         let arrivals: Vec<(CohostWelcomeBack, String)> = {
             let mut runtime = state.community.lock();
-            let Some(session) = runtime
+            let running = runtime
                 .session
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            else {
-                return;
-            };
-            // D15: the report counts what the arrival rows said.
-            for message in &messages {
-                if let Some(arrival) = message.arrival.clone()
-                    && session.report_arrivals.len() < REPORT_ARRIVALS_MAX
-                {
-                    session.report_arrivals.push(ReportArrival {
-                        name: message.author_name.trim().to_string(),
-                        platform: message.platform,
-                        arrival,
-                    });
+                .as_ref()
+                .is_some_and(|session| session.session_id == session_id);
+            match runtime.session_mut(session_id) {
+                Some(session) => {
+                    // D15: the report counts what the arrival rows said.
+                    for message in &messages {
+                        if let Some(arrival) = message.arrival.clone()
+                            && session.report_arrivals.len() < REPORT_ARRIVALS_MAX
+                        {
+                            session.report_arrivals.push(ReportArrival {
+                                name: message.author_name.trim().to_string(),
+                                platform: message.platform,
+                                arrival,
+                            });
+                        }
+                    }
+                    if running {
+                        messages
+                            .iter()
+                            .filter_map(|message| {
+                                let arrival = message.arrival.clone()?;
+                                let author_id = message.author_id.as_deref()?;
+                                let key = account_key(message.platform, author_id);
+                                let person_id = session.people_by_key.get(&key)?.clone();
+                                Some((
+                                    CohostWelcomeBack {
+                                        person_id,
+                                        author_key: key,
+                                        name: message.author_name.trim().to_string(),
+                                        platform: message.platform,
+                                        arrival,
+                                        first_seen_at: message.received_at.clone(),
+                                    },
+                                    message.id.clone(),
+                                ))
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
                 }
+                None => Vec::new(),
             }
-            messages
-                .iter()
-                .filter_map(|message| {
-                    let arrival = message.arrival.clone()?;
-                    let author_id = message.author_id.as_deref()?;
-                    let key = account_key(message.platform, author_id);
-                    let person_id = session.people_by_key.get(&key)?.clone();
-                    Some((
-                        CohostWelcomeBack {
-                            person_id,
-                            author_key: key,
-                            name: message.author_name.trim().to_string(),
-                            platform: message.platform,
-                            arrival,
-                            first_seen_at: message.received_at.clone(),
-                        },
-                        message.id.clone(),
-                    ))
-                })
-                .collect()
         };
         if !arrivals.is_empty() {
             let now = Instant::now();
@@ -678,14 +730,11 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
     }
 }
 
-/// D15: count something for this session's report.
+/// D15: count something for this session's report (a session that just
+/// ended still counts its last batch, F1).
 fn count_for_report(state: &AppState, session_id: &str, count: impl FnOnce(&mut SessionCommunity)) {
     let mut runtime = state.community.lock();
-    if let Some(session) = runtime
-        .session
-        .as_mut()
-        .filter(|session| session.session_id == session_id)
-    {
+    if let Some(session) = runtime.session_mut(session_id) {
         count(session);
     }
 }
@@ -700,13 +749,13 @@ fn count_link_for_live_report(state: &AppState) {
 
 fn log_store_error_once(state: &AppState, session_id: &str, error: &anyhow::Error) {
     let mut runtime = state.community.lock();
-    let log = match runtime.session.as_mut() {
-        Some(session) if session.session_id == session_id => {
+    let log = match runtime.session_mut(session_id) {
+        Some(session) => {
             let first = !session.store_error_logged;
             session.store_error_logged = true;
             first
         }
-        _ => true,
+        None => true,
     };
     drop(runtime);
     if log {
@@ -2600,18 +2649,7 @@ mod tests {
         )
         .await;
         crate::live_chat::stop_live_chat(&state).await;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let community = loop {
-            let report = state.database.get_cohost_report("s2").unwrap();
-            if let Some(community) = report.and_then(|report| report.community) {
-                break community;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the Community block never landed"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        };
+        let community = report_block(&state, "s2").await;
         assert_eq!(community.first_timers, 1);
         assert_eq!(community.regulars_back, 0);
         assert!(community.regulars.is_empty());
@@ -2619,6 +2657,146 @@ mod tests {
         // The report reads back as JSON without a null anywhere.
         let json = serde_json::to_string(&community).unwrap();
         assert!(!json.contains("null"));
+    }
+
+    /// The session's Community block, once its report task wrote it.
+    async fn report_block(
+        state: &AppState,
+        session_id: &str,
+    ) -> crate::protocol::CohostReportCommunity {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let report = state.database.get_cohost_report(session_id).unwrap();
+            if let Some(community) = report.and_then(|report| report.community) {
+                return community;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the Community block for {session_id} never landed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// An ended session's report task is done with it: it left `ending`
+    /// (a stream with an empty block writes no report to wait for).
+    async fn session_settled(state: &AppState, session_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let gone = {
+                let runtime = state.community.lock();
+                !runtime
+                    .ending
+                    .iter()
+                    .any(|session| session.session_id == session_id)
+            };
+            if gone {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the session {session_id} never settled"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The Linux CI red in the test above (and 11 of 50 runs on a Mac,
+    /// 2026-11-09): a fast machine runs a stream's end and the next one's
+    /// first delivery inside one millisecond, so a returning person's two
+    /// first messages share a timestamp at the store's resolution, and the
+    /// strict "chatted before" read them as a first-timer. Pinned here with
+    /// the same stamp on both: a tie is "before", the person came back.
+    #[tokio::test]
+    async fn a_person_back_within_the_same_millisecond_is_not_a_first_timer() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let at = Utc::now().to_rfc3339();
+        let first = start_session(&state, "s1").await;
+        let mut hello = row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello");
+        hello.received_at = at.clone();
+        deliver(&state, first, vec![hello]).await;
+        crate::live_chat::stop_live_chat(&state).await;
+        let second = start_session(&state, "s2").await;
+        let mut back = row("s2", StreamPlatform::Twitch, "ada", "Ada", 2, "back");
+        back.received_at = at.clone();
+        let mut bo = row("s2", StreamPlatform::Twitch, "bo", "Bo", 3, "first time");
+        bo.received_at = at;
+        deliver(&state, second, vec![back, bo]).await;
+        crate::live_chat::stop_live_chat(&state).await;
+        let community = report_block(&state, "s2").await;
+        assert_eq!(community.first_timers, 1, "Bo alone is new; Ada came back");
+    }
+
+    /// The review of 2026-11-09, F1: a stream that ends right after a
+    /// delivery still counts that batch. The batch's detached task used to
+    /// find the session gone and return before the viewers' commands ran, so
+    /// a `!forgetme` in it was skipped and its arrival never reached the
+    /// report. Ada's third stream makes her a regular on the threshold; Bo
+    /// asks to be forgotten in the same last batch; the stop follows at
+    /// once, with no wait for the writes.
+    #[tokio::test]
+    async fn a_session_that_ends_right_after_a_batch_still_counts_it_and_runs_its_commands() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        for session_id in ["s1", "s2"] {
+            let generation = start_session(&state, session_id).await;
+            deliver(
+                &state,
+                generation,
+                vec![
+                    row(session_id, StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
+                    row(session_id, StreamPlatform::Twitch, "bo", "Bo", 2, "hi"),
+                ],
+            )
+            .await;
+            crate::live_chat::stop_live_chat(&state).await;
+            session_settled(&state, session_id).await;
+        }
+        let third = start_session(&state, "s3").await;
+        try_deliver_messages(
+            &state,
+            third,
+            vec![
+                row("s3", StreamPlatform::Twitch, "ada", "Ada", 3, "back again"),
+                row("s3", StreamPlatform::Twitch, "bo", "Bo", 4, "!forgetme"),
+            ],
+        )
+        .await
+        .unwrap();
+        // The stop lands while the batch's task is still on its way.
+        crate::live_chat::stop_live_chat(&state).await;
+        let community = report_block(&state, "s3").await;
+        assert_eq!(community.opt_outs, 1, "the !forgetme in the last batch ran");
+        assert_eq!(
+            state
+                .database
+                .community_account_person("twitch:bo")
+                .unwrap(),
+            None,
+            "Bo is forgotten"
+        );
+        // Both arrivals of the last batch reached the report: Ada and Bo
+        // are regulars on their third stream (Bo's row carried his arrival
+        // before his `!forgetme` ran).
+        assert_eq!(
+            community.regulars_back, 2,
+            "the arrivals in the last batch reached the report"
+        );
+        assert_eq!(community.new_regulars, 2);
+        assert_eq!(
+            community
+                .regulars
+                .iter()
+                .map(|person| person.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Ada", "Bo"]
+        );
+        assert_eq!(community.first_timers, 0);
+        assert!(
+            state.community.lock().ending.is_empty(),
+            "the ended session left the runtime with its report"
+        );
     }
 
     /// B1: the arrival rides the delivery, once per person per stream, for

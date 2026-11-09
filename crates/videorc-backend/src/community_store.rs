@@ -2596,7 +2596,11 @@ impl Database {
     /// D15: the first-timers of one stream and how many stayed 40 minutes
     /// or more (first to last message of the stream). A first-timer is a
     /// person, not a bot or a tombstone, none of whose accounts chatted
-    /// before this stream's first message from them. Returns
+    /// before this stream's first message from them. "Before" includes the
+    /// same millisecond: timestamps are stored to the millisecond, and a
+    /// quick stop and restart can land one person's two first messages in
+    /// the same one (the Linux CI red of 2026-11-09); a tie with another
+    /// stream means they chatted before, never that they are new. Returns
     /// `(first_timers, stayed)`.
     pub fn community_session_first_timers(&self, session_id: &str) -> Result<(u32, u32)> {
         let conn = self.lock()?;
@@ -2621,7 +2625,7 @@ impl Database {
                   ON other.account_key = before.account_key
                 WHERE other.person_id = here.person_id
                   AND before.session_id != ?1
-                  AND before.first_message_at < here.first_at
+                  AND before.first_message_at <= here.first_at
              )",
         )?;
         let rows = statement.query_map(params![session_id], |row| {
