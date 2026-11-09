@@ -56,7 +56,7 @@ impl Default for V4l2Roots {
 pub enum NodeAccess {
     Ok,
     PermissionDenied,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only a real node open says so
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only node_access reports it
     Missing,
 }
 

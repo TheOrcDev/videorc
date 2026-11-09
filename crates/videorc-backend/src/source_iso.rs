@@ -1759,7 +1759,8 @@ pub struct SourceIsoStartGuard {
     state: AppState,
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the macOS ISO runtime test reads it
 pub(crate) struct SourceIsoStartReceipt {
     pub pids: Vec<u32>,
     pub fifos: Vec<PathBuf>,

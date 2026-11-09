@@ -97,6 +97,7 @@ mod metal_compositor;
 mod metrics_journal;
 mod microphone_denoise;
 mod moments;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod mpeg_ts;
 mod native_preview_host;
 mod noise_cleanup;

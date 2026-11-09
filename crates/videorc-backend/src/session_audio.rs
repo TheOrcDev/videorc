@@ -717,6 +717,7 @@ impl ProducerSource {
     /// Windows) for [`SystemAudioHandle::prepare`]. The bus never retires it
     /// for silence; it retires only when `failure` is filled or the receiver
     /// disconnects.
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub fn system(
         device_id: String,
         device_name: String,
@@ -1707,6 +1708,11 @@ impl BusLevels {
     }
 }
 
+/// A cancellation test's probe: the timeline generation the ramp must keep,
+/// and how to prepare that timeline's input.
+#[cfg(test)]
+type CancellationInput = (u64, fn(&mut AudioTimeline));
+
 struct AudioShared {
     owner_present: bool,
     retiring: Vec<(String, tokio::sync::watch::Receiver<ProducerCompletion>)>,
@@ -1743,8 +1749,7 @@ struct AudioShared {
     #[cfg(test)]
     after_ramp: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     #[cfg(test)]
-    #[allow(clippy::type_complexity)]
-    cancellation_input: Option<(u64, fn(&mut AudioTimeline))>,
+    cancellation_input: Option<CancellationInput>,
     #[cfg(test)]
     mix_observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
     #[cfg(test)]
