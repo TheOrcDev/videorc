@@ -8918,7 +8918,14 @@ async fn apply_active_screen_output(
     update_compositor_active_screen(state, active_screen).await;
     // Plan 223: the watchdog guards on this takeover from its cache, never
     // from a SQLite read on the tick (a rollback passes back through here).
-    crate::watchdog::observe_takeover(state, watched.as_ref());
+    // The image's mean luma (the dark-takeover guard) is decoded here, on a
+    // blocking thread after the picture changed, and cached beside the
+    // path, so the tick never opens the file under the watchdog's lock.
+    let luma = match crate::watchdog::takeover_image_path(watched.as_ref()) {
+        Some(image_path) => crate::watchdog::read_takeover_luma(image_path).await,
+        None => None,
+    };
+    crate::watchdog::observe_takeover(state, watched.as_ref(), luma);
     Ok(())
 }
 

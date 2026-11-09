@@ -10,10 +10,14 @@ import {
   watchdogChipLabel,
   watchdogClearedAlerts,
   watchdogClearedToast,
+  watchdogEventTarget,
   watchdogHistory,
   watchdogHistorySpan,
   watchdogNotificationWords,
   watchdogNotifyCandidates,
+  watchdogQuietedAlerts,
+  watchdogSameWords,
+  watchdogStayedOpenDelayMs,
   watchdogToastId
 } from '@/lib/watchdog-view'
 import { watchdogCardVariant, watchdogQuietLabel } from '@/components/studio/watchdog-alert-card'
@@ -85,6 +89,40 @@ describe('watchdog view (plan 223 A5, A6)', () => {
     expect(watchdogChipLabel(alert({ check: 'chat-says', targetId: 'lag' }))).toBe(
       'Chat says lagging'
     )
+    // L9: a title the regexes do not know falls back to the platform, then
+    // to the title; never "Destination".
+    expect(
+      watchdogChipLabel(
+        alert({ check: 'destination-down', title: 'Something new', platform: 'kick' })
+      )
+    ).toBe('Kick down')
+    expect(watchdogChipLabel(alert({ check: 'destination-down', title: 'Something new' }))).toBe(
+      'Something new down'
+    )
+    expect(
+      watchdogChipLabel(
+        alert({ check: 'destination-down', title: "Twitch (main) isn't receiving your stream" })
+      )
+    ).toBe('Twitch (main) down')
+    // L1: the clock in a detail is not a change of words.
+    expect(
+      watchdogSameWords(
+        'Muted for 0:41. Viewers hear no voice.',
+        'Muted for 0:42. Viewers hear no voice.'
+      )
+    ).toBe(true)
+    expect(
+      watchdogSameWords(
+        'Muted for 1:02:03. Viewers hear no voice.',
+        'Muted for 0:42. Viewers hear no voice.'
+      )
+    ).toBe(true)
+    expect(
+      watchdogSameWords(
+        'Muted for 0:42. Viewers hear no voice.',
+        'Muted for 0:42. Viewers hear no voice. Nothing else is playing.'
+      )
+    ).toBe(false)
     expect(watchdogToastId(alert({ check: 'mic-muted' }))).toBe('watchdog:mic-muted')
     expect(watchdogToastId(alert({ check: 'destination-down', targetId: 'yt' }))).toBe(
       'watchdog:destination-down:yt'
@@ -110,12 +148,19 @@ describe('watchdog view (plan 223 A5, A6)', () => {
     })
   })
 
-  it('notifies on an open and on a repeat, never for a notice or still-there', () => {
+  it('asks on an open and on a repeat, with the reason, never for a notice or still-there', () => {
     const muted = alert({ check: 'mic-muted' })
-    expect(watchdogNotifyCandidates([], [muted]).map((a) => a.id)).toEqual([muted.id])
+    expect(watchdogNotifyCandidates([], [muted]).map((c) => [c.alert.id, c.reason])).toEqual([
+      [muted.id, 'opened']
+    ])
     expect(watchdogNotifyCandidates([muted], [muted])).toEqual([])
     const repeated = { ...muted, lastRepeatAt: '2026-11-08T12:09:00.000Z' }
-    expect(watchdogNotifyCandidates([muted], [repeated]).length).toBe(1)
+    expect(watchdogNotifyCandidates([muted], [repeated]).map((c) => c.reason)).toEqual(['repeat'])
+    // The second ask (D2, D3) lands at since + 60 s.
+    const opened = Date.parse(muted.since)
+    expect(watchdogStayedOpenDelayMs(muted, opened)).toBe(60_000)
+    expect(watchdogStayedOpenDelayMs(muted, opened + 45_000)).toBe(15_000)
+    expect(watchdogStayedOpenDelayMs(muted, opened + 90_000)).toBe(0)
     expect(
       watchdogNotifyCandidates([], [alert({ check: 'brb-long', severity: 'notice' })])
     ).toEqual([])
@@ -130,6 +175,49 @@ describe('watchdog view (plan 223 A5, A6)', () => {
       )
     ).toBe('Twitch is back')
     expect(watchdogClearedToast(alert({ check: 'chat-says' }))).toBe('Chat has gone quiet about it')
+  })
+
+  it('never says "is back" for a withdrawn, snoozed or acknowledged alert (M2)', () => {
+    const youtube = alert({
+      check: 'destination-down',
+      severity: 'warning',
+      title: 'YouTube has been down for 0:20',
+      targetId: 'youtube',
+      id: 'watchdog:destination-down:youtube:1'
+    })
+    const twitch = alert({
+      check: 'destination-down',
+      severity: 'warning',
+      title: 'Twitch has been down for 0:20',
+      targetId: 'twitch',
+      id: 'watchdog:destination-down:twitch:2'
+    })
+    const all = alert({
+      check: 'destination-down',
+      title: 'Nobody is receiving your stream',
+      targetId: 'all',
+      id: 'watchdog:destination-down:all:3'
+    })
+    // The fold: both per-leg ids leave, withdrawn; no "is back".
+    const withdrawn = [youtube.id, twitch.id]
+    expect(watchdogClearedAlerts([youtube, twitch], [all], withdrawn)).toEqual([])
+    expect(watchdogQuietedAlerts([youtube, twitch], [all], withdrawn).map((a) => a.id)).toEqual(
+      withdrawn
+    )
+    // A real recovery of one leg while the other stays down.
+    expect(watchdogClearedAlerts([youtube, twitch], [twitch]).map((a) => a.id)).toEqual([
+      youtube.id
+    ])
+    // "I meant to" keeps the card listed and hidden: the toast goes, quietly.
+    const muted = alert({ check: 'mic-muted' })
+    const meantTo = { ...muted, state: 'snoozed' as const, meantTo: true }
+    expect(watchdogClearedAlerts([muted], [meantTo])).toEqual([])
+    expect(watchdogQuietedAlerts([muted], [meantTo]).map((a) => a.id)).toEqual([muted.id])
+    const seen = { ...muted, state: 'acknowledged' as const }
+    expect(watchdogQuietedAlerts([muted], [seen]).map((a) => a.id)).toEqual([muted.id])
+    expect(watchdogQuietedAlerts([seen], [seen])).toEqual([])
+    // The session's end withdraws everything.
+    expect(watchdogClearedAlerts([muted, all], [], [muted.id, all.id])).toEqual([])
   })
 
   it('gives every check its button set: the fix, then Got it or I meant to', () => {
@@ -207,5 +295,84 @@ describe('watchdog view (plan 223 A5, A6)', () => {
     ])
     expect(watchdogHistorySpan(rows[0])).toMatch(/ to .* \(0:52\)$/)
     expect(watchdogHistorySpan(rows[1])).toMatch(/, still open$/)
+  })
+
+  it('pairs history rows on the check and its target (L3)', () => {
+    expect(watchdogEventTarget('destination-down', 'YouTube has been down for 0:20. x')).toBe(
+      'YouTube'
+    )
+    expect(watchdogEventTarget('destination-down', 'Streaming to Twitch (main) stopped. x')).toBe(
+      'Twitch (main)'
+    )
+    expect(watchdogEventTarget('destination-down', 'Twitch (main) is back')).toBe('Twitch (main)')
+    expect(watchdogEventTarget('destination-down', 'Nobody is receiving your stream. x')).toBe(
+      'all'
+    )
+    expect(watchdogEventTarget('destination-down', 'Destinations are back')).toBe('all')
+    expect(watchdogEventTarget('platform-health', 'YouTube reports no audio. x')).toBe('YouTube')
+    expect(watchdogEventTarget('chat-says', 'Chat says the stream is frozen. 2 people')).toBe(
+      'video'
+    )
+    expect(watchdogEventTarget('chat-says', 'Chat has gone quiet about it')).toBeNull()
+    expect(watchdogEventTarget('mic-muted', 'Your microphone is muted on the livestream. x')).toBe(
+      null
+    )
+    // YouTube down, then Twitch down, then YouTube back: YouTube's row
+    // closes, Twitch's stays open. Then the fold withdraws Twitch's row and
+    // opens the one card, which clears on its own.
+    const rows = watchdogHistory([
+      {
+        code: 'watchdog-destination-down',
+        message: 'YouTube has been down for 0:20. Videorc is retrying every 2 seconds.',
+        createdAt: '2026-11-08T12:04:00.000Z'
+      },
+      {
+        code: 'watchdog-destination-down',
+        message: 'Twitch has been down for 0:20. Videorc is retrying every 2 seconds.',
+        createdAt: '2026-11-08T12:04:10.000Z'
+      },
+      {
+        code: 'watchdog-destination-down-cleared',
+        message: 'YouTube is back',
+        createdAt: '2026-11-08T12:04:30.000Z'
+      },
+      {
+        code: 'watchdog-destination-down-withdrawn',
+        message: 'Twitch has been down for 0:40. Withdrawn without a recovery.',
+        createdAt: '2026-11-08T12:04:50.000Z'
+      },
+      {
+        code: 'watchdog-destination-down',
+        message: 'Nobody is receiving your stream. Every destination is down.',
+        createdAt: '2026-11-08T12:04:50.000Z'
+      },
+      {
+        code: 'watchdog-destination-down-cleared',
+        message: 'Destinations are back',
+        createdAt: '2026-11-08T12:05:30.000Z'
+      },
+      {
+        code: 'watchdog-chat-says',
+        message: "Chat says they can't hear you. 2 people in the last 2 minutes.",
+        createdAt: '2026-11-08T12:06:00.000Z'
+      },
+      {
+        code: 'watchdog-chat-says',
+        message: 'Chat says the stream is lagging. 2 people in the last 2 minutes.',
+        createdAt: '2026-11-08T12:06:10.000Z'
+      },
+      {
+        code: 'watchdog-chat-says-cleared',
+        message: 'Chat has gone quiet about it',
+        createdAt: '2026-11-08T12:07:00.000Z'
+      }
+    ])
+    expect(rows.map((row) => [row.title, row.clearedAt])).toEqual([
+      ['YouTube has been down for 0:20', '2026-11-08T12:04:30.000Z'],
+      ['Twitch has been down for 0:20', '2026-11-08T12:04:50.000Z'],
+      ['Nobody is receiving your stream', '2026-11-08T12:05:30.000Z'],
+      ["Chat says they can't hear you", '2026-11-08T12:07:00.000Z'],
+      ['Chat says the stream is lagging', null]
+    ])
   })
 })

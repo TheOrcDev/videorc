@@ -801,7 +801,8 @@ mod tests {
         .expect("the echo arrives");
         assert_eq!(echoes.len(), 1);
         assert_eq!(echoes[0].platform, StreamPlatform::Twitch);
-        assert_eq!(echoes[0].author_roles, vec!["broadcaster".to_string()]);
+        // The echo wears `owner`, as the connectors' streamer rows do (plan 223 M1).
+        assert_eq!(echoes[0].author_roles, vec!["owner".to_string()]);
         assert!(echoes[0].provider_message_id.starts_with("fake-sent-"));
 
         // The fake removes the viewer's message on Twitch at once.

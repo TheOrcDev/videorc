@@ -13,8 +13,10 @@
 //! A record-only session never ticks (plan 221 Q7: "warn while only
 //! recording: not in v1"); the one check it keeps is the 1064 microphone
 //! silence report, which the recording's own sampler sends in. The tick
-//! itself touches no lock but the watchdog's and reads no database: the
-//! takeover it guards on is a cache the Screens transition refreshes.
+//! itself touches no lock but the watchdog's, reads no database and decodes
+//! no image: the takeover it guards on is a cache the Screens transition
+//! refreshes, with the image's mean luma (the dark-takeover guard) read
+//! there, off the runtime, and kept beside the path.
 
 pub mod alerts;
 pub mod chat_signals;
@@ -52,6 +54,11 @@ pub type WatchdogSlot = Arc<Mutex<WatchdogRuntime>>;
 pub const KICK_LIVENESS_ALERTS: bool = false;
 /// Misses in a row (60 s polls) before Kick reads as offline, once on.
 pub const KICK_LIVENESS_MISSES: u32 = 3;
+/// A platform's word (A4) ages out after three missed 60 s polls plus a
+/// poll's own timeout (L6): a watch that stopped answering (live chat
+/// stopped mid-stream, a token that died) no longer holds its card open
+/// for the rest of the stream.
+pub const PLATFORM_HEALTH_STALE_AFTER: Duration = Duration::from_secs(3 * 60 + 30);
 
 /// The `watchdog.alerts` event and the `watchdog.alerts.list` answer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +68,12 @@ pub struct WatchdogAlertsView {
     pub session_id: Option<String>,
     #[serde(default)]
     pub alerts: Vec<WatchdogAlert>,
+    /// Ids that left the list in this update without a recovery (M2): a
+    /// fold, a replace, the session's end. The renderer drops their toasts
+    /// instead of saying "is back". Only on the event, never in the RPC's
+    /// answer; absent when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withdrawn: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,7 +105,18 @@ pub struct SessionFacts {
     /// The runner's legs carry this session (a cloud show).
     pub cloud_show: bool,
     pub cloud: Option<CloudSignal>,
-    pub takeover: Option<(String, String)>,
+    pub takeover: Option<CachedTakeover>,
+}
+
+/// The active takeover as the Screens transition last applied it: the
+/// screen, its image, and the image's mean luma (D10's dark-takeover
+/// guard), decoded once there and never on the tick. `luma` is None when
+/// the image did not decode; the guard then never suppresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedTakeover {
+    pub screen_id: String,
+    pub image_path: String,
+    pub luma: Option<u8>,
 }
 
 /// The per-session watch.
@@ -111,7 +135,8 @@ struct SessionWatch {
     black_since: Option<Instant>,
     last_luma_at: Option<Instant>,
     destination_since: BTreeMap<String, (DestinationPhase, Instant)>,
-    platform_health: BTreeMap<String, PlatformHealthSignal>,
+    /// The platforms' words, with when each last arrived (L6).
+    platform_health: BTreeMap<String, (PlatformHealthSignal, Instant)>,
     chat: chat_signals::ChatWindow,
     takeover: Option<ActiveTakeover>,
     push: push::PushLedger,
@@ -156,6 +181,7 @@ impl SessionWatch {
         WatchdogAlertsView {
             session_id: Some(self.session_id.clone()),
             alerts: self.state.alerts(),
+            withdrawn: Vec::new(),
         }
     }
 }
@@ -166,15 +192,15 @@ pub struct WatchdogRuntime {
     session: Option<SessionWatch>,
     /// The renderer's last `watchdog.idle.report`, and when it arrived.
     system_idle: Option<(Duration, Instant)>,
-    /// The active takeover (screen id, image path) as the Screens
-    /// transition last applied it: seeded from the store at startup and
-    /// refreshed by `observe_takeover`, so the tick never reads SQLite on
-    /// a runtime thread.
-    takeover: Option<(String, String)>,
+    /// The active takeover as the Screens transition last applied it, with
+    /// its image's luma: seeded from the store at startup and refreshed by
+    /// `observe_takeover`, so the tick never reads SQLite or decodes a PNG
+    /// on a runtime thread.
+    takeover: Option<CachedTakeover>,
 }
 
 impl WatchdogRuntime {
-    pub fn new(settings: WatchdogSettings, takeover: Option<(String, String)>) -> Self {
+    pub fn new(settings: WatchdogSettings, takeover: Option<CachedTakeover>) -> Self {
         let thresholds = thresholds_for(&settings);
         Self {
             settings,
@@ -216,20 +242,44 @@ fn thresholds_for(settings: &WatchdogSettings) -> Thresholds {
     })
 }
 
-pub fn new_slot(settings: WatchdogSettings, takeover: Option<(String, String)>) -> WatchdogSlot {
+pub fn new_slot(settings: WatchdogSettings, takeover: Option<CachedTakeover>) -> WatchdogSlot {
     Arc::new(Mutex::new(WatchdogRuntime::new(settings, takeover)))
 }
 
-/// The persisted active takeover, read once at startup to seed the cache;
+/// The persisted active takeover, read once at startup to seed the cache
+/// (its image decoded once there too, before the runtime serves anything);
 /// from then on `observe_takeover` keeps it current.
-pub fn load_takeover(database: &crate::storage::Database) -> Option<(String, String)> {
+pub fn load_takeover(database: &crate::storage::Database) -> Option<CachedTakeover> {
     match database.active_stream_screen() {
-        Ok(screen) => takeover_of(screen.as_ref()),
+        Ok(screen) => takeover_of(screen.as_ref()).map(|(screen_id, image_path)| {
+            let luma = luma::mean_luma_png(std::path::Path::new(&image_path));
+            CachedTakeover {
+                screen_id,
+                image_path,
+                luma,
+            }
+        }),
         Err(error) => {
             tracing::warn!("Could not read the active Screen for the watchdog: {error:#}");
             None
         }
     }
+}
+
+/// The image a takeover draws, when it draws one (a Ready screen with an
+/// image); what `read_takeover_luma` decodes.
+pub fn takeover_image_path(screen: Option<&StreamScreen>) -> Option<String> {
+    takeover_of(screen).map(|(_, image_path)| image_path)
+}
+
+/// The mean luma of a takeover's image, decoded on a blocking thread (a
+/// 4K PNG is tens of milliseconds), for the cache `observe_takeover` fills.
+/// None when the image does not decode: the guard then never suppresses.
+pub async fn read_takeover_luma(image_path: String) -> Option<u8> {
+    tokio::task::spawn_blocking(move || luma::mean_luma_png(std::path::Path::new(&image_path)))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// A takeover the viewers see: a Ready screen with an image. A missing or
@@ -285,14 +335,19 @@ pub fn set_settings(
 
 /// The Screens transition applied this takeover to the output (main.rs
 /// `apply_active_screen_output`: activate, clear, delete, retire, and the
-/// rollback of a failed persist). The tick reads this cache instead of the
-/// store.
-pub fn observe_takeover(state: &AppState, screen: Option<&StreamScreen>) {
-    lock(&state.watchdog).takeover = takeover_of(screen);
+/// rollback of a failed persist), with the image's luma it read through
+/// `read_takeover_luma`. The tick reads this cache instead of the store.
+pub fn observe_takeover(state: &AppState, screen: Option<&StreamScreen>, luma: Option<u8>) {
+    lock(&state.watchdog).takeover =
+        takeover_of(screen).map(|(screen_id, image_path)| CachedTakeover {
+            screen_id,
+            image_path,
+            luma,
+        });
 }
 
-/// The cached active takeover: (screen id, image path).
-pub fn takeover_snapshot(state: &AppState) -> Option<(String, String)> {
+/// The cached active takeover.
+pub fn takeover_snapshot(state: &AppState) -> Option<CachedTakeover> {
     lock(&state.watchdog).takeover.clone()
 }
 
@@ -453,7 +508,9 @@ pub fn observe_platform_health(
     };
     match signal {
         Some(signal) => {
-            watch.platform_health.insert(target_id.to_string(), signal);
+            watch
+                .platform_health
+                .insert(target_id.to_string(), (signal, Instant::now()));
         }
         None => {
             watch.platform_health.remove(target_id);
@@ -461,16 +518,21 @@ pub fn observe_platform_health(
     }
 }
 
+/// Backdates every platform signal by `by` (the ageing test).
+#[cfg(test)]
+pub(crate) fn age_platform_health(state: &AppState, session_id: &str, by: Duration) {
+    let mut runtime = lock(&state.watchdog);
+    if let Some(watch) = runtime.watch_mut(session_id) {
+        for (_, at) in watch.platform_health.values_mut() {
+            *at = at.checked_sub(by).unwrap_or(*at);
+        }
+    }
+}
+
 /// One delivered chat message (B1): the streamer's own and Buddy's never
 /// count; everything else goes into the window with its class.
 pub fn observe_chat(state: &AppState, message: &crate::live_chat::LiveChatMessage) {
-    if message.is_deleted
-        || message
-            .author_roles
-            .iter()
-            .chain(message.author_badges.iter())
-            .any(|role| role.eq_ignore_ascii_case("broadcaster"))
-    {
+    if message.is_deleted || is_streamers_own_row(message) {
         return;
     }
     let text = message.message_text.trim();
@@ -500,6 +562,23 @@ pub fn observe_chat(state: &AppState, message: &crate::live_chat::LiveChatMessag
         return;
     };
     watch.chat.push(line);
+}
+
+/// The streamer's own row: the connectors normalize the broadcaster to the
+/// `owner` role (YouTube's chat owner, Twitch's and Kick's broadcaster
+/// badge, X's host); `broadcaster` is kept for a raw badge or an older
+/// row, as `cohost_greetings` and `community_service` read it.
+fn is_streamers_own_row(message: &crate::live_chat::LiveChatMessage) -> bool {
+    message
+        .author_roles
+        .iter()
+        .chain(message.author_badges.iter())
+        .any(|role| {
+            matches!(
+                role.trim().to_ascii_lowercase().as_str(),
+                "owner" | "broadcaster"
+            )
+        })
 }
 
 /// `watchdog.idle.report` from the renderer (main's `powerMonitor`).
@@ -542,22 +621,23 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
         let watch = runtime.watch_or_start(session_id);
         watch.live = facts.live;
 
-        // The takeover: a new one reads its own image's luma once.
+        // The takeover: a new screen starts its clock; the luma is the
+        // cache's (decoded by the Screens transition, M4), read every tick
+        // so a direct A→B switch guards on B's image (M3).
         match facts.takeover.as_ref() {
-            Some((screen_id, image_path)) => {
-                if watch
-                    .takeover
-                    .as_ref()
-                    .is_none_or(|active| &active.screen_id != screen_id)
-                {
+            Some(cached) => match watch.takeover.as_mut() {
+                Some(active) if active.screen_id == cached.screen_id => {
+                    active.luma = cached.luma;
+                }
+                _ => {
                     watch.takeover = Some(ActiveTakeover {
-                        screen_id: screen_id.clone(),
+                        screen_id: cached.screen_id.clone(),
                         since: now,
                         activated_at: clock.wall,
-                        luma: luma::mean_luma_png(std::path::Path::new(image_path)),
+                        luma: cached.luma,
                     });
                 }
-            }
+            },
             None => watch.takeover = None,
         }
         let takeover = watch.takeover.as_ref().map(|active| TakeoverSignal {
@@ -608,8 +688,27 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
         }
         watch.destination_since.retain(|id, _| seen.contains(id));
 
-        let platform_health: Vec<PlatformHealthSignal> =
-            watch.platform_health.values().cloned().collect();
+        // L6: a platform's word that stopped arriving no longer holds its
+        // card; the card leaves quietly (nothing said it was fine).
+        let mut transitions = Vec::new();
+        let stale: Vec<String> = watch
+            .platform_health
+            .iter()
+            .filter(|(_, (_, at))| now.saturating_duration_since(*at) > PLATFORM_HEALTH_STALE_AFTER)
+            .map(|(target, _)| target.clone())
+            .collect();
+        for target in stale {
+            watch.platform_health.remove(&target);
+            transitions.extend(watch.state.withdraw(&alerts::alert_key(
+                WatchdogCheck::PlatformHealth,
+                Some(&target),
+            )));
+        }
+        let platform_health: Vec<PlatformHealthSignal> = watch
+            .platform_health
+            .values()
+            .map(|(signal, _)| signal.clone())
+            .collect();
         let chat: Vec<ChatDecision> = watch
             .chat
             .decide(now)
@@ -647,10 +746,13 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
             system_idle,
             chat: &chat,
         };
-        let transitions =
-            watch
-                .checks
-                .tick(&signals, &thresholds, &settings, &mut watch.state, clock);
+        transitions.extend(watch.checks.tick(
+            &signals,
+            &thresholds,
+            &settings,
+            &mut watch.state,
+            clock,
+        ));
 
         // B2: the AI read, when the free match saw a candidate.
         let ai_read = if facts.live
@@ -658,26 +760,11 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
             && !watch.ai_refused
             && crate::cohost::premium_entitled()
         {
-            watch.chat.ai_read_due(now).map(|lines| {
-                let mut authors: Vec<String> = Vec::new();
-                lines
-                    .iter()
-                    .map(|line| {
-                        let author = match authors.iter().position(|known| known == &line.author) {
-                            Some(index) => index,
-                            None => {
-                                authors.push(line.author.clone());
-                                authors.len() - 1
-                            }
-                        };
-                        json!({
-                            "author": author.min(chat_signals::AI_READ_MESSAGES - 1),
-                            "platform": line.platform,
-                            "text": truncate_chars(&line.text, 500),
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
+            watch
+                .chat
+                .ai_read_due(now)
+                .map(|lines| ai_read_messages(&lines))
+                .filter(|messages| !messages.is_empty())
         } else {
             None
         };
@@ -695,25 +782,93 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
     }
 }
 
+/// The web's chat platforms (`COHOST_PLATFORMS` in `lib/ai/cohost.ts`):
+/// the strict request schema refuses any other.
+const AI_READ_PLATFORMS: [&str; 4] = ["twitch", "youtube", "x", "kick"];
+/// The web's `MAX_WATCHDOG_CHAT_TEXT_CHARS`.
+const AI_READ_TEXT_CHARS: usize = 500;
+
+/// The AI read's `messages` (B2), exactly the web's strict
+/// `watchdogChatMessageSchema`: the text (trimmed, never empty, at most
+/// 500 chars), the platform (one the web knows) and a per-call author
+/// index (0 to 19; the same number is the same person in this call only),
+/// never an id or a name; the last 20 lines at most, oldest first.
+pub(crate) fn ai_read_messages(lines: &[&chat_signals::ChatLine]) -> Vec<serde_json::Value> {
+    let kept: Vec<&&chat_signals::ChatLine> = lines
+        .iter()
+        .filter(|line| AI_READ_PLATFORMS.contains(&line.platform.as_str()))
+        .filter(|line| !line.text.trim().is_empty())
+        .collect();
+    let start = kept.len().saturating_sub(chat_signals::AI_READ_MESSAGES);
+    let mut authors: Vec<&str> = Vec::new();
+    kept[start..]
+        .iter()
+        .map(|line| {
+            let author = match authors.iter().position(|known| *known == line.author) {
+                Some(index) => index,
+                None => {
+                    authors.push(&line.author);
+                    authors.len() - 1
+                }
+            };
+            json!({
+                "author": author.min(chat_signals::AI_READ_MESSAGES - 1),
+                "platform": line.platform,
+                "text": truncate_chars(line.text.trim(), AI_READ_TEXT_CHARS),
+            })
+        })
+        .collect()
+}
+
 fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
-/// The session is gone: its alerts die with it (history is persisted).
+/// The session is gone: its alerts die with it, withdrawn, never "back"
+/// (history is persisted: an info event closes each row).
 pub fn session_ended(state: &AppState, session_id: &str) {
-    let ended = {
+    let withdrawn = {
         let mut runtime = lock(&state.watchdog);
-        match runtime.session.as_ref() {
+        match runtime.session.as_mut() {
             Some(watch) if watch.session_id == session_id => {
+                let withdrawn = watch.state.withdraw_all();
                 runtime.session = None;
-                true
+                Some(withdrawn)
             }
-            _ => false,
+            _ => None,
         }
     };
-    if ended {
-        state.emit_event("watchdog.alerts", WatchdogAlertsView::default());
+    if let Some(withdrawn) = withdrawn {
+        for transition in &withdrawn {
+            if let Some(code) = alerts::health_code(transition) {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Info,
+                    &code,
+                    &withdrawn_message(transition.alert()),
+                );
+            }
+        }
+        state.emit_event(
+            "watchdog.alerts",
+            WatchdogAlertsView {
+                withdrawn: withdrawn
+                    .iter()
+                    .map(|transition| transition.alert().id.clone())
+                    .collect(),
+                ..Default::default()
+            },
+        );
     }
+}
+
+/// The session log's line for a quiet departure (M2): never "is back".
+fn withdrawn_message(alert: &WatchdogAlert) -> String {
+    format!(
+        "{}. Withdrawn without a recovery.",
+        alert.title.trim_end_matches('.')
+    )
 }
 
 /// Whether this session has a watch (a tick or a 1064 report started it).
@@ -725,6 +880,16 @@ pub(crate) fn watching(state: &AppState, session_id: &str) -> bool {
         .is_some_and(|watch| watch.session_id == session_id)
 }
 
+/// How many chat lines the session's window holds (B1's exclusions).
+#[cfg(test)]
+pub(crate) fn chat_lines(state: &AppState, session_id: &str) -> usize {
+    lock(&state.watchdog)
+        .session
+        .as_ref()
+        .filter(|watch| watch.session_id == session_id)
+        .map_or(0, |watch| watch.chat.len())
+}
+
 /// The takeover the session's watch guards on, as the last tick saw it.
 #[cfg(test)]
 pub(crate) fn watched_takeover(state: &AppState, session_id: &str) -> Option<String> {
@@ -734,6 +899,17 @@ pub(crate) fn watched_takeover(state: &AppState, session_id: &str) -> Option<Str
         .filter(|watch| watch.session_id == session_id)
         .and_then(|watch| watch.takeover.as_ref())
         .map(|active| active.screen_id.clone())
+}
+
+/// The luma the session's watch guards on, as the last tick saw it.
+#[cfg(test)]
+pub(crate) fn watched_takeover_luma(state: &AppState, session_id: &str) -> Option<u8> {
+    lock(&state.watchdog)
+        .session
+        .as_ref()
+        .filter(|watch| watch.session_id == session_id)
+        .and_then(|watch| watch.takeover.as_ref())
+        .and_then(|active| active.luma)
 }
 
 // --- RPCs -----------------------------------------------------------------
@@ -790,6 +966,11 @@ fn announce_transitions_with_view(
     transitions: Vec<Transition>,
     emit_view: bool,
 ) {
+    // L5: the phone hears about a stream, never about a recording alone.
+    let live = lock(&state.watchdog)
+        .session
+        .as_ref()
+        .is_some_and(|watch| watch.session_id == session_id && watch.live);
     for transition in &transitions {
         if let Some(code) = alerts::health_code(transition) {
             let alert = transition.alert();
@@ -802,6 +983,11 @@ fn announce_transitions_with_view(
             };
             let message = match transition {
                 Transition::Cleared(_) => alerts::cleared_toast(alert),
+                Transition::Withdrawn(_) => withdrawn_message(alert),
+                // L4: chat quotes stay on the card; the record (the health
+                // event, the session log, the support bundle) keeps the
+                // count and the class, as the push does.
+                _ if alert.check == WatchdogCheck::ChatSays => push::chat_says_record(alert),
                 _ => format!("{}. {}", alert.title.trim_end_matches('.'), alert.detail),
             };
             let _ = crate::recording::emit_health_event(
@@ -827,12 +1013,19 @@ fn announce_transitions_with_view(
                 let _ = crate::cohost::say_utterance(&say_state, params).await;
             });
         }
-        if let Some(body) = push::notify_body(transition) {
+        if let Some(body) = push::notify_body(transition, live) {
             spawn_push(state.clone(), session_id.to_string(), body);
         }
     }
     if emit_view || !transitions.is_empty() {
-        let view = alerts_view(state);
+        let mut view = alerts_view(state);
+        view.withdrawn = transitions
+            .iter()
+            .filter_map(|transition| match transition {
+                Transition::Withdrawn(alert) => Some(alert.id.clone()),
+                _ => None,
+            })
+            .collect();
         state.emit_event("watchdog.alerts", view);
     }
 }
@@ -963,6 +1156,7 @@ mod tests {
         let alerts: WatchdogAlertsView = serde_json::from_value(fixture["alerts"].clone()).unwrap();
         assert_eq!(alerts.alerts.len(), 3);
         assert_eq!(alerts.alerts[1].source, alerts::AlertSource::Cloud);
+        assert_eq!(alerts.withdrawn, vec!["watchdog:destination-down:twitch:4"]);
         assert_eq!(serde_json::to_value(&alerts).unwrap(), fixture["alerts"]);
         let empty: WatchdogAlertsView =
             serde_json::from_value(fixture["emptyAlerts"].clone()).unwrap();
@@ -1033,6 +1227,37 @@ mod tests {
         )
     }
 
+    /// A `sessions` row, so the health log's foreign key holds and the
+    /// tests can read the lines back.
+    fn persist_session(state: &AppState, session_id: &str) {
+        state
+            .database
+            .create_session(&crate::storage::NewSession {
+                id: session_id.to_string(),
+                title: "Watchdog test".to_string(),
+                started_at: "2026-11-09T10:00:00Z".to_string(),
+                mode: "record+stream".to_string(),
+                output_path: Some("/tmp/watchdog-test.mp4".to_string()),
+                container: Some("mp4".to_string()),
+                stream_preset: None,
+                sources: serde_json::from_str("{}").unwrap(),
+                layout: crate::protocol::default_layout_settings(),
+                output: serde_json::from_value(json!({
+                    "recordEnabled": true,
+                    "streamEnabled": true,
+                    "video": {
+                        "preset": "tutorial-1080p30",
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30,
+                        "bitrateKbps": 6000
+                    },
+                    "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+                }))
+                .unwrap(),
+            })
+            .unwrap();
+    }
     fn ready_screen(id: &str, image_path: &str) -> StreamScreen {
         StreamScreen {
             id: id.to_string(),
@@ -1057,23 +1282,27 @@ mod tests {
             "a fresh store has no takeover"
         );
 
-        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")));
+        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")), Some(30));
         assert_eq!(
             takeover_snapshot(&state),
-            Some(("brb".to_string(), "/tmp/brb.png".to_string()))
+            Some(CachedTakeover {
+                screen_id: "brb".to_string(),
+                image_path: "/tmp/brb.png".to_string(),
+                luma: Some(30),
+            })
         );
 
         let mut missing = ready_screen("gone", "");
         missing.status = StreamScreenStatus::Missing;
-        observe_takeover(&state, Some(&missing));
+        observe_takeover(&state, Some(&missing), None);
         assert_eq!(
             takeover_snapshot(&state),
             None,
             "a missing image draws nothing"
         );
 
-        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")));
-        observe_takeover(&state, None);
+        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")), None);
+        observe_takeover(&state, None, None);
         assert_eq!(takeover_snapshot(&state), None, "clear ends the takeover");
     }
 
@@ -1094,10 +1323,370 @@ mod tests {
             .unwrap();
         database.activate_stream_screen(&screen.id).unwrap();
         let seeded = load_takeover(&database).expect("the active screen seeds the cache");
-        assert_eq!(seeded.0, screen.id);
-        assert_eq!(seeded.1, screen.image_path);
+        assert_eq!(seeded.screen_id, screen.id);
+        assert_eq!(seeded.image_path, screen.image_path);
+        assert_eq!(seeded.luma, None, "a file that is not an image reads None");
         database.clear_active_stream_screen().unwrap();
         assert_eq!(load_takeover(&database), None);
+    }
+
+    /// Plan 223 L8 (the review): the AI read's body against the web's
+    /// strict schema (`lib/ai/watchdog-chat.ts`): the five top-level keys
+    /// and nothing else, consent `true`, 1 to 20 messages of exactly
+    /// `author` (0 to 19), `platform` (twitch, youtube, x, kick) and `text`
+    /// (trimmed, 1 to 500 chars); a platform the web does not know and an
+    /// empty line never go; the same person keeps one index.
+    #[test]
+    fn the_ai_read_body_fits_the_webs_strict_schema() {
+        let at = Instant::now();
+        let line = |author: &str, platform: &str, text: &str| chat_signals::ChatLine {
+            author: author.to_string(),
+            text: text.to_string(),
+            platform: platform.to_string(),
+            at,
+            class: None,
+        };
+        let long = "x".repeat(600);
+        let mut lines = vec![
+            line("twitch:a", "twitch", "  no sound??  "),
+            line("youtube:b", "youtube", &long),
+            line("custom:c", "custom", "never sent"),
+            line("x:d", "x", "   "),
+            line("kick:e", "kick", "lag"),
+            line("twitch:a", "twitch", "still no sound"),
+        ];
+        for index in 0..30 {
+            lines.push(line(
+                &format!("twitch:v{index}"),
+                "twitch",
+                &format!("line {index}"),
+            ));
+        }
+        let refs: Vec<&chat_signals::ChatLine> = lines.iter().collect();
+        let messages = ai_read_messages(&refs);
+        assert_eq!(
+            messages.len(),
+            chat_signals::AI_READ_MESSAGES,
+            "the last 20 go"
+        );
+        let body = crate::videorc_api::watchdog_chat_request("session-1", messages.clone());
+        let mut keys: Vec<&String> = body.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "clientVersion",
+                "consentToProcessChat",
+                "messages",
+                "seq",
+                "sessionClientId"
+            ]
+        );
+        assert_eq!(body["consentToProcessChat"], json!(true));
+        assert_eq!(body["seq"], json!(0));
+        let version = body["clientVersion"].as_str().unwrap();
+        assert!(!version.trim().is_empty() && version.len() <= 64);
+        assert!(body["sessionClientId"].as_str().unwrap().len() <= 128);
+        for message in body["messages"].as_array().unwrap() {
+            let mut keys: Vec<&String> = message.as_object().unwrap().keys().collect();
+            keys.sort();
+            assert_eq!(keys, ["author", "platform", "text"]);
+            let author = message["author"].as_u64().unwrap();
+            assert!(author < chat_signals::AI_READ_MESSAGES as u64);
+            assert!(AI_READ_PLATFORMS.contains(&message["platform"].as_str().unwrap()));
+            let text = message["text"].as_str().unwrap();
+            assert!(!text.is_empty() && text.chars().count() <= 500);
+            assert_eq!(text, text.trim());
+            assert_ne!(text, "never sent");
+        }
+        // The window's first six lines, alone: the same person keeps one
+        // index, the long line is cut, the unknown platform and the blank
+        // line never go.
+        let head: Vec<&chat_signals::ChatLine> = lines[..6].iter().collect();
+        let messages = ai_read_messages(&head);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["text"], "no sound??");
+        assert_eq!(messages[0]["author"], 0);
+        assert_eq!(messages[1]["text"].as_str().unwrap().chars().count(), 500);
+        assert_eq!(messages[1]["author"], 1);
+        assert_eq!(messages[2]["platform"], "kick");
+        assert_eq!(messages[3]["author"], 0, "the same person, the same index");
+        assert!(ai_read_messages(&[]).is_empty());
+    }
+
+    /// Plan 223 L6 (the review): a platform's word holds its card only
+    /// while it keeps arriving; three missed polls later the card leaves,
+    /// withdrawn (the platform never said it was fine). A fresh word keeps
+    /// it; a withdrawn word (`None`) clears it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_platform_health_card_ages_out_with_its_signal() {
+        let state = test_state();
+        persist_session(&state, "live");
+        let facts = || SessionFacts {
+            live: true,
+            ..Default::default()
+        };
+        tick(&state, "live", facts());
+        let signal = || PlatformHealthSignal {
+            target_id: "youtube".to_string(),
+            label: "YouTube".to_string(),
+            platform: "youtube".to_string(),
+            kind: PlatformHealthKind::NoAudio,
+            critical: true,
+            description: Some("The stream has no audio.".to_string()),
+            dashboard_url: None,
+        };
+        observe_platform_health(&state, "live", "youtube", Some(signal()));
+        tick(&state, "live", facts());
+        assert_eq!(alerts_view(&state).alerts.len(), 1);
+        assert_eq!(
+            alerts_view(&state).alerts[0].check,
+            WatchdogCheck::PlatformHealth
+        );
+
+        // Two polls late: still fresh.
+        age_platform_health(&state, "live", Duration::from_secs(150));
+        tick(&state, "live", facts());
+        assert_eq!(
+            alerts_view(&state).alerts.len(),
+            1,
+            "two missed polls keep the card"
+        );
+
+        // A fresh word resets the age.
+        observe_platform_health(&state, "live", "youtube", Some(signal()));
+        age_platform_health(&state, "live", Duration::from_secs(150));
+        tick(&state, "live", facts());
+        assert_eq!(alerts_view(&state).alerts.len(), 1);
+
+        // Past the stale line: withdrawn, not cleared.
+        age_platform_health(
+            &state,
+            "live",
+            PLATFORM_HEALTH_STALE_AFTER + Duration::from_secs(1),
+        );
+        tick(&state, "live", facts());
+        assert!(alerts_view(&state).alerts.is_empty(), "the card aged out");
+        let codes: Vec<String> = state
+            .database
+            .list_health_events("live")
+            .unwrap()
+            .into_iter()
+            .map(|event| event.code)
+            .collect();
+        assert!(
+            codes.contains(&"watchdog-platform-health-withdrawn".to_string()),
+            "{codes:?}"
+        );
+        assert!(
+            !codes.contains(&"watchdog-platform-health-cleared".to_string()),
+            "{codes:?}"
+        );
+
+        // The platform says it is fine: a clear.
+        observe_platform_health(&state, "live", "youtube", Some(signal()));
+        tick(&state, "live", facts());
+        observe_platform_health(&state, "live", "youtube", None);
+        tick(&state, "live", facts());
+        let codes: Vec<String> = state
+            .database
+            .list_health_events("live")
+            .unwrap()
+            .into_iter()
+            .map(|event| event.code)
+            .collect();
+        assert!(
+            codes.contains(&"watchdog-platform-health-cleared".to_string()),
+            "{codes:?}"
+        );
+        session_ended(&state, "live");
+    }
+
+    /// Plan 223 M2 (the review): a quiet departure rides the event as
+    /// `withdrawn` and the log as an info `-withdrawn` line, never as a
+    /// clear; the session's end withdraws everything the same way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_withdrawal_rides_the_event_and_the_log_and_never_reads_as_a_clear() {
+        let state = test_state();
+        persist_session(&state, "live");
+        let mut events = state.events.subscribe();
+        tick(
+            &state,
+            "live",
+            SessionFacts {
+                live: true,
+                ..Default::default()
+            },
+        );
+        observe_health_event(
+            &state,
+            Some("live"),
+            crate::recording::MICROPHONE_SILENT_CODE,
+            "The microphone has been silent for 20 seconds.",
+        );
+        let id = alerts_view(&state).alerts[0].id.clone();
+        session_ended(&state, "live");
+        let mut saw_withdrawn = false;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "watchdog.alerts" && event.payload["withdrawn"] == json!([id.clone()])
+            {
+                saw_withdrawn = true;
+                assert_eq!(event.payload["alerts"], json!([]));
+            }
+            assert_ne!(
+                event.payload["code"],
+                json!("watchdog-mic-silent-cleared"),
+                "the session's end is not a recovery"
+            );
+        }
+        assert!(saw_withdrawn, "the empty view names the withdrawn id");
+        let events = state.database.list_health_events("live").unwrap();
+        let codes: Vec<&str> = events.iter().map(|event| event.code.as_str()).collect();
+        assert!(
+            codes.contains(&"watchdog-mic-silent-withdrawn"),
+            "{codes:?}"
+        );
+        assert!(!codes.contains(&"watchdog-mic-silent-cleared"), "{codes:?}");
+        let withdrawn = events
+            .iter()
+            .find(|event| event.code == "watchdog-mic-silent-withdrawn")
+            .unwrap();
+        assert!(matches!(withdrawn.level, HealthLevel::Info));
+        assert!(withdrawn.message.ends_with("Withdrawn without a recovery."));
+    }
+
+    /// Plan 223 M4 (the review): the takeover's luma is decoded off the
+    /// runtime by the Screens transition and travels in the cache; the tick
+    /// never opens the file. A switch to another screen brings that
+    /// screen's luma (M3).
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_takeover_luma_is_decoded_once_off_the_tick_and_follows_a_switch() {
+        let dir = crate::test_temp_dir::TestTempDir::new("watchdog-takeover-luma");
+        let dark = dir.join("dark.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([30, 30, 30, 255]))
+            .save(&dark)
+            .unwrap();
+        assert_eq!(
+            read_takeover_luma(dark.to_string_lossy().into_owned()).await,
+            Some(30)
+        );
+        assert_eq!(
+            read_takeover_luma(dir.join("missing.png").to_string_lossy().into_owned()).await,
+            None,
+            "a file that does not decode reads None"
+        );
+
+        let state = test_state();
+        let facts = |takeover: Option<CachedTakeover>| SessionFacts {
+            live: true,
+            takeover,
+            ..Default::default()
+        };
+        observe_takeover(&state, Some(&ready_screen("a", "/tmp/a.png")), Some(30));
+        tick(&state, "live", facts(takeover_snapshot(&state)));
+        assert_eq!(watched_takeover(&state, "live").as_deref(), Some("a"));
+        assert_eq!(watched_takeover_luma(&state, "live"), Some(30));
+        // A direct switch: B's luma, not A's verdict.
+        observe_takeover(&state, Some(&ready_screen("b", "/tmp/b.png")), Some(200));
+        tick(&state, "live", facts(takeover_snapshot(&state)));
+        assert_eq!(watched_takeover(&state, "live").as_deref(), Some("b"));
+        assert_eq!(watched_takeover_luma(&state, "live"), Some(200));
+        session_ended(&state, "live");
+    }
+
+    /// Plan 223 M1 (the review): the streamer's own line never counts, in
+    /// the role each connector writes: YouTube's chat owner, Twitch's and
+    /// Kick's broadcaster badge (normalized to `owner`, the raw badge kept),
+    /// X's host, and the fake echo's `owner`. A raw `broadcaster` on an
+    /// older row is excluded too; a moderator's and a viewer's line count.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_streamers_own_line_never_counts_on_any_platform() {
+        use crate::streaming::StreamPlatform;
+        let state = test_state();
+        tick(
+            &state,
+            "live",
+            SessionFacts {
+                live: true,
+                ..Default::default()
+            },
+        );
+        let line = |platform, roles: &[&str], badges: &[&str], text: &str| {
+            let mut message = crate::live_chat::fake_message("live", platform, None, 7);
+            message.author_roles = roles.iter().map(|role| role.to_string()).collect();
+            message.author_badges = badges.iter().map(|badge| badge.to_string()).collect();
+            message.message_text = text.to_string();
+            message
+        };
+        let own = [
+            (
+                "youtube",
+                line(
+                    StreamPlatform::Youtube,
+                    &["owner"],
+                    &[],
+                    "no sound today, sorry",
+                ),
+            ),
+            (
+                "twitch",
+                line(
+                    StreamPlatform::Twitch,
+                    &["owner"],
+                    &["broadcaster"],
+                    "cant hear u",
+                ),
+            ),
+            (
+                "kick",
+                line(
+                    StreamPlatform::Kick,
+                    &["owner", "member"],
+                    &["broadcaster"],
+                    "no audio",
+                ),
+            ),
+            ("x", line(StreamPlatform::X, &["owner"], &[], "sin audio")),
+            (
+                "legacy",
+                line(StreamPlatform::Twitch, &[" Broadcaster "], &[], "no sound"),
+            ),
+        ];
+        for (shape, message) in &own {
+            observe_chat(&state, message);
+            assert_eq!(
+                chat_lines(&state, "live"),
+                0,
+                "{shape}: the streamer's own line counted"
+            );
+        }
+        let echo = crate::live_chat::fake_echo_message_for_tests(
+            "live",
+            StreamPlatform::Twitch,
+            "no sound??",
+        );
+        assert_eq!(echo.author_roles, vec!["owner".to_string()]);
+        observe_chat(&state, &echo);
+        assert_eq!(
+            chat_lines(&state, "live"),
+            0,
+            "the fake echo is the streamer's own line"
+        );
+
+        observe_chat(
+            &state,
+            &line(StreamPlatform::Youtube, &["moderator"], &[], "no sound??"),
+        );
+        observe_chat(
+            &state,
+            &line(StreamPlatform::Kick, &[], &["subscriber"], "cant hear u"),
+        );
+        assert_eq!(
+            chat_lines(&state, "live"),
+            2,
+            "a moderator's and a viewer's line count"
+        );
+        session_ended(&state, "live");
     }
 
     /// Issue 1064 on a record-only session: no tick ever starts its watch

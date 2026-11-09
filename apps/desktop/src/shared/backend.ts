@@ -5611,6 +5611,12 @@ export interface WatchdogAlert {
 export interface WatchdogAlertsView {
   sessionId?: string
   alerts: WatchdogAlert[]
+  /**
+   * Ids that left the list in this update without a recovery (plan 223 M2):
+   * a fold, a replace, the session's end. Their toasts are dropped, never
+   * replaced by "is back". Only on the event; absent when empty.
+   */
+  withdrawn?: string[]
 }
 
 export type WatchdogSnoozeScope = 'ten-minutes' | 'stream'
@@ -5642,14 +5648,24 @@ export interface WatchdogAlertDevicesView {
   devices: WatchdogAlertDevice[]
 }
 
+/** Why the renderer asks for a system notification (plan 223 D2, D3). */
+export type WatchdogNoticeReason = 'opened' | 'stayed-open' | 'repeat'
+
 /** `watchdog:notify` (renderer → main): the system notification's words. */
 export interface WatchdogNotice {
   alertId: string
   title: string
   body: string
   critical: boolean
-  /** Seconds the alert has been open: a critical one 60 s old shows even when focused. */
+  /** Seconds the alert has been open; main applies the 60 s rule to it. */
   openSeconds: number
+  /**
+   * `opened`: the alert just opened (critical shows at once when the Studio
+   * is not in front). `stayed-open`: the second ask at since + 60 s for an
+   * alert still open (a warning's first chance; a critical one shows even
+   * over a focused Studio). `repeat`: the severity's repeat cadence.
+   */
+  reason: WatchdogNoticeReason
 }
 
 /** A fix pressed on a card in the Stream Manager (`watchdog:fix-request`). */

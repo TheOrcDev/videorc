@@ -28,34 +28,101 @@ export function watchdogNotificationWords(alert: WatchdogAlert): { title: string
   return { title, body }
 }
 
+/**
+ * Two card texts that differ only in their live clock ("0:41" vs "0:42")
+ * are the same words (the backend's `same_words`): the list re-emits them
+ * every second, the toast must not (L1).
+ */
+export function watchdogSameWords(before: string, after: string): boolean {
+  const strip = (text: string) => text.replace(/[\d:]+/g, '#')
+  return strip(before) === strip(after)
+}
+
 /** Seconds since the alert opened, from its RFC 3339 `since`. */
 export function watchdogOpenSeconds(alert: Pick<WatchdogAlert, 'since'>, nowMs: number): number {
   const since = Date.parse(alert.since)
   return Number.isNaN(since) ? 0 : Math.max(0, Math.floor((nowMs - since) / 1000))
 }
 
-/** Whether a transition between two lists means a notification (open or repeat). */
+/** Alerts that may notify at all (D3): warning and critical, never still-there. */
+export function watchdogNotifies(alert: Pick<WatchdogAlert, 'severity' | 'check'>): boolean {
+  return alert.severity !== 'notice' && alert.check !== 'still-there'
+}
+
+/**
+ * Whether a transition between two lists means an ask (open or repeat),
+ * and why; the second ask at since + 60 s is `watchdogStayedOpenDelayMs`.
+ */
 export function watchdogNotifyCandidates(
   previous: readonly WatchdogAlert[],
   next: readonly WatchdogAlert[]
-): WatchdogAlert[] {
+): { alert: WatchdogAlert; reason: 'opened' | 'repeat' }[] {
   const before = new Map(previous.map((alert) => [alert.id, alert]))
-  return next.filter((alert) => {
-    if (alert.severity === 'notice' || alert.check === 'still-there') return false
-    if (alert.state === 'snoozed') return false
+  const out: { alert: WatchdogAlert; reason: 'opened' | 'repeat' }[] = []
+  for (const alert of next) {
+    if (!watchdogNotifies(alert) || alert.state === 'snoozed') continue
     const known = before.get(alert.id)
-    if (!known) return true
-    return (alert.lastRepeatAt ?? null) !== (known.lastRepeatAt ?? null) && !!alert.lastRepeatAt
-  })
+    if (!known) {
+      out.push({ alert, reason: 'opened' })
+    } else if (
+      !!alert.lastRepeatAt &&
+      (alert.lastRepeatAt ?? null) !== (known.lastRepeatAt ?? null)
+    ) {
+      out.push({ alert, reason: 'repeat' })
+    }
+  }
+  return out
 }
 
-/** Alerts that were open before and are gone now: their clearing toasts. */
+/** D2, D3: the second ask comes when the alert has been open this long. */
+export const WATCHDOG_STAYED_OPEN_SECONDS = 60
+
+/** Milliseconds until the alert's since + 60 s (0 when that has passed). */
+export function watchdogStayedOpenDelayMs(
+  alert: Pick<WatchdogAlert, 'since'>,
+  nowMs: number
+): number {
+  const since = Date.parse(alert.since)
+  if (Number.isNaN(since)) return WATCHDOG_STAYED_OPEN_SECONDS * 1000
+  return Math.max(0, since + WATCHDOG_STAYED_OPEN_SECONDS * 1000 - nowMs)
+}
+
+/**
+ * Alerts that were listed before and are gone now because their signal
+ * recovered: their clearing toasts. An id the backend named as withdrawn
+ * (M2: a fold, a replace, the session's end) is not a recovery; see
+ * `watchdogQuietedAlerts`.
+ */
 export function watchdogClearedAlerts(
   previous: readonly WatchdogAlert[],
-  next: readonly WatchdogAlert[]
+  next: readonly WatchdogAlert[],
+  withdrawn: readonly string[] = []
 ): WatchdogAlert[] {
   const ids = new Set(next.map((alert) => alert.id))
-  return previous.filter((alert) => !ids.has(alert.id))
+  const quiet = new Set(withdrawn)
+  return previous.filter((alert) => !ids.has(alert.id) && !quiet.has(alert.id))
+}
+
+/**
+ * Alerts whose toast should simply go (M2): withdrawn without a recovery,
+ * or snoozed (ten minutes, or "I meant to", which keeps the card listed and
+ * hidden) or acknowledged since the last list.
+ */
+export function watchdogQuietedAlerts(
+  previous: readonly WatchdogAlert[],
+  next: readonly WatchdogAlert[],
+  withdrawn: readonly string[] = []
+): WatchdogAlert[] {
+  const ids = new Set(next.map((alert) => alert.id))
+  const quiet = new Set(withdrawn)
+  const before = new Map(previous.map((alert) => [alert.id, alert]))
+  const gone = previous.filter((alert) => !ids.has(alert.id) && quiet.has(alert.id))
+  const hushed = next.filter((alert) => {
+    if (alert.state === 'open') return false
+    const known = before.get(alert.id)
+    return !known || known.state === 'open'
+  })
+  return [...gone, ...hushed]
 }
 
 /** The success toast when a check clears ("Copy (exact)", the last row). */
@@ -107,16 +174,51 @@ export interface WatchdogHistoryRow {
   clearedAt: string | null
 }
 
+/**
+ * The target a `watchdog-<check>*` event names, read from its message
+ * (L3): a destination's label for `destination-down` and `platform-health`
+ * ("YouTube has been down for 0:20", "Streaming to Twitch (main) stopped",
+ * "YouTube is back"; `all` for the fold and "Destinations are back"), the
+ * class for a `chat-says` open ("Chat says the stream is frozen" → video).
+ * Null when the message names none (a clear of `chat-says`, every other
+ * check), which pairs with the oldest open row of that check.
+ */
+export function watchdogEventTarget(check: string, message: string): string | null {
+  const title = message.split('. ')[0] ?? message
+  if (check === 'destination-down' || check === 'platform-health') {
+    if (/^Nobody is receiving your stream/.test(title) || /^Destinations are back/.test(title)) {
+      return 'all'
+    }
+    return (
+      /^Streaming to (.+) stopped$/.exec(title)?.[1] ??
+      /^(.+?) (has been down|isn't receiving|ended the broadcast|reports |is back$)/.exec(
+        title
+      )?.[1] ??
+      null
+    )
+  }
+  if (check === 'chat-says') {
+    if (/can't hear/.test(title)) return 'audio'
+    if (/frozen/.test(title)) return 'video'
+    if (/lagging/.test(title)) return 'lag'
+  }
+  return null
+}
+
 export function watchdogHistory(
   events: readonly { code: string; message: string; createdAt: string }[]
 ): WatchdogHistoryRow[] {
   const sorted = [...events].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-  const open = new Map<string, WatchdogHistoryRow>()
+  // Open rows by check, oldest first; each keyed on its target too (L3),
+  // so a fold's per-leg rows and the one card they folded into pair with
+  // their own close, never with each other's.
+  const open = new Map<string, { target: string | null; row: WatchdogHistoryRow }[]>()
   const rows: WatchdogHistoryRow[] = []
   for (const event of sorted) {
-    const match = /^watchdog-(.+?)(?:-(cleared|acknowledged|snoozed))?$/.exec(event.code)
+    const match = /^watchdog-(.+?)(?:-(cleared|acknowledged|snoozed|withdrawn))?$/.exec(event.code)
     if (!match) continue
     const [, check, suffix] = match
+    const target = watchdogEventTarget(check, event.message)
     if (!suffix) {
       const row: WatchdogHistoryRow = {
         check,
@@ -124,14 +226,15 @@ export function watchdogHistory(
         openedAt: event.createdAt,
         clearedAt: null
       }
-      open.set(check, row)
+      const list = open.get(check) ?? []
+      list.push({ target, row })
+      open.set(check, list)
       rows.push(row)
-    } else if (suffix === 'cleared' || suffix === 'snoozed') {
-      const row = open.get(check)
-      if (row) {
-        row.clearedAt = event.createdAt
-        open.delete(check)
-      }
+    } else if (suffix === 'cleared' || suffix === 'snoozed' || suffix === 'withdrawn') {
+      const list = open.get(check) ?? []
+      const index = target === null ? 0 : list.findIndex((candidate) => candidate.target === target)
+      const [closed] = index >= 0 ? list.splice(index, 1) : []
+      if (closed) closed.row.clearedAt = event.createdAt
     }
   }
   return rows

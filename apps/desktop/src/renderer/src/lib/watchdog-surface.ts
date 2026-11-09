@@ -6,7 +6,12 @@
 // `takeoverHide`, the pages) and never a new control of their own.
 
 import type { BackendClient } from '@/backendClient'
-import type { WatchdogAlert, WatchdogAlertFix, WatchdogSettings } from '@/lib/backend'
+import type {
+  WatchdogAlert,
+  WatchdogAlertFix,
+  WatchdogNoticeReason,
+  WatchdogSettings
+} from '@/lib/backend'
 import { openHealth } from '@/lib/health-door'
 import type { StudioActionSource } from '@/lib/studio-actions/studio-context'
 import { toast } from '@/lib/toast'
@@ -15,14 +20,24 @@ import {
   watchdogClearedAlerts,
   watchdogClearedToast,
   watchdogNotificationWords,
+  watchdogNotifies,
   watchdogNotifyCandidates,
   watchdogOpenSeconds,
+  watchdogQuietedAlerts,
+  watchdogSameWords,
+  watchdogStayedOpenDelayMs,
   watchdogToastId
 } from '@/lib/watchdog-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 export interface WatchdogSurfaceDeps {
   client: BackendClient | null
+  /**
+   * The session streams (L5): a record-only session's silent microphone
+   * (the 1064 adoption) is the recording's own notice, never a system
+   * notification (plan 221 Q7).
+   */
+  live: () => boolean
   source: () => StudioActionSource | null
   /** Opens the Takeover list (assets) or the Scenes list (layouts). */
   openStudioPanel: (panel: 'assets' | 'layouts') => void
@@ -51,21 +66,82 @@ export function noteWatchdogSettings(settings: WatchdogSettings): void {
   settingsCache = { at: Date.now(), settings }
 }
 
+/** The last list this surface saw, for the 60 s ask. */
+let latestAlerts: readonly WatchdogAlert[] = []
+/** The second asks (D2, D3) by alert id: a pending timer, or 'asked' once it fired. */
+const stayedOpenAsks = new Map<string, number | 'asked'>()
+
+async function askMain(alert: WatchdogAlert, reason: WatchdogNoticeReason, now: number) {
+  const words = watchdogNotificationWords(alert)
+  await window.videorc?.notifyWatchdog?.({
+    alertId: alert.id,
+    title: words.title,
+    body: words.body,
+    critical: alert.severity === 'critical',
+    openSeconds: watchdogOpenSeconds(alert, now),
+    reason
+  })
+}
+
+/**
+ * D2, D3: a second ask at since + 60 s for every warning and critical alert
+ * still open then (a warning's first chance to notify; a critical one shows
+ * over a focused Studio). Main applies the 60 s rule and never repeats what
+ * the first ask showed.
+ */
+function scheduleStayedOpenAsk(alert: WatchdogAlert, deps: WatchdogSurfaceDeps, now: number) {
+  if (stayedOpenAsks.has(alert.id)) return
+  const timer = window.setTimeout(
+    () => {
+      stayedOpenAsks.set(alert.id, 'asked')
+      const current = latestAlerts.find((candidate) => candidate.id === alert.id)
+      if (!current || current.state !== 'open' || !deps.live()) return
+      void systemNotificationsOn(deps.client).then((on) => {
+        if (on) void askMain(current, 'stayed-open', Date.now())
+      })
+    },
+    watchdogStayedOpenDelayMs(alert, now)
+  )
+  stayedOpenAsks.set(alert.id, timer)
+}
+
+function dropStayedOpenAsk(alertId: string) {
+  const pending = stayedOpenAsks.get(alertId)
+  if (pending === undefined) return
+  if (pending !== 'asked') window.clearTimeout(pending)
+  stayedOpenAsks.delete(alertId)
+}
+
+export interface WatchdogListChange {
+  /** The event's `withdrawn` ids (M2): gone without a recovery. */
+  withdrawn?: readonly string[]
+}
+
 /**
  * Called with each `watchdog.alerts` list after the first. Opens and
- * refreshes the toasts, replaces them with the clearing toast, and asks main
- * for the system notification on an open and on every repeat.
+ * refreshes the toasts, replaces them with the clearing toast when the
+ * signal recovered, drops them when the alert was withdrawn or hushed
+ * (M2), and asks main for the system notification on an open and on every
+ * repeat.
  */
 export async function onWatchdogAlertsChanged(
   previous: readonly WatchdogAlert[],
   next: readonly WatchdogAlert[],
-  deps: WatchdogSurfaceDeps
+  deps: WatchdogSurfaceDeps,
+  change: WatchdogListChange = {}
 ): Promise<void> {
+  const withdrawn = change.withdrawn ?? []
   const before = new Map(previous.map((alert) => [alert.id, alert]))
   for (const alert of next) {
-    if (alert.state === 'snoozed') continue
+    // Seen (Got it) or snoozed: the card stays, the toast never comes back.
+    if (alert.state !== 'open') continue
     const known = before.get(alert.id)
-    const changed = !known || known.title !== alert.title || known.detail !== alert.detail
+    // The clock in the detail moves every second (L1): only new words
+    // re-issue the toast, so a closed toast stays closed.
+    const changed =
+      !known ||
+      !watchdogSameWords(known.title, alert.title) ||
+      !watchdogSameWords(known.detail, alert.detail)
     if (!changed) continue
     const [fix] = alert.fixes ?? []
     // Critical rides the warning toast too: the error toast adds its Copy
@@ -81,22 +157,28 @@ export async function onWatchdogAlertsChanged(
         : {})
     })
   }
-  for (const alert of watchdogClearedAlerts(previous, next)) {
+  for (const alert of watchdogQuietedAlerts(previous, next, withdrawn)) {
+    toast.dismiss(watchdogToastId(alert))
+  }
+  for (const alert of watchdogClearedAlerts(previous, next, withdrawn)) {
     toast.success(watchdogClearedToast(alert), { id: watchdogToastId(alert) })
   }
+  latestAlerts = next
+  const now = Date.now()
+  for (const id of [...stayedOpenAsks.keys()]) {
+    // Gone, hushed or seen: the second ask is off (it is never re-armed:
+    // an alert that comes back comes back under a new id).
+    if (next.find((candidate) => candidate.id === id)?.state !== 'open') dropStayedOpenAsk(id)
+  }
+  if (!deps.live()) return
   const candidates = watchdogNotifyCandidates(previous, next)
   if (candidates.length > 0 && (await systemNotificationsOn(deps.client))) {
-    const now = Date.now()
-    for (const alert of candidates) {
-      const words = watchdogNotificationWords(alert)
-      void window.videorc?.notifyWatchdog?.({
-        alertId: alert.id,
-        title: words.title,
-        body: words.body,
-        critical: alert.severity === 'critical',
-        openSeconds: watchdogOpenSeconds(alert, now)
-      })
+    for (const { alert, reason } of candidates) {
+      void askMain(alert, reason, now)
     }
+  }
+  for (const alert of next) {
+    if (alert.state === 'open' && watchdogNotifies(alert)) scheduleStayedOpenAsk(alert, deps, now)
   }
 }
 

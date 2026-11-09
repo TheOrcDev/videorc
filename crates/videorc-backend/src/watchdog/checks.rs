@@ -133,7 +133,8 @@ pub struct TakeoverSignal {
     pub since: Instant,
     /// The wall clock of `since`, for "since 12:04".
     pub activated_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Mean luma of its own image, read once at activation (D10's guard).
+    /// Mean luma of its own image (D10's guard), from the watchdog's cache:
+    /// the Screens transition decodes it, the tick reads it every second.
     pub luma: Option<u8>,
 }
 
@@ -237,7 +238,6 @@ pub struct Checks {
     last_voice: Option<Instant>,
     voice_since: Option<Instant>,
     no_voice_armed_at: Option<Instant>,
-    takeover_dark: Option<bool>,
     av_drift_since: Option<Instant>,
     chat_last_opened: BTreeMap<super::chat_signals::ChatClass, Instant>,
     still_there_quiet_since: Option<Instant>,
@@ -321,7 +321,13 @@ impl Checks {
             }
         } else {
             self.mic_muted_since = None;
-            out.extend(state.clear(&mic_key));
+            // Unmuted is a recovery; a takeover over a muted mic, or the
+            // switch, is not (M2): the card leaves quietly.
+            out.extend(if signals.mic_muted {
+                state.withdraw(&mic_key)
+            } else {
+                state.clear(&mic_key)
+            });
         }
         let mic_muted_open = state.is_open(&mic_key);
 
@@ -372,6 +378,10 @@ impl Checks {
                 .source(source)
                 .fix(fix);
             out.extend(state.open(WatchdogCheck::ProgramSilent, &silent_key, spec, clock));
+        } else if desktop_silent.is_some() || cloud_silent.is_some() {
+            // Still silent: the mic card carries it now, or the check is
+            // off. "Sound is back" would be false (M2).
+            out.extend(state.withdraw(&silent_key));
         } else {
             out.extend(state.clear(&silent_key));
         }
@@ -387,7 +397,9 @@ impl Checks {
         }
         if no_voice_guarded || !settings.enabled(WatchdogCheck::NoVoice) {
             self.no_voice_armed_at = None;
-            out.extend(state.clear(&voice_key));
+            // A mute, a takeover, music or the switch explains it: no voice
+            // came back (M2).
+            out.extend(state.withdraw(&voice_key));
         } else {
             let armed = *self.no_voice_armed_at.get_or_insert(now);
             let quiet_since = self.last_voice.unwrap_or(armed).max(armed);
@@ -411,17 +423,11 @@ impl Checks {
 
         // --- picture-black (desktop if A7 shipped it, cloud) ---
         let black_key = alert_key(WatchdogCheck::PictureBlack, None);
-        match takeover {
-            Some(takeover) => {
-                if self.takeover_dark.is_none() {
-                    self.takeover_dark = takeover
-                        .luma
-                        .map(|luma| (BLACK_LUMA..DARK_TAKEOVER_LUMA).contains(&luma));
-                }
-            }
-            None => self.takeover_dark = None,
-        }
-        let dark_takeover = takeover.is_some() && self.takeover_dark == Some(true);
+        // The guard is the active takeover's own luma, read every tick: a
+        // direct A→B switch guards on B's image, never on A's verdict (M3).
+        let dark_takeover = takeover
+            .and_then(|takeover| takeover.luma)
+            .is_some_and(|luma| (BLACK_LUMA..DARK_TAKEOVER_LUMA).contains(&luma));
         // The sampler may have read black since the first frame; the clock
         // counts from the end of the grace, like the silence clock.
         let grace_end = (!warming_up)
@@ -462,6 +468,10 @@ impl Checks {
             .source(source)
             .fix(fix);
             out.extend(state.open(WatchdogCheck::PictureBlack, &black_key, spec, clock));
+        } else if desktop_black.is_some() || cloud_black.is_some() {
+            // Still black, under a dark card by design or with the check
+            // off: not "Picture is back" (M2).
+            out.extend(state.withdraw(&black_key));
         } else {
             out.extend(state.clear(&black_key));
         }
@@ -504,6 +514,8 @@ impl Checks {
                 .fix(AlertFix::new(FixKind::SwitchScene, "Switch scene"))
                 .fix(AlertFix::new(FixKind::OpenHealth, "Open Health"));
             out.extend(state.open(WatchdogCheck::PictureStopped, &stopped_key, spec, clock));
+        } else if desktop_stopped.is_some() || cloud_frozen.is_some() {
+            out.extend(state.withdraw(&stopped_key));
         } else {
             out.extend(state.clear(&stopped_key));
         }
@@ -512,9 +524,10 @@ impl Checks {
         self.tick_destinations(signals, thresholds, settings, state, clock, &mut out);
 
         // --- platform-health ---
-        let health_prefix = WatchdogCheck::PlatformHealth.id();
         let mut health_keys = Vec::new();
-        if settings.enabled(WatchdogCheck::PlatformHealth) {
+        if !settings.enabled(WatchdogCheck::PlatformHealth) {
+            out.extend(state.withdraw_prefix(WatchdogCheck::PlatformHealth.id()));
+        } else {
             for signal in signals.platform_health {
                 let key = alert_key(WatchdogCheck::PlatformHealth, Some(&signal.target_id));
                 health_keys.push(key.clone());
@@ -563,7 +576,6 @@ impl Checks {
         for key in stale {
             out.extend(state.clear(&key));
         }
-        let _ = health_prefix;
 
         // --- bitrate-floor ---
         let floor_key = alert_key(WatchdogCheck::BitrateFloor, None);
@@ -592,6 +604,8 @@ impl Checks {
             .source(source)
             .fix(AlertFix::new(FixKind::OpenHealth, "Open Health"));
             out.extend(state.open(WatchdogCheck::BitrateFloor, &floor_key, spec, clock));
+        } else if desktop_floor.is_some() || cloud_floor.is_some() {
+            out.extend(state.withdraw(&floor_key));
         } else {
             out.extend(state.clear(&floor_key));
         }
@@ -677,6 +691,9 @@ impl Checks {
             )
             .fix(AlertFix::new(FixKind::ShowBrb, "Show Be right back"));
             out.extend(state.open(WatchdogCheck::StillThere, &still_key, spec, clock));
+        } else if idle_long && quiet_long {
+            // Be right back is up, or the check is off: nobody came back.
+            out.extend(state.withdraw(&still_key));
         } else {
             out.extend(state.clear(&still_key));
         }
@@ -696,7 +713,7 @@ impl Checks {
     ) {
         let check = WatchdogCheck::DestinationDown;
         if !settings.enabled(check) {
-            out.extend(state.clear_prefix(check.id()));
+            out.extend(state.withdraw_prefix(check.id()));
             return;
         }
         let now = clock.now;
@@ -814,7 +831,17 @@ impl Checks {
             .filter(|key| !keep.contains(key))
             .collect();
         for key in stale {
-            out.extend(state.clear(&key));
+            // The fold (every leg down: the per-leg cards go into one) and
+            // the unfold (one leg back: the one card goes back to per-leg
+            // cards) are quiet; nothing came back (M2). A leg that is live
+            // again, or every leg back, is a recovery.
+            let fold = all_down && key != all_key;
+            let unfold = key == all_key && !keep.is_empty();
+            out.extend(if fold || unfold {
+                state.withdraw(&key)
+            } else {
+                state.clear(&key)
+            });
         }
     }
 
@@ -829,7 +856,7 @@ impl Checks {
         use super::chat_signals::ChatClass;
         let check = WatchdogCheck::ChatSays;
         if !settings.enabled(check) {
-            out.extend(state.clear_prefix(check.id()));
+            out.extend(state.withdraw_prefix(check.id()));
             return;
         }
         let now = clock.now;
@@ -993,6 +1020,15 @@ mod tests {
         out.iter()
             .filter_map(|transition| match transition {
                 Transition::Cleared(alert) => Some(alert.check),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn withdrawn(out: &[Transition]) -> Vec<(WatchdogCheck, Option<String>)> {
+        out.iter()
+            .filter_map(|transition| match transition {
+                Transition::Withdrawn(alert) => Some((alert.check, alert.target_id.clone())),
                 _ => None,
             })
             .collect()
@@ -1360,7 +1396,12 @@ mod tests {
             opened(&out),
             vec![(WatchdogCheck::DestinationDown, AlertSeverity::Critical)]
         );
-        assert_eq!(cleared(&out), vec![WatchdogCheck::DestinationDown]);
+        // M2: the fold is quiet. YouTube is not back.
+        assert!(cleared(&out).is_empty(), "{out:?}");
+        assert_eq!(
+            withdrawn(&out),
+            vec![(WatchdogCheck::DestinationDown, Some("youtube".to_string()))]
+        );
         let all = state.open_alert("destination-down:all").unwrap();
         assert_eq!(all.title, "Nobody is receiving your stream");
         assert!(
@@ -1369,7 +1410,9 @@ mod tests {
         );
         assert_eq!(state.alerts().len(), 1);
 
-        // Twitch comes back: the fold clears, YouTube's own card returns.
+        // Twitch comes back: the fold unfolds quietly (YouTube is still
+        // down, so "Destinations are back" would be false), YouTube's own
+        // card returns.
         let legs = [
             destination("youtube", DestinationPhase::Failed, start.now, false),
             destination("twitch", DestinationPhase::Live, start.now, false),
@@ -1383,9 +1426,125 @@ mod tests {
             &signals,
         );
         assert_eq!(opened(&out).len(), 1);
-        assert_eq!(cleared(&out).len(), 1);
+        assert!(cleared(&out).is_empty(), "{out:?}");
+        assert_eq!(
+            withdrawn(&out),
+            vec![(WatchdogCheck::DestinationDown, Some("all".to_string()))]
+        );
         assert!(state.is_open("destination-down:youtube"));
         assert!(!state.is_open("destination-down:all"));
+
+        // Every leg back: a recovery, "YouTube is back".
+        let legs = [
+            destination("youtube", DestinationPhase::Live, start.now, false),
+            destination("twitch", DestinationPhase::Live, start.now, false),
+        ];
+        signals.destinations = &legs;
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(24)),
+            1,
+            &signals,
+        );
+        assert_eq!(cleared(&out), vec![WatchdogCheck::DestinationDown]);
+        assert!(withdrawn(&out).is_empty());
+        assert!(state.alerts().is_empty());
+
+        // Both down from the start, then both back: the one card clears,
+        // "Destinations are back".
+        let legs = [
+            destination("youtube", DestinationPhase::Failed, start.now, false),
+            destination("twitch", DestinationPhase::Failed, start.now, false),
+        ];
+        signals.destinations = &legs;
+        run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(25)),
+            1,
+            &signals,
+        );
+        assert!(state.is_open("destination-down:all"));
+        signals.destinations = &[];
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(26)),
+            1,
+            &signals,
+        );
+        assert_eq!(cleared(&out), vec![WatchdogCheck::DestinationDown]);
+    }
+
+    /// M2: the replace is quiet too. Silence with the mic on is its own
+    /// card; a mute hands it to the mic card without "Sound is back", and
+    /// a takeover over the muted mic takes the mic card without
+    /// "Microphone unmuted". The unmute, with sound, is the one recovery.
+    #[test]
+    fn a_replace_withdraws_the_old_card_without_a_recovery() {
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let start = clock();
+        let mut signals = live();
+        signals.audio.master_rms_db = Some(-90.0);
+        signals.audio.microphone_rms_db = Some(-90.0);
+        run(&mut checks, &mut state, start, 21, &signals);
+        assert!(state.is_open("program-silent"));
+
+        signals.mic_muted = true;
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(21)),
+            1,
+            &signals,
+        );
+        assert!(
+            cleared(&out).is_empty(),
+            "the mute is not a recovery: {out:?}"
+        );
+        assert_eq!(withdrawn(&out), vec![(WatchdogCheck::ProgramSilent, None)]);
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(22)),
+            30,
+            &signals,
+        );
+        assert_eq!(
+            opened(&out),
+            vec![(WatchdogCheck::MicMuted, AlertSeverity::Critical)]
+        );
+
+        signals.takeover = Some(TakeoverSignal {
+            since: start.now + Duration::from_secs(52),
+            activated_at: None,
+            luma: Some(128),
+        });
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(52)),
+            1,
+            &signals,
+        );
+        assert!(cleared(&out).is_empty(), "{out:?}");
+        assert_eq!(withdrawn(&out), vec![(WatchdogCheck::MicMuted, None)]);
+
+        signals.takeover = None;
+        signals.mic_muted = false;
+        signals.audio.master_rms_db = Some(-30.0);
+        signals.audio.microphone_rms_db = Some(-30.0);
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(53)),
+            1,
+            &signals,
+        );
+        assert!(withdrawn(&out).is_empty(), "{out:?}");
+        assert!(state.alerts().is_empty());
     }
 
     #[test]
@@ -1550,6 +1709,67 @@ mod tests {
             state.open_alert("picture-black").unwrap().fixes[0].kind,
             FixKind::EndTakeover
         );
+    }
+
+    /// Plan 223 M3 (the review): the dark-takeover guard follows the
+    /// takeover on screen. A dark card A suppresses the black sampler; a
+    /// direct switch to a bright card B, with the program still black,
+    /// alarms within the threshold with End takeover; a switch back to a
+    /// dark card C suppresses again, and the alert leaves the list.
+    #[test]
+    fn a_direct_takeover_switch_reads_the_new_cards_luma() {
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let start = clock();
+        let mut signals = live();
+        signals.black_since = Some(start.now);
+        let card = |luma: u8| TakeoverSignal {
+            since: start.now,
+            activated_at: None,
+            luma: Some(luma),
+        };
+        signals.takeover = Some(card(30));
+        let out = run(&mut checks, &mut state, start, 30, &signals);
+        assert!(opened(&out).is_empty(), "a dark card is by design: {out:?}");
+
+        signals.takeover = Some(card(200));
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(30)),
+            1,
+            &signals,
+        );
+        assert_eq!(
+            opened(&out),
+            vec![(WatchdogCheck::PictureBlack, AlertSeverity::Critical)],
+            "a bright card over a black program alarms at once (the sampler has read black for 30 s)"
+        );
+        assert_eq!(
+            state.open_alert("picture-black").unwrap().fixes[0].kind,
+            FixKind::EndTakeover
+        );
+
+        signals.takeover = Some(card(40));
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(31)),
+            1,
+            &signals,
+        );
+        assert!(
+            !state.is_open("picture-black"),
+            "a dark card suppresses again: {out:?}"
+        );
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(32)),
+            30,
+            &signals,
+        );
+        assert!(opened(&out).is_empty(), "{out:?}");
     }
 
     #[test]

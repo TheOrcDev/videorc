@@ -5636,7 +5636,8 @@ const watchdogAlertSchema = objectSchema(
 const watchdogAlertsViewSchema = objectSchema(
   {
     sessionId: optionalSchema(boundedString),
-    alerts: arraySchema(watchdogAlertSchema, { maxLength: 64 })
+    alerts: arraySchema(watchdogAlertSchema, { maxLength: 64 }),
+    withdrawn: optionalSchema(arraySchema(boundedString, { maxLength: 64 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<WatchdogAlertsView>

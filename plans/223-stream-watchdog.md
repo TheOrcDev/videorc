@@ -767,8 +767,13 @@ Change it here first, then in every repo it touches.
   source: "desktop|cloud|platform", platform?, targetId?, fixes: [{ kind:
   "unmute|end-takeover|switch-scene|open-audio|open-health|open-livestream|
   reconnect-destination|open-platform-dashboard|show-brb", label, url? }],
-  snoozedUntil?, meantTo? }] }`. Every optional is `skip_serializing_if`.
-  Add the schema to `backend-rpc-contract.ts` beside
+  snoozedUntil?, meantTo? }], withdrawn?: [id] }`. Every optional is
+  `skip_serializing_if`. `withdrawn` (the review's M2) names the ids that
+  left this update without a recovery (a fold, a replace, the session's
+  end); it rides the event only, never the RPC's answer, and the renderer
+  drops those toasts instead of saying "is back". A meant-to alert stays
+  in the list as `snoozed` with `meantTo: true`, hidden, until its signal
+  recovers. Add the schema to `backend-rpc-contract.ts` beside
   `audioLevelsEventSchema`.
 - **RPCs**: `watchdog.alerts.list` → the same shape;
   `watchdog.alert.acknowledge { id }`; `watchdog.alert.snooze { id, scope:
@@ -778,9 +783,12 @@ Change it here first, then in every repo it touches.
   `storage.rs` like other app settings.
 - **Health events**: `watchdog-<check>` (level `warn` for warning/notice,
   `error` for critical) on open; `watchdog-<check>-cleared` (info);
-  `watchdog-<check>-acknowledged`, `watchdog-<check>-snoozed` (info). The
-  message is the card's title plus detail. Through `emit_health_event`, so
-  URLs are redacted and the session log mirrors it.
+  `watchdog-<check>-acknowledged`, `watchdog-<check>-snoozed` (info);
+  `watchdog-<check>-withdrawn` (info: the card left without a recovery,
+  so the history closes its row without an "is back"). The message is the
+  card's title plus detail; for `chat-says` the count-and-class form only
+  (the quotes stay on the card, L4). Through `emit_health_event`, so URLs
+  are redacted and the session log mirrors it.
 - **Renderer → main (IPC)**: `watchdog:notify { alertId, title, body }` and
   `watchdog:focus` for the system notification; main checks
   `mainWindow.isFocused()` and the alert's age before showing.
@@ -1258,6 +1266,7 @@ Stop and report when:
 | C4 the cloud smoke scenario | **Done**: `VIDEORC_CLOUD_SOLO_WATCHDOG=1 pnpm smoke:cloud-solo`. Deviations: the runner has no dev env to shorten the 20-failure cap, so the leg scenario drives a `reconnecting` leg (the upsert restarts reconnecting legs too), not a `failed` one; and the scenario runs before the drops, not after, because a resumed show holds no keys on this computer. |
 | D2 the desktop sends | **Done**. `watchdog/push.rs` builds the body (a count and a class for `chat-says`, never words; no URL, no key); `VideorcApiClient::post_alert_notify` on open and clear of critical and warning alerts, off without Premium or the switch; one session-log line per stream on failure, never a toast; `GET /api/alerts/devices` behind `watchdog.phone.devices` for the section's "Alerts reach {n} devices". |
 | D3 owner acceptance | Waits for the owner's phone. |
+| Review fixes (2026-11-09) | **Done** on `fix/223-review`, one commit per finding: M1 the `owner` role is the streamer in `observe_chat` (the fake echo wears it; one test per platform shape); M2 `Transition::Withdrawn` for the fold, the unfold, the mute replace, a takeover or guard, the switch and the session's end (no push, no toast, an info `-withdrawn` event; the event's `withdrawn` ids), and "I meant to" keeps the card listed as snoozed with `meantTo`; M3 the dark-takeover guard reads the live card's luma every tick; M4 the luma is decoded by the Screens transition through `spawn_blocking` and cached beside the path (`CachedTakeover`); M5 the notice carries its reason and a second ask lands at since + 60 s, main applying D2/D3; L1 the toast compares words without the clock and never re-issues for a seen or snoozed alert; L2 the compact card draws fixes only; L3 the history pairs by check and target; L4 `chat-says` is recorded as a count and a class (the bundle cuts older quotes); L5 the push and the notification wait for a live watch; L6 a platform signal ages out after three missed polls (`PLATFORM_HEALTH_STALE_AFTER`); L7 a host-shaped label becomes the platform's name in the push; L8 `smoke:output-stall` refuses a watchdog alert, and the AI read body is held to the web's schema; L9 the chip falls back to the platform, then the title. |
 
 ### Gates (2026-11-08, on `plan-184-videorc-cloud`)
 

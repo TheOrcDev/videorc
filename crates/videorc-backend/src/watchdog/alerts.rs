@@ -2,8 +2,10 @@
 //!
 //! One alert per open problem. It opens, repeats on its severity's cadence
 //! until acknowledged, may be snoozed for ten minutes or for the rest of the
-//! stream ("I meant to", which also tells the check), and clears when the
-//! signal recovers. The runtime (`mod.rs`) turns every transition into a
+//! stream ("I meant to", which also tells the check and keeps the card in
+//! the list, hidden), clears when the signal recovers, and is withdrawn,
+//! quietly, when another card carries it (a fold, a replace) or the stream
+//! ends with it. The runtime (`mod.rs`) turns every transition into a
 //! health event, the `watchdog.alerts` event, a system notification and a
 //! phone push; nothing here touches the wire or a clock of its own.
 
@@ -306,7 +308,14 @@ pub enum Transition {
     Snoozed(WatchdogAlert),
     /// A snooze ran out: the card is back.
     Unsnoozed(WatchdogAlert),
+    /// The signal recovered: "{label} is back".
     Cleared(WatchdogAlert),
+    /// The alert left the list without a recovery: it folded into another
+    /// card (every destination down), another check explains it now (a
+    /// muted microphone owns the silence), a guard took over (a dark
+    /// takeover), or the stream ended with it. No "is back" anywhere: an
+    /// info health event only, no push, no toast (M2).
+    Withdrawn(WatchdogAlert),
 }
 
 impl Transition {
@@ -318,7 +327,8 @@ impl Transition {
             | Transition::Acknowledged(alert)
             | Transition::Snoozed(alert)
             | Transition::Unsnoozed(alert)
-            | Transition::Cleared(alert) => alert,
+            | Transition::Cleared(alert)
+            | Transition::Withdrawn(alert) => alert,
         }
     }
 }
@@ -451,15 +461,38 @@ impl WatchdogState {
             .map(|open| Transition::Cleared(open.alert))
     }
 
+    /// The alert leaves without a recovery (M2): quietly.
+    pub fn withdraw(&mut self, key: &str) -> Option<Transition> {
+        self.alerts
+            .remove(key)
+            .map(|open| Transition::Withdrawn(open.alert))
+    }
+
     /// Clear every alert whose key starts with `prefix` (a check's family).
     pub fn clear_prefix(&mut self, prefix: &str) -> Vec<Transition> {
-        let keys: Vec<String> = self
-            .alerts
+        let keys = self.family_keys(prefix);
+        keys.iter().filter_map(|key| self.clear(key)).collect()
+    }
+
+    /// Withdraw a check's family (the check was switched off: nothing
+    /// recovered).
+    pub fn withdraw_prefix(&mut self, prefix: &str) -> Vec<Transition> {
+        let keys = self.family_keys(prefix);
+        keys.iter().filter_map(|key| self.withdraw(key)).collect()
+    }
+
+    /// Every alert that leaves at once, withdrawn (the session ended).
+    pub fn withdraw_all(&mut self) -> Vec<Transition> {
+        let keys: Vec<String> = self.alerts.keys().cloned().collect();
+        keys.iter().filter_map(|key| self.withdraw(key)).collect()
+    }
+
+    fn family_keys(&self, prefix: &str) -> Vec<String> {
+        self.alerts
             .keys()
             .filter(|key| key.as_str() == prefix || key.starts_with(&format!("{prefix}:")))
             .cloned()
-            .collect();
-        keys.iter().filter_map(|key| self.clear(key)).collect()
+            .collect()
     }
 
     /// "I saw it": repeats stop; the card stays until it clears.
@@ -473,30 +506,32 @@ impl WatchdogState {
     }
 
     /// "Not now": hidden for ten minutes, or for the rest of the stream
-    /// ("I meant to"), which also silences the check (D3).
+    /// ("I meant to"), which also silences the check (D3). A meant-to alert
+    /// stays in the list as snoozed with `meantTo`, so the renderer hides
+    /// it instead of seeing it vanish (M2); it clears when the signal
+    /// recovers, like any other.
     pub fn snooze(&mut self, id: &str, scope: SnoozeScope, clock: Clock) -> Option<Transition> {
         let key = self
             .alerts
             .iter()
             .find(|(_, open)| open.alert.id == id)
             .map(|(key, _)| key.clone())?;
+        let open = self.alerts.get_mut(&key)?;
+        open.acknowledged = true;
+        open.alert.state = AlertState::Snoozed;
         match scope {
             SnoozeScope::TenMinutes => {
-                let open = self.alerts.get_mut(&key)?;
                 open.snoozed_until = Some(clock.now + SNOOZE_TEN_MINUTES);
-                open.acknowledged = true;
-                open.alert.state = AlertState::Snoozed;
                 open.alert.snoozed_until = Some(clock.plus(SNOOZE_TEN_MINUTES).rfc3339());
-                Some(Transition::Snoozed(open.alert.clone()))
             }
             SnoozeScope::Stream => {
-                let mut open = self.alerts.remove(&key)?;
-                self.meant_to.insert(open.alert.check);
-                open.alert.state = AlertState::Snoozed;
+                open.snoozed_until = None;
+                open.alert.snoozed_until = None;
                 open.alert.meant_to = Some(true);
-                Some(Transition::Snoozed(open.alert))
+                self.meant_to.insert(open.alert.check);
             }
         }
+        Some(Transition::Snoozed(open.alert.clone()))
     }
 
     /// Once a second: snoozes that ran out and repeats that are due.
@@ -564,7 +599,9 @@ pub fn format_clock(elapsed: Duration) -> String {
 }
 
 /// The health code for a transition (D13): `watchdog-<check>` on open,
-/// `-cleared`, `-acknowledged`, `-snoozed`; none for a repeat or a refresh.
+/// `-cleared`, `-acknowledged`, `-snoozed`, `-withdrawn` (info: the card
+/// left without a recovery, so the history can close its row); none for a
+/// repeat or a refresh.
 pub fn health_code(transition: &Transition) -> Option<String> {
     let check = transition.alert().check.id();
     match transition {
@@ -572,6 +609,7 @@ pub fn health_code(transition: &Transition) -> Option<String> {
         Transition::Cleared(_) => Some(format!("watchdog-{check}-cleared")),
         Transition::Acknowledged(_) => Some(format!("watchdog-{check}-acknowledged")),
         Transition::Snoozed(_) => Some(format!("watchdog-{check}-snoozed")),
+        Transition::Withdrawn(_) => Some(format!("watchdog-{check}-withdrawn")),
         Transition::Updated(_) | Transition::Repeated(_) | Transition::Unsnoozed(_) => None,
     }
 }
@@ -601,16 +639,22 @@ pub fn cleared_toast(alert: &WatchdogAlert) -> String {
 }
 
 /// The destination's label from a card title ("YouTube has been down for
-/// 0:20" → "YouTube"; "Streaming to Twitch (main) stopped" → "Twitch (main)").
-fn destination_label(title: &str) -> String {
+/// 0:20" → "YouTube"; "Streaming to Twitch (main) stopped" → "Twitch (main)";
+/// "Twitch (main) isn't receiving your stream" → "Twitch (main)").
+pub(crate) fn destination_label(title: &str) -> String {
     if let Some(rest) = title.strip_prefix("Streaming to ") {
         return rest.trim_end_matches(" stopped").to_string();
     }
-    if let Some(index) = title.find(" has been down") {
-        return title[..index].to_string();
-    }
-    if let Some(index) = title.find(" reports ") {
-        return title[..index].to_string();
+    for marker in [
+        " has been down",
+        " isn't receiving",
+        " ended the broadcast",
+        " reports ",
+        " is back",
+    ] {
+        if let Some(index) = title.find(marker) {
+            return title[..index].to_string();
+        }
     }
     title.to_string()
 }
@@ -824,7 +868,12 @@ mod tests {
             panic!("expected a snooze");
         };
         assert_eq!(alert.meant_to, Some(true));
-        assert!(state.alerts().is_empty(), "the card is gone");
+        assert_eq!(alert.state, AlertState::Snoozed);
+        assert_eq!(alert.snoozed_until, None);
+        // M2: the card stays in the list, hidden, so the renderer never sees
+        // it vanish and never says "Microphone unmuted" while it is muted.
+        assert_eq!(state.alerts().len(), 1, "the card stays, snoozed");
+        assert_eq!(state.alerts()[0].meant_to, Some(true));
         assert!(state.meant_to(WatchdogCheck::MicMuted));
         assert_eq!(
             state.open(
@@ -836,6 +885,16 @@ mod tests {
             None,
             "the check stays silent for the rest of the stream"
         );
+        assert!(
+            state.tick(start.plus(Duration::from_secs(3600))).is_empty(),
+            "a meant-to alert never repeats"
+        );
+        // The real recovery still clears it.
+        assert!(matches!(
+            state.clear("mic-muted"),
+            Some(Transition::Cleared(_))
+        ));
+        assert!(state.alerts().is_empty());
         // Another check is untouched.
         assert!(
             state
@@ -899,6 +958,44 @@ mod tests {
         // Key order: "destination-down:twitch" clears before ":youtube".
         assert_eq!(cleared_toast(cleared[0].alert()), "Twitch is back");
         assert_eq!(cleared_toast(cleared[1].alert()), "YouTube is back");
+    }
+
+    /// M2: a withdrawal is not a recovery: its own transition, its own
+    /// info code, and the list simply no longer carries the alert.
+    #[test]
+    fn withdraw_is_quiet_and_never_reads_as_a_recovery() {
+        let mut state = WatchdogState::new();
+        let start = clock();
+        state
+            .open(WatchdogCheck::MicMuted, "mic-muted", muted_spec(), start)
+            .unwrap();
+        state
+            .open(
+                WatchdogCheck::DestinationDown,
+                "destination-down:yt",
+                AlertSpec::new(
+                    AlertSeverity::Warning,
+                    "YouTube has been down for 0:20",
+                    "x",
+                ),
+                start,
+            )
+            .unwrap();
+        let withdrawn = state.withdraw("destination-down:yt").unwrap();
+        assert!(
+            matches!(withdrawn, Transition::Withdrawn(_)),
+            "{withdrawn:?}"
+        );
+        assert_eq!(
+            health_code(&withdrawn).as_deref(),
+            Some("watchdog-destination-down-withdrawn")
+        );
+        assert_eq!(state.withdraw("destination-down:yt"), None);
+        assert_eq!(state.alerts().len(), 1);
+        let all = state.withdraw_all();
+        assert_eq!(all.len(), 1);
+        assert!(matches!(all[0], Transition::Withdrawn(_)));
+        assert!(state.alerts().is_empty());
     }
 
     #[test]

@@ -2877,6 +2877,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Plan 223: the watchdog's alerts, drawn here and in the Stream Manager.
   const [watchdogAlerts, setWatchdogAlerts] = useState<WatchdogAlert[]>([])
   const watchdogAlertsRef = useRef<WatchdogAlert[]>([])
+  // Ids that left without a recovery (M2), gathered from every event until
+  // the surface drains them with the next list.
+  const watchdogWithdrawnRef = useRef<string[]>([])
+  // Whether the session streams (L5): the surface notifies for a stream,
+  // never for a recording alone.
+  const watchdogLiveRef = useRef(false)
   // The Studio's action source is built far below (plan 209 S5); a fix
   // pressed on a card reads it at click time.
   const studioActionSourceRef = useRef<(() => StudioActionSource | null) | null>(null)
@@ -5567,6 +5573,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const watchdogDeps = useCallback(
     () => ({
       client,
+      live: () => watchdogLiveRef.current,
       source: () => studioActionSourceRef.current?.() ?? null,
       openStudioPanel: (panel: 'assets' | 'layouts') => openWorkspaceTab(panel),
       openStudio: () => openWorkspaceTab('studio')
@@ -5576,9 +5583,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     const previous = watchdogAlertsRef.current
     watchdogAlertsRef.current = watchdogAlerts
+    const withdrawn = watchdogWithdrawnRef.current.splice(0)
     if (previous.length === 0 && watchdogAlerts.length === 0) return
     void import('@/lib/watchdog-surface').then((surface) =>
-      surface.onWatchdogAlertsChanged(previous, watchdogAlerts, watchdogDeps())
+      surface.onWatchdogAlertsChanged(previous, watchdogAlerts, watchdogDeps(), { withdrawn })
     )
   }, [watchdogAlerts, watchdogDeps])
   const watchdogAct = useCallback(
@@ -5596,6 +5604,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // The notification's click, a fix from the Stream Manager and the idle
   // time for still-there (plan 223 A6, A7), mounted from the lazy chunk.
   const watchdogLive = sessionIsLive(recording)
+  watchdogLiveRef.current = watchdogLive
   useEffect(() => {
     let dispose: (() => void) | null = null
     let cancelled = false
@@ -8488,6 +8497,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('stream.audience', (payload) => feedDashboard('stream.audience', payload)),
       nextClient.on('watchdog.alerts', (payload) => {
         const view = payload as WatchdogAlertsView
+        if (view.withdrawn?.length) watchdogWithdrawnRef.current.push(...view.withdrawn)
         setWatchdogAlerts(view.alerts)
         feedDashboard('watchdog.alerts', payload)
       }),
