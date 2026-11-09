@@ -323,7 +323,8 @@ pub struct CloudShowSummary {
     /// while this desktop holds the show's room (plan 224).
     pub resumable: bool,
     /// `solo`, `talk` or `test` (plan 224: a resumable talk show rejoins the
-    /// room, it never starts a local session).
+    /// room, it never starts a local session). A kind the web adds later is
+    /// absent (L6, `known_show_kind`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
 }
@@ -1449,6 +1450,16 @@ pub fn load_settings(database: &crate::storage::Database) -> CloudSettings {
     }
 }
 
+/// The show kinds `backend-rpc-contract.ts` closes `show.kind` to. The web's
+/// `kind` is an open string, so a kind it adds later reads as absent here
+/// (plan 222 review L6) rather than failing a shipped desktop's strict
+/// contract; `ShowRecord::kind` keeps the raw value.
+const SHOW_KINDS: [&str; 3] = ["solo", "talk", "test"];
+
+fn known_show_kind(kind: &str) -> Option<String> {
+    SHOW_KINDS.contains(&kind).then(|| kind.to_string())
+}
+
 pub(crate) fn lock(slot: &CloudShowSlot) -> std::sync::MutexGuard<'_, CloudShowRuntime> {
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -1535,7 +1546,7 @@ impl CloudShowRuntime {
                 created_at: show.record.created_at.clone(),
                 expires_at: show.record.expires_at.clone(),
                 resumable: show.session_id.is_none() && self.talk.is_none(),
-                kind: (!show.record.kind.is_empty()).then(|| show.record.kind.clone()),
+                kind: known_show_kind(&show.record.kind),
             }),
             session_id: self.show.as_ref().and_then(|show| show.session_id.clone()),
             connected: self.connected,
@@ -8491,5 +8502,40 @@ mod tests {
         server.send(ack(&frame["id"]));
         reconnect.await.unwrap().unwrap();
         assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Live);
+    }
+
+    // Plan 222 review L6: `show.kind` is closed to solo, talk and test in
+    // the renderer's contract while the web's is an open string; a kind the
+    // web adds later reads as absent, never as a failed app load.
+    #[test]
+    fn an_unknown_show_kind_reads_as_absent() {
+        let runtime_with = |kind: &str| CloudShowRuntime {
+            show: Some(ActiveShow {
+                record: ShowRecord {
+                    kind: kind.to_string(),
+                    ..created().show
+                },
+                control: created().control,
+                ingest: None,
+                session_id: None,
+                destinations: Vec::new(),
+                handed_over: false,
+                hold_image_png_base64: None,
+                resuming: false,
+            }),
+            ..CloudShowRuntime::default()
+        };
+        for kind in ["solo", "talk", "test"] {
+            assert_eq!(
+                runtime_with(kind).status().show.unwrap().kind.as_deref(),
+                Some(kind)
+            );
+        }
+        for kind in ["panel", "", "SOLO"] {
+            let status = runtime_with(kind).status();
+            assert_eq!(status.show.as_ref().unwrap().kind, None, "{kind:?}");
+            let json = serde_json::to_value(&status).unwrap();
+            assert!(json["show"].get("kind").is_none(), "{json}");
+        }
     }
 }
