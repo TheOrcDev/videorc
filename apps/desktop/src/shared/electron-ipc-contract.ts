@@ -1280,7 +1280,8 @@ const watchdogNoticeSchema = objectSchema(
     title: stringSchema({ minLength: 1, maxLength: 200 }),
     body: stringSchema({ maxLength: 500 }),
     critical: booleanSchema,
-    openSeconds: numberSchema({ min: 0 })
+    openSeconds: numberSchema({ min: 0 }),
+    reason: enumSchema(['opened', 'stayed-open', 'repeat'])
   },
   { allowUnknown: false }
 )

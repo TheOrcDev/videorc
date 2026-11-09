@@ -34,19 +34,47 @@ export function watchdogOpenSeconds(alert: Pick<WatchdogAlert, 'since'>, nowMs: 
   return Number.isNaN(since) ? 0 : Math.max(0, Math.floor((nowMs - since) / 1000))
 }
 
-/** Whether a transition between two lists means a notification (open or repeat). */
+/** Alerts that may notify at all (D3): warning and critical, never still-there. */
+export function watchdogNotifies(alert: Pick<WatchdogAlert, 'severity' | 'check'>): boolean {
+  return alert.severity !== 'notice' && alert.check !== 'still-there'
+}
+
+/**
+ * Whether a transition between two lists means an ask (open or repeat),
+ * and why; the second ask at since + 60 s is `watchdogStayedOpenDelayMs`.
+ */
 export function watchdogNotifyCandidates(
   previous: readonly WatchdogAlert[],
   next: readonly WatchdogAlert[]
-): WatchdogAlert[] {
+): { alert: WatchdogAlert; reason: 'opened' | 'repeat' }[] {
   const before = new Map(previous.map((alert) => [alert.id, alert]))
-  return next.filter((alert) => {
-    if (alert.severity === 'notice' || alert.check === 'still-there') return false
-    if (alert.state === 'snoozed') return false
+  const out: { alert: WatchdogAlert; reason: 'opened' | 'repeat' }[] = []
+  for (const alert of next) {
+    if (!watchdogNotifies(alert) || alert.state === 'snoozed') continue
     const known = before.get(alert.id)
-    if (!known) return true
-    return (alert.lastRepeatAt ?? null) !== (known.lastRepeatAt ?? null) && !!alert.lastRepeatAt
-  })
+    if (!known) {
+      out.push({ alert, reason: 'opened' })
+    } else if (
+      !!alert.lastRepeatAt &&
+      (alert.lastRepeatAt ?? null) !== (known.lastRepeatAt ?? null)
+    ) {
+      out.push({ alert, reason: 'repeat' })
+    }
+  }
+  return out
+}
+
+/** D2, D3: the second ask comes when the alert has been open this long. */
+export const WATCHDOG_STAYED_OPEN_SECONDS = 60
+
+/** Milliseconds until the alert's since + 60 s (0 when that has passed). */
+export function watchdogStayedOpenDelayMs(
+  alert: Pick<WatchdogAlert, 'since'>,
+  nowMs: number
+): number {
+  const since = Date.parse(alert.since)
+  if (Number.isNaN(since)) return WATCHDOG_STAYED_OPEN_SECONDS * 1000
+  return Math.max(0, since + WATCHDOG_STAYED_OPEN_SECONDS * 1000 - nowMs)
 }
 
 /**

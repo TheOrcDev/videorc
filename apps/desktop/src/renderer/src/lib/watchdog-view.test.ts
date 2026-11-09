@@ -15,6 +15,7 @@ import {
   watchdogNotificationWords,
   watchdogNotifyCandidates,
   watchdogQuietedAlerts,
+  watchdogStayedOpenDelayMs,
   watchdogToastId
 } from '@/lib/watchdog-view'
 import { watchdogCardVariant, watchdogQuietLabel } from '@/components/studio/watchdog-alert-card'
@@ -111,12 +112,19 @@ describe('watchdog view (plan 223 A5, A6)', () => {
     })
   })
 
-  it('notifies on an open and on a repeat, never for a notice or still-there', () => {
+  it('asks on an open and on a repeat, with the reason, never for a notice or still-there', () => {
     const muted = alert({ check: 'mic-muted' })
-    expect(watchdogNotifyCandidates([], [muted]).map((a) => a.id)).toEqual([muted.id])
+    expect(watchdogNotifyCandidates([], [muted]).map((c) => [c.alert.id, c.reason])).toEqual([
+      [muted.id, 'opened']
+    ])
     expect(watchdogNotifyCandidates([muted], [muted])).toEqual([])
     const repeated = { ...muted, lastRepeatAt: '2026-11-08T12:09:00.000Z' }
-    expect(watchdogNotifyCandidates([muted], [repeated]).length).toBe(1)
+    expect(watchdogNotifyCandidates([muted], [repeated]).map((c) => c.reason)).toEqual(['repeat'])
+    // The second ask (D2, D3) lands at since + 60 s.
+    const opened = Date.parse(muted.since)
+    expect(watchdogStayedOpenDelayMs(muted, opened)).toBe(60_000)
+    expect(watchdogStayedOpenDelayMs(muted, opened + 45_000)).toBe(15_000)
+    expect(watchdogStayedOpenDelayMs(muted, opened + 90_000)).toBe(0)
     expect(
       watchdogNotifyCandidates([], [alert({ check: 'brb-long', severity: 'notice' })])
     ).toEqual([])
