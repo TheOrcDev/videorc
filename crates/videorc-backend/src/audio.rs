@@ -30,6 +30,11 @@ pub const AUDIO_COVERAGE_WARMUP_SECS: f64 = 3.0;
 // CoreAudio must never block on the realtime callback. The recording bridge can briefly
 // stop reading the audio FIFO while probing/flushing the H.264 video FIFO, so keep a
 // bounded multi-second packet cushion instead of dropping valid mic callbacks.
+// Only the macOS source, the debug contract source and tests read it.
+#[cfg_attr(
+    not(any(target_os = "macos", debug_assertions, test)),
+    allow(dead_code)
+)]
 const AUDIO_RING_CAPACITY_PACKETS: usize = 1024;
 const METER_SAMPLE_DURATION: Duration = Duration::from_millis(700);
 // FFmpeg's demux thread for the session audio FIFO. Gain and mute are applied
@@ -1465,6 +1470,11 @@ pub(crate) fn db_to_level(db: f32) -> f64 {
     f64::from(((db + 60.0) / 60.0).clamp(0.0, 1.0))
 }
 
+// Only the macOS source, the debug contract source and tests read it.
+#[cfg_attr(
+    not(any(target_os = "macos", debug_assertions, test)),
+    allow(dead_code)
+)]
 fn timestamp_for_frame(frame_cursor: u64) -> u64 {
     frame_cursor.saturating_mul(1_000_000) / u64::from(NATIVE_AUDIO_SAMPLE_RATE)
 }
