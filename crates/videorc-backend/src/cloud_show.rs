@@ -2893,7 +2893,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         // legs beside it, two publishers on one key. A show this computer
         // remembers but does not hold is asked about first; when the web
         // cannot say (plan 222 D6), Go Live streams directly with
-        // `cloud-unchecked`, once, and the show stays remembered.
+        // `cloud-unchecked`, once, and the show stays remembered. Signed
+        // out, nobody can ask (plan 222 review M2): the start fails, like a
+        // held show's does, and the show stays remembered.
+        if unconfirmed && bearer.is_none() {
+            bail!("Sign in to Videorc to resume the stream.");
+        }
         if unconfirmed && let Some(bearer) = bearer.as_deref() {
             match self.web.current_show(bearer).await {
                 Ok(current) => {
@@ -8863,6 +8868,39 @@ mod tests {
             Some("sh_abc")
         );
         assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+    }
+
+    // Plan 222 review M2: a show this desktop remembers but could not
+    // confirm, with nobody signed in to ask: the start fails, as a held
+    // show's does, and the show stays remembered. Never direct unchecked.
+    #[tokio::test(start_paused = true)]
+    async fn a_remembered_show_while_signed_out_fails_go_live_instead_of_streaming_directly() {
+        for entitled in [true, false] {
+            let harness = harness_remembering(entitled, Some("sh_abc"));
+            let error = harness
+                .context
+                .prepare_session("session-x", None, Vec::new(), destinations(), None)
+                .await
+                .expect_err("never direct beside a show nobody could check");
+            assert_eq!(
+                error.to_string(),
+                "Sign in to Videorc to resume the stream."
+            );
+            assert_eq!(harness.context.web.current_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+            let status = lock(&harness.context.slot).status();
+            assert_eq!(status.phase, CloudPhase::Off);
+            assert_eq!(status.fallback, None, "nothing streamed, no toast");
+            assert_eq!(
+                lock(&harness.context.slot).remembered_show(),
+                Some("sh_abc")
+            );
+            assert!(
+                harness.remembered.lock().unwrap().is_empty(),
+                "still remembered"
+            );
+        }
     }
 
     // Plan 222 review L1: the launch check connects its banner socket after
