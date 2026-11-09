@@ -24,6 +24,30 @@ export const RECORD_LATENCY_BUDGETS = Object.freeze({
   calibratedFrom: 'docs/acceptance/2026-09-16-record-latency-calibration.md'
 })
 
+/**
+ * Windows budgets (#1068 step 6), calibrated on the finished #1068 slices with
+ * the release dev backend: 3 fresh-process runs × 10 cycles on an i5-8400 with
+ * a GTX 1650 SUPER. The macOS budgets above stay as they are. On Windows the
+ * Media Foundation bridge's bring-up (`bridge-ready`, p50 ≈ 1.19 s) is most of
+ * the start, so Windows has its own numbers instead of a loosened shared set.
+ */
+export const WINDOWS_RECORD_LATENCY_BUDGETS = Object.freeze({
+  // Calibrated warm p95 ≈ 1476 ms (max 1483 ms). #1068 opened at 2013–2165 ms.
+  warmStartClickToRecordingP95Ms: 2000,
+  // Calibrated cold max ≈ 1748 ms.
+  coldStartClickToRecordingMs: 2500,
+  // Calibrated p95 ≈ 181 ms (max 194 ms); the macOS bound holds.
+  stopClickToIdleP95Ms: 300,
+  // Calibrated p95 ≈ 332 ms (cold max 1250 ms via sessions.list).
+  finalizationIdleToFinalizedP95Ms: 5000,
+  calibratedFrom: 'docs/acceptance/2026-11-09-windows-record-latency-calibration.md'
+})
+
+/** The budget set the gate enforces on `platform` (a `process.platform` value). */
+export function recordLatencyBudgetsFor(platform) {
+  return platform === 'win32' ? WINDOWS_RECORD_LATENCY_BUDGETS : RECORD_LATENCY_BUDGETS
+}
+
 // Same-kind remote intents are debounced per family (remote_control.rs); start
 // and stop share the `record` family.
 export const REMOTE_RECORD_INTENT_DEBOUNCE_MS = 150
