@@ -28,6 +28,16 @@ export function watchdogNotificationWords(alert: WatchdogAlert): { title: string
   return { title, body }
 }
 
+/**
+ * Two card texts that differ only in their live clock ("0:41" vs "0:42")
+ * are the same words (the backend's `same_words`): the list re-emits them
+ * every second, the toast must not (L1).
+ */
+export function watchdogSameWords(before: string, after: string): boolean {
+  const strip = (text: string) => text.replace(/[\d:]+/g, '#')
+  return strip(before) === strip(after)
+}
+
 /** Seconds since the alert opened, from its RFC 3339 `since`. */
 export function watchdogOpenSeconds(alert: Pick<WatchdogAlert, 'since'>, nowMs: number): number {
   const since = Date.parse(alert.since)

@@ -33,7 +33,8 @@ export function topWatchdogAlert(alerts: readonly WatchdogAlert[]): WatchdogAler
  * there is one ("YouTube down", "Chat says no sound").
  */
 export function watchdogChipLabel(
-  alert: Pick<WatchdogAlert, 'check' | 'title' | 'targetId'>
+  alert: Pick<WatchdogAlert, 'check' | 'title' | 'targetId'> &
+    Partial<Pick<WatchdogAlert, 'platform'>>
 ): string {
   switch (alert.check) {
     case 'mic-muted':
@@ -49,7 +50,7 @@ export function watchdogChipLabel(
     case 'picture-stopped':
       return 'Picture stopped'
     case 'destination-down':
-      return alert.targetId === 'all' ? 'Nobody receiving' : `${destinationOf(alert.title)} down`
+      return alert.targetId === 'all' ? 'Nobody receiving' : `${destinationOf(alert)} down`
     case 'platform-health':
       return alert.title
     case 'bitrate-floor':
@@ -69,11 +70,32 @@ export function watchdogChipLabel(
   }
 }
 
-function destinationOf(title: string): string {
+/** Plan 223's platform ids as the chip may name them (L9's fallback). */
+const PLATFORM_NAMES: Record<string, string> = {
+  youtube: 'YouTube',
+  twitch: 'Twitch',
+  kick: 'Kick',
+  x: 'X',
+  facebook: 'Facebook',
+  tiktok: 'TikTok',
+  instagram: 'Instagram',
+  custom: 'Custom destination'
+}
+
+/**
+ * The destination's label from the card's title, in every shape the
+ * backend writes ("Streaming to {label} stopped", "{label} has been down
+ * for 0:20", "{label} isn't receiving your stream"); else the platform's
+ * name; else the title itself, never a made-up "Destination" (L9).
+ */
+function destinationOf(
+  alert: Pick<WatchdogAlert, 'title'> & Partial<Pick<WatchdogAlert, 'platform'>>
+): string {
   return (
-    /^Streaming to (.+) stopped$/.exec(title)?.[1] ??
-    /^(.+?) (has been down|isn't receiving)/.exec(title)?.[1] ??
-    'Destination'
+    /^Streaming to (.+) stopped$/.exec(alert.title)?.[1] ??
+    /^(.+?) (has been down|isn't receiving|ended the broadcast|reports )/.exec(alert.title)?.[1] ??
+    (alert.platform ? PLATFORM_NAMES[alert.platform] : undefined) ??
+    alert.title
   )
 }
 

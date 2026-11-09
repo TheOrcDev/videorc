@@ -19,7 +19,11 @@ export interface WatchdogAlertCardProps {
   onFix: (alert: WatchdogAlert, fix: WatchdogAlertFix) => void
   onAcknowledge: (alert: WatchdogAlert) => void
   onSnooze: (alert: WatchdogAlert, scope: 'ten-minutes' | 'stream') => void
-  /** The Stream Manager's hover card: compact, with no kebab. */
+  /**
+   * The Stream Manager's hover card: compact, with the fixes only. Got it,
+   * I meant to and Snooze need the backend socket, which that window has
+   * not (plan 223 A6), so they are not drawn there (L2).
+   */
   compact?: boolean
 }
 
@@ -103,7 +107,7 @@ export function WatchdogAlertCard({
               {fix.label}
             </Button>
           ))}
-          {quiet === 'I meant to' ? (
+          {compact ? null : quiet === 'I meant to' ? (
             <Button
               data-testid="watchdog-alert-quiet"
               size="xs"

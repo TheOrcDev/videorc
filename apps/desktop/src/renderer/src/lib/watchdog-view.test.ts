@@ -15,6 +15,7 @@ import {
   watchdogNotificationWords,
   watchdogNotifyCandidates,
   watchdogQuietedAlerts,
+  watchdogSameWords,
   watchdogStayedOpenDelayMs,
   watchdogToastId
 } from '@/lib/watchdog-view'
@@ -87,6 +88,40 @@ describe('watchdog view (plan 223 A5, A6)', () => {
     expect(watchdogChipLabel(alert({ check: 'chat-says', targetId: 'lag' }))).toBe(
       'Chat says lagging'
     )
+    // L9: a title the regexes do not know falls back to the platform, then
+    // to the title; never "Destination".
+    expect(
+      watchdogChipLabel(
+        alert({ check: 'destination-down', title: 'Something new', platform: 'kick' })
+      )
+    ).toBe('Kick down')
+    expect(watchdogChipLabel(alert({ check: 'destination-down', title: 'Something new' }))).toBe(
+      'Something new down'
+    )
+    expect(
+      watchdogChipLabel(
+        alert({ check: 'destination-down', title: "Twitch (main) isn't receiving your stream" })
+      )
+    ).toBe('Twitch (main) down')
+    // L1: the clock in a detail is not a change of words.
+    expect(
+      watchdogSameWords(
+        'Muted for 0:41. Viewers hear no voice.',
+        'Muted for 0:42. Viewers hear no voice.'
+      )
+    ).toBe(true)
+    expect(
+      watchdogSameWords(
+        'Muted for 1:02:03. Viewers hear no voice.',
+        'Muted for 0:42. Viewers hear no voice.'
+      )
+    ).toBe(true)
+    expect(
+      watchdogSameWords(
+        'Muted for 0:42. Viewers hear no voice.',
+        'Muted for 0:42. Viewers hear no voice. Nothing else is playing.'
+      )
+    ).toBe(false)
     expect(watchdogToastId(alert({ check: 'mic-muted' }))).toBe('watchdog:mic-muted')
     expect(watchdogToastId(alert({ check: 'destination-down', targetId: 'yt' }))).toBe(
       'watchdog:destination-down:yt'

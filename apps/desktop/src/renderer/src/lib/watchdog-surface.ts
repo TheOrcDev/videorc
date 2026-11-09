@@ -24,6 +24,7 @@ import {
   watchdogNotifyCandidates,
   watchdogOpenSeconds,
   watchdogQuietedAlerts,
+  watchdogSameWords,
   watchdogStayedOpenDelayMs,
   watchdogToastId
 } from '@/lib/watchdog-view'
@@ -126,9 +127,15 @@ export async function onWatchdogAlertsChanged(
   const withdrawn = change.withdrawn ?? []
   const before = new Map(previous.map((alert) => [alert.id, alert]))
   for (const alert of next) {
-    if (alert.state === 'snoozed') continue
+    // Seen (Got it) or snoozed: the card stays, the toast never comes back.
+    if (alert.state !== 'open') continue
     const known = before.get(alert.id)
-    const changed = !known || known.title !== alert.title || known.detail !== alert.detail
+    // The clock in the detail moves every second (L1): only new words
+    // re-issue the toast, so a closed toast stays closed.
+    const changed =
+      !known ||
+      !watchdogSameWords(known.title, alert.title) ||
+      !watchdogSameWords(known.detail, alert.detail)
     if (!changed) continue
     const [fix] = alert.fixes ?? []
     // Critical rides the warning toast too: the error toast adds its Copy
