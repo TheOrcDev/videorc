@@ -904,6 +904,11 @@ fn announce_transitions_with_view(
     transitions: Vec<Transition>,
     emit_view: bool,
 ) {
+    // L5: the phone hears about a stream, never about a recording alone.
+    let live = lock(&state.watchdog)
+        .session
+        .as_ref()
+        .is_some_and(|watch| watch.session_id == session_id && watch.live);
     for transition in &transitions {
         if let Some(code) = alerts::health_code(transition) {
             let alert = transition.alert();
@@ -946,7 +951,7 @@ fn announce_transitions_with_view(
                 let _ = crate::cohost::say_utterance(&say_state, params).await;
             });
         }
-        if let Some(body) = push::notify_body(transition) {
+        if let Some(body) = push::notify_body(transition, live) {
             spawn_push(state.clone(), session_id.to_string(), body);
         }
     }

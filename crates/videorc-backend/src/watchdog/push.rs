@@ -16,8 +16,14 @@ pub const ALERTS_NOTIFY_PATH: &str = "/api/alerts/notify";
 pub const ALERTS_DEVICES_PATH: &str = "/api/alerts/devices";
 
 /// Whether this transition reaches the phone (D3): critical and warning
-/// alerts, once on open and once on clear.
-pub fn pushes(transition: &Transition) -> bool {
+/// alerts, once on open and once on clear, and only while the session
+/// streams (L5): a record-only session's silent microphone (the 1064
+/// adoption) is the recording's own notice, never a phone alert (plan 221
+/// Q7: nothing warns while only recording).
+pub fn pushes(transition: &Transition, live: bool) -> bool {
+    if !live {
+        return false;
+    }
     let alert = transition.alert();
     if !alert.severity.interrupts() || alert.check == WatchdogCheck::StillThere {
         return false;
@@ -170,8 +176,8 @@ fn chat_says_people(alert: &WatchdogAlert) -> u64 {
 }
 
 /// The notify body for a transition, or None when it never pushes.
-pub fn notify_body(transition: &Transition) -> Option<Value> {
-    if !pushes(transition) {
+pub fn notify_body(transition: &Transition, live: bool) -> Option<Value> {
+    if !pushes(transition, live) {
         return None;
     }
     let alert = transition.alert();
@@ -276,7 +282,7 @@ mod tests {
             "Your microphone is muted on the livestream",
             "Muted for 0:42. Viewers hear no voice.",
         );
-        let body = notify_body(&Transition::Opened(muted.clone())).unwrap();
+        let body = notify_body(&Transition::Opened(muted.clone()), true).unwrap();
         assert_eq!(
             body,
             json!({
@@ -289,7 +295,7 @@ mod tests {
                 "body": "Muted for 0:42 on the livestream."
             })
         );
-        let cleared = notify_body(&Transition::Cleared(muted)).unwrap();
+        let cleared = notify_body(&Transition::Cleared(muted), true).unwrap();
         assert_eq!(cleared["resolved"], true);
         assert_eq!(cleared["title"], "Microphone unmuted");
         let keys: Vec<&String> = cleared.as_object().unwrap().keys().collect();
@@ -314,7 +320,7 @@ mod tests {
         );
         chat.target_id = Some("audio".to_string());
         chat.platform = Some("youtube".to_string());
-        let body = notify_body(&Transition::Opened(chat.clone())).unwrap();
+        let body = notify_body(&Transition::Opened(chat.clone()), true).unwrap();
         assert_eq!(body["chat"], json!({ "class": "audio", "people": 3 }));
         assert!(body.get("title").is_none() && body.get("body").is_none());
         assert_eq!(body["platform"], "youtube");
@@ -341,22 +347,25 @@ mod tests {
             "Be right back",
             "x",
         );
-        assert_eq!(notify_body(&Transition::Opened(notice)), None);
+        assert_eq!(notify_body(&Transition::Opened(notice), true), None);
         let still = alert(
             WatchdogCheck::StillThere,
             AlertSeverity::Warning,
             "Still there?",
             "x",
         );
-        assert_eq!(notify_body(&Transition::Opened(still)), None);
+        assert_eq!(notify_body(&Transition::Opened(still), true), None);
         let muted = alert(
             WatchdogCheck::MicMuted,
             AlertSeverity::Critical,
             "x",
             "Muted for 0:42.",
         );
-        assert_eq!(notify_body(&Transition::Repeated(muted.clone())), None);
-        assert_eq!(notify_body(&Transition::Acknowledged(muted)), None);
+        assert_eq!(notify_body(&Transition::Repeated(muted.clone()), true), None);
+        assert_eq!(notify_body(&Transition::Acknowledged(muted.clone()), true), None);
+        // L5: a record-only session never pushes (the 1064 adoption).
+        assert_eq!(notify_body(&Transition::Opened(muted.clone()), false), None);
+        assert!(!pushes(&Transition::Withdrawn(muted), true), "a withdrawal is not a recovery");
     }
 
     #[test]
@@ -368,7 +377,7 @@ mod tests {
             "Check rtmp://a.rtmp.youtube.com/live2 and \"the key\".",
         );
         health.platform = Some("youtube".to_string());
-        let body = notify_body(&Transition::Opened(health)).unwrap();
+        let body = notify_body(&Transition::Opened(health), true).unwrap();
         assert_eq!(body["body"], "Check the platform's live dashboard.");
         let quoted = alert(
             WatchdogCheck::NoVoice,
@@ -392,10 +401,10 @@ mod tests {
         );
         down.platform = Some("custom".to_string());
         down.target_id = Some("custom-1".to_string());
-        let body = notify_body(&Transition::Opened(down.clone())).unwrap();
+        let body = notify_body(&Transition::Opened(down.clone()), true).unwrap();
         assert_eq!(body["title"], "Custom destination has been down for 0:20");
         assert!(!body.to_string().contains("example.com"));
-        let cleared = notify_body(&Transition::Cleared(down)).unwrap();
+        let cleared = notify_body(&Transition::Cleared(down), true).unwrap();
         assert_eq!(cleared["title"], "Custom destination is back");
 
         let mut all = alert(
@@ -405,7 +414,7 @@ mod tests {
             "Every destination is down. Videorc can't reconnect my.server.tv:1935 without a gap on the others. Keep going, or end the livestream and go live again.",
         );
         all.target_id = Some("all".to_string());
-        let body = notify_body(&Transition::Opened(all)).unwrap();
+        let body = notify_body(&Transition::Opened(all), true).unwrap();
         assert_eq!(body["title"], "Nobody is receiving your stream");
         assert!(
             !body["body"].as_str().unwrap().contains("my.server.tv"),
@@ -419,7 +428,7 @@ mod tests {
             "Videorc can't reconnect 192.168.1.20 without a gap on the others. Keep going, or end the livestream and go live again.",
         );
         stopped.platform = Some("custom".to_string());
-        let body = notify_body(&Transition::Opened(stopped)).unwrap();
+        let body = notify_body(&Transition::Opened(stopped), true).unwrap();
         assert_eq!(body["title"], "Streaming to Custom destination stopped");
         assert!(!body["body"].as_str().unwrap().contains("192.168"));
 
@@ -429,7 +438,7 @@ mod tests {
             "Twitch (main) has been down for 0:20",
             "Videorc is retrying every 2 seconds.",
         );
-        let body = notify_body(&Transition::Opened(named)).unwrap();
+        let body = notify_body(&Transition::Opened(named), true).unwrap();
         assert_eq!(body["title"], "Twitch (main) has been down for 0:20");
         let mut named_custom = alert(
             WatchdogCheck::DestinationDown,
@@ -438,7 +447,7 @@ mod tests {
             "x",
         );
         named_custom.platform = Some("custom".to_string());
-        let body = notify_body(&Transition::Opened(named_custom)).unwrap();
+        let body = notify_body(&Transition::Opened(named_custom), true).unwrap();
         assert_eq!(body["title"], "My server has been down for 0:20");
         assert!(looks_like_host("a.rtmp.youtube.com"));
         assert!(looks_like_host("live.twitch.tv"));

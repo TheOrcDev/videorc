@@ -2880,6 +2880,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Ids that left without a recovery (M2), gathered from every event until
   // the surface drains them with the next list.
   const watchdogWithdrawnRef = useRef<string[]>([])
+  // Whether the session streams (L5): the surface notifies for a stream,
+  // never for a recording alone.
+  const watchdogLiveRef = useRef(false)
   // The Studio's action source is built far below (plan 209 S5); a fix
   // pressed on a card reads it at click time.
   const studioActionSourceRef = useRef<(() => StudioActionSource | null) | null>(null)
@@ -5570,6 +5573,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const watchdogDeps = useCallback(
     () => ({
       client,
+      live: () => watchdogLiveRef.current,
       source: () => studioActionSourceRef.current?.() ?? null,
       openStudioPanel: (panel: 'assets' | 'layouts') => openWorkspaceTab(panel),
       openStudio: () => openWorkspaceTab('studio')
@@ -5600,6 +5604,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // The notification's click, a fix from the Stream Manager and the idle
   // time for still-there (plan 223 A6, A7), mounted from the lazy chunk.
   const watchdogLive = sessionIsLive(recording)
+  watchdogLiveRef.current = watchdogLive
   useEffect(() => {
     let dispose: (() => void) | null = null
     let cancelled = false

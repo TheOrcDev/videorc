@@ -32,6 +32,12 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 export interface WatchdogSurfaceDeps {
   client: BackendClient | null
+  /**
+   * The session streams (L5): a record-only session's silent microphone
+   * (the 1064 adoption) is the recording's own notice, never a system
+   * notification (plan 221 Q7).
+   */
+  live: () => boolean
   source: () => StudioActionSource | null
   /** Opens the Takeover list (assets) or the Scenes list (layouts). */
   openStudioPanel: (panel: 'assets' | 'layouts') => void
@@ -89,7 +95,7 @@ function scheduleStayedOpenAsk(alert: WatchdogAlert, deps: WatchdogSurfaceDeps, 
     () => {
       stayedOpenAsks.set(alert.id, 'asked')
       const current = latestAlerts.find((candidate) => candidate.id === alert.id)
-      if (!current || current.state !== 'open') return
+      if (!current || current.state !== 'open' || !deps.live()) return
       void systemNotificationsOn(deps.client).then((on) => {
         if (on) void askMain(current, 'stayed-open', Date.now())
       })
@@ -164,6 +170,7 @@ export async function onWatchdogAlertsChanged(
     // an alert that comes back comes back under a new id).
     if (next.find((candidate) => candidate.id === id)?.state !== 'open') dropStayedOpenAsk(id)
   }
+  if (!deps.live()) return
   const candidates = watchdogNotifyCandidates(previous, next)
   if (candidates.length > 0 && (await systemNotificationsOn(deps.client))) {
     for (const { alert, reason } of candidates) {
