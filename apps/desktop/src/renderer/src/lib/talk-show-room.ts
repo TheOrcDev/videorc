@@ -10,9 +10,10 @@
 // eager renderer bundle (the budget is an owner STOP).
 //
 // The host token is a secret. It arrives through `requestToken` (the
-// backend's `cloud.room.token.refresh`, renderer role only), is handed to
-// `Room.connect` and kept in memory for the next reconnect; it is never
-// logged, stored or put in the snapshot.
+// backend's `cloud.room.token.refresh`, renderer role only) and is handed to
+// `Room.connect`, nothing else: LiveKit refreshes a running connection's
+// token itself, and every join and rejoin asks for a fresh one (review L4).
+// It is never logged, stored or put in the snapshot.
 
 import {
   ConnectionQuality,
@@ -41,8 +42,6 @@ export { isRunnerIdentity } from '@/lib/talk-show-room-audio'
 
 /** The data topic the guest page listens on (`guest-wire.ts`, `STAGE_TOPIC`). */
 export const STAGE_TOPIC = 'videorc.stage'
-/** Host tokens live 10 minutes (the web); refresh with a margin. */
-const TOKEN_REFRESH_MS = 8 * 60 * 1000
 const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]
 
 export type TalkShowPerson = {
@@ -153,7 +152,6 @@ export async function microphoneDeviceIdFor(
 export class TalkShowRoomClient {
   readonly #deps: TalkShowRoomDeps
   #room: Room | null = null
-  #refreshTimer: number | null = null
   #reconnectTimer: number | null = null
   #reconnectAttempt = 0
   #closed = false
@@ -204,7 +202,6 @@ export class TalkShowRoomClient {
       return
     }
     this.#reconnectAttempt = 0
-    this.#armTokenRefresh()
     this.#setState('connected', null, token.identity)
     await this.#publishLocal()
     this.#applySubscriptions()
@@ -434,23 +431,6 @@ export class TalkShowRoomClient {
     }
   }
 
-  #armTokenRefresh(): void {
-    this.#clearRefresh()
-    this.#refreshTimer = window.setTimeout(() => {
-      // A refresh keeps the backend's token fresh for the next reconnect;
-      // the SDK keeps its own copy for the running connection.
-      void this.#deps
-        .requestToken()
-        .then(() => {})
-        .catch((error: unknown) => {
-          console.warn('[talk-show] token refresh failed', messageOf(error))
-        })
-        .finally(() => {
-          if (!this.#closed) this.#armTokenRefresh()
-        })
-    }, TOKEN_REFRESH_MS)
-  }
-
   #scheduleReconnect(reason?: DisconnectReason): void {
     const attempt = this.#reconnectAttempt
     const terminal =
@@ -490,7 +470,6 @@ export class TalkShowRoomClient {
       this.#bind(room)
       await room.connect(token.url, token.hostToken, { autoSubscribe: false })
       this.#reconnectAttempt = 0
-      this.#armTokenRefresh()
       this.#setState('connected', null, token.identity)
       await this.#publishLocal()
       this.#applySubscriptions()
@@ -502,15 +481,7 @@ export class TalkShowRoomClient {
     }
   }
 
-  #clearRefresh(): void {
-    if (this.#refreshTimer !== null) {
-      window.clearTimeout(this.#refreshTimer)
-      this.#refreshTimer = null
-    }
-  }
-
   #clearTimers(): void {
-    this.#clearRefresh()
     if (this.#reconnectTimer !== null) {
       window.clearTimeout(this.#reconnectTimer)
       this.#reconnectTimer = null

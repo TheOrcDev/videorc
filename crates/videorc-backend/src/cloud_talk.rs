@@ -810,12 +810,11 @@ pub type CloudRequestHook = Arc<dyn Fn(CloudRoomRequest) + Send + Sync>;
 // --- The runtime's talk-show state --------------------------------------------
 
 /// What this desktop holds about its open room. Lives beside `show` in the
-/// runtime; cleared with it. The token is the one secret here.
+/// runtime; cleared with it. No token: the renderer asks for a fresh one
+/// through `room_token` on every join (review L4), so none is kept here.
 #[derive(Clone)]
 pub(crate) struct TalkShowState {
     pub phase: CloudRoomPhase,
-    pub room_url: String,
-    pub host_token: String,
     pub invite: Option<ShowInvite>,
     pub door_open: bool,
     pub title: Option<String>,
@@ -843,8 +842,6 @@ impl std::fmt::Debug for TalkShowState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TalkShowState")
             .field("phase", &self.phase)
-            .field("room_url", &self.room_url)
-            .field("host_token", &"••••")
             .field("invite", &self.invite)
             .field("door_open", &self.door_open)
             .field("stage", &self.stage)
@@ -859,16 +856,9 @@ impl TalkShowState {
     /// runner's own default, the host alone on Solo (plan 224 D8): a Bring
     /// on edits this stage, so the first `stage.set` always names the host
     /// and the host's camera and mic never leave the program.
-    fn new(
-        room: ShowRoomAnswer,
-        settings: RoomSettingsRecord,
-        invite: Option<ShowInvite>,
-        show_id: &str,
-    ) -> Self {
+    fn new(settings: RoomSettingsRecord, invite: Option<ShowInvite>, show_id: &str) -> Self {
         Self {
             phase: CloudRoomPhase::Open,
-            room_url: room.url,
-            host_token: room.host_token,
             invite,
             door_open: settings.open_door,
             title: (!settings.title.is_empty()).then_some(settings.title),
@@ -1110,7 +1100,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         };
         let show_id = created.show.id.clone();
-        let (Some(room), Some(invite)) = (created.room.clone(), created.invite.clone()) else {
+        // The create's host token is never kept (L4): the renderer joins
+        // with a fresh one through `room_token`.
+        let (Some(_), Some(invite)) = (created.room.as_ref(), created.invite.clone()) else {
             let _ = self.web.end_show(&bearer, &show_id).await;
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             bail!("Videorc Cloud created the show without a room.");
@@ -1157,7 +1149,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             runtime.message = None;
             runtime.restart = None;
             let mut talk = TalkShowState::new(
-                room,
                 RoomSettingsRecord {
                     title: params.title.unwrap_or_default(),
                     platforms,
@@ -1231,10 +1222,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             .room_token(&bearer, &show_id)
             .await
             .map_err(anyhow::Error::new)?;
-        if let Some(talk) = lock(&self.slot).talk.as_mut() {
-            talk.host_token = answer.host_token.clone();
-            talk.room_url = answer.url.clone();
-        }
         Ok(RoomTokenRefreshAnswer {
             host_token: answer.host_token,
             url: answer.url,
@@ -1678,13 +1665,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 return Err(anyhow::Error::new(error));
             }
         };
-        let token = match self.web.room_token(&bearer, &show_id).await {
-            Ok(token) => token,
-            Err(error) => {
-                let _ = (self.hooks.camera)(CameraHandover::Return).await;
-                return Err(anyhow::Error::new(error));
-            }
-        };
         let unconnected = lock(&self.slot).control_tx.is_none();
         if unconnected && let Err(error) = self.connect_talk_control(&bearer, &show_id).await {
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
@@ -1701,16 +1681,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 // loop forgot it); nothing is left to resume.
                 break 'open None;
             }
-            let mut talk = TalkShowState::new(
-                ShowRoomAnswer {
-                    url: token.url,
-                    host_token: token.host_token,
-                    name: show_id.clone(),
-                },
-                settings.room,
-                settings.invite,
-                &show_id,
-            );
+            let mut talk = TalkShowState::new(settings.room, settings.invite, &show_id);
             // The runner keeps the legs it holds (C5b): the show is on air
             // while it lists them; its clock is the only one left.
             talk.live = runtime

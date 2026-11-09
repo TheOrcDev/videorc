@@ -5299,6 +5299,11 @@ mod tests {
         assert!(room.live, "on air from the runner's legs");
         assert!(room.live_since.is_none(), "the runner's clock, not ours");
         assert_eq!(
+            harness.context.web.room_tokens.load(Ordering::SeqCst),
+            0,
+            "the resume keeps no host token: the renderer asks for its own (L4)"
+        );
+        assert_eq!(
             harness.camera.lock().unwrap().last(),
             Some(&crate::cloud_talk::CameraHandover::Lend)
         );
