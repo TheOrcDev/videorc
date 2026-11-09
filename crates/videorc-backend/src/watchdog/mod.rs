@@ -917,6 +917,10 @@ fn announce_transitions_with_view(
             let message = match transition {
                 Transition::Cleared(_) => alerts::cleared_toast(alert),
                 Transition::Withdrawn(_) => withdrawn_message(alert),
+                // L4: chat quotes stay on the card; the record (the health
+                // event, the session log, the support bundle) keeps the
+                // count and the class, as the push does.
+                _ if alert.check == WatchdogCheck::ChatSays => push::chat_says_record(alert),
                 _ => format!("{}. {}", alert.title.trim_end_matches('.'), alert.detail),
             };
             let _ = crate::recording::emit_health_event(

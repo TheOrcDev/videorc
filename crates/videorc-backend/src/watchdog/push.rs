@@ -140,6 +140,35 @@ fn scrub_quotes(text: &str) -> String {
     )
 }
 
+/// `chat-says` as the record keeps it (L4): the count and the class, never
+/// a viewer's words. The card's detail quotes chat ("3 people in the last 2
+/// minutes: “no sound??”, …"); the health event, the session log and the
+/// support bundle carry "Chat says they can't hear you. 3 people in the
+/// last 2 minutes (audio)." and nothing of what anyone typed.
+pub fn chat_says_record(alert: &WatchdogAlert) -> String {
+    let class = alert.target_id.as_deref().unwrap_or("audio");
+    let people = chat_says_people(alert);
+    let people = match people {
+        1 => "1 person".to_string(),
+        n => format!("{n} people"),
+    };
+    format!(
+        "{}. {people} in the last 2 minutes ({class}).",
+        alert.title.trim_end_matches('.')
+    )
+}
+
+/// The distinct authors a `chat-says` detail counts ("3 people …").
+fn chat_says_people(alert: &WatchdogAlert) -> u64 {
+    alert
+        .detail
+        .split(' ')
+        .next()
+        .and_then(|count| count.parse::<u64>().ok())
+        .unwrap_or(1)
+        .clamp(1, 999)
+}
+
 /// The notify body for a transition, or None when it never pushes.
 pub fn notify_body(transition: &Transition) -> Option<Value> {
     if !pushes(transition) {
@@ -168,14 +197,7 @@ pub fn notify_body(transition: &Transition) -> Option<Value> {
             .target_id
             .clone()
             .unwrap_or_else(|| "audio".to_string());
-        let people = alert
-            .detail
-            .split(' ')
-            .next()
-            .and_then(|count| count.parse::<u64>().ok())
-            .unwrap_or(1)
-            .clamp(1, 999);
-        body["chat"] = json!({ "class": class, "people": people });
+        body["chat"] = json!({ "class": class, "people": chat_says_people(alert) });
     } else {
         let (title, text) = push_words(alert, resolved);
         body["title"] = json!(title);
@@ -292,11 +314,23 @@ mod tests {
         );
         chat.target_id = Some("audio".to_string());
         chat.platform = Some("youtube".to_string());
-        let body = notify_body(&Transition::Opened(chat)).unwrap();
+        let body = notify_body(&Transition::Opened(chat.clone())).unwrap();
         assert_eq!(body["chat"], json!({ "class": "audio", "people": 3 }));
         assert!(body.get("title").is_none() && body.get("body").is_none());
         assert_eq!(body["platform"], "youtube");
         assert!(!body.to_string().contains("no sound"));
+        // L4: the record keeps the same form.
+        assert_eq!(
+            chat_says_record(&chat),
+            "Chat says they can't hear you. 3 people in the last 2 minutes (audio)."
+        );
+        let mut one = chat.clone();
+        one.detail = "1 person in the last 2 minutes: \u{201c}lag\u{201d}.".to_string();
+        one.target_id = Some("lag".to_string());
+        assert_eq!(
+            chat_says_record(&one),
+            "Chat says they can't hear you. 1 person in the last 2 minutes (lag)."
+        );
     }
 
     #[test]
