@@ -2720,10 +2720,14 @@ function StudioCloudProvider({
   children?: ReactNode
 }): ReactElement {
   const [talkShow, setTalkShow] = useState<TalkShowContextValue>(NO_TALK_SHOW)
-  const value = useMemo(
-    () => (cloud && talkShowDeps ? { ...cloud, talkShow } : (cloud ?? null)),
-    [cloud, talkShow, talkShowDeps]
-  )
+  const value = useMemo(() => {
+    if (!cloud || !talkShowDeps) return cloud ?? null
+    // DEV only: a scripted room (screenshots, probes) stands in for the status.
+    if (import.meta.env.DEV && talkShow.scriptedCloudStatus) {
+      return { ...cloud, cloudStatus: talkShow.scriptedCloudStatus, talkShow }
+    }
+    return { ...cloud, talkShow }
+  }, [cloud, talkShow, talkShowDeps])
   return (
     <>
       {talkShowDeps ? (

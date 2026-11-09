@@ -4,6 +4,7 @@ import type {
   CloudRoomOpenParams,
   CloudStage,
   CloudStageLayout,
+  CloudStatus,
   TalkShowDisplaySource
 } from '@/lib/backend'
 import type { TalkShowRoomSnapshot } from '@/lib/talk-show-room'
@@ -68,6 +69,8 @@ export interface TalkShowContextValue {
   stopCloudRecording: () => Promise<void>
   /** End livestream in a talk show (D17): the legs end, the room stays. */
   endTalkShowLivestream: () => Promise<void>
+  /** DEV only: a scripted room's status (screenshots and probes, no backend). */
+  scriptedCloudStatus?: CloudStatus
 }
 
 export const NO_TALK_SHOW: TalkShowContextValue = {

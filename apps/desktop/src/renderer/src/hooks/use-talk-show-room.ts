@@ -320,7 +320,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       },
       setMonitor: async (enabled) => {
         clientRef.current?.setMonitor(enabled)
-        await call('cloud.return.set', { open: enabled }, 'switch the Program monitor').catch(
+        await call('cloud.return.set', { open: enabled }, 'show the Program monitor for').catch(
           () => {}
         )
       },

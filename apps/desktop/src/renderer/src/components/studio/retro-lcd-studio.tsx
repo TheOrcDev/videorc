@@ -33,6 +33,7 @@ import {
 } from '@/components/studio/quick-settings'
 import {
   CohostSessionRow,
+  GuestsSessionSlot,
   LiveDestinationRows,
   LiveStreamHealthRow,
   SESSION_STATUS_ICONS,
@@ -287,6 +288,7 @@ export function RetroSessionPanel({ live = false, ...notices }: SessionPanelProp
         {live ? <LiveDestinationRows look="lcd" /> : null}
         {live ? <LiveStreamHealthRow look="lcd" /> : null}
         {live ? <CohostSessionRow look="lcd" /> : null}
+        <GuestsSessionSlot look="lcd" />
         <AgentsSessionRow look="lcd" />
       </LcdPanel>
       <SessionNotices {...notices} />

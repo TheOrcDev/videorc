@@ -382,6 +382,8 @@ export function SessionPanel({ live = false, ...notices }: SessionPanelProps): R
             session fact, knowable without the Stream Manager; a recording
             has no chat for it to read. */}
         {live ? <CohostSessionRow /> : null}
+        {/* Plan 224 D16: the room's one row, which opens Livestream → Guests. */}
+        <GuestsSessionSlot />
         {/* Plan 209 D12: which agents are connected, with Stop. */}
         <AgentsSessionRow />
       </GroupedList>
@@ -415,6 +417,26 @@ export function useSessionOutputSummary(live: boolean): string {
 /** The last refused start and a mid-session notice, under the Session facts. */
 // The watchdog's cards (plan 223 A5) load with the first alert: the chunk
 // holds the card and its words, and the eager Studio keeps only the list.
+// Plan 224 D16: the Guests row loads with the room, never with the Studio.
+const GuestsSessionRow = lazy(async () => ({
+  default: (await import('@/components/studio/guests-session-row')).GuestsSessionRow
+}))
+
+/** The Guests row while the room is open, in either look (plan 224 D16). */
+export function GuestsSessionSlot({
+  look = 'default'
+}: {
+  look?: StudioLook
+}): ReactElement | null {
+  const { cloudStatus } = useStudioCloud()
+  if (cloudStatus?.room?.phase !== 'open') return null
+  return (
+    <Suspense fallback={null}>
+      <GuestsSessionRow look={look} />
+    </Suspense>
+  )
+}
+
 const WatchdogAlertCard = lazy(async () => ({
   default: (await import('@/components/studio/watchdog-alert-card')).WatchdogAlertCard
 }))

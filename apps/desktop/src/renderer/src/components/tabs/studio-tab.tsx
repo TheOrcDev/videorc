@@ -65,6 +65,9 @@ const AudioSection = lazy(async () => ({
 const StudioChatSection = lazy(async () => ({
   default: (await import('@/components/studio/studio-chat')).StudioChatSection
 }))
+// Plan 224 C-G3: the Show stage replaces the Preview while the room is open;
+// it loads with the room. Until it does, the Preview card says why.
+const ShowStage = lazy(() => import('@/components/studio/show-stage'))
 // Rare (a cloud show this computer stopped feeding): its own chunk.
 const CloudResumeNotice = lazy(async () => ({
   default: (await import('@/components/studio/cloud-resume-notice')).CloudResumeNotice
@@ -209,7 +212,7 @@ export function StudioTab(): ReactElement {
           banner (post-0.9.4 fix batch F8). */}
       <div className={STUDIO_GRID}>
         <div className={STUDIO_PREVIEW_COLUMN}>
-          <StudioPreviewPanel />
+          <StudioStagePanel />
           {/* Scenes and the vertical leg: deferred so the launch surface
               paints its preview and transport first. */}
           <Suspense fallback={<StudioDashboardBottomRowFallback />}>
@@ -380,6 +383,20 @@ function AudioSectionFallback({ retro }: { retro: boolean }): ReactElement {
       <Skeleton className="h-4 rounded-chip" />
       <Skeleton className="h-4 rounded-chip" />
     </PanelSection>
+  )
+}
+
+/**
+ * The Preview, or the Show stage while a talk show's room is open (plan 224
+ * D7, C-G3). Its own component, so only it re-renders with the cloud's state.
+ */
+function StudioStagePanel(): ReactElement {
+  const { talkShow } = useStudioCloud()
+  if (!talkShow.previewReplaced) return <StudioPreviewPanel />
+  return (
+    <Suspense fallback={<StudioPreviewPanel />}>
+      <ShowStage />
+    </Suspense>
   )
 }
 
