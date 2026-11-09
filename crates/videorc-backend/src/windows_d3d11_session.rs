@@ -812,6 +812,23 @@ impl WindowsD3d11CfrSequencer {
     }
 }
 
+/// Plan 210 S7 (Hide screen): the first native frame after a Show takes over
+/// from the BGRA stand-in. The stand-in's sequences are the preview store's,
+/// the native frame's are the capture owner's: two clocks, so the source
+/// fence restarts with the takeover, as it does for any source replacement
+/// (encoder time never does). Without it the first live frame after a Show
+/// reads as a capture that went backwards and the recording ends.
+fn take_over_from_privacy_stand_in(
+    cfr: &mut WindowsD3d11CfrSequencer,
+    resume_pending: &mut bool,
+) -> bool {
+    if !std::mem::take(resume_pending) {
+        return false;
+    }
+    cfr.replace_source();
+    true
+}
+
 #[cfg(target_os = "windows")]
 mod runtime {
     use std::collections::BTreeSet;
@@ -2746,10 +2763,10 @@ mod runtime {
                     };
                     retained_capture_ticket = Some(source_ticket);
                     new_capture_sequence = Some(sequence);
-                    if privacy_resume_pending {
+                    if super::take_over_from_privacy_stand_in(&mut cfr, &mut privacy_resume_pending)
+                    {
                         // The first native frame after a show: the BGRA
                         // stand-in is done.
-                        privacy_resume_pending = false;
                         capture_frame = None;
                         last_capture_upload = None;
                     }
@@ -5757,6 +5774,51 @@ mod tests {
         let first_b = sequencer.advance(Some(1)).unwrap().unwrap();
         assert_eq!((first_b.output_sequence, first_b.source_sequence), (3, 1));
         assert!(sequencer.advance(Some(1)).is_err());
+    }
+
+    #[test]
+    fn windows_d3d11_cfr_show_hands_back_to_the_native_capture_clock() {
+        // Issue #1088: native Desktop Duplication frames count from the
+        // capture owner (~70 here); the hidden still and the stand-in after
+        // a Show count from the preview store (~420). Measured on a UHD 620
+        // laptop: the first native frame after Show ended the recording with
+        // "D3D11 capture sequence 73 did not advance beyond Some(421)".
+        let mut cfr = WindowsD3d11CfrSequencer::default();
+        assert!(cfr.advance(Some(68)).unwrap().is_some());
+        assert!(cfr.advance(Some(69)).unwrap().is_some());
+        // Hide: the loop replaces the source and composes the still.
+        cfr.replace_source();
+        assert!(cfr.advance(Some(419)).unwrap().is_some());
+        // Show: replaced again; the stand-in keeps drawing from the store
+        // until the first native frame.
+        cfr.replace_source();
+        assert!(cfr.advance(Some(420)).unwrap().is_some());
+        assert!(cfr.advance(Some(421)).unwrap().is_some());
+        let mut without_takeover = cfr;
+        assert!(
+            without_takeover.advance(Some(73)).is_err(),
+            "without a takeover the native clock reads as going backwards"
+        );
+
+        let mut resume_pending = true;
+        assert!(take_over_from_privacy_stand_in(
+            &mut cfr,
+            &mut resume_pending
+        ));
+        assert!(!resume_pending);
+        let first_live = cfr.advance(Some(73)).unwrap().unwrap();
+        assert_eq!(
+            (first_live.output_sequence, first_live.source_sequence),
+            (6, 73),
+            "encoder time continues; the source fence restarts"
+        );
+        assert!(cfr.advance(Some(74)).unwrap().is_some());
+        // Only the first native frame takes over.
+        assert!(!take_over_from_privacy_stand_in(
+            &mut cfr,
+            &mut resume_pending
+        ));
+        assert!(cfr.advance(Some(74)).is_err());
     }
 
     #[test]
