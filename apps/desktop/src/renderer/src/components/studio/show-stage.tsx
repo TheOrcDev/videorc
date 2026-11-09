@@ -55,6 +55,7 @@ import type { TalkShowPerson } from '@/lib/talk-show-room'
 import { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
 import {
   planStage,
+  showStageInput,
   stageRectPercent,
   type StageCanvas,
   type StageTile
@@ -122,13 +123,9 @@ export default function ShowStage(): ReactElement {
 function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
   const room = cloudStatus?.room
-  const stage = room?.stage
-  const plan = planStage(STAGE_CANVAS, {
-    layout: stage?.layout ?? 'solo',
-    people: stage?.onStage ?? [],
-    spotlight: stage?.spotlight ?? null,
-    screen: stage?.screen ?? null
-  })
+  // Review M2: the stage as the program draws it, never a tile or a
+  // screen the viewers don't see.
+  const plan = planStage(STAGE_CANVAS, showStageInput(room))
   const state = talkShow.room.state
   const joining = state === 'connecting' || state === 'reconnecting'
   return (

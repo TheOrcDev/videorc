@@ -5753,6 +5753,15 @@ const cloudRoomStatusSchema = objectSchema(
     client: enumSchema(['idle', 'connecting', 'connected', 'reconnecting', 'disconnected']),
     returnEnabled: booleanSchema,
     stageSet: booleanSchema,
+    shown: optionalSchema(
+      objectSchema(
+        {
+          onStage: arraySchema(boundedString, { maxLength: 8 }),
+          screen: optionalSchema(boundedString)
+        },
+        { allowUnknown: false }
+      )
+    ),
     live: booleanSchema,
     liveSince: optionalSchema(timestamp),
     message: optionalText

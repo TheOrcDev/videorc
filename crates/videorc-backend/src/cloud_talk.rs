@@ -237,6 +237,22 @@ pub struct RunnerRoomState {
     pub return_enabled: bool,
     #[serde(default)]
     pub stage_set: bool,
+    /// Review M2: the stage as the program draws it (the runner's re-flow
+    /// and stale-screen fallbacks applied); absent from an older runner and
+    /// until the current stage is composed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<CloudRoomShown>,
+}
+
+/// `state.room.shown` and `CloudRoomStatus.shown` (review M2): the people
+/// the program's layout drew, in stage order, and whose screen it showed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoomShown {
+    #[serde(default)]
+    pub on_stage: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -544,6 +560,11 @@ pub struct CloudRoomStatus {
     pub client: CloudRoomClientState,
     pub return_enabled: bool,
     pub stage_set: bool,
+    /// Review M2: what the program draws of the stage, from the runner; the
+    /// Show stage drops whoever the runner re-flowed out and shows the
+    /// screen it shows. Absent until the runner reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<CloudRoomShown>,
     /// On air: the runner holds platform legs for this room (`state.legs`
     /// non-empty, never its `phase`, which stays `live` after `legs.end`).
     pub live: bool,
@@ -903,6 +924,7 @@ impl TalkShowState {
             client: self.client,
             return_enabled: runner_room.is_some_and(|room| room.return_enabled),
             stage_set: runner_room.is_some_and(|room| room.stage_set),
+            shown: runner_room.and_then(|room| room.shown.clone()),
             live: self.live,
             live_since: self.live_since.clone(),
             message: self.message.clone(),

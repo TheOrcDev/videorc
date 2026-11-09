@@ -5443,6 +5443,15 @@ export interface CloudStage {
   hostShape?: CloudHostShape
 }
 
+/**
+ * The stage as the program draws it (review M2, the runner's `state.room.shown`):
+ * whoever D12's re-flow took out is missing, and `screen` is the screen it shows.
+ */
+export interface CloudRoomShown {
+  onStage: string[]
+  screen?: string
+}
+
 /** `CloudStatus.room`: what the Guests tab, the Show stage and the strip draw. */
 export interface CloudRoomStatus {
   phase: CloudRoomPhase
@@ -5463,6 +5472,8 @@ export interface CloudRoomStatus {
   client: CloudRoomClientState
   returnEnabled: boolean
   stageSet: boolean
+  /** What the program draws of the stage; absent until the runner reports it. */
+  shown?: CloudRoomShown
   /** On air: the runner holds platform legs for this room (never its `phase`). */
   live: boolean
   /** When this desktop handed the destinations over (this Go Live's clock); absent after a resume. */

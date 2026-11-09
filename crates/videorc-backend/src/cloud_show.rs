@@ -5377,6 +5377,51 @@ mod tests {
         assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 1);
     }
 
+    /// Review M2: the runner's `state.room.shown` (what the program draws)
+    /// parses, rides the room status to the Show stage, and is absent, never
+    /// null, from an older runner.
+    #[tokio::test(start_paused = true)]
+    async fn the_runners_shown_stage_rides_the_room_status() {
+        let older: crate::cloud_talk::RunnerRoomState =
+            serde_json::from_value(json!({ "connected": true, "layout": "solo" })).unwrap();
+        assert!(older.shown.is_none());
+        assert!(serde_json::to_value(&older).unwrap().get("shown").is_none());
+
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created_talk()));
+        let context = harness.context.clone();
+        let open = tokio::spawn(async move {
+            context
+                .open_room(Some("bearer".to_string()), room_open_params(), false)
+                .await
+        });
+        let server = harness.context.connector.accept().await;
+        server.send(welcome_talk(false));
+        let status = open.await.unwrap().expect("the room opens");
+        assert!(status.room.as_ref().unwrap().shown.is_none());
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 5, "feeds": [], "legs": [],
+            "room": { "connected": true, "participants": [], "layout": "screen-people",
+                      "hostAway": false, "stageSet": true,
+                      "shown": { "onStage": ["host:sh_abc"], "screen": "g_ada" } }
+        } }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let room = lock(&harness.context.slot).status().room.unwrap();
+        assert_eq!(
+            room.shown,
+            Some(crate::cloud_talk::CloudRoomShown {
+                on_stage: vec!["host:sh_abc".to_string()],
+                screen: Some("g_ada".to_string()),
+            })
+        );
+        let wire = serde_json::to_value(&room).unwrap();
+        assert_eq!(
+            wire["shown"],
+            json!({ "onStage": ["host:sh_abc"], "screen": "g_ada" })
+        );
+    }
+
     /// The runner's on-stage people: the host first and always, no runner,
     /// no duplicate, no more than the runner takes.
     #[test]

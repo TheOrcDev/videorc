@@ -103,6 +103,38 @@ describe('the stage (D8)', () => {
     }
   )
 
+  it('draws the stage as the program does: no re-flowed guest, no stale screen (review M2)', async () => {
+    const participant = (identity: string) => ({
+      identity,
+      name: identity,
+      role: identity === HOST ? ('host' as const) : ('guest' as const),
+      onStage: true,
+      video: true,
+      audio: true,
+      muted: false,
+      screen: false,
+      quality: 'good' as const,
+      sinceMs: 1000,
+      away: false
+    })
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada, grace],
+          participants: [participant(HOST), participant('g_ada'), participant('g_grace')],
+          stage: { layout: 'screen-people', onStage: [HOST, 'g_ada', 'g_grace'], screen: 'g_ada' },
+          shown: { onStage: [HOST, 'g_ada'] }
+        })
+      }),
+      talkShow()
+    )
+    const tiles = [...container.querySelectorAll<HTMLElement>('[data-testid="show-stage-tile"]')]
+    expect(tiles.map((tile) => tile.dataset.stageIdentity)).toEqual([HOST, 'g_ada'])
+    expect(tiles.every((tile) => tile.dataset.stageKind === 'person')).toBe(true)
+    const checked = container.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')
+    expect(checked?.textContent).toBe('Side by side')
+  })
+
   it('says so when nobody is on stage, and keeps the Preview line for the lifecycle probe', async () => {
     await mount(
       talkStatus({ room: openRoom({ stage: { layout: 'solo', onStage: [] } }) }),

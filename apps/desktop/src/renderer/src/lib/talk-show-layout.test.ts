@@ -2,10 +2,11 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
-import type { CloudStageLayout } from '@/lib/backend'
+import type { CloudRoomStatus, CloudStageLayout } from '@/lib/backend'
 import {
   effectiveStageLayout,
   planStage,
+  showStageInput,
   stageRectPercent,
   type StageCanvas,
   type StagePlan,
@@ -98,5 +99,82 @@ describe('stageRectPercent', () => {
     expect(
       stageRectPercent({ width: 1920, height: 1080 }, { x: 960, y: 270, w: 480, h: 540 })
     ).toEqual({ left: '50%', top: '25%', width: '25%', height: '50%' })
+  })
+})
+
+describe('showStageInput (review M2)', () => {
+  const HOST = 'host:sh_talk'
+  const person = (identity: string, onStage: boolean) => ({
+    identity,
+    name: identity,
+    role: identity === HOST ? ('host' as const) : ('guest' as const),
+    onStage,
+    video: true,
+    audio: true,
+    muted: false,
+    screen: false,
+    quality: 'good' as const,
+    sinceMs: 1000,
+    away: false
+  })
+  const room = (overrides: Partial<CloudRoomStatus> = {}): CloudRoomStatus => ({
+    phase: 'open',
+    doorOpen: false,
+    declinedCount: 0,
+    participants: [person(HOST, true), person('g_ada', true), person('g_bo', true)],
+    stage: {
+      layout: 'screen-people',
+      onStage: [HOST, 'g_ada', 'g_bo'],
+      screen: 'g_ada'
+    },
+    hostAway: false,
+    connected: true,
+    client: 'connected',
+    returnEnabled: false,
+    stageSet: true,
+    live: false,
+    ...overrides
+  })
+
+  it('draws the stage as sent while the runner reports nothing', () => {
+    expect(showStageInput(room())).toEqual({
+      layout: 'screen-people',
+      people: [HOST, 'g_ada', 'g_bo'],
+      spotlight: null,
+      screen: 'g_ada'
+    })
+    expect(showStageInput(undefined)).toEqual({
+      layout: 'solo',
+      people: [],
+      spotlight: null,
+      screen: null
+    })
+  })
+
+  it('leaves out who the runner re-flowed and shows the screen the program shows', () => {
+    const input = showStageInput(room({ shown: { onStage: [HOST, 'g_ada'], screen: 'g_bo' } }))
+    expect(input.people).toEqual([HOST, 'g_ada'])
+    expect(input.screen).toBe('g_bo')
+    // A stale named screen with none to stand in: Side by side, as the program.
+    const stale = room({ shown: { onStage: [HOST, 'g_ada', 'g_bo'] } })
+    expect(showStageInput(stale).screen).toBeNull()
+    expect(effectiveStageLayout(showStageInput(stale))).toBe('side-by-side')
+  })
+
+  it('never waits on the runner for a Bring on or a Send backstage', () => {
+    // Cy was just brought on: not on the runner's stage yet, so drawn.
+    const broughtOn = room({
+      participants: [person(HOST, true), person('g_ada', true), person('g_cy', false)],
+      stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada', 'g_cy'] },
+      shown: { onStage: [HOST, 'g_ada'] }
+    })
+    expect(showStageInput(broughtOn).people).toEqual([HOST, 'g_ada', 'g_cy'])
+    // Ada was just sent backstage: gone at once, whatever the runner drew.
+    const sentBack = room({
+      stage: { layout: 'side-by-side', onStage: [HOST, 'g_bo'] },
+      shown: { onStage: [HOST, 'g_ada', 'g_bo'], screen: 'g_ada' }
+    })
+    expect(showStageInput(sentBack).people).toEqual([HOST, 'g_bo'])
+    expect(showStageInput(sentBack).screen).toBeNull()
   })
 })

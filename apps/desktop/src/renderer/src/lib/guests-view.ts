@@ -9,7 +9,7 @@ import type {
 import { plural } from '@/lib/format'
 import { platformLabel } from '@/lib/platform-copy'
 import type { StatusTone } from '@/lib/status-word'
-import { effectiveStageLayout } from '@/lib/talk-show-layout'
+import { effectiveStageLayout, showStageInput } from '@/lib/talk-show-layout'
 
 // What Livestream → Guests and the Show stage say about the room (plan 224
 // C-G2, C-G3), derived from the backend's `CloudStatus.room`. Pure, so every
@@ -363,14 +363,13 @@ export function layoutReasonsLine(options: readonly LayoutOption[]): string | nu
   return reasons.length > 0 ? reasons.join(' ') : null
 }
 
-/** The layout the stage shows: the runner's own fallbacks applied (D8). */
+/**
+ * The layout the stage shows: the runner's own fallbacks applied (D8), on the
+ * stage as the program draws it (review M2: a stale screen is Side by side).
+ */
 export function shownLayout(room: CloudRoomStatus | undefined): CloudStageLayout {
   if (!room) return 'solo'
-  return effectiveStageLayout({
-    layout: room.stage.layout,
-    people: room.stage.onStage,
-    screen: room.stage.screen ?? null
-  })
+  return effectiveStageLayout(showStageInput(room))
 }
 
 // --- Moderation (D5, D14) ------------------------------------------------------
