@@ -90,6 +90,7 @@ fn lookup(
             &[(platform, author_id.to_string())],
             &HashSet::new(),
             &mut arrived,
+            &mut None,
             now,
             3,
             false,
@@ -179,7 +180,9 @@ fn a_two_account_person_counts_the_union_and_a_split_restores_both_sides() {
     // "Not the same person": every count comes back exactly.
     let split = database
         .community_unlink("youtube:y1", day(2026, 11, 2))
-        .unwrap();
+        .unwrap()
+        .person_id()
+        .to_string();
     assert_ne!(split, twitch.id);
     let twitch_again = person_of(&database, StreamPlatform::Twitch, "t1");
     let youtube_again = person_of(&database, StreamPlatform::Youtube, "y1");
@@ -333,7 +336,9 @@ fn memories_follow_their_account_through_a_split() {
     );
     let split = database
         .community_unlink("kick:k1", day(2026, 10, 4))
-        .unwrap();
+        .unwrap()
+        .person_id()
+        .to_string();
     let twitch = person_of(&database, StreamPlatform::Twitch, "t1");
     let kick = person_of(&database, StreamPlatform::Kick, "k1");
     assert_eq!(kick.id, split);
@@ -402,6 +407,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
             ],
             &streamer,
             &mut arrived,
+            &mut None,
             now,
             3,
             false,
@@ -439,6 +445,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
                     &[(StreamPlatform::Twitch, "kim".to_string())],
                     &streamer,
                     &mut again,
+                    &mut None,
                     now,
                     3,
                     false,
@@ -485,6 +492,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
             &[(StreamPlatform::Kick, "kimk".to_string())],
             &streamer,
             &mut arrived,
+            &mut None,
             later,
             3,
             false,
@@ -502,6 +510,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
             &[(StreamPlatform::Twitch, "kim".to_string())],
             &streamer,
             &mut arrived,
+            &mut None,
             later,
             3,
             false,
@@ -800,9 +809,51 @@ fn forgetme_leaves_a_tombstone_that_later_chat_never_revives_until_rememberme() 
     let gone = person_of(&database, StreamPlatform::Twitch, "t1");
     assert!(gone.id.is_empty());
     assert!(gone.note.is_empty());
-    // Forget everyone: nothing is left, tombstones included.
-    database.community_forget_all().unwrap();
-    assert_eq!(database.community_account_status("twitch:t1"), None);
+    // Forget everyone: nothing is left but the tombstones (F3): Ada's
+    // Twitch `!forgetme` outlives the streamer's wipe, with no person.
+    database.community_forget_all(day(2026, 10, 17)).unwrap();
+    assert_eq!(
+        database.community_account_status("twitch:t1"),
+        Some((String::new(), CommunityPersonStatus::Forgotten))
+    );
+    assert_eq!(database.community_account_status("kick:k1"), None);
+    stream_with(
+        &database,
+        "s4",
+        day(2026, 10, 18),
+        &[(StreamPlatform::Twitch, "t1", "Ada")],
+    );
+    assert_eq!(
+        database
+            .community_account_status("twitch:t1")
+            .map(|(_, s)| s),
+        Some(CommunityPersonStatus::Forgotten),
+        "still never learned again"
+    );
+    {
+        let conn = database.lock().unwrap();
+        let people: i64 = conn
+            .query_row("SELECT COUNT(*) FROM community_people", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(people, 0, "the forgotten account has no person");
+    }
+    database
+        .community_forget_account("x:gone", day(2026, 10, 18))
+        .unwrap();
+    database.community_forget_all(day(2026, 10, 19)).unwrap();
+    assert!(
+        database
+            .community_export(day(2026, 10, 19))
+            .unwrap()
+            .people
+            .iter()
+            .all(|person| {
+                person.status == "forgotten" && person.accounts.iter().all(|a| a.name.is_empty())
+            }),
+        "only nameless tombstones export after a wipe"
+    );
     assert_eq!(
         database
             .community_summary(day(2026, 10, 17), 3, CommunityBackfill::default())
@@ -1263,6 +1314,7 @@ fn memories_and_the_note_ride_the_arrival_only_with_remember_on() {
                 &[(StreamPlatform::Twitch, "1".to_string())],
                 &streamer,
                 &mut arrived,
+                &mut None,
                 day(2026, 11, 8),
                 3,
                 remember,
@@ -1308,4 +1360,577 @@ fn memories_and_the_note_ride_the_arrival_only_with_remember_on() {
         8,
         "at most eight in all"
     );
+}
+
+/// The review of 2026-11-09, F2: a forget leaves no trace. The account's
+/// link events go with it (forget, the person's deletion and the prune),
+/// and the names in past reports' Community blocks are scrubbed, while the
+/// counts stay (the report counts opt-outs, never names them, D13).
+#[test]
+fn a_forget_takes_the_link_events_and_the_past_reports_names_with_it() {
+    use crate::protocol::{
+        CohostReportCommunity, CohostReportCommunityMilestone, CohostReportCommunityPerson,
+        CohostSessionReport,
+    };
+    let database = Database::open_in_memory_for_tests();
+    stream_with(
+        &database,
+        "s1",
+        day(2026, 10, 1),
+        &[
+            (StreamPlatform::Twitch, "t1", "Ada"),
+            (StreamPlatform::Kick, "k1", "Ada"),
+            (StreamPlatform::Twitch, "t2", "Bo"),
+        ],
+    );
+    let twitch = person_of(&database, StreamPlatform::Twitch, "t1");
+    let kick = person_of(&database, StreamPlatform::Kick, "k1");
+    let kept = database
+        .community_link(
+            &twitch.id,
+            &kick.id,
+            CommunityLinkKind::Manual,
+            day(2026, 10, 2),
+        )
+        .unwrap();
+    assert_eq!(
+        person_of(&database, StreamPlatform::Twitch, "t1")
+            .link_events
+            .len(),
+        1
+    );
+    // A past report names Ada (Twitch) as a regular and Bo's milestone.
+    database.ensure_fake_live_chat_session("s1").unwrap();
+    let block = CohostReportCommunity {
+        regulars_back: 2,
+        regulars: vec![
+            CohostReportCommunityPerson {
+                name: "Ada".to_string(),
+                platform: StreamPlatform::Twitch,
+                platforms: vec![StreamPlatform::Kick, StreamPlatform::Twitch],
+                streams: 5,
+            },
+            CohostReportCommunityPerson {
+                name: "Bo".to_string(),
+                platform: StreamPlatform::Twitch,
+                platforms: Vec::new(),
+                streams: 4,
+            },
+        ],
+        milestones: vec![CohostReportCommunityMilestone {
+            name: "Bo".to_string(),
+            platform: StreamPlatform::Twitch,
+            milestone: ViewerMilestone {
+                kind: ViewerMilestoneKind::Streams,
+                value: 5,
+            },
+        }],
+        ..Default::default()
+    };
+    database
+        .upsert_cohost_report(&CohostSessionReport::community_only(
+            "s1",
+            block,
+            &day(2026, 10, 1).to_rfc3339(),
+        ))
+        .unwrap();
+    // `!forgetme` from the Kick account: its link event goes; the report
+    // still names Ada on Twitch (a different account) and Bo.
+    database
+        .community_forget_account("kick:k1", day(2026, 10, 3))
+        .unwrap();
+    let ada = person_of(&database, StreamPlatform::Twitch, "t1");
+    assert_eq!(ada.id, kept);
+    assert!(
+        ada.link_events.is_empty(),
+        "the forgotten account's link event is gone: {:?}",
+        ada.link_events
+    );
+    let report = |database: &Database| {
+        database
+            .get_cohost_report("s1")
+            .unwrap()
+            .unwrap()
+            .community
+            .unwrap()
+    };
+    assert_eq!(report(&database).regulars.len(), 2);
+    // `!forgetme` from the Twitch account: Ada leaves the report by name,
+    // the count stays.
+    database
+        .community_forget_account("twitch:t1", day(2026, 10, 4))
+        .unwrap();
+    let scrubbed = report(&database);
+    assert_eq!(scrubbed.regulars_back, 2, "counts stay");
+    assert_eq!(
+        scrubbed
+            .regulars
+            .iter()
+            .map(|person| person.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Bo"]
+    );
+    assert_eq!(scrubbed.milestones.len(), 1);
+    {
+        let conn = database.lock().unwrap();
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM community_link_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(events, 0, "no link event outlives its person");
+    }
+    // "Forget Bo…" scrubs his milestone and his name too.
+    let bo = person_of(&database, StreamPlatform::Twitch, "t2");
+    database
+        .community_forget_person(&bo.id, day(2026, 10, 5))
+        .unwrap();
+    let scrubbed = report(&database);
+    assert!(scrubbed.regulars.is_empty());
+    assert!(scrubbed.milestones.is_empty());
+    assert_eq!(scrubbed.regulars_back, 2);
+    // The prune takes a pruned person's link events too.
+    stream_with(
+        &database,
+        "s2",
+        day(2025, 1, 1),
+        &[
+            (StreamPlatform::Twitch, "old1", "Old"),
+            (StreamPlatform::Kick, "old2", "Old"),
+        ],
+    );
+    let a = person_of(&database, StreamPlatform::Twitch, "old1");
+    let b = person_of(&database, StreamPlatform::Kick, "old2");
+    database
+        .community_link(&a.id, &b.id, CommunityLinkKind::Manual, day(2025, 1, 2))
+        .unwrap();
+    assert_eq!(database.community_prune(day(2026, 10, 6)).unwrap(), 2);
+    {
+        let conn = database.lock().unwrap();
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM community_link_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(events, 0);
+    }
+}
+
+/// The review of 2026-11-09, F4: the arrival lookup rides the delivery
+/// path, so a raid must not cost queries per author. 400 fresh authors,
+/// half of them known from an earlier stream, are looked up with one
+/// statement per table (plus the one-time stream read the session caches),
+/// and the answers are the same as before.
+#[test]
+fn a_raid_of_four_hundred_fresh_authors_costs_one_read_per_table() {
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static STATEMENTS: AtomicUsize = AtomicUsize::new(0);
+    fn count(event: TraceEvent<'_>) {
+        if matches!(event, TraceEvent::Stmt(..)) {
+            STATEMENTS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let database = Database::open_in_memory_for_tests();
+    let known: Vec<(StreamPlatform, String, String)> = (0..200)
+        .map(|index| {
+            (
+                StreamPlatform::Twitch,
+                format!("known{index}"),
+                format!("Known {index}"),
+            )
+        })
+        .collect();
+    let chatters: Vec<(StreamPlatform, &str, &str)> = known
+        .iter()
+        .map(|(platform, id, name)| (*platform, id.as_str(), name.as_str()))
+        .collect();
+    stream_with(&database, "s1", day(2026, 10, 1), &chatters);
+    stream_with(&database, "s2", day(2026, 10, 8), &chatters);
+    database
+        .community_record_stream("s3", day(2026, 10, 15), &[StreamPlatform::Twitch])
+        .unwrap();
+    let mut authors: Vec<(StreamPlatform, String)> = known
+        .iter()
+        .map(|(platform, id, _)| (*platform, id.clone()))
+        .collect();
+    authors.extend((0..200).map(|index| (StreamPlatform::Twitch, format!("new{index}"))));
+    {
+        let conn = database.lock().unwrap();
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count));
+    }
+    let mut arrived = HashSet::new();
+    let mut streams = None;
+    STATEMENTS.store(0, Ordering::SeqCst);
+    let lookups = database
+        .community_lookup_arrivals(
+            "s3",
+            &authors,
+            &HashSet::new(),
+            &mut arrived,
+            &mut streams,
+            day(2026, 10, 15),
+            3,
+            true,
+        )
+        .unwrap();
+    let cold = STATEMENTS.load(Ordering::SeqCst);
+    assert!(
+        cold <= 8,
+        "a raid of 400 cost {cold} statements (streams, accounts, people, live accounts, attendance, memories)"
+    );
+    assert_eq!(lookups.len(), 400);
+    let arrivals = lookups.iter().filter(|l| l.arrival.is_some()).count();
+    assert_eq!(arrivals, 200, "every known person arrived once");
+    assert!(
+        lookups
+            .iter()
+            .filter(|l| l.key.starts_with("twitch:new"))
+            .all(|l| l.person_id.is_none() && l.arrival.is_none())
+    );
+    let one = lookups
+        .iter()
+        .find(|l| l.key == "twitch:known7")
+        .and_then(|l| l.arrival.as_ref())
+        .unwrap();
+    assert_eq!((one.streams, one.in_a_row, one.regular), (3, 3, true));
+    assert_eq!(arrived.len(), 200);
+    assert!(streams.as_ref().is_some_and(|s| s.len() == 3), "cached");
+    // Warm: the streams are cached, and nobody arrives twice.
+    STATEMENTS.store(0, Ordering::SeqCst);
+    let again = database
+        .community_lookup_arrivals(
+            "s3",
+            &authors,
+            &HashSet::new(),
+            &mut arrived,
+            &mut streams,
+            day(2026, 10, 15),
+            3,
+            true,
+        )
+        .unwrap();
+    let warm = STATEMENTS.load(Ordering::SeqCst);
+    assert!(warm <= 6, "warm: {warm}");
+    assert!(again.iter().all(|l| l.arrival.is_none()));
+    {
+        let conn = database.lock().unwrap();
+        conn.trace_v2(TraceEventCodes::empty(), None);
+    }
+}
+
+/// The review of 2026-11-09, F7 (D3, H4): what the memory pass sends about
+/// a linked person is never derived from YouTube. Ada chatted in three
+/// streams on YouTube (as "ada_dev", most recently) and in one on Twitch:
+/// the pass sees one stream, no regular, the Twitch name and Twitch alone.
+#[test]
+fn the_memory_pass_facts_about_a_linked_person_leave_youtube_out() {
+    let database = Database::open_in_memory_for_tests();
+    for (session_id, at) in [
+        ("y1", day(2026, 10, 20)),
+        ("y2", day(2026, 10, 27)),
+        ("y3", day(2026, 11, 3)),
+    ] {
+        stream_with(
+            &database,
+            session_id,
+            at,
+            &[(StreamPlatform::Youtube, "UCada", "ada_dev")],
+        );
+    }
+    stream_with(
+        &database,
+        "t1",
+        day(2026, 10, 1),
+        &[(StreamPlatform::Twitch, "ada", "Ada")],
+    );
+    let youtube = person_of(&database, StreamPlatform::Youtube, "UCada");
+    let twitch = person_of(&database, StreamPlatform::Twitch, "ada");
+    database
+        .community_link(
+            &twitch.id,
+            &youtube.id,
+            CommunityLinkKind::Manual,
+            day(2026, 11, 4),
+        )
+        .unwrap();
+    let linked = person_of(&database, StreamPlatform::Twitch, "ada");
+    assert_eq!(linked.streams, 4);
+    assert!(linked.regular, "the card counts everything");
+    assert_eq!(linked.name, "ada_dev", "the newest name, YouTube's");
+    let (by_key, people) = database
+        .community_memory_people(&["twitch:ada".to_string()], day(2026, 11, 8), 3)
+        .unwrap();
+    assert_eq!(by_key.len(), 1);
+    let facts = people.values().next().unwrap();
+    assert_eq!(facts.name, "Ada", "the non-YouTube name");
+    assert_eq!(facts.streams, 1, "YouTube attendance never leaves");
+    assert!(!facts.regular);
+    assert_eq!(
+        facts.accounts,
+        vec![("twitch:ada".to_string(), StreamPlatform::Twitch)]
+    );
+}
+
+/// The review of 2026-11-09, F8: nothing derived from a YouTube account
+/// outlives its 30 days (D3). Kim, YouTube only, tipped on day 1 and
+/// chatted five days running (a 5th-stream milestone, best 5 in a row);
+/// once days 1 and 2 are past the window, the tip, the milestone and the
+/// best run are recomputed from the three days left. And support is per
+/// account (D4): a split gives each side its own back.
+#[test]
+fn youtube_derived_support_milestones_and_best_run_leave_with_the_attendance() {
+    let database = Database::open_in_memory_for_tests();
+    for (index, day_of_month) in (1..=5u32).enumerate() {
+        let at = day(2026, 9, day_of_month);
+        let session_id = format!("s{day_of_month}");
+        database
+            .community_record_stream(&session_id, at, &[StreamPlatform::Youtube])
+            .unwrap();
+        let mut row = facts(&chat(
+            &session_id,
+            StreamPlatform::Youtube,
+            "kim",
+            "Kim",
+            index as u32,
+            at,
+        ));
+        if day_of_month == 1 {
+            row.support.tips.insert("USD".to_string(), 20_000_000);
+        }
+        if day_of_month == 5 {
+            row.celebrate = Some(ViewerMilestone {
+                kind: ViewerMilestoneKind::Streams,
+                value: 5,
+            });
+        }
+        database.community_record_batch(&[row], at).unwrap();
+    }
+    let kim = person_of(&database, StreamPlatform::Youtube, "kim");
+    assert_eq!((kim.streams, kim.in_a_row, kim.best_in_a_row), (5, 5, 5));
+    assert_eq!(kim.support.tips.get("USD"), Some(&20_000_000));
+    assert_eq!(kim.milestones, vec!["streams-5".to_string()]);
+    // Day 33 after the first chat: days 1 and 2 leave the window.
+    assert_eq!(database.community_prune(day(2026, 10, 3)).unwrap(), 0);
+    let kim = person_of(&database, StreamPlatform::Youtube, "kim");
+    assert_eq!((kim.streams, kim.in_a_row, kim.best_in_a_row), (3, 3, 3));
+    assert!(
+        kim.support.is_empty(),
+        "the day-1 tip left: {:?}",
+        kim.support
+    );
+    assert!(
+        kim.milestones.is_empty(),
+        "a 5th-stream milestone three streams cannot justify: {:?}",
+        kim.milestones
+    );
+    // A Twitch person keeps the best run and the milestones for good.
+    database
+        .community_record_stream("t1", day(2026, 9, 1), &[StreamPlatform::Twitch])
+        .unwrap();
+    let mut cheer = facts(&chat(
+        "t1",
+        StreamPlatform::Twitch,
+        "ada",
+        "Ada",
+        9,
+        day(2026, 9, 1),
+    ));
+    cheer.support.bits = 100;
+    cheer.celebrate = Some(ViewerMilestone {
+        kind: ViewerMilestoneKind::Row,
+        value: 3,
+    });
+    database
+        .community_record_batch(&[cheer], day(2026, 9, 1))
+        .unwrap();
+    let mut kicks = facts(&chat(
+        "t1",
+        StreamPlatform::Kick,
+        "ada-k",
+        "Ada",
+        10,
+        day(2026, 9, 1),
+    ));
+    kicks.support.kicks = 50;
+    database
+        .community_record_batch(&[kicks], day(2026, 9, 1))
+        .unwrap();
+    assert_eq!(database.community_prune(day(2026, 10, 3)).unwrap(), 0);
+    let ada = person_of(&database, StreamPlatform::Twitch, "ada");
+    assert_eq!(ada.milestones, vec!["row-3".to_string()]);
+    assert_eq!(ada.support.bits, 100);
+    // Linked: the union; split: each side's own support comes back (D4).
+    let kick = person_of(&database, StreamPlatform::Kick, "ada-k");
+    database
+        .community_link(
+            &ada.id,
+            &kick.id,
+            CommunityLinkKind::Manual,
+            day(2026, 10, 4),
+        )
+        .unwrap();
+    let linked = person_of(&database, StreamPlatform::Twitch, "ada");
+    assert_eq!((linked.support.bits, linked.support.kicks), (100, 50));
+    database
+        .community_unlink("kick:ada-k", day(2026, 10, 5))
+        .unwrap();
+    let twitch = person_of(&database, StreamPlatform::Twitch, "ada");
+    let kick = person_of(&database, StreamPlatform::Kick, "ada-k");
+    assert_eq!((twitch.support.bits, twitch.support.kicks), (100, 0));
+    assert_eq!((kick.support.bits, kick.support.kicks), (0, 50));
+    // The export carries the rows, and a round trip keeps them.
+    let file = database.community_export(day(2026, 10, 6)).unwrap();
+    let ada_export = file
+        .people
+        .iter()
+        .find(|person| {
+            person
+                .accounts
+                .iter()
+                .any(|a| a.account_key == "twitch:ada")
+        })
+        .unwrap();
+    assert_eq!(ada_export.accounts[0].support.len(), 1);
+    assert_eq!(ada_export.accounts[0].support[0].support.bits, 100);
+    let other = Database::open_in_memory_for_tests();
+    other.community_import(&file, day(2026, 10, 7)).unwrap();
+    assert_eq!(
+        person_of(&other, StreamPlatform::Twitch, "ada")
+            .support
+            .bits,
+        100
+    );
+    other.community_import(&file, day(2026, 10, 8)).unwrap();
+    assert_eq!(
+        person_of(&other, StreamPlatform::Twitch, "ada")
+            .support
+            .bits,
+        100,
+        "a second import doubles nothing"
+    );
+}
+
+/// The review of 2026-11-09, F9: the import's gaps. An account it attaches
+/// to a person already here gets a `manual` link event; an X account joins
+/// an existing person only when the file held every account of that
+/// person (otherwise it lands alone); a file's "forgotten" person status
+/// imports as normal (tombstones are the accounts' own).
+#[test]
+fn the_import_records_its_links_refuses_strange_x_attachments_and_clamps_status() {
+    let file = |people: Vec<ExportPerson>| CommunityExportFile {
+        version: EXPORT_VERSION,
+        exported_at: day(2026, 10, 10).to_rfc3339(),
+        people,
+        streams: Vec::new(),
+    };
+    let account = |key: &str, platform: StreamPlatform, name: &str| ExportAccount {
+        account_key: key.to_string(),
+        platform: stream_platform_id(platform).to_string(),
+        author_id: key.split_once(':').unwrap().1.to_string(),
+        name: name.to_string(),
+        handle: None,
+        avatar_url: None,
+        first_seen_at: day(2026, 10, 1).to_rfc3339(),
+        last_seen_at: day(2026, 10, 9).to_rfc3339(),
+        status: "normal".to_string(),
+        updated_at: day(2026, 10, 9).to_rfc3339(),
+        attendance: Vec::new(),
+        support: Vec::new(),
+    };
+    let person = |id: &str, status: &str, accounts: Vec<ExportAccount>| ExportPerson {
+        id: id.to_string(),
+        status: status.to_string(),
+        updated_at: day(2026, 10, 9).to_rfc3339(),
+        accounts,
+        ..Default::default()
+    };
+    // Locally: Ada on Twitch and Kick (one person), Bo on Kick alone.
+    let database = Database::open_in_memory_for_tests();
+    stream_with(
+        &database,
+        "s1",
+        day(2026, 10, 1),
+        &[
+            (StreamPlatform::Twitch, "ada", "Ada"),
+            (StreamPlatform::Kick, "ada-k", "Ada"),
+            (StreamPlatform::Kick, "bo", "Bo"),
+        ],
+    );
+    let ada = person_of(&database, StreamPlatform::Twitch, "ada");
+    let ada_kick = person_of(&database, StreamPlatform::Kick, "ada-k");
+    database
+        .community_link(
+            &ada.id,
+            &ada_kick.id,
+            CommunityLinkKind::Manual,
+            day(2026, 10, 2),
+        )
+        .unwrap();
+    // The file: Ada's Kick and X (the other computer never saw her Twitch),
+    // Bo's Kick and X, and Cy marked "forgotten" with a live account.
+    let imported = file(vec![
+        person(
+            "p-ada",
+            "normal",
+            vec![
+                account("kick:ada-k", StreamPlatform::Kick, "Ada"),
+                account("x:ada-x", StreamPlatform::X, "ada"),
+                account("youtube:UCada", StreamPlatform::Youtube, "ada_dev"),
+            ],
+        ),
+        person(
+            "p-bo",
+            "normal",
+            vec![
+                account("kick:bo", StreamPlatform::Kick, "Bo"),
+                account("x:bo-x", StreamPlatform::X, "bo"),
+            ],
+        ),
+        person(
+            "p-cy",
+            "forgotten",
+            vec![account("twitch:cy", StreamPlatform::Twitch, "Cy")],
+        ),
+    ]);
+    database
+        .community_import(&imported, day(2026, 10, 12))
+        .unwrap();
+    // Ada's X account: the file never held her Twitch account, so it
+    // lands alone; her YouTube account attaches, on the record.
+    let ada = person_of(&database, StreamPlatform::Twitch, "ada");
+    let mut keys: Vec<&str> = ada
+        .accounts
+        .iter()
+        .map(|a| a.account_key.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["kick:ada-k", "twitch:ada", "youtube:UCada"]);
+    let ada_x = person_of(&database, StreamPlatform::X, "ada-x");
+    assert_ne!(
+        ada_x.id, ada.id,
+        "a stranger on this side refuses the X join"
+    );
+    assert_eq!(ada_x.accounts.len(), 1);
+    assert!(
+        ada.link_events
+            .iter()
+            .any(|event| event.account_key == "youtube:UCada"
+                && event.kind == CommunityLinkKind::Manual),
+        "{:?}",
+        ada.link_events
+    );
+    // Bo's X account: the file held both of Bo's accounts, so it joins.
+    let bo = person_of(&database, StreamPlatform::Kick, "bo");
+    assert_eq!(bo.accounts.len(), 2);
+    assert!(bo.accounts.iter().any(|a| a.account_key == "x:bo-x"));
+    assert!(
+        bo.link_events
+            .iter()
+            .any(|event| event.account_key == "x:bo-x" && event.kind == CommunityLinkKind::Manual)
+    );
+    // Cy is a normal person with a live account, never "forgotten".
+    let cy = person_of(&database, StreamPlatform::Twitch, "cy");
+    assert_eq!(cy.status, CommunityPersonStatus::Normal);
+    assert!(!cy.id.is_empty());
 }

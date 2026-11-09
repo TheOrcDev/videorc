@@ -29,8 +29,8 @@ use crate::community::{
     CommunityPersonStatus, CommunitySuggestion, CommunitySuggestionReason, CommunitySummary,
     CommunitySupport, KnownStream, LIST_LIMIT_MAX, NOTE_MAX_CHARS, OTHER_RETENTION_DAYS,
     PersonHistory, REGULAR_WINDOW_DAYS, VIEWER_MEMORIES_MAX, ViewerArrival, ViewerMilestone,
-    YOUTUBE_RETENTION_DAYS, account_key, arrival_facts, away_days, in_a_row, is_regular,
-    platform_has_identity, suggestion_name_key,
+    YOUTUBE_RETENTION_DAYS, account_key, arrival_facts, away_days, best_in_a_row, in_a_row,
+    is_regular, milestones_within, platform_has_identity, suggestion_name_key,
 };
 use crate::live_chat::{LiveChatEventDetails, LiveChatEventType, LiveChatMessage};
 use crate::storage::Database;
@@ -265,6 +265,25 @@ pub struct ArrivalLookup {
     /// Set for a returning person; `None` for a first-timer, a bot, a
     /// forgotten account or the streamer.
     pub arrival: Option<ViewerArrival>,
+    /// The person already arrived this stream on another account (F6): the
+    /// row is neither a first chat nor a return, and earns no welcome.
+    pub already_arrived: bool,
+}
+
+/// What `community_unlink` did (F10): the account split off into a new
+/// person, or it was alone already and nothing changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommunityUnlinkOutcome {
+    Split { person_id: String },
+    Alone { person_id: String },
+}
+
+impl CommunityUnlinkOutcome {
+    pub fn person_id(&self) -> &str {
+        match self {
+            Self::Split { person_id } | Self::Alone { person_id } => person_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -317,6 +336,10 @@ pub struct ExportAccount {
     pub status: String,
     pub updated_at: String,
     pub attendance: Vec<ExportAttendance>,
+    /// F8: the support given per stream (a file from before it has none;
+    /// its person-level total lands on the first account).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub support: Vec<ExportSupport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -326,6 +349,14 @@ pub struct ExportAttendance {
     pub first_message_at: String,
     pub last_message_at: String,
     pub messages: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSupport {
+    pub session_id: String,
+    pub support: CommunitySupport,
+    pub at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -341,6 +372,16 @@ pub const EXPORT_VERSION: u32 = 1;
 // --- Schema -------------------------------------------------------------------
 
 pub(crate) fn create_community_schema(conn: &Connection) -> Result<()> {
+    // F8: support used to be one total per person; a store from before the
+    // per-stream rows keeps that total on its first live account.
+    let had_support_rows: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'community_support'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false);
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS community_people (
             id TEXT PRIMARY KEY,
@@ -390,6 +431,13 @@ pub(crate) fn create_community_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_community_attendance_session
             ON community_attendance(session_id);
+        CREATE TABLE IF NOT EXISTS community_support (
+            account_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            support_json TEXT NOT NULL,
+            at TEXT NOT NULL,
+            PRIMARY KEY (account_key, session_id)
+        );
         CREATE TABLE IF NOT EXISTS community_link_events (
             id TEXT PRIMARY KEY,
             person_id TEXT NOT NULL,
@@ -436,6 +484,19 @@ pub(crate) fn create_community_schema(conn: &Connection) -> Result<()> {
     if !has_last_attempt {
         conn.execute(
             "ALTER TABLE community_memory_jobs ADD COLUMN last_attempt_at TEXT",
+            [],
+        )?;
+    }
+    if !had_support_rows {
+        conn.execute(
+            "INSERT OR IGNORE INTO community_support (account_key, session_id, support_json, at)
+             SELECT (SELECT account_key FROM community_accounts
+                     WHERE person_id = p.id AND status != 'forgotten'
+                     ORDER BY first_seen_at ASC, account_key ASC LIMIT 1),
+                    'legacy', p.support_json, p.updated_at
+             FROM community_people p
+             WHERE p.support_json != '{}' AND EXISTS (
+                SELECT 1 FROM community_accounts WHERE person_id = p.id AND status != 'forgotten')",
             [],
         )?;
     }
@@ -540,6 +601,62 @@ fn live_accounts_locked(conn: &Connection, person_id: &str) -> Result<Vec<Accoun
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// One `IN (...)` per this many keys (F4): SQLite's bundled variable limit
+/// is far above it, and a raid of 400 fresh authors stays at one read per
+/// table.
+const IN_CHUNK: usize = 500;
+
+fn in_placeholders(count: usize) -> String {
+    (1..=count)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The accounts behind these keys, by key (F4: one query per chunk).
+fn accounts_by_keys_locked(
+    conn: &Connection,
+    keys: &[String],
+) -> Result<HashMap<String, AccountRow>> {
+    let mut out = HashMap::with_capacity(keys.len());
+    for chunk in keys.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM community_accounts WHERE account_key IN ({})",
+            in_placeholders(chunk.len())
+        ))?;
+        let rows =
+            statement.query_map(rusqlite::params_from_iter(chunk.iter()), account_from_row)?;
+        for row in rows {
+            let row = row?;
+            out.insert(row.account_key.clone(), row);
+        }
+    }
+    Ok(out)
+}
+
+/// The live accounts of these people, by person (F4).
+fn live_accounts_by_people_locked(
+    conn: &Connection,
+    person_ids: &[String],
+) -> Result<HashMap<String, Vec<AccountRow>>> {
+    let mut out: HashMap<String, Vec<AccountRow>> = HashMap::with_capacity(person_ids.len());
+    for chunk in person_ids.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM community_accounts
+             WHERE person_id IN ({}) AND status != 'forgotten'
+             ORDER BY first_seen_at ASC, account_key ASC",
+            in_placeholders(chunk.len())
+        ))?;
+        let rows =
+            statement.query_map(rusqlite::params_from_iter(chunk.iter()), account_from_row)?;
+        for row in rows {
+            let row = row?;
+            out.entry(row.person_id.clone()).or_default().push(row);
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone)]
 struct PersonRow {
     id: String,
@@ -552,29 +669,54 @@ struct PersonRow {
     status: CommunityPersonStatus,
 }
 
+const PERSON_COLUMNS: &str =
+    "id, name, avatar_url, best_in_a_row, support_json, milestones_json, note, status";
+
+fn person_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonRow> {
+    let support_json: String = row.get(4)?;
+    let milestones_json: String = row.get(5)?;
+    let status: String = row.get(7)?;
+    Ok(PersonRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        avatar_url: row.get(2)?,
+        best_in_a_row: row.get::<_, i64>(3)?.max(0) as u32,
+        support: serde_json::from_str(&support_json).unwrap_or_default(),
+        milestones: serde_json::from_str(&milestones_json).unwrap_or_default(),
+        note: row.get(6)?,
+        status: CommunityPersonStatus::parse(&status),
+    })
+}
+
 fn person_locked(conn: &Connection, id: &str) -> Result<Option<PersonRow>> {
     Ok(conn
         .query_row(
-            "SELECT id, name, avatar_url, best_in_a_row, support_json, milestones_json, note, status
-             FROM community_people WHERE id = ?1",
+            &format!("SELECT {PERSON_COLUMNS} FROM community_people WHERE id = ?1"),
             params![id],
-            |row| {
-                let support_json: String = row.get(4)?;
-                let milestones_json: String = row.get(5)?;
-                let status: String = row.get(7)?;
-                Ok(PersonRow {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    avatar_url: row.get(2)?,
-                    best_in_a_row: row.get::<_, i64>(3)?.max(0) as u32,
-                    support: serde_json::from_str(&support_json).unwrap_or_default(),
-                    milestones: serde_json::from_str(&milestones_json).unwrap_or_default(),
-                    note: row.get(6)?,
-                    status: CommunityPersonStatus::parse(&status),
-                })
-            },
+            person_from_row,
         )
         .optional()?)
+}
+
+/// The people behind these ids, by id (F4: one query per chunk).
+fn people_by_ids_locked(
+    conn: &Connection,
+    person_ids: &[String],
+) -> Result<HashMap<String, PersonRow>> {
+    let mut out = HashMap::with_capacity(person_ids.len());
+    for chunk in person_ids.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT {PERSON_COLUMNS} FROM community_people WHERE id IN ({})",
+            in_placeholders(chunk.len())
+        ))?;
+        let rows =
+            statement.query_map(rusqlite::params_from_iter(chunk.iter()), person_from_row)?;
+        for row in rows {
+            let row = row?;
+            out.insert(row.id.clone(), row);
+        }
+    }
+    Ok(out)
 }
 
 fn known_streams_locked(conn: &Connection) -> Result<Vec<KnownStream>> {
@@ -607,63 +749,203 @@ fn known_streams_locked(conn: &Connection) -> Result<Vec<KnownStream>> {
 /// time; an attendance row whose stream is unknown uses its own first
 /// message time), messages, first and last chat, celebrated milestones.
 fn person_history_locked(conn: &Connection, person: &PersonRow) -> Result<PersonHistory> {
-    let accounts = live_accounts_locked(conn, &person.id)?;
-    let mut history = PersonHistory {
-        platforms: accounts.iter().map(|account| account.platform).collect(),
-        celebrated: person.milestones.clone(),
-        ..Default::default()
-    };
-    history
-        .platforms
-        .sort_by_key(|platform| stream_platform_id(*platform));
-    history.platforms.dedup();
-    let mut statement = conn.prepare(
-        "SELECT t.session_id, t.first_message_at, t.last_message_at, t.messages, s.started_at
-         FROM community_attendance t
-         JOIN community_accounts a ON a.account_key = t.account_key
-         LEFT JOIN community_streams s ON s.session_id = t.session_id
-         WHERE a.person_id = ?1 AND a.status != 'forgotten'",
-    )?;
-    let rows = statement.query_map(params![person.id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, Option<String>>(4)?,
-        ))
-    })?;
-    for row in rows {
-        let (session_id, first, last, messages, started_at) = row?;
-        let first_at = parse_at(&first);
-        let last_at = parse_at(&last);
-        let started = started_at.as_deref().and_then(parse_at).or(first_at);
-        if let Some(started) = started {
-            history.attended.push((session_id, started));
-        }
-        history.messages = history.messages.saturating_add(messages.max(0) as u64);
-        if let Some(first_at) = first_at {
-            history.first_seen_at = Some(
-                history
-                    .first_seen_at
-                    .map_or(first_at, |seen| seen.min(first_at)),
-            );
-        }
-        if let Some(last_at) = last_at {
-            history.last_seen_at = Some(
-                history
-                    .last_seen_at
-                    .map_or(last_at, |seen| seen.max(last_at)),
-            );
-        }
-    }
-    Ok(history)
+    Ok(histories_locked(conn, &[person], false)?
+        .remove(&person.id)
+        .unwrap_or_default())
 }
 
-/// Recompute a person's stored counts and newest name from its accounts
-/// and attendance (D1, D2). A person with no live account left is deleted
-/// with its memories, note and link events' target (the events stay as
-/// history on the kept side).
+/// [`person_history_locked`] for many people at once (F4): one read of the
+/// live accounts and one of the attendance, whatever the count. Every
+/// person given gets an entry. With `without_youtube` the YouTube accounts
+/// and their attendance are left out (F7: what leaves the computer for the
+/// memory pass is never derived from YouTube, D3).
+fn histories_locked(
+    conn: &Connection,
+    people: &[&PersonRow],
+    without_youtube: bool,
+) -> Result<HashMap<String, PersonHistory>> {
+    let ids: Vec<String> = people.iter().map(|person| person.id.clone()).collect();
+    let mut accounts = live_accounts_by_people_locked(conn, &ids)?;
+    let mut histories: HashMap<String, PersonHistory> = HashMap::with_capacity(people.len());
+    for person in people {
+        let accounts = accounts.remove(&person.id).unwrap_or_default();
+        let mut history = PersonHistory {
+            platforms: accounts
+                .iter()
+                .map(|account| account.platform)
+                .filter(|platform| !without_youtube || *platform != StreamPlatform::Youtube)
+                .collect(),
+            celebrated: person.milestones.clone(),
+            ..Default::default()
+        };
+        history
+            .platforms
+            .sort_by_key(|platform| stream_platform_id(*platform));
+        history.platforms.dedup();
+        histories.insert(person.id.clone(), history);
+    }
+    for chunk in ids.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT a.person_id, t.session_id, t.first_message_at, t.last_message_at, t.messages, s.started_at
+             FROM community_attendance t
+             JOIN community_accounts a ON a.account_key = t.account_key
+             LEFT JOIN community_streams s ON s.session_id = t.session_id
+             WHERE a.person_id IN ({}) AND a.status != 'forgotten'{}",
+            in_placeholders(chunk.len()),
+            if without_youtube {
+                " AND a.platform != 'youtube'"
+            } else {
+                ""
+            }
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (person_id, session_id, first, last, messages, started_at) = row?;
+            let Some(history) = histories.get_mut(&person_id) else {
+                continue;
+            };
+            let first_at = parse_at(&first);
+            let last_at = parse_at(&last);
+            let started = started_at.as_deref().and_then(parse_at).or(first_at);
+            if let Some(started) = started {
+                history.attended.push((session_id, started));
+            }
+            history.messages = history.messages.saturating_add(messages.max(0) as u64);
+            if let Some(first_at) = first_at {
+                history.first_seen_at = Some(
+                    history
+                        .first_seen_at
+                        .map_or(first_at, |seen| seen.min(first_at)),
+                );
+            }
+            if let Some(last_at) = last_at {
+                history.last_seen_at = Some(
+                    history
+                        .last_seen_at
+                        .map_or(last_at, |seen| seen.max(last_at)),
+                );
+            }
+        }
+    }
+    Ok(histories)
+}
+
+/// The memories of these people, by person, newest first (F4: one read).
+fn memories_by_people_locked(
+    conn: &Connection,
+    person_ids: &[String],
+) -> Result<HashMap<String, Vec<CommunityMemory>>> {
+    let mut out: HashMap<String, Vec<CommunityMemory>> = HashMap::with_capacity(person_ids.len());
+    for chunk in person_ids.chunks(IN_CHUNK) {
+        let mut statement = conn.prepare(&format!(
+            "SELECT person_id, id, account_key, text, session_id, created_at, updated_at
+             FROM community_memories WHERE person_id IN ({})
+             ORDER BY updated_at DESC, id ASC",
+            in_placeholders(chunk.len())
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                CommunityMemory {
+                    id: row.get(1)?,
+                    account_key: row.get(2)?,
+                    text: row.get(3)?,
+                    session_id: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (person_id, memory) = row?;
+            out.entry(person_id).or_default().push(memory);
+        }
+    }
+    Ok(out)
+}
+
+/// F8: add one row's support to the account's total for that stream. Per
+/// account and per stream, so a split gives both sides their own back (D4)
+/// and the YouTube prune can take what is older than 30 days (D3).
+fn add_support_locked(
+    conn: &Connection,
+    account_key: &str,
+    session_id: &str,
+    support: &CommunitySupport,
+    at: DateTime<Utc>,
+) -> Result<()> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT support_json FROM community_support WHERE account_key = ?1 AND session_id = ?2",
+            params![account_key, session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut total: CommunitySupport = existing
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    total.add(support);
+    set_support_locked(conn, account_key, session_id, &total, at)
+}
+
+/// F8: set the account's support for one stream (the backfill and the
+/// import: a re-run changes nothing).
+fn set_support_locked(
+    conn: &Connection,
+    account_key: &str,
+    session_id: &str,
+    support: &CommunitySupport,
+    at: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO community_support (account_key, session_id, support_json, at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(account_key, session_id) DO UPDATE SET
+            support_json = excluded.support_json, at = MAX(at, excluded.at)",
+        params![
+            account_key,
+            session_id,
+            serde_json::to_string(support)?,
+            iso(at)
+        ],
+    )?;
+    Ok(())
+}
+
+/// A person's support: the sum over its live accounts' rows (F8).
+fn person_support_locked(conn: &Connection, person_id: &str) -> Result<CommunitySupport> {
+    let mut statement = conn.prepare(
+        "SELECT s.support_json FROM community_support s
+         JOIN community_accounts a ON a.account_key = s.account_key
+         WHERE a.person_id = ?1 AND a.status != 'forgotten'",
+    )?;
+    let rows = statement.query_map(params![person_id], |row| row.get::<_, String>(0))?;
+    let mut total = CommunitySupport::default();
+    for row in rows {
+        if let Ok(part) = serde_json::from_str::<CommunitySupport>(&row?) {
+            total.add(&part);
+        }
+    }
+    Ok(total)
+}
+
+/// Recompute a person's stored counts, support and newest name from its
+/// accounts, attendance and support rows (D1, D2). A YouTube-only person's
+/// best run and celebrated milestones are recomputed too (F8), so nothing
+/// derived from YouTube outlives its 30 days (D3). A person with no live
+/// account left is deleted
+/// with its memories, note and link events (F2: a forgotten person leaves
+/// no trace; the kept side of a split keeps its own events).
 fn refresh_person_locked(conn: &Connection, person_id: &str) -> Result<()> {
     let Some(person) = person_locked(conn, person_id)? else {
         return Ok(());
@@ -680,10 +962,27 @@ fn refresh_person_locked(conn: &Connection, person_id: &str) -> Result<()> {
         .iter()
         .max_by(|a, b| a.last_seen_at.cmp(&b.last_seen_at))
         .unwrap_or(&accounts[0]);
+    let support = person_support_locked(conn, person_id)?;
+    // F8: a YouTube-only person's best run and milestones come from the
+    // retained history alone; everyone else keeps their best.
+    let (best, milestones): (Option<i64>, Option<String>) = if history.youtube_only() {
+        let best = best_in_a_row(&history, &streams).max(run);
+        (
+            Some(i64::from(best)),
+            Some(serde_json::to_string(&milestones_within(
+                &person.milestones,
+                history.streams(),
+                best,
+            ))?),
+        )
+    } else {
+        (None, None)
+    };
     conn.execute(
         "UPDATE community_people SET name = ?2, avatar_url = ?3, streams = ?4, messages = ?5,
-            in_a_row = ?6, best_in_a_row = MAX(best_in_a_row, ?6), first_seen_at = ?7,
-            last_seen_at = ?8, updated_at = ?9
+            in_a_row = ?6, best_in_a_row = COALESCE(?11, MAX(best_in_a_row, ?6)),
+            milestones_json = COALESCE(?12, milestones_json), support_json = ?10,
+            first_seen_at = ?7, last_seen_at = ?8, updated_at = ?9
          WHERE id = ?1",
         params![
             person_id,
@@ -695,6 +994,9 @@ fn refresh_person_locked(conn: &Connection, person_id: &str) -> Result<()> {
             history.first_seen_at.map(iso),
             history.last_seen_at.map(iso),
             iso(Utc::now()),
+            serde_json::to_string(&support)?,
+            best,
+            milestones,
         ],
     )?;
     Ok(())
@@ -706,10 +1008,61 @@ fn delete_person_locked(conn: &Connection, person_id: &str) -> Result<()> {
         params![person_id],
     )?;
     conn.execute(
+        "DELETE FROM community_link_events WHERE person_id = ?1",
+        params![person_id],
+    )?;
+    conn.execute(
         "DELETE FROM community_people WHERE id = ?1",
         params![person_id],
     )?;
     Ok(())
+}
+
+/// F2: take forgotten names out of past Buddy reports' Community blocks
+/// (the regulars named and the milestones celebrated). `gone` lists
+/// `(name, platform)` pairs; `None` scrubs every name ("Forget
+/// everyone"). The counts stay: the report counts opt-outs, never names
+/// them (D13). Returns how many reports changed.
+fn scrub_report_names_locked(
+    conn: &Connection,
+    gone: Option<&[(String, StreamPlatform)]>,
+    now: DateTime<Utc>,
+) -> Result<u32> {
+    let mut statement = conn.prepare("SELECT session_id, report_json FROM cohost_reports")?;
+    let rows: Vec<(String, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let matches = |name: &str, platform: StreamPlatform| match gone {
+        None => true,
+        Some(gone) => gone
+            .iter()
+            .any(|(gone_name, gone_platform)| *gone_platform == platform && gone_name == name),
+    };
+    let mut scrubbed = 0u32;
+    for (session_id, json) in rows {
+        let Some(mut report) = crate::protocol::CohostSessionReport::from_stored_json(&json) else {
+            continue;
+        };
+        let Some(community) = report.community.as_mut() else {
+            continue;
+        };
+        let before = (community.regulars.len(), community.milestones.len());
+        community
+            .regulars
+            .retain(|person| !matches(&person.name, person.platform));
+        community
+            .milestones
+            .retain(|milestone| !matches(&milestone.name, milestone.platform));
+        if before == (community.regulars.len(), community.milestones.len()) {
+            continue;
+        }
+        conn.execute(
+            "UPDATE cohost_reports SET report_json = ?2, updated_at = ?3 WHERE session_id = ?1",
+            params![session_id, serde_json::to_string(&report)?, iso(now)],
+        )?;
+        scrubbed = scrubbed.saturating_add(1);
+    }
+    Ok(scrubbed)
 }
 
 fn insert_person_locked(
@@ -786,8 +1139,9 @@ fn ordered_pair<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-/// Move every live account of `from` into `into` (D4): memories follow
-/// their account, support and milestones merge, the older note stays.
+/// Move every live account of `from` into `into` (D4): memories and
+/// support rows follow their account, milestones merge, the older note
+/// stays; the refresh recomputes the counts and the support (F8).
 fn merge_people_locked(
     conn: &Connection,
     into: &str,
@@ -821,8 +1175,6 @@ fn merge_people_locked(
         "UPDATE community_link_events SET person_id = ?2 WHERE person_id = ?1",
         params![from, into],
     )?;
-    let mut support = kept.support.clone();
-    support.add(&gone.support);
     let mut milestones = kept.milestones.clone();
     for key in gone.milestones {
         if !milestones.contains(&key) {
@@ -841,12 +1193,11 @@ fn merge_people_locked(
             CommunityPersonStatus::Normal
         };
     conn.execute(
-        "UPDATE community_people SET support_json = ?2, milestones_json = ?3, note = ?4,
-            best_in_a_row = MAX(best_in_a_row, ?5), status = ?6, updated_at = ?7
+        "UPDATE community_people SET milestones_json = ?2, note = ?3,
+            best_in_a_row = MAX(best_in_a_row, ?4), status = ?5, updated_at = ?6
          WHERE id = ?1",
         params![
             into,
-            serde_json::to_string(&support)?,
             serde_json::to_string(&milestones)?,
             note,
             i64::from(gone.best_in_a_row),
@@ -1079,11 +1430,14 @@ impl Database {
         Ok(())
     }
 
-    /// The arrival facts of fresh authors (B1, D14): one indexed read per
-    /// account, off the runtime. A returning person gets `arrival`; a
-    /// first-timer, a bot, a forgotten account or the streamer gets none.
-    /// `arrived` holds the people already given an arrival this stream, so a
-    /// two-account person gets one whichever account chats first.
+    /// The arrival facts of fresh authors (B1, D14): one read per table for
+    /// the whole batch, off the runtime (F4: a raid of 400 fresh authors
+    /// costs five statements, not five per author). A returning person gets
+    /// `arrival`; a first-timer, a bot, a forgotten account or the streamer
+    /// gets none. `arrived` holds the people already given an arrival this
+    /// stream, so a two-account person gets one whichever account chats
+    /// first. `streams` caches the known streams for the session: filled
+    /// here on first use, kept by the caller.
     #[allow(clippy::too_many_arguments)]
     pub fn community_lookup_arrivals(
         &self,
@@ -1091,12 +1445,55 @@ impl Database {
         authors: &[(StreamPlatform, String)],
         streamer_keys: &HashSet<String>,
         arrived: &mut HashSet<String>,
+        streams: &mut Option<Vec<KnownStream>>,
         now: DateTime<Utc>,
         threshold: u32,
         remember: bool,
     ) -> Result<Vec<ArrivalLookup>> {
         let conn = self.lock()?;
-        let streams = known_streams_locked(&conn)?;
+        let streams: &Vec<KnownStream> = match streams {
+            Some(streams) => streams,
+            None => streams.insert(known_streams_locked(&conn)?),
+        };
+        let mut wanted: Vec<String> = Vec::with_capacity(authors.len());
+        let mut seen: HashSet<String> = HashSet::with_capacity(authors.len());
+        for (platform, author_id) in authors {
+            if !platform_has_identity(*platform) {
+                continue;
+            }
+            let key = account_key(*platform, author_id);
+            if streamer_keys.contains(&key) || !seen.insert(key.clone()) {
+                continue;
+            }
+            wanted.push(key);
+        }
+        let accounts = accounts_by_keys_locked(&conn, &wanted)?;
+        let person_ids: Vec<String> = accounts
+            .values()
+            .filter(|account| account.status != CommunityPersonStatus::Forgotten)
+            .map(|account| account.person_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let people = people_by_ids_locked(&conn, &person_ids)?;
+        // Only the people who may arrive need their history.
+        let candidates: Vec<&PersonRow> = people
+            .values()
+            .filter(|person| {
+                person.status == CommunityPersonStatus::Normal && !arrived.contains(&person.id)
+            })
+            .collect();
+        let histories = histories_locked(&conn, &candidates, false)?;
+        let mut memories = if remember {
+            let ids: Vec<String> = candidates.iter().map(|person| person.id.clone()).collect();
+            memories_by_people_locked(&conn, &ids)?
+        } else {
+            HashMap::new()
+        };
+        let current_started_at = streams
+            .iter()
+            .find(|stream| stream.session_id == session_id)
+            .map(|stream| stream.started_at);
         let mut out = Vec::with_capacity(authors.len());
         for (platform, author_id) in authors {
             let key = account_key(*platform, author_id);
@@ -1104,12 +1501,13 @@ impl Database {
                 key: key.clone(),
                 person_id: None,
                 arrival: None,
+                already_arrived: false,
             };
             if !platform_has_identity(*platform) || streamer_keys.contains(&key) {
                 out.push(lookup);
                 continue;
             }
-            let Some(account) = account_locked(&conn, &key)? else {
+            let Some(account) = accounts.get(&key) else {
                 out.push(lookup);
                 continue;
             };
@@ -1118,16 +1516,23 @@ impl Database {
                 out.push(lookup);
                 continue;
             }
-            let Some(person) = person_locked(&conn, &account.person_id)? else {
+            let Some(person) = people.get(&account.person_id) else {
                 out.push(lookup);
                 continue;
             };
-            if person.status != CommunityPersonStatus::Normal || !arrived.insert(person.id.clone())
-            {
+            if person.status != CommunityPersonStatus::Normal {
                 out.push(lookup);
                 continue;
             }
-            let before = person_history_locked(&conn, &person)?;
+            if !arrived.insert(person.id.clone()) {
+                lookup.already_arrived = true;
+                out.push(lookup);
+                continue;
+            }
+            let Some(before) = histories.get(&person.id) else {
+                out.push(lookup);
+                continue;
+            };
             let earlier: Vec<&(String, DateTime<Utc>)> = before
                 .attended
                 .iter()
@@ -1140,38 +1545,33 @@ impl Database {
             }
             let mut with_current = before.clone();
             if !with_current.attended.iter().any(|(id, _)| id == session_id) {
-                let started_at = streams
-                    .iter()
-                    .find(|stream| stream.session_id == session_id)
-                    .map_or(now, |stream| stream.started_at);
                 with_current
                     .attended
-                    .push((session_id.to_string(), started_at));
+                    .push((session_id.to_string(), current_started_at.unwrap_or(now)));
             }
-            let mut streams_with_current = streams.clone();
-            if !streams_with_current
-                .iter()
-                .any(|stream| stream.session_id == session_id)
-            {
+            let run = if current_started_at.is_some() {
+                in_a_row(&with_current, streams)
+            } else {
+                let mut streams_with_current = streams.clone();
                 streams_with_current.push(KnownStream {
                     session_id: session_id.to_string(),
                     started_at: now,
                     platforms: with_current.platforms.clone(),
                 });
-            }
+                in_a_row(&with_current, &streams_with_current)
+            };
             let streams_count = with_current.streams();
-            let run = in_a_row(&with_current, &streams_with_current);
             // Regular and milestones count this stream; Back and "since"
             // read the history before it.
             let mut facts = arrival_facts(&with_current, streams_count, run, now, threshold);
-            facts.away_days = away_days(&before, now);
+            facts.away_days = away_days(before, now);
             if remember {
                 // D10: with "Buddy remembers" on, the newest memories and
                 // the streamer's note ride the arrival for one delivery
                 // (never the wire), so the greet and the tick can use them.
-                let mut memories = memories_locked(&conn, &person.id)?;
-                memories.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 facts.memories = memories
+                    .remove(&person.id)
+                    .unwrap_or_default()
                     .into_iter()
                     .take(VIEWER_MEMORIES_MAX)
                     .map(|memory| memory.text)
@@ -1260,27 +1660,22 @@ impl Database {
                     params![key, row.session_id, iso(row.at)],
                 )?;
             }
-            if (!row.support.is_empty() || row.celebrate.is_some())
+            if !row.support.is_empty() {
+                // F8: per account and per stream; the refresh sums it.
+                add_support_locked(&transaction, &key, &row.session_id, &row.support, row.at)?;
+            }
+            if let Some(milestone) = row.celebrate
                 && let Some(person) = person_locked(&transaction, &account.person_id)?
             {
-                let mut support = person.support.clone();
-                support.add(&row.support);
                 let mut milestones = person.milestones.clone();
-                if let Some(milestone) = row.celebrate {
-                    let key = milestone.key();
-                    if !milestones.contains(&key) {
-                        milestones.push(key);
-                    }
-                }
-                transaction.execute(
-                        "UPDATE community_people SET support_json = ?2, milestones_json = ?3, updated_at = ?4 WHERE id = ?1",
-                        params![
-                            person.id,
-                            serde_json::to_string(&support)?,
-                            serde_json::to_string(&milestones)?,
-                            iso(now)
-                        ],
+                let milestone_key = milestone.key();
+                if !milestones.contains(&milestone_key) {
+                    milestones.push(milestone_key);
+                    transaction.execute(
+                        "UPDATE community_people SET milestones_json = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![person.id, serde_json::to_string(&milestones)?, iso(now)],
                     )?;
+                }
             }
             if !touched.contains(&account.person_id) {
                 touched.push(account.person_id.clone());
@@ -1632,13 +2027,14 @@ impl Database {
     }
 
     /// "Not the same person" or `!unlink` (D4): the account moves into a new
-    /// person; its memories follow; both sides' counts come back from the
-    /// per-account attendance. Returns the new person's id.
+    /// person; its memories and support follow; both sides' counts come
+    /// back from the per-account rows. An account alone in its person has
+    /// nothing to split (F10): the caller stays quiet.
     pub fn community_unlink(
         &self,
         account_key: &str,
         now: DateTime<Utc>,
-    ) -> Result<String, CommunityError> {
+    ) -> Result<CommunityUnlinkOutcome, CommunityError> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
         let account = account_locked(&transaction, account_key)?.ok_or(CommunityError::NotFound)?;
@@ -1647,8 +2043,9 @@ impl Database {
         }
         let siblings = live_accounts_locked(&transaction, &account.person_id)?;
         if siblings.len() < 2 {
-            // Alone already: nothing to split.
-            return Ok(account.person_id);
+            return Ok(CommunityUnlinkOutcome::Alone {
+                person_id: account.person_id,
+            });
         }
         let old_person =
             person_locked(&transaction, &account.person_id)?.ok_or(CommunityError::NotFound)?;
@@ -1684,7 +2081,9 @@ impl Database {
         refresh_person_locked(&transaction, &old_person.id)?;
         refresh_person_locked(&transaction, &new_person)?;
         transaction.commit()?;
-        Ok(new_person)
+        Ok(CommunityUnlinkOutcome::Split {
+            person_id: new_person,
+        })
     }
 
     /// "Not the same" (D4 c): the pair never shows again.
@@ -1747,6 +2146,8 @@ impl Database {
         };
         let name = account.name.clone();
         forget_account_locked(&transaction, &account, now)?;
+        // F2: past reports named them as a regular or a milestone.
+        scrub_report_names_locked(&transaction, Some(&[(name.clone(), account.platform)]), now)?;
         transaction.commit()?;
         Ok((!name.is_empty()).then_some(name))
     }
@@ -1773,28 +2174,43 @@ impl Database {
         if person_locked(&transaction, person_id)?.is_none() {
             return Err(CommunityError::NotFound);
         }
-        for account in live_accounts_locked(&transaction, person_id)? {
-            forget_account_locked(&transaction, &account, now)?;
+        let accounts = live_accounts_locked(&transaction, person_id)?;
+        let gone: Vec<(String, StreamPlatform)> = accounts
+            .iter()
+            .map(|account| (account.name.clone(), account.platform))
+            .collect();
+        for account in &accounts {
+            forget_account_locked(&transaction, account, now)?;
         }
         delete_person_locked(&transaction, person_id)?;
+        scrub_report_names_locked(&transaction, Some(&gone), now)?;
         transaction.commit()?;
         Ok(())
     }
 
-    /// "Forget everyone…" (D13): the whole store, tombstones included (a
-    /// viewer who typed `!forgetme` is forgotten either way).
-    pub fn community_forget_all(&self) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute_batch(
+    /// "Forget everyone…" (D13): the whole store, except the `!forgetme`
+    /// tombstones (F3): a viewer who asked never to be learned again stays
+    /// unlearned after the streamer wipes the store, with nothing but the
+    /// account key, platform, author id and status left on the row.
+    pub fn community_forget_all(&self, now: DateTime<Utc>) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        transaction.execute_batch(
             "DELETE FROM community_attendance;
+             DELETE FROM community_support;
              DELETE FROM community_memories;
              DELETE FROM community_memory_jobs;
              DELETE FROM community_link_events;
              DELETE FROM community_suggestions;
-             DELETE FROM community_accounts;
+             DELETE FROM community_accounts WHERE status != 'forgotten';
+             UPDATE community_accounts SET person_id = '', name = '', handle = NULL, avatar_url = NULL
+                WHERE status = 'forgotten';
              DELETE FROM community_people;
              DELETE FROM community_streams;",
         )?;
+        // F2: every name in every past report's Community block goes too.
+        scrub_report_names_locked(&transaction, None, now)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1897,8 +2313,11 @@ impl Database {
     /// The people behind these account keys, for a memory pass: each live,
     /// normal person once (a bot, a forgotten account or an account the
     /// store never met is left out), with their live accounts, what Buddy
-    /// knows and the streamer's note. Returns the key → person map and the
-    /// people by id.
+    /// knows and the streamer's note. Nothing here is derived from a
+    /// YouTube account (F7, D3): the name is the newest non-YouTube
+    /// account's, the stream count and the regular flag count non-YouTube
+    /// attendance only, and the accounts listed are the non-YouTube ones.
+    /// Returns the key → person map and the people by id.
     pub fn community_memory_people(
         &self,
         keys: &[String],
@@ -1928,13 +2347,23 @@ impl Database {
             if people.contains_key(&person.id) {
                 continue;
             }
-            let history = person_history_locked(&conn, &person)?;
-            let accounts = live_accounts_locked(&conn, &person.id)?
+            let history = histories_locked(&conn, &[&person], true)?
+                .remove(&person.id)
+                .unwrap_or_default();
+            let off_youtube: Vec<AccountRow> = live_accounts_locked(&conn, &person.id)?
+                .into_iter()
+                .filter(|account| account.platform != StreamPlatform::Youtube)
+                .collect();
+            let name = off_youtube
+                .iter()
+                .max_by(|a, b| a.last_seen_at.cmp(&b.last_seen_at))
+                .map_or_else(|| person.name.clone(), |account| account.name.clone());
+            let accounts = off_youtube
                 .into_iter()
                 .map(|account| (account.account_key, account.platform))
                 .collect();
             let facts = CommunityMemoryPersonFacts {
-                name: person.name.clone(),
+                name,
                 regular: is_regular(&history, now, threshold),
                 streams: history.streams(),
                 accounts,
@@ -2006,10 +2435,11 @@ impl Database {
 
     /// The daily and at-start prune (D3, A4), per account clock: a YouTube
     /// account and everything derived from it go 30 days after its last
-    /// chat (and its older attendance rows go daily); a Twitch, Kick or X
-    /// account 12 months after. Tombstones stay. A linked person outlives
-    /// one account's expiry; a person with no live account left is deleted.
-    /// Returns how many accounts went.
+    /// chat (and its older attendance and support rows go daily, with the
+    /// best run and the milestones they earned recomputed, F8); a Twitch,
+    /// Kick or X account 12 months after. Tombstones stay. A linked person
+    /// outlives one account's expiry; a person with no live account left is
+    /// deleted. Returns how many accounts went.
     pub fn community_prune(&self, now: DateTime<Utc>) -> Result<u32> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
@@ -2019,6 +2449,12 @@ impl Database {
         // the account is alive (D3: counts are recomputed daily).
         transaction.execute(
             "DELETE FROM community_attendance WHERE last_message_at < ?1 AND account_key IN (
+                SELECT account_key FROM community_accounts WHERE platform = 'youtube')",
+            params![youtube_cutoff],
+        )?;
+        // F8: so does the support given from a YouTube account back then.
+        transaction.execute(
+            "DELETE FROM community_support WHERE at < ?1 AND account_key IN (
                 SELECT account_key FROM community_accounts WHERE platform = 'youtube')",
             params![youtube_cutoff],
         )?;
@@ -2048,6 +2484,14 @@ impl Database {
             )?;
             transaction.execute(
                 "DELETE FROM community_suggestions WHERE account_a = ?1 OR account_b = ?1",
+                params![account.account_key],
+            )?;
+            transaction.execute(
+                "DELETE FROM community_link_events WHERE account_key = ?1",
+                params![account.account_key],
+            )?;
+            transaction.execute(
+                "DELETE FROM community_support WHERE account_key = ?1",
                 params![account.account_key],
             )?;
             transaction.execute(
@@ -2082,6 +2526,10 @@ impl Database {
         )?;
         transaction.execute(
             "DELETE FROM community_memories WHERE person_id NOT IN (SELECT id FROM community_people)",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM community_link_events WHERE person_id NOT IN (SELECT id FROM community_people)",
             [],
         )?;
         transaction.commit()?;
@@ -2134,6 +2582,7 @@ impl Database {
         let mut platforms: Vec<StreamPlatform> = Vec::new();
         let mut facts: BTreeMap<String, CommunityRowFacts> = BTreeMap::new();
         let mut attendance: BTreeMap<String, (DateTime<Utc>, DateTime<Utc>, u64)> = BTreeMap::new();
+        let mut support: BTreeMap<String, (CommunitySupport, DateTime<Utc>)> = BTreeMap::new();
         for message in &messages {
             if platform_has_identity(message.platform) && !platforms.contains(&message.platform) {
                 platforms.push(message.platform);
@@ -2151,6 +2600,14 @@ impl Database {
                 slot.1 = slot.1.max(row.at);
                 slot.2 += 1;
             }
+            if !row.support.is_empty() {
+                // F8: set, not added, so a re-run changes nothing.
+                let slot = support
+                    .entry(key.clone())
+                    .or_insert((CommunitySupport::default(), row.at));
+                slot.0.add(&row.support);
+                slot.1 = slot.1.max(row.at);
+            }
             match facts.get_mut(&key) {
                 Some(existing) => {
                     if row.at >= existing.at {
@@ -2160,12 +2617,12 @@ impl Database {
                         }
                         existing.at = row.at;
                     }
-                    existing.support.add(&row.support);
                 }
                 None => {
                     let mut first = row.clone();
                     first.counts = false;
                     first.celebrate = None;
+                    first.support = CommunitySupport::default();
                     facts.insert(key, first);
                 }
             }
@@ -2177,6 +2634,18 @@ impl Database {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
         let mut touched: Vec<String> = Vec::new();
+        for (key, (given, at)) in support {
+            if account_locked(&transaction, &key)?
+                .is_some_and(|account| account.status != CommunityPersonStatus::Forgotten)
+            {
+                set_support_locked(&transaction, &key, session_id, &given, at)?;
+                if let Some(account) = account_locked(&transaction, &key)?
+                    && !touched.contains(&account.person_id)
+                {
+                    touched.push(account.person_id);
+                }
+            }
+        }
         for (key, (first, last, messages)) in attendance {
             transaction.execute(
                 "INSERT INTO community_attendance (account_key, session_id, first_message_at, last_message_at, messages)
@@ -2294,6 +2763,19 @@ impl Database {
                         })
                     })?
                     .collect::<Result<_, _>>()?;
+                let mut support = conn.prepare(
+                    "SELECT session_id, support_json, at FROM community_support WHERE account_key = ?1",
+                )?;
+                let support: Vec<ExportSupport> = support
+                    .query_map(params![account.account_key], |row| {
+                        let json: String = row.get(1)?;
+                        Ok(ExportSupport {
+                            session_id: row.get(0)?,
+                            support: serde_json::from_str(&json).unwrap_or_default(),
+                            at: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<_, _>>()?;
                 person.accounts.push(ExportAccount {
                     account_key: account.account_key,
                     platform: stream_platform_id(account.platform).to_string(),
@@ -2306,6 +2788,7 @@ impl Database {
                     status: account.status.as_str().to_string(),
                     updated_at,
                     attendance,
+                    support,
                 });
             }
             file.people.push(person);
@@ -2337,6 +2820,7 @@ impl Database {
                     status: "forgotten".to_string(),
                     updated_at,
                     attendance: Vec::new(),
+                    support: Vec::new(),
                 }],
                 ..Default::default()
             });
@@ -2346,8 +2830,13 @@ impl Database {
 
     /// Merge an export file in (D5's rules): account and person rows
     /// last-writer-wins by `updated_at`, attendance a union, a forgotten
-    /// tombstone wins over everything. Returns `(people, merged)`: people in
-    /// the file, and how many met an existing person.
+    /// tombstone wins over everything. An account the import attaches to
+    /// an existing person gets a `manual` link event (the streamer did
+    /// it); an X account joins an existing person only when the file held
+    /// every account of that person too (D4: X links come from the viewer,
+    /// never from a merge here); a person's status is normal or bot (F9).
+    /// Returns `(people, merged)`: people in the file, and how many met an
+    /// existing person.
     pub fn community_import(
         &self,
         file: &CommunityExportFile,
@@ -2423,11 +2912,16 @@ impl Database {
                     break;
                 }
             }
+            // F9: a file never makes a person "forgotten"; tombstones are
+            // the accounts' own (above).
+            let status = match CommunityPersonStatus::parse(&person.status) {
+                CommunityPersonStatus::Bot => CommunityPersonStatus::Bot,
+                _ => CommunityPersonStatus::Normal,
+            };
             let (person_id, existing) = match target {
                 Some(id) => (id, true),
                 None => {
                     let first = live[0];
-                    let status = CommunityPersonStatus::parse(&person.status);
                     let id = insert_person_locked(
                         &transaction,
                         &first.name,
@@ -2441,6 +2935,18 @@ impl Database {
             if existing {
                 merged += 1;
             }
+            // F9: an X account may join an existing person only when the
+            // file held every one of that person's accounts (the viewer
+            // linked them there); a stranger on the local side refuses it.
+            let file_keys: HashSet<&str> = person
+                .accounts
+                .iter()
+                .map(|account| account.account_key.as_str())
+                .collect();
+            let strangers = existing
+                && live_accounts_locked(&transaction, &person_id)?
+                    .iter()
+                    .any(|account| !file_keys.contains(account.account_key.as_str()));
             for account in &live {
                 let Some(platform) = stream_platform_from_id(&account.platform) else {
                     continue;
@@ -2476,6 +2982,19 @@ impl Database {
                         }
                     }
                     None => {
+                        let lands_in = if platform == StreamPlatform::X && strangers {
+                            let own = insert_person_locked(
+                                &transaction,
+                                &account.name,
+                                account.avatar_url.as_deref(),
+                                status,
+                                now,
+                            )?;
+                            touched.push(own.clone());
+                            own
+                        } else {
+                            person_id.clone()
+                        };
                         transaction.execute(
                             "INSERT INTO community_accounts (account_key, platform, author_id, person_id, name,
                                 handle, avatar_url, first_seen_at, last_seen_at, status, updated_at)
@@ -2484,7 +3003,7 @@ impl Database {
                                 account.account_key,
                                 stream_platform_id(platform),
                                 account.author_id,
-                                person_id,
+                                lands_in,
                                 account.name,
                                 account.handle,
                                 account.avatar_url,
@@ -2493,6 +3012,17 @@ impl Database {
                                 account.updated_at
                             ],
                         )?;
+                        if existing && lands_in == person_id {
+                            // F9: the import attached it to a person already
+                            // here: the streamer's doing, on the record.
+                            insert_link_event_locked(
+                                &transaction,
+                                &person_id,
+                                &account.account_key,
+                                CommunityLinkKind::Manual,
+                                now,
+                            )?;
+                        }
                     }
                 }
                 for row in &account.attendance {
@@ -2512,6 +3042,40 @@ impl Database {
                         ],
                     )?;
                 }
+                // F8: the support per stream; the file's row wins when newer.
+                for row in &account.support {
+                    transaction.execute(
+                        "INSERT INTO community_support (account_key, session_id, support_json, at)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(account_key, session_id) DO UPDATE SET
+                            support_json = CASE WHEN at < excluded.at THEN excluded.support_json ELSE support_json END,
+                            at = MAX(at, excluded.at)",
+                        params![
+                            account.account_key,
+                            row.session_id,
+                            serde_json::to_string(&row.support)?,
+                            row.at
+                        ],
+                    )?;
+                }
+            }
+            // A file from before the per-stream rows: its one total lands
+            // on the first live account, once.
+            if !person.support.is_empty()
+                && live.iter().all(|account| account.support.is_empty())
+                && let Some(first) = live
+                    .iter()
+                    .find(|account| stream_platform_from_id(&account.platform).is_some())
+            {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO community_support (account_key, session_id, support_json, at)
+                     VALUES (?1, 'legacy', ?2, ?3)",
+                    params![
+                        first.account_key,
+                        serde_json::to_string(&person.support)?,
+                        person.updated_at
+                    ],
+                )?;
             }
             if let Some(current) = person_locked(&transaction, &person_id)? {
                 // A person this import created takes the file's values; an
@@ -2522,10 +3086,6 @@ impl Database {
                         params![person_id, person.updated_at],
                         |row| row.get(0),
                     )?;
-                let mut support = current.support.clone();
-                if newer {
-                    support = person.support.clone();
-                }
                 let mut milestones = current.milestones.clone();
                 for key in &person.milestones {
                     if !milestones.contains(key) {
@@ -2538,12 +3098,11 @@ impl Database {
                     current.note.clone()
                 };
                 transaction.execute(
-                    "UPDATE community_people SET support_json = ?2, milestones_json = ?3, note = ?4,
-                        best_in_a_row = MAX(best_in_a_row, ?5), updated_at = MAX(updated_at, ?6)
+                    "UPDATE community_people SET milestones_json = ?2, note = ?3,
+                        best_in_a_row = MAX(best_in_a_row, ?4), updated_at = MAX(updated_at, ?5)
                      WHERE id = ?1",
                     params![
                         person_id,
-                        serde_json::to_string(&support)?,
                         serde_json::to_string(&milestones)?,
                         note,
                         i64::from(person.best_in_a_row),
@@ -2730,6 +3289,15 @@ fn forget_account_locked(
         "DELETE FROM community_suggestions WHERE account_a = ?1 OR account_b = ?1",
         params![account.account_key],
     )?;
+    // F2: who linked this account, and when, goes with it.
+    conn.execute(
+        "DELETE FROM community_link_events WHERE account_key = ?1",
+        params![account.account_key],
+    )?;
+    conn.execute(
+        "DELETE FROM community_support WHERE account_key = ?1",
+        params![account.account_key],
+    )?;
     conn.execute(
         "UPDATE community_accounts SET name = '', handle = NULL, avatar_url = NULL, status = 'forgotten', updated_at = ?2
          WHERE account_key = ?1",
@@ -2737,6 +3305,14 @@ fn forget_account_locked(
     )?;
     // The person's live accounts decide whether it survives (D13).
     refresh_person_locked(conn, &account.person_id)?;
+    // F2: a person left with one account joins nothing any more, so its
+    // link history (which named the join with the forgotten account) goes.
+    if live_accounts_locked(conn, &account.person_id)?.len() < 2 {
+        conn.execute(
+            "DELETE FROM community_link_events WHERE person_id = ?1",
+            params![account.person_id],
+        )?;
+    }
     Ok(())
 }
 

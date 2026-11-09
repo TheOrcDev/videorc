@@ -759,6 +759,15 @@ min", "2 comebacks", "1 milestone") and `ListRow`s for the names. The
 summary reads as a quiet paragraph under the stats, or a `LockAlert` line
 without Premium.
 
+**Known drift (review 2026-11-09, F13).** The report's first-timers come
+from the community store, whose YouTube attendance is 30 days deep (D3);
+the chat row's "First chat" mark comes from plan 055's query over the chat
+history, which keeps YouTube chat for ever (Open question 2). So a YouTube
+viewer who last chatted more than 30 days ago is a first-timer in the
+report but gets no "First chat" mark on the row. The two agree once the
+YouTube chat prune of Open question 2 lands; until then the drift stays,
+and the report's number is the one that respects YouTube's rule.
+
 ### D16. Pull requests ⚑
 
 - **Superseded by the owner, 2026-11-08:** "execute the entire plan and put
@@ -1293,7 +1302,8 @@ Plan 183's nine, refreshed, then the new ones.
 2. **YouTube chat today** is kept forever on the computer (plan 055; the
    compliance reply says so at lines 72-73). Fix it in a small separate
    plan that prunes YouTube chat after 30 days? *Recommended: yes,
-   separately.*
+   separately.* Until then the report's first-timers and the row's "First
+   chat" differ for YouTube people after 30 days (D15, review F13).
 3. **Free versus Premium** as D6: store, flags, chips, card, Community,
    linking (all three ways) and the report counts are free; memory, AI
    welcomes and drafts with memory, the audience summary and sync are

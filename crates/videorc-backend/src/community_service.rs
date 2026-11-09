@@ -36,7 +36,8 @@ use crate::community::{
     report_community,
 };
 use crate::community_store::{
-    CommunityError, CommunityExportFile, CommunityRowFacts, PRUNED_AT_SETTING_KEY,
+    CommunityError, CommunityExportFile, CommunityRowFacts, CommunityUnlinkOutcome,
+    PRUNED_AT_SETTING_KEY,
 };
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 use crate::state::AppState;
@@ -75,6 +76,9 @@ struct SessionCommunity {
     people_by_key: HashMap<String, String>,
     links: PendingLinks,
     streamer_keys: Option<HashSet<String>>,
+    /// F4: the known streams, read once per session for the arrival
+    /// lookup's "in a row" (the table is never pruned and grows for ever).
+    known_streams: Option<Vec<crate::community::KnownStream>>,
     /// D14: a store error is logged once per session.
     store_error_logged: bool,
     /// D15: what the report's Community block counts, kept as it happens.
@@ -140,6 +144,10 @@ impl CommunityRuntime {
 pub struct CommunityShared {
     runtime: StdMutex<CommunityRuntime>,
     writes_done: Notify,
+    /// F4: arrival lookups run one at a time (so two batches never give one
+    /// person two arrivals) without holding `runtime` across the store
+    /// read, which the delivery fence's `arrival_reaction_due` also takes.
+    lookup: StdMutex<()>,
 }
 
 pub type CommunitySlot = Arc<CommunityShared>;
@@ -148,6 +156,7 @@ pub fn new_slot() -> CommunitySlot {
     Arc::new(CommunityShared {
         runtime: StdMutex::new(CommunityRuntime::default()),
         writes_done: Notify::new(),
+        lookup: StdMutex::new(()),
     })
 }
 
@@ -223,6 +232,10 @@ pub(crate) fn arrival_reaction_due(slot: &CommunitySlot, now: Instant) -> bool {
 /// following the live-chat session like the automatic chat lane.
 #[derive(Debug, Default)]
 pub struct CommunityLane {
+    /// The chat session the rows belong to (F11): a session's start keeps
+    /// only its own rows and its end takes only its own, so a quick stop
+    /// and restart never wipes the new stream's "Welcome back".
+    session_id: Option<String>,
     welcome_back: Vec<(CohostWelcomeBack, String, Instant)>,
     link_made: Vec<(CohostLinkMade, Instant)>,
     /// Arrival rows the bubble welcomed, or whose Suggest card was posted or
@@ -239,10 +252,16 @@ impl CommunityLane {
     /// A returning person arrived (`message_id` is their arrival row).
     pub(crate) fn note_arrival(
         &mut self,
+        session_id: &str,
         entry: CohostWelcomeBack,
         message_id: String,
         now: Instant,
     ) {
+        self.claim_session(session_id);
+        if self.session_id.as_deref() != Some(session_id) {
+            // Another session's lane: the row is stale.
+            return;
+        }
         if self.welcomed.contains(&message_id) {
             return;
         }
@@ -278,7 +297,11 @@ impl CommunityLane {
         before != self.welcome_back.len()
     }
 
-    pub(crate) fn note_link_made(&mut self, link: CohostLinkMade, now: Instant) {
+    pub(crate) fn note_link_made(&mut self, session_id: &str, link: CohostLinkMade, now: Instant) {
+        self.claim_session(session_id);
+        if self.session_id.as_deref() != Some(session_id) {
+            return;
+        }
         self.link_made.push((link, now));
     }
 
@@ -288,6 +311,26 @@ impl CommunityLane {
         self.link_made
             .retain(|(link, _)| link.account_key != account_key);
         before != self.link_made.len()
+    }
+
+    /// F2: a `!forgetme` or "Forget Ada…": the person's "Welcome back" row
+    /// and any "Linked … Undo" card naming the person or the account leave
+    /// at once, not at the end of their window.
+    pub(crate) fn note_forgotten(
+        &mut self,
+        person_id: Option<&str>,
+        account_key: Option<&str>,
+    ) -> bool {
+        let before = (self.welcome_back.len(), self.link_made.len());
+        self.welcome_back.retain(|(waiting, _, _)| {
+            Some(waiting.person_id.as_str()) != person_id
+                && Some(waiting.author_key.as_str()) != account_key
+        });
+        self.link_made.retain(|(link, _)| {
+            Some(link.person_id.as_str()) != person_id
+                && Some(link.account_key.as_str()) != account_key
+        });
+        before != (self.welcome_back.len(), self.link_made.len())
     }
 
     pub(crate) fn welcome_back(&self, now: Instant) -> Vec<CohostWelcomeBack> {
@@ -311,6 +354,31 @@ impl CommunityLane {
         self.link_made.clear();
         self.welcomed.clear();
     }
+
+    /// F11: a chat session started. Rows of another session leave; rows the
+    /// new session already noted (its first batch landed before this ran)
+    /// stay.
+    pub(crate) fn start_session(&mut self, session_id: &str) {
+        if self.session_id.as_deref() != Some(session_id) {
+            self.clear();
+            self.session_id = Some(session_id.to_string());
+        }
+    }
+
+    /// F11: a chat session ended. Its rows leave; a newer session's stay.
+    pub(crate) fn end_session(&mut self, session_id: &str) {
+        if self.session_id.as_deref() == Some(session_id) {
+            self.clear();
+            self.session_id = None;
+        }
+    }
+
+    /// F11: rows noted before the session's start task ran belong to it.
+    fn claim_session(&mut self, session_id: &str) {
+        if self.session_id.is_none() {
+            self.session_id = Some(session_id.to_string());
+        }
+    }
 }
 
 // --- Live-chat hooks ---------------------------------------------------------------
@@ -328,7 +396,12 @@ pub(crate) fn session_started(state: &AppState, session_id: &str, platforms: Vec
     let state = state.clone();
     let session_id = session_id.to_string();
     tokio::spawn(async move {
-        state.cohost.lock().await.community.clear();
+        state
+            .cohost
+            .lock()
+            .await
+            .community
+            .start_session(&session_id);
         let database = state.database.clone();
         let record_session_id = session_id.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -357,8 +430,9 @@ pub(crate) fn session_started(state: &AppState, session_id: &str, platforms: Vec
     });
 }
 
-/// The chat session ended: pending `!link` words die with it; the lane is
-/// cleared; the report's Community block (D15) is written once the
+/// The chat session ended: pending `!link` words die with it; its rows
+/// leave the lane (F11: never a newer session's); the report's Community
+/// block (D15) is written once the
 /// session's detached store writes have landed. Until then the session
 /// stays reachable (`ending`): the last delivered batch's task still
 /// counts its arrivals and `!` commands into it, so a stop right after a
@@ -387,10 +461,12 @@ pub(crate) fn session_ended(state: &AppState) {
     );
     let state = state.clone();
     tokio::spawn(async move {
-        state.cohost.lock().await.community.clear();
         let Some(session_id) = ended_id else {
             return;
         };
+        // F11: only this session's rows leave; a session started meanwhile
+        // keeps its own.
+        state.cohost.lock().await.community.end_session(&session_id);
         state.emit_log(
             "info",
             format!("Community: writing the report block for {session_id}."),
@@ -485,72 +561,104 @@ async fn wait_for_pending_writes(state: &AppState, limit: Duration) {
     }
 }
 
+/// What the arrival lookup tells the delivery path: `account_key` →
+/// arrival for the returning people of this batch, the keys whose person
+/// already arrived this stream on another account (F6: no welcome, no
+/// first chat), and a log line for a store error.
+pub(crate) type ArrivalLookups = (
+    HashMap<String, ViewerArrival>,
+    HashSet<String>,
+    Option<String>,
+);
+
 /// B1, D14: the arrival lookup, inside the same blocking read as the
-/// first-time marker. One indexed read per fresh account. A store error
-/// leaves every row without `arrival` and logs once per session. Returns
-/// `account_key` → arrival for the returning people of this batch.
+/// first-time marker. One read per table per batch (F4). A store error
+/// leaves every row without `arrival` and logs once per session.
 pub(crate) fn lookup_arrivals_blocking(
     database: &Database,
     slot: &CommunitySlot,
     session_id: &str,
     fresh: &[(StreamPlatform, String)],
     now: DateTime<Utc>,
-) -> (HashMap<String, ViewerArrival>, Option<String>) {
+) -> ArrivalLookups {
     let settings = settings_snapshot(database, slot);
     if !settings.enabled || fresh.is_empty() {
-        return (HashMap::new(), None);
+        return (HashMap::new(), HashSet::new(), None);
     }
-    // The runtime lock is held across the read so two batches never give
-    // one person two arrivals. It is a std mutex inside `spawn_blocking`;
-    // nothing async waits on it, and the store lock is taken inside it, so
-    // nothing may take the runtime lock while holding the store's.
-    let mut runtime = slot.lock();
-    let Some(session) = runtime.session.as_mut() else {
-        return (HashMap::new(), None);
+    // F4: lookups run one at a time (so two batches never give one person
+    // two arrivals), but the runtime lock is taken only to borrow the
+    // session's bookkeeping and to give it back: the store read runs
+    // without it, so the delivery fence's `arrival_reaction_due` never
+    // waits on SQLite. Both are std mutexes inside `spawn_blocking`.
+    let _one_at_a_time = slot
+        .lookup
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (streamer_keys, mut arrived, mut streams) = {
+        let mut runtime = slot.lock();
+        let Some(session) = runtime.session.as_mut() else {
+            return (HashMap::new(), HashSet::new(), None);
+        };
+        if session.session_id != session_id {
+            return (HashMap::new(), HashSet::new(), None);
+        }
+        (
+            session.streamer_keys.clone(),
+            std::mem::take(&mut session.arrived),
+            session.known_streams.take(),
+        )
     };
-    if session.session_id != session_id {
-        return (HashMap::new(), None);
-    }
-    let streamer_keys = match session.streamer_keys.clone() {
+    let streamer_keys = match streamer_keys {
         Some(keys) => keys,
-        None => match database.community_streamer_keys() {
-            Ok(keys) => {
-                session.streamer_keys = Some(keys.clone());
-                keys
-            }
-            Err(_) => HashSet::new(),
-        },
+        None => database.community_streamer_keys().unwrap_or_default(),
     };
-    let mut arrived = std::mem::take(&mut session.arrived);
     let looked_up = database.community_lookup_arrivals(
         session_id,
         fresh,
         &streamer_keys,
         &mut arrived,
+        &mut streams,
         now,
         settings.regular_streams,
         settings.remember,
     );
-    session.arrived = arrived;
+    let mut runtime = slot.lock();
+    let Some(session) = runtime
+        .session
+        .as_mut()
+        .filter(|session| session.session_id == session_id)
+    else {
+        // The session ended during the read: its rows go without arrivals.
+        return (HashMap::new(), HashSet::new(), None);
+    };
+    session.arrived.extend(arrived);
+    session.known_streams = streams;
+    if session.streamer_keys.is_none() {
+        session.streamer_keys = Some(streamer_keys);
+    }
     match looked_up {
         Ok(lookups) => {
             let mut arrivals = HashMap::new();
+            let mut already = HashSet::new();
             for lookup in lookups {
                 if let Some(person_id) = lookup.person_id.clone() {
                     session.people_by_key.insert(lookup.key.clone(), person_id);
+                }
+                if lookup.already_arrived {
+                    already.insert(lookup.key.clone());
                 }
                 if let Some(arrival) = lookup.arrival {
                     arrivals.insert(lookup.key, arrival);
                 }
             }
-            (arrivals, None)
+            (arrivals, already, None)
         }
         Err(error) => {
             let log = (!session.store_error_logged).then(|| {
                 format!("Community: the arrival lookup failed; chat goes on without it: {error:#}")
             });
             session.store_error_logged = true;
-            (HashMap::new(), log)
+            (HashMap::new(), HashSet::new(), log)
         }
     }
 }
@@ -640,6 +748,11 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
                             && session.report_arrivals.len() < REPORT_ARRIVALS_MAX
                         {
                             session.report_arrivals.push(ReportArrival {
+                                account_key: message
+                                    .author_id
+                                    .as_deref()
+                                    .map(|author_id| account_key(message.platform, author_id))
+                                    .unwrap_or_default(),
                                 name: message.author_name.trim().to_string(),
                                 platform: message.platform,
                                 arrival,
@@ -678,7 +791,9 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
             let now = Instant::now();
             let mut engine = state.cohost.lock().await;
             for (entry, message_id) in arrivals {
-                engine.community.note_arrival(entry, message_id, now);
+                engine
+                    .community
+                    .note_arrival(session_id, entry, message_id, now);
             }
             drop(engine);
             publish_cohost_state(state).await;
@@ -739,6 +854,58 @@ fn count_for_report(state: &AppState, session_id: &str, count: impl FnOnce(&mut 
     }
 }
 
+/// F2: a forgotten account or person leaves the stream in progress too:
+/// their arrival rows leave the report's Community block before it is
+/// written, their "Welcome back" row and any "Linked … Undo" card leave
+/// the pane at once, and the lookup's key → person mapping forgets them.
+/// `session_id` names the session (`None`: the running one); the account
+/// key or the person id, whichever the caller knows.
+async fn drop_forgotten(
+    state: &AppState,
+    session_id: Option<&str>,
+    account_key: Option<&str>,
+    person_id: Option<&str>,
+) {
+    let person_id: Option<String> = {
+        let mut runtime = state.community.lock();
+        let session = match session_id {
+            Some(session_id) => runtime.session_mut(session_id),
+            None => runtime.session.as_mut(),
+        };
+        match session {
+            Some(session) => {
+                let person_id = person_id.map(str::to_string).or_else(|| {
+                    account_key.and_then(|key| session.people_by_key.get(key).cloned())
+                });
+                let keys: HashSet<String> = session
+                    .people_by_key
+                    .iter()
+                    .filter(|(key, person)| {
+                        Some(key.as_str()) == account_key
+                            || person_id.as_deref() == Some(person.as_str())
+                    })
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                session.report_arrivals.retain(|arrival| {
+                    !keys.contains(&arrival.account_key)
+                        && Some(arrival.account_key.as_str()) != account_key
+                });
+                session.people_by_key.retain(|key, _| !keys.contains(key));
+                person_id
+            }
+            None => person_id.map(str::to_string),
+        }
+    };
+    let mut engine = state.cohost.lock().await;
+    let left = engine
+        .community
+        .note_forgotten(person_id.as_deref(), account_key);
+    drop(engine);
+    if left {
+        publish_cohost_state(state).await;
+    }
+}
+
 /// D15: a link the streamer made while a chat session runs counts in that
 /// session's report.
 fn count_link_for_live_report(state: &AppState) {
@@ -794,6 +961,7 @@ async fn run_chat_command(
                     count_for_report(state, session_id, |session| {
                         session.opt_outs = session.opt_outs.saturating_add(1)
                     });
+                    drop_forgotten(state, Some(session_id), Some(key), None).await;
                     state.emit_log(
                         "info",
                         format!(
@@ -831,7 +999,7 @@ async fn run_chat_command(
             match tokio::task::spawn_blocking(move || database.community_unlink(&unlink_key, now))
                 .await
             {
-                Ok(Ok(_)) => {
+                Ok(Ok(CommunityUnlinkOutcome::Split { .. })) => {
                     changed = true;
                     line = command_bubble_line(talk, &command, &name, None);
                     let mut engine = state.cohost.lock().await;
@@ -840,6 +1008,8 @@ async fn run_chat_command(
                         publish_cohost_state(state).await;
                     }
                 }
+                // F10: alone already; nothing happened, so nothing is said.
+                Ok(Ok(CommunityUnlinkOutcome::Alone { .. })) => {}
                 Ok(Err(CommunityError::NotFound)) => {}
                 Ok(Err(error)) => {
                     state.emit_log("warn", format!("Community: !unlink failed: {error}"))
@@ -904,12 +1074,11 @@ async fn run_chat_command(
                                 account_key: second.account_key.clone(),
                                 at: now.to_rfc3339(),
                             };
-                            state
-                                .cohost
-                                .lock()
-                                .await
-                                .community
-                                .note_link_made(link, Instant::now());
+                            state.cohost.lock().await.community.note_link_made(
+                                session_id,
+                                link,
+                                Instant::now(),
+                            );
                             publish_cohost_state(state).await;
                         }
                         Ok(Err(error)) => {
@@ -929,6 +1098,60 @@ async fn run_chat_command(
                     .await
                     {
                         changed = true;
+                    }
+                }
+                LinkOutcome::Hijacked {
+                    first,
+                    second,
+                    third,
+                } => {
+                    // F5: the word was public and a third account said it
+                    // inside the window, so the join may be a hijack. Undo
+                    // it (the account that joined splits off again), take
+                    // the card down, and list every pair for the streamer.
+                    // Nothing is said: the streamer settles it in Community.
+                    let database = state.database.clone();
+                    let split_key = second.account_key.clone();
+                    let pairs = [
+                        (first.account_key.clone(), second.account_key.clone()),
+                        (first.account_key.clone(), third.account_key.clone()),
+                        (second.account_key.clone(), third.account_key.clone()),
+                    ];
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        database.community_unlink(&split_key, now)?;
+                        for (a, b) in &pairs {
+                            database.community_link_cancelled(a, b, now)?;
+                        }
+                        Ok::<(), CommunityError>(())
+                    })
+                    .await;
+                    match outcome {
+                        Ok(Ok(())) => {
+                            changed = true;
+                            count_for_report(state, session_id, |session| {
+                                session.links_made = session.links_made.saturating_sub(1)
+                            });
+                            let mut engine = state.cohost.lock().await;
+                            if engine.community.note_unlinked(&second.account_key) {
+                                drop(engine);
+                                publish_cohost_state(state).await;
+                            }
+                            state.emit_log(
+                                "info",
+                                format!(
+                                    "Community: a !link word was claimed a third time ({}); the link was undone and waits for you in Community.",
+                                    crate::streaming::stream_platform_label(third.platform)
+                                ),
+                            );
+                        }
+                        Ok(Err(error)) => state.emit_log(
+                            "warn",
+                            format!("Community: could not undo a hijacked !link: {error}"),
+                        ),
+                        Err(error) => state.emit_log(
+                            "warn",
+                            format!("Community: could not undo a hijacked !link: {error}"),
+                        ),
                     }
                 }
             }
@@ -1159,7 +1382,7 @@ pub async fn unlink(
         ));
     }
     let undo_key = key.clone();
-    let person_id = blocking(state, move |database| {
+    let outcome = blocking(state, move |database| {
         database.community_unlink(&undo_key, Utc::now())
     })
     .await?;
@@ -1169,8 +1392,12 @@ pub async fn unlink(
     if card_left {
         publish_cohost_state(state).await;
     }
-    emit_changed(state).await;
-    Ok(CommunityUnlinkResult { person_id })
+    if matches!(outcome, CommunityUnlinkOutcome::Split { .. }) {
+        emit_changed(state).await;
+    }
+    Ok(CommunityUnlinkResult {
+        person_id: outcome.person_id().to_string(),
+    })
 }
 
 pub async fn suggestion_dismiss(
@@ -1232,12 +1459,8 @@ pub async fn forget(
         database.community_forget_person(&id, Utc::now())
     })
     .await?;
-    let mut engine = state.cohost.lock().await;
-    let row_left = engine.community.note_waved(&person_id);
-    drop(engine);
-    if row_left {
-        publish_cohost_state(state).await;
-    }
+    // F2: the pane and the report in progress forget them too.
+    drop_forgotten(state, None, None, Some(&person_id)).await;
     emit_changed(state).await;
     Ok(CommunityAccepted { accepted: true })
 }
@@ -1245,7 +1468,7 @@ pub async fn forget(
 pub async fn forget_all(state: &AppState) -> Result<CommunityAccepted, CommunityError> {
     blocking(state, move |database| {
         database
-            .community_forget_all()
+            .community_forget_all(Utc::now())
             .map_err(CommunityError::from)
     })
     .await?;
@@ -1255,6 +1478,10 @@ pub async fn forget_all(state: &AppState) -> Result<CommunityAccepted, Community
             session.arrived.clear();
             session.people_by_key.clear();
             session.links.clear();
+            // F2: the report in progress names nobody either.
+            session.report_arrivals.clear();
+            // F4: the streams are gone with the store.
+            session.known_streams = None;
         }
     }
     state.cohost.lock().await.community.clear();
@@ -2571,6 +2798,391 @@ mod tests {
         assert_eq!(summary.people, 4);
     }
 
+    /// The review of 2026-11-09, F14: an X account joins only through the
+    /// viewer's own `!link`. The same name on Twitch and X opens no "might
+    /// be the same person" suggestion, and the word joins them through the
+    /// service like any other pair.
+    #[tokio::test]
+    async fn an_x_account_joins_through_its_own_link_word_and_never_by_name() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let generation = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            generation,
+            vec![
+                row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
+                row("s1", StreamPlatform::X, "1001", "Ada", 2, "hello from x"),
+            ],
+        )
+        .await;
+        let twitch = state
+            .database
+            .community_account_person("twitch:ada")
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            state
+                .database
+                .community_account_person("x:1001")
+                .unwrap()
+                .unwrap(),
+            twitch
+        );
+        assert!(
+            suggestions(&state).await.unwrap().suggestions.is_empty(),
+            "a name never suggests an X account"
+        );
+        deliver(
+            &state,
+            generation,
+            vec![row(
+                "s1",
+                StreamPlatform::Twitch,
+                "ada",
+                "Ada",
+                3,
+                "!link orcwave",
+            )],
+        )
+        .await;
+        assert_eq!(pending_link_words(&state), 1);
+        deliver(
+            &state,
+            generation,
+            vec![row(
+                "s1",
+                StreamPlatform::X,
+                "1001",
+                "Ada",
+                4,
+                "!link orcwave",
+            )],
+        )
+        .await;
+        assert_eq!(pending_link_words(&state), 0);
+        assert_eq!(
+            state
+                .database
+                .community_account_person("x:1001")
+                .unwrap()
+                .unwrap(),
+            twitch,
+            "one person now"
+        );
+        assert_eq!(bubble_lines(&state), ["Linked: Ada on Twitch and X."]);
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert_eq!(snapshot.link_made.len(), 1);
+        assert_eq!(snapshot.link_made[0].account_key, "x:1001");
+    }
+
+    /// The review of 2026-11-09, F5: the `!link` word is public, so a third
+    /// account saying it inside the window may mean the join was hijacked.
+    /// Ada links Twitch and YouTube; Mallory types the same word on Kick
+    /// moments later: the YouTube account splits off again, the "Linked …
+    /// Undo" card comes down, nothing is said, and all three pairs wait for
+    /// the streamer under "Links that need you".
+    #[tokio::test]
+    async fn a_third_claim_on_a_linked_word_undoes_the_join_and_lists_the_pairs() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let generation = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            generation,
+            vec![
+                row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
+                row("s1", StreamPlatform::Youtube, "UCada", "ada_dev", 2, "hi"),
+                row("s1", StreamPlatform::Kick, "mal", "Mallory", 3, "hey"),
+                row(
+                    "s1",
+                    StreamPlatform::Twitch,
+                    "ada",
+                    "Ada",
+                    4,
+                    "!link pixel42",
+                ),
+                row(
+                    "s1",
+                    StreamPlatform::Youtube,
+                    "UCada",
+                    "ada_dev",
+                    5,
+                    "!link pixel42",
+                ),
+            ],
+        )
+        .await;
+        let twitch = state
+            .database
+            .community_account_person("twitch:ada")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state
+                .database
+                .community_account_person("youtube:UCada")
+                .unwrap()
+                .unwrap(),
+            twitch,
+            "linked"
+        );
+        assert_eq!(state.cohost.lock().await.snapshot().link_made.len(), 1);
+        assert_eq!(bubble_lines(&state).len(), 1);
+        deliver(
+            &state,
+            generation,
+            vec![row(
+                "s1",
+                StreamPlatform::Kick,
+                "mal",
+                "Mallory",
+                6,
+                "!link pixel42",
+            )],
+        )
+        .await;
+        let youtube = state
+            .database
+            .community_account_person("youtube:UCada")
+            .unwrap()
+            .unwrap();
+        assert_ne!(youtube, twitch, "the join is undone");
+        assert_eq!(
+            state
+                .database
+                .community_account_person("kick:mal")
+                .unwrap()
+                .unwrap()
+                .len(),
+            36,
+            "Mallory is her own person still"
+        );
+        assert!(
+            state.cohost.lock().await.snapshot().link_made.is_empty(),
+            "the card came down"
+        );
+        assert_eq!(bubble_lines(&state).len(), 1, "a hijack says nothing");
+        let listed = suggestions(&state).await.unwrap().suggestions;
+        let mut pairs: Vec<(String, String)> = listed
+            .iter()
+            .map(|s| {
+                (
+                    s.account_a.account_key.clone(),
+                    s.account_b.account_key.clone(),
+                )
+            })
+            .collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("kick:mal".to_string(), "twitch:ada".to_string()),
+                ("kick:mal".to_string(), "youtube:UCada".to_string()),
+                ("twitch:ada".to_string(), "youtube:UCada".to_string()),
+            ]
+        );
+        assert!(
+            listed
+                .iter()
+                .all(|s| s.reason == crate::community::CommunitySuggestionReason::LinkCancelled)
+        );
+        assert_eq!(pending_link_words(&state), 0, "the word stays burnt");
+        // The report counts no link for this stream.
+        assert_eq!(
+            state.community.lock().session.as_ref().unwrap().links_made,
+            0
+        );
+    }
+
+    /// The review of 2026-11-09, F6: a linked person is welcomed once per
+    /// stream. Ada's Twitch row arrives (one welcome card); her YouTube row
+    /// later the same stream is neither a return nor a first chat, so it
+    /// earns no second card and no "First chat" mark (D7: first time only
+    /// when no account was seen before).
+    #[tokio::test]
+    async fn a_linked_person_is_welcomed_once_per_stream() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Suggest).await;
+        let first = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            first,
+            vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
+        )
+        .await;
+        crate::live_chat::stop_live_chat(&state).await;
+        session_settled(&state, "s1").await;
+        // Her YouTube account, never seen, is linked by the streamer.
+        let twitch = state
+            .database
+            .community_account_person("twitch:ada")
+            .unwrap()
+            .unwrap();
+        let second = start_session(&state, "s2").await;
+        deliver(
+            &state,
+            second,
+            vec![row(
+                "s2",
+                StreamPlatform::Youtube,
+                "UCada",
+                "ada_dev",
+                2,
+                "yo",
+            )],
+        )
+        .await;
+        let youtube = state
+            .database
+            .community_account_person("youtube:UCada")
+            .unwrap()
+            .unwrap();
+        state
+            .database
+            .community_link(&twitch, &youtube, CommunityLinkKind::Manual, Utc::now())
+            .unwrap();
+        crate::live_chat::stop_live_chat(&state).await;
+        session_settled(&state, "s2").await;
+        let third = start_session(&state, "s3").await;
+        deliver(
+            &state,
+            third,
+            vec![
+                row("s3", StreamPlatform::Twitch, "ada", "Ada", 3, "back"),
+                row(
+                    "s3",
+                    StreamPlatform::Youtube,
+                    "UCada",
+                    "ada_dev",
+                    4,
+                    "and here",
+                ),
+            ],
+        )
+        .await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        let cards = snapshot
+            .utterances
+            .iter()
+            .filter(|u| u.trigger.kind == CohostUtteranceTriggerKind::Greeting)
+            .count();
+        assert_eq!(
+            cards, 1,
+            "one welcome for one person: {:?}",
+            snapshot.utterances
+        );
+        assert_eq!(snapshot.welcome_back.len(), 1);
+        let rows = state
+            .database
+            .list_live_chat_messages_recent("s3", 10)
+            .unwrap();
+        let by_seq = |seq: u32| {
+            rows.iter()
+                .find(|m| m.provider_message_id == format!("fake-{seq}"))
+                .unwrap()
+                .clone()
+        };
+        assert!(by_seq(3).arrival.is_some(), "the Twitch row arrived");
+        let second_account = by_seq(4);
+        assert!(second_account.arrival.is_none());
+        assert!(
+            !second_account.first_message,
+            "a linked person's other account is no first chat"
+        );
+    }
+
+    /// The review of 2026-11-09, F10: `!unlink` from an account that is
+    /// alone in its person has nothing to split: the bubble says nothing and
+    /// the community is unchanged (no `changed` event, no "Unlinked, Ada.").
+    #[tokio::test]
+    async fn an_unlink_from_a_single_account_person_stays_silent() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let generation = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            generation,
+            vec![
+                row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
+                row("s1", StreamPlatform::Twitch, "ada", "Ada", 2, "!unlink"),
+            ],
+        )
+        .await;
+        assert!(
+            bubble_lines(&state).is_empty(),
+            "{:?}",
+            bubble_lines(&state)
+        );
+        let person = state
+            .database
+            .community_account_person("twitch:ada")
+            .unwrap()
+            .unwrap();
+        let outcome = state
+            .database
+            .community_unlink("twitch:ada", Utc::now())
+            .unwrap();
+        assert_eq!(
+            outcome,
+            CommunityUnlinkOutcome::Alone {
+                person_id: person.clone()
+            }
+        );
+        // The RPC still answers with the person, unchanged.
+        let answer = unlink(
+            &state,
+            CommunityUnlinkParams {
+                account_key: "twitch:ada".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.person_id, person);
+    }
+
+    /// The review of 2026-11-09, F11: a stop and a restart both cleared the
+    /// lane in detached tasks, so the old session's late clear could wipe
+    /// the new session's "Welcome back" rows. The lane is tagged with its
+    /// session: here the new session's row is noted first and the old
+    /// session's end runs after it, and the row stays.
+    #[tokio::test]
+    async fn an_old_sessions_late_clear_never_wipes_the_new_sessions_rows() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let first = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            first,
+            vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
+        )
+        .await;
+        crate::live_chat::stop_live_chat(&state).await;
+        session_settled(&state, "s1").await;
+        let second = start_session(&state, "s2").await;
+        deliver(
+            &state,
+            second,
+            vec![row("s2", StreamPlatform::Twitch, "ada", "Ada", 2, "back")],
+        )
+        .await;
+        assert_eq!(state.cohost.lock().await.snapshot().welcome_back.len(), 1);
+        // The old session's end, arriving late: it takes nothing of s2's.
+        state.cohost.lock().await.community.end_session("s1");
+        assert_eq!(
+            state.cohost.lock().await.snapshot().welcome_back.len(),
+            1,
+            "s2's row survived s1's late clear"
+        );
+        // A row noted before s2's start task ran belongs to s2 and stays
+        // when that start runs.
+        state.cohost.lock().await.community.start_session("s2");
+        assert_eq!(state.cohost.lock().await.snapshot().welcome_back.len(), 1);
+        // s2's own end takes it.
+        state.cohost.lock().await.community.end_session("s2");
+        assert!(state.cohost.lock().await.snapshot().welcome_back.is_empty());
+    }
+
     /// Owner call 2026-11-08 (plan 225 C3): in Suggest mode the "Welcome
     /// back" row stays while its welcome card waits, and leaves when the
     /// card is dismissed (or posted).
@@ -2776,21 +3388,21 @@ mod tests {
             None,
             "Bo is forgotten"
         );
-        // Both arrivals of the last batch reached the report: Ada and Bo
-        // are regulars on their third stream (Bo's row carried his arrival
-        // before his `!forgetme` ran).
+        // Ada's arrival in the last batch reached the report: she is a
+        // regular on her third stream. Bo's arrival went out with his
+        // `!forgetme` (review F2: a forget leaves no name in the report).
         assert_eq!(
-            community.regulars_back, 2,
-            "the arrivals in the last batch reached the report"
+            community.regulars_back, 1,
+            "the arrival in the last batch reached the report"
         );
-        assert_eq!(community.new_regulars, 2);
+        assert_eq!(community.new_regulars, 1);
         assert_eq!(
             community
                 .regulars
                 .iter()
                 .map(|person| person.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Ada", "Bo"]
+            vec!["Ada"]
         );
         assert_eq!(community.first_timers, 0);
         assert!(
@@ -3454,6 +4066,118 @@ mod tests {
         let split = person_at(&state, StreamPlatform::Kick, "9");
         assert_eq!(split.memories.len(), 1);
         assert_eq!(split.memories[0].text, "Streams on Kick at night");
+    }
+
+    /// The review of 2026-11-09, F2: a `!forgetme` leaves no trace in the
+    /// stream in progress either. Ada is a regular on her third stream (a
+    /// "Welcome back" row and a report arrival) and has just linked her
+    /// YouTube account (a "Linked … Undo" card); her `!forgetme` from
+    /// Twitch takes the row, the card and the arrival out at once, so the
+    /// report counts the opt-out and names nobody.
+    #[tokio::test]
+    async fn a_forgetme_drops_the_welcome_back_row_the_link_card_and_the_report_arrival() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        for session_id in ["s1", "s2"] {
+            let generation = start_session(&state, session_id).await;
+            deliver(
+                &state,
+                generation,
+                vec![row(
+                    session_id,
+                    StreamPlatform::Twitch,
+                    "ada",
+                    "Ada",
+                    1,
+                    "hello",
+                )],
+            )
+            .await;
+            crate::live_chat::stop_live_chat(&state).await;
+            session_settled(&state, session_id).await;
+        }
+        let third = start_session(&state, "s3").await;
+        deliver(
+            &state,
+            third,
+            vec![
+                row("s3", StreamPlatform::Twitch, "ada", "Ada", 2, "back"),
+                row("s3", StreamPlatform::Youtube, "UCada", "ada_dev", 3, "hi"),
+                row(
+                    "s3",
+                    StreamPlatform::Twitch,
+                    "ada",
+                    "Ada",
+                    4,
+                    "!link pixel42",
+                ),
+                row(
+                    "s3",
+                    StreamPlatform::Youtube,
+                    "UCada",
+                    "ada_dev",
+                    5,
+                    "!link pixel42",
+                ),
+            ],
+        )
+        .await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert_eq!(snapshot.welcome_back.len(), 1, "Ada is back");
+        assert_eq!(snapshot.link_made.len(), 1, "the card is up");
+        deliver(
+            &state,
+            third,
+            vec![row(
+                "s3",
+                StreamPlatform::Twitch,
+                "ada",
+                "Ada",
+                6,
+                "!forgetme",
+            )],
+        )
+        .await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert!(snapshot.welcome_back.is_empty(), "the row left with her");
+        assert!(snapshot.link_made.is_empty(), "the card left with her");
+        assert!(
+            state
+                .community
+                .lock()
+                .session
+                .as_ref()
+                .unwrap()
+                .report_arrivals
+                .is_empty(),
+            "her arrival left the report"
+        );
+        assert_eq!(
+            state
+                .database
+                .community_account_person("twitch:ada")
+                .unwrap(),
+            None
+        );
+        crate::live_chat::stop_live_chat(&state).await;
+        let community = report_block(&state, "s3").await;
+        assert_eq!(community.opt_outs, 1);
+        assert_eq!(community.regulars_back, 0);
+        assert!(community.regulars.is_empty(), "{:?}", community.regulars);
+        // The person's link event went with the account.
+        let person = state
+            .database
+            .community_person(
+                &CommunityPersonParams {
+                    platform: Some(StreamPlatform::Youtube),
+                    author_id: Some("UCada".to_string()),
+                    ..Default::default()
+                },
+                Utc::now(),
+                3,
+            )
+            .unwrap();
+        assert!(person.link_events.is_empty(), "{:?}", person.link_events);
     }
 
     /// The smoke's fake Twitch lane: six rows from three authors (`seq % 3`),

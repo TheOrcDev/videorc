@@ -80,6 +80,27 @@ It is Premium, needs Cloud AI consent, and follows Videorc's voice-command
 switch. Without it, or on a free account ("Buddy requires Videorc
 Premium."), everything above works exactly as before.
 
+## Commands viewers type in chat (plan 225)
+
+These are the viewers' own, typed in your chat on YouTube, Twitch, Kick or
+X. They always work: in every talk mode, with "Remember my community" on
+or off, free or Premium. They are the deletion path the platforms' rules
+and GDPR ask for (D13), so they cannot be turned off. Buddy never answers
+in chat: in Bubble mode its bubble says one line on stream; in Suggest and
+Off it says nothing, and the command still runs.
+
+| Command        | Exact, any case, trimmed    | What happens                                                                                                                                                                                                                                                                                                                                                 | Bubble (Bubble mode only)                           |
+| -------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| `!forgetme`    | `!forgetme`                 | Deletes the account's attendance, support, memories and link events, its name in past reports and its place in the stream in progress; if it was the person's last account, the person, note and milestones go too. Keeps a tombstone (platform and public id) so the account is never learned again. Counted as an opt-out in the report, never named. | "Done, {name}. I've forgotten you."                 |
+| `!rememberme`  | `!rememberme`               | Lifts the tombstone; the account is learned afresh from its next chat.                                                                                                                                                                                                                                                                                       | "Welcome back to the list, {name}."                 |
+| `!unlink`      | `!unlink`                   | Splits the sender's account off its person into a new one; both sides' counts come back exactly. An account alone in its person: nothing happens, nothing is said.                                                                                                                                                                                           | "Unlinked, {name}."                                 |
+| `!link <word>` | one word, 4 to 24 of `a-z 0-9 - _` | The same word in two of your chats on two different platforms within 10 minutes joins the two accounts into one person. The word is single-use and burnt for the rest of its window: a third account saying it undoes the join and lists every pair under Community → "Links that need you"; two accounts on the same platform cancel it and are listed. The streamer's own `!link` does nothing. | "Linked: {name} on {platform} and {name} on {platform}." |
+
+`!link` is the only way an X account is ever linked (the viewer's own two
+messages are their consent). Pending words live in memory and die with the
+stream. Anything else after `!link` ("!link two words", "!link a") is not a
+command, and "hello !forgetme" is talk.
+
 ## How Buddy picks "this one"
 
 - **To highlight:** the comment Buddy thinks you are talking about. If there

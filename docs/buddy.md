@@ -38,8 +38,8 @@ platforms you stream to (D3). There is no bot account.
 
 | Place                                                       | Job                                                                                                                                                                                                                                                                                                                         |
 | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Buddy page** (sidebar, second, directly under Studio, ⌘9) | Creates and sets up. **Profile**: the status row with Buddy Live and Open Stream Manager, My Buddies, name, personality, avatar (Still or Alive), reactions, motion, bubble style, listening, Cloud AI consent. **Chat**: Greetings, Answers, Banter and moderation. **Voice**: voice commands. **Reports**. **Clean cut**. |
-| **Stream Manager** (⇧⌘J, the Buddy pane)                    | Operates live. Buddy Live, "{name} talks" (Off, Bubble, Suggest), Suggest cards, the Say box and reactions, the "{name} on stream" switch, questions, flags. Greetings, Answers and Banter show as read-only chips that open Buddy → Chat.                                                                                  |
+| **Buddy page** (sidebar, second, directly under Studio, ⌘9) | Creates and sets up. **Profile**: the status row with Buddy Live and Open Stream Manager, My Buddies, name, personality, avatar (Still or Alive), reactions, motion, bubble style, listening, Cloud AI consent. **Chat**: Greetings, Answers, Banter and moderation. **Community** (plan 225): the people who chat, regulars, links, settings, Export… and Import…. **Voice**: voice commands. **Reports**. **Clean cut**. |
+| **Stream Manager** (⇧⌘J, the Buddy pane)                    | Operates live. Buddy Live, "{name} talks" (Off, Bubble, Suggest), Suggest cards, the Say box and reactions, the "{name} on stream" switch, questions, flags, "Welcome back" (the regulars who just arrived, with Wave) and the "Linked … Undo" card. Greetings, Answers and Banter show as read-only chips that open Buddy → Chat.                                                                                  |
 | **Scene page** (⌘3, the Live Scene canvas)                  | Places. Where Buddy sits on each orientation, and whether it is on the stream and in the recording. See [overlays.md](overlays.md).                                                                                                                                                                                         |
 
 Each control has one home. The Buddy page stays where it is, second in the
@@ -233,8 +233,11 @@ computer.
 | Alive: importing a pack, the pet on stream       | Nothing                                |
 | Alive: creating your own pet                     | Premium + Cloud AI consent + 3 a month |
 | Questions, flags, promises, voice commands       | Premium + Cloud AI consent (as before) |
+| Community: who comes back, regulars, chips, the person card, linking, the report's counts | Nothing (plan 225 D6) |
+| Buddy remembers (memories, welcomes and the audience summary with them) | Premium + Cloud AI consent + Buddy Live consent |
+| Community sync                                   | Premium (a later update)               |
 
-(D6, owner decision 2026-10-08.)
+(D6, owner decision 2026-10-08; plan 225 D6, owner 2026-11-08.)
 
 ## Buddy on stream
 
@@ -448,6 +451,136 @@ support bundle or to any upload.
 a switcher for recent ones. In Library, a stream's row menu has "Buddy
 report", which opens the tab on that session. A stream Buddy was off for
 still shows its moments and chat totals.
+
+## Community: know your viewers across platforms (plan 225)
+
+**What.** Videorc counts who chats on your streams, on your computer, so
+chat shows your regulars and Buddy can welcome them. An **account** is one
+identity on one platform (YouTube, Twitch, Kick or X; a Custom RTMP row is
+never counted); a **person** owns one or more accounts, and every count is
+the person's over the union of their accounts. Per account Videorc keeps the
+platform, its public id, the latest display name and avatar link (never a
+name history), the first and last chat. Per person: the accounts, streams
+chatted in, messages, in a row and best in a row, the support given (bits,
+KICKs, gifted subs, sub months, tips by currency, per account and per
+stream), the milestones celebrated, your note (300 characters) and the
+status (normal, bot, forgotten).
+
+**The numbers (D7, D8).** A **regular** chatted in 3 of your streams in the
+last 90 days (set 2 to 10 in Community → Community settings, "Regular
+after"). **Back**: the last chat was 30 days or more ago; never for a
+YouTube-only person. **Milestones**: the 5th, 10th, 25th, 50th, 100th,
+250th and 500th stream; 3, 5, 10 and 20 in a row ("in a row", never
+"streak", Twitch's word); one year since the first chat, within a week
+after the date, never for a YouTube-only person. Each is celebrated once
+per person; when two land together the biggest wins. "In a row" counts only
+streams that reached one of the person's platforms.
+
+**Where you see it.**
+
+- **The chat row** carries one quiet chip on the person's first row of the
+  stream: "Regular · 14", "Back · 3 wk" (weeks under 8, then "Back · 3 mo")
+  or the milestone ("10th stream", "5 in a row", "One year"). "First chat"
+  stays as it was (plan 055); a linked person is first-time only when no
+  account was seen before. The row's ⋯ menu and a right-click open **About
+  {name}**, the person card: the counts, the accounts and their platforms,
+  "Same person as…", "Not the same" on a linked account ("Split off"),
+  "Mark as bot", "Forget {name}…", your note ("Only you see this. Buddy
+  never changes it.") and, with Premium, what Buddy remembers.
+- **Stream Manager → Buddy pane → "Welcome back"**: the regulars and
+  comebacks who just arrived, 15 minutes at most, with **Wave** (the
+  regular reaction on stream and, in Bubble mode, "Hey {name}!" in the
+  bubble). A row leaves when you wave, when the bubble welcomed them, or
+  when a Suggest welcome card is posted or dismissed. The "Linked {name}
+  ({platform}) and {name} ({platform})" card with **Undo** stays 15 minutes
+  after a `!link`.
+- **Buddy → Community**: "Your community" (how many people, from how many
+  streams, how many regulars), the people list (Everyone, Regulars, Linked,
+  Bots; sorted by Streams, Last chat or Name; "Search people"), "Links that
+  need you" (name matches Videorc suggests and `!link` words that were
+  cancelled or hijacked, each with "Same person" and "Not the same"),
+  Community settings and "Your data" (Export…, Import…, the channel line
+  with Copy, "Forget everyone…"). The first open reads your past streams
+  into the store ("Reading your past streams… 12 of 41").
+- **Buddy on stream.** A regular's arrival makes Buddy wave; in Bubble mode
+  the bubble says the regular, comeback or milestone welcome (Buddy → Chat →
+  Greetings → the welcome kinds). One wave per 20 seconds of regulars; every
+  milestone its own moment. "Welcome regulars on stream" off makes every
+  arrival the plain returning welcome. "Show milestone cards automatically"
+  (off by default) puts the milestone card on stream by itself. Nothing
+  goes to chat.
+- **Reports** (D15) gain a Community block: regulars back (with the top 10
+  names and their linked platforms), new regulars, comebacks, first-timers
+  and how many stayed 40 minutes or more, milestones, links made, memories
+  learned, opt-outs (counted, never named), and with Premium the audience
+  summary.
+
+**Linking one person across platforms (D4).**
+
+- **`!link <word>`**: the viewer types `!link` and one word (4 to 24
+  letters, digits, `-` or `_`) in two of your chats on different platforms
+  within 10 minutes; Videorc joins the two accounts on your computer. The
+  word is single-use and stays burnt for the rest of its window: a third
+  account saying it undoes the join and lists all three pairs under "Links
+  that need you"; two accounts on the same platform cancel it. This is the
+  only way an X account is ever linked. The bubble says "Linked: Ada on
+  Twitch and ada_dev on YouTube." in Bubble mode; nothing goes to chat.
+- **Same person as…** on the card and in Community: your call, confirmed.
+  X accounts are not offered ("X viewers link themselves with !link").
+- **Might be the same as {name} on {platform}**: Videorc suggests when two
+  names on different platforms match after lowercasing and dropping spaces,
+  `_`, `.` and `-`; it never merges on its own, never suggests an X account,
+  and never changes a count. "Not the same" dismisses the pair for good.
+- **Unlinking**: "Not the same" on the card, Undo on the card in the pane,
+  or the viewer's `!unlink`, moves the account into its own person;
+  attendance and support are per account, so every count comes back
+  exactly. The card's link history shows who linked what and when ("Linked
+  with !link", "Linked by you", "Linked from a suggestion").
+
+**How long it is kept (D3).** YouTube accounts: 30 days after their last
+chat, rolling; attendance, support, the best run and the milestones they
+earned are recomputed daily and at app start, and nothing derived from a
+YouTube account leaves the computer. The card says "YouTube viewers are
+remembered for 30 days after they chat (YouTube's rules)." Twitch, Kick and
+X accounts: 12 months after the last chat. A linked person keeps each
+account's own clock and survives while any account does. Deleting a
+recording never deletes community data.
+
+**Viewers stay in control (D13).** `!forgetme`, `!rememberme`, `!unlink`
+and `!link` always work, in every talk mode, whether or not the store is
+on; see [buddy-commands.md](buddy-commands.md#commands-viewers-type-in-chat-plan-225).
+`!forgetme` deletes the account's attendance, support, memories and link
+events, its name in past reports' Community blocks and its place in the
+stream in progress (the chip's row stays as delivered), and keeps a
+tombstone (platform and public id only) so the account is never learned
+again. "Forget {name}…" and "Forget everyone…" do the same for you;
+"Forget everyone" keeps the viewers' own tombstones. The report counts
+opt-outs and never names them.
+
+**Buddy remembers (Premium, D10, off by default).** Offered once after the
+first stream regulars came to ("Let Buddy remember what your regulars tell
+it?"). Once per stream, after it ends, the people who chatted at least
+twice off YouTube (at most 15, their newest 20 messages each) go to the
+memory route with their non-YouTube name, stream count and platforms, what
+Buddy already knows and your note; the answer adds, rewrites or forgets at
+most two memories per person (eight in all), each on the account whose
+words taught it, and writes two sentences about your audience into the
+report. Memories ride a regular's arrival into Buddy's welcome and the tick
+for one delivery, never the wire. You see and delete every memory on the
+card ("Forget this memory?").
+
+**Export… and Import…** (Community → Your data) move the whole store as one
+JSON file (`videorc-community-<date>.json`, never overwriting the day's
+earlier export) through the app's own file pickers. An import merges:
+newer names win, attendance and support union, a `!forgetme` tombstone wins
+over everything, an account it attaches to a person already here is
+recorded as linked by you, and an X account joins an existing person only
+when the file held every account of that person.
+
+**Never slow chat down (D14).** The arrival lookup rides the first-chat
+marker's blocking read, one read per table per batch; the write is one
+transaction after delivery, outside every fence; a store error leaves rows
+without a chip and logs once per session.
 
 ## Clip that
 
