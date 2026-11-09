@@ -116,7 +116,8 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_capture::tests::windows_d3d11_capture_routes_cross_adapter_duplication_through_wgc',
     'windows_d3d11_capture::tests::windows_d3d11_capture_selects_cursor_safe_backend',
     'windows_d3d11_capture::tests::windows_d3d11_capture_validates_pointer_shape_layouts',
-    'windows_d3d11_capture::tests::windows_d3d11_capture_wgc_cursor_exclusion_fails_closed'
+    'windows_d3d11_capture::tests::windows_d3d11_capture_wgc_cursor_exclusion_fails_closed',
+    'windows_d3d11_capture::tests::windows_d3d11_capture_worker_opens_wgc_when_duplication_is_cross_adapter'
   ]),
   compositor: Object.freeze([
     'windows_d3d11_compositor::runtime::sprite_shader_tests::windows_d3d11_shaders_compile_with_the_buddy_sprite_turn',
