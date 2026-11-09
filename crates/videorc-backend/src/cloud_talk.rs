@@ -237,6 +237,22 @@ pub struct RunnerRoomState {
     pub return_enabled: bool,
     #[serde(default)]
     pub stage_set: bool,
+    /// Review M2: the stage as the program draws it (the runner's re-flow
+    /// and stale-screen fallbacks applied); absent from an older runner and
+    /// until the current stage is composed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<CloudRoomShown>,
+}
+
+/// `state.room.shown` and `CloudRoomStatus.shown` (review M2): the people
+/// the program's layout drew, in stage order, and whose screen it showed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoomShown {
+    #[serde(default)]
+    pub on_stage: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -544,6 +560,11 @@ pub struct CloudRoomStatus {
     pub client: CloudRoomClientState,
     pub return_enabled: bool,
     pub stage_set: bool,
+    /// Review M2: what the program draws of the stage, from the runner; the
+    /// Show stage drops whoever the runner re-flowed out and shows the
+    /// screen it shows. Absent until the runner reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<CloudRoomShown>,
     /// On air: the runner holds platform legs for this room (`state.legs`
     /// non-empty, never its `phase`, which stays `live` after `legs.end`).
     pub live: bool,
@@ -676,6 +697,88 @@ impl CloudOverlayOrientation {
     }
 }
 
+impl CloudOverlayOrientation {
+    /// The output's own shape, as the takeover render fills it: 16:9 or 9:16.
+    fn takeover_canvas(self) -> (u32, u32) {
+        match self {
+            Self::H => (1920, 1080),
+            Self::V => (1080, 1920),
+        }
+    }
+}
+
+/// The largest a takeover PNG may be on the socket (the runner's hold limit).
+const TAKEOVER_PNG_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Review L6: the takeover as each output shows it, for the runner's
+/// `takeover` slot, `h` then `v`. The runner fits an overlay inside its rect
+/// with transparency around it, so the one 16:9 Screen image on the 9:16
+/// output left the stage showing above and below the takeover. An image
+/// that already has an output's shape goes as is (re-encoded only when it
+/// is not a PNG); for any other output the image gets its own render, the
+/// output's shape, the image contained on black like the local compositor
+/// draws a Screen image, opaque so nothing of the stage shows.
+pub fn takeover_overlays(screen_path: &str) -> Result<Vec<(CloudOverlayOrientation, String)>> {
+    use anyhow::Context as _;
+    use base64::Engine as _;
+    let bytes = std::fs::read(screen_path)
+        .with_context(|| format!("Could not read the takeover image at {screen_path}"))?;
+    let decoded = image::load_from_memory(&bytes).context("The takeover image did not decode.")?;
+    let (width, height) = (decoded.width().max(1), decoded.height().max(1));
+    let mut overlays = Vec::with_capacity(2);
+    for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+        let (canvas_w, canvas_h) = orientation.takeover_canvas();
+        // Within 1% of the output's aspect: the image is that output's render.
+        let fits = (u64::from(width) * u64::from(canvas_h))
+            .abs_diff(u64::from(height) * u64::from(canvas_w))
+            * 100
+            <= u64::from(height) * u64::from(canvas_w);
+        let png = if fits && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            bytes.clone()
+        } else {
+            let source = if fits {
+                decoded.to_rgba8()
+            } else {
+                let scale = (f64::from(canvas_w) / f64::from(width))
+                    .min(f64::from(canvas_h) / f64::from(height));
+                let fit_w = ((f64::from(width) * scale).round() as u32).clamp(1, canvas_w);
+                let fit_h = ((f64::from(height) * scale).round() as u32).clamp(1, canvas_h);
+                let fitted = image::imageops::resize(
+                    &decoded.to_rgba8(),
+                    fit_w,
+                    fit_h,
+                    image::imageops::FilterType::Triangle,
+                );
+                let mut canvas =
+                    image::RgbaImage::from_pixel(canvas_w, canvas_h, image::Rgba([0, 0, 0, 255]));
+                image::imageops::overlay(
+                    &mut canvas,
+                    &fitted,
+                    i64::from((canvas_w - fit_w) / 2),
+                    i64::from((canvas_h - fit_h) / 2),
+                );
+                canvas
+            };
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(source)
+                .write_to(&mut out, image::ImageFormat::Png)
+                .context("The takeover image could not be encoded as PNG.")?;
+            out.into_inner()
+        };
+        if png.len() > TAKEOVER_PNG_MAX_BYTES {
+            bail!(
+                "The takeover image is {} bytes; the runner takes at most {TAKEOVER_PNG_MAX_BYTES}.",
+                png.len()
+            );
+        }
+        overlays.push((
+            orientation,
+            base64::engine::general_purpose::STANDARD.encode(png),
+        ));
+    }
+    Ok(overlays)
+}
+
 /// A normalized rect (0 to 1 of the output), the runner's `OverlayRect`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct CloudOverlayRect {
@@ -789,12 +892,11 @@ pub type CloudRequestHook = Arc<dyn Fn(CloudRoomRequest) + Send + Sync>;
 // --- The runtime's talk-show state --------------------------------------------
 
 /// What this desktop holds about its open room. Lives beside `show` in the
-/// runtime; cleared with it. The token is the one secret here.
+/// runtime; cleared with it. No token: the renderer asks for a fresh one
+/// through `room_token` on every join (review L4), so none is kept here.
 #[derive(Clone)]
 pub(crate) struct TalkShowState {
     pub phase: CloudRoomPhase,
-    pub room_url: String,
-    pub host_token: String,
     pub invite: Option<ShowInvite>,
     pub door_open: bool,
     pub title: Option<String>,
@@ -822,8 +924,6 @@ impl std::fmt::Debug for TalkShowState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TalkShowState")
             .field("phase", &self.phase)
-            .field("room_url", &self.room_url)
-            .field("host_token", &"••••")
             .field("invite", &self.invite)
             .field("door_open", &self.door_open)
             .field("stage", &self.stage)
@@ -838,16 +938,9 @@ impl TalkShowState {
     /// runner's own default, the host alone on Solo (plan 224 D8): a Bring
     /// on edits this stage, so the first `stage.set` always names the host
     /// and the host's camera and mic never leave the program.
-    fn new(
-        room: ShowRoomAnswer,
-        settings: RoomSettingsRecord,
-        invite: Option<ShowInvite>,
-        show_id: &str,
-    ) -> Self {
+    fn new(settings: RoomSettingsRecord, invite: Option<ShowInvite>, show_id: &str) -> Self {
         Self {
             phase: CloudRoomPhase::Open,
-            room_url: room.url,
-            host_token: room.host_token,
             invite,
             door_open: settings.open_door,
             title: (!settings.title.is_empty()).then_some(settings.title),
@@ -903,6 +996,7 @@ impl TalkShowState {
             client: self.client,
             return_enabled: runner_room.is_some_and(|room| room.return_enabled),
             stage_set: runner_room.is_some_and(|room| room.stage_set),
+            shown: runner_room.and_then(|room| room.shown.clone()),
             live: self.live,
             live_since: self.live_since.clone(),
             message: self.message.clone(),
@@ -974,6 +1068,12 @@ impl CloudShowRuntime {
     }
 }
 
+/// Plan 224 D15 (B, the owner's answer through plan 221 U3): the one lock
+/// sentence for talk shows. Premium seats one guest and Max five, so the
+/// lowest plan with guests is named; the renderer's Guests tab
+/// (`GUESTS_PREMIUM_REASON`) and the web's 403 say the same words.
+pub const TALK_SHOWS_LOCK_MESSAGE: &str = "Talk shows with guests come with Videorc Premium.";
+
 /// `cloud.room.open` refused before anything reaches the web.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomOpenRefusal {
@@ -1000,7 +1100,7 @@ impl std::fmt::Display for RoomOpenRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SignedOut => write!(f, "Sign in to Videorc to open a room."),
-            Self::NotEntitled => write!(f, "Talk shows with guests come with Videorc Max."),
+            Self::NotEntitled => write!(f, "{TALK_SHOWS_LOCK_MESSAGE}"),
             Self::ShowLive => write!(
                 f,
                 "A show is already live through Videorc Cloud. End it first."
@@ -1071,13 +1171,20 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         };
         let created = match self.web.create_show(&bearer, &request).await {
             Ok(created) => created,
+            // The web's 403 for talk shows reads as the same lock (L1).
+            Err(CloudApiError::NotEntitled) => {
+                let _ = (self.hooks.camera)(CameraHandover::Return).await;
+                return Err(RoomOpenRefusal::NotEntitled.into());
+            }
             Err(error) => {
                 let _ = (self.hooks.camera)(CameraHandover::Return).await;
                 return Err(anyhow::Error::new(error));
             }
         };
         let show_id = created.show.id.clone();
-        let (Some(room), Some(invite)) = (created.room.clone(), created.invite.clone()) else {
+        // The create's host token is never kept (L4): the renderer joins
+        // with a fresh one through `room_token`.
+        let (Some(_), Some(invite)) = (created.room.as_ref(), created.invite.clone()) else {
             let _ = self.web.end_show(&bearer, &show_id).await;
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             bail!("Videorc Cloud created the show without a room.");
@@ -1124,7 +1231,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             runtime.message = None;
             runtime.restart = None;
             let mut talk = TalkShowState::new(
-                room,
                 RoomSettingsRecord {
                     title: params.title.unwrap_or_default(),
                     platforms,
@@ -1198,10 +1304,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             .room_token(&bearer, &show_id)
             .await
             .map_err(anyhow::Error::new)?;
-        if let Some(talk) = lock(&self.slot).talk.as_mut() {
-            talk.host_token = answer.host_token.clone();
-            talk.room_url = answer.url.clone();
-        }
         Ok(RoomTokenRefreshAnswer {
             host_token: answer.host_token,
             url: answer.url,
@@ -1614,6 +1716,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// renderer joins with a fresh token through `cloud.room.token.refresh`;
     /// no `destinations.set` goes out (plan 184 C5b). The runner's
     /// `stageSet: false` after a crash is answered by `resend_stage`.
+    ///
+    /// Review M1: a launch check that could not reach the node leaves the
+    /// show held with no control socket, so the resume connects one itself
+    /// (`connect_talk_control`); a failure gives the camera back and leaves
+    /// the show resumable, or forgets it when the node or the web says it
+    /// is over.
     pub async fn resume_room(&self, bearer: Option<String>) -> Result<CloudStatus> {
         let bearer = bearer_or_bail(bearer)?;
         let show_id = {
@@ -1639,25 +1747,23 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 return Err(anyhow::Error::new(error));
             }
         };
-        let token = match self.web.room_token(&bearer, &show_id).await {
-            Ok(token) => token,
-            Err(error) => {
-                let _ = (self.hooks.camera)(CameraHandover::Return).await;
-                return Err(anyhow::Error::new(error));
-            }
-        };
-        let generation = {
+        let unconnected = lock(&self.slot).control_tx.is_none();
+        if unconnected && let Err(error) = self.connect_talk_control(&bearer, &show_id).await {
+            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            return Err(error);
+        }
+        let generation = 'open: {
             let mut runtime = lock(&self.slot);
-            let mut talk = TalkShowState::new(
-                ShowRoomAnswer {
-                    url: token.url,
-                    host_token: token.host_token,
-                    name: show_id.clone(),
-                },
-                settings.room,
-                settings.invite,
-                &show_id,
-            );
+            if runtime
+                .show
+                .as_ref()
+                .is_none_or(|show| show.record.id != show_id)
+            {
+                // The show ended while the resume asked the web (the control
+                // loop forgot it); nothing is left to resume.
+                break 'open None;
+            }
+            let mut talk = TalkShowState::new(settings.room, settings.invite, &show_id);
             // The runner keeps the legs it holds (C5b): the show is on air
             // while it lists them; its clock is the only one left.
             talk.live = runtime
@@ -1674,11 +1780,85 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             if let Some(show) = runtime.show.as_mut() {
                 show.resuming = false;
             }
-            generation
+            Some(generation)
+        };
+        let Some(generation) = generation else {
+            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            bail!("The show already ended on Videorc Cloud. Open the room to start a new one.");
         };
         self.spawn_guests_poll(bearer, show_id, generation);
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
+    }
+
+    /// Review M1: the resume's own control socket, the way the solo resume
+    /// connects (`resume_into_session`): a fresh show token from `GET
+    /// current`, hello, and the control loop installed. A show the web or
+    /// the node no longer has is forgotten; an unreachable node goes to the
+    /// lost route first, which may end the show; otherwise the resume fails
+    /// and the show stays resumable.
+    async fn connect_talk_control(&self, bearer: &str, show_id: &str) -> Result<()> {
+        let current = self.web.current_show(bearer).await;
+        let control = {
+            let mut runtime = lock(&self.slot);
+            let Some(show) = runtime
+                .show
+                .as_mut()
+                .filter(|show| show.record.id == show_id)
+            else {
+                bail!("There's no Videorc Cloud show to resume.");
+            };
+            if let Ok(current) = &current {
+                match &current.show {
+                    Some(fresh) if fresh.id == show_id && !fresh.is_ended() => {
+                        show.record = fresh.clone();
+                        if let Some(control) = &current.control {
+                            show.control = control.clone();
+                        }
+                    }
+                    _ => {
+                        runtime.clear_show(Some("show-gone".to_string()));
+                        drop(runtime);
+                        self.hooks.emit_from(&self.slot);
+                        bail!(
+                            "The show already ended on Videorc Cloud. Open the room to start a new one."
+                        );
+                    }
+                }
+            }
+            show.control.clone()
+        };
+        let (transport, welcome) = match connect_and_hello(self.connector.as_ref(), &control).await
+        {
+            Ok(connected) => connected,
+            Err(HelloFailure::NoSuchShow) => {
+                lock(&self.slot).clear_show(Some("show-gone".to_string()));
+                self.hooks.emit_from(&self.slot);
+                bail!("The show already ended on Videorc Cloud. Open the room to start a new one.");
+            }
+            Err(HelloFailure::BadToken) => {
+                bail!("Videorc Cloud refused the show token; try again.")
+            }
+            Err(HelloFailure::Transport(message)) => {
+                if let Some(end_reason) = self.report_lost_on_resume(bearer, show_id).await {
+                    lock(&self.slot).clear_show(Some(end_reason));
+                    self.hooks.emit_from(&self.slot);
+                    bail!(
+                        "The show already ended on Videorc Cloud. Open the room to start a new one."
+                    );
+                }
+                bail!("Videorc Cloud could not be reached to resume the room: {message}")
+            }
+        };
+        install_control_loop(
+            self,
+            bearer.to_string(),
+            control,
+            show_id.to_string(),
+            transport,
+            welcome,
+        );
+        Ok(())
     }
 
     async fn simple_intent(&self, kind: &str, failure: &str) -> Result<CloudStatus> {
@@ -1800,5 +1980,131 @@ pub fn talk_show_create_refusal(error: &CloudApiError) -> Option<&'static str> {
         CloudApiError::GuestHoursUsedUp { .. } => Some("cloud-guest-hours-used-up"),
         CloudApiError::RoomsUnavailable => Some("cloud-rooms-unavailable"),
         _ => None,
+    }
+}
+
+/// Test support for the RPC forks (C-G6, C-G7): a talk show open on
+/// `show_id`, on air when `live`, with the control socket replaced by a
+/// channel the test reads and acks (`ControlRequest::answer_for_tests`).
+#[cfg(test)]
+pub(crate) fn open_talk_show_for_tests(
+    slot: &crate::cloud_show::CloudShowSlot,
+    show_id: &str,
+    live: bool,
+) -> tokio::sync::mpsc::UnboundedReceiver<crate::cloud_show::ControlRequest> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut runtime = lock(slot);
+    runtime.show = Some(ActiveShow {
+        record: serde_json::from_value(json!({ "id": show_id, "kind": "talk", "status": "live" }))
+            .expect("a show record"),
+        control: serde_json::from_value(
+            json!({ "url": "wss://node.test/control", "token": "vcs1.test" }),
+        )
+        .expect("a show control"),
+        ingest: None,
+        session_id: None,
+        destinations: Vec::new(),
+        handed_over: false,
+        hold_image_png_base64: None,
+        resuming: false,
+    });
+    let mut talk = TalkShowState::new(
+        RoomSettingsRecord {
+            title: String::new(),
+            platforms: Vec::new(),
+            open_door: false,
+            limits: TalkLimits::default(),
+        },
+        None,
+        show_id,
+    );
+    talk.live = live;
+    runtime.talk = Some(talk);
+    runtime.control_tx = Some(tx);
+    rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode(base64_png: &str) -> image::RgbaImage {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64_png)
+            .expect("base64");
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "a PNG");
+        image::load_from_memory(&bytes).expect("decodes").to_rgba8()
+    }
+
+    /// Review L6: each output gets the takeover in its own shape. A 16:9
+    /// Screen image goes to `h` byte for byte; `v` gets a 9:16 render with
+    /// the image contained on opaque black, so no stage shows around it.
+    /// A 9:16 image is the other way round.
+    #[test]
+    fn each_output_gets_the_takeover_in_its_own_shape() {
+        let dir = std::env::temp_dir().join(format!("videorc-takeover-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let red = image::Rgba([255, 0, 0, 255]);
+        let wide = dir.join("wide.png");
+        image::RgbaImage::from_pixel(320, 180, red)
+            .save(&wide)
+            .unwrap();
+        let wide_bytes = std::fs::read(&wide).unwrap();
+
+        let overlays = takeover_overlays(wide.to_str().unwrap()).unwrap();
+        assert_eq!(
+            overlays.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
+            vec![CloudOverlayOrientation::H, CloudOverlayOrientation::V]
+        );
+        {
+            use base64::Engine as _;
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&overlays[0].1)
+                    .unwrap(),
+                wide_bytes,
+                "the 16:9 image is the horizontal output's, as is"
+            );
+        }
+        let vertical = decode(&overlays[1].1);
+        assert_eq!(vertical.dimensions(), (1080, 1920));
+        assert_eq!(
+            *vertical.get_pixel(540, 960),
+            red,
+            "the image in the middle"
+        );
+        for (x, y) in [(540, 10), (540, 1910), (5, 5)] {
+            assert_eq!(
+                *vertical.get_pixel(x, y),
+                image::Rgba([0, 0, 0, 255]),
+                "opaque black around it at ({x}, {y})"
+            );
+        }
+        // The contained band is the image's 16:9 at the output's width.
+        assert_eq!(*vertical.get_pixel(540, 960 - 300), red);
+        assert_eq!(
+            *vertical.get_pixel(540, 960 - 310),
+            image::Rgba([0, 0, 0, 255])
+        );
+
+        let tall = dir.join("tall.jpg");
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(180, 320, red))
+            .to_rgb8()
+            .save(&tall)
+            .unwrap();
+        let overlays = takeover_overlays(tall.to_str().unwrap()).unwrap();
+        let horizontal = decode(&overlays[0].1);
+        assert_eq!(horizontal.dimensions(), (1920, 1080));
+        assert_eq!(horizontal.get_pixel(5, 540).0[3], 255, "opaque");
+        assert_eq!(horizontal.get_pixel(5, 540).0[..3], [0, 0, 0]);
+        let vertical = decode(&overlays[1].1);
+        assert_eq!(
+            vertical.dimensions(),
+            (180, 320),
+            "a 9:16 image is the vertical output's, re-encoded as PNG"
+        );
+        assert!(takeover_overlays(dir.join("missing.png").to_str().unwrap()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

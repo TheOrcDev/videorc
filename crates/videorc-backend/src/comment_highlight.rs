@@ -1249,6 +1249,83 @@ pub(crate) mod tests {
         }
     }
 
+    /// Plan 224 C-G7 (review L9, the overlay forks): in a talk show on air
+    /// the card goes to the runner's `card` slot, horizontal then vertical,
+    /// with its rect (the default when none) and the ten-second life; the
+    /// compositor never draws it; only the show's own chat may be shown; a
+    /// clear takes it off both of the runner's outputs.
+    #[tokio::test]
+    async fn a_talk_show_on_air_sends_the_card_to_the_runner_and_never_composes_it() {
+        let state = test_state();
+        let mut runner =
+            crate::cloud_talk::open_talk_show_for_tests(&state.cloud_show, "session-1", true);
+        {
+            let mut chat = state.live_chat.lock().await;
+            chat.start_session("session-1".to_string(), Vec::new());
+            chat.ingest(message(LiveChatEventType::Message, false));
+        }
+        let mut request = params();
+        request.vertical_png_base64 = Some(TEST_PNG.to_string());
+        request.rect = Some(OverlayRect {
+            x: 0.1,
+            y: 0.5,
+            w: 0.4,
+            h: 0.3,
+        });
+        let answer = async {
+            let mut frames = Vec::new();
+            for _ in 0..2 {
+                let intent = runner.recv().await.expect("an overlay intent");
+                frames.push(intent.answer_for_tests(None));
+            }
+            frames
+        };
+        let (status, frames) = tokio::join!(set_comment_highlight(&state, request), answer);
+        assert_eq!(status.unwrap().phase, CommentHighlightPhase::Live);
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.set");
+            assert_eq!(frame["slot"], "card");
+            assert_eq!(frame["orientation"], orientation);
+            assert_eq!(frame["ttlSeconds"], 10);
+            assert_eq!(frame["pngBase64"], TEST_PNG);
+        }
+        assert_eq!(
+            frames[0]["rect"],
+            serde_json::json!({ "x": 0.1, "y": 0.5, "w": 0.4, "h": 0.3 })
+        );
+        assert_eq!(
+            frames[1]["rect"],
+            serde_json::json!({ "x": 0.04, "y": 0.6, "w": 0.44, "h": 0.36 }),
+            "no vertical rect: the default card place"
+        );
+        assert!(
+            crate::captions::current_caption_overlay(&state.highlight_overlay).is_none(),
+            "the desktop composes nothing for a talk show's stream"
+        );
+        assert!(
+            crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay).is_none()
+        );
+
+        let mut other = params();
+        other.session_id = "session-2".to_string();
+        assert!(matches!(
+            set_comment_highlight(&state, other).await,
+            Err(CommentHighlightError::WrongSession)
+        ));
+
+        clear_comment_highlight(&state).await;
+        for orientation in ["h", "v"] {
+            let frame = runner
+                .recv()
+                .await
+                .expect("an overlay clear")
+                .answer_for_tests(None);
+            assert_eq!(frame["kind"], "overlay.clear");
+            assert_eq!(frame["slot"], "card");
+            assert_eq!(frame["orientation"], orientation);
+        }
+    }
+
     /// A card live on a stream session through the real `set` path (the
     /// Buddy's animator tests watch the pet look at it, plan 168 S-C3).
     pub(crate) async fn install_live_highlight_for_test(state: &AppState) -> CommentHighlightState {

@@ -111,3 +111,15 @@ omitted, never `null`; both sides round-trip every shape field for field.
 
 - Rust: `cargo test -p videorc-backend shared_community_fixture`
 - TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
+
+## `guest-consent-lines.json`
+
+Plan 224 D13 (review L2): the consent line a guest reads before "Ask to join",
+for a set of saved platforms, edited by hand. The guest page (videorc-web
+`lib/cloud/guest-consent.ts` `consentLine`) and the Guests tab
+(`apps/desktop/src/renderer/src/lib/guests-view.ts` `guestConsentLine`) must
+both say every case word for word; videorc-web keeps a byte-identical copy at
+`tests/fixtures/guest-consent-lines.json`.
+
+- TypeScript: `pnpm --filter @videorc/desktop test -- guests-view.test.ts`
+- Web: `node --test tests/guest-consent-lines.test.ts` in videorc-web

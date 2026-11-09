@@ -1,4 +1,4 @@
-import type { CloudStageLayout } from '@/lib/backend'
+import type { CloudRoomStatus, CloudStageLayout } from '@/lib/backend'
 
 // The talk-show geometry (plan 224 D8), mirrored from the runner's
 // `talk_show_layout.rs` so the Show stage draws the picture the cloud sends.
@@ -149,6 +149,39 @@ export function effectiveStageLayout(input: StageInput): CloudStageLayout {
   if (input.layout === 'screen-people' && !input.screen) return 'side-by-side'
   if (input.layout === 'solo' && people.length > 1) return 'side-by-side'
   return input.layout
+}
+
+/**
+ * The Show stage's input (review M2): the stage this desktop set, as the
+ * program draws it. The stage as sent lands at once (a Bring on or a Send
+ * backstage never waits for the runner); the runner's `shown` takes out
+ * whoever it has on its stage and no longer draws (D12's re-flow after 60 s
+ * away) and names the screen it shows (another on-stage screen, or none,
+ * when the named one is stale). Without `shown` (an older runner, or a stage
+ * not composed yet) the stage is drawn as sent.
+ */
+export function showStageInput(room: CloudRoomStatus | undefined): StageInput {
+  const stage = room?.stage
+  const input: StageInput = {
+    layout: stage?.layout ?? 'solo',
+    people: stage?.onStage ?? [],
+    spotlight: stage?.spotlight ?? null,
+    screen: stage?.screen ?? null
+  }
+  const shown = room?.shown
+  if (!shown) return input
+  const runnerStage = new Set(
+    (room?.participants ?? [])
+      .filter((participant) => participant.onStage)
+      .map((participant) => participant.identity)
+  )
+  const drawn = new Set(shown.onStage)
+  const screen = shown.screen && input.people.includes(shown.screen) ? shown.screen : null
+  return {
+    ...input,
+    people: input.people.filter((identity) => !runnerStage.has(identity) || drawn.has(identity)),
+    screen
+  }
 }
 
 /**

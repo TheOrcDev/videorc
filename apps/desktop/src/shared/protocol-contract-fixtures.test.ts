@@ -626,6 +626,14 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendRpcResult('cloud.room.open', statusTalk))).toEqual(statusTalk)
     expect(statusTalk.room?.phase).toBe('open')
     expect(statusTalk.room?.stage.layout).toBe('side-by-side')
+    // Review M2: what the program draws rides the status; null is never absent.
+    expect(statusTalk.room?.shown?.onStage).toEqual(statusTalk.room?.stage.onStage)
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusTalk,
+        room: { ...statusTalk.room, shown: null }
+      })
+    ).toThrow()
     expect(statusTalk.recording?.active).toBe(true)
     expect(statusTalk.show?.kind).toBe('talk')
     expect(JSON.stringify(statusTalk)).not.toMatch(/hostToken|token|rtmps?:|streamKey/)

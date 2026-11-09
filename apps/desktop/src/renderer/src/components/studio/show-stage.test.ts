@@ -103,6 +103,38 @@ describe('the stage (D8)', () => {
     }
   )
 
+  it('draws the stage as the program does: no re-flowed guest, no stale screen (review M2)', async () => {
+    const participant = (identity: string) => ({
+      identity,
+      name: identity,
+      role: identity === HOST ? ('host' as const) : ('guest' as const),
+      onStage: true,
+      video: true,
+      audio: true,
+      muted: false,
+      screen: false,
+      quality: 'good' as const,
+      sinceMs: 1000,
+      away: false
+    })
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada, grace],
+          participants: [participant(HOST), participant('g_ada'), participant('g_grace')],
+          stage: { layout: 'screen-people', onStage: [HOST, 'g_ada', 'g_grace'], screen: 'g_ada' },
+          shown: { onStage: [HOST, 'g_ada'] }
+        })
+      }),
+      talkShow()
+    )
+    const tiles = [...container.querySelectorAll<HTMLElement>('[data-testid="show-stage-tile"]')]
+    expect(tiles.map((tile) => tile.dataset.stageIdentity)).toEqual([HOST, 'g_ada'])
+    expect(tiles.every((tile) => tile.dataset.stageKind === 'person')).toBe(true)
+    const checked = container.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')
+    expect(checked?.textContent).toBe('Side by side')
+  })
+
   it('says so when nobody is on stage, and keeps the Preview line for the lifecycle probe', async () => {
     await mount(
       talkStatus({ room: openRoom({ stage: { layout: 'solo', onStage: [] } }) }),
@@ -147,6 +179,23 @@ describe('the backstage strip (C-G3)', () => {
     await act(async () => button(row('Grace'), 'Send backstage').click())
     expect(show.bringOn).toHaveBeenCalledWith('g_ada')
     expect(show.sendBackstage).toHaveBeenCalledWith('g_grace')
+  })
+
+  it('never offers to send the host backstage (review L3)', async () => {
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada],
+          stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'] }
+        })
+      }),
+      talkShow()
+    )
+    const host = row('You')
+    expect(host.querySelector('[data-testid="show-stage-send-backstage"]')).toBeNull()
+    expect(host.querySelector('[data-testid="show-stage-bring-on"]')).toBeNull()
+    expect(button(host, 'Mute')).toBeDefined()
+    expect(row('Ada').querySelector('[data-testid="show-stage-send-backstage"]')).not.toBeNull()
   })
 
   it("holds a guest's mic by guest id, and mutes the host's own mic locally", async () => {

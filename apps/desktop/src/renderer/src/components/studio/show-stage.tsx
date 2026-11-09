@@ -55,6 +55,7 @@ import type { TalkShowPerson } from '@/lib/talk-show-room'
 import { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
 import {
   planStage,
+  showStageInput,
   stageRectPercent,
   type StageCanvas,
   type StageTile
@@ -122,13 +123,9 @@ export default function ShowStage(): ReactElement {
 function StageWell({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
   const room = cloudStatus?.room
-  const stage = room?.stage
-  const plan = planStage(STAGE_CANVAS, {
-    layout: stage?.layout ?? 'solo',
-    people: stage?.onStage ?? [],
-    spotlight: stage?.spotlight ?? null,
-    screen: stage?.screen ?? null
-  })
+  // Review M2: the stage as the program draws it, never a tile or a
+  // screen the viewers don't see.
+  const plan = planStage(STAGE_CANVAS, showStageInput(room))
   const state = talkShow.room.state
   const joining = state === 'connecting' || state === 'reconnecting'
   return (
@@ -649,24 +646,27 @@ function StripRow({
       }
       title={person.name}
     >
-      <DisabledReason reason={blocked}>
-        <Button
-          data-testid={person.onStage ? 'show-stage-send-backstage' : 'show-stage-bring-on'}
-          disabled={disabled || blocked !== null}
-          size="xs"
-          type="button"
-          variant={person.onStage ? 'outline' : 'secondary'}
-          onClick={() =>
-            void (
-              person.onStage
-                ? talkShow.sendBackstage(person.identity)
-                : talkShow.bringOn(person.identity)
-            ).catch(() => {})
-          }
-        >
-          {person.onStage ? 'Send backstage' : 'Bring on'}
-        </Button>
-      </DisabledReason>
+      {/* The host is always on stage (H2): their row has no stage move (L3). */}
+      {person.host ? null : (
+        <DisabledReason reason={blocked}>
+          <Button
+            data-testid={person.onStage ? 'show-stage-send-backstage' : 'show-stage-bring-on'}
+            disabled={disabled || blocked !== null}
+            size="xs"
+            type="button"
+            variant={person.onStage ? 'outline' : 'secondary'}
+            onClick={() =>
+              void (
+                person.onStage
+                  ? talkShow.sendBackstage(person.identity)
+                  : talkShow.bringOn(person.identity)
+              ).catch(() => {})
+            }
+          >
+            {person.onStage ? 'Send backstage' : 'Bring on'}
+          </Button>
+        </DisabledReason>
+      )}
       <Button
         aria-label={
           person.host

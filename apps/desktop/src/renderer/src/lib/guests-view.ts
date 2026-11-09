@@ -3,13 +3,11 @@ import type {
   CloudRoomRequest,
   CloudRoomStatus,
   CloudStageLayout,
-  CloudStatus,
-  StreamPlatform
+  CloudStatus
 } from '@/lib/backend'
 import { plural } from '@/lib/format'
-import { platformLabel } from '@/lib/platform-copy'
 import type { StatusTone } from '@/lib/status-word'
-import { effectiveStageLayout } from '@/lib/talk-show-layout'
+import { effectiveStageLayout, showStageInput } from '@/lib/talk-show-layout'
 
 // What Livestream → Guests and the Show stage say about the room (plan 224
 // C-G2, C-G3), derived from the backend's `CloudStatus.room`. Pure, so every
@@ -19,13 +17,15 @@ import { effectiveStageLayout } from '@/lib/talk-show-layout'
 
 // --- Locks (C-G2, D15) -------------------------------------------------------
 
-/** Basic: guests come with a paid plan (D15 B: Premium seats one). */
+/**
+ * D15 B (plan 221 U3): the one lock sentence for talk shows. Premium seats one
+ * guest and Max five, so Basic is sold Premium; the backend's refusal
+ * (`TALK_SHOWS_LOCK_MESSAGE`) and the web's 403 say the same words.
+ */
 export const GUESTS_PREMIUM_REASON = 'Talk shows with guests come with Videorc Premium.'
-/** A plan without talk shows (D15 A, kept for an allowance that says so). */
-export const GUESTS_MAX_REASON = 'Talk shows with guests come with Videorc Max.'
 /** A paid plan whose cloud isn't on yet (the rollout switch, the cohort). */
 export const GUESTS_CLOUD_NOT_YET_REASON = "Videorc Cloud isn't on for your account yet."
-/** Max with talk shows switched off for the account (the rollout). */
+/** A paid plan whose allowance has no talk shows yet (D15 B: the rollout). */
 export const GUESTS_NOT_YET_REASON = "Talk shows aren't on for your account yet."
 /** The backend never answered with the cloud's state (an older backend). */
 export const GUESTS_CLOUD_UNKNOWN_REASON = "Videorc can't check Videorc Cloud right now."
@@ -46,10 +46,10 @@ export function guestsAccess(status: CloudStatus | null): GuestsAccess {
       ? { kind: 'locked', reason: GUESTS_CLOUD_NOT_YET_REASON, upsell: false }
       : { kind: 'locked', reason: GUESTS_PREMIUM_REASON, upsell: true }
   }
+  // D15 B: every paid plan has talk shows, so an allowance without them is
+  // the rollout, never an upsell.
   if (status.allowance && !status.allowance.talkShows) {
-    return status.plan === 'max'
-      ? { kind: 'locked', reason: GUESTS_NOT_YET_REASON, upsell: false }
-      : { kind: 'locked', reason: GUESTS_MAX_REASON, upsell: true }
+    return { kind: 'locked', reason: GUESTS_NOT_YET_REASON, upsell: false }
   }
   return { kind: 'available' }
 }
@@ -124,21 +124,41 @@ export function newLinkAsksFirst(room: CloudRoomStatus | undefined): boolean {
   return (room?.guests?.length ?? 0) > 0
 }
 
-const joinWords = (words: readonly string[]): string =>
-  words.length <= 1
-    ? (words[0] ?? '')
-    : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`
+/**
+ * The platform names in D13's line, as the guest page writes them
+ * (videorc-web `lib/cloud/guest-consent.ts`); any other value is left out.
+ */
+const CONSENT_PLATFORM_NAMES: ReadonlyMap<string, string> = new Map([
+  ['youtube', 'YouTube'],
+  ['twitch', 'Twitch'],
+  ['kick', 'Kick'],
+  ['x', 'X'],
+  ['facebook', 'Facebook'],
+  ['tiktok', 'TikTok'],
+  ['instagram', 'Instagram'],
+  ['custom', 'your own server']
+])
+
+/** "A", "A and B", "A, B, and C": the guest page's list, serial comma included. */
+function consentListPhrase(items: readonly string[]): string {
+  if (items.length <= 1) return items.join('')
+  if (items.length === 2) return `${items[0]} and ${items[1]}`
+  return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`
+}
 
 /**
  * D13: the line a guest reads before "Ask to join", from the show's saved
- * destinations; before any is known, the short form.
+ * destinations; before any is known, the short form. Word for word the guest
+ * page's `consentLine` (review L2), pinned by `protocol-fixtures/guest-consent-lines.json`,
+ * which videorc-web keeps a copy of.
  */
 export function guestConsentLine(platforms: readonly string[] | undefined): string {
-  const names = [...new Set((platforms ?? []).filter(Boolean))].map((platform) =>
-    platformLabel(platform as StreamPlatform)
-  )
+  const names = (platforms ?? []).flatMap((platform) => {
+    const name = CONSENT_PLATFORM_NAMES.get(platform)
+    return name ? [name] : []
+  })
   return names.length > 0
-    ? `This show goes out live on ${joinWords(names)} and may be recorded. Your camera and voice are part of it.`
+    ? `This show goes out live on ${consentListPhrase(names)} and may be recorded. Your camera and voice are part of it.`
     : 'This show goes out live and may be recorded. Your camera and voice are part of it.'
 }
 
@@ -363,14 +383,13 @@ export function layoutReasonsLine(options: readonly LayoutOption[]): string | nu
   return reasons.length > 0 ? reasons.join(' ') : null
 }
 
-/** The layout the stage shows: the runner's own fallbacks applied (D8). */
+/**
+ * The layout the stage shows: the runner's own fallbacks applied (D8), on the
+ * stage as the program draws it (review M2: a stale screen is Side by side).
+ */
 export function shownLayout(room: CloudRoomStatus | undefined): CloudStageLayout {
   if (!room) return 'solo'
-  return effectiveStageLayout({
-    layout: room.stage.layout,
-    people: room.stage.onStage,
-    screen: room.stage.screen ?? null
-  })
+  return effectiveStageLayout(showStageInput(room))
 }
 
 // --- Moderation (D5, D14) ------------------------------------------------------

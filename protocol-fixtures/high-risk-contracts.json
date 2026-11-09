@@ -2715,6 +2715,12 @@
         "client": "connected",
         "returnEnabled": false,
         "stageSet": true,
+        "shown": {
+          "onStage": [
+            "host:sh_0123456789abcdefghijkl",
+            "g_0123456789abcdefghijkl"
+          ]
+        },
         "live": true,
         "liveSince": "2026-11-08T12:02:00.000Z"
       },

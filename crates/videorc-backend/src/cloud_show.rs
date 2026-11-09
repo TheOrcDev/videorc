@@ -1276,6 +1276,21 @@ pub(crate) struct ControlRequest {
     ack: Option<(String, AckSender)>,
 }
 
+#[cfg(test)]
+impl ControlRequest {
+    /// Test support: what a test's stand-in runner received, acked `ok` or
+    /// refused with `refusal`.
+    pub(crate) fn answer_for_tests(self, refusal: Option<&str>) -> Value {
+        if let Some((_, waiter)) = self.ack {
+            let _ = waiter.send(match refusal {
+                None => Ok(None),
+                Some(problem) => Err(problem.to_string()),
+            });
+        }
+        self.frame
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveShow {
     pub(crate) record: ShowRecord,
@@ -3283,7 +3298,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// The lost route for a resume whose node did not answer hello (L4):
     /// `Some(end_reason)` when the web ended the show (or lists another),
     /// `None` when it kept the show or could not be asked.
-    async fn report_lost_on_resume(&self, bearer: &str, show_id: &str) -> Option<String> {
+    pub(crate) async fn report_lost_on_resume(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> Option<String> {
         let report = LostShowReport {
             at: Some(now_rfc3339()),
             feed_failed_seconds: None,
@@ -5245,6 +5264,236 @@ mod tests {
         assert_eq!(stage.layout, crate::cloud_talk::CloudStageLayout::Spotlight);
     }
 
+    /// `GET current` for a held talk show, as a relaunched desktop sees it.
+    fn held_talk_current() -> CurrentShowResponse {
+        let created = created_talk();
+        CurrentShowResponse {
+            show: Some(created.show.clone()),
+            control: Some(created.control.clone()),
+            ingest: None,
+        }
+    }
+
+    /// The review of 2026-11-09, M1 (and L9's talk resume): a relaunch whose
+    /// launch check could not reach the node holds the talk show with no
+    /// control socket, and Resume used to open the room on that silence
+    /// (every stage, Go Live and Record refused "not connected"). Resume now
+    /// connects the socket itself; a node it cannot reach gives the camera
+    /// back and keeps the show resumable; a show the web ended is forgotten.
+    #[tokio::test(start_paused = true)]
+    async fn a_talk_resume_without_a_control_socket_connects_one_or_gives_the_camera_back() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        let push_current = |answer: std::result::Result<CurrentShowResponse, CloudApiError>| {
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(answer);
+        };
+        let refuse_next_connect = || {
+            harness
+                .context
+                .connector
+                .refuse_next
+                .lock()
+                .unwrap()
+                .push_back(None);
+        };
+        // The launch check finds the talk show and cannot reach its node.
+        push_current(Ok(held_talk_current()));
+        refuse_next_connect();
+        let status = harness.context.detect_current_show("bearer").await.unwrap();
+        assert!(!status.connected);
+        assert!(lock(&harness.context.slot).control_tx.is_none());
+
+        // Resume while the node is still unreachable and the web keeps the
+        // show: the resume fails, the camera comes back, nothing is open.
+        push_current(Ok(held_talk_current()));
+        refuse_next_connect();
+        harness
+            .context
+            .web
+            .lost
+            .lock()
+            .unwrap()
+            .push_back(Ok(lost_answer("live", None)));
+        let error = harness
+            .context
+            .resume_room(Some("bearer".to_string()))
+            .await
+            .expect_err("an unreachable node fails the resume");
+        assert!(
+            error.to_string().contains("could not be reached"),
+            "{error}"
+        );
+        assert_eq!(
+            harness.camera.lock().unwrap().as_slice(),
+            &[
+                crate::cloud_talk::CameraHandover::Lend,
+                crate::cloud_talk::CameraHandover::Return
+            ]
+        );
+        assert!(lock(&harness.context.slot).talk.is_none());
+        assert_eq!(
+            lock(&harness.context.slot).resumable_show_id().as_deref(),
+            Some("sh_abc"),
+            "the show stays resumable"
+        );
+
+        // Resume once the node answers: the socket connects inside the
+        // resume, the room opens on the runner's legs, and the stage reaches
+        // the runner on that socket.
+        push_current(Ok(held_talk_current()));
+        let context = harness.context.clone();
+        let resume =
+            tokio::spawn(async move { context.resume_room(Some("bearer".to_string())).await });
+        let mut server = harness.context.connector.accept().await;
+        let hello = server.next_frame().await;
+        assert_eq!(hello["t"], "hello");
+        let mut welcome = welcome_talk(true);
+        welcome["state"]["phase"] = json!("live");
+        welcome["state"]["legs"] = json!([
+            { "id": "youtube-main", "platform": "youtube", "label": "YouTube", "orientation": "horizontal", "state": "live" }
+        ]);
+        server.send(welcome);
+        let status = resume.await.unwrap().expect("the resume opens the room");
+        assert!(status.connected);
+        let room = status.room.as_ref().expect("the room is open");
+        assert_eq!(room.phase, crate::cloud_talk::CloudRoomPhase::Open);
+        assert!(room.live, "on air from the runner's legs");
+        assert!(room.live_since.is_none(), "the runner's clock, not ours");
+        assert_eq!(
+            harness.context.web.room_tokens.load(Ordering::SeqCst),
+            0,
+            "the resume keeps no host token: the renderer asks for its own (L4)"
+        );
+        assert_eq!(
+            harness.camera.lock().unwrap().last(),
+            Some(&crate::cloud_talk::CameraHandover::Lend)
+        );
+        let context = harness.context.clone();
+        let mut stage = room.stage.clone();
+        stage.layout = crate::cloud_talk::CloudStageLayout::SideBySide;
+        stage.on_stage.push("g_ada".to_string());
+        let set = tokio::spawn(async move { context.set_stage(stage).await });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["kind"], "stage.set");
+        assert_eq!(frame["onStage"], json!(["host:sh_abc", "g_ada"]));
+        server.send(ack(&frame["id"]));
+        set.await
+            .unwrap()
+            .expect("the stage lands on the resumed socket");
+        // A resume of an open room changes nothing and connects nothing new.
+        let connects = harness.context.connector.connects.load(Ordering::SeqCst);
+        harness
+            .context
+            .resume_room(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            harness.context.connector.connects.load(Ordering::SeqCst),
+            connects
+        );
+    }
+
+    /// M1: a held talk show the web ended while the desktop was away is
+    /// forgotten by the resume's own connect, and the camera comes back.
+    #[tokio::test(start_paused = true)]
+    async fn a_talk_resume_of_a_show_the_web_ended_forgets_it() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(held_talk_current()));
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .push_back(None);
+        harness.context.detect_current_show("bearer").await.unwrap();
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse {
+                show: None,
+                control: None,
+                ingest: None,
+            }));
+        let error = harness
+            .context
+            .resume_room(Some("bearer".to_string()))
+            .await
+            .expect_err("the show is gone");
+        assert!(error.to_string().contains("already ended"), "{error}");
+        assert!(lock(&harness.context.slot).show.is_none());
+        assert!(lock(&harness.context.slot).talk.is_none());
+        assert_eq!(
+            harness.camera.lock().unwrap().as_slice(),
+            &[
+                crate::cloud_talk::CameraHandover::Lend,
+                crate::cloud_talk::CameraHandover::Return
+            ]
+        );
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 1);
+    }
+
+    /// Review M2: the runner's `state.room.shown` (what the program draws)
+    /// parses, rides the room status to the Show stage, and is absent, never
+    /// null, from an older runner.
+    #[tokio::test(start_paused = true)]
+    async fn the_runners_shown_stage_rides_the_room_status() {
+        let older: crate::cloud_talk::RunnerRoomState =
+            serde_json::from_value(json!({ "connected": true, "layout": "solo" })).unwrap();
+        assert!(older.shown.is_none());
+        assert!(serde_json::to_value(&older).unwrap().get("shown").is_none());
+
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created_talk()));
+        let context = harness.context.clone();
+        let open = tokio::spawn(async move {
+            context
+                .open_room(Some("bearer".to_string()), room_open_params(), false)
+                .await
+        });
+        let server = harness.context.connector.accept().await;
+        server.send(welcome_talk(false));
+        let status = open.await.unwrap().expect("the room opens");
+        assert!(status.room.as_ref().unwrap().shown.is_none());
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 5, "feeds": [], "legs": [],
+            "room": { "connected": true, "participants": [], "layout": "screen-people",
+                      "hostAway": false, "stageSet": true,
+                      "shown": { "onStage": ["host:sh_abc"], "screen": "g_ada" } }
+        } }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let room = lock(&harness.context.slot).status().room.unwrap();
+        assert_eq!(
+            room.shown,
+            Some(crate::cloud_talk::CloudRoomShown {
+                on_stage: vec!["host:sh_abc".to_string()],
+                screen: Some("g_ada".to_string()),
+            })
+        );
+        let wire = serde_json::to_value(&room).unwrap();
+        assert_eq!(
+            wire["shown"],
+            json!({ "onStage": ["host:sh_abc"], "screen": "g_ada" })
+        );
+    }
+
     /// The runner's on-stage people: the host first and always, no runner,
     /// no duplicate, no more than the runner takes.
     #[test]
@@ -5274,6 +5523,51 @@ mod tests {
         assert_eq!(
             crate::cloud_talk::runner_on_stage("host:sh_abc", &crowd).len(),
             crate::cloud_talk::MAX_ON_STAGE
+        );
+    }
+
+    /// Review L1: one lock sentence for talk shows, D15 B's, whether this
+    /// computer refuses (no talk shows in the allowance) or the web's 403
+    /// does; the web's refusal gives the camera back.
+    #[tokio::test(start_paused = true)]
+    async fn a_room_refused_for_the_plan_says_d15_bs_one_sentence() {
+        assert_eq!(
+            crate::cloud_talk::TALK_SHOWS_LOCK_MESSAGE,
+            "Talk shows with guests come with Videorc Premium."
+        );
+        let harness = harness(true);
+        let error = harness
+            .context
+            .open_room(Some("bearer".to_string()), room_open_params(), false)
+            .await
+            .expect_err("no talk shows in the allowance");
+        assert_eq!(
+            error.to_string(),
+            crate::cloud_talk::TALK_SHOWS_LOCK_MESSAGE
+        );
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() = Some(Err(CloudApiError::NotEntitled));
+        let error = harness
+            .context
+            .open_room(Some("bearer".to_string()), room_open_params(), false)
+            .await
+            .expect_err("the web refuses the plan");
+        assert_eq!(
+            error
+                .downcast_ref::<crate::cloud_talk::RoomOpenRefusal>()
+                .map(|refusal| refusal.code()),
+            Some("cloud-not-entitled")
+        );
+        assert_eq!(
+            error.to_string(),
+            crate::cloud_talk::TALK_SHOWS_LOCK_MESSAGE
+        );
+        assert_eq!(
+            harness.camera.lock().unwrap().as_slice(),
+            &[
+                crate::cloud_talk::CameraHandover::Lend,
+                crate::cloud_talk::CameraHandover::Return
+            ]
         );
     }
 

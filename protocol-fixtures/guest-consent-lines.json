@@ -1,0 +1,37 @@
+{
+  "about": "Plan 224 D13: the consent line a guest reads before Ask to join, from the show's saved platforms. The web's guest page (videorc-web lib/cloud/guest-consent.ts consentLine) and the desktop's Guests tab (apps/desktop/src/renderer/src/lib/guests-view.ts guestConsentLine) both reproduce every case word for word; videorc-web keeps a byte-identical copy at tests/fixtures/guest-consent-lines.json.",
+  "cases": [
+    {
+      "platforms": [],
+      "line": "This show goes out live and may be recorded. Your camera and voice are part of it."
+    },
+    {
+      "platforms": ["youtube"],
+      "line": "This show goes out live on YouTube and may be recorded. Your camera and voice are part of it."
+    },
+    {
+      "platforms": ["youtube", "twitch"],
+      "line": "This show goes out live on YouTube and Twitch and may be recorded. Your camera and voice are part of it."
+    },
+    {
+      "platforms": ["youtube", "twitch", "kick"],
+      "line": "This show goes out live on YouTube, Twitch, and Kick and may be recorded. Your camera and voice are part of it."
+    },
+    {
+      "platforms": ["facebook", "tiktok", "instagram", "x"],
+      "line": "This show goes out live on Facebook, TikTok, Instagram, and X and may be recorded. Your camera and voice are part of it."
+    },
+    {
+      "platforms": ["twitch", "custom"],
+      "line": "This show goes out live on Twitch and your own server and may be recorded. Your camera and voice are part of it."
+    },
+    {
+      "platforms": ["not-a-platform", "constructor", "kick"],
+      "line": "This show goes out live on Kick and may be recorded. Your camera and voice are part of it."
+    },
+    {
+      "platforms": ["not-a-platform"],
+      "line": "This show goes out live and may be recorded. Your camera and voice are part of it."
+    }
+  ]
+}
