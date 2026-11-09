@@ -688,17 +688,20 @@ fn known_streams_locked(conn: &Connection) -> Result<Vec<KnownStream>> {
 /// time; an attendance row whose stream is unknown uses its own first
 /// message time), messages, first and last chat, celebrated milestones.
 fn person_history_locked(conn: &Connection, person: &PersonRow) -> Result<PersonHistory> {
-    Ok(histories_locked(conn, &[person])?
+    Ok(histories_locked(conn, &[person], false)?
         .remove(&person.id)
         .unwrap_or_default())
 }
 
 /// [`person_history_locked`] for many people at once (F4): one read of the
 /// live accounts and one of the attendance, whatever the count. Every
-/// person given gets an entry.
+/// person given gets an entry. With `without_youtube` the YouTube accounts
+/// and their attendance are left out (F7: what leaves the computer for the
+/// memory pass is never derived from YouTube, D3).
 fn histories_locked(
     conn: &Connection,
     people: &[&PersonRow],
+    without_youtube: bool,
 ) -> Result<HashMap<String, PersonHistory>> {
     let ids: Vec<String> = people.iter().map(|person| person.id.clone()).collect();
     let mut accounts = live_accounts_by_people_locked(conn, &ids)?;
@@ -706,7 +709,11 @@ fn histories_locked(
     for person in people {
         let accounts = accounts.remove(&person.id).unwrap_or_default();
         let mut history = PersonHistory {
-            platforms: accounts.iter().map(|account| account.platform).collect(),
+            platforms: accounts
+                .iter()
+                .map(|account| account.platform)
+                .filter(|platform| !without_youtube || *platform != StreamPlatform::Youtube)
+                .collect(),
             celebrated: person.milestones.clone(),
             ..Default::default()
         };
@@ -722,8 +729,13 @@ fn histories_locked(
              FROM community_attendance t
              JOIN community_accounts a ON a.account_key = t.account_key
              LEFT JOIN community_streams s ON s.session_id = t.session_id
-             WHERE a.person_id IN ({}) AND a.status != 'forgotten'",
-            in_placeholders(chunk.len())
+             WHERE a.person_id IN ({}) AND a.status != 'forgotten'{}",
+            in_placeholders(chunk.len()),
+            if without_youtube {
+                " AND a.platform != 'youtube'"
+            } else {
+                ""
+            }
         ))?;
         let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
             Ok((
@@ -1324,7 +1336,7 @@ impl Database {
                 person.status == CommunityPersonStatus::Normal && !arrived.contains(&person.id)
             })
             .collect();
-        let histories = histories_locked(&conn, &candidates)?;
+        let histories = histories_locked(&conn, &candidates, false)?;
         let mut memories = if remember {
             let ids: Vec<String> = candidates.iter().map(|person| person.id.clone()).collect();
             memories_by_people_locked(&conn, &ids)?
@@ -2158,8 +2170,11 @@ impl Database {
     /// The people behind these account keys, for a memory pass: each live,
     /// normal person once (a bot, a forgotten account or an account the
     /// store never met is left out), with their live accounts, what Buddy
-    /// knows and the streamer's note. Returns the key → person map and the
-    /// people by id.
+    /// knows and the streamer's note. Nothing here is derived from a
+    /// YouTube account (F7, D3): the name is the newest non-YouTube
+    /// account's, the stream count and the regular flag count non-YouTube
+    /// attendance only, and the accounts listed are the non-YouTube ones.
+    /// Returns the key → person map and the people by id.
     pub fn community_memory_people(
         &self,
         keys: &[String],
@@ -2189,13 +2204,23 @@ impl Database {
             if people.contains_key(&person.id) {
                 continue;
             }
-            let history = person_history_locked(&conn, &person)?;
-            let accounts = live_accounts_locked(&conn, &person.id)?
+            let history = histories_locked(&conn, &[&person], true)?
+                .remove(&person.id)
+                .unwrap_or_default();
+            let off_youtube: Vec<AccountRow> = live_accounts_locked(&conn, &person.id)?
+                .into_iter()
+                .filter(|account| account.platform != StreamPlatform::Youtube)
+                .collect();
+            let name = off_youtube
+                .iter()
+                .max_by(|a, b| a.last_seen_at.cmp(&b.last_seen_at))
+                .map_or_else(|| person.name.clone(), |account| account.name.clone());
+            let accounts = off_youtube
                 .into_iter()
                 .map(|account| (account.account_key, account.platform))
                 .collect();
             let facts = CommunityMemoryPersonFacts {
-                name: person.name.clone(),
+                name,
                 regular: is_regular(&history, now, threshold),
                 streams: history.streams(),
                 accounts,

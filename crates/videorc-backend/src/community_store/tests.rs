@@ -1603,3 +1603,56 @@ fn a_raid_of_four_hundred_fresh_authors_costs_one_read_per_table() {
         conn.trace_v2(TraceEventCodes::empty(), None);
     }
 }
+
+/// The review of 2026-11-09, F7 (D3, H4): what the memory pass sends about
+/// a linked person is never derived from YouTube. Ada chatted in three
+/// streams on YouTube (as "ada_dev", most recently) and in one on Twitch:
+/// the pass sees one stream, no regular, the Twitch name and Twitch alone.
+#[test]
+fn the_memory_pass_facts_about_a_linked_person_leave_youtube_out() {
+    let database = Database::open_in_memory_for_tests();
+    for (session_id, at) in [
+        ("y1", day(2026, 10, 20)),
+        ("y2", day(2026, 10, 27)),
+        ("y3", day(2026, 11, 3)),
+    ] {
+        stream_with(
+            &database,
+            session_id,
+            at,
+            &[(StreamPlatform::Youtube, "UCada", "ada_dev")],
+        );
+    }
+    stream_with(
+        &database,
+        "t1",
+        day(2026, 10, 1),
+        &[(StreamPlatform::Twitch, "ada", "Ada")],
+    );
+    let youtube = person_of(&database, StreamPlatform::Youtube, "UCada");
+    let twitch = person_of(&database, StreamPlatform::Twitch, "ada");
+    database
+        .community_link(
+            &twitch.id,
+            &youtube.id,
+            CommunityLinkKind::Manual,
+            day(2026, 11, 4),
+        )
+        .unwrap();
+    let linked = person_of(&database, StreamPlatform::Twitch, "ada");
+    assert_eq!(linked.streams, 4);
+    assert!(linked.regular, "the card counts everything");
+    assert_eq!(linked.name, "ada_dev", "the newest name, YouTube's");
+    let (by_key, people) = database
+        .community_memory_people(&["twitch:ada".to_string()], day(2026, 11, 8), 3)
+        .unwrap();
+    assert_eq!(by_key.len(), 1);
+    let facts = people.values().next().unwrap();
+    assert_eq!(facts.name, "Ada", "the non-YouTube name");
+    assert_eq!(facts.streams, 1, "YouTube attendance never leaves");
+    assert!(!facts.regular);
+    assert_eq!(
+        facts.accounts,
+        vec![("twitch:ada".to_string(), StreamPlatform::Twitch)]
+    );
+}
