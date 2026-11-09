@@ -2079,6 +2079,24 @@ fn restart_leg_rows(
     })
 }
 
+/// The session's rows for a show the runner ended (L5): every leg it last
+/// reported, Stopped, with the end named in plain words.
+fn stopped_leg_rows(legs: &[RunnerLeg], end_reason: Option<&str>) -> Vec<StreamTargetRuntime> {
+    let message = match end_reason {
+        Some("hold-limit") => "Videorc Cloud ended the show: the hold ran past its limit.",
+        Some("max-show") => "Videorc Cloud ended the show: a show runs 12 hours at most.",
+        Some("no-feed") => "Videorc Cloud ended the show: no feed arrived.",
+        _ => "Videorc Cloud ended the show.",
+    };
+    legs.iter()
+        .map(|leg| StreamTargetRuntime {
+            state: StreamTargetState::Stopped,
+            message: Some(message.to_string()),
+            ..runner_leg_to_runtime(leg)
+        })
+        .collect()
+}
+
 enum LoopExit {
     /// A newer owner took the show over.
     Superseded,
@@ -2149,6 +2167,24 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             LoopExit::Ended(reason) => {
                 if self.current() {
                     self.context.forget_talk_show().await;
+                    // Plan 222 review L5: the rows the runner last reported
+                    // go Stopped before the show (their source) is
+                    // forgotten, so the session's list stops saying Live.
+                    let stopped = {
+                        let runtime = lock(&self.context.slot);
+                        runtime.feeding_session().and_then(|session| {
+                            let legs = runtime
+                                .runner
+                                .as_ref()
+                                .map(|runner| runner.legs.as_slice())
+                                .unwrap_or_default();
+                            (!legs.is_empty())
+                                .then(|| (session, stopped_leg_rows(legs, reason.as_deref())))
+                        })
+                    };
+                    if let Some((session, rows)) = stopped {
+                        (self.context.hooks.legs)(&session, rows);
+                    }
                     lock(&self.context.slot).clear_show(reason);
                     self.context.hooks.emit_from(&self.context.slot);
                 }
@@ -8506,6 +8542,36 @@ mod tests {
         server.send(ack(&frame["id"]));
         reconnect.await.unwrap().unwrap();
         assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Live);
+    }
+
+    // Plan 222 review L5: a show the runner ends (the hold limit, the
+    // 12-hour cap) leaves the session's platform rows: they go Stopped, with
+    // the reason in plain words, before the show is forgotten.
+    #[tokio::test(start_paused = true)]
+    async fn a_show_the_runner_ends_stops_the_platform_rows() {
+        let harness = harness(true);
+        let server = live_show(&harness).await;
+        server.send(json!({ "t": "state", "state": {
+            "phase": "ended", "endReason": "hold-limit", "liveSeconds": 400, "feeds": [], "legs": []
+        }}));
+        wait_for_phase(&harness.context.slot, CloudPhase::Off).await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.show, None);
+        assert_eq!(status.end_reason.as_deref(), Some("hold-limit"));
+        let legs = harness.legs.lock().unwrap();
+        let (session, rows) = legs.last().expect("the rows were pushed");
+        assert_eq!(session, "session-1");
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| row.state == StreamTargetState::Stopped)
+        );
+        assert_eq!(rows[0].target_id, "youtube-main");
+        assert_eq!(rows[1].target_id, "twitch-main");
+        assert_eq!(
+            rows[0].message.as_deref(),
+            Some("Videorc Cloud ended the show: the hold ran past its limit.")
+        );
     }
 
     // Plan 222 review L6: `show.kind` is closed to solo, talk and test in
