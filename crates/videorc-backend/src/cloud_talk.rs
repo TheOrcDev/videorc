@@ -1614,6 +1614,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// renderer joins with a fresh token through `cloud.room.token.refresh`;
     /// no `destinations.set` goes out (plan 184 C5b). The runner's
     /// `stageSet: false` after a crash is answered by `resend_stage`.
+    ///
+    /// Review M1: a launch check that could not reach the node leaves the
+    /// show held with no control socket, so the resume connects one itself
+    /// (`connect_talk_control`); a failure gives the camera back and leaves
+    /// the show resumable, or forgets it when the node or the web says it
+    /// is over.
     pub async fn resume_room(&self, bearer: Option<String>) -> Result<CloudStatus> {
         let bearer = bearer_or_bail(bearer)?;
         let show_id = {
@@ -1646,8 +1652,22 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 return Err(anyhow::Error::new(error));
             }
         };
-        let generation = {
+        let unconnected = lock(&self.slot).control_tx.is_none();
+        if unconnected && let Err(error) = self.connect_talk_control(&bearer, &show_id).await {
+            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            return Err(error);
+        }
+        let generation = 'open: {
             let mut runtime = lock(&self.slot);
+            if runtime
+                .show
+                .as_ref()
+                .is_none_or(|show| show.record.id != show_id)
+            {
+                // The show ended while the resume asked the web (the control
+                // loop forgot it); nothing is left to resume.
+                break 'open None;
+            }
             let mut talk = TalkShowState::new(
                 ShowRoomAnswer {
                     url: token.url,
@@ -1674,11 +1694,85 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             if let Some(show) = runtime.show.as_mut() {
                 show.resuming = false;
             }
-            generation
+            Some(generation)
+        };
+        let Some(generation) = generation else {
+            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            bail!("The show already ended on Videorc Cloud. Open the room to start a new one.");
         };
         self.spawn_guests_poll(bearer, show_id, generation);
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
+    }
+
+    /// Review M1: the resume's own control socket, the way the solo resume
+    /// connects (`resume_into_session`): a fresh show token from `GET
+    /// current`, hello, and the control loop installed. A show the web or
+    /// the node no longer has is forgotten; an unreachable node goes to the
+    /// lost route first, which may end the show; otherwise the resume fails
+    /// and the show stays resumable.
+    async fn connect_talk_control(&self, bearer: &str, show_id: &str) -> Result<()> {
+        let current = self.web.current_show(bearer).await;
+        let control = {
+            let mut runtime = lock(&self.slot);
+            let Some(show) = runtime
+                .show
+                .as_mut()
+                .filter(|show| show.record.id == show_id)
+            else {
+                bail!("There's no Videorc Cloud show to resume.");
+            };
+            if let Ok(current) = &current {
+                match &current.show {
+                    Some(fresh) if fresh.id == show_id && !fresh.is_ended() => {
+                        show.record = fresh.clone();
+                        if let Some(control) = &current.control {
+                            show.control = control.clone();
+                        }
+                    }
+                    _ => {
+                        runtime.clear_show(Some("show-gone".to_string()));
+                        drop(runtime);
+                        self.hooks.emit_from(&self.slot);
+                        bail!(
+                            "The show already ended on Videorc Cloud. Open the room to start a new one."
+                        );
+                    }
+                }
+            }
+            show.control.clone()
+        };
+        let (transport, welcome) = match connect_and_hello(self.connector.as_ref(), &control).await
+        {
+            Ok(connected) => connected,
+            Err(HelloFailure::NoSuchShow) => {
+                lock(&self.slot).clear_show(Some("show-gone".to_string()));
+                self.hooks.emit_from(&self.slot);
+                bail!("The show already ended on Videorc Cloud. Open the room to start a new one.");
+            }
+            Err(HelloFailure::BadToken) => {
+                bail!("Videorc Cloud refused the show token; try again.")
+            }
+            Err(HelloFailure::Transport(message)) => {
+                if let Some(end_reason) = self.report_lost_on_resume(bearer, show_id).await {
+                    lock(&self.slot).clear_show(Some(end_reason));
+                    self.hooks.emit_from(&self.slot);
+                    bail!(
+                        "The show already ended on Videorc Cloud. Open the room to start a new one."
+                    );
+                }
+                bail!("Videorc Cloud could not be reached to resume the room: {message}")
+            }
+        };
+        install_control_loop(
+            self,
+            bearer.to_string(),
+            control,
+            show_id.to_string(),
+            transport,
+            welcome,
+        );
+        Ok(())
     }
 
     async fn simple_intent(&self, kind: &str, failure: &str) -> Result<CloudStatus> {
