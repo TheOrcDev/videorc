@@ -232,6 +232,10 @@ pub(crate) fn arrival_reaction_due(slot: &CommunitySlot, now: Instant) -> bool {
 /// following the live-chat session like the automatic chat lane.
 #[derive(Debug, Default)]
 pub struct CommunityLane {
+    /// The chat session the rows belong to (F11): a session's start keeps
+    /// only its own rows and its end takes only its own, so a quick stop
+    /// and restart never wipes the new stream's "Welcome back".
+    session_id: Option<String>,
     welcome_back: Vec<(CohostWelcomeBack, String, Instant)>,
     link_made: Vec<(CohostLinkMade, Instant)>,
     /// Arrival rows the bubble welcomed, or whose Suggest card was posted or
@@ -248,10 +252,16 @@ impl CommunityLane {
     /// A returning person arrived (`message_id` is their arrival row).
     pub(crate) fn note_arrival(
         &mut self,
+        session_id: &str,
         entry: CohostWelcomeBack,
         message_id: String,
         now: Instant,
     ) {
+        self.claim_session(session_id);
+        if self.session_id.as_deref() != Some(session_id) {
+            // Another session's lane: the row is stale.
+            return;
+        }
         if self.welcomed.contains(&message_id) {
             return;
         }
@@ -287,7 +297,11 @@ impl CommunityLane {
         before != self.welcome_back.len()
     }
 
-    pub(crate) fn note_link_made(&mut self, link: CohostLinkMade, now: Instant) {
+    pub(crate) fn note_link_made(&mut self, session_id: &str, link: CohostLinkMade, now: Instant) {
+        self.claim_session(session_id);
+        if self.session_id.as_deref() != Some(session_id) {
+            return;
+        }
         self.link_made.push((link, now));
     }
 
@@ -340,6 +354,31 @@ impl CommunityLane {
         self.link_made.clear();
         self.welcomed.clear();
     }
+
+    /// F11: a chat session started. Rows of another session leave; rows the
+    /// new session already noted (its first batch landed before this ran)
+    /// stay.
+    pub(crate) fn start_session(&mut self, session_id: &str) {
+        if self.session_id.as_deref() != Some(session_id) {
+            self.clear();
+            self.session_id = Some(session_id.to_string());
+        }
+    }
+
+    /// F11: a chat session ended. Its rows leave; a newer session's stay.
+    pub(crate) fn end_session(&mut self, session_id: &str) {
+        if self.session_id.as_deref() == Some(session_id) {
+            self.clear();
+            self.session_id = None;
+        }
+    }
+
+    /// F11: rows noted before the session's start task ran belong to it.
+    fn claim_session(&mut self, session_id: &str) {
+        if self.session_id.is_none() {
+            self.session_id = Some(session_id.to_string());
+        }
+    }
 }
 
 // --- Live-chat hooks ---------------------------------------------------------------
@@ -357,7 +396,12 @@ pub(crate) fn session_started(state: &AppState, session_id: &str, platforms: Vec
     let state = state.clone();
     let session_id = session_id.to_string();
     tokio::spawn(async move {
-        state.cohost.lock().await.community.clear();
+        state
+            .cohost
+            .lock()
+            .await
+            .community
+            .start_session(&session_id);
         let database = state.database.clone();
         let record_session_id = session_id.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -386,8 +430,9 @@ pub(crate) fn session_started(state: &AppState, session_id: &str, platforms: Vec
     });
 }
 
-/// The chat session ended: pending `!link` words die with it; the lane is
-/// cleared; the report's Community block (D15) is written once the
+/// The chat session ended: pending `!link` words die with it; its rows
+/// leave the lane (F11: never a newer session's); the report's Community
+/// block (D15) is written once the
 /// session's detached store writes have landed. Until then the session
 /// stays reachable (`ending`): the last delivered batch's task still
 /// counts its arrivals and `!` commands into it, so a stop right after a
@@ -416,10 +461,17 @@ pub(crate) fn session_ended(state: &AppState) {
     );
     let state = state.clone();
     tokio::spawn(async move {
-        state.cohost.lock().await.community.clear();
         let Some(session_id) = ended_id else {
             return;
         };
+        // F11: only this session's rows leave; a session started meanwhile
+        // keeps its own.
+        state
+            .cohost
+            .lock()
+            .await
+            .community
+            .end_session(&session_id);
         state.emit_log(
             "info",
             format!("Community: writing the report block for {session_id}."),
@@ -744,7 +796,9 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
             let now = Instant::now();
             let mut engine = state.cohost.lock().await;
             for (entry, message_id) in arrivals {
-                engine.community.note_arrival(entry, message_id, now);
+                engine
+                    .community
+                    .note_arrival(session_id, entry, message_id, now);
             }
             drop(engine);
             publish_cohost_state(state).await;
@@ -1030,7 +1084,7 @@ async fn run_chat_command(
                                 .lock()
                                 .await
                                 .community
-                                .note_link_made(link, Instant::now());
+                                .note_link_made(session_id, link, Instant::now());
                             publish_cohost_state(state).await;
                         }
                         Ok(Err(error)) => {
@@ -2987,6 +3041,48 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(answer.person_id, person);
+    }
+
+    /// The review of 2026-11-09, F11: a stop and a restart both cleared the
+    /// lane in detached tasks, so the old session's late clear could wipe
+    /// the new session's "Welcome back" rows. The lane is tagged with its
+    /// session: here the new session's row is noted first and the old
+    /// session's end runs after it, and the row stays.
+    #[tokio::test]
+    async fn an_old_sessions_late_clear_never_wipes_the_new_sessions_rows() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let first = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            first,
+            vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
+        )
+        .await;
+        crate::live_chat::stop_live_chat(&state).await;
+        session_settled(&state, "s1").await;
+        let second = start_session(&state, "s2").await;
+        deliver(
+            &state,
+            second,
+            vec![row("s2", StreamPlatform::Twitch, "ada", "Ada", 2, "back")],
+        )
+        .await;
+        assert_eq!(state.cohost.lock().await.snapshot().welcome_back.len(), 1);
+        // The old session's end, arriving late: it takes nothing of s2's.
+        state.cohost.lock().await.community.end_session("s1");
+        assert_eq!(
+            state.cohost.lock().await.snapshot().welcome_back.len(),
+            1,
+            "s2's row survived s1's late clear"
+        );
+        // A row noted before s2's start task ran belongs to s2 and stays
+        // when that start runs.
+        state.cohost.lock().await.community.start_session("s2");
+        assert_eq!(state.cohost.lock().await.snapshot().welcome_back.len(), 1);
+        // s2's own end takes it.
+        state.cohost.lock().await.community.end_session("s2");
+        assert!(state.cohost.lock().await.snapshot().welcome_back.is_empty());
     }
 
     /// Owner call 2026-11-08 (plan 225 C3): in Suggest mode the "Welcome
