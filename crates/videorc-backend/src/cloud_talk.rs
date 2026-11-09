@@ -697,6 +697,88 @@ impl CloudOverlayOrientation {
     }
 }
 
+impl CloudOverlayOrientation {
+    /// The output's own shape, as the takeover render fills it: 16:9 or 9:16.
+    fn takeover_canvas(self) -> (u32, u32) {
+        match self {
+            Self::H => (1920, 1080),
+            Self::V => (1080, 1920),
+        }
+    }
+}
+
+/// The largest a takeover PNG may be on the socket (the runner's hold limit).
+const TAKEOVER_PNG_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Review L6: the takeover as each output shows it, for the runner's
+/// `takeover` slot, `h` then `v`. The runner fits an overlay inside its rect
+/// with transparency around it, so the one 16:9 Screen image on the 9:16
+/// output left the stage showing above and below the takeover. An image
+/// that already has an output's shape goes as is (re-encoded only when it
+/// is not a PNG); for any other output the image gets its own render, the
+/// output's shape, the image contained on black like the local compositor
+/// draws a Screen image, opaque so nothing of the stage shows.
+pub fn takeover_overlays(screen_path: &str) -> Result<Vec<(CloudOverlayOrientation, String)>> {
+    use anyhow::Context as _;
+    use base64::Engine as _;
+    let bytes = std::fs::read(screen_path)
+        .with_context(|| format!("Could not read the takeover image at {screen_path}"))?;
+    let decoded = image::load_from_memory(&bytes).context("The takeover image did not decode.")?;
+    let (width, height) = (decoded.width().max(1), decoded.height().max(1));
+    let mut overlays = Vec::with_capacity(2);
+    for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+        let (canvas_w, canvas_h) = orientation.takeover_canvas();
+        // Within 1% of the output's aspect: the image is that output's render.
+        let fits = (u64::from(width) * u64::from(canvas_h))
+            .abs_diff(u64::from(height) * u64::from(canvas_w))
+            * 100
+            <= u64::from(height) * u64::from(canvas_w);
+        let png = if fits && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            bytes.clone()
+        } else {
+            let source = if fits {
+                decoded.to_rgba8()
+            } else {
+                let scale = (f64::from(canvas_w) / f64::from(width))
+                    .min(f64::from(canvas_h) / f64::from(height));
+                let fit_w = ((f64::from(width) * scale).round() as u32).clamp(1, canvas_w);
+                let fit_h = ((f64::from(height) * scale).round() as u32).clamp(1, canvas_h);
+                let fitted = image::imageops::resize(
+                    &decoded.to_rgba8(),
+                    fit_w,
+                    fit_h,
+                    image::imageops::FilterType::Triangle,
+                );
+                let mut canvas =
+                    image::RgbaImage::from_pixel(canvas_w, canvas_h, image::Rgba([0, 0, 0, 255]));
+                image::imageops::overlay(
+                    &mut canvas,
+                    &fitted,
+                    i64::from((canvas_w - fit_w) / 2),
+                    i64::from((canvas_h - fit_h) / 2),
+                );
+                canvas
+            };
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(source)
+                .write_to(&mut out, image::ImageFormat::Png)
+                .context("The takeover image could not be encoded as PNG.")?;
+            out.into_inner()
+        };
+        if png.len() > TAKEOVER_PNG_MAX_BYTES {
+            bail!(
+                "The takeover image is {} bytes; the runner takes at most {TAKEOVER_PNG_MAX_BYTES}.",
+                png.len()
+            );
+        }
+        overlays.push((
+            orientation,
+            base64::engine::general_purpose::STANDARD.encode(png),
+        ));
+    }
+    Ok(overlays)
+}
+
 /// A normalized rect (0 to 1 of the output), the runner's `OverlayRect`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct CloudOverlayRect {
@@ -1898,5 +1980,90 @@ pub fn talk_show_create_refusal(error: &CloudApiError) -> Option<&'static str> {
         CloudApiError::GuestHoursUsedUp { .. } => Some("cloud-guest-hours-used-up"),
         CloudApiError::RoomsUnavailable => Some("cloud-rooms-unavailable"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode(base64_png: &str) -> image::RgbaImage {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64_png)
+            .expect("base64");
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "a PNG");
+        image::load_from_memory(&bytes).expect("decodes").to_rgba8()
+    }
+
+    /// Review L6: each output gets the takeover in its own shape. A 16:9
+    /// Screen image goes to `h` byte for byte; `v` gets a 9:16 render with
+    /// the image contained on opaque black, so no stage shows around it.
+    /// A 9:16 image is the other way round.
+    #[test]
+    fn each_output_gets_the_takeover_in_its_own_shape() {
+        let dir = std::env::temp_dir().join(format!("videorc-takeover-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let red = image::Rgba([255, 0, 0, 255]);
+        let wide = dir.join("wide.png");
+        image::RgbaImage::from_pixel(320, 180, red)
+            .save(&wide)
+            .unwrap();
+        let wide_bytes = std::fs::read(&wide).unwrap();
+
+        let overlays = takeover_overlays(wide.to_str().unwrap()).unwrap();
+        assert_eq!(
+            overlays.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
+            vec![CloudOverlayOrientation::H, CloudOverlayOrientation::V]
+        );
+        {
+            use base64::Engine as _;
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&overlays[0].1)
+                    .unwrap(),
+                wide_bytes,
+                "the 16:9 image is the horizontal output's, as is"
+            );
+        }
+        let vertical = decode(&overlays[1].1);
+        assert_eq!(vertical.dimensions(), (1080, 1920));
+        assert_eq!(
+            *vertical.get_pixel(540, 960),
+            red,
+            "the image in the middle"
+        );
+        for (x, y) in [(540, 10), (540, 1910), (5, 5)] {
+            assert_eq!(
+                *vertical.get_pixel(x, y),
+                image::Rgba([0, 0, 0, 255]),
+                "opaque black around it at ({x}, {y})"
+            );
+        }
+        // The contained band is the image's 16:9 at the output's width.
+        assert_eq!(*vertical.get_pixel(540, 960 - 300), red);
+        assert_eq!(
+            *vertical.get_pixel(540, 960 - 310),
+            image::Rgba([0, 0, 0, 255])
+        );
+
+        let tall = dir.join("tall.jpg");
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(180, 320, red))
+            .to_rgb8()
+            .save(&tall)
+            .unwrap();
+        let overlays = takeover_overlays(tall.to_str().unwrap()).unwrap();
+        let horizontal = decode(&overlays[0].1);
+        assert_eq!(horizontal.dimensions(), (1920, 1080));
+        assert_eq!(horizontal.get_pixel(5, 540).0[3], 255, "opaque");
+        assert_eq!(horizontal.get_pixel(5, 540).0[..3], [0, 0, 0]);
+        let vertical = decode(&overlays[1].1);
+        assert_eq!(
+            vertical.dimensions(),
+            (180, 320),
+            "a 9:16 image is the vertical output's, re-encoded as PNG"
+        );
+        assert!(takeover_overlays(dir.join("missing.png").to_str().unwrap()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

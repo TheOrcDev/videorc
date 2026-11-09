@@ -8868,36 +8868,49 @@ async fn apply_active_screen_output(
     }
     // Plan 224 D9 (C-G7): in a talk show on air the desktop composes nothing
     // for the stream; the takeover goes to the runner's `takeover` slot, full
-    // frame, per orientation. Best effort: a refusal is logged, the local
-    // preview still shows the screen below.
+    // frame, per orientation, each output's own render (review L6: the 9:16
+    // output gets a 9:16 image, never the 16:9 one with the stage around
+    // it). Best effort: a refusal is logged, the local preview still shows
+    // the screen below.
     if cloud_talk_show_live_show_id(state).is_some()
         && let Some(context) = cloud_context(state)
     {
         use cloud_talk::{CloudOverlayOrientation, CloudOverlayRect, CloudOverlaySlot};
         match active_screen.as_ref() {
-            Some(screen) => match cloud_show::hold_image_png_base64(&screen.image_path) {
-                Ok(png) => {
-                    for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
-                        if let Err(problem) = context
-                            .set_overlay(
-                                CloudOverlaySlot::Takeover,
-                                orientation,
-                                &png,
-                                CloudOverlayRect::FULL,
-                                None,
-                            )
-                            .await
-                        {
-                            tracing::warn!("The takeover did not reach Videorc Cloud: {problem}");
+            Some(screen) => {
+                let image_path = screen.image_path.clone();
+                let overlays =
+                    tokio::task::spawn_blocking(move || cloud_talk::takeover_overlays(&image_path))
+                        .await
+                        .context("The takeover render task stopped")
+                        .and_then(|rendered| rendered);
+                match overlays {
+                    Ok(overlays) => {
+                        for (orientation, png) in overlays {
+                            if let Err(problem) = context
+                                .set_overlay(
+                                    CloudOverlaySlot::Takeover,
+                                    orientation,
+                                    &png,
+                                    CloudOverlayRect::FULL,
+                                    None,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    orientation = orientation.as_str(),
+                                    "The takeover did not reach Videorc Cloud: {problem}"
+                                );
+                            }
                         }
                     }
+                    Err(error) => {
+                        tracing::warn!(
+                            "The takeover image could not be sent to Videorc Cloud: {error:#}"
+                        );
+                    }
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        "The takeover image could not be sent to Videorc Cloud: {error:#}"
-                    );
-                }
-            },
+            }
             None => {
                 for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
                     if let Err(problem) = context
