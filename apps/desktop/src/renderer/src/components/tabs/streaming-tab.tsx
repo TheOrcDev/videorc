@@ -7,6 +7,8 @@ import { LIVESTREAM_SETUP_GRID, PAGE_LEAD_COLUMN } from '@/lib/page-layout'
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
+// Plan 224 C-G2: the Guests tab loads with its first open.
+const GuestsTab = lazy(() => import('@/components/guests/guests-tab'))
 
 import { GroupedList } from '@/components/list-row'
 import { LockAlert, SessionLockAlert } from '@/components/lock-alert'
@@ -78,10 +80,10 @@ import { broadcastThumbnailHint } from '@/lib/broadcast-info'
 import { streamLanguageOptions } from '@/lib/stream-languages'
 
 /**
- * Livestream (plan 174 S1.6b, A-14): Setup and Upcoming in a strip pinned
- * under the toolbar, like Settings; only the view under it scrolls. The view
- * lives in the shell, so the page reopens on the one used last and ⌘K can
- * open Upcoming by name.
+ * Livestream (plan 174 S1.6b, A-14): Setup, Upcoming and Guests (plan 224
+ * D16) in a strip pinned under the toolbar, like Settings; only the view
+ * under it scrolls. The view lives in the shell, so the page reopens on the
+ * one used last and ⌘K can open Upcoming and Guests by name.
  */
 export function StreamingTab({
   view,
@@ -111,6 +113,11 @@ export function StreamingTab({
       <TabsContent value="upcoming">
         <Suspense fallback={<p role="status">Loading upcoming streams…</p>}>
           <ScheduledStreams />
+        </Suspense>
+      </TabsContent>
+      <TabsContent value="guests">
+        <Suspense fallback={<p role="status">Loading guests…</p>}>
+          <GuestsTab />
         </Suspense>
       </TabsContent>
     </PageTabs>

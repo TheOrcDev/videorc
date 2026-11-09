@@ -13,7 +13,7 @@ import {
 
 describe('livestream views', () => {
   it('lists Setup then Upcoming, and opens on Setup by default', () => {
-    expect(LIVESTREAM_VIEWS.map(({ id }) => id)).toEqual(['setup', 'upcoming'])
+    expect(LIVESTREAM_VIEWS.map(({ id }) => id)).toEqual(['setup', 'upcoming', 'guests'])
     expect(DEFAULT_LIVESTREAM_VIEW).toBe('setup')
     expect(isLivestreamViewId('upcoming')).toBe(true)
     expect(isLivestreamViewId('streaming')).toBe(false)

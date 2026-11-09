@@ -1,5 +1,6 @@
 import { DEFAULT_SCREEN_HIDE_SHORTCUT } from '../../../shared/global-shortcuts'
 import {
+  AccountIcon,
   CaptionsIcon,
   ChatIcon,
   ClipIcon,
@@ -403,6 +404,16 @@ export function CommandPalette({
           >
             <LivestreamIcon className="size-4" />
             Upcoming events
+            <Context>Livestream</Context>
+          </CommandItem>
+          {/* Plan 224 D16: the talk show's room and its invite link. */}
+          <CommandItem
+            value="Open Guests"
+            keywords={['guest', 'invite', 'room', 'talk show', 'co-host', 'link']}
+            onSelect={() => run(() => openLivestreamView('guests'))}
+          >
+            <AccountIcon className="size-4" />
+            Guests
             <Context>Livestream</Context>
           </CommandItem>
         </CommandGroup>
