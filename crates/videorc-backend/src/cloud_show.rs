@@ -1833,7 +1833,11 @@ pub enum GoLiveDecision {
     /// Stream directly as today, silently: the user switched the cloud off,
     /// or the account has no cloud right now (Basic, signed out, the rollout
     /// switch off, outside the cohort). Nothing was expected, so nothing is
-    /// explained: a Basic user's Go Live never mentions the cloud.
+    /// explained: a Basic user's Go Live never mentions the cloud. The web's
+    /// kill switch (`VIDEORC_CLOUD_DISABLED`) lands here too once a
+    /// capabilities refresh has carried `enabled: false`; before that
+    /// refresh the create answers `cloud-disabled` and Go Live says so once
+    /// (plan 222 O1's drill names both).
     DirectByChoice,
     /// Stream directly and say why once: the account expected the cloud.
     DirectWithReason(CloudFallbackReason),

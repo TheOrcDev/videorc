@@ -1021,10 +1021,18 @@ Every slice names the owner's exact ask. Nothing here needs the desktop.
 
 - **O1. Kill switch drill** (web + desktop). With a show live on the real
   node: flip `VIDEORC_CLOUD_DISABLED=true`; the show keeps running, a new
-  Go Live streams directly with "Videorc Cloud is off right now. You're
-  streaming directly from this computer.", `current` and End still answer,
-  a relaunched desktop finds the show (R3). Flip back; the next Go Live
-  goes through the cloud. Write the steps into `docs/cloud.md` Rollback.
+  Go Live streams directly, `current` and End still answer, a relaunched
+  desktop finds the show (R3). Flip back; the next Go Live goes through
+  the cloud. Write the steps into `docs/cloud.md` Rollback. What the
+  second computer's Go Live says depends on what its last capabilities
+  refresh carried (review 2026-11-09, L3): while it still says `enabled:
+  true`, the create answers `503 cloud-disabled` and Go Live says once
+  "Videorc Cloud is off right now. You're streaming directly from this
+  computer."; once a refresh (at launch, at sign-in, or the renderer's
+  `entitlements.refresh`) has carried `enabled: false`, Go Live streams
+  directly silently (`DirectByChoice`: no cloud was expected), and the
+  Livestream page's cloud section shows the cloud as off. The drill
+  records which of the two it saw; both pass.
   - Done when the drill is run once on production with the owner's
     account and its log is in the runbook.
 - **O2. Rollout order** (web env; plan 185 T6). (1) `plan_override = 'max'`
@@ -1264,7 +1272,7 @@ Plan 184's table stands. These rows change or are new:
 | The stream quality is 4K30 | Nothing | "Videorc Cloud carries up to 1080p60 for now. You're streaming directly from this computer." (D5) | Direct, as today |
 | The upload is too thin for the feed | Lower bitrate, then skipped seconds | Stream health "Connection too slow", the Cloud row (plan 218, L2) | The bitrate steps down; the runner's output stays steady |
 | Hours run out mid-show | Nothing | "You're 12 min past this month's cloud hours. The show keeps going." (U5) | The next show streams directly |
-| The kill switch is flipped mid-show | Nothing | Nothing; the next Go Live streams directly and says why | End and `current` keep working (O1) |
+| The kill switch is flipped mid-show | Nothing | Nothing; the next Go Live streams directly, saying why once until a capabilities refresh carries `enabled: false`, silently after (O1) | End and `current` keep working (O1) |
 | The port lands and the cloud is dormant | Nothing | Nothing | By design until the cohort (O2) |
 
 ## STOP conditions
