@@ -63,6 +63,12 @@ pub struct WatchdogAlertsView {
     pub session_id: Option<String>,
     #[serde(default)]
     pub alerts: Vec<WatchdogAlert>,
+    /// Ids that left the list in this update without a recovery (M2): a
+    /// fold, a replace, the session's end. The renderer drops their toasts
+    /// instead of saying "is back". Only on the event, never in the RPC's
+    /// answer; absent when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withdrawn: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +175,7 @@ impl SessionWatch {
         WatchdogAlertsView {
             session_id: Some(self.session_id.clone()),
             alerts: self.state.alerts(),
+            withdrawn: Vec::new(),
         }
     }
 }
@@ -755,21 +762,51 @@ fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
-/// The session is gone: its alerts die with it (history is persisted).
+/// The session is gone: its alerts die with it, withdrawn, never "back"
+/// (history is persisted: an info event closes each row).
 pub fn session_ended(state: &AppState, session_id: &str) {
-    let ended = {
+    let withdrawn = {
         let mut runtime = lock(&state.watchdog);
-        match runtime.session.as_ref() {
+        match runtime.session.as_mut() {
             Some(watch) if watch.session_id == session_id => {
+                let withdrawn = watch.state.withdraw_all();
                 runtime.session = None;
-                true
+                Some(withdrawn)
             }
-            _ => false,
+            _ => None,
         }
     };
-    if ended {
-        state.emit_event("watchdog.alerts", WatchdogAlertsView::default());
+    if let Some(withdrawn) = withdrawn {
+        for transition in &withdrawn {
+            if let Some(code) = alerts::health_code(transition) {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Info,
+                    &code,
+                    &withdrawn_message(transition.alert()),
+                );
+            }
+        }
+        state.emit_event(
+            "watchdog.alerts",
+            WatchdogAlertsView {
+                withdrawn: withdrawn
+                    .iter()
+                    .map(|transition| transition.alert().id.clone())
+                    .collect(),
+                ..Default::default()
+            },
+        );
     }
+}
+
+/// The session log's line for a quiet departure (M2): never "is back".
+fn withdrawn_message(alert: &WatchdogAlert) -> String {
+    format!(
+        "{}. Withdrawn without a recovery.",
+        alert.title.trim_end_matches('.')
+    )
 }
 
 /// Whether this session has a watch (a tick or a 1064 report started it).
@@ -879,6 +916,7 @@ fn announce_transitions_with_view(
             };
             let message = match transition {
                 Transition::Cleared(_) => alerts::cleared_toast(alert),
+                Transition::Withdrawn(_) => withdrawn_message(alert),
                 _ => format!("{}. {}", alert.title.trim_end_matches('.'), alert.detail),
             };
             let _ = crate::recording::emit_health_event(
@@ -909,7 +947,14 @@ fn announce_transitions_with_view(
         }
     }
     if emit_view || !transitions.is_empty() {
-        let view = alerts_view(state);
+        let mut view = alerts_view(state);
+        view.withdrawn = transitions
+            .iter()
+            .filter_map(|transition| match transition {
+                Transition::Withdrawn(alert) => Some(alert.id.clone()),
+                _ => None,
+            })
+            .collect();
         state.emit_event("watchdog.alerts", view);
     }
 }
@@ -1040,6 +1085,7 @@ mod tests {
         let alerts: WatchdogAlertsView = serde_json::from_value(fixture["alerts"].clone()).unwrap();
         assert_eq!(alerts.alerts.len(), 3);
         assert_eq!(alerts.alerts[1].source, alerts::AlertSource::Cloud);
+        assert_eq!(alerts.withdrawn, vec!["watchdog:destination-down:twitch:4"]);
         assert_eq!(serde_json::to_value(&alerts).unwrap(), fixture["alerts"]);
         let empty: WatchdogAlertsView =
             serde_json::from_value(fixture["emptyAlerts"].clone()).unwrap();
@@ -1180,6 +1226,59 @@ mod tests {
         assert_eq!(seeded.luma, None, "a file that is not an image reads None");
         database.clear_active_stream_screen().unwrap();
         assert_eq!(load_takeover(&database), None);
+    }
+
+    /// Plan 223 M2 (the review): a quiet departure rides the event as
+    /// `withdrawn` and the log as an info `-withdrawn` line, never as a
+    /// clear; the session's end withdraws everything the same way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_withdrawal_rides_the_event_and_the_log_and_never_reads_as_a_clear() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        tick(
+            &state,
+            "live",
+            SessionFacts {
+                live: true,
+                ..Default::default()
+            },
+        );
+        observe_health_event(
+            &state,
+            Some("live"),
+            crate::recording::MICROPHONE_SILENT_CODE,
+            "The microphone has been silent for 20 seconds.",
+        );
+        let id = alerts_view(&state).alerts[0].id.clone();
+        session_ended(&state, "live");
+        let mut saw_withdrawn = false;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "watchdog.alerts"
+                && event.payload["withdrawn"] == json!([id.clone()])
+            {
+                saw_withdrawn = true;
+                assert_eq!(event.payload["alerts"], json!([]));
+            }
+            assert_ne!(
+                event.payload["code"],
+                json!("watchdog-mic-silent-cleared"),
+                "the session's end is not a recovery"
+            );
+        }
+        assert!(saw_withdrawn, "the empty view names the withdrawn id");
+        let events = state.database.list_health_events("live").unwrap();
+        let codes: Vec<&str> = events.iter().map(|event| event.code.as_str()).collect();
+        assert!(
+            codes.contains(&"watchdog-mic-silent-withdrawn"),
+            "{codes:?}"
+        );
+        assert!(!codes.contains(&"watchdog-mic-silent-cleared"), "{codes:?}");
+        let withdrawn = events
+            .iter()
+            .find(|event| event.code == "watchdog-mic-silent-withdrawn")
+            .unwrap();
+        assert_eq!(withdrawn.level, HealthLevel::Info);
+        assert!(withdrawn.message.ends_with("Withdrawn without a recovery."));
     }
 
     /// Plan 223 M4 (the review): the takeover's luma is decoded off the

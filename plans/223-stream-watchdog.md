@@ -767,8 +767,13 @@ Change it here first, then in every repo it touches.
   source: "desktop|cloud|platform", platform?, targetId?, fixes: [{ kind:
   "unmute|end-takeover|switch-scene|open-audio|open-health|open-livestream|
   reconnect-destination|open-platform-dashboard|show-brb", label, url? }],
-  snoozedUntil?, meantTo? }] }`. Every optional is `skip_serializing_if`.
-  Add the schema to `backend-rpc-contract.ts` beside
+  snoozedUntil?, meantTo? }], withdrawn?: [id] }`. Every optional is
+  `skip_serializing_if`. `withdrawn` (the review's M2) names the ids that
+  left this update without a recovery (a fold, a replace, the session's
+  end); it rides the event only, never the RPC's answer, and the renderer
+  drops those toasts instead of saying "is back". A meant-to alert stays
+  in the list as `snoozed` with `meantTo: true`, hidden, until its signal
+  recovers. Add the schema to `backend-rpc-contract.ts` beside
   `audioLevelsEventSchema`.
 - **RPCs**: `watchdog.alerts.list` → the same shape;
   `watchdog.alert.acknowledge { id }`; `watchdog.alert.snooze { id, scope:
@@ -778,9 +783,12 @@ Change it here first, then in every repo it touches.
   `storage.rs` like other app settings.
 - **Health events**: `watchdog-<check>` (level `warn` for warning/notice,
   `error` for critical) on open; `watchdog-<check>-cleared` (info);
-  `watchdog-<check>-acknowledged`, `watchdog-<check>-snoozed` (info). The
-  message is the card's title plus detail. Through `emit_health_event`, so
-  URLs are redacted and the session log mirrors it.
+  `watchdog-<check>-acknowledged`, `watchdog-<check>-snoozed` (info);
+  `watchdog-<check>-withdrawn` (info: the card left without a recovery,
+  so the history closes its row without an "is back"). The message is the
+  card's title plus detail; for `chat-says` the count-and-class form only
+  (the quotes stay on the card, L4). Through `emit_health_event`, so URLs
+  are redacted and the session log mirrors it.
 - **Renderer → main (IPC)**: `watchdog:notify { alertId, title, body }` and
   `watchdog:focus` for the system notification; main checks
   `mainWindow.isFocused()` and the alert's age before showing.

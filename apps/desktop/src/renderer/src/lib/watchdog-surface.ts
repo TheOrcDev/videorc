@@ -17,6 +17,7 @@ import {
   watchdogNotificationWords,
   watchdogNotifyCandidates,
   watchdogOpenSeconds,
+  watchdogQuietedAlerts,
   watchdogToastId
 } from '@/lib/watchdog-view'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -51,16 +52,25 @@ export function noteWatchdogSettings(settings: WatchdogSettings): void {
   settingsCache = { at: Date.now(), settings }
 }
 
+export interface WatchdogListChange {
+  /** The event's `withdrawn` ids (M2): gone without a recovery. */
+  withdrawn?: readonly string[]
+}
+
 /**
  * Called with each `watchdog.alerts` list after the first. Opens and
- * refreshes the toasts, replaces them with the clearing toast, and asks main
- * for the system notification on an open and on every repeat.
+ * refreshes the toasts, replaces them with the clearing toast when the
+ * signal recovered, drops them when the alert was withdrawn or hushed
+ * (M2), and asks main for the system notification on an open and on every
+ * repeat.
  */
 export async function onWatchdogAlertsChanged(
   previous: readonly WatchdogAlert[],
   next: readonly WatchdogAlert[],
-  deps: WatchdogSurfaceDeps
+  deps: WatchdogSurfaceDeps,
+  change: WatchdogListChange = {}
 ): Promise<void> {
+  const withdrawn = change.withdrawn ?? []
   const before = new Map(previous.map((alert) => [alert.id, alert]))
   for (const alert of next) {
     if (alert.state === 'snoozed') continue
@@ -81,7 +91,10 @@ export async function onWatchdogAlertsChanged(
         : {})
     })
   }
-  for (const alert of watchdogClearedAlerts(previous, next)) {
+  for (const alert of watchdogQuietedAlerts(previous, next, withdrawn)) {
+    toast.dismiss(watchdogToastId(alert))
+  }
+  for (const alert of watchdogClearedAlerts(previous, next, withdrawn)) {
     toast.success(watchdogClearedToast(alert), { id: watchdogToastId(alert) })
   }
   const candidates = watchdogNotifyCandidates(previous, next)

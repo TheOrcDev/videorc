@@ -5609,6 +5609,12 @@ export interface WatchdogAlert {
 export interface WatchdogAlertsView {
   sessionId?: string
   alerts: WatchdogAlert[]
+  /**
+   * Ids that left the list in this update without a recovery (plan 223 M2):
+   * a fold, a replace, the session's end. Their toasts are dropped, never
+   * replaced by "is back". Only on the event; absent when empty.
+   */
+  withdrawn?: string[]
 }
 
 export type WatchdogSnoozeScope = 'ten-minutes' | 'stream'

@@ -14,6 +14,7 @@ import {
   watchdogHistorySpan,
   watchdogNotificationWords,
   watchdogNotifyCandidates,
+  watchdogQuietedAlerts,
   watchdogToastId
 } from '@/lib/watchdog-view'
 import { watchdogCardVariant, watchdogQuietLabel } from '@/components/studio/watchdog-alert-card'
@@ -130,6 +131,49 @@ describe('watchdog view (plan 223 A5, A6)', () => {
       )
     ).toBe('Twitch is back')
     expect(watchdogClearedToast(alert({ check: 'chat-says' }))).toBe('Chat has gone quiet about it')
+  })
+
+  it('never says "is back" for a withdrawn, snoozed or acknowledged alert (M2)', () => {
+    const youtube = alert({
+      check: 'destination-down',
+      severity: 'warning',
+      title: 'YouTube has been down for 0:20',
+      targetId: 'youtube',
+      id: 'watchdog:destination-down:youtube:1'
+    })
+    const twitch = alert({
+      check: 'destination-down',
+      severity: 'warning',
+      title: 'Twitch has been down for 0:20',
+      targetId: 'twitch',
+      id: 'watchdog:destination-down:twitch:2'
+    })
+    const all = alert({
+      check: 'destination-down',
+      title: 'Nobody is receiving your stream',
+      targetId: 'all',
+      id: 'watchdog:destination-down:all:3'
+    })
+    // The fold: both per-leg ids leave, withdrawn; no "is back".
+    const withdrawn = [youtube.id, twitch.id]
+    expect(watchdogClearedAlerts([youtube, twitch], [all], withdrawn)).toEqual([])
+    expect(watchdogQuietedAlerts([youtube, twitch], [all], withdrawn).map((a) => a.id)).toEqual(
+      withdrawn
+    )
+    // A real recovery of one leg while the other stays down.
+    expect(watchdogClearedAlerts([youtube, twitch], [twitch]).map((a) => a.id)).toEqual([
+      youtube.id
+    ])
+    // "I meant to" keeps the card listed and hidden: the toast goes, quietly.
+    const muted = alert({ check: 'mic-muted' })
+    const meantTo = { ...muted, state: 'snoozed' as const, meantTo: true }
+    expect(watchdogClearedAlerts([muted], [meantTo])).toEqual([])
+    expect(watchdogQuietedAlerts([muted], [meantTo]).map((a) => a.id)).toEqual([muted.id])
+    const seen = { ...muted, state: 'acknowledged' as const }
+    expect(watchdogQuietedAlerts([muted], [seen]).map((a) => a.id)).toEqual([muted.id])
+    expect(watchdogQuietedAlerts([seen], [seen])).toEqual([])
+    // The session's end withdraws everything.
+    expect(watchdogClearedAlerts([muted, all], [], [muted.id, all.id])).toEqual([])
   })
 
   it('gives every check its button set: the fix, then Got it or I meant to', () => {
