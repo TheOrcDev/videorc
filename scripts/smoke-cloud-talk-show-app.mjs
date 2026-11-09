@@ -109,11 +109,18 @@ const cloudDir = resolve(process.env.VIDEORC_CLOUD_DIR ?? join(repoRoot, '..', '
 const livekitKeys = { apiKey: 'devkey', apiSecret: `smoke-${Math.random().toString(36).slice(2)}` }
 
 // The people: a flat colour and a tone each (bursts: Chromium's noise
-// suppression on the host's mic would swallow a steady tone).
+// suppression on the host's mic would swallow a steady tone). The guests'
+// tones sit far from the host's and off its harmonics: the host's mic runs
+// Chromium's echo canceller with the backstage guests the host hears as its
+// reference, and with a file for a mic (no acoustic echo to cancel) it leaks
+// a little of that reference near the host's own tone into the host's track.
+// A guest at 523 Hz read -19 to -27 dB in Solo (run 3, 2026-11-09) though the
+// runner never subscribes to a backstage guest (`room.rs` wanted_sources);
+// one at 659 Hz never rose above -43 dB.
 const PEOPLE = {
   host: { name: 'Host', color: '40C0FF', tone: 440 },
-  ada: { name: 'Ada', color: 'C02020', tone: 523 },
-  bo: { name: 'Bo', color: 'F0F060', tone: 659 }
+  ada: { name: 'Ada', color: 'C02020', tone: 1100 },
+  bo: { name: 'Bo', color: 'F0F060', tone: 1500 }
 }
 const CONTROL_TONE = 2200
 const PROBE_WIDTH = 320
