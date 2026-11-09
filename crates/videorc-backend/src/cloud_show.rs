@@ -3621,8 +3621,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 .show
                 .as_ref()
                 .is_some_and(|active| active.session_id.is_some())
+                || runtime.talk.is_some()
             {
-                // A session is feeding a show right now; never replace it.
+                // A session is feeding a show right now, or this desktop
+                // holds the show's room (plan 224): never replace it. The
+                // re-run launch check (L4) may answer after a room opened,
+                // and replacing the show would supersede the room's socket
+                // and forget its handed-over destinations.
                 return Ok(runtime.status());
             }
             runtime.failed = None;
@@ -5101,6 +5106,53 @@ mod tests {
             &["sh_abc".to_string()]
         );
         assert!(!lock(&harness.context.slot).talk_show_open());
+    }
+
+    /// Plan 222 review L4 meets plan 224: the launch check runs again after
+    /// every successful entitlement refresh until the web answers, so its
+    /// answer may land after a room opened. It lists the room's own show;
+    /// the check is answered, and the room keeps its show, its socket and
+    /// its generation.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_launch_check_never_replaces_the_show_whose_room_is_open() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created_talk()));
+        let context = harness.context.clone();
+        let open = tokio::spawn(async move {
+            context
+                .open_room(Some("bearer".to_string()), room_open_params(), false)
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome_talk(false));
+        open.await.unwrap().expect("the room opens");
+        assert!(launch_check_due(&lock(&harness.context.slot), true));
+        let (generation, control_tx) = {
+            let runtime = lock(&harness.context.slot);
+            (runtime.generation, runtime.control_tx.clone().unwrap())
+        };
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(held_current(&created_talk())));
+        let status = harness.context.detect_current_show("bearer").await.unwrap();
+        assert!(status.room.is_some(), "the room is still open");
+        assert!(!launch_check_due(&lock(&harness.context.slot), true));
+        let runtime = lock(&harness.context.slot);
+        assert_eq!(runtime.generation, generation);
+        assert!(
+            runtime
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .same_channel(&control_tx)
+        );
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 1);
     }
 
     /// The review of 2026-11-09, H2: the room opened with an empty stage, so
