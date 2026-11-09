@@ -1,7 +1,7 @@
 const CHROME_ROW_CLASS = Object.freeze({
-  /** The row that is on stream: a plate with a polished edge down its left. */
+  /** The row that is on stream: a plate with a top line and a rim. */
   live: 'chrome-row-live',
-  /** A member's row: a quieter plate with an edge in the member hue. */
+  /** A member's row: a quieter plate. */
   member: 'chrome-row-member'
 } as const)
 

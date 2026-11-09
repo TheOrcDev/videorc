@@ -29,6 +29,13 @@ pub struct NativePreviewHostBounds {
     // Corner radius in points; see PreviewSurfaceBounds::corner_radius.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corner_radius: Option<f64>,
+    // In-window origin and host height; see PreviewSurfaceBounds::host_x.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_height: Option<f64>,
     // Cross-process stacking target (detached preview window) + always-on-top.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_above_window_id: Option<u32>,
@@ -56,6 +63,9 @@ impl NativePreviewHostBounds {
             clip_height: bounds.clip_height.map(|height| height.max(0.0)),
             visible: bounds.visible,
             corner_radius: bounds.corner_radius,
+            host_x: bounds.host_x,
+            host_y: bounds.host_y,
+            host_height: bounds.host_height,
             order_above_window_id: bounds.order_above_window_id,
             order_above_window_handle: None,
             preview_generation: None,
@@ -207,6 +217,7 @@ fn native_preview_command_invalidates_iosurface_cache(
 
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct NativePreviewIosurfaceCacheMetrics {
     pub hits: u64,
     pub imports: u64,
@@ -219,24 +230,29 @@ pub struct NativePreviewIosurfaceCacheMetrics {
 
 #[cfg(any(target_os = "macos", test))]
 impl NativePreviewIosurfaceCacheMetrics {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_cache_hit(&mut self) {
         self.hits = self.hits.saturating_add(1);
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_import_success(&mut self) {
         self.imports = self.imports.saturating_add(1);
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_import_failure(&mut self) {
         self.import_failures = self.import_failures.saturating_add(1);
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_invalidation(&mut self, cached_entry_count: usize) {
         if cached_entry_count > 0 {
             self.invalidations = self.invalidations.saturating_add(1);
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_cache_state(&mut self, cached_entry_count: usize, ceiling: usize) {
         self.live_count = u64::try_from(cached_entry_count).unwrap_or(u64::MAX);
         self.peak_count = self.peak_count.max(self.live_count);
@@ -277,10 +293,15 @@ impl NativePreviewHostActivation {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the Metal presenter fails this way
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativePreviewHostPresentFailure {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     MissingOverlay,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     IosurfaceImportFailed,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     DrawableUnavailable,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     CommandBufferUnavailable,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     EncodeFailed,
 }
 
@@ -922,6 +943,40 @@ pub use macos::{
 mod tests {
     use super::*;
 
+    #[test]
+    fn in_window_placement_survives_the_helper_bounds_and_their_wire_form() {
+        // Plan 213 D2: the in-process layer is placed from these; a mirror
+        // that drops them puts the layer at its host's origin.
+        let bounds = PreviewSurfaceBounds {
+            screen_x: 320.0,
+            screen_y: 276.0,
+            width: 800.0,
+            height: 450.0,
+            scale_factor: 2.0,
+            host_x: Some(240.0),
+            host_y: Some(96.0),
+            host_height: Some(780.0),
+            ..Default::default()
+        };
+        let host = NativePreviewHostBounds::from_surface_bounds(&bounds);
+        assert_eq!(
+            (host.host_x, host.host_y, host.host_height),
+            (Some(240.0), Some(96.0), Some(780.0))
+        );
+        let wire = serde_json::to_value(&host).unwrap();
+        assert_eq!(wire["hostX"], 240.0);
+        assert_eq!(wire["hostY"], 96.0);
+        assert_eq!(wire["hostHeight"], 780.0);
+        let legacy = serde_json::to_value(NativePreviewHostBounds::from_surface_bounds(
+            &PreviewSurfaceBounds::default(),
+        ))
+        .unwrap();
+        assert!(
+            legacy.get("hostX").is_none(),
+            "absent stays absent on the wire"
+        );
+    }
+
     fn slot(screen_x: f64, screen_y: f64, scale: f64) -> NativePreviewHostBounds {
         NativePreviewHostBounds {
             screen_x,
@@ -1171,6 +1226,9 @@ mod tests {
             clip_width: Some(640.0),
             clip_height: Some(200.0),
             visible: Some(true),
+            host_x: None,
+            host_y: None,
+            host_height: None,
             order_above_window_id: None,
             order_above_window_handle: None,
             preview_generation: None,
@@ -1253,6 +1311,9 @@ mod tests {
             visible: Some(true),
             order_above_window_id: None,
             elevated: None,
+            host_x: None,
+            host_y: None,
+            host_height: None,
         };
 
         let host_bounds = NativePreviewHostBounds::from_surface_bounds(&bounds);

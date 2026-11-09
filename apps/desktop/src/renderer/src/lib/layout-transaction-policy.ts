@@ -165,6 +165,7 @@ export function layoutTransactionSourcesFromScene<
     cameraName?: string
     screenId?: string
     screenName?: string
+    screenUuid?: string
     windowId?: string
     windowName?: string
     testPattern?: boolean
@@ -184,6 +185,8 @@ export function layoutTransactionSourcesFromScene<
     if (source.kind === 'screen') {
       sources.screenName =
         sources.screenId === source.deviceId ? (sources.screenName ?? source.name) : source.name
+      // Plan 213 F1: another display's UUID would find that display first.
+      if (sources.screenId !== source.deviceId) sources.screenUuid = undefined
       sources.screenId = source.deviceId
       sources.windowId = undefined
       sources.windowName = undefined
@@ -195,10 +198,12 @@ export function layoutTransactionSourcesFromScene<
       sources.windowId = source.deviceId
       sources.screenId = undefined
       sources.screenName = undefined
+      sources.screenUuid = undefined
       sources.testPattern = false
     }
     if (source.kind === 'test-pattern' && !packaged) {
       sources.screenId = undefined
+      sources.screenUuid = undefined
       sources.windowId = undefined
       sources.testPattern = true
     }

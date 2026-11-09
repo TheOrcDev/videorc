@@ -62,4 +62,17 @@ describe('audioMixerMonitorState', () => {
       'muted'
     )
   })
+
+  // Issue 1064: the bus reads digital silence from an unmuted microphone.
+  it('is silent when the backend watchdog says so, never "live", and the mute still wins', () => {
+    expect(audioMixerMonitorState({ sessionActive: true, signalLive: true, silent: true })).toBe(
+      'silent'
+    )
+    expect(
+      audioMixerMonitorState({ sessionActive: true, signalLive: true, silent: true, muted: true })
+    ).toBe('muted')
+    expect(audioMixerMonitorState({ sessionActive: true, signalLive: true, silent: false })).toBe(
+      'live'
+    )
+  })
 })

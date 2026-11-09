@@ -186,6 +186,8 @@ pub struct LiveBackgroundGlRenderer {
     shared: Option<Arc<Shared>>,
     failure: Option<Failure>,
     reported_status: Option<LiveBackgroundStatus>,
+    /// The board's ticket for `reported_status` (`LiveBackgroundBoard::withdraw`).
+    reported_ticket: Option<u64>,
     reported_resources: (u32, u64),
 }
 
@@ -197,6 +199,7 @@ impl LiveBackgroundGlRenderer {
             shared: None,
             failure: None,
             reported_status: None,
+            reported_ticket: None,
             reported_resources: (0, 0),
         }
     }
@@ -334,20 +337,26 @@ impl LiveBackgroundGlRenderer {
         self.report_resources((0, 0));
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn holds_resources(&self) -> bool {
         self.shared.is_some()
     }
 
     /// The live background left (or composition stopped): stop the worker and
-    /// clear what this renderer reported.
+    /// clear what this renderer reported. A status left up would outlive the
+    /// run: the idle Linux preview composes nothing, so nothing replaces it
+    /// (fix plan 0007). Cheap when there is nothing to clear.
     pub fn release(&mut self) {
         self.stop_worker();
         self.reported_status = None;
+        if let Some(ticket) = self.reported_ticket.take() {
+            self.board.withdraw(ticket);
+        }
     }
 
     fn report_status(&mut self, status: LiveBackgroundStatus) {
         if self.reported_status.as_ref() != Some(&status) {
-            self.board.report(status.clone());
+            self.reported_ticket = Some(self.board.report(status.clone()));
             self.reported_status = Some(status);
         }
     }
@@ -362,7 +371,7 @@ impl LiveBackgroundGlRenderer {
 
 impl Drop for LiveBackgroundGlRenderer {
     fn drop(&mut self) {
-        self.stop_worker();
+        self.release();
     }
 }
 
@@ -411,7 +420,7 @@ pub(crate) fn choose_live_node(
         vaapi_quarantined
             .iter()
             .chain(live_quarantined)
-            .any(|entry| entry.node == node)
+            .any(|entry| entry.names(&node))
     };
     candidates
         .iter()
@@ -629,13 +638,15 @@ fn run_worker(shared: &Arc<Shared>) -> Result<(), Failure> {
     let node = pick_node()?;
     let live = live_quarantine();
     // No sentinel, no GPU: a context that hangs the host must be remembered.
-    live.begin_probe(&node, SENTINEL_PROBE).map_err(|error| {
+    // The armed probe is held until the node proves itself; dropping it in
+    // process clears the sentinel, so only a hang that kills the process
+    // leaves it behind.
+    let mut armed = Some(live.begin_probe(&node, SENTINEL_PROBE).map_err(|error| {
         Failure::gpu(
             LiveBackgroundStillReason::NoGpu,
             format!("could not arm the live background sentinel: {error}"),
         )
-    })?;
-    let mut sentinel_armed = true;
+    })?);
     let result = (|| {
         let context = unsafe { GlesContext::open(&node.path) }?;
         let gl = &context.gl;
@@ -671,11 +682,10 @@ fn run_worker(shared: &Arc<Shared>) -> Result<(), Failure> {
                         sequence: frame_tag(request.id, counter),
                         rendering: request.rendering,
                     }));
-                    if sentinel_armed {
+                    if let Some(probe) = armed.take() {
                         // The node drew a frame: the sentinel no longer means
                         // a hang.
-                        let _ = live.finish_probe();
-                        sentinel_armed = false;
+                        let _ = probe.finish();
                     }
                     let mut stats = lock(&shared.stats);
                     stats.last_render_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
@@ -696,9 +706,9 @@ fn run_worker(shared: &Arc<Shared>) -> Result<(), Failure> {
         unsafe { state.destroy(gl) };
         Ok(())
     })();
-    if sentinel_armed {
+    if let Some(probe) = armed.take() {
         // The thread ended without hanging: whatever failed, it returned.
-        let _ = live.finish_probe();
+        let _ = probe.finish();
     }
     result
 }
@@ -1565,6 +1575,7 @@ mod tests {
             ffmpeg_path: SENTINEL_PROBE.to_string(),
             probe_started_at_unix_secs: 0,
             quarantined_at_unix_secs: 0,
+            timed_out_after_secs: None,
         }
     }
 
@@ -1586,6 +1597,13 @@ mod tests {
         );
         assert_eq!(
             choose_live_node(&nodes, None, &[], &[quarantined("renderD128")])
+                .unwrap()
+                .node_name(),
+            "renderD129"
+        );
+        // An entry planted by hand may name the node by path.
+        assert_eq!(
+            choose_live_node(&nodes, None, &[quarantined("/dev/dri/renderD128")], &[])
                 .unwrap()
                 .node_name(),
             "renderD129"
@@ -1720,6 +1738,7 @@ mod tests {
         ))
         .unwrap();
         let (width, height) = (640u32, 360u32);
+        let mut failures = Vec::new();
         for frame in fixture["frames"].as_array().unwrap() {
             let id: LiveBackgroundId = serde_json::from_value(frame["id"].clone()).unwrap();
             let (look, _) = super::super::looks::look_or_first(id, frame["look"].as_str().unwrap());
@@ -1737,14 +1756,31 @@ mod tests {
             };
             let expected = base64_decode(frame["rgb"].as_str().unwrap());
             let (mean, max) = grid_error(&bgra, width, height, &expected);
-            assert!(
-                mean <= 2.0 && max <= 10,
-                "{id:?} {}: mean {mean:.3}, max {max}",
-                look.id
-            );
+            let name = format!("{id:?} {}@{}", look.id, frame["phase"]);
+            eprintln!("golden {name}: mean {mean:.3}, max cell {max}");
+            // Every frame is checked before the test fails, so one miss
+            // cannot hide the rest (#987).
+            if mean > GOLDEN_BOUND.0 || max > GOLDEN_BOUND.1 {
+                failures.push(format!("{name}: mean {mean:.3}, max {max}"));
+            }
         }
         unsafe { state.destroy(gl) };
+        assert!(failures.is_empty(), "golden grids off: {failures:?}");
     }
+
+    /// The (mean, max cell) bound every golden frame stays inside, in 0–255
+    /// units: mean 2.0 and cell 10, the Metal port's bound on an Apple GPU.
+    ///
+    /// Beams and Ghost Fibers once had wider bounds here (24 / 240 and
+    /// 2 / 96): they hashed with `fract(sin(x) * 47453.5453)` of hundreds to
+    /// 1e7 rad, whose last bits no two drivers share (radeonsi scales into
+    /// revolutions first, llvmpipe rounds differently again), and Beams'
+    /// Perlin gradient was decided by divide rounding. Both now hash in
+    /// integers and split the gradient in whole numbers (#987, #1077), so
+    /// every GLES driver draws the goldens' lanes and strands; a miss is a
+    /// port bug.
+    #[cfg(target_os = "linux")]
+    const GOLDEN_BOUND: (f64, u8) = (2.0, 10);
 
     #[cfg(target_os = "linux")]
     fn base64_decode(text: &str) -> Vec<u8> {

@@ -34,6 +34,8 @@ import { existsSync, mkdtempSync, readFileSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { fixtureH264EncoderArgs } from './lib/ffmpeg-available.mjs'
+import { runSmokeCargoTest } from './lib/smoke-cargo-test.mjs'
 import { spawnProcessGroup } from './lib/process-group.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { assertSceneSwitchPixels } from './lib/scene-switch-pixels.mjs'
@@ -50,6 +52,13 @@ import {
 const root = resolve(import.meta.dirname, '..')
 const directory = mkdtempSync(join(tmpdir(), 'videorc-separate-source-fixture-'))
 const ffmpeg = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+// The H.264 encoder this FFmpeg actually has: libx264 at CRF 12 where it
+// exists, else OpenH264 (the vendored LGPL Linux build has no libx264) or
+// Media Foundation (the vendored LGPL Windows build).
+const FIXTURE_VIDEO_CODEC_ARGS = (() => {
+  const args = fixtureH264EncoderArgs(ffmpeg)
+  return args.includes('libx264') ? [...args, '-crf', '12'] : args
+})()
 const ffprobe = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const WIDTH = 64
 const HEIGHT = 36
@@ -74,8 +83,7 @@ const roleSize = (role) =>
     : { width: WIDTH, height: HEIGHT }
 
 console.log(`Separate source fixture evidence: ${directory}`)
-await run(
-  'cargo',
+await runSmokeCargoTest(
   [
     'test',
     '-p',
@@ -88,7 +96,7 @@ await run(
     'session_audio::mix_tests::source_iso_audio_artifact_fixture',
     '--nocapture'
   ],
-  { ...process.env, VIDEORC_SOURCE_ISO_ARTIFACT_DIR: directory }
+  { cwd: root, env: { ...process.env, VIDEORC_SOURCE_ISO_ARTIFACT_DIR: directory } }
 )
 for (const role of TAKE_ROLES) {
   if (!existsSync(audioPcm(role))) {
@@ -292,12 +300,7 @@ function encodeRole(mode, videoRole, audioRole, output) {
     '0:v',
     '-map',
     '1:a',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'ultrafast',
-    '-crf',
-    '12',
+    ...FIXTURE_VIDEO_CODEC_ARGS,
     '-pix_fmt',
     'yuv420p',
     '-color_range',

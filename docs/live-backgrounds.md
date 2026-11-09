@@ -347,7 +347,13 @@ Windows CI compiles every entry point and runs the golden grids on WARP.
   the poster until the first frame lands.
 - **Lifecycle.** The thread starts with the first composed frame (the idle
   Linux preview composes none; the proof surface draws it in WebGL2) and
-  stops when composition stops or the live background leaves.
+  stops when composition stops or the live background leaves. Its status
+  goes with it: the idle Linux compositor reports no live background (the
+  proof surface reports its own), so a stopped take never leaves its
+  `shader` behind. `pnpm smoke:live-background` checks the idle preview on
+  the proof surface on Linux and accepts its poster only for a Chromium
+  launched without a GPU (`software-gpu`/`no-gpu` under
+  `VIDEORC_DISABLE_GPU=1`); the takes still check the compositor's shader.
 - **Plasma Wave** needs `EXT_color_buffer_float` or
   `EXT_color_buffer_half_float`. Without them only Plasma Wave shows its
   poster.
@@ -357,7 +363,10 @@ macOS can't compile the Linux target (PipeWire needs Linux headers), so
 type-checks the GL module on any OS. CI's Linux job is the real compile gate.
 A GLES golden-grid test runs on Linux when EGL is present; it skips without
 EGL and accepts Mesa's llvmpipe only with
-`VIDEORC_LIVE_BACKGROUND_GL_ALLOW_SOFTWARE=1`.
+`VIDEORC_LIVE_BACKGROUND_GL_ALLOW_SOFTWARE=1`. Beams and Ghost Fibers get the
+paravirtual Metal bounds there (mean 24 / cell 240 and 2 / 96): their
+`sin` hashes of large arguments hold an Apple GPU's last bits, which no GLES
+driver reproduces (`golden_bound` in `gl.rs` has the measurements).
 
 ### Measuring a machine
 

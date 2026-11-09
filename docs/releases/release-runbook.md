@@ -85,7 +85,9 @@ lane is `.github/workflows/release-linux-alpha.yml`. It writes only:
 
 It must never write `releases/macos/`, `releases/windows/`, `updates/macos/`,
 `updates/windows/`, `latest-mac.yml`, or the Windows `latest.yml` feed. Public
-download remains disabled. Hold the Linux Discord announcement until that
+download remains disabled. When a Linux step changes
+`VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY` on videorc-web, apply it with
+`pnpm release:web:redeploy` (see "Redeploying videorc-web production"). Hold the Linux Discord announcement until that
 download is public; preview with
 `pnpm release:notify:discord <releaseId> --dry-run`, then send with
 `pnpm release:notify:discord <releaseId>`. Never print
@@ -150,6 +152,10 @@ check (default in packaged builds since 0.9.10; opt out via
   keychain (or `CSC_LINK`). See [macos-signing.md](macos-signing.md).
   **Auto-update requires a signed build** — electron-updater refuses to apply an
   unsigned/ad-hoc update.
+- **Videorc Camera profile** (plan 214) — `VIDEORC_MACOS_PROFILE_APP` in
+  `~/.videorc-release.env` (base64 or a path to the one Developer ID
+  provisioning profile, for the app; the extension needs none). See
+  [Videorc Camera](#videorc-camera-plan-214) below.
 - **Storage write creds** — the Neon uploader key
   (`VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `storage:read` + `storage:write`) in
   `~/.videorc-release.env`. While R2 is still an origin, also the
@@ -170,6 +176,71 @@ check (default in packaged builds since 0.9.10; opt out via
   `videorc-releases/updates/...` (where nothing reads them) while the upload still
   reports success. If your `.env` endpoint has the bucket suffix, fix it there or
   override per-run (Step 3 below).
+
+## Videorc Camera (plan 214)
+
+The signed build embeds the Videorc Camera system extension
+(`apps/desktop/camera-extension/`) when `VIDEORC_MACOS_PROFILE_APP` is set:
+the one Developer ID profile, for the app (the extension embeds none, spike
+P0a). The secret, how to renew the profile when the Developer ID certificate
+is renewed (next: 2027-02-01), the macOS approval path and what the signed app
+looks like are in
+[macos-signing.md, "Videorc Camera"](macos-signing.md#videorc-camera-plan-214).
+What the release path checks:
+
+- `release:preflight:macos` requires `VIDEORC_MACOS_PROFILE_APP` and fails on
+  the retired `VIDEORC_MACOS_PROFILE_CAMERA` when it is still set.
+- `package:preflight:macos` requires the built extension
+  (`pnpm build:camera-extension`, part of `package:backend:macos`) when
+  the profile is set, and prints `Videorc Camera skipped: ...` when not.
+- The packaging hook checks the profile (team, App ID, the restricted key,
+  expiry, and that it embeds the certificate signing the build) and logs
+  `Videorc Camera embedded at
+  Contents/Library/SystemExtensions/dev.theorcdev.videorc.camera.systemextension (<version>)`.
+  A release log that says `Videorc Camera skipped` is not a release.
+- `release:validate:macos` fails a release that lacks the extension, its
+  signature, its exact two entitlements, `SYSX`, the app's embedded profile or
+  the restricted keys on the app, and fails if the extension embeds a profile,
+  if the bundle holds more than the app's one profile, or if any other binary
+  (bare tools, helpers, crashpad, ShipIt) shows anything but the five inherit
+  keys (the lines are listed in macos-signing.md). `check:packaged-app` fails a
+  Developer ID build that lacks any part of it and repeats the shape checks.
+- The acceptance gate for the camera is plan 214 F2 on the lab Mac: the
+  approval flow in System Settings (General → Login Items & Extensions →
+  Camera Extensions), Meet, Zoom, FaceTime, an update that replaces the
+  extension without re-approval or a reboot, and delete-the-app uninstalling it.
+
+Rollback: a build without the profile never passes validation; a shipped
+camera problem rolls forward with a higher version like any other. Shipping
+without the camera is a reviewed PR that removes the hook, the entitlements
+split and the validator checks together, never an unset secret.
+
+## Redeploying videorc-web production
+
+Every "redeploy" in this runbook and in [../distribution.md](../distribution.md)
+means this. Use it after you change a videorc-web production env var, such as
+`VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY`,
+`VIDEORC_DOWNLOAD_MANIFEST_OBJECT_KEY` or `VIDEORC_DOWNLOAD_STORAGE_PRIMARY`:
+
+```sh
+pnpm release:web:redeploy   # rebuild production from the GitHub build of videorc-web main, then check it
+pnpm release:web:check      # PASS only when www.videorc.com serves that build
+```
+
+Never run `vercel deploy --prod` or `vercel --prod` from a videorc-web
+checkout. Never `vercel redeploy` whatever production serves now. A CLI deploy
+ships the checkout's files, however long ago it last pulled `main`. On
+2026-11-05 and 2026-11-06, Linux alpha steps deployed this way from a checkout
+last pulled on 2026-10-10, and the 0.20.3 Linux step redeployed that build.
+Production lost 24 merged web PRs, among them the X chat relay fix
+(videorc-web#104). X chat then showed "reconnecting" with HTTP 400
+`x-chat-broadcast-invalid` on every desktop version. `release:web:check` fails
+such a deployment: it follows redeploys back to the first build and requires a
+GitHub build of the current `main`.
+
+If `release:web:redeploy` finds no READY GitHub build of `main`, Vercel's git
+deployment of `main` is still building or has failed. Wait for it or fix it.
+Never deploy a local checkout instead.
 
 ## Storage origins
 
@@ -817,6 +888,9 @@ ever changes again, update `publish.url`, `videorc-web-links.ts`, and the Rust
   presigned URL and is intentionally cached `max-age=60`. Do not restore a long /
   `immutable` cache, or the CDN serves an expired redirect (403). (videorc-web
   `lib/updates-route.ts`.)
+- **Web redeploys build GitHub `main`, never a checkout.** Use
+  `pnpm release:web:redeploy`, then confirm `pnpm release:web:check` PASS (see
+  "Redeploying videorc-web production").
 - **Signed builds only** — unsigned/ad-hoc builds won't self-update.
 - **arm64 only** — `latest-mac.yml` is arm64; Intel Macs are not served or
   updated. Add x64/universal before claiming Intel support.
@@ -827,8 +901,12 @@ ever changes again, update `publish.url`, `videorc-web-links.ts`, and the Rust
 
 Fail closed instead of mutating a bad release — see "Beta Download Rollback" in
 [../distribution.md](../distribution.md): set
-`VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` or repoint the manifest and redeploy, and
+`VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` or repoint the manifest and redeploy
+(`pnpm release:web:redeploy`), and
 cut a `-beta.N+1` rather than overwriting. For the feed, publish a corrected build
 with a **higher** version; the bad one stops being offered once a higher version
 exists. (The flat `updates/macos/` prefix is overwritten each release, so the
-feed always reflects the latest upload.)
+feed always reflects the latest upload.) Videorc Camera (plan 214): a build that
+lacks the app's provisioning profile fails the validator and never ships; a camera
+that misbehaves in a shipped Beta rolls forward the same way, and the next
+activation replaces the installed extension.

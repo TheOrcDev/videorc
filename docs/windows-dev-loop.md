@@ -100,6 +100,18 @@ pnpm smoke:recording-native-preview -- --d3d11 --require-d3d11
 pnpm smoke:windows-live-audio-controls
 ```
 
+Add `--background` to the first command to record a screen scene over the
+packaged app's bundled background (#1067). The session must still take the
+D3D11 path, and the recording's border must match the background from its
+first frame.
+
+Add `--scene-edit` instead to record the scene the renderer sends in scene
+edit mode, with the screen moved into the right half of the canvas (#1175).
+The session must still take the D3D11 path, and from the first frame the left
+half must show the canvas fill while the moved box shows the screen.
+`--scene-edit --background` checks the same placement over the bundled
+background.
+
 On supported hardware, the first two commands require D3D11 capture/composition,
 Media Foundation GPU input, the canonical DirectComposition preview triple, and
 zero production readbacks/raw copies/system-memory encoder samples/BMP work.
@@ -298,6 +310,31 @@ Learned on-box 2026-07-08; encoded in `scripts/lib/app-launcher.mjs`:
   before they spawn anything. Prefer ordinary CLI flags when the script already
   exposes them, or set env in the parent Node `spawn({ env })`.
 
+## Shared host admission is off on Windows
+
+The shared-host rules in `AGENTS.md` (one app-smoke host lock per machine, two
+build slots for backend prebuilds and `pnpm cargo:slot`) are macOS and Linux
+only. `scripts/lib/host-lock.mjs` turns admission off on win32 by design
+(#937): `acquirePortLock`, `acquireHostSmokeLock` and `withBuildSlot` admit
+every caller at once, without taking a port. On a Windows box, nothing
+serializes parallel app smokes or cargo builds; run them one at a time
+yourself.
+
+`pnpm test:scripts` on Windows therefore skips the TCP lock cases in
+`scripts/lib/host-lock.test.mjs` with that reason, and runs one Windows-only
+case that pins the no-op instead. Unverified on Windows, because the code
+does not do it there:
+
+- mutual exclusion on the `VIDEORC_SMOKE_LOCK_PORT` lock and the holder named
+  in a timeout;
+- a crashed holder (killed by `TerminateProcess`) freeing its port;
+- in-process reentrancy and `VIDEORC_SMOKE_*_HOLDER` inheritance by children;
+- the build-slot cap (`VIDEORC_SMOKE_BUILD_SLOTS`) and nested builds;
+- refusing port 0 and the release that never waits on a probing peer.
+
+The memory check (`VIDEORC_SMOKE_MEMORY_*`) does run on Windows; it reads
+`os.freemem()`.
+
 ## electron-builder winCodeSign / symlink privilege
 
 Packaging used to pull the legacy `winCodeSign` tool bundle (for rcedit /
@@ -332,6 +369,23 @@ deletes old autobuild releases, so the pin 404s over time. Re-pin by picking a
 current `ffmpeg-n8.x-*-win64-lgpl-8.x.zip` from
 https://github.com/BtbN/FFmpeg-Builds/releases, downloading it, and recording
 its sha256 in the pin (LGPL-only assets — repo policy).
+
+## Protected Windows stream performance gate
+
+`pnpm smoke:windows-stream-performance` without `--incident` is a physical
+Windows 11 x64 gate. It requires an **installed NSIS** `Videorc.exe` candidate
+(`VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE` or `VIDEORC_PERF_APP_EXECUTABLE`), not an
+unsigned `win-unpacked` tree. When you run it outside
+`pnpm smoke:local-gates:windows`, also set:
+
+- `VIDEORC_WINDOWS_ACCEPTANCE_DIR` — absolute hardware-class evidence root
+- `VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256` — lowercase 64-hex digest of
+  the installed `Videorc.exe` (names the immutable evidence directory for
+  `--gate` / protected calibration runs)
+
+The parent gate supplies those values (and related release identity env) after
+verifying the packaged payload. Missing host, candidate, or digest env remains
+`BLOCKED` (exit `2`), not a script crash.
 
 ## Startup incident diagnostics (Plan 067)
 
@@ -387,9 +441,14 @@ runner-owned fixture flags. Its CoreAudio-prefixed synthetic device ID does not
 represent a physical CoreAudio device on Windows. The fixture keeps an anchored
 sample clock after delayed scheduling, catches up at most one second, and reports
 any skipped expired samples. `--audio ffmpeg-control` selects a separate debug and
-smoke gated lavfi 880 Hz source, requires no selected microphone, and bypasses the
-native PCM bus. Both modes keep the same strict artifact gates and retain separate
-reports; the FFmpeg control does not replace failed native PCM evidence.
+smoke gated 880 Hz source, requires no selected microphone, and bypasses the
+native PCM bus: its own writer feeds a session PCM FIFO from the video epoch at
+wall-clock pace, the input shape every real microphone has. It is no longer an
+FFmpeg lavfi source: FFmpeg generates that faster than real time, and `-shortest`
+then let 117-267 ms of tone outlast the video on every stream leg (#1008); pacing
+it inside FFmpeg instead raced into a 10 s startup freeze. Both modes keep the
+same strict artifact gates and retain separate reports; the FFmpeg control does
+not replace failed native PCM evidence.
 An absent microphone would
 produce intentional silence and is not used as tone evidence. A named case can be run:
 

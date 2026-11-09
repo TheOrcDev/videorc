@@ -67,6 +67,15 @@ export const DEFAULT_GATES = Object.freeze({
   digitalZeroTailMs: 300,
   maxDigitalZeroRuns: 0,
   requireNoDigitalZeroRuns: false,
+  // Silent track (issue 1064): a Windows take whose DirectShow microphone
+  // returned 1-LSB silence read "silence 11285 ms" over the whole take and
+  // still PASSED. When the run declares a microphone (expectAudio), a track
+  // that sits under -80 dBFS (digital silence; a quiet room's floor is far
+  // above it) for nearly all of its length fails: the microphone recorded
+  // nothing. Runs without a microphone are untouched.
+  silentTrackNoiseDb: -80,
+  silentTrackMinRunMs: 100,
+  silentTrackMinCoverage: 0.95,
   // Recording colorimetry law (2026-07 quality plan Q1): artifacts must be
   // TAGGED BT.709 video-range. Warn by default (legacy files and third-party
   // callers); the recording matrix smoke sets true to hard-fail.
@@ -303,6 +312,24 @@ export function pacingStats(ptsTimes) {
     jitterMs: Math.sqrt(variance) * 1000,
     observedFps: span > 0 ? (count - 1) / span : null
   }
+}
+
+/**
+ * The duration the frame-count and stretch gates hold the video to. MP4
+ * records the video stream's own duration, and that is trusted. FLV and MKV
+ * leave it unset, and their format duration also covers the audio a stop
+ * drain writes after the last frame (214 ms on a Linux RTMP stream), which
+ * would count frames the video never owed. There the span of the video
+ * packets stands in, plus one frame for the last packet's own duration.
+ * @returns {number|null}
+ */
+export function frameCountDurationSeconds(probe, ptsTimes, fps) {
+  if (Number.isFinite(probe.video?.duration)) return probe.video.duration
+  const sorted = [...ptsTimes].sort((a, b) => a - b)
+  if (sorted.length >= 2 && Number.isFinite(fps) && fps > 0) {
+    return sorted[sorted.length - 1] - sorted[0] + 1 / fps
+  }
+  return probe.formatDuration ?? null
 }
 
 /**
@@ -626,7 +653,8 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
     metrics.durationStretchRatio > gates.maxDurationStretchRatio
   ) {
     failures.push(
-      `timestamp/duration stretch: container duration ${metrics.durationSeconds.toFixed(2)}s ` +
+      `timestamp/duration stretch: video duration ` +
+        `${(metrics.frameCountDurationSeconds ?? metrics.durationSeconds).toFixed(2)}s ` +
         `vs ${metrics.frameDerivedDurationSeconds.toFixed(2)}s implied by ` +
         `${metrics.observedFrames} frame(s) at ${metrics.intendedFps}fps ` +
         `(${metrics.durationStretchRatio.toFixed(1)}x, max ${gates.maxDurationStretchRatio.toFixed(1)}x)`
@@ -662,6 +690,31 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
         failures.push(message)
       } else {
         warnings.push(message)
+      }
+    }
+    // Issue 1064: a declared microphone whose track is digital silence from
+    // start to end recorded nothing, whatever the meter showed.
+    if (
+      metrics.expectAudio &&
+      metrics.silentTrackCoverage != null &&
+      metrics.silentTrackCoverage >= gates.silentTrackMinCoverage
+    ) {
+      const silentTrack =
+        `audio track is digital silence (under ${gates.silentTrackNoiseDb} dBFS) for ` +
+        `${(metrics.silentTrackCoverage * 100).toFixed(1)}% of the take ` +
+        `(${(metrics.silentTrackMs ?? 0).toFixed(0)}ms)`
+      // A run that declares no microphone input device (a hosted CI runner,
+      // a test-pattern smoke) records the paced-silence bus: silence is the
+      // expected content, not a microphone that recorded nothing.
+      if (metrics.microphoneAvailable === false) {
+        warnings.push(
+          `${silentTrack} — silent-microphone check skipped: the run declared no ` +
+            `microphone input device, so the track is the paced-silence bus`
+        )
+      } else {
+        failures.push(
+          `${silentTrack} although a microphone was selected — the microphone recorded nothing`
+        )
       }
     }
   } else if (metrics.expectAudio) {
@@ -995,6 +1048,8 @@ export async function runAudioPackets(filePath, { ffprobePath = 'ffprobe' } = {}
  * @param {string} [options.ffprobePath]
  * @param {number} [options.intendedFps] - the session's selected fps (for the frame-count gate)
  * @param {boolean} [options.expectAudio] - whether a mic was selected (default: infer from stream)
+ * @param {boolean} [options.microphoneAvailable] - false when the run has no microphone input
+ *   device, so an all-silent track is the paced-silence bus and only warns (default: true)
  * @param {object} [options.gates] - overrides for DEFAULT_GATES
  * @returns {Promise<object>} the full report (verdict + metrics + raw findings)
  */
@@ -1011,6 +1066,7 @@ export async function analyzeRecording(filePath, options = {}) {
   const hasVideo = probe.video != null
   const hasAudio = probe.audio.length > 0
   const expectAudio = options.expectAudio ?? hasAudio
+  const microphoneAvailable = options.microphoneAvailable ?? true
 
   // Run the video passes (freeze, exact-dup frames, pacing) and the audio passes
   // (packet gaps, silence) concurrently. A frozen/black source can still produce a
@@ -1022,7 +1078,8 @@ export async function analyzeRecording(filePath, options = {}) {
     audioPackets,
     silences,
     keyframeTimes,
-    digitalZeroSegments
+    digitalZeroSegments,
+    silentTrackSegments
   ] = await Promise.all([
     hasVideo
       ? runFreezedetect(filePath, {
@@ -1050,8 +1107,22 @@ export async function analyzeRecording(filePath, options = {}) {
           noiseDb: gates.digitalZeroNoiseDb,
           minSilenceMs: gates.digitalZeroMinMs
         })
+      : [],
+    // Issue 1064: digital silence over the whole track, whatever the room.
+    hasAudio
+      ? runSilencedetect(filePath, {
+          ffmpegPath,
+          noiseDb: gates.silentTrackNoiseDb,
+          minSilenceMs: gates.silentTrackMinRunMs
+        })
       : []
   ])
+  const silentTrackSeconds = silentTrackSegments.reduce((sum, s) => sum + (s.duration ?? 0), 0)
+  const audioDurationSeconds = probe.audio[0]?.duration ?? probe.formatDuration ?? null
+  const silentTrackCoverage =
+    hasAudio && audioDurationSeconds != null && audioDurationSeconds > 0
+      ? Math.min(1, silentTrackSeconds / audioDurationSeconds)
+      : null
   const digitalZeroRuns = interiorSilenceRuns(digitalZeroSegments, {
     leadInMs: gates.digitalZeroLeadInMs,
     tailMs: gates.digitalZeroTailMs,
@@ -1080,7 +1151,7 @@ export async function analyzeRecording(filePath, options = {}) {
   const skewComponents = avSkewComponents(probe)
 
   const intendedFps = options.intendedFps ?? probe.video?.nominalFps ?? probe.video?.avgFps ?? null
-  const durationForCount = probe.video?.duration ?? probe.formatDuration ?? null
+  const durationForCount = frameCountDurationSeconds(probe, ptsTimes, intendedFps)
   const observedFrames =
     probe.video?.nbFrames ?? (frameHashes.length > 0 ? frameHashes.length : pacing.count || null)
   const expectedFrames =
@@ -1103,8 +1174,10 @@ export async function analyzeRecording(filePath, options = {}) {
     hasVideo,
     hasAudio,
     expectAudio,
+    microphoneAvailable,
     intendedFps,
-    durationSeconds: durationForCount,
+    durationSeconds: probe.video?.duration ?? probe.formatDuration ?? null,
+    frameCountDurationSeconds: durationForCount,
     codec: probe.video?.codec ?? null,
     pixFmt: probe.video?.pixFmt ?? null,
     profile: probe.video?.profile ?? null,
@@ -1154,6 +1227,8 @@ export async function analyzeRecording(filePath, options = {}) {
     digitalZeroRunCount: hasAudio ? digitalZeroRuns.length : null,
     longestDigitalZeroMs: hasAudio ? longestDigitalZero * 1000 : null,
     firstDigitalZeroSeconds: digitalZeroRuns.length > 0 ? digitalZeroRuns[0].start : null,
+    silentTrackMs: hasAudio ? silentTrackSeconds * 1000 : null,
+    silentTrackCoverage,
     avSkewMs: skew,
     startSkewMs: skewComponents.startSkewMs,
     tailMismatchMs: skewComponents.tailMismatchMs,
@@ -1250,7 +1325,10 @@ export function renderMarkdownReport(report) {
         : '')
   )
   lines.push(
-    `- Frames: observed ${m.observedFrames ?? 'n/a'} | expected ~${m.expectedFrames ?? 'n/a'}`
+    `- Frames: observed ${m.observedFrames ?? 'n/a'} | expected ~${m.expectedFrames ?? 'n/a'}` +
+      (m.frameCountDurationSeconds != null && m.frameCountDurationSeconds !== m.durationSeconds
+        ? ` over the video's ${fmt(m.frameCountDurationSeconds, 2)}s`
+        : '')
   )
   lines.push(
     `- Decoded uniqueness: ${m.uniqueFrameCount ?? 'n/a'}/${m.observedFrameHashes ?? 'n/a'} unique ` +
@@ -1277,7 +1355,9 @@ export function renderMarkdownReport(report) {
   if (m.hasAudio) {
     lines.push(`- Audio gaps: max ${fmt(m.maxAudioGapMs)}ms across ${m.audioGapCount} gap(s)`)
     lines.push(
-      `- Silence: longest ${fmt(m.longestSilenceMs)}ms across ${m.silenceCount} segment(s)`
+      `- Silence: longest ${fmt(m.longestSilenceMs)}ms across ${m.silenceCount} segment(s)`,
+      `- Digital silence: ${fmt(m.silentTrackMs ?? 0, 0)}ms` +
+        (m.silentTrackCoverage != null ? ` (${(m.silentTrackCoverage * 100).toFixed(1)}% of the track)` : '')
     )
     lines.push(
       `- Digital zero runs mid-take: ${m.digitalZeroRunCount ?? 'n/a'} ` +

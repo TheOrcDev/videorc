@@ -1,6 +1,8 @@
-import { createElement } from 'react'
+// @vitest-environment happy-dom
+import { act, createElement } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { gainReset } from '@/components/audio/gain-faders'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -13,6 +15,7 @@ import {
   applySyncChange,
   keepMicrophoneReadyHint,
   MicrophoneChannel,
+  noiseReductionSwitchView,
   SyncCalibrationView,
   syncOffsetTag,
   SoundsSettings,
@@ -238,6 +241,26 @@ describe('Sources System audio row (plans 069, 173)', () => {
   })
 })
 
+function microphoneProps(): Parameters<typeof MicrophoneChannel>[0] {
+  return {
+    picker: createElement('div', { 'data-test-picker': '' }),
+    microphoneSelected: true,
+    status: null,
+    meter: { kind: 'value', peakDb: -18 },
+    monitorState: 'monitoring',
+    unavailableReason: undefined,
+    gainDb: 0,
+    muted: false,
+    syncOffsetMs: 0,
+    syncUserSet: false,
+    sessionActive: false,
+    calibration: null,
+    onGainChange: noop,
+    onMutedChange: noop,
+    onSyncChange: noop
+  }
+}
+
 function renderMicrophone(
   overrides: Partial<Parameters<typeof MicrophoneChannel>[0]> = {}
 ): string {
@@ -245,24 +268,7 @@ function renderMicrophone(
     createElement(
       TooltipProvider,
       null,
-      createElement(MicrophoneChannel, {
-        picker: createElement('div', { 'data-test-picker': '' }),
-        microphoneSelected: true,
-        status: null,
-        meter: { kind: 'value', peakDb: -18 },
-        monitorState: 'monitoring',
-        unavailableReason: undefined,
-        gainDb: 0,
-        muted: false,
-        syncOffsetMs: 0,
-        syncUserSet: false,
-        sessionActive: false,
-        calibration: null,
-        onGainChange: noop,
-        onMutedChange: noop,
-        onSyncChange: noop,
-        ...overrides
-      })
+      createElement(MicrophoneChannel, { ...microphoneProps(), ...overrides })
     )
   )
 }
@@ -343,6 +349,29 @@ describe('Sources Microphone row (plans 093, 173)', () => {
     expect(renderMicrophone()).not.toContain('data-videorc-mic-level-reason')
   })
 
+  // Issue 1064: a running bus with no level paints nothing and says so; a
+  // microphone the bus reads as digital silence is "Silent", not "Receiving".
+  it("says the level is unavailable during a session, and Silent on the watchdog's word", () => {
+    const unavailable = renderMicrophone({
+      meter: NO_READING,
+      monitorState: 'idle',
+      sessionActive: true,
+      sessionLevelUnavailable: true
+    })
+    expect(unavailable).toContain('data-videorc-mic-level-reason="session"')
+    expect(unavailable).toContain(
+      'Level unavailable. The meter shows only what your recording and stream hear.'
+    )
+    const silent = renderMicrophone({
+      monitorState: 'silent',
+      sessionActive: true,
+      status: { label: 'Silent', tone: 'warn' }
+    })
+    expect(silent).toContain('data-videorc-mic-monitor-state="silent"')
+    expect(silent).toContain('>Silent<')
+    expect(silent).not.toContain('>Receiving<')
+  })
+
   it('folds Sync into More, closed by default (plan 173, D2)', () => {
     const closed = renderMicrophone({ syncOffsetMs: 150, syncUserSet: true })
     expect(closed).not.toContain('data-slot="parameter-slider"')
@@ -404,6 +433,135 @@ describe('syncOffsetTag (plan 173)', () => {
     expect(syncOffsetTag(-40, true)).toBe('Sync −40 ms')
     expect(syncOffsetTag(0, true)).toBeNull()
     expect(syncOffsetTag(150, false)).toBeNull()
+  })
+})
+
+describe('microphone noise reduction switch (PR 1036)', () => {
+  const noiseRow = (markup: string): string =>
+    markup.slice(markup.indexOf('data-videorc-mic-noise-reduction'))
+  const noiseSwitch = (markup: string): string =>
+    noiseRow(markup).match(/<span[^>]*role="switch"[^>]*>/)?.[0] ?? ''
+
+  it('is a labelled settings row in the body, right under Gain, never folded into More', () => {
+    const markup = renderMicrophone()
+    expect(markup).toContain('data-videorc-mic-noise-reduction=""')
+    expect(noiseRow(markup)).toMatch(/data-slot="field-label"[^>]*>Noise reduction</)
+    expect(noiseRow(markup)).toMatch(
+      /data-slot="field-description"[^>]*>Cuts background noise while you record or go live\. The level shows the cleaned sound only then\.</
+    )
+    // One switch, not an Off/On pair.
+    expect(noiseSwitch(markup)).toContain('data-size="sm"')
+    expect(markup).not.toMatch(/>Off<\/button>|>On<\/button>/)
+    expect(markup).not.toContain('>RNNoise<')
+    // Below the Gain fader, and visible with More closed.
+    expect(markup.indexOf('aria-label="Microphone gain"')).toBeLessThan(
+      markup.indexOf('data-videorc-mic-noise-reduction')
+    )
+    expect(markup).not.toContain('data-slot="parameter-slider"')
+  })
+
+  it('is checked for rnnoise and unchecked for off', () => {
+    expect(noiseSwitch(renderMicrophone())).toContain('aria-checked="false"')
+    expect(noiseSwitch(renderMicrophone({ noiseSuppression: 'off' }))).toContain(
+      'aria-checked="false"'
+    )
+    expect(noiseSwitch(renderMicrophone({ noiseSuppression: 'rnnoise' }))).toContain(
+      'aria-checked="true"'
+    )
+  })
+
+  it("can't turn On with no microphone, and says why", () => {
+    const markup = renderMicrophone({ microphoneSelected: false })
+    expect(noiseSwitch(markup)).toContain('aria-checked="false"')
+    expect(noiseSwitch(markup)).toContain('aria-disabled="true"')
+    expect(noiseRow(markup)).toContain(
+      'Cuts background noise while you record or go live. Choose a microphone to turn it on.'
+    )
+  })
+
+  it('keeps Off possible after the microphone is removed while On', () => {
+    const markup = renderMicrophone({ noiseSuppression: 'rnnoise', microphoneSelected: false })
+    expect(noiseSwitch(markup)).toContain('aria-checked="true"')
+    expect(noiseSwitch(markup)).not.toContain('aria-disabled="true"')
+    expect(noiseRow(markup)).not.toContain('Choose a microphone')
+  })
+
+  it('maps each state to checked, disabled and its line', () => {
+    const level = 'The level shows the cleaned sound only then.'
+    const reason = 'Choose a microphone to turn it on.'
+    expect(noiseReductionSwitchView('off', true)).toMatchObject({ checked: false, disabled: false })
+    expect(noiseReductionSwitchView('off', true).description).toContain(level)
+    expect(noiseReductionSwitchView('rnnoise', true)).toMatchObject({
+      checked: true,
+      disabled: false
+    })
+    expect(noiseReductionSwitchView('off', false)).toMatchObject({ checked: false, disabled: true })
+    expect(noiseReductionSwitchView('off', false).description).toContain(reason)
+    expect(noiseReductionSwitchView('rnnoise', false)).toMatchObject({
+      checked: true,
+      disabled: false
+    })
+    expect(noiseReductionSwitchView('rnnoise', false).description).toContain(level)
+  })
+})
+
+describe('microphone noise reduction switch, clicked (PR 1036)', () => {
+  let container: HTMLDivElement
+  let root: Root
+
+  beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+  })
+
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    container.remove()
+    vi.unstubAllGlobals()
+  })
+
+  async function clickNoiseSwitch(
+    overrides: Partial<Parameters<typeof MicrophoneChannel>[0]>
+  ): Promise<ReturnType<typeof vi.fn>> {
+    const onNoiseSuppressionChange = vi.fn()
+    await act(async () => {
+      root.render(
+        createElement(
+          TooltipProvider,
+          null,
+          createElement(MicrophoneChannel, {
+            ...microphoneProps(),
+            onNoiseSuppressionChange,
+            ...overrides
+          })
+        )
+      )
+    })
+    const control = container.querySelector<HTMLElement>(
+      '[data-videorc-mic-noise-reduction] [role="switch"]'
+    )
+    if (!control) throw new Error('no Noise reduction switch')
+    // The row's label names its switch.
+    const labelledBy = control.getAttribute('aria-labelledby')
+    expect(labelledBy && document.getElementById(labelledBy)?.textContent).toBe('Noise reduction')
+    await act(async () => control.click())
+    return onNoiseSuppressionChange
+  }
+
+  it('turns On to rnnoise and Off to off', async () => {
+    expect(await clickNoiseSwitch({ noiseSuppression: 'off' })).toHaveBeenCalledWith('rnnoise')
+    expect(await clickNoiseSwitch({ noiseSuppression: 'rnnoise' })).toHaveBeenCalledWith('off')
+  })
+
+  it('never turns On with no microphone, and always turns Off', async () => {
+    expect(
+      await clickNoiseSwitch({ noiseSuppression: 'off', microphoneSelected: false })
+    ).not.toHaveBeenCalled()
+    const off = await clickNoiseSwitch({ noiseSuppression: 'rnnoise', microphoneSelected: false })
+    expect(off).toHaveBeenCalledTimes(1)
+    expect(off).toHaveBeenCalledWith('off')
   })
 })
 

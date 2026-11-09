@@ -30,12 +30,14 @@ import type {
   CameraCorner,
   CameraShape,
   EffectiveSceneBackground,
+  LayoutSettings,
   OverlayItem,
   Scene,
   SceneEditorDraftParams,
   SceneSource
 } from '@/lib/backend'
 import { backgroundAssetDisplayUrl } from '@/lib/background-library'
+import { sourceCroppable } from '@/lib/freeform-memory'
 import {
   createEditorDraftChannel,
   type EditorDraftChannel,
@@ -65,14 +67,27 @@ import {
 import { stagePixelSize, stagePoint, type StageMapping } from './stage-viewport'
 import {
   handleCursor,
+  roundCropForCommit,
   roundRectForCommit,
+  stageCropOf,
   stageHandlePoints,
   stageSnapTargets,
   stageSourceShape,
   type GhostResult,
+  type StageCrop,
   type StageHandleId,
   type StageRect
 } from './stage-transform'
+import {
+  previewProofBackgroundStageMargin,
+  previewProofLayerFit
+} from '../../../../shared/native-preview-proof-geometry'
+import {
+  sceneFrameRect,
+  scenePictureRect,
+  screenBoxIsPicture,
+  type PixelSize
+} from '../../../../shared/scene-picture-geometry'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /** The invisible outline that drags a selected overlay item (CSS px). */
@@ -139,17 +154,48 @@ export interface StageOverlays {
 const OVERLAY_ICONS: Record<OverlayItem, ElementType> = {
   highlight: ChatIcon,
   captions: CaptionsIcon,
-  buddy: BuddyIcon
+  buddy: BuddyIcon,
+  chat: ChatIcon
 }
 const stageItemIcon = (entry: OverlayStageItem): ElementType =>
   entry.kind === 'overlay' ? OVERLAY_ICONS[entry.item] : ImageIcon
-type StageGhost = GhostResult & { sourceId: string }
+type StageGhost = GhostResult & { sourceId: string; crop?: StageCrop }
+
+/**
+ * Whether a gesture's frames go to the compositor as editor drafts: only
+ * where the native picture is showing (the live canvas, or the floating
+ * preview), with both RPCs wired, and never while a recording or a livestream
+ * runs (plan 215 D1): the compositor refuses them (plan 058 decision 4), so
+ * the outline is painted here and the outputs move on release.
+ */
+export function stageDraftsEnabled({
+  liveSurface,
+  previewFollowsGestures,
+  draftRpc,
+  draftsRefused
+}: {
+  liveSurface: boolean
+  previewFollowsGestures: boolean
+  draftRpc: boolean
+  draftsRefused: boolean
+}): boolean {
+  return !draftsRefused && (liveSurface || previewFollowsGestures) && draftRpc
+}
 
 /** What the stage is doing: a pointer gesture, a released commit still landing, or nothing. */
 export type StagePhase = 'idle' | 'dragging' | 'pending'
 
 /** A schematic editor: pointer samples never start capture; the only IPC a
  * gesture crosses is the live draft below, and only over the live canvas.
+ *
+ * The box is the PICTURE (plan 216 B3, owner decision D2): every source is
+ * drawn, hit, snapped to and held where the compositor draws its picture
+ * (`scenePictureRect`: its frame on the scene background's stage margin,
+ * and on Fit the picture's own box inside it), never its frame. A gesture
+ * starts from the picture and ends with a commit of the frame that picture
+ * maps back to (`sceneFrameRect`), so a Freeform screen's frame becomes its
+ * picture the first time it is edited and never before (D3: a display swap
+ * writes nothing).
  *
  * Live canvas (plan 058): on macOS the docked native preview glues itself over
  * the canvas rect (`slotRef`, `data-videorc-dock-slot="scene"`) and the SVG
@@ -165,7 +211,13 @@ export type StagePhase = 'idle' | 'dragging' | 'pending'
  * With the preview floating in its own window instead (`previewFollowsGestures`),
  * the schematic is the canvas and the gesture's drafts still go out, so the
  * real picture over there follows the drag too; nothing is held between
- * gestures, so that window shows no selection at rest. */
+ * gestures, so that window shows no selection at rest.
+ *
+ * While a recording or a livestream runs (`draftsRefused`, plan 215 D1) the
+ * compositor refuses every draft (plan 058 decision 4: a draft never reaches
+ * an output), so nothing is drafted or held; the selection frame, its handles
+ * and the guides are painted over the live picture instead, the outline
+ * follows the drag, and the outputs move on release. */
 export function SceneStage({
   scene,
   selectedSourceId,
@@ -175,16 +227,21 @@ export function SceneStage({
   previewFollowsGestures = false,
   liveDocked = false,
   liveHint = null,
+  draftsRefused = false,
   slotRef,
   onPopOut,
   onShowLive,
   onDraft,
   onDraftClear,
   outputWidth,
+  outputHeight,
+  layout,
+  sourceSizes,
   cameraShape = 'rectangle',
   cameraCornerRadiusPct = 12,
   dragEnabled = false,
   resizeEnabled = false,
+  cropEnabled = false,
   cameraAspectLocked = false,
   freeform = false,
   outputAspect = 16 / 9,
@@ -217,6 +274,10 @@ export function SceneStage({
   liveDocked?: boolean
   /** Tertiary copy under the canvas while the docked surface is hidden. */
   liveHint?: string | null
+  /** A recording or livestream is running (plan 215 D1): the compositor
+   * refuses drafts, so none go out and the chrome is painted over the live
+   * picture. The outputs move on release. */
+  draftsRefused?: boolean
   /** Dock-slot reporter ref for the canvas rect (macOS live canvas only). */
   slotRef?: (element: HTMLElement | null) => void
   /** Present only where the live canvas is supported; the footer then offers
@@ -228,12 +289,23 @@ export function SceneStage({
   onDraft?: (params: SceneEditorDraftParams) => Promise<unknown>
   onDraftClear?: () => Promise<unknown>
   /** Output width in pixels: sizes the compositor-drawn chrome so a hairline is
-   * a hairline on screen at every slot size. */
+   * a hairline on screen at every slot size, and with `outputHeight` rounds the
+   * picture to canvas pixels as the compositor does (plan 216 B3). */
   outputWidth?: number
+  outputHeight?: number
+  /** The layout, for how the compositor fits each source into its box (plan
+   * 216 B3: the stage draws the PICTURE, not the frame). Without it every
+   * source is drawn as its frame, on the stage margin. */
+  layout?: LayoutSettings
+  /** Each source's picture size in pixels, by source id, when known (plan
+   * 216 B2: the compositor's status, else the capture status). */
+  sourceSizes?: Readonly<Record<string, PixelSize>>
   cameraShape?: CameraShape
   cameraCornerRadiusPct?: number
   dragEnabled?: boolean
   resizeEnabled?: boolean
+  /** ⌥-drag on a screen's edge crops it (plan 213 G2): Freeform, idle only. */
+  cropEnabled?: boolean
   cameraAspectLocked?: boolean
   freeform?: boolean
   outputAspect?: number
@@ -263,8 +335,45 @@ export function SceneStage({
   const sources = scene?.sources ?? []
   const stageH =
     STAGE_W / (Number.isFinite(outputAspect) && outputAspect > 0 ? outputAspect : 16 / 9)
+  // The output canvas in pixels: the picture rounds to it like the
+  // compositor's fit (plan 216 B3). Without an output size, a 1920-wide
+  // canvas of the stage's shape stands in.
+  const canvasWidth = outputWidth && outputWidth > 0 ? outputWidth : 1920
+  const canvasHeight =
+    outputHeight && outputHeight > 0
+      ? outputHeight
+      : Math.max(1, Math.round((canvasWidth * stageH) / STAGE_W))
+  const stageMargin = previewProofBackgroundStageMargin(background)
+  const sourceFit = (source: SceneSource): 'contain' | 'cover' =>
+    layout ? previewProofLayerFit(source, layout) : 'cover'
+  const sourceSize = (source: SceneSource): PixelSize | null => sourceSizes?.[source.id] ?? null
+  /** Where the source's picture is for `frame` (its transform, a draft, a
+   * corner drop), in canvas fractions: what the stage draws and edits. */
+  const pictureOf = (
+    source: SceneSource,
+    frame: StageRect,
+    crop?: Partial<StageCrop> | null
+  ): StageRect =>
+    scenePictureRect({
+      frame,
+      kind: source.kind,
+      fit: sourceFit(source),
+      source: sourceSize(source),
+      crop: crop ?? source.transform,
+      stageMargin,
+      canvas: { width: canvasWidth, height: canvasHeight }
+    })
+  /** The frame a box on the stage commits as: back through the stage margin. */
+  const frameOf = (source: SceneSource, picture: StageRect): StageRect =>
+    sceneFrameRect(picture, source.kind, stageMargin)
+  /** The box follows the picture's shape (plan 216 D2): a Freeform screen
+   * on Fit with a known size. Its aspect is forced in a resize, like a
+   * shaped camera's, and crop is how its shape changes. */
+  const boxIsPicture = (source: SceneSource): boolean =>
+    freeform && screenBoxIsPicture(source.kind, sourceFit(source), sourceSize(source))
   const svgRef = useRef<SVGSVGElement | null>(null)
   const clipId = useId()
+  const gutterClipId = useId()
   const [failedBackgroundAssetId, setFailedBackgroundAssetId] = useState<string | null>(null)
   const backgroundUrl =
     background && background.assetId !== failedBackgroundAssetId
@@ -326,8 +435,18 @@ export function SceneStage({
   }, [edits, scene])
   // Gestures draft wherever the native picture is showing (here, or in the
   // floating preview); the idle selection is held only on the live canvas.
-  const draftEnabled = (liveSurface || previewFollowsGestures) && Boolean(onDraft && onDraftClear)
+  // A running session refuses every draft (plan 215 D1), so none go out.
+  const draftEnabled = stageDraftsEnabled({
+    liveSurface,
+    previewFollowsGestures,
+    draftRpc: Boolean(onDraft && onDraftClear),
+    draftsRefused
+  })
   const holdEnabled = liveSurface && draftEnabled
+  // The live canvas hides the chrome the compositor draws from the held or
+  // drafted frame; with drafts refused there is no such frame, so the
+  // selection, its handles and the guides are painted here instead.
+  const chromeHidden = liveSurface && !draftsRefused
   // Unmount needs no dispose: the mount effect's cleanup cancels the gesture,
   // which clears the channel, and an idle channel holds no timer.
   useLayoutEffect(() => {
@@ -349,6 +468,10 @@ export function SceneStage({
         `${source.id}:${source.kind}:${source.deviceId}:${source.locked}:${source.visible}`
     )
     .join('|')
+  // A source's picture size arriving or changing under a gesture (a camera
+  // that starts as it is grabbed, a display swap) never ends it: the ghost
+  // is already in picture coordinates and the release commits the frame it
+  // maps back to; the new size shapes the box from the next render on.
   useLayoutEffect(() => {
     cancelGesture()
     edits.invalidate()
@@ -437,14 +560,17 @@ export function SceneStage({
 
   const editable = (source: SceneSource): boolean =>
     !source.locked && (freeform || source.transform.width < 1 || source.transform.height < 1)
+  // The box the stage shows for a source: the ghost (already the picture)
+  // during its gesture, else the picture of the frame still landing, of a
+  // corner drop, or of the committed transform.
   const displayed = (source: SceneSource): StageRect =>
     ghost?.sourceId === source.id
       ? ghost.rect
       : edits.draft?.sourceId === source.id
-        ? edits.draft.rect
+        ? pictureOf(source, edits.draft.rect, edits.draft.crop)
         : cornerDrop?.sourceId === source.id
-          ? cornerDrop.rect
-          : source.transform
+          ? pictureOf(source, cornerDrop.rect)
+          : pictureOf(source, source.transform)
   /** Output pixels per CSS pixel of the canvas, as estimated from the session's
    * output width (the schema caps it at 64; a canvas that small has no visible
    * chrome anyway). Only a fallback: the compositor sizes the chrome from
@@ -459,8 +585,13 @@ export function SceneStage({
   const draftOf = (gesture: ActiveGesture, ghost: GhostResult): EditorDraftSample => {
     const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
     const kind = gesture.motion.kind
+    const crop = gesture.item ? null : gesture.motion.crop
+    // The draft's transform is the frame the ghost's picture maps back to;
+    // its chrome sits on the picture, where the handles are.
+    const transform = gesture.item || !source ? ghost.rect : frameOf(source, ghost.rect)
     return {
-      transform: ghost.rect,
+      transform,
+      ...(crop ? { crop } : {}),
       chrome: {
         selected: ghost.rect,
         handles: gesture.item
@@ -509,8 +640,8 @@ export function SceneStage({
     : null
   const heldRect = selectedSource
     ? edits.draft?.sourceId === selectedSource.id
-      ? edits.draft.rect
-      : selectedSource.transform
+      ? pictureOf(selectedSource, edits.draft.rect, edits.draft.crop)
+      : pictureOf(selectedSource, selectedSource.transform)
     : selectedOverlay
       ? displayedOverlay(selectedOverlay)
       : null
@@ -580,6 +711,14 @@ export function SceneStage({
     event.preventDefault()
     onSelectSource(source.id)
     const initial = { ...displayed(source) }
+    // ⌥ down on an edge of a screen crops it instead of resizing (plan 213
+    // G2), from the crop the stage shows now: a crop still landing is the
+    // one to carry on from.
+    const crop =
+      kind !== 'move' && event.altKey && cropEnabled && sourceCroppable(source.kind)
+        ? ((edits.draft?.sourceId === source.id ? edits.draft.crop : undefined) ??
+          stageCropOf(source.transform))
+        : null
     const motion = new StageGesture(
       source.id,
       event.pointerId,
@@ -590,7 +729,11 @@ export function SceneStage({
       stageSnapTargets(sources.filter((other) => other.id !== source.id).map(displayed)),
       effectiveSnap,
       aspectLocked,
-      source.kind === 'camera' && cameraAspectLocked
+      // The aspect is law for a shaped camera (the mask), and for a Freeform
+      // screen whose box is its picture (plan 216 D2): the key never
+      // stretches it, and the crop changes its shape instead.
+      (source.kind === 'camera' && cameraAspectLocked) || boxIsPicture(source),
+      crop
     )
     // Initial modifiers establish ownership without changing the grabbed point.
     motion.sample(point, event)
@@ -692,6 +835,7 @@ export function SceneStage({
       sourceId: gesture.motion.sourceId,
       ...gesture.motion.sample(point, sample)
     }
+    if (gesture.motion.crop) next.crop = gesture.motion.crop
     // A preset scene's camera moved into a canvas corner re-enters the preset
     // there on release: the ghost (and the live draft) is that box, so the
     // drop lands where it is shown. Out of the corner it follows the pointer.
@@ -699,8 +843,11 @@ export function SceneStage({
       !gesture.item && gesture.motion.kind === 'move' && onSnapCorner
         ? snapCornerOf(gesture.motion.rect)
         : null
-    if (gesture.corner && cornerDropRect)
-      next = { sourceId: next.sourceId, rect: cornerDropRect(gesture.corner), guides: [] }
+    if (gesture.corner && cornerDropRect) {
+      const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
+      const box = cornerDropRect(gesture.corner)
+      next = { sourceId: next.sourceId, rect: source ? pictureOf(source, box) : box, guides: [] }
+    }
     setGhost(next)
     if (draft) channel.sample(draftOf(gesture, next))
     return next
@@ -747,15 +894,26 @@ export function SceneStage({
     // corner snap commits through a preset instead: its last frame is the
     // preset's box, held (`cornerDrop`) until the preset's scene shows it;
     // without that box the draft is cleared with the gesture.
-    if (changed && (!corner || cornerDropRect)) channel.release(roundRectForCommit(final.rect))
+    const crop = final.crop
+    // What is committed is the FRAME (plan 216 B3): the released picture
+    // back through the stage margin, or the preset's box for a corner snap.
+    const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
+    const frame =
+      corner && cornerDropRect
+        ? cornerDropRect(corner)
+        : source
+          ? frameOf(source, final.rect)
+          : final.rect
+    if (changed && (!corner || cornerDropRect))
+      channel.release(roundRectForCommit(frame), crop && roundCropForCommit(crop))
     cancelGesture()
     if (!changed) return
     if (corner) {
-      if (cornerDropRect) setCornerDrop({ sourceId: gesture.motion.sourceId, rect: final.rect })
+      if (cornerDropRect) setCornerDrop({ sourceId: gesture.motion.sourceId, rect: frame })
       onSnapCorner?.(corner)
       return
     }
-    edits.submit(gesture.motion.sourceId, final.rect)
+    edits.submit(gesture.motion.sourceId, frame, crop)
   }
   const gutter = 28 / pixelScale
   const canvasRadius = Math.min(CANVAS_RADIUS_PX / pixelScale, stageH / 2)
@@ -775,6 +933,12 @@ export function SceneStage({
     event.preventDefault()
     onNudge(selectedSource.id, nudge.directionX, nudge.directionY, nudge.large)
   }
+  // Keyed on the scene, never the selection: the footer must not change at
+  // pointerdown (see stage-undo-control.ts).
+  const cropHint =
+    cropEnabled &&
+    resizeEnabled &&
+    sources.some((source) => sourceCroppable(source.kind) && editable(source))
   const activeMotion = gestureRef.current
   const activeHandle =
     activeMotion && activeMotion.motion.kind !== 'move'
@@ -901,6 +1065,17 @@ export function SceneStage({
             <defs>
               <clipPath id={clipId}>
                 <rect x={0} y={0} width={STAGE_W} height={stageH} rx={canvasRadius} />
+              </clipPath>
+              {/* Plan 215 E3 (D2): a box may hang off the canvas by up to
+                  three canvases; its selection frame and handles stop at the
+                  handle gutter, where the hit targets live anyway. */}
+              <clipPath id={gutterClipId}>
+                <rect
+                  x={-gutter}
+                  y={-gutter}
+                  width={STAGE_W + gutter * 2}
+                  height={stageH + gutter * 2}
+                />
               </clipPath>
             </defs>
             <rect
@@ -1202,7 +1377,7 @@ export function SceneStage({
                 <line
                   key={`${guide.axis}-${guide.position}`}
                   data-videorc-stage-guide={guide.axis}
-                  className={cn('stroke-ring', liveSurface && 'invisible')}
+                  className={cn('stroke-ring', chromeHidden && 'invisible')}
                   strokeDasharray="4 3"
                   strokeWidth={1}
                   vectorEffect="non-scaling-stroke"
@@ -1213,27 +1388,29 @@ export function SceneStage({
                 />
               ))}
             </g>
-            {selectedSource ? (
-              <StageSelection
-                rect={displayed(selectedSource)}
-                activeHandle={activeHandle}
-                stageH={stageH}
-                scale={pixelScale}
-                enabled={resizeEnabled && editable(selectedSource)}
-                hitOnly={liveSurface}
-                onHandle={(handle, event) => beginGesture(selectedSource, handle, event)}
-              />
-            ) : selectedOverlay ? (
-              <StageSelection
-                rect={displayedOverlay(selectedOverlay)}
-                activeHandle={activeHandle}
-                stageH={stageH}
-                scale={pixelScale}
-                enabled={Boolean(overlays?.editable)}
-                hitOnly={liveSurface}
-                onHandle={(handle, event) => beginOverlayGesture(selectedOverlay, handle, event)}
-              />
-            ) : null}
+            <g clipPath={`url(#${gutterClipId})`}>
+              {selectedSource ? (
+                <StageSelection
+                  rect={displayed(selectedSource)}
+                  activeHandle={activeHandle}
+                  stageH={stageH}
+                  scale={pixelScale}
+                  enabled={resizeEnabled && editable(selectedSource)}
+                  hitOnly={chromeHidden}
+                  onHandle={(handle, event) => beginGesture(selectedSource, handle, event)}
+                />
+              ) : selectedOverlay ? (
+                <StageSelection
+                  rect={displayedOverlay(selectedOverlay)}
+                  activeHandle={activeHandle}
+                  stageH={stageH}
+                  scale={pixelScale}
+                  enabled={Boolean(overlays?.editable)}
+                  hitOnly={chromeHidden}
+                  onHandle={(handle, event) => beginOverlayGesture(selectedOverlay, handle, event)}
+                />
+              ) : null}
+            </g>
             {/* Keep the edge hit targets within a reserved, unobstructed gutter. */}
             <rect
               x={-gutter}
@@ -1294,10 +1471,10 @@ export function SceneStage({
                   ? 'constrain / aspect / bigger nudge'
                   : 'constrain / aspect'}
               </span>
-              {effectiveSnap ? (
-                <span className="inline-flex items-center gap-1.5">
+              {effectiveSnap || cropHint ? (
+                <span className="inline-flex items-center gap-1.5" data-videorc-stage-alt-hint>
                   <ShortcutKeys accelerator="Alt" />
-                  no snap
+                  {!cropHint ? 'no snap' : effectiveSnap ? 'no snap / crop edge' : 'crop edge'}
                 </span>
               ) : null}
               <span className="inline-flex items-center gap-1.5">

@@ -4,7 +4,7 @@ import type {
   ResolveAppWindowResult,
   SourceSelection
 } from './backend'
-import { reconcileSourceSelection } from './capture'
+import { reconcileSourceSelection, type ReconcileSourceSelectionOptions } from './capture'
 import {
   normalizeSceneApp,
   type SavedScene,
@@ -78,10 +78,11 @@ export function sceneAppState(
 export async function reconcileWorkingSceneSources(
   sources: SourceSelection & VisualSources,
   devices: Device[],
-  resolve: ResolveAppWindow
+  resolve: ResolveAppWindow,
+  options: ReconcileSourceSelectionOptions = {}
 ): Promise<{ sources: SourceSelection & VisualSources; appState?: SceneAppState }> {
   if (!sources.app || devices.length === 0)
-    return { sources: reconcileSourceSelection(sources, devices) }
+    return { sources: reconcileSourceSelection(sources, devices, options) }
   const result = await resolve({ bundleId: sources.app.bundleId, preferWindowId: sources.windowId })
   // Refusal waits with Screen None, without exact-title rebinding to another window.
   const next = result.ok
@@ -91,6 +92,7 @@ export async function reconcileWorkingSceneSources(
         windowName: result.title,
         screenId: undefined,
         screenName: undefined,
+        screenUuid: undefined,
         captureOff: false,
         testPattern: false
       }
@@ -100,9 +102,10 @@ export async function reconcileWorkingSceneSources(
         windowName: undefined,
         screenId: undefined,
         screenName: undefined,
+        screenUuid: undefined,
         captureOff: true
       }
-  const reconciled = reconcileSourceSelection(next, devices)
+  const reconciled = reconcileSourceSelection(next, devices, options)
   // A successful resolver may be newer than devices.list. Preserve its authoritative window.
   return result.ok
     ? {

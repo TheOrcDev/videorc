@@ -217,6 +217,30 @@ describe('runtime info helpers', () => {
     expect(info.backendCrashes).toEqual([])
   })
 
+  it('carries the Preview watchdog decisions into the bundle (plan 216 D3)', () => {
+    const decision = {
+      at: '2026-11-03T14:51:40.000Z',
+      watch: 'presenter' as const,
+      decision: 'presenter-retired' as const,
+      reason: 'Native preview presenting watchdog requested a clean presenter.',
+      evidence: { driverKind: 'helper-process', hadDriver: true, fallbackWindowShown: true }
+    }
+    const info = buildRuntimeInfo({
+      appVersion: '9.9.9-test',
+      execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+      firstFrameDecisions: [decision],
+      env: {}
+    })
+    expect(JSON.parse(JSON.stringify(info)).firstFrameDecisions).toEqual([decision])
+    expect(
+      buildRuntimeInfo({
+        appVersion: '9.9.9-test',
+        execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+        env: {}
+      }).firstFrameDecisions
+    ).toEqual([])
+  })
+
   it('surfaces the running app version', () => {
     const info = buildRuntimeInfo({
       appVersion: '1.2.3',
@@ -272,6 +296,18 @@ describe('runtime info helpers', () => {
       styleRequested: 'material'
     } as const
     expect(buildRuntimeInfo({ ...base, windowGlass }).windowGlass).toEqual(windowGlass)
+  })
+
+  it('names why global shortcuts cannot work only when main found a reason', () => {
+    const base = { appVersion: '1.2.3', execPath: '/opt/Videorc/videorc', env: {} }
+    expect(buildRuntimeInfo(base)).not.toHaveProperty('globalShortcutsUnavailable')
+    expect(buildRuntimeInfo({ ...base, globalShortcutsUnavailable: null })).not.toHaveProperty(
+      'globalShortcutsUnavailable'
+    )
+    expect(
+      buildRuntimeInfo({ ...base, globalShortcutsUnavailable: 'No key grab here.' })
+        .globalShortcutsUnavailable
+    ).toBe('No key grab here.')
   })
 
   it('surfaces graphics fallback evidence and recovery state', () => {

@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 use super::*;
 use crate::cohost::get_cohost_settings;
 use crate::storage::Database;
+use crate::test_temp_dir::TestTempDir;
 
 pub(crate) const BEARER: &str = "bearer-1";
 const AVATAR: &str = "7c9e6679-7425-40de-944b-e07fc1ee9a51";
@@ -30,10 +31,8 @@ pub(crate) fn test_state() -> AppState {
     )
 }
 
-pub(crate) fn temp_root() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("videorc-buddy-library-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
-    root
+pub(crate) fn temp_root() -> TestTempDir {
+    TestTempDir::new("buddy-library")
 }
 
 /// A 4 x 4 PNG whose one opaque pixel has `shade`, so pictures are told apart.

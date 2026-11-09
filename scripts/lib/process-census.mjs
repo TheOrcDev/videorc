@@ -58,7 +58,7 @@ export async function collectProcessCensus({
   const interestingPids = new Set([...records.map((record) => record.pid), ...extraPids])
   const processGroupRows =
     typeof pgid === 'number'
-      ? processTable.filter((row) => row.pgid === pgid)
+      ? processGroupTreeRows(processTable, pgid)
       : Number.isInteger(rootPid) && rootPid > 1
         ? processTreeRows(processTable, rootPid)
         : []
@@ -94,6 +94,31 @@ export function processTreeRows(processTable, rootPid) {
   if (!Number.isInteger(rootPid) || rootPid <= 1) {
     return []
   }
+  return descendantRows(processTable, [rootPid])
+}
+
+/**
+ * Every member of POSIX process group `pgid`, plus the nested groups the
+ * package manager made. pnpm 11 starts each script it runs in a process group
+ * of its own, so in `pnpm dev` the launched group can hold only the outer pnpm
+ * while Electron, its renderers and the backend sit in a nested group (Linux,
+ * 2026-11-03: the lifecycle gate counted no Electron main or renderer). The
+ * walk crosses into a child's new group only when its parent is tooling
+ * (pnpm, a node script runner); a group the app makes itself, such as the
+ * backend's bounded jobs (`process_group(0)` in process_job.rs), stays out of
+ * the census exactly as with a plain pgid filter.
+ */
+export function processGroupTreeRows(processTable, pgid) {
+  const rootPids = (processTable ?? [])
+    .filter((row) => Number.isInteger(row?.pid) && row.pid > 1 && row.pgid === pgid)
+    .map((row) => row.pid)
+  return descendantRows(processTable, rootPids, (child, parent) => {
+    if (child.pgid === parent?.pgid) return true
+    return parent !== undefined && classifyProcess(parent) === 'tooling'
+  })
+}
+
+function descendantRows(processTable, rootPids, canEnter = () => true) {
   const childrenByParent = new Map()
   for (const row of processTable ?? []) {
     if (!Number.isInteger(row?.pid) || !Number.isInteger(row?.ppid)) {
@@ -104,15 +129,14 @@ export function processTreeRows(processTable, rootPid) {
     childrenByParent.set(row.ppid, children)
   }
   const rowsByPid = new Map((processTable ?? []).map((row) => [row.pid, row]))
-  if (!rowsByPid.has(rootPid)) {
-    return []
-  }
-  const seen = new Set([rootPid])
-  const queue = [rootPid]
+  const roots = rootPids.filter((pid) => rowsByPid.has(pid))
+  const seen = new Set(roots)
+  const queue = [...roots]
   while (queue.length > 0) {
     const parentPid = queue.shift()
     for (const child of childrenByParent.get(parentPid) ?? []) {
       if (seen.has(child.pid)) continue
+      if (!canEnter(child, rowsByPid.get(parentPid))) continue
       seen.add(child.pid)
       queue.push(child.pid)
     }
@@ -510,6 +534,9 @@ export function classifyProcessInTable(row, rowsByPid) {
 }
 
 export function classifyProcess(row) {
+  if (isExitedProcessRow(row)) {
+    return 'exited'
+  }
   const text = `${row.command} ${row.args}`
   const lowerText = text.toLowerCase()
   const commandName = (row.command.split(/[\\/]/).pop() ?? row.command).toLowerCase()
@@ -527,10 +554,13 @@ export function classifyProcess(row) {
   if (executableNames.has('videorc-backend') || executableNames.has('videorc-backend.exe')) {
     return 'backend'
   }
-  if (lowerText.includes('ffmpeg')) {
+  // By executable name, not substring: a checkout under a directory named
+  // `…ffmpeg…` put every Electron process's argv over the line and the census
+  // read the whole app as FFmpeg (Linux, 2026-11-06).
+  if (executableNames.has('ffmpeg') || executableNames.has('ffmpeg.exe')) {
     return 'ffmpeg'
   }
-  if (lowerText.includes('ffprobe')) {
+  if (executableNames.has('ffprobe') || executableNames.has('ffprobe.exe')) {
     return 'ffprobe'
   }
   for (const role of ['notes', 'comments', 'captions']) {
@@ -567,6 +597,24 @@ export function classifyProcess(row) {
     return 'tooling'
   }
   return 'other'
+}
+
+/**
+ * procps prints a process without a command line as its bracketed name. Outside
+ * kernel threads (group 0) that is a process that has exited: a zombie its
+ * parent has not reaped yet (`[electron] <defunct>`, after the comm column's
+ * own `electron <defun`, cut at 15 characters) or one already tearing down its
+ * memory (`[electron]`, no RSS). Linux Chromium's zygote forks the renderers
+ * and reaps them, so in the moment between a renderer's exit and the reap the
+ * census read a nameless `electron` without `--type=` as a second Electron
+ * main and failed the lifecycle gate (Linux, 2026-11-06).
+ */
+function isExitedProcessRow(row) {
+  const args = String(row.args ?? '').trim()
+  if (/(?:^|\s)\[[^\]]*\] <defunct>$/.test(args)) {
+    return true
+  }
+  return row.pgid !== 0 && Number(row.rssKb) === 0 && args === `[${row.command}]`
 }
 
 function processArgumentExecutableName(args) {

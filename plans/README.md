@@ -1,5 +1,100 @@
 # Implementation Plans
 
+- 2026-11-05: [Plan 218](218-the-stream-holds-its-frame-rate.md), a
+  streamer's support bundle (0.18.0): "laggy on YouTube, streaming 1080,
+  saving 1440". PLANNED, not started:
+  - Cause, proven part: in all three of their sessions (two of them
+    stream-only), about 30 % of stream frames were dropped before encode,
+    so YouTube got about 21 of 30 fps, and an RTMP leg overflowed its fifo
+    (`FIFO queue full`). The 1440p recording was clean. Neither problem
+    ever shows on the owner's Mac.
+  - Open: why FFmpeg reads the stream video late on their Mac. Either a
+    slow uplink pushing back, or FFmpeg's 100 ms interleave hold on the
+    150 ms audio playout delay. S0 asks the streamer for evidence; S1
+    reproduces it here.
+  - Fix: adaptive stream bitrate (uplink) or a stream queue budget that
+    allows for the interleave wait, plus a leg-named live warning and a
+    support bundle that can tell the two apart.
+  - Open: D1 (one slow leg lowers all), D2 (bitrate floor), D3 (pre-live
+    upload check).
+- 2026-11-04: [Plan 217](217-the-stream-never-waits-for-the-recording.md),
+  the owner's live stream lagged while recording 4K. PLANNED, not started:
+  - Cause: one FFmpeg carries the audio, the 4K recording and the 1080p
+    stream, and FFmpeg holds every input to the slowest output. When a local
+    release build pushed the load to 24 on 10 cores, the 4K leg fell behind
+    and the stream stalled for 2–3 s at a time, with up to 12 s of silent
+    audio.
+  - Fix: split-output sessions run the stream in its own FFmpeg process; the
+    recording reads a mixed audio tap that can never slow the bus.
+  - Already shipped beside it: agent builds and smokes wait while Videorc is
+    live on this Mac (`waitWhileVideorcLive`).
+  - Open: D1 (replay buffer side), D2 (stream process dies), D3 (Windows).
+- 2026-11-03: [Plan 216](216-freeform-screen-box-and-drag.md), a streamer's
+  bug report with a video and a support bundle (0.18.0, all three bugs still
+  on main). BUILT 2026-11-03 (#1100, #1102, #1098, #1097); the owner took
+  D1 to D5 as recommended:
+  - A: a rearrangement (Freeform, a move, Fill/Fit) never waits for a source
+    already in the scene; their camera said "live" but sent no frames, so
+    Freeform failed after 15 s. One "Switching…" label, a named failure,
+    and the bundle keeps recent errors.
+  - B: in Freeform the screen's box is its picture (one picture-rect rule in
+    Rust and TypeScript), on top of plan 215 E and before 215 F.
+  - C: on macOS the fallback preview lives inside the main window, as on
+    Linux, so the canvas drags; a real-mouse probe gates it.
+  - D: a camera that sends no video says so, and the bundle keeps the
+    watchdog's decisions; why their Mac fell back still needs the streamer.
+  - Owed: by eye in both themes, a real-mouse probe, D1's streamer answers.
+- 2026-11-03: [Plan 215](215-streamer-list-2026-11-02.md), a streamer's
+  list from 2026-11-02. Seven workstreams, one PR each:
+  - A: X chat names the missing Videorc sign-in, warns before Go Live, and
+    attaches when you sign in. A silent sign-out on a 401 was the likely
+    cause; X itself was fine.
+  - B: Edit scene on the Scene page and in ⌘K, as well as in Studio.
+  - C: Hide from stream for the Stream Manager, next to Keep on top.
+  - D: move and resize while recording or live. This was locked since
+    2026-07-03, not a regression; outputs move on release.
+  - E: sources up to 400% and cut off at the canvas edge, never squashed;
+    a screen Zoom slider.
+  - F: rounded corners for the screen on all four render paths.
+  - G: chat on stream, the last 5 messages, off by default.
+
+  **PLANNED** 2026-11-03; the owner took D1 to D7 as recommended. G
+  **BUILT** 2026-11-03 (draft PR; CI, the smokes and the by-eye check owed).
+
+- 2026-11-02: [Plan 214](214-videorc-camera-in-meet-and-zoom.md), Videorc
+  Camera in Meet and Zoom. Owner ask: a virtual camera like OBS's, so the
+  program shows up as a camera in Google Meet, Zoom, Teams and Discord, on
+  macOS, Windows 11 and Linux. Three spikes outside the tree, then six
+  workstreams:
+  - A: the output tap, reading the program as the Preview shows it,
+    converting off the compositor tick, and asking for pixels at idle on
+    Windows and Linux.
+  - B: the macOS Camera Extension in the bundle, with the restricted
+    entitlement, one Developer ID provisioning profile for the app, split
+    entitlements, activation from Electron main, the backend's CMIO sink,
+    and the release validator.
+  - C: the Windows media-source DLL, a cross-session shared ring, and a
+    one-time elevated setup.
+  - D: the Linux v4l2loopback writer with install guidance.
+  - E: the Output page switch, the approval guidance, ⌘K and the agents'
+    mirror, Health.
+  - F: a packaged read-back smoke that compares the camera with a
+    recording and proves Hide screen.
+
+  No audio (a virtual microphone is a separate, harder project).
+
+  **MERGED** 2026-11-03 as #1091 (`bc84c35ec`): A, B, D, E and F, with
+  D1 to D14 as recommended.
+  - P0a is a go on macOS 26: Xcode issued the one profile, a notarized test
+    camera showed a pushed picture in Chrome, and a re-signed app launched
+    with no AMFI kill.
+  - Linux is hidden until P0c. Windows (C) follows in its own PR, hidden
+    until P0b. The review's fixes are in a follow-up PR.
+  - Owed on main (the owner's rule: no smokes or app runs before main):
+    `smoke:virtual-camera`, the recording-studio and record-latency
+    smokes, a signed build in /Applications, and Meet, Zoom and FaceTime by
+    eye.
+
 - 2026-11-01: [Plan 213](213-new-streamer-feedback.md), a new streamer's
   feedback (macOS, AeroSpace, a 16:9 virtual display on an ultrawide,
   Continuity Camera). Ten workstreams, one PR each:
@@ -8,17 +103,27 @@
   - C: pages that fit a small window or display.
   - D: Stick to app draws inside the main window, and a floating Preview
     stops fighting a tiling window manager.
-  - E: a missing screen or camera never rewrites your choice (implemented;
-    draft PR, physical camera/display checks owed).
+  - E: a missing screen or camera never rewrites your choice.
   - F: real display names, hot-plug, and resolution changes.
   - G: screen crop and Fill.
   - H: Continuity Camera disconnects and returns cleanly.
   - I: camera brightness, contrast and saturation.
   - J: X chat with a stream key says how to get it.
 
-  **EXECUTING** 2026-11-01: the owner took every recommendation except
-  D2 (no window-size change; C2 dropped) and asked for one PR per
-  workstream.
+  The owner took every recommendation except D2 (no window-size change;
+  C2 dropped) and asked for one PR per workstream.
+
+  **BUILT** 2026-11-02: every workstream is on main as of `d74018b0`.
+  - PRs: #1001, #1010, #1003, #1018, #1000 and #1011, #1019, #1029,
+    #1015, #1017, #1002.
+  - Fixes found along the way: #1007 and #1030.
+  - The combined full desktop suite, `test:scripts` and the
+    recording-studio stages pass, apart from the known 4K separate-source
+    and live-background reds and four smokes the dev app can't run
+    without a camera.
+  - Open: videorc-ui#1, the synced `page.tsx` for C.
+  - Owed: owner acceptance by eye, with AeroSpace, a virtual display, an
+    iPhone and X.
 
 - 2026-10-31: [Plan 212](212-the-preview-never-shows-test-noise.md), The
   Preview never shows test noise. Owner report: on the first launch after

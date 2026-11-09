@@ -33,6 +33,23 @@ export const PAGE_LEAD_COLUMN = 'flex min-w-0 flex-col @min-[940px]/page:border-
 /** The right column of a two-column page: a hairline above it while stacked, beside it when wide. */
 export const PAGE_TRAIL_COLUMN = 'min-w-0 border-t @min-[940px]/page:border-t-0'
 
+/**
+ * The Scene inspector column, a container of its own: the default 1,180 px
+ * window gives it about 420 px beside the canvas, a stacked page its whole
+ * width.
+ */
+export const SCENE_INSPECTOR = '@container/inspector min-w-0 gap-0'
+
+/**
+ * Inspector width from which the camera's Size and Shape sit side by side:
+ * two Shape tracks ("Rectangle | Rounded | Circle", 235 px on one line),
+ * the gap between them and the section's gutters.
+ */
+export const SCENE_INSPECTOR_PAIR_MIN_PX = 540
+
+/** Two segmented controls in the inspector: stacked, side by side once each fits on one line. */
+export const SCENE_INSPECTOR_PAIR = 'grid min-w-0 gap-4 @min-[540px]/inspector:grid-cols-2'
+
 /** The Captions preview stays in view while the controls beside it scroll. */
 export const CAPTIONS_PREVIEW_PIN = '@min-[940px]/page:sticky @min-[940px]/page:top-0'
 

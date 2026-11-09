@@ -78,3 +78,18 @@ JSON field for field.
 
 - Rust: `cargo test -p videorc-backend screen_privacy_fixture`
 - TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
+
+## `virtual-camera.json`
+
+Videorc Camera's wire shapes (plan 214 A4): the `VirtualCameraStatus` as
+`virtualCamera.status` and `virtualCamera.set` return it and
+`virtualCamera.changed` carries it (off, unavailable without a sink, needs
+approval, needs setup, ready, streaming with and without a viewer count),
+the `virtualCamera.set` params, the `virtualCamera.platform.report` params
+main sends (with and without a message), and shapes the renderer must reject
+(a `null` field, an unknown state, a missing flag). Absent fields are
+omitted, never `null`; the Rust test serializes the backend types and
+compares them with the JSON field for field.
+
+- Rust: `cargo test -p videorc-backend virtual_camera_fixture`
+- TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`

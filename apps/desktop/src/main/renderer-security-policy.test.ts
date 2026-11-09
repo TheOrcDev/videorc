@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, format as formatUrl, pathToFileURL } from 'node:url'
 import type { Session } from 'electron'
 
 import { describe, expect, it } from 'vitest'
@@ -38,6 +38,12 @@ describe('renderer security policy', () => {
     expect(roleCanInvokeChannel('main', 'scheduled-streams:import-thumbnail')).toBe(true)
     for (const role of ['notes', 'comments', 'captions'] as const) {
       expect(roleCanInvokeChannel(role, 'scheduled-streams:import-thumbnail')).toBe(false)
+    }
+  })
+  it('lets only the Studio renderer run a Videorc Camera action (plan 214 E)', () => {
+    expect(roleCanInvokeChannel('main', 'virtual-camera:action')).toBe(true)
+    for (const role of ['notes', 'comments', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'virtual-camera:action')).toBe(false)
     }
   })
   it('derives only known preload roles from main-owned process arguments', () => {
@@ -120,6 +126,64 @@ describe('renderer security policy', () => {
         isMainFrame: false
       })
     ).toBe(false)
+  })
+
+  it('recognizes the same Windows short-path file from Node and Electron URL formatters', () => {
+    const registry = new RendererSecurityRegistry()
+    const file =
+      'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\Videorc\\resources\\app.asar\\out\\renderer\\index.html'
+    const trusted = pathToFileURL(file, { windows: true }).toString()
+    // Electron 39 WebContents.loadFile uses the legacy formatter, then
+    // Chromium parses its backslashes as file URL path separators.
+    const loaded = new URL(
+      formatUrl({ protocol: 'file', slashes: true, pathname: file })
+    ).toString()
+    registry.register(17, 'main')
+    registry.trustDocument(17, trusted)
+    const identity = { senderId: 17, frameUrl: loaded, isMainFrame: true }
+    expect(registry.invokeAllowed('app:get-runtime-info', identity)).toBe(true)
+    expect(registry.navigationAllowed(17, trusted, `${loaded}#studio`)).toBe(true)
+    expect(registry.documentTrusted(17, loaded.replace('RUNNER~1', 'RUNNER%7e1'))).toBe(true)
+    expect(registry.invokeAllowed('app:get-runtime-info', { ...identity, senderId: 18 })).toBe(
+      false
+    )
+    expect(
+      registry.invokeAllowed('app:get-runtime-info', { ...identity, isMainFrame: false })
+    ).toBe(false)
+    registry.register(18, 'comments')
+    registry.trustDocument(18, trusted)
+    expect(registry.invokeAllowed('app:get-runtime-info', { ...identity, senderId: 18 })).toBe(
+      false
+    )
+  })
+
+  it('does not turn encoded separators, another file, or a remote document into a trusted file', () => {
+    const registry = new RendererSecurityRegistry()
+    const trusted = 'file:///C:/Users/RUNNER%7E1/Videorc/resources/app.asar/out/renderer/index.html'
+    registry.register(17, 'main')
+    registry.trustDocument(17, trusted)
+    for (const frameUrl of [
+      trusted.replace('renderer/index.html', 'renderer%2Findex.html'),
+      trusted.replace('renderer/index.html', 'renderer%5Cindex.html'),
+      trusted.replace('RUNNER%7E1', 'RUNNER%257E1'),
+      trusted.replace('index.html', 'comments.html'),
+      trusted.replace('index.html', 'index.html%3Fother'),
+      trusted.replace('index.html', 'index.html%23other'),
+      trusted.replace('file:///', 'https://attacker.example/'),
+      'file:///C:/Users/RUNNER~1/Videorc/resources/app.asar/out/renderer/../index.html'
+    ]) {
+      expect(
+        registry.invokeAllowed('app:get-runtime-info', {
+          senderId: 17,
+          frameUrl,
+          isMainFrame: true
+        })
+      ).toBe(false)
+    }
+    // HTTP servers may distinguish escaped paths. The compatibility rule is
+    // limited to local files and must not broaden dev-server document trust.
+    registry.trustDocument(17, 'http://localhost:5173/app%7E/index.html')
+    expect(registry.documentTrusted(17, 'http://localhost:5173/app~/index.html')).toBe(false)
   })
 
   it('defaults web permissions closed: main-frame audio, sanitized writes from main and the Stream Manager', () => {
@@ -434,6 +498,26 @@ describe('renderer security policy', () => {
     expect(handler.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
     expect(handler.slice(0, 1000)).toContain(
       "sendElectronEvent(mainWindow.webContents, 'livestream:open-destination'"
+    )
+  })
+
+  it('lets only the Chat window ask for the Videorc sign-in, checked by sender (plan 215 A3)', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:sign-in-videorc')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:sign-in-videorc')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'comments-window:sign-in-videorc')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('signInToVideorcFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('signInToVideorcFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('signInToVideorcFromCommentsWindow')
+    // The sign-in itself stays with the main window: no auxiliary window can
+    // start it, and only the main window hears the ask.
+    for (const keys of Object.values(AUXILIARY_API_KEYS)) {
+      expect(keys).not.toContain('beginAccountSignIn')
+      expect(keys).not.toContain('onAccountSignInRequest')
+    }
+    const handler = source('./index.ts').split("'comments-window:sign-in-videorc',")[1] ?? ''
+    expect(handler.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
+    expect(handler.slice(0, 1000)).toContain(
+      "sendElectronEvent(mainWindow.webContents, 'account:sign-in-request'"
     )
   })
 

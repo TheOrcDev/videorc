@@ -16,12 +16,13 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { devAppSpawnOptions, repoRoot, stopProcess } from './lib/app-launcher.mjs'
 import { connectBackend } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const BLOCK_METHOD = 'test.commandLanes.accountMaintenance.block'
 const STATUS_METHOD = 'test.commandLanes.accountMaintenance.status'
@@ -95,7 +96,12 @@ try {
       sessionId: 'command-lane-smoke',
       text: 'command lane smoke'
     }),
-    probe(rpc, 'Stop', 'session.stop', {})
+    probe(rpc, 'Stop', 'session.stop', {}),
+    // Issue #1068 part 5: the Phone remote's projection has its own lane.
+    probe(rpc, 'SurfacePublish', 'remote.surface.publish', {
+      state: { sessionState: 'idle', sessionActive: false },
+      describe: { windows: [] }
+    })
   ])
 
   for (const result of probes) {
@@ -109,6 +115,10 @@ try {
     diagnostics?.websocketTransport?.commandLanes?.accountMaintenance,
     'diagnostics.stats did not expose AccountMaintenance lane telemetry'
   )
+  assert.ok(
+    diagnostics?.websocketTransport?.commandLanes?.surfacePublish,
+    'diagnostics.stats did not expose SurfacePublish lane telemetry'
+  )
   const chat = probes.find((result) => result.label === 'DurableChat')?.response
   assert.ok(
     chat?.ok || chat?.error?.code === 'live-chat-send-failed',
@@ -116,10 +126,23 @@ try {
   )
   const scene = probes.find((result) => result.label === 'LiveControl/scene')?.response
   assert.ok(
-    scene?.ok || ['invalid-params', 'layout-preview-failed'].includes(scene?.error?.code),
+    scene?.ok ||
+      [
+        'invalid-params',
+        'layout-preview-failed',
+        // Plan 216 A3: a source that never sent a frame names itself.
+        'layout-camera-not-ready',
+        'layout-screen-not-ready'
+      ].includes(scene?.error?.code),
     `scene change returned an unexpected domain outcome: ${JSON.stringify(scene)}`
   )
-  for (const label of ['Observation', 'LiveControl/screens', 'LiveControl/captions', 'Stop']) {
+  for (const label of [
+    'Observation',
+    'LiveControl/screens',
+    'LiveControl/captions',
+    'Stop',
+    'SurfacePublish'
+  ]) {
     const outcome = probes.find((result) => result.label === label)?.response
     assert.equal(outcome?.ok, true, `${label} should succeed: ${JSON.stringify(outcome)}`)
   }
@@ -156,7 +179,7 @@ try {
 
   console.log(
     'Command-lane smoke PASS — one real WebSocket held AccountMaintenance while Observation, ' +
-      'screens/captions LiveControl, DurableChat, and Stop all replied before explicit release. ' +
+      'screens/captions LiveControl, DurableChat, Stop, and SurfacePublish all replied before explicit release. ' +
       probes.map(({ label, elapsedMs }) => `${label}=${elapsedMs}ms`).join(', ')
   )
 } finally {
@@ -168,7 +191,7 @@ try {
   if (backendProcess) {
     await stopProcess(backendProcess, { timeoutMs: 10_000 }).catch(() => {})
   }
-  rmSync(stateRoot, { recursive: true, force: true })
+  await removeProfileDir(stateRoot, { label: 'command-lanes smoke' })
 }
 
 async function probe(client, label, method, params) {

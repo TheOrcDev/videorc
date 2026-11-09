@@ -1,5 +1,46 @@
 {
   "schemaVersion": 2,
+  "microphoneNoiseSuppression": {
+    "audioSettings": {
+      "microphoneNoiseSuppression": "rnnoise",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneSyncOffsetMs": 0,
+      "systemAudioEnabled": false,
+      "systemAudioGainDb": -6
+    },
+    "legacyAudioSettings": { "microphoneGainDb": 0, "microphoneMuted": false },
+    "update": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneNoiseSuppression": "rnnoise",
+      "systemAudioEnabled": true
+    },
+    "legacyUpdate": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 3,
+      "microphoneMuted": true
+    },
+    "applied": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneNoiseSuppression": "rnnoise",
+      "applied": true
+    },
+    "unavailable": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneNoiseSuppression": "rnnoise",
+      "applied": false,
+      "reasonCode": "microphone-noise-suppression-unavailable",
+      "confirmedMicrophoneGainDb": 0,
+      "confirmedMicrophoneMuted": false,
+      "confirmedMicrophoneNoiseSuppression": "off"
+    }
+  },
   "sessionChatTotals": {
     "params": { "sessionId": "session-fixture" },
     "available": {
@@ -31,7 +72,10 @@
       "clipHeight": 500.0,
       "visible": true,
       "orderAboveWindowId": 4242,
-      "elevated": false
+      "elevated": false,
+      "hostX": 20.5,
+      "hostY": 12.25,
+      "hostHeight": 900.0
     },
     "normalized": {
       "screenX": 120.5,
@@ -46,7 +90,10 @@
       "clipHeight": 500.0,
       "visible": true,
       "orderAboveWindowId": 4242,
-      "elevated": false
+      "elevated": false,
+      "hostX": 20.5,
+      "hostY": 12.25,
+      "hostHeight": 900.0
     },
     "legacyWire": {
       "screenX": 0.0,
@@ -63,6 +110,7 @@
       "scaleFactor": 1.0
     }
   },
+  "cameraLook": { "brightness": 0.05, "contrast": 1.1, "saturation": 0.8 },
   "layout": {
     "legacyWire": {
       "cameraCorner": "bottom-right",
@@ -93,8 +141,50 @@
       "sideBySideSplit": "70-30",
       "sideBySideCameraSide": "right",
       "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
       "arrangementMode": "preset",
       "sourceTransformOverrides": {},
+      "sourceVisibility": {
+        "camera": true,
+        "capture": true
+      }
+    },
+    "freeformCrop": {
+      "layoutPreset": "screen-only",
+      "cameraTransformMode": "preset",
+      "cameraTransform": null,
+      "cameraCorner": "bottom-right",
+      "cameraSize": "medium",
+      "cameraShape": "rectangle",
+      "cameraCornerRadiusPct": 12,
+      "cameraAspect": "source",
+      "cameraChromaKeyEnabled": false,
+      "cameraChromaKeyColor": "#00FF00",
+      "cameraChromaKeySimilarityPct": 40,
+      "cameraChromaKeySmoothnessPct": 8,
+      "cameraChromaKeySpillPct": 10,
+      "cameraMargin": 32,
+      "cameraFit": "fill",
+      "cameraMirror": false,
+      "cameraZoom": 100,
+      "cameraOffsetX": 0,
+      "cameraOffsetY": 0,
+      "sideBySideSplit": "70-30",
+      "sideBySideCameraSide": "right",
+      "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
+      "arrangementMode": "freeform",
+      "sourceTransformOverrides": {
+        "source:base": {
+          "x": 0.1,
+          "y": 0.05,
+          "width": 0.8,
+          "height": 0.8,
+          "cropLeft": 0.25,
+          "cropBottom": 0.125
+        },
+        "source:camera": { "x": 0.7, "y": 0.6, "width": 0.25, "height": 0.3 }
+      },
       "sourceVisibility": {
         "camera": true,
         "capture": true
@@ -173,7 +263,13 @@
           }
         ]
       },
-      "durationMs": 12345
+      "durationMs": 12345,
+      "acceptsLiveSceneEdits": true
+    },
+    "fixedSceneWire": {
+      "state": "recording",
+      "sessionId": "session-legacy-graph",
+      "acceptsLiveSceneEdits": false
     },
     "minimalWire": {
       "state": "idle"
@@ -1605,6 +1701,12 @@
         "vertical": { "x": 0.608889, "y": 0.6, "w": 0.32, "h": 0.18 },
         "showOnStream": false,
         "showInRecording": false
+      },
+      "chat": {
+        "horizontal": { "x": 0.0225, "y": 0.04, "w": 0.3, "h": 0.44 },
+        "vertical": { "x": 0.071111, "y": 0.08, "w": 0.8, "h": 0.3 },
+        "showOnStream": false,
+        "showInRecording": false
       }
     },
     "placed": {
@@ -1625,6 +1727,12 @@
         "vertical": { "x": 0.6, "y": 0.6, "w": 0.32, "h": 0.18 },
         "showOnStream": false,
         "showInRecording": true
+      },
+      "chat": {
+        "horizontal": { "x": 0.65, "y": 0.1, "w": 0.3, "h": 0.5 },
+        "vertical": { "x": 0.1, "y": 0.1, "w": 0.8, "h": 0.3 },
+        "showOnStream": true,
+        "showInRecording": false
       }
     }
   },

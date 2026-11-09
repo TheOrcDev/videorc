@@ -261,7 +261,7 @@ pub fn concat_list(selection: &Selection, segment_dir: &Path) -> String {
     let mut script = String::from("ffconcat version 1.0\n");
     for (index, segment) in selection.segments.iter().enumerate() {
         let path = segment_dir.join(&segment.file_name);
-        let quoted = path.display().to_string().replace('\'', "'\\''");
+        let quoted = crate::ffmpeg::ffmpeg_file_path(&path).replace('\'', "'\\''");
         script.push_str(&format!("file '{quoted}'\n"));
         if let Some(next) = selection.segments.get(index + 1) {
             let duration = (next.start_seconds - segment.start_seconds).max(0.0);
@@ -271,32 +271,43 @@ pub fn concat_list(selection: &Selection, segment_dir: &Path) -> String {
     script
 }
 
+/// The segment muxer's options and its output pattern: the ring as its own
+/// output ([`segment_muxer_args`]) or as a tee slave beside the file (the
+/// Linux raw path shares the file's encode with the ring).
+pub fn segment_muxer_options(
+    segment_dir: &Path,
+    seconds: u32,
+) -> (Vec<(&'static str, String)>, String) {
+    let options = vec![
+        ("segment_format", "mpegts".to_string()),
+        ("segment_time", SEGMENT_SECONDS.to_string()),
+        ("reset_timestamps", "0".to_string()),
+        (
+            "segment_list",
+            crate::ffmpeg::ffmpeg_file_path(&segment_dir.join(SEGMENT_LIST_FILE)),
+        ),
+        ("segment_list_type", "csv".to_string()),
+        ("segment_list_size", keep_count(seconds).to_string()),
+        ("segment_list_flags", "+live".to_string()),
+    ];
+    let pattern = crate::ffmpeg::ffmpeg_file_path(
+        &segment_dir.join(format!("{SEGMENT_FILE_PREFIX}%06d{SEGMENT_FILE_SUFFIX}")),
+    );
+    (options, pattern)
+}
+
 /// The segment muxer tail of the ring output. The caller has already mapped
 /// the streams and chosen the codecs (`-c:v copy` behind an encoded bridge,
 /// the platform encoder on the raw and legacy paths, AAC audio either way).
 pub fn segment_muxer_args(segment_dir: &Path, seconds: u32) -> Vec<String> {
-    vec![
-        "-f".to_string(),
-        "segment".to_string(),
-        "-segment_format".to_string(),
-        "mpegts".to_string(),
-        "-segment_time".to_string(),
-        SEGMENT_SECONDS.to_string(),
-        "-reset_timestamps".to_string(),
-        "0".to_string(),
-        "-segment_list".to_string(),
-        segment_dir.join(SEGMENT_LIST_FILE).display().to_string(),
-        "-segment_list_type".to_string(),
-        "csv".to_string(),
-        "-segment_list_size".to_string(),
-        keep_count(seconds).to_string(),
-        "-segment_list_flags".to_string(),
-        "+live".to_string(),
-        segment_dir
-            .join(format!("{SEGMENT_FILE_PREFIX}%06d{SEGMENT_FILE_SUFFIX}"))
-            .display()
-            .to_string(),
-    ]
+    let (options, pattern) = segment_muxer_options(segment_dir, seconds);
+    let mut args = vec!["-f".to_string(), "segment".to_string()];
+    for (key, value) in options {
+        args.push(format!("-{key}"));
+        args.push(value);
+    }
+    args.push(pattern);
+    args
 }
 
 /// The audio encoding of the ring output: the session's own audio filter
@@ -333,7 +344,7 @@ pub fn save_args(concat_list_path: &Path, partial_output: &Path) -> Vec<String> 
         "-safe".to_string(),
         "0".to_string(),
         "-i".to_string(),
-        concat_list_path.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(concat_list_path),
         "-map".to_string(),
         "0:v:0".to_string(),
         "-map".to_string(),
@@ -344,7 +355,7 @@ pub fn save_args(concat_list_path: &Path, partial_output: &Path) -> Vec<String> 
         "+faststart".to_string(),
         "-f".to_string(),
         "mp4".to_string(),
-        partial_output.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(partial_output),
     ]
 }
 
@@ -523,6 +534,9 @@ pub struct ReplayRuntime {
     pub save_in_progress: bool,
     /// One more save is waiting behind the running one (plan 181 S3).
     pub queued_save: Option<QueuedSave>,
+    /// The handover ends this ring without its flush (see
+    /// [`claim_unflushed_retire`]); a press now waits for the next ring.
+    pub retiring_unflushed: bool,
 }
 
 /// The save waiting behind the running one: its accepted id, what asked for
@@ -592,11 +606,16 @@ pub fn start_in_flight(state: &AppState) -> bool {
 }
 
 /// The ring root: under the backend's managed app data, beside the
-/// database; a temp directory for the in-memory test database.
+/// database; a temp directory of its own for each in-memory test database,
+/// so parallel tests never create and remove one shared root.
 pub fn ring_root(state: &AppState) -> PathBuf {
     let database = state.database.path();
     if database.to_string_lossy() == ":memory:" {
-        return std::env::temp_dir().join(format!("videorc-replay-buffer-{}", std::process::id()));
+        return std::env::temp_dir().join(format!(
+            "videorc-replay-buffer-{}-{:x}",
+            std::process::id(),
+            state.database.instance_key()
+        ));
     }
     database
         .parent()
@@ -757,6 +776,7 @@ pub fn prepare(state: &AppState, request: RingRequest<'_>) -> Result<RingGuard> 
         prune_task: None,
         save_in_progress: false,
         queued_save: None,
+        retiring_unflushed: false,
     };
     {
         let mut registry = lock(state);
@@ -924,6 +944,28 @@ pub enum RetireOutcome {
     Failed(String),
 }
 
+/// Plan 181 S7: a Record hands over from the buffer-only session, and
+/// `retire` deletes the ring the moment that session's FFmpeg exits, so its
+/// flush of the last segment is work nobody reads (250 to 300 ms of a VAAPI
+/// Record press on Linux). Claims the ring for an unflushed end when nothing
+/// reads it again: no save runs or waits. A press after the claim is refused
+/// as starting, since the next ring starts with the session that follows.
+pub fn claim_unflushed_retire(state: &AppState, session_id: &str) -> bool {
+    let mut registry = lock(state);
+    let Some(runtime) = registry
+        .active
+        .as_mut()
+        .filter(|runtime| runtime.session_id == session_id && runtime.replay_only)
+    else {
+        return false;
+    };
+    if runtime.save_in_progress || runtime.queued_save.is_some() {
+        return false;
+    }
+    runtime.retiring_unflushed = true;
+    true
+}
+
 /// The session's monitor retired its slot: stop pruning, delete the ring
 /// and publish `off` (or `error` with the reason).
 pub fn retire(state: &AppState, session_id: &str, outcome: RetireOutcome) {
@@ -992,6 +1034,37 @@ pub fn snapshot(state: &AppState) -> ReplayStateEvent {
             segment_files: None,
         }),
     }
+}
+
+/// An automatic buffer-only start the software encoder guard refused
+/// ([`AutoStartRefused`]): the ring stays off, and `replay.status` says why
+/// instead of a bare `off`, so a remote, an agent or a smoke reading the
+/// backend sees the same reason the Output page shows. A ring that runs
+/// later (the user turned Clips on) replaces it; one already running (a
+/// recording's ring) keeps its own state.
+pub fn note_auto_start_refused(state: &AppState, reason: &str) {
+    let event = {
+        let mut registry = lock(state);
+        if registry.active.is_some() {
+            return;
+        }
+        let seconds = registry
+            .last_event
+            .as_ref()
+            .map_or(DEFAULT_SECONDS, |event| event.seconds);
+        let event = ReplayStateEvent {
+            state: ReplayBufferState::Off,
+            session_id: None,
+            seconds,
+            buffered_seconds: 0.0,
+            replay_only: false,
+            reason: Some(reason.to_string()),
+            segment_files: None,
+        };
+        registry.last_event = Some(event.clone());
+        event
+    };
+    state.emit_event("replay.state", event);
 }
 
 fn emit_state(state: &AppState) {
@@ -1173,6 +1246,9 @@ pub fn request_save(
             return Err(SaveRefusal::off());
         };
         match runtime.state {
+            ReplayBufferState::On if runtime.retiring_unflushed => {
+                return Err(SaveRefusal::starting());
+            }
             ReplayBufferState::On => {}
             ReplayBufferState::Starting => return Err(SaveRefusal::starting()),
             ReplayBufferState::Off | ReplayBufferState::Error => return Err(SaveRefusal::off()),
@@ -1437,7 +1513,7 @@ async fn probe_replay(ffprobe_path: &str, path: &Path) -> Result<ReplayProbe, St
             "-of",
             "json",
         ])
-        .arg(path)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(path))
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1684,6 +1760,14 @@ pub(crate) fn replay_only_test_params() -> StartSessionParams {
     .unwrap()
 }
 
+/// Marks the current ring as read by a clip save, for tests in other modules.
+#[cfg(test)]
+pub(crate) fn mark_save_in_progress_for_test(state: &AppState) {
+    if let Some(runtime) = lock(state).active.as_mut() {
+        runtime.save_in_progress = true;
+    }
+}
+
 #[cfg(test)]
 mod runtime_tests {
     use super::*;
@@ -1713,6 +1797,30 @@ mod runtime_tests {
             })
             .collect::<String>();
         std::fs::write(dir.join(SEGMENT_LIST_FILE), list).unwrap();
+    }
+
+    #[test]
+    fn in_memory_states_own_isolated_ring_roots() {
+        // CI flake (2026-11-02): every in-memory state shared one root keyed
+        // on the process id, so one test's clean_leftovers removed it while
+        // another's prepare was creating it ("File exists").
+        let state = test_state();
+        let other = test_state();
+        let clone = state.clone();
+        let root = ring_root(&state);
+        let other_root = ring_root(&other);
+        assert_eq!(ring_root(&clone), root, "clones share their state's ring");
+        assert_ne!(root, other_root, "independent states must not share a ring");
+
+        let dir = ring_dir(&state, "same-session");
+        let other_dir = ring_dir(&other, "same-session");
+        write_ring(&dir, 0..1, 0..1);
+        write_ring(&other_dir, 0..1, 0..1);
+        clean_leftovers(&state);
+        assert!(!root.exists());
+        assert!(other_dir.join("seg-000000.ts").is_file());
+        clean_leftovers(&other);
+        assert!(!other_root.exists());
     }
 
     #[test]
@@ -1861,6 +1969,73 @@ mod runtime_tests {
         assert!(!ring_root(&state).exists());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_guard_refusal_is_an_off_with_its_reason_until_a_ring_runs() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let refusal = auto_start_refusal(crate::protocol::EncodeBackend::SoftwareOpenH264)
+            .expect("OpenH264 is a software encoder path");
+        assert!(refusal.message.contains("OpenH264"));
+        // Mirrored by `SOFTWARE_ENCODER_GUARD_PREFIX` in
+        // scripts/lib/remote-control-smoke-gates.mjs.
+        assert!(
+            refusal
+                .message
+                .starts_with("This computer encodes video on its processor")
+        );
+        note_auto_start_refused(&state, &refusal.message);
+        let refused = events.recv().await.unwrap();
+        assert_eq!(refused.event, "replay.state");
+        assert_eq!(refused.payload["state"], "off");
+        assert_eq!(refused.payload["reason"], refusal.message.as_str());
+        let status = snapshot(&state);
+        assert_eq!(status.state, ReplayBufferState::Off);
+        assert_eq!(status.reason.as_deref(), Some(refusal.message.as_str()));
+
+        // The user turns Clips on: the running ring answers for itself, and
+        // the reason is gone once it stops.
+        let params: StartSessionParams = serde_json::from_value(serde_json::json!({
+            "sources": { "screenId": null, "windowId": null, "cameraId": null, "microphoneId": null, "testPattern": true },
+            "layout": { "cameraCorner": "bottom-right", "cameraSize": "medium", "cameraShape": "rectangle", "cameraMargin": 32 },
+            "output": {
+                "recordEnabled": false,
+                "streamEnabled": false,
+                "outputDirectory": null,
+                "ffmpegPath": null,
+                "video": { "preset": "tutorial-1080p30", "width": 1920, "height": 1080, "fps": 30, "bitrateKbps": 8000 },
+                "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+            },
+            "replay": { "seconds": 30 }
+        }))
+        .unwrap();
+        let recordings = std::env::temp_dir().join("videorc-replay-recordings-test");
+        let guard = prepare(
+            &state,
+            RingRequest {
+                session_id: "session-explicit",
+                params: &params,
+                replay_only: true,
+                recordings_dir: &recordings,
+                ffmpeg_path: "ffmpeg",
+            },
+        )
+        .unwrap();
+        let _ = events.recv().await.unwrap();
+        assert_eq!(snapshot(&state).reason, None);
+        // A recording's ring that already runs keeps its own state.
+        note_auto_start_refused(&state, &refusal.message);
+        assert_eq!(snapshot(&state).state, ReplayBufferState::Starting);
+        assert_eq!(snapshot(&state).reason, None);
+        attach(&state, guard);
+        let _ = events.recv().await.unwrap();
+        retire(&state, "session-explicit", RetireOutcome::Stopped);
+        let off = events.recv().await.unwrap();
+        assert_eq!(off.payload["state"], "off");
+        assert!(off.payload.get("reason").is_none());
+        assert_eq!(snapshot(&state).reason, None);
+        clean_leftovers(&state);
+    }
+
     #[test]
     fn probe_parsing_and_the_replay_check() {
         let json = r#"{"streams":[{"codec_type":"video","codec_name":"h264"},{"codec_type":"audio","codec_name":"aac"}],"format":{"duration":"30.040000"}}"#;
@@ -1916,6 +2091,59 @@ mod runtime_tests {
         let third = unused_target(&dir, "Replay 2026-10-12 18-30-05.mp4");
         assert_eq!(third, dir.join("Replay 2026-10-12 18-30-05 (3).mp4"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Plan 181 S7: the handover ends a buffer-only ring unflushed only when
+    /// no save runs or waits, never a ring riding on a recording, and a press
+    /// after the claim waits for the next ring instead of starting a save.
+    #[test]
+    fn an_unflushed_retire_is_claimed_only_while_no_save_needs_the_ring() {
+        let state = test_state();
+        let recordings = std::env::temp_dir().join("videorc-replay-recordings-test");
+        let params = replay_only_params();
+        let ring = |session_id: &'static str, replay_only: bool| {
+            let guard = prepare(
+                &state,
+                RingRequest {
+                    session_id,
+                    params: &params,
+                    replay_only,
+                    recordings_dir: &recordings,
+                    ffmpeg_path: "ffmpeg",
+                },
+            )
+            .unwrap();
+            lock(&state).active.as_mut().unwrap().state = ReplayBufferState::On;
+            guard
+        };
+
+        assert!(!claim_unflushed_retire(&state, "no-ring"));
+
+        let guard = ring("session-recording", false);
+        assert!(!claim_unflushed_retire(&state, "session-recording"));
+        drop(guard);
+
+        let guard = ring("session-saving", true);
+        lock(&state).active.as_mut().unwrap().save_in_progress = true;
+        assert!(!claim_unflushed_retire(&state, "session-saving"));
+        lock(&state).active.as_mut().unwrap().save_in_progress = false;
+        lock(&state).active.as_mut().unwrap().queued_save = Some(QueuedSave {
+            save_id: "queued".to_string(),
+            source: None,
+            seconds: 30,
+        });
+        assert!(!claim_unflushed_retire(&state, "session-saving"));
+        drop(guard);
+
+        let guard = ring("session-idle", true);
+        assert!(!claim_unflushed_retire(&state, "another-session"));
+        assert!(claim_unflushed_retire(&state, "session-idle"));
+        assert_eq!(
+            request_save(&state, None, None).unwrap_err().code,
+            "replay-starting"
+        );
+        assert!(!lock(&state).active.as_ref().unwrap().save_in_progress);
+        drop(guard);
     }
 
     #[test]

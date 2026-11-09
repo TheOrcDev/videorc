@@ -30,6 +30,9 @@ export const IPC_INVOKE_ROLES = {
   'app:set-native-theme': MAIN_ONLY,
   'app:exit': MAIN_ONLY,
   'system:open-permissions': MAIN_ONLY,
+  // Videorc Camera (plan 214 E): System Settings, removal and setup are the
+  // Output page's and Health's, so the Studio renderer only.
+  'virtual-camera:action': MAIN_ONLY,
   'system:request-media-access': MAIN_ONLY,
   'system:request-screen-access': MAIN_ONLY,
   'system:recheck-permission-grants': MAIN_ONLY,
@@ -132,6 +135,7 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:toggle': MAIN_ONLY,
   'comments-window:get-state': MAIN_AND_COMMENTS,
   'comments-window:set-always-on-top': MAIN_AND_COMMENTS,
+  'comments-window:set-hidden-from-stream': MAIN_AND_COMMENTS,
   'comments-window:set-highlight-anchor': MAIN_AND_COMMENTS,
   'comments-window:set-auto-show-activity': MAIN_AND_COMMENTS,
   'comments-window:push-snapshot': MAIN_ONLY,
@@ -188,6 +192,9 @@ export const IPC_INVOKE_ROLES = {
   // "Use Sign in" on an X stream-key destination (plan 213 J1): the Chat
   // window asks, main shows the main window on that destination.
   'comments-window:open-destination': MAIN_AND_COMMENTS,
+  // "Sign in to Videorc" on a chat row that waits on it (plan 215 A3): the
+  // Chat window asks, main shows the main window, which starts the sign-in.
+  'comments-window:sign-in-videorc': MAIN_AND_COMMENTS,
   // Remove from chat and the removal card's answers (plan 140, S6): the Chat
   // window asks (its handler refuses any other sender), Studio replies.
   'comments-window:moderation': MAIN_AND_COMMENTS,
@@ -269,6 +276,16 @@ function normalizedDocumentUrl(rawUrl: string): string | null {
     url.hash = ''
     if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'file:') {
       url.search = ''
+    }
+    if (url.protocol === 'file:') {
+      // Node's pathToFileURL escapes Windows short-path tildes (%7E), while
+      // Electron loadFile's legacy URL formatter leaves them literal. They
+      // identify the same file. Normalize only unreserved ASCII characters;
+      // never decode separators, URL delimiters, or another percent escape.
+      url.pathname = url.pathname.replace(/%([0-9a-f]{2})/gi, (escape, hex: string) => {
+        const character = String.fromCharCode(Number.parseInt(hex, 16))
+        return /^[A-Za-z0-9._~-]$/.test(character) ? character : escape
+      })
     }
     return url.toString()
   } catch {

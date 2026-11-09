@@ -141,12 +141,15 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
                         // Mirror the microphone rule: the FFmpeg fallback rows are
                         // a safety net for when native discovery returns nothing,
                         // not duplicate picker entries beside every native camera.
+                        // Plan 214 A5: Videorc Camera is never a source of itself.
                         if !native_camera_rows_present
                             && !device.name.to_lowercase().contains("capture screen")
+                            && !crate::virtual_camera::is_videorc_camera_ffmpeg_name(&device.name)
                         {
                             devices.push(Device {
                                 app: None,
                                 window_title: None,
+                                display_uuid: None,
                                 id: format!("camera:avfoundation:{}", device.index),
                                 name: format!("FFmpeg fallback - {}", device.name),
                                 kind: DeviceKind::Camera,
@@ -234,6 +237,7 @@ fn unsupported_device_list() -> DeviceList {
         Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: "screen:unsupported-platform".to_string(),
             name: "Primary Display".to_string(),
             kind: DeviceKind::Screen,
@@ -245,6 +249,7 @@ fn unsupported_device_list() -> DeviceList {
         Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: "window:unsupported-platform".to_string(),
             name: "Window Capture".to_string(),
             kind: DeviceKind::Window,
@@ -299,6 +304,7 @@ fn avfoundation_screen_devices(
         .map(|device| Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: format!("screen:avfoundation:{}", device.index),
             name: device.name.clone(),
             kind: DeviceKind::Screen,
@@ -325,6 +331,7 @@ fn missing_avfoundation_screen_device() -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: "screen:avfoundation-missing".to_string(),
         name: "Primary Display".to_string(),
         kind: DeviceKind::Screen,
@@ -343,6 +350,7 @@ fn avfoundation_probe_failed_screen_device() -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: "screen:probe-failed".to_string(),
         name: "Primary Display".to_string(),
         kind: DeviceKind::Screen,
@@ -481,6 +489,7 @@ fn system_audio_device_for(support: SystemAudioSupport) -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: SYSTEM_AUDIO_DEVICE_ID.to_string(),
         name: "System audio".to_string(),
         kind: DeviceKind::SystemAudio,
@@ -549,8 +558,14 @@ pub async fn find_avfoundation_camera_index(ffmpeg_path: &str, camera_name: &str
         .filter(|device| {
             device.kind == AvFoundationDeviceKind::Video
                 && !device.name.to_lowercase().contains("capture screen")
+                // Plan 214 A5: a saved id naming Videorc Camera resolves to
+                // nothing; never a silent substitute.
+                && !crate::virtual_camera::is_videorc_camera_ffmpeg_name(&device.name)
         })
         .collect::<Vec<_>>();
+    if crate::virtual_camera::is_videorc_camera_ffmpeg_name(camera_name) {
+        return None;
+    }
 
     video_devices
         .iter()
@@ -639,6 +654,7 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
         return sample_native_audio_meter(
             device_id,
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: params.microphone_gain_db,
                 muted: params.microphone_muted,
             },
@@ -776,6 +792,7 @@ pub async fn sample_native_audio_meters(
     params: AudioMeterProbeParams,
 ) -> AudioMeterDeviceProbeResult {
     let settings = AudioProcessingSettings {
+        noise_suppression: Default::default(),
         gain_db: params.microphone_gain_db,
         muted: params.microphone_muted,
     };
@@ -989,6 +1006,7 @@ fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id,
         name: device.name.clone(),
         kind: DeviceKind::Microphone,
@@ -1323,6 +1341,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit:1".to_string(),
                 name: "Display 1".to_string(),
                 kind: DeviceKind::Screen,
@@ -1334,6 +1353,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "window:screencapturekit:42".to_string(),
                 name: "Editor".to_string(),
                 kind: DeviceKind::Window,
@@ -1345,6 +1365,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "camera:native".to_string(),
                 name: "Camera".to_string(),
                 kind: DeviceKind::Camera,
@@ -1374,6 +1395,7 @@ mod tests {
                 devices: vec![Device {
                     app: None,
                     window_title: None,
+                    display_uuid: None,
                     id: "screen:dxgi:0000000000000001:0".to_string(),
                     name: "Display 1".to_string(),
                     kind: DeviceKind::Screen,
@@ -1388,6 +1410,7 @@ mod tests {
                 devices: vec![Device {
                     app: None,
                     window_title: None,
+                    display_uuid: None,
                     id: "camera:windows-dshow:5553422043616d657261".to_string(),
                     name: "USB Camera".to_string(),
                     kind: DeviceKind::Camera,
@@ -1401,6 +1424,7 @@ mod tests {
             vec![Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "microphone:windows-dshow:4d6963726f70686f6e65204172726179".to_string(),
                 name: "Microphone Array".to_string(),
                 kind: DeviceKind::Microphone,
@@ -1600,6 +1624,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit:111".to_string(),
                 name: "Display 1".to_string(),
                 kind: DeviceKind::Screen,
@@ -1611,6 +1636,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit:222".to_string(),
                 name: "Display 2".to_string(),
                 kind: DeviceKind::Screen,

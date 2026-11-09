@@ -209,6 +209,14 @@ _Avoid_: mic
 The camera, spelled out.
 _Avoid_: cam, webcam
 
+**Videorc Camera**:
+The camera other apps see: Videorc's program, as the Preview shows it, offered
+as a camera that Meet, Zoom, Teams, Discord or FaceTime can choose. No sound.
+Output → Camera for other apps is its one home (a switch, off by default);
+⌘K and agents mirror it, and Health removes it on macOS. Windows adds
+" Windows Virtual Camera" to the name on its own. Plan 214.
+_Avoid_: virtual cam, vcam, webcam, virtual camera (in copy)
+
 ### Destinations and accounts
 
 **Destination**:

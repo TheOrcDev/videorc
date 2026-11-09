@@ -177,6 +177,8 @@ export class RemoteSurfacePublisher {
   private lastPublishedBody: string | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
   private retryAttempt = 0
+  /** Counts publishes as they are sent; only the newest records its body. */
+  private publishSeq = 0
   private offSounds: (() => void) | null = null
 
   /** Plan 189: the soundboard the remotes are shown, followed outside React. */
@@ -252,9 +254,14 @@ export class RemoteSurfacePublisher {
     if (body === this.lastPublishedBody) {
       return
     }
+    const publish = ++this.publishSeq
     try {
       await client.request('remote.surface.publish', latest)
-      this.lastPublishedBody = body
+      // Publishes overlap (a change during one in flight sends another) and
+      // the backend keeps the newest (issue #1068: a queued older publish is
+      // superseded). An older resolve must not record its body as what the
+      // backend holds, or flipping back to that state would never publish.
+      if (publish === this.publishSeq) this.lastPublishedBody = body
       this.retryAttempt = 0
     } catch (error) {
       if (this.retryAttempt < PUBLISH_RETRY_DELAYS_MS.length) {

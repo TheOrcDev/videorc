@@ -558,13 +558,14 @@ pub fn validate_managed_background_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_temp_dir::TestTempDir;
 
-    fn temp_file() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("videorc-resource-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
+    /// A fixture file in its own folder; keep the guard for the whole test.
+    fn temp_file() -> (TestTempDir, PathBuf) {
+        let root = TestTempDir::new("resource");
         let file = root.join("picked.mp4");
         std::fs::write(&file, b"fixture").unwrap();
-        file
+        (root, file)
     }
 
     fn issue_params(path: &Path, kind: ResourceCapabilityKind) -> IssueResourceCapabilityParams {
@@ -580,7 +581,7 @@ mod tests {
     fn scheduled_thumbnail_authority_checks_root_content_and_immutable_identity() {
         use sha2::{Digest, Sha256};
         let authority = ResourceAuthority::default();
-        let file = temp_file();
+        let (_dir, file) = temp_file();
         let root = file.parent().unwrap().to_path_buf();
         let mut bytes = std::io::Cursor::new(Vec::new());
         image::DynamicImage::new_rgb8(4, 4)
@@ -648,7 +649,7 @@ mod tests {
     #[test]
     fn capability_is_typed_one_shot_and_unforgeable() {
         let authority = ResourceAuthority::default();
-        let file = temp_file();
+        let (_dir, file) = temp_file();
         let issued = authority
             .issue(issue_params(&file, ResourceCapabilityKind::InputFile))
             .unwrap();
@@ -683,7 +684,7 @@ mod tests {
     #[test]
     fn managed_backgrounds_resolve_by_asset_id_not_renderer_path() {
         let authority = ResourceAuthority::default();
-        let file = temp_file();
+        let (_dir, file) = temp_file();
         authority
             .register_managed_background("background_01", &file.display().to_string())
             .unwrap();
@@ -703,7 +704,7 @@ mod tests {
     #[test]
     fn expired_capability_is_rejected_and_retired() {
         let authority = ResourceAuthority::default();
-        let file = temp_file();
+        let (_dir, file) = temp_file();
         let now = Instant::now();
         let issued = authority
             .issue_at(
@@ -735,7 +736,7 @@ mod tests {
     #[test]
     fn issuing_a_capability_sweeps_other_abandoned_expired_entries() {
         let authority = ResourceAuthority::default();
-        let file = temp_file();
+        let (_dir, file) = temp_file();
         let now = Instant::now();
         let abandoned = authority
             .issue_at(
@@ -781,7 +782,7 @@ mod tests {
     #[test]
     fn active_capability_capacity_is_bounded_and_recovers_after_revoke() {
         let authority = ResourceAuthority::default();
-        let file = temp_file();
+        let (_dir, file) = temp_file();
         let now = Instant::now();
         let mut issued_ids = Vec::with_capacity(MAX_ACTIVE_RESOURCE_CAPABILITIES);
 
@@ -814,7 +815,7 @@ mod tests {
     #[test]
     fn capability_rejects_a_different_file_installed_at_the_same_path() {
         let authority = ResourceAuthority::default();
-        let file = temp_file();
+        let (_dir, file) = temp_file();
         let original = file.with_file_name("picked-original.mp4");
         let issued = authority
             .issue(issue_params(&file, ResourceCapabilityKind::InputFile))
@@ -838,7 +839,7 @@ mod tests {
     #[test]
     fn capability_rejects_a_different_directory_installed_at_the_same_path() {
         let authority = ResourceAuthority::default();
-        let root = std::env::temp_dir().join(format!("videorc-resource-{}", Uuid::new_v4()));
+        let root = TestTempDir::new("resource");
         let directory = root.join("output");
         let original = root.join("output-original");
         std::fs::create_dir_all(&directory).unwrap();
@@ -927,10 +928,8 @@ mod tests {
     fn containment_uses_canonical_paths_and_rejects_symlink_escape() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join(format!("videorc-root-{}", Uuid::new_v4()));
-        let outside = std::env::temp_dir().join(format!("videorc-outside-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
+        let root = TestTempDir::new("root");
+        let outside = TestTempDir::new("outside");
         let outside_file = outside.join("secret.json");
         std::fs::write(&outside_file, b"secret").unwrap();
         let link = root.join("escape.json");
@@ -938,7 +937,7 @@ mod tests {
 
         assert!(!canonical_path_is_within(
             &link,
-            std::slice::from_ref(&root)
+            std::slice::from_ref(&*root)
         ));
     }
 }

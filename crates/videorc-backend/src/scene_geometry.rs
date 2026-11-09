@@ -1,21 +1,118 @@
 use crate::protocol::{
     ArrangementMode, CameraAspect, CameraCorner, CameraFit, CameraShape, CameraSize,
-    CameraTransformMode, EffectiveSceneBackground, LayoutPreset, LayoutSettings, SceneSourceKind,
-    SceneTransform, SideBySideSplit,
+    CameraTransform, CameraTransformMode, EffectiveSceneBackground, LayoutPreset, LayoutSettings,
+    SceneSourceKind, SceneTransform, SideBySideSplit,
 };
 
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
 const CAMERA_REFERENCE_HEIGHT: u32 = 720;
 
+/// The protocol's bounds for a scene source's box, as canvas fractions (plan
+/// 215 E3, owner decision D2): a source may be up to 400% of the canvas and
+/// sit anywhere from three canvases left or above the canvas to four right
+/// or below it. These are the coarse limits every render path tolerates
+/// (`scene::sanitize_transform_unsnapped` clamps to them); the editor keeps
+/// at least 5% of the canvas covered on each axis (the stage's
+/// `MIN_SOURCE_FRACTION`). Mirrored by `transform-fields-math.ts`,
+/// `stage-transform.ts` and the Windows D3D11 planner.
+pub const MAX_SOURCE_SIZE_FRACTION: f64 = 4.0;
+pub const MIN_SOURCE_POSITION_FRACTION: f64 = -3.0;
+pub const MAX_SOURCE_POSITION_FRACTION: f64 = 4.0;
+
 /// Backend-independent destination rectangle used by the FFmpeg recording and
 /// CPU/Metal compositor paths. Renderer-specific syntax and buffer handling
-/// deliberately stay in those consumers.
+/// deliberately stay in those consumers. Always on the canvas: a source's
+/// box before the canvas edge cuts it is a [`SignedPixelRect`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PixelRect {
     pub x: u32,
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+/// A source's box in canvas pixels before the canvas edge cuts it (plan 215
+/// E1): signed, so a box that starts left of or above the canvas keeps its
+/// true origin, and as big as its transform says, so one that runs past the
+/// right or bottom edge keeps its true size. Every render path fits the
+/// source into THIS box and lets the canvas edge cut what hangs off (the GPU
+/// paths clip the quad; the CPU path draws `intersect_canvas`); nothing
+/// squashes the box onto the canvas any more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedPixelRect {
+    pub x: i64,
+    pub y: i64,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// What the canvas edge leaves of a [`SignedPixelRect`]: the part on the
+/// canvas, and how many pixels of the box's left and top the edge cut off
+/// (the right and bottom cuts follow from the sizes). A consumer that draws
+/// `visible` from a source window fitted to the whole box starts the window
+/// `cut_left` and `cut_top` box pixels in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanvasCut {
+    pub visible: PixelRect,
+    pub cut_left: u32,
+    pub cut_top: u32,
+}
+
+impl SignedPixelRect {
+    pub fn right(self) -> i64 {
+        self.x.saturating_add(i64::from(self.width))
+    }
+
+    pub fn bottom(self) -> i64 {
+        self.y.saturating_add(i64::from(self.height))
+    }
+
+    /// The box intersected with a `canvas_width`×`canvas_height` canvas, with
+    /// the amount cut off its left and top; `None` when nothing of it is on
+    /// the canvas (or the box is empty).
+    pub fn intersect_canvas(self, canvas_width: u32, canvas_height: u32) -> Option<CanvasCut> {
+        let left = self.x.max(0);
+        let top = self.y.max(0);
+        let right = self.right().min(i64::from(canvas_width));
+        let bottom = self.bottom().min(i64::from(canvas_height));
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(CanvasCut {
+            visible: PixelRect {
+                x: left as u32,
+                y: top as u32,
+                width: (right - left) as u32,
+                height: (bottom - top) as u32,
+            },
+            cut_left: (left - self.x) as u32,
+            cut_top: (top - self.y) as u32,
+        })
+    }
+
+    /// The whole box as an on-canvas rect, only when the canvas edge cuts
+    /// nothing off it. Only the Windows recording path asks; elsewhere the
+    /// tests still read it.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn whole_on_canvas(self, canvas_width: u32, canvas_height: u32) -> Option<PixelRect> {
+        let cut = self.intersect_canvas(canvas_width, canvas_height)?;
+        (cut.cut_left == 0
+            && cut.cut_top == 0
+            && cut.visible.width == self.width
+            && cut.visible.height == self.height)
+            .then_some(cut.visible)
+    }
+}
+
+impl From<PixelRect> for SignedPixelRect {
+    fn from(rect: PixelRect) -> Self {
+        Self {
+            x: i64::from(rect.x),
+            y: i64::from(rect.y),
+            width: rect.width,
+            height: rect.height,
+        }
+    }
 }
 
 /// A normalized crop in source coordinates. Values are clamped independently
@@ -132,25 +229,26 @@ pub fn scene_source_uses_background_stage(source_kind: &SceneSourceKind) -> bool
     )
 }
 
+/// A scene source's box in canvas pixels, uncut (plan 215 E1, D2): its true
+/// origin (signed, so a box that starts left of or above the canvas keeps
+/// it) and its true size (so a box past the right or bottom edge keeps it).
+/// What hangs off the canvas is the render path's to cut, never to squash:
+/// before this, the origin was clamped onto the canvas and the size shrunk
+/// to what was left, which squeezed the whole picture into the visible part.
+/// A box wholly on the canvas comes out exactly as it always did.
 pub fn scene_source_rect_pixels(
     transform: &SceneTransform,
     canvas_width: u32,
     canvas_height: u32,
-) -> Option<PixelRect> {
+) -> Option<SignedPixelRect> {
     if transform.width <= 0.0 || transform.height <= 0.0 {
         return None;
     }
-    let x = normalized_to_pixel(transform.x, canvas_width).min(canvas_width.saturating_sub(1));
-    let y = normalized_to_pixel(transform.y, canvas_height).min(canvas_height.saturating_sub(1));
-    let max_width = canvas_width.saturating_sub(x).max(1);
-    let max_height = canvas_height.saturating_sub(y).max(1);
-    let width = normalized_to_span(transform.width, canvas_width).min(max_width);
-    let height = normalized_to_span(transform.height, canvas_height).min(max_height);
-    Some(PixelRect {
-        x,
-        y,
-        width,
-        height,
+    Some(SignedPixelRect {
+        x: normalized_to_signed_pixel(transform.x, canvas_width),
+        y: normalized_to_signed_pixel(transform.y, canvas_height),
+        width: normalized_to_span(transform.width, canvas_width),
+        height: normalized_to_span(transform.height, canvas_height),
     })
 }
 
@@ -161,6 +259,115 @@ pub fn scene_crop_from_transform(transform: &SceneTransform) -> SceneCrop {
         right: transform.crop_right.clamp(0.0, 0.95),
         bottom: transform.crop_bottom.clamp(0.0, 0.95),
     }
+}
+
+/// The largest box of a picture's aspect inside `rect`, centred: the
+/// compositor's Fit (plan 216 B1). `source_width` and `source_height` are
+/// the picture after its crop, in source pixels. This is the one contain
+/// arithmetic: `compositor::source_fit` draws with it, and
+/// [`scene_picture_rect_pixels`] tells the renderer where the picture is,
+/// so the Scene stage's box, handles and hit target land on the picture the
+/// compositor really draws (`apps/desktop/src/shared/scene-picture-geometry.ts`
+/// is its TypeScript twin; `protocol-fixtures/scene-picture-geometry.json`
+/// keeps them equal). A degenerate box or picture comes back as the box.
+pub fn contain_rect_pixels(
+    source_width: f64,
+    source_height: f64,
+    rect: SignedPixelRect,
+) -> SignedPixelRect {
+    // A NaN size is not a size either: `NaN > 0.0` is false.
+    let fits = source_width > 0.0 && source_height > 0.0 && rect.width > 0 && rect.height > 0;
+    if !fits {
+        return rect;
+    }
+    let source_aspect = source_width / source_height;
+    let rect_aspect = f64::from(rect.width) / f64::from(rect.height);
+    let (width, height) = if source_aspect > rect_aspect {
+        let width = rect.width;
+        let height = (f64::from(width) / source_aspect).round().max(1.0) as u32;
+        (width, height.min(rect.height))
+    } else {
+        let height = rect.height;
+        let width = (f64::from(height) * source_aspect).round().max(1.0) as u32;
+        (width.min(rect.width), height)
+    };
+    SignedPixelRect {
+        x: rect.x + i64::from((rect.width - width) / 2),
+        y: rect.y + i64::from((rect.height - height) / 2),
+        width,
+        height,
+    }
+}
+
+/// Where a scene source's PICTURE lands, in canvas pixels (plan 216 B1,
+/// owner decision D2): the source's frame mapped onto the scene background's
+/// stage margin ([`scene_source_render_transform`]) and rounded to pixels
+/// ([`scene_source_rect_pixels`]), then, on Fit with a known source size,
+/// the cropped picture's largest box inside it ([`contain_rect_pixels`]).
+/// Fill, the test pattern (drawn at the canvas size) and an unknown size
+/// give the frame itself. `None` only for an empty frame.
+///
+/// The renderer's twin is the consumer today (the fixture keeps the two
+/// equal); plan 215 F's rounded-screen mask is the first Rust caller.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn scene_picture_rect_pixels(
+    transform: &SceneTransform,
+    kind: &SceneSourceKind,
+    fit: SceneFit,
+    source_size: Option<(u32, u32)>,
+    stage_margin: f64,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Option<SignedPixelRect> {
+    let staged = scene_source_render_transform(transform, kind, stage_margin);
+    let rect = scene_source_rect_pixels(&staged, canvas_width, canvas_height)?;
+    let Some((source_width, source_height)) = source_size else {
+        return Some(rect);
+    };
+    if matches!(fit, SceneFit::Cover)
+        || matches!(kind, SceneSourceKind::TestPattern)
+        || source_width == 0
+        || source_height == 0
+    {
+        return Some(rect);
+    }
+    let crop = scene_crop_from_transform(&staged);
+    Some(contain_rect_pixels(
+        f64::from(source_width) * crop.kept_width(),
+        f64::from(source_height) * crop.kept_height(),
+        rect,
+    ))
+}
+
+/// [`scene_picture_rect_pixels`] as canvas fractions: the box the Scene
+/// stage draws and edits for the source.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn scene_picture_rect(
+    transform: &SceneTransform,
+    kind: &SceneSourceKind,
+    fit: SceneFit,
+    source_size: Option<(u32, u32)>,
+    stage_margin: f64,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Option<CameraTransform> {
+    let pixels = scene_picture_rect_pixels(
+        transform,
+        kind,
+        fit,
+        source_size,
+        stage_margin,
+        canvas_width,
+        canvas_height,
+    )?;
+    let width = f64::from(canvas_width.max(1));
+    let height = f64::from(canvas_height.max(1));
+    Some(CameraTransform {
+        x: pixels.x as f64 / width,
+        y: pixels.y as f64 / height,
+        width: f64::from(pixels.width) / width,
+        height: f64::from(pixels.height) / height,
+    })
 }
 
 /// True for every vertical-mode preset: their regions are short-form bands
@@ -189,11 +396,21 @@ pub fn vertical_screen_fits(layout: &LayoutSettings) -> bool {
         )
 }
 
+/// True when a landscape scene fills its screen (plan 213 G3): the user's
+/// `HorizontalScreenFraming::Fill`. Vertical presets never consult the field.
+pub fn horizontal_screen_fills(layout: &LayoutSettings) -> bool {
+    !layout.layout_preset.is_vertical()
+        && matches!(
+            layout.horizontal_screen_framing,
+            crate::protocol::HorizontalScreenFraming::Fill
+        )
+}
+
 /// The shared fit policy for source status, FFmpeg filters, CPU blits, and
 /// Metal placement. Side-by-side and ALL vertical presets cover their regions
 /// (short-form bands are filled, center-cropped — never letterboxed); the
 /// horizontal full-frame screen/window presets contain so UI edges are never
-/// cropped. Vertical BAND cameras cover unconditionally — a contain camera
+/// cropped, unless the user chose Fill for them (plan 213 G3). Vertical BAND cameras cover unconditionally — a contain camera
 /// band letterboxes exactly like the reported bug; zoom/pan still frame the
 /// crop. The vertical screen+camera inset bubble keeps the user's Fit choice
 /// like its horizontal twin.
@@ -228,6 +445,7 @@ pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> Scen
                 SceneFit::Contain
             } else if matches!(layout.layout_preset, LayoutPreset::SideBySide)
                 || vertical_fill_preset(&layout.layout_preset)
+                || horizontal_screen_fills(layout)
             {
                 SceneFit::Cover
             } else {
@@ -431,19 +649,29 @@ pub fn chroma_key_despill(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> (u8, u8,
     (r, g, b)
 }
 
-pub fn circle_geometry(rect: PixelRect) -> CircleGeometry {
+/// Mask geometry over a box that may hang off the canvas (plan 215 E2): the
+/// circle or corners belong to the whole box, so a source bigger than the
+/// canvas keeps its true shape and the canvas edge cuts the shape, not the
+/// other way round. An on-canvas [`PixelRect`] converts; the f64s are the
+/// same ones as before for it.
+pub fn circle_geometry(rect: impl Into<SignedPixelRect>) -> CircleGeometry {
+    let rect = rect.into();
     CircleGeometry {
-        center_x: f64::from(rect.x) + f64::from(rect.width) / 2.0,
-        center_y: f64::from(rect.y) + f64::from(rect.height) / 2.0,
+        center_x: rect.x as f64 + f64::from(rect.width) / 2.0,
+        center_y: rect.y as f64 + f64::from(rect.height) / 2.0,
         radius: f64::from(rect.width.min(rect.height)) / 2.0,
     }
 }
 
-pub fn rounded_rect_geometry(rect: PixelRect, radius_pct: u32) -> RoundedRectGeometry {
+pub fn rounded_rect_geometry(
+    rect: impl Into<SignedPixelRect>,
+    radius_pct: u32,
+) -> RoundedRectGeometry {
+    let rect = rect.into();
     let radius = f64::from(rect.width.min(rect.height)) * f64::from(radius_pct.min(50)) / 100.0;
     RoundedRectGeometry {
-        center_x: f64::from(rect.x) + f64::from(rect.width) / 2.0,
-        center_y: f64::from(rect.y) + f64::from(rect.height) / 2.0,
+        center_x: rect.x as f64 + f64::from(rect.width) / 2.0,
+        center_y: rect.y as f64 + f64::from(rect.height) / 2.0,
         radius,
         inner_half_width: (f64::from(rect.width) / 2.0 - radius).max(0.0),
         inner_half_height: (f64::from(rect.height) / 2.0 - radius).max(0.0),
@@ -453,7 +681,12 @@ pub fn rounded_rect_geometry(rect: PixelRect, radius_pct: u32) -> RoundedRectGeo
 /// The single-pixel mask test. Per-pixel loops build a `SceneMaskTester` once
 /// instead (plan 191); this is the same tester, so there is one rule.
 #[cfg(test)]
-pub fn scene_mask_allows(mask: SceneMask, rect: PixelRect, x: usize, y: usize) -> bool {
+pub fn scene_mask_allows(
+    mask: SceneMask,
+    rect: impl Into<SignedPixelRect>,
+    x: usize,
+    y: usize,
+) -> bool {
     SceneMaskTester::new(mask, rect).allows(x, y)
 }
 
@@ -469,7 +702,8 @@ pub enum SceneMaskTester {
 }
 
 impl SceneMaskTester {
-    pub fn new(mask: SceneMask, rect: PixelRect) -> Self {
+    pub fn new(mask: SceneMask, rect: impl Into<SignedPixelRect>) -> Self {
+        let rect = rect.into();
         match mask {
             SceneMask::None => Self::None,
             SceneMask::Circle => Self::Circle(circle_geometry(rect)),
@@ -715,12 +949,17 @@ pub fn side_by_side_widths(split: SideBySideSplit, total_width: u32) -> (u32, u3
     (screen_width, total_width - screen_width)
 }
 
-fn normalized_to_pixel(value: f64, span: u32) -> u32 {
-    (finite_or_zero(value).clamp(0.0, 1.0) * f64::from(span)).round() as u32
+/// A box origin in canvas pixels, signed, within the protocol's position
+/// bounds (so a malformed transform cannot ask for a box light-years off).
+fn normalized_to_signed_pixel(value: f64, span: u32) -> i64 {
+    (finite_or_zero(value).clamp(MIN_SOURCE_POSITION_FRACTION, MAX_SOURCE_POSITION_FRACTION)
+        * f64::from(span))
+    .round() as i64
 }
 
+/// A box side in canvas pixels, at least one and at most the protocol's 400%.
 fn normalized_to_span(value: f64, span: u32) -> u32 {
-    (finite_or_zero(value).clamp(0.0, 1.0) * f64::from(span))
+    (finite_or_zero(value).clamp(0.0, MAX_SOURCE_SIZE_FRACTION) * f64::from(span))
         .round()
         .max(1.0) as u32
 }
@@ -744,10 +983,249 @@ fn finite_or_zero(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{CameraTransform, SideBySideCameraSide, default_layout_settings};
+    use crate::protocol::{SideBySideCameraSide, default_layout_settings};
 
     fn layout() -> LayoutSettings {
         default_layout_settings()
+    }
+
+    /// Plan 216 B1: the shared fixture pins the Rust picture rect to the TS
+    /// `scenePictureRectPixels`, within a pixel, case for case.
+    #[test]
+    fn picture_rect_reproduces_the_shared_fixture() {
+        #[derive(serde::Deserialize)]
+        struct FixtureSize {
+            width: u32,
+            height: u32,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FixtureCrop {
+            #[serde(default)]
+            crop_left: f64,
+            #[serde(default)]
+            crop_top: f64,
+            #[serde(default)]
+            crop_right: f64,
+            #[serde(default)]
+            crop_bottom: f64,
+        }
+        #[derive(serde::Deserialize)]
+        struct FixtureRect {
+            x: i64,
+            y: i64,
+            width: i64,
+            height: i64,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FixtureCase {
+            name: String,
+            frame: CameraTransform,
+            kind: SceneSourceKind,
+            fit: String,
+            source: Option<FixtureSize>,
+            crop: Option<FixtureCrop>,
+            #[serde(default)]
+            stage_margin: f64,
+            canvas: FixtureSize,
+            expected: FixtureRect,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fixture {
+            schema_version: u32,
+            cases: Vec<FixtureCase>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/scene-picture-geometry.json"
+        ))
+        .expect("protocol-fixtures/scene-picture-geometry.json is valid JSON");
+        assert_eq!(fixture.schema_version, 1);
+        assert!(fixture.cases.len() >= 12);
+        for case in fixture.cases {
+            let crop = case.crop.unwrap_or(FixtureCrop {
+                crop_left: 0.0,
+                crop_top: 0.0,
+                crop_right: 0.0,
+                crop_bottom: 0.0,
+            });
+            let transform = SceneTransform {
+                x: case.frame.x,
+                y: case.frame.y,
+                width: case.frame.width,
+                height: case.frame.height,
+                crop_left: crop.crop_left,
+                crop_top: crop.crop_top,
+                crop_right: crop.crop_right,
+                crop_bottom: crop.crop_bottom,
+            };
+            let fit = match case.fit.as_str() {
+                "contain" => SceneFit::Contain,
+                "cover" => SceneFit::Cover,
+                other => panic!("{}: unknown fit {other}", case.name),
+            };
+            let pixels = scene_picture_rect_pixels(
+                &transform,
+                &case.kind,
+                fit,
+                case.source.as_ref().map(|size| (size.width, size.height)),
+                case.stage_margin,
+                case.canvas.width,
+                case.canvas.height,
+            )
+            .unwrap_or_else(|| panic!("{}: no picture rect", case.name));
+            let within = |actual: i64, expected: i64, what: &str| {
+                assert!(
+                    (actual - expected).abs() <= 1,
+                    "{}: {what} {actual} vs {expected}",
+                    case.name
+                );
+            };
+            within(pixels.x, case.expected.x, "x");
+            within(pixels.y, case.expected.y, "y");
+            within(i64::from(pixels.width), case.expected.width, "width");
+            within(i64::from(pixels.height), case.expected.height, "height");
+            // The fraction form is the pixel form over the canvas.
+            let fraction = scene_picture_rect(
+                &transform,
+                &case.kind,
+                fit,
+                case.source.as_ref().map(|size| (size.width, size.height)),
+                case.stage_margin,
+                case.canvas.width,
+                case.canvas.height,
+            )
+            .unwrap();
+            within(
+                (fraction.x * f64::from(case.canvas.width)).round() as i64,
+                case.expected.x,
+                "fraction x",
+            );
+            within(
+                (fraction.width * f64::from(case.canvas.width)).round() as i64,
+                case.expected.width,
+                "fraction width",
+            );
+        }
+    }
+
+    /// The streamer's numbers (plan 216): a 2228x1440 display Fit in a
+    /// 16:9 frame of 2321x1306 px at 9.3% is about 2021 px wide, at x 0.152.
+    #[test]
+    fn picture_rect_is_the_fitted_picture_not_the_frame() {
+        let frame = SceneTransform {
+            x: 0.0932,
+            y: 0.0932,
+            width: 0.9068,
+            height: 0.9068,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        let picture = scene_picture_rect(
+            &frame,
+            &SceneSourceKind::Screen,
+            SceneFit::Contain,
+            Some((2228, 1440)),
+            0.0,
+            2560,
+            1440,
+        )
+        .unwrap();
+        assert!((picture.x - 0.152).abs() < 0.001, "{picture:?}");
+        assert!((picture.width - 0.789).abs() < 0.001, "{picture:?}");
+        assert!((picture.y - frame.y).abs() < 0.001, "{picture:?}");
+        // Fill, an unknown size and the test pattern give the frame.
+        for (fit, kind, size) in [
+            (SceneFit::Cover, SceneSourceKind::Screen, Some((2228, 1440))),
+            (SceneFit::Contain, SceneSourceKind::Screen, None),
+            (
+                SceneFit::Cover,
+                SceneSourceKind::TestPattern,
+                Some((2560, 1440)),
+            ),
+        ] {
+            let rect =
+                scene_picture_rect_pixels(&frame, &kind, fit, size, 0.0, 2560, 1440).unwrap();
+            assert_eq!(
+                rect,
+                scene_source_rect_pixels(&frame, 2560, 1440).unwrap(),
+                "{kind:?} {fit:?}"
+            );
+        }
+        // A scene background's margin moves the screen's picture, never the camera's.
+        let staged = scene_picture_rect_pixels(
+            &frame,
+            &SceneSourceKind::Screen,
+            SceneFit::Contain,
+            Some((2228, 1440)),
+            0.1,
+            2560,
+            1440,
+        )
+        .unwrap();
+        let expected = scene_source_render_transform(&frame, &SceneSourceKind::Screen, 0.1);
+        let expected = contain_rect_pixels(
+            2228.0,
+            1440.0,
+            scene_source_rect_pixels(&expected, 2560, 1440).unwrap(),
+        );
+        assert_eq!(staged, expected);
+    }
+
+    #[test]
+    fn horizontal_fill_covers_the_landscape_screen_scenes_only() {
+        // Plan 213 G3: Fill makes the landscape screen scenes cover; the
+        // default stays Fit (contain), side by side always covers, and a
+        // vertical scene ignores the landscape field.
+        use crate::protocol::HorizontalScreenFraming;
+        assert_eq!(
+            layout().horizontal_screen_framing,
+            HorizontalScreenFraming::Fit
+        );
+        for preset in [LayoutPreset::ScreenCamera, LayoutPreset::ScreenOnly] {
+            for freeform in [false, true] {
+                let mut layout = layout();
+                layout.layout_preset = preset.clone();
+                if freeform {
+                    layout.arrangement_mode = ArrangementMode::Freeform;
+                }
+                for kind in [SceneSourceKind::Screen, SceneSourceKind::Window] {
+                    assert_eq!(scene_source_fit(&kind, &layout), SceneFit::Contain);
+                    layout.horizontal_screen_framing = HorizontalScreenFraming::Fill;
+                    assert_eq!(
+                        scene_source_fit(&kind, &layout),
+                        SceneFit::Cover,
+                        "{preset:?}"
+                    );
+                    layout.horizontal_screen_framing = HorizontalScreenFraming::Fit;
+                }
+                // The camera keeps its own Fit choice.
+                layout.horizontal_screen_framing = HorizontalScreenFraming::Fill;
+                layout.camera_fit = CameraFit::Fit;
+                assert_eq!(
+                    scene_source_fit(&SceneSourceKind::Camera, &layout),
+                    SceneFit::Contain
+                );
+            }
+        }
+        let mut side_by_side = layout();
+        side_by_side.layout_preset = LayoutPreset::SideBySide;
+        assert_eq!(
+            scene_source_fit(&SceneSourceKind::Screen, &side_by_side),
+            SceneFit::Cover
+        );
+        let mut vertical = layout();
+        vertical.layout_preset = LayoutPreset::VerticalScreenOnly;
+        vertical.vertical_screen_framing = crate::protocol::VerticalScreenFraming::Fit;
+        vertical.horizontal_screen_framing = HorizontalScreenFraming::Fill;
+        assert_eq!(
+            scene_source_fit(&SceneSourceKind::Screen, &vertical),
+            SceneFit::Contain,
+            "a vertical scene reads only its own framing"
+        );
     }
 
     #[test]
@@ -1202,7 +1680,7 @@ mod tests {
             let transform = preset_camera_transform(&layout, width, height);
             assert_eq!(
                 scene_source_rect_pixels(&transform, width, height),
-                Some(expected)
+                Some(SignedPixelRect::from(expected))
             );
         }
     }
@@ -1279,7 +1757,7 @@ mod tests {
         for (width, height) in [(1920, 1080), (3840, 2160)] {
             let transform = resolved_camera_transform(&layout, width, height);
             let rect = scene_source_rect_pixels(&transform, width, height).unwrap();
-            assert_eq!(rect.x + rect.width, width, "custom x clamps on-canvas");
+            assert_eq!(rect.right(), i64::from(width), "custom x clamps on-canvas");
             assert_eq!(rect.y, 0, "custom y clamps on-canvas");
             assert!((transform.crop_left - 0.233_333_333_333_333_34).abs() < 1e-9);
             assert!((transform.crop_right - 0.1).abs() < 1e-9);
@@ -1288,9 +1766,14 @@ mod tests {
         }
     }
 
+    /// Plan 215 E1 (D2): a box that runs past the canvas edge keeps its true
+    /// origin and size, so what hangs off is cut, never squashed. Before,
+    /// `scene_source_rect_pixels` clamped the origin onto the canvas and
+    /// shrank the size to what was left, which squeezed the whole picture
+    /// into the visible part.
     #[test]
-    fn transform_and_crop_table_clips_at_canvas_edges() {
-        let transform = SceneTransform {
+    fn transform_and_crop_table_cuts_at_canvas_edges_and_never_squashes() {
+        let past_the_corner = SceneTransform {
             x: 0.75,
             y: 0.8,
             width: 0.5,
@@ -1300,40 +1783,159 @@ mod tests {
             crop_right: 4.0,
             crop_bottom: 0.125,
         };
+        let left_of_the_canvas = SceneTransform {
+            x: -0.25,
+            y: 0.0,
+            width: 1.5,
+            height: 1.0,
+            ..past_the_corner.clone()
+        };
+        let four_hundred_percent = SceneTransform {
+            x: -1.5,
+            y: -1.5,
+            width: 4.0,
+            height: 4.0,
+            ..past_the_corner.clone()
+        };
+        // (transform, canvas) -> the uncut box: signed origin, full size.
         let cases = [
+            (&past_the_corner, (1920, 1080), (1440, 864, 960, 540)),
+            (&past_the_corner, (3840, 2160), (2880, 1728, 1920, 1080)),
+            (&left_of_the_canvas, (1920, 1080), (-480, 0, 2880, 1080)),
+            (&left_of_the_canvas, (3840, 2160), (-960, 0, 5760, 2160)),
             (
+                &four_hundred_percent,
                 (1920, 1080),
-                PixelRect {
-                    x: 1440,
-                    y: 864,
-                    width: 480,
-                    height: 216,
-                },
-            ),
-            (
-                (3840, 2160),
-                PixelRect {
-                    x: 2880,
-                    y: 1728,
-                    width: 960,
-                    height: 432,
-                },
+                (-2880, -1620, 7680, 4320),
             ),
         ];
-        for ((width, height), expected) in cases {
+        for (transform, (width, height), (x, y, w, h)) in cases {
+            let rect = scene_source_rect_pixels(transform, width, height).expect("a box");
             assert_eq!(
-                scene_source_rect_pixels(&transform, width, height),
-                Some(expected)
+                (rect.x, rect.y, rect.width, rect.height),
+                (x, y, w, h),
+                "{transform:?} on {width}x{height}"
             );
         }
         assert_eq!(
-            scene_crop_from_transform(&transform),
+            scene_crop_from_transform(&past_the_corner),
             SceneCrop {
                 left: 0.0,
                 top: 0.25,
                 right: 0.95,
                 bottom: 0.125,
             }
+        );
+    }
+
+    #[test]
+    fn signed_rect_intersects_the_canvas_and_reports_the_cut() {
+        let rect = |x, y, width, height| SignedPixelRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        let pixel = |x, y, width, height| PixelRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        // Past the bottom-right corner: the origin stays, the size is cut.
+        assert_eq!(
+            rect(1440, 864, 960, 540).intersect_canvas(1920, 1080),
+            Some(CanvasCut {
+                visible: pixel(1440, 864, 480, 216),
+                cut_left: 0,
+                cut_top: 0,
+            })
+        );
+        // Left of the canvas: the visible part starts at 0 and the source
+        // window starts 480 box pixels in.
+        assert_eq!(
+            rect(-480, 0, 2880, 1080).intersect_canvas(1920, 1080),
+            Some(CanvasCut {
+                visible: pixel(0, 0, 1920, 1080),
+                cut_left: 480,
+                cut_top: 0,
+            })
+        );
+        // A 400% box centred on the canvas covers it; three quarters of it
+        // hang off.
+        assert_eq!(
+            rect(-2880, -1620, 7680, 4320).intersect_canvas(1920, 1080),
+            Some(CanvasCut {
+                visible: pixel(0, 0, 1920, 1080),
+                cut_left: 2880,
+                cut_top: 1620,
+            })
+        );
+        // Nothing on the canvas: off every side, and an empty box.
+        assert_eq!(rect(1920, 0, 100, 100).intersect_canvas(1920, 1080), None);
+        assert_eq!(rect(-100, 0, 100, 100).intersect_canvas(1920, 1080), None);
+        assert_eq!(rect(0, 1080, 100, 100).intersect_canvas(1920, 1080), None);
+        assert_eq!(rect(0, -100, 100, 100).intersect_canvas(1920, 1080), None);
+        assert_eq!(rect(0, 0, 0, 100).intersect_canvas(1920, 1080), None);
+        // One pixel on the canvas still counts.
+        assert_eq!(
+            rect(-99, -99, 100, 100).intersect_canvas(1920, 1080),
+            Some(CanvasCut {
+                visible: pixel(0, 0, 1, 1),
+                cut_left: 99,
+                cut_top: 99,
+            })
+        );
+        assert_eq!(rect(-99, -99, 100, 100).whole_on_canvas(1920, 1080), None);
+        assert_eq!(
+            rect(0, 0, 1920, 1080).whole_on_canvas(1920, 1080),
+            Some(pixel(0, 0, 1920, 1080))
+        );
+    }
+
+    /// Plan 215 E2: a mask belongs to the whole box, so a circle on a box
+    /// that hangs off the canvas is centred where the box is centred (off
+    /// the canvas too), and the canvas edge cuts the circle. Squashing the
+    /// box onto the canvas would have drawn a smaller circle in the corner.
+    #[test]
+    fn masks_keep_their_geometry_on_a_box_that_hangs_off_the_canvas() {
+        let hanging = SignedPixelRect {
+            x: -100,
+            y: -100,
+            width: 200,
+            height: 200,
+        };
+        let circle = circle_geometry(hanging);
+        assert_eq!(
+            (circle.center_x, circle.center_y, circle.radius),
+            (0.0, 0.0, 100.0)
+        );
+        let tester = SceneMaskTester::new(SceneMask::Circle, hanging);
+        // Inside the quarter of the circle that is on the canvas...
+        assert!(tester.allows(10, 10));
+        assert!(tester.allows(70, 70));
+        // ...and outside it, still on the canvas and still inside the box.
+        assert!(!tester.allows(90, 90));
+        assert!(!tester.allows(99, 50));
+        // The same box as an on-canvas rect gives the same f64s.
+        let on_canvas = PixelRect {
+            x: 40,
+            y: 60,
+            width: 200,
+            height: 200,
+        };
+        assert_eq!(
+            circle_geometry(on_canvas),
+            circle_geometry(SignedPixelRect::from(on_canvas))
+        );
+        assert_eq!(
+            rounded_rect_geometry(on_canvas, 24),
+            rounded_rect_geometry(SignedPixelRect::from(on_canvas), 24)
+        );
+        let corners = rounded_rect_geometry(hanging, 50);
+        assert_eq!(
+            (corners.center_x, corners.center_y, corners.radius),
+            (0.0, 0.0, 100.0)
         );
     }
 
@@ -1489,5 +2091,134 @@ mod tests {
             allowed > 0 && rejected > 0,
             "{allowed} allowed, {rejected} rejected"
         );
+    }
+}
+
+/// Plan 213 G1: the one cropped-screen fixture every render path draws (CPU,
+/// Metal, the FFmpeg legacy graph and the aux leg), so a crop that one path
+/// ignores shows up as a wrong colour at a known point.
+#[cfg(test)]
+pub(crate) mod screen_crop_fixture {
+    use crate::protocol::SceneTransform;
+
+    pub const SOURCE_WIDTH: u32 = 64;
+    pub const SOURCE_HEIGHT: u32 = 36;
+
+    pub const RED: [u8; 3] = [255, 0, 0];
+    pub const GREEN: [u8; 3] = [0, 255, 0];
+    pub const BLUE: [u8; 3] = [0, 0, 255];
+    pub const WHITE: [u8; 3] = [255, 255, 255];
+    pub const MAGENTA: [u8; 3] = [255, 0, 255];
+    pub const CYAN: [u8; 3] = [0, 255, 255];
+    pub const BLACK: [u8; 3] = [0, 0, 0];
+
+    /// The screen picture as RGB: four 16 px columns (red, green, blue,
+    /// white) between a magenta band on top and a cyan band at the bottom,
+    /// 9 rows each.
+    pub fn source_rgb(x: u32, y: u32) -> [u8; 3] {
+        if y < 9 {
+            MAGENTA
+        } else if y >= SOURCE_HEIGHT - 9 {
+            CYAN
+        } else {
+            [RED, GREEN, BLUE, WHITE][(x / 16) as usize]
+        }
+    }
+
+    pub fn source_bgra() -> Vec<u8> {
+        (0..SOURCE_HEIGHT)
+            .flat_map(|y| (0..SOURCE_WIDTH).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let [r, g, b] = source_rgb(x, y);
+                [b, g, r, 255]
+            })
+            .collect()
+    }
+
+    /// A box in the middle half of the canvas with a quarter cropped off
+    /// every side. What is left is the green and blue columns, 32×18: the
+    /// box's own 16:9, so Fit fills the box exactly.
+    pub fn transform() -> SceneTransform {
+        SceneTransform {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            crop_left: 0.25,
+            crop_top: 0.25,
+            crop_right: 0.25,
+            crop_bottom: 0.25,
+        }
+    }
+
+    /// Canvas points (fractions, so any canvas size) and the colour each
+    /// shows. Without the crop the four points next to the box's edges would
+    /// show red, magenta, cyan and white instead.
+    pub fn expected_samples() -> [((f64, f64), [u8; 3]); 7] {
+        [
+            ((0.30, 0.50), GREEN),
+            ((0.45, 0.30), GREEN),
+            ((0.45, 0.70), GREEN),
+            ((0.55, 0.50), BLUE),
+            ((0.70, 0.50), BLUE),
+            ((0.10, 0.10), BLACK),
+            ((0.90, 0.90), BLACK),
+        ]
+    }
+
+    /// The sample's pixel on a `width`×`height` canvas.
+    pub fn sample_pixel(point: (f64, f64), width: u32, height: u32) -> (usize, usize) {
+        (
+            (point.0 * f64::from(width)).floor() as usize,
+            (point.1 * f64::from(height)).floor() as usize,
+        )
+    }
+}
+
+/// Plan 215 E2 (D2): the one bigger-than-canvas fixture every render path
+/// draws (CPU, Metal, the FFmpeg legacy graph, the aux leg and the D3D11
+/// planner): the crop fixture's screen picture, uncropped, in a 150% box
+/// with a quarter of it past every canvas edge. Cut, each visible stripe is
+/// three times its source width and the outer stripes are half off the
+/// canvas; squashed onto the canvas, the whole picture would show at twice
+/// its width, so the two differ at the points below.
+#[cfg(test)]
+pub(crate) mod screen_beyond_canvas_fixture {
+    use super::screen_crop_fixture::{BLUE, CYAN, GREEN, MAGENTA, RED, WHITE};
+    use crate::protocol::SceneTransform;
+
+    /// A 16:9 box (so Fit fills it exactly on a 16:9 canvas) at 150% of the
+    /// canvas, centred: 25% hangs off every edge.
+    pub fn transform() -> SceneTransform {
+        SceneTransform {
+            x: -0.25,
+            y: -0.25,
+            width: 1.5,
+            height: 1.5,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        }
+    }
+
+    /// Canvas points (fractions, so any 16:9 canvas) and the colour each
+    /// shows when the box is cut at the edge. With the box squashed onto the
+    /// canvas instead, the first four points would show red, white, magenta
+    /// and cyan. Every point sits mid-stripe: x 0.5 lands on the green/blue
+    /// column edge (source x 32), where the bilinear paths (Metal, the aux
+    /// leg, FFmpeg) rightly blend, so the vertical probes use x 0.6875, the
+    /// middle of the blue column (source x 40).
+    pub fn expected_samples() -> [((f64, f64), [u8; 3]); 8] {
+        [
+            ((0.20, 0.50), GREEN),
+            ((0.80, 0.50), BLUE),
+            ((0.6875, 0.18), BLUE),
+            ((0.6875, 0.82), BLUE),
+            ((0.05, 0.50), RED),
+            ((0.95, 0.50), WHITE),
+            ((0.50, 0.05), MAGENTA),
+            ((0.50, 0.95), CYAN),
+        ]
     }
 }

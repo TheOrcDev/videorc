@@ -4,6 +4,12 @@ import type {
   SessionSources,
   ScreenHideParams,
   ScreenPrivacy,
+  VirtualCameraPlatformReportParams,
+  VirtualCameraSetParams,
+  CameraLowLightParams,
+  CameraLowLightSetParams,
+  CameraLowLightState,
+  VirtualCameraStatus,
   SourceSwitchParams,
   BackendHealth,
   ScheduledStreamEvent,
@@ -46,6 +52,10 @@ import type {
   BuddyReactionTable,
   MigrateHighlightAnchorParams,
   OverlayLayout,
+  OverlayItemLayout,
+  ChatOverlayCanvases,
+  ChatOverlayInfo,
+  SetChatOverlayParams,
   Banner,
   BannerHideParams,
   Sound,
@@ -504,6 +514,11 @@ export interface BackendRpcMethodMap {
     OverlayLayout
   >
   // --- end overlay layout (plan 164) ---
+  // --- Chat on stream (plan 215 G) ---
+  'chat.overlay.set': BackendRpcDefinition<SetChatOverlayParams, ChatOverlayInfo>
+  'chat.overlay.clear': BackendRpcDefinition<undefined, ChatOverlayInfo>
+  'chat.overlay.canvases': BackendRpcDefinition<undefined, ChatOverlayCanvases>
+  // --- end chat on stream (plan 215 G) ---
   // --- Banners (plan 186) ---
   'banners.list': BackendRpcDefinition<undefined, Banner[]>
   'banners.importImage': BackendRpcDefinition<BannerImportImageParams, Banner>
@@ -521,6 +536,20 @@ export interface BackendRpcMethodMap {
   'screen.show': BackendRpcDefinition<undefined, ScreenPrivacy>
   'screen.privacy.get': BackendRpcDefinition<undefined, ScreenPrivacy>
   // --- end Hide screen (plan 210 S7) ---
+  // --- Videorc Camera (plan 214 A4) ---
+  'virtualCamera.status': BackendRpcDefinition<undefined, VirtualCameraStatus>
+  /** The switch is saved (D4); the answer is the status it earns now. */
+  'virtualCamera.set': BackendRpcDefinition<VirtualCameraSetParams, VirtualCameraStatus>
+  /** Admin socket only: main's report of the extension or the Windows setup step. */
+  'virtualCamera.platform.report': BackendRpcDefinition<
+    VirtualCameraPlatformReportParams,
+    VirtualCameraStatus
+  >
+  // --- end Videorc Camera (plan 214 A4) ---
+  // --- Camera low-light compensation (issue #1066) ---
+  'camera.lowLight.get': BackendRpcDefinition<CameraLowLightParams, CameraLowLightState>
+  /** Saved per camera and written to the device now; open or not. */
+  'camera.lowLight.set': BackendRpcDefinition<CameraLowLightSetParams, CameraLowLightState>
   'sounds.list': BackendRpcDefinition<undefined, SoundboardState>
   'sounds.import': BackendRpcDefinition<SoundImportParams, Sound>
   'sounds.update': BackendRpcDefinition<SoundUpdateParams, Sound>
@@ -647,6 +676,8 @@ export interface BackendEventMap {
   'scheduledStreams.changed': ScheduledStreamEvent
   'devices.changed': DeviceList
   'entitlements.updated': EntitlementsSnapshot
+  // Plan 215 A5: the account as the backend holds it, and why it changed.
+  'account.changed': import('./backend').AccountChangedEvent
   'noiseCleanup.status': NoiseCleanupJob
   'cleanCut.status': CleanCutJob
   'recording.finalization': RecordingFinalizationEvent
@@ -675,6 +706,8 @@ export interface BackendEventMap {
   // --- Hide screen (plan 210 S7): the state, on every hide and show ---
   'remote.state': { screenHidden: boolean; [key: string]: unknown }
   'screen.privacy.changed': ScreenPrivacy
+  // --- Videorc Camera (plan 214 A4): the status, on every change ---
+  'virtualCamera.changed': VirtualCameraStatus
   'sounds.playback': SoundsPlayback
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
@@ -871,6 +904,8 @@ const deviceSchema = objectSchema(
       )
     ),
     windowTitle: optionalText,
+    // Plan 213 F1: a display's UUID, its identity across reconnects.
+    displayUuid: optionalText,
     id: boundedString,
     name: boundedString,
     kind: enumSchema(['screen', 'window', 'camera', 'microphone', 'system-audio']),
@@ -901,7 +936,9 @@ const recordingStatusSchema = objectSchema(
     pipeline: optionalSchema(boundedBackendPayloadSchema),
     durationMs: optionalSchema(numberSchema({ min: 0 })),
     message: optionalText,
-    replayOnly: optionalSchema(booleanSchema)
+    replayOnly: optionalSchema(booleanSchema),
+    // Plan 215 D1: the running session's word on live scene edits.
+    acceptsLiveSceneEdits: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<RecordingStatus>
@@ -1518,7 +1555,11 @@ const streamTargetRuntimeSchema = objectSchema(
       'stopped'
     ]),
     message: optionalText,
-    redactedUrl: optionalText
+    redactedUrl: optionalText,
+    // Plan 218: fifo overflows on this leg (the connection could not carry
+    // the stream to it); additive to `state`, absent until the first one.
+    uplinkOverflows: optionalSchema(nonNegativeInteger),
+    uplinkOverflowAt: optionalSchema(timestamp)
   },
   { allowUnknown: false }
 )
@@ -1600,6 +1641,9 @@ const sourceSelectionSchema = objectSchema(
   {
     screenId: optionalText,
     screenName: optionalText,
+    // Plan 213 F1: the chosen display's UUID. Renderer intent; the backend
+    // ignores it.
+    screenUuid: optionalText,
     windowId: optionalText,
     windowName: optionalText,
     captureOff: optionalSchema(booleanSchema),
@@ -1610,6 +1654,7 @@ const sourceSelectionSchema = objectSchema(
     // flags; the backend ignores it.
     wantedScreenId: optionalText,
     wantedScreenName: optionalText,
+    wantedScreenUuid: optionalText,
     wantedWindowId: optionalText,
     wantedWindowName: optionalText,
     wantedCameraId: optionalText,
@@ -1618,6 +1663,22 @@ const sourceSelectionSchema = objectSchema(
     microphoneName: optionalText,
     microphoneOff: optionalSchema(booleanSchema),
     testPattern: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
+// A freeform box; the screen's crop rides along when it has one (plan 213 G2).
+const cropFraction = optionalSchema(numberSchema({ min: 0, max: 1 }))
+const sourceTransformOverrideSchema = objectSchema(
+  {
+    x: numberSchema(),
+    y: numberSchema(),
+    width: numberSchema(),
+    height: numberSchema(),
+    cropLeft: cropFraction,
+    cropTop: cropFraction,
+    cropRight: cropFraction,
+    cropBottom: cropFraction
   },
   { allowUnknown: false }
 )
@@ -1632,6 +1693,16 @@ const layoutSchema = objectSchema(
     cameraShape: enumSchema(['rectangle', 'rounded', 'circle']),
     cameraCornerRadiusPct: numberSchema({ min: 0, max: 100 }),
     cameraAspect: enumSchema(['source', 'square', 'portrait']),
+    cameraLook: optionalSchema(
+      objectSchema(
+        {
+          brightness: numberSchema({ min: -0.25, max: 0.25 }),
+          contrast: numberSchema({ min: 0.5, max: 1.5 }),
+          saturation: numberSchema({ min: 0, max: 2 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraChromaKeyEnabled: booleanSchema,
     cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
     cameraChromaKeySimilarityPct: numberSchema({ min: 0, max: 100 }),
@@ -1646,6 +1717,7 @@ const layoutSchema = objectSchema(
     sideBySideSplit: enumSchema(['50-50', '60-40', '70-30']),
     sideBySideCameraSide: enumSchema(['left', 'right']),
     verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit'])),
+    horizontalScreenFraming: optionalSchema(enumSchema(['fit', 'fill'])),
     arrangementMode: optionalSchema(enumSchema(['preset', 'freeform'])),
     sourceVisibility: optionalSchema(
       objectSchema(
@@ -1654,7 +1726,7 @@ const layoutSchema = objectSchema(
       )
     ),
     sourceTransformOverrides: optionalSchema(
-      recordSchema(boundedBackendParamValueSchema, { maxKeys: 16 })
+      recordSchema(sourceTransformOverrideSchema, { maxKeys: 16 })
     )
   },
   { allowUnknown: false }
@@ -1746,6 +1818,18 @@ const sceneEditorDraftParamsSchema = objectSchema(
     sourceId: boundedString,
     // Absent = chrome-only (the idle selection holds the frame and handles).
     transform: optionalSchema(cameraTransformSchema),
+    // An ⌥-drag crop's live crop (plan 213 G2); absent keeps the committed one.
+    crop: optionalSchema(
+      objectSchema(
+        {
+          cropLeft: numberSchema({ min: 0, max: 1 }),
+          cropTop: numberSchema({ min: 0, max: 1 }),
+          cropRight: numberSchema({ min: 0, max: 1 }),
+          cropBottom: numberSchema({ min: 0, max: 1 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     chrome: editorChromeSchema
   },
   { allowUnknown: false }
@@ -1898,7 +1982,10 @@ const rendererSafePreviewBoundsSchema = objectSchema(
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
     elevated: optionalSchema(booleanSchema),
-    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -1930,7 +2017,10 @@ const mainOwnedPreviewBoundsSchema = objectSchema(
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
     orderAboveWindowHandle: optionalSchema(opaqueNativeWindowHandleSchema),
     elevated: optionalSchema(booleanSchema),
-    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -2028,6 +2118,7 @@ const previewSurfaceStatusFieldsSchema = objectSchema(
         'backend-d3d11-presenter'
       ])
     ),
+    nativePreviewHostWindow: optionalSchema(enumSchema(['main', 'preview'])),
     bounds: optionalSchema(rendererSafePreviewBoundsSchema),
     windowsD3d11Presenter: optionalSchema(windowsD3d11PresenterDiagnosticsSchema),
     updatedAt: timestamp
@@ -2085,11 +2176,19 @@ const previewCameraStatusSchema = boundedSemanticValue(
   'a preview camera status',
   objectSchema(
     {
-      state: enumSchema(['starting', 'live', 'permission-needed', 'device-missing', 'failed']),
+      state: enumSchema([
+        'starting',
+        'live',
+        'permission-needed',
+        'device-missing',
+        'disconnected',
+        'failed'
+      ]),
       targetFps: numberSchema({ min: 0, max: 1000 }),
       framesCaptured: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,
       frameAgeMs: optionalSchema(nonNegativeInteger),
+      noVideo: optionalSchema(booleanSchema),
       updatedAt: timestamp
     },
     { allowUnknown: true }
@@ -2249,6 +2348,24 @@ const captureRecoveryStatusSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CaptureRecoveryStatus>
 
+// Plan 218 S2: `degraded` holds while more than 10 % of the stream's frames
+// were skipped before encode over the last 30 s (clears under 5 %).
+const streamDeliveryStateSchema = objectSchema(
+  {
+    targetFps: nonNegativeInteger,
+    deliveredFps: numberSchema({ min: 0 }),
+    dropPercent: numberSchema({ min: 0, max: 100 }),
+    windowSeconds: numberSchema({ min: 0 }),
+    degraded: booleanSchema,
+    degradedSince: optionalSchema(timestamp),
+    bitrateKbps: optionalSchema(nonNegativeInteger),
+    chosenBitrateKbps: optionalSchema(nonNegativeInteger),
+    atFloor: booleanSchema,
+    uplinkOverflows: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
 const diagnosticStatsSchema = boundedSemanticValue(
   'bounded diagnostic statistics',
   objectSchema(
@@ -2277,6 +2394,35 @@ const diagnosticStatsSchema = boundedSemanticValue(
       encoderBridgeVideoToolboxPendingEncodeFrames: optionalSchema(nonNegativeInteger),
       encoderBridgeVideoToolboxPendingFifoFrames: optionalSchema(nonNegativeInteger),
       encoderBridgeEncodedAccessUnitDroppedFrames: optionalSchema(nonNegativeInteger),
+      // Plan 218 S2: the live stream's delivery over a rolling 30 s window
+      // (absent without a stream) and per-leg fifo overflow counts.
+      streamDelivery: optionalSchema(streamDeliveryStateSchema),
+      streamLegOverflows: optionalSchema(
+        arraySchema(
+          objectSchema(
+            {
+              targetId: boundedString,
+              platform: streamPlatformSchema,
+              label: boundedString,
+              overflows: nonNegativeInteger
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: 16 }
+        )
+      ),
+      streamDestinationCount: optionalSchema(nonNegativeInteger),
+      streamDestinationPlatforms: optionalSchema(
+        arraySchema(streamPlatformSchema, { maxLength: 16 })
+      ),
+      microphoneSyncOffsetMs: optionalSchema(numberSchema({ integer: true })),
+      recordingMeasuredBitrateKbps: optionalSchema(numberSchema({ min: 0 })),
+      recordingOutputTotalBytes: optionalSchema(nonNegativeInteger),
+      encoderBridgeStreamVideoToolboxFifoWriteP95Ms: optionalSchema(numberSchema({ min: 0 })),
+      encoderBridgeStreamQueueAgeP95Ms: optionalSchema(numberSchema({ min: 0 })),
+      encoderBridgeStreamQueueDepthTrips: optionalSchema(nonNegativeInteger),
+      encoderBridgeStreamQueueAgeTrips: optionalSchema(nonNegativeInteger),
+      encoderBridgeStreamQueueLastTrip: optionalSchema(enumSchema(['depth', 'age'])),
       windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
       previewImagePollCounts: optionalSchema(previewImagePollCountsSchema),
       compositorSourceCaptureTextureReuses: nonNegativeInteger,
@@ -2457,7 +2603,7 @@ const sessionSummarySchema = boundedSemanticValue(
       // Plan 157: separate-source take membership.
       takeId: optionalSchema(boundedString),
       recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera'])),
-      // A take Videorc stopped mid-recording, recovered on the next start.
+      // A take that ended early, recovered as MP4 (or not).
       interruptionRecovery: optionalSchema(interruptionRecoverySchema)
     },
     { allowUnknown: false }
@@ -3373,11 +3519,36 @@ const overlayItemLayoutSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+/** `OverlayLayout::default().chat` (plan 215 D5): the chat box top-left and
+ * off for both outputs. Pinned to the renderer's `DEFAULT_OVERLAY_LAYOUT` and
+ * the shared fixture by the contract test. */
+export const DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT: Readonly<OverlayItemLayout> = Object.freeze({
+  horizontal: Object.freeze({ x: 0.0225, y: 0.04, w: 0.3, h: 0.44 }),
+  vertical: Object.freeze({ x: 0.071111, y: 0.08, w: 0.8, h: 0.3 }),
+  showOnStream: false,
+  showInRecording: false
+})
+// A layout from before the chat box (plan 215 G) has no `chat`: it takes the
+// default, as the stored row does through `#[serde(default)]`, and keeps its
+// highlight, captions and Buddy placement. Present, it is exact.
+const chatOverlayItemLayoutSchema = runtimeSchema<OverlayItemLayout>(
+  `${overlayItemLayoutSchema.description} or undefined (the default chat box)`,
+  (value, path) =>
+    value === undefined
+      ? {
+          ...DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT,
+          horizontal: { ...DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT.horizontal },
+          vertical: { ...DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT.vertical }
+        }
+      : overlayItemLayoutSchema.parse(value, path)
+)
+// The backend always serializes every item; the other three stay required.
 const overlayLayoutSchema = objectSchema(
   {
     highlight: overlayItemLayoutSchema,
     captions: overlayItemLayoutSchema,
-    buddy: overlayItemLayoutSchema
+    buddy: overlayItemLayoutSchema,
+    chat: chatOverlayItemLayoutSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<OverlayLayout>
@@ -3386,6 +3557,45 @@ const migrateHighlightAnchorParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<MigrateHighlightAnchorParams>
 // --- end overlay layout (plan 164) ---
+// --- Chat on stream (plan 215 G) ---
+// A 4 MB PNG cap on the Rust side: base64 of that is 5.6 M characters. The
+// rects are the overlay layout's, optional like the highlight's.
+const setChatOverlayParamsSchema = objectSchema(
+  {
+    pngBase64: stringSchema({ minLength: 4, maxLength: 5_600_000 }),
+    rect: optionalSchema(overlayRectSchema),
+    verticalPngBase64: optionalSchema(stringSchema({ minLength: 4, maxLength: 5_600_000 })),
+    verticalRect: optionalSchema(overlayRectSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SetChatOverlayParams>
+const chatOverlayInfoSchema = objectSchema(
+  {
+    active: booleanSchema,
+    width: numberSchema({ integer: true, min: 0 }),
+    height: numberSchema({ integer: true, min: 0 }),
+    revision: numberSchema({ integer: true, min: 0 }),
+    vertical: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatOverlayInfo>
+// A canvas is omitted, never null, when the session has no such leg (no
+// session, or no portrait leg; `skip_serializing_if` on the Rust side).
+const chatOverlayCanvasSchema = objectSchema(
+  {
+    width: numberSchema({ integer: true, min: 1 }),
+    height: numberSchema({ integer: true, min: 1 })
+  },
+  { allowUnknown: false }
+)
+const chatOverlayCanvasesSchema = objectSchema(
+  {
+    horizontal: optionalSchema(chatOverlayCanvasSchema),
+    vertical: optionalSchema(chatOverlayCanvasSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatOverlayCanvases>
+// --- end chat on stream (plan 215 G) ---
 // --- Banners (plan 186) ---
 // Exact: the pinned `banner` fixture. The only optional fields are the Phase 2
 // timer, omitted when off (`skip_serializing_if`); a `null` is refused, the
@@ -3531,6 +3741,62 @@ const screenHideParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ScreenHideParams>
 // --- end Hide screen (plan 210 S7) ---
+// --- Videorc Camera (plan 214 A4) ---
+const virtualCameraStateSchema = enumSchema([
+  'off',
+  'installing',
+  'needs-approval',
+  'needs-setup',
+  'ready',
+  'streaming',
+  'unavailable'
+])
+const virtualCameraPlatformStepSchema = enumSchema([
+  'installing',
+  'needs-approval',
+  'needs-reboot',
+  'ready',
+  'failed',
+  'needs-setup',
+  'setting-up',
+  'unsupported'
+])
+const virtualCameraStatusSchema = objectSchema(
+  {
+    on: booleanSchema,
+    available: booleanSchema,
+    state: virtualCameraStateSchema,
+    viewers: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    platformStep: optionalSchema(virtualCameraPlatformStepSchema),
+    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<VirtualCameraStatus>
+const virtualCameraSetParamsSchema = objectSchema(
+  { on: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<VirtualCameraSetParams>
+const cameraLowLightCameraIdSchema = stringSchema({ minLength: 1, maxLength: 1024 })
+const cameraLowLightParamsSchema = objectSchema(
+  { cameraId: cameraLowLightCameraIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CameraLowLightParams>
+const cameraLowLightSetParamsSchema = objectSchema(
+  { cameraId: cameraLowLightCameraIdSchema, compensation: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CameraLowLightSetParams>
+const cameraLowLightStateSchema = objectSchema(
+  { cameraId: cameraLowLightCameraIdSchema, supported: booleanSchema, compensation: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CameraLowLightState>
+const virtualCameraPlatformReportParamsSchema = objectSchema(
+  {
+    platformStep: virtualCameraPlatformStepSchema,
+    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<VirtualCameraPlatformReportParams>
+// --- end Videorc Camera (plan 214 A4) ---
 
 const soundboardStateSchema = objectSchema(
   {
@@ -3841,7 +4107,9 @@ const audioLevelsEventSchema = objectSchema(
     // Plan 189: the soundboard's sounds as mixed.
     sounds: optionalSchema(audioLevelReadingSchema),
     master: optionalSchema(audioLevelReadingSchema),
-    masterClippedSamples: nonNegativeInteger
+    masterClippedSamples: nonNegativeInteger,
+    // Issue 1064: the silence watchdog's report, sent only while true.
+    microphoneSilent: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<AudioLevelsEvent>
@@ -5266,6 +5534,11 @@ const runtimeContracts = {
     result: overlayLayoutSchema
   },
   // --- end overlay layout (plan 164) ---
+  // --- Chat on stream (plan 215 G) ---
+  'chat.overlay.set': { params: setChatOverlayParamsSchema, result: chatOverlayInfoSchema },
+  'chat.overlay.clear': { params: undefinedSchema, result: chatOverlayInfoSchema },
+  'chat.overlay.canvases': { params: undefinedSchema, result: chatOverlayCanvasesSchema },
+  // --- end chat on stream (plan 215 G) ---
   // --- Banners (plan 186) ---
   'banners.list': { params: undefinedSchema, result: bannerListSchema },
   'banners.importImage': { params: bannerImportImageParamsSchema, result: bannerSchema },
@@ -5281,6 +5554,19 @@ const runtimeContracts = {
   'screen.show': { params: undefinedSchema, result: screenPrivacySchema },
   'screen.privacy.get': { params: undefinedSchema, result: screenPrivacySchema },
   // --- end Hide screen (plan 210 S7) ---
+  // --- Videorc Camera (plan 214 A4) ---
+  'virtualCamera.status': { params: undefinedSchema, result: virtualCameraStatusSchema },
+  'virtualCamera.set': { params: virtualCameraSetParamsSchema, result: virtualCameraStatusSchema },
+  'virtualCamera.platform.report': {
+    params: virtualCameraPlatformReportParamsSchema,
+    result: virtualCameraStatusSchema
+  },
+  // --- end Videorc Camera (plan 214 A4) ---
+  'camera.lowLight.get': { params: cameraLowLightParamsSchema, result: cameraLowLightStateSchema },
+  'camera.lowLight.set': {
+    params: cameraLowLightSetParamsSchema,
+    result: cameraLowLightStateSchema
+  },
   'sounds.list': { params: undefinedSchema, result: soundboardStateSchema },
   'sounds.import': { params: soundImportParamsSchema, result: soundSchema },
   'sounds.update': { params: soundUpdateParamsSchema, result: soundSchema },
@@ -5468,6 +5754,14 @@ const runtimeEventSchemas = {
   'scheduledStreams.changed': boundedBackendPayloadSchema,
   'devices.changed': deviceListSchema,
   'entitlements.updated': entitlementsSchema,
+  // Plan 215 A5: the account as the backend holds it, and why it changed.
+  'account.changed': objectSchema(
+    {
+      account: accountSchema,
+      reason: enumSchema(['signed-in', 'signed-out', 'session-expired'])
+    },
+    { allowUnknown: false }
+  ),
   'noiseCleanup.status': noiseCleanupJobSchema,
   'cleanCut.status': cleanCutJobSchema,
   'recording.finalization': recordingFinalizationEventSchema,
@@ -5491,6 +5785,7 @@ const runtimeEventSchemas = {
   'banners.changed': bannerListSchema,
   'sounds.changed': soundboardStateSchema,
   'screen.privacy.changed': screenPrivacySchema,
+  'virtualCamera.changed': virtualCameraStatusSchema,
   'remote.state': runtimeSchema<BackendEventMap['remote.state']>('remote state', (value, path) => {
     objectSchema({ screenHidden: booleanSchema }, { allowUnknown: true }).parse(value, path)
     return value as BackendEventMap['remote.state']
@@ -5607,3 +5902,41 @@ function assertExactEnvelopeFields(
     }
   }
 }
+
+// Support bundle camera story (plan 213 H5). Camera type and transport are in
+// Device.detail. cameraConnections is a bundle-only history, never an event.
+export const cameraSelectionDiagnosticsSchema = objectSchema({
+  wantedCameraId: optionalSchema(stringSchema()),
+  wantedCameraName: optionalSchema(stringSchema()),
+  usedCameraId: optionalSchema(stringSchema()),
+  deviceUniqueId: optionalSchema(stringSchema()),
+  state: enumSchema([
+    'starting',
+    'live',
+    'permission-needed',
+    'device-missing',
+    'disconnected',
+    'failed'
+  ])
+})
+export const cameraConnectionHistoryEntrySchema = objectSchema({
+  deviceType: stringSchema(),
+  transport: numberSchema({ integer: true }),
+  uniqueId: stringSchema(),
+  name: stringSchema(),
+  connected: booleanSchema,
+  timestamp
+})
+
+// Support bundle account section (plan 215 A6): the account the app shows,
+// the session token on disk, and whether the secrets store read at all.
+// Booleans only, never the token or the identity; bundle-only, never an event.
+export const supportBundleAccountSchema = objectSchema(
+  {
+    signedIn: booleanSchema,
+    tokenPresent: booleanSchema,
+    storeReadable: booleanSchema,
+    storeError: optionalText
+  },
+  { allowUnknown: false }
+)

@@ -5,8 +5,10 @@ import type {
   OverlayLayout,
   PreviewSurfaceStatus,
   RecordingStatus,
+  Scene,
   ServerEvent,
-  ServerResponse
+  ServerResponse,
+  VirtualCameraStatus
 } from '../shared/backend'
 import {
   parseBackendWireMessage,
@@ -14,6 +16,14 @@ import {
   validateBackendRpcResult,
   validateCompositorFrameReadyPayload
 } from '../shared/backend-rpc-contract'
+import { LIVE_BACKGROUND_IDS, type LiveBackgroundId } from '../shared/live-background-ids'
+import {
+  enumSchema,
+  numberSchema,
+  objectSchema,
+  optionalSchema,
+  stringSchema
+} from '../shared/runtime-schema'
 
 /**
  * Feeds whose bad payload must never retire the main socket: that socket also
@@ -23,7 +33,13 @@ import {
  */
 export const MAIN_ISOLATED_BACKEND_EVENTS: ReadonlySet<string> = new Set([
   'banners.changed',
-  'overlays.layout'
+  'overlays.layout',
+  // Plan 214 B3: the camera switch activates the extension; a bad status
+  // is dropped with a warning, never the socket.
+  'virtualCamera.changed',
+  // The proof surface draws the committed scene's background; a bad scene
+  // is dropped with a warning, never the socket.
+  'scene.changed'
 ])
 
 /** The privileged main-process socket uses the same bounded wire contract as the renderer. */
@@ -82,4 +98,64 @@ export function parseMainOverlayLayout(payload: unknown): OverlayLayout {
 /** `overlays.layout` event: the whole layout, strictly validated. */
 export function parseMainOverlayLayoutEvent(payload: unknown): OverlayLayout {
   return validateBackendEventPayload('overlays.layout', payload) as OverlayLayout
+}
+
+// The shared scene contract leaves the background as a bounded payload; the
+// proof surface draws it, so main checks every field it reads (Rust
+// `EffectiveSceneBackground`, which skips an absent `live`).
+const sceneBackgroundSchema = objectSchema(
+  {
+    assetId: stringSchema({ minLength: 1, maxLength: 16_384 }),
+    managedAssetPath: stringSchema({ minLength: 1, maxLength: 16_384 }),
+    fit: enumSchema(['fill', 'fit', 'stretch']),
+    scale: numberSchema(),
+    offsetX: numberSchema(),
+    offsetY: numberSchema(),
+    blurPx: numberSchema(),
+    dimPercent: numberSchema(),
+    saturationPercent: numberSchema(),
+    vignettePercent: numberSchema(),
+    visibilityPercent: numberSchema(),
+    live: optionalSchema(
+      objectSchema(
+        {
+          id: enumSchema(LIVE_BACKGROUND_IDS as [LiveBackgroundId, ...LiveBackgroundId[]]),
+          look: stringSchema({ minLength: 1, maxLength: 64 }),
+          motion: enumSchema(['calm', 'normal'])
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+
+function withSceneBackground(scene: Scene, path: string): Scene {
+  if (scene.background !== undefined)
+    sceneBackgroundSchema.parse(scene.background, `${path}.background`)
+  return scene
+}
+
+/** `scene.get` result: the committed scene, for the proof surface's background. */
+export function parseMainScene(payload: unknown): Scene {
+  return withSceneBackground(
+    validateBackendRpcResult('scene.get', payload) as Scene,
+    'backend.scene.get.result'
+  )
+}
+
+/** `scene.changed` event: the whole committed scene, strictly validated. */
+export function parseMainSceneChangedEvent(payload: unknown): Scene {
+  return withSceneBackground(
+    validateBackendEventPayload('scene.changed', payload) as Scene,
+    'backend.event.scene.changed'
+  )
+}
+
+export function parseMainVirtualCameraStatus(payload: unknown): VirtualCameraStatus {
+  return validateBackendRpcResult('virtualCamera.status', payload) as VirtualCameraStatus
+}
+
+export function parseMainVirtualCameraChangedEvent(payload: unknown): VirtualCameraStatus {
+  return validateBackendEventPayload('virtualCamera.changed', payload) as VirtualCameraStatus
 }

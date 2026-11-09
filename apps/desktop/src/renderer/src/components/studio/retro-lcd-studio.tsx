@@ -26,7 +26,11 @@ import { STATUS_TONE_CLASS } from '@/components/status-badge'
 import { AgentsSessionRow } from '@/components/studio/agents-session-row'
 import { MicLcdMeter } from '@/components/studio/mic-level-meter'
 import type { MicrophoneRowProps, SystemAudioRowProps } from '@/components/studio/audio-section'
-import { type ScreenPrivacyControl, useStudioSources } from '@/components/studio/quick-settings'
+import {
+  type ScreenPrivacyControl,
+  useStudioChatDoor,
+  useStudioSources
+} from '@/components/studio/quick-settings'
 import {
   CohostSessionRow,
   LiveDestinationRows,
@@ -52,6 +56,7 @@ import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources } from '@/lib/capture'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
+import { MIC_SESSION_LEVEL_UNAVAILABLE_COPY } from '@/lib/mic-meter-input'
 import { screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { captionsStatusLabel, micSignalLabel, systemAudioIssueLabel } from '@/lib/state-labels'
@@ -67,6 +72,7 @@ import {
 import { systemAudioIssueCopy, type SystemAudioSwitchView } from '@/lib/system-audio'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 // Plan 197: Retro LCD, an option in Settings → General (owner 2026-10-25:
 // "let's put it only as some retro LCD option in settings"). The Studio
@@ -352,6 +358,7 @@ function RetroMicrophoneRows({
   discoveryPending,
   meter,
   monitorState,
+  sessionLevelUnavailable = false,
   muted,
   muteShortcut,
   platform,
@@ -440,6 +447,12 @@ function RetroMicrophoneRows({
           {micSignalLabel(monitorState)}
         </span>
       </div>
+      {/* Issue 1064: a session meter with no backend level says so. */}
+      {sessionLevelUnavailable ? (
+        <div className={LCD_MESSAGE} data-videorc-mic-level-reason="session">
+          {MIC_SESSION_LEVEL_UNAVAILABLE_COPY}
+        </div>
+      ) : null}
       <div className={cn(LCD_FADER, 'py-1.5')}>
         <MicrophoneGainFader gainDb={gainDb} onGainChange={onGainChange} />
       </div>
@@ -505,8 +518,8 @@ function RetroSystemAudioRows({
 /**
  * Sources on one screen (its title and the way to Sources, Screen and Camera
  * with their live switch status under them; System audio is in Audio since
- * plan 201), then Captions on a screen of its
- * own: captions aren't a source (B-15).
+ * plan 201), then Captions and Chat on a screen of their
+ * own: neither is a source (B-15, plan 213 B1).
  */
 export function RetroQuickSettings(): ReactElement {
   const {
@@ -591,9 +604,31 @@ export function RetroQuickSettings(): ReactElement {
             })}
             onNavigate={() => openStudioPanel('captions')}
           />
+          <RetroChatDoorRow />
         </LcdPanel>
       </PanelSection>
     </>
+  )
+}
+
+/** The Chat row on the Captions screen (plan 213 B1): the same door as the inspector's. */
+function RetroChatDoorRow(): ReactElement | null {
+  const door = useStudioChatDoor()
+  if (!door) return null
+  return (
+    <LcdPanelNavRow
+      hint={door.newLabel ? door.openLabel : undefined}
+      label="Chat"
+      value={
+        door.newLabel ?? (
+          <span className="truncate">
+            {WINDOW_NAMES.streamManager} ·{' '}
+            <ShortcutKeys accelerator={door.accelerator} platform={door.platform} variant="text" />
+          </span>
+        )
+      }
+      onNavigate={door.open}
+    />
   )
 }
 

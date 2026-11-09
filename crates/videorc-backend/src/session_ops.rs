@@ -299,6 +299,7 @@ pub(crate) fn rename_session_file_no_replace(source: &Path, destination: &Path) 
     std::fs::remove_file(source)
 }
 
+#[cfg_attr(target_os = "windows", allow(unused_variables))]
 pub(crate) fn sync_session_file_parent(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
@@ -334,7 +335,7 @@ pub(crate) async fn probe_duration_ms(ffmpeg_path: &str, file: &Path) -> Option<
             "-of",
             "json",
         ])
-        .arg(file)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(file))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let output = output_duration_probe(&mut command).await.ok()?;

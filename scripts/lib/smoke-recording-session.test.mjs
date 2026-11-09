@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 
-import { recordScenario, request } from '../smoke-recording-session.mjs'
+import { recordScenario, request, sessionSelectsMicrophone } from '../smoke-recording-session.mjs'
 
 const temporaryDirectories = []
 
@@ -178,6 +178,18 @@ describe('recordScenario terminal contract', () => {
       /session\.start failed.*rejected\.mkv.*FFmpeg output startup failed/
     )
     assert.deepEqual(ws.requestedMethods, ['session.start'])
+  })
+})
+
+describe('sessionSelectsMicrophone', () => {
+  it('arms the silent-microphone gate only for a selected microphoneId', () => {
+    assert.equal(sessionSelectsMicrophone({ testPattern: true }), false)
+    assert.equal(sessionSelectsMicrophone({ testPattern: true, microphoneId: null }), false)
+    assert.equal(sessionSelectsMicrophone({ microphoneId: '' }), false)
+    assert.equal(sessionSelectsMicrophone(undefined), false)
+    assert.equal(sessionSelectsMicrophone({ testPattern: true, microphoneId: 'audio:1' }), true)
+    // The protocol has no `microphone` source field; it must not arm the gate.
+    assert.equal(sessionSelectsMicrophone({ microphone: 'audio:1' }), false)
   })
 })
 

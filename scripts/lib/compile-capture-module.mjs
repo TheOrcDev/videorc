@@ -33,12 +33,15 @@ export function withRelativeAliases(code, source) {
 /**
  * capture.ts's runtime imports and theirs, from the repository root. Plan 174
  * S1.4 gave capture.ts the formatters and the platform words, and
- * layout-framing-memory the layout labels; a module missing here fails every
- * smoke that compiles capture.ts with "Cannot find module".
+ * layout-framing-memory the layout labels; plan 213 I gave it the camera look.
+ * A module missing here fails every smoke that compiles capture.ts with
+ * "Cannot find module".
  */
 const CAPTURE_RUNTIME_DEPENDENCIES = [
   'apps/desktop/src/renderer/src/lib/accelerator.ts',
   'apps/desktop/src/renderer/src/lib/backend.ts',
+  'apps/desktop/src/renderer/src/lib/bridge-envelope.ts',
+  'apps/desktop/src/renderer/src/lib/camera-look.ts',
   'apps/desktop/src/renderer/src/lib/format-video.ts',
   'apps/desktop/src/renderer/src/lib/layout-framing-memory.ts',
   'apps/desktop/src/renderer/src/lib/layout-labels.ts',

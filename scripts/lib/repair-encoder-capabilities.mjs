@@ -11,19 +11,47 @@
 // Pure parsing lives here (covered by test:scripts); running the binary is the
 // caller's job.
 
+import { CAMERA_LOOK_FFMPEG_FILTERS } from './camera-look-ffmpeg-filters.mjs'
 import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
 
 /** Repair-encoder preference, mirroring RepairVideoEncoder in repair.rs:
  * quality-controllable software x264 first (dev/full builds), then the
- * platform hardware encoders the LGPL bundles ship. */
-export const REPAIR_ENCODER_PREFERENCE = ['libx264', 'h264_videotoolbox', 'h264_mf']
+ * platform hardware encoders the LGPL bundles ship, then OpenH264 (the only
+ * one the Linux bundle can run without a device). */
+export const REPAIR_ENCODER_PREFERENCE = ['libx264', 'h264_videotoolbox', 'h264_mf', 'libopenh264']
 
 /** The per-encoder quality args build_repair_args (repair.rs) emits, kept here
  * so the smoke exercises the exact command shape the app ships. */
 export const REPAIR_ENCODER_ARGS = {
   libx264: ['-c:v', 'libx264', '-crf', '18', '-preset', 'medium', '-threads', '1'],
   h264_videotoolbox: ['-c:v', 'h264_videotoolbox', '-q:v', '65', '-allow_sw', '1'],
-  h264_mf: ['-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '90']
+  h264_mf: ['-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '90'],
+  libopenh264: [
+    '-c:v',
+    'libopenh264',
+    '-rc_mode',
+    'bitrate',
+    '-allow_skip_frames',
+    '0',
+    '-profile:v',
+    'high',
+    '-threads',
+    '1'
+  ]
+}
+
+/** repair.rs' REPAIR_MIN_VIDEO_KBPS: the floor of a repair's bitrate target. */
+export const REPAIR_MIN_VIDEO_KBPS = 2000
+
+/** The encoder args for one repair. OpenH264 has no quality mode, so
+ * build_repair_args adds the source video's bitrate (never under the floor);
+ * the other encoders ignore it. */
+export function repairEncoderArgs(encoder, videoBitrateKbps = REPAIR_MIN_VIDEO_KBPS) {
+  const args = [...REPAIR_ENCODER_ARGS[encoder]]
+  if (encoder === 'libopenh264') {
+    args.push('-b:v', `${Math.max(REPAIR_MIN_VIDEO_KBPS, Math.round(videoBitrateKbps))}k`)
+  }
+  return args
 }
 
 /** Encoders every shipped macOS ffmpeg must expose: the repair/record H.264
@@ -31,9 +59,13 @@ export const REPAIR_ENCODER_ARGS = {
 export const REQUIRED_MACOS_FFMPEG_ENCODERS = ['h264_videotoolbox', 'aac', 'pcm_s16le']
 
 /** Filters required by Premium local creative transforms: `afftdn` for Noise
- * Cleanup (built into the LGPL FFmpeg bundle, no separately licensed model)
- * and the trim/concat set Clean cut renders with (plan 119 S13). */
-export const REQUIRED_MACOS_FFMPEG_FILTERS = ['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS]
+ * Cleanup (built into the LGPL FFmpeg bundle, no separately licensed model),
+ * the trim/concat set Clean cut renders with (plan 119 S13), and the
+ * full-range YUV lookup-table chain the legacy recording path grades the
+ * camera look with (plan 213 I; never the GPL-only `eq`). */
+export const REQUIRED_MACOS_FFMPEG_FILTERS = [
+  ...new Set(['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS])
+]
 
 /** Protocols every shipped macOS ffmpeg must expose. rtmps implies a TLS
  * backend was linked (static OpenSSL since 0.9.23); tls is listed separately

@@ -60,7 +60,6 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
-  rmSync,
   statSync,
   writeFileSync
 } from 'node:fs'
@@ -84,6 +83,7 @@ import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const debug = process.env.VIDEORC_AGENT_SMOKE_DEBUG === '1'
@@ -383,6 +383,22 @@ try {
   const smoke = launch.connections['preview-motion-ready']
   const evalRenderer = async (code, params = {}) =>
     (await requestSmokeCommand(smoke, 'eval-js', { code, ...params }, { timeoutMs })).result
+
+  // A scene transaction answers its caller at the backend's commit; the
+  // Studio then holds "The scene is changing." until the preview proves the
+  // new revision (about half a second idle with the preview open). An
+  // Arrange call made inside that window is refused, as a second click would
+  // be, so after switch_scene or a camera corner this waits for the Studio to
+  // settle, as smoke:scene-presets does, before the next Arrange call.
+  const waitForSceneSettled = async (label) =>
+    waitUntil(`the Studio to settle after ${label}`, async () => {
+      const state = await evalRenderer('return window.__videorcSmokeScenePresets?.state() ?? null')
+      const value = {
+        pendingId: state?.pendingId ?? null,
+        pendingLayout: state?.pendingLayout ?? null
+      }
+      return { done: value.pendingId === null && value.pendingLayout === null, value }
+    })
   // What the backend tells every window: the D11 notices (`agents.activity`)
   // and the destinations' runtime states (`stream.targets`).
   const activity = []
@@ -638,6 +654,12 @@ try {
     fail(
       `get_picture is ${size.width}×${size.height}; at most 1280 wide, as structuredContent says`
     )
+  }
+  // The app opens on a tab with no Preview slot: the docked Preview is hidden
+  // there, and the program must keep a real size (a 1×1 program was the
+  // in-window dock's placeholder rect sizing the idle compositor).
+  if (size.width < 160 || size.height < 90) {
+    fail(`get_picture is ${size.width}×${size.height}: the program collapsed off the Preview's tab`)
   }
   const picturePath = join(outputDirectory, 'agent-picture.jpg')
   writeFileSync(picturePath, image.bytes)
@@ -1252,6 +1274,7 @@ try {
       },
       AGENT_POLL
     )
+    await waitForSceneSettled(`switch_scene to ${active.name}`)
     const cameraItem =
       (await callOk(bridge, 'get_scene_layout')).structuredContent?.items?.find(
         (entry) => entry.kind === 'camera'
@@ -1279,10 +1302,13 @@ try {
           corner === 'top-left' ? centreX < 0.5 && centreY < 0.5 : centreX > 0.5 && centreY > 0.5
         return { done: wanted, value: camera?.transform }
       })
+      await waitForSceneSettled(`move_on_scene camera ${corner}`)
       await callOk(bridge, 'move_on_scene', { item: 'camera', place: cameraItem.corner })
+      await waitForSceneSettled(`move_on_scene camera ${cameraItem.corner}`)
       cornerNote = `the camera went ${corner} and back (preset kept), idle`
     }
     await callOk(bridge, 'switch_scene', { sceneId: 'screen-only' })
+    await waitForSceneSettled('switch_scene to Screen only')
   }
   skip(
     'step B5 (the camera corner during a recording)',
@@ -1776,8 +1802,9 @@ try {
   try {
     await stopApp()
   } finally {
-    rmSync(userDataDir, { recursive: true, force: true })
-    if (passed && createdOutput) rmSync(outputDirectory, { recursive: true, force: true })
+    await removeProfileDir(userDataDir, { label: 'agent-mcp smoke' })
+    if (passed && createdOutput)
+      await removeProfileDir(outputDirectory, { label: 'agent-mcp smoke' })
     else if (!passed) console.error(`agent-mcp smoke: evidence kept in ${outputDirectory}`)
   }
 }

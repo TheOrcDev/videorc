@@ -30,7 +30,14 @@ vi.mock('@/hooks/use-studio', () => ({
     armed: false,
     blockedReason: null,
     setEnabled: () => {}
-  })
+  }),
+  // The Studio's Chat row under Captions (plan 213 B1), idle.
+  useStudioChat: () => ({
+    liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
+    chatNewCount: 0
+  }),
+  useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
+  useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
 }))
 const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
 vi.mock('@/lib/toast', () => ({ toast }))
@@ -64,13 +71,15 @@ function Harness({
   video,
   recordEnabled,
   initialSettings,
-  configPatch
+  configPatch,
+  platform = 'darwin'
 }: {
   surface: () => ReactElement
   video: VideoSettings
   recordEnabled: boolean
   initialSettings: SettingsState
   configPatch?: Partial<CaptureConfig>
+  platform?: string
 }) {
   const [config, setConfig] = useState<CaptureConfig>({
     ...defaultCaptureConfig,
@@ -86,7 +95,7 @@ function Harness({
     setCaptureConfig: setConfig,
     settings,
     setSettings,
-    runtimeInfo: { platform: 'darwin' },
+    runtimeInfo: { platform },
     encoderPreference: null,
     setEncoderPreference: vi.fn(),
     patchVideo: (patch: Partial<VideoSettings>) => {
@@ -133,8 +142,14 @@ async function render(
   {
     recordEnabled = true,
     settings = defaultSettings,
-    config
-  }: { recordEnabled?: boolean; settings?: SettingsState; config?: Partial<CaptureConfig> } = {}
+    config,
+    platform
+  }: {
+    recordEnabled?: boolean
+    settings?: SettingsState
+    config?: Partial<CaptureConfig>
+    platform?: string
+  } = {}
 ): Promise<void> {
   await act(async () =>
     root.render(
@@ -143,7 +158,8 @@ async function render(
         video,
         recordEnabled,
         initialSettings: settings,
-        configPatch: config
+        configPatch: config,
+        platform
       })
     )
   )
@@ -203,6 +219,29 @@ const renderOutputPage = (
   video?: VideoSettings,
   options?: { recordEnabled?: boolean; settings?: SettingsState }
 ): Promise<void> => render(() => createElement(RecordingTab), video, options)
+
+describe('the Windows encoder bridge envelope (issue #1062)', () => {
+  it('says why a saved 4K60 output cannot record on a Windows PC', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['record-4k60-experimental'], {
+      platform: 'win32'
+    })
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+      "4K at 60 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 60 fps."
+    )
+  })
+
+  it('stays quiet on a Mac', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['record-4k60-experimental'])
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('stays quiet at 4K30 on Windows', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['record-4k30'], {
+      platform: 'win32'
+    })
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+  })
+})
 
 describe('separate files encoder notice (plan 200 D4)', () => {
   const separateFiles: Partial<CaptureConfig> = {

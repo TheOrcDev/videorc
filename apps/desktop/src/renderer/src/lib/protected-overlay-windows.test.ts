@@ -4,7 +4,8 @@ import type { DeviceList } from '@/lib/backend'
 
 import {
   deviceListWithoutProtectedOverlayWindows,
-  protectedOverlayWindowIdsFromOverlayWindows
+  protectedOverlayWindowIdsFromOverlayWindows,
+  streamManagerProtectedOverlayWindow
 } from './protected-overlay-windows'
 
 function deviceList(): DeviceList {
@@ -39,6 +40,45 @@ describe('protected overlay windows', () => {
     )
 
     expect(filtered.devices.map((device) => device.id)).toEqual(['screen:screencapturekit:1'])
+  })
+
+  // Plan 215 D6: the Stream Manager is excluded, and left out of the window
+  // picker, only while Hide from stream is on.
+  it('counts the Stream Manager only while Hide from stream is on', () => {
+    expect(
+      protectedOverlayWindowIdsFromOverlayWindows(
+        streamManagerProtectedOverlayWindow({ open: true, windowId: 22, hiddenFromStream: false })
+      )
+    ).toEqual([])
+    expect(
+      protectedOverlayWindowIdsFromOverlayWindows(
+        streamManagerProtectedOverlayWindow({ open: true, windowId: 22, hiddenFromStream: true })
+      )
+    ).toEqual([22])
+    expect(
+      protectedOverlayWindowIdsFromOverlayWindows(
+        streamManagerProtectedOverlayWindow({ open: false, windowId: 22, hiddenFromStream: true })
+      )
+    ).toEqual([])
+    expect(
+      protectedOverlayWindowIdsFromOverlayWindows(
+        streamManagerProtectedOverlayWindow({ open: true, hiddenFromStream: true })
+      )
+    ).toEqual([])
+    const current = deviceList()
+    expect(
+      deviceListWithoutProtectedOverlayWindows(
+        current,
+        streamManagerProtectedOverlayWindow({ open: true, windowId: 22, hiddenFromStream: false })
+      )
+    ).toBe(current)
+    expect(
+      deviceListWithoutProtectedOverlayWindows(
+        current,
+        { open: true, windowId: 11 },
+        streamManagerProtectedOverlayWindow({ open: true, windowId: 22, hiddenFromStream: true })
+      ).devices.map((device) => device.id)
+    ).toEqual(['window:screencapturekit:33', 'screen:screencapturekit:1'])
   })
 
   it('returns the original device list when no protected windows match', () => {

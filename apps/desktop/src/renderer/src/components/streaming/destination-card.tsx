@@ -131,6 +131,20 @@ const RUNTIME_BADGE_TONES: Record<StreamTargetRuntime['state'], BadgeTone> = {
   stopped: 'outline'
 }
 
+/**
+ * Plan 218: how often this session the connection could not carry the stream
+ * to this destination. Each time FFmpeg threw the leg's queued seconds away
+ * and resumed at the next keyframe, so its viewers saw a freeze and a jump.
+ * Additive to the state badge: the leg stays on air.
+ */
+export function destinationUplinkLine(runtime?: StreamTargetRuntime): string | null {
+  const count = runtime?.uplinkOverflows ?? 0
+  if (count <= 0) return null
+  return count === 1
+    ? 'Your connection fell behind on this destination once; its viewers skipped a few seconds.'
+    : `Your connection fell behind on this destination ${count} times; its viewers skipped a few seconds each time.`
+}
+
 /** The running destination's badge: the one destination vocabulary (plan 174 J2-4). */
 function runtimeBadge(runtime: StreamTargetRuntime): { tone: BadgeTone; label: string } {
   return {
@@ -267,6 +281,7 @@ export function DestinationCard({
       ? { tone: 'warning' as const, label: 'API paused' }
       : idleDestinationBadge(target, account)
   const statusMessage = runtime?.message ?? target.status?.message
+  const uplinkLine = destinationUplinkLine(runtime)
   // Multistreaming is free for every plan: the only enable gate left is the
   // shared destination cap (or a disabled livestreaming feature), so the
   // switch is always rendered and the page's one cap notice says why it is
@@ -406,6 +421,11 @@ export function DestinationCard({
         }
       >
         {badge ? <Badge variant={badge.tone}>{badge.label}</Badge> : null}
+        {uplinkLine ? (
+          <Badge data-testid="destination-uplink" variant="warning">
+            Falling behind
+          </Badge>
+        ) : null}
         {qualityTag ? (
           <Badge data-testid="destination-quality" variant="outline">
             <span className="sr-only">Stream quality: </span>
@@ -440,6 +460,7 @@ export function DestinationCard({
         {statusMessage ? (
           <span className="text-xs text-muted-foreground">{statusMessage}</span>
         ) : null}
+        {uplinkLine ? <span className="text-xs text-muted-foreground">{uplinkLine}</span> : null}
 
         {!expanded ? null : (
           <>

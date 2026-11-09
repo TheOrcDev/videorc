@@ -769,19 +769,31 @@ fn caption_burn_staging_path(recording: &std::path::Path, owner_token: &str) -> 
     final_path.with_file_name(format!(".{final_name}.{owner_token}.partial"))
 }
 
+/// Every path goes through [`crate::ffmpeg::ffmpeg_path_arg`]: on Windows the
+/// recording path is verbatim (`\\?\C:\…`), and the concat demuxer resolves
+/// the list's bare `0.png` entries against a verbatim list path as `\\0.png`,
+/// so the burn exits with ENOENT and no captioned copy is made (issue #1061).
 fn caption_burn_ffmpeg_args(
     recording_path: &std::path::Path,
     list_path: &std::path::Path,
     private_output_path: &std::path::Path,
-) -> [OsString; 14] {
+) -> [OsString; 18] {
+    use crate::ffmpeg::ffmpeg_path_arg;
     [
         OsString::from("-y"),
+        // stderr carries only errors, for the failure reason (issue #1061).
+        // `-nostats` too: FFmpeg prints its progress line to stderr even at
+        // `-loglevel error`, and it would push the cause out of the tail.
+        OsString::from("-hide_banner"),
+        OsString::from("-nostats"),
+        OsString::from("-loglevel"),
+        OsString::from("error"),
         OsString::from("-i"),
-        recording_path.as_os_str().to_owned(),
+        ffmpeg_path_arg(recording_path),
         OsString::from("-f"),
         OsString::from("concat"),
         OsString::from("-i"),
-        list_path.as_os_str().to_owned(),
+        ffmpeg_path_arg(list_path),
         OsString::from("-filter_complex"),
         OsString::from("[0:v][1:v]overlay=eof_action=pass"),
         OsString::from("-c:a"),
@@ -790,8 +802,47 @@ fn caption_burn_ffmpeg_args(
         // infer the output muxer from the filename.
         OsString::from("-f"),
         OsString::from("mp4"),
-        private_output_path.as_os_str().to_owned(),
+        ffmpeg_path_arg(private_output_path),
     ]
+}
+
+/// The burn's stderr drain task. Dropping it aborts the task, so a killed or
+/// abandoned burn never leaves a reader behind.
+struct CaptionBurnStderr(Option<tokio::task::JoinHandle<crate::ffmpeg::FfmpegStderrTail>>);
+
+impl CaptionBurnStderr {
+    /// The tail once the exited child's pipe closes. The wait is bounded: a
+    /// grandchild holding the pipe open must not hold the burn's failure.
+    async fn collect(&mut self) -> Option<crate::ffmpeg::FfmpegStderrTail> {
+        let task = self.0.as_mut()?;
+        let tail = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .ok()?
+            .ok();
+        self.0 = None;
+        tail
+    }
+}
+
+impl Drop for CaptionBurnStderr {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+/// `ffmpeg exited with <status>`, then FFmpeg's own first and last error
+/// lines when it printed any, so the health message says why (issue #1061
+/// showed only `exit code: 0xfffffffe`).
+fn caption_burn_exit_reason(
+    status: &std::process::ExitStatus,
+    tail: Option<&crate::ffmpeg::FfmpegStderrTail>,
+) -> String {
+    match tail.and_then(crate::ffmpeg::FfmpegStderrTail::failure_summary) {
+        Some(summary) => format!("ffmpeg exited with {status}: {summary}"),
+        None => format!("ffmpeg exited with {status}"),
+    }
 }
 
 fn chunk_cue_window(chunk: &CaptionChunkRecord) -> (f64, f64) {
@@ -1948,11 +1999,18 @@ async fn run_caption_overlay_burn(
                 ))
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
+                .stderr(std::process::Stdio::piped());
             command.kill_on_drop(true);
             let mut child = spawn_owned_tokio(&mut command).map_err(|error| {
                 format!("could not start ffmpeg for the captioned copy: {error}")
             })?;
+            // Aborted on drop, so every early return below also ends it.
+            let mut stderr_tail = CaptionBurnStderr(
+                child
+                    .stderr
+                    .take()
+                    .map(|stderr| tokio::spawn(crate::ffmpeg::drain_ffmpeg_stderr(stderr))),
+            );
 
             loop {
                 match caption_burn_interruption(
@@ -1965,6 +2023,7 @@ async fn run_caption_overlay_burn(
                     }
                     Some(CaptionBurnInterruption::RetryAfterCapture) => {
                         let _ = child.kill().await;
+                        drop(stderr_tail);
                         let _ = tokio::fs::remove_file(&private_output_path).await;
                         state.emit_log(
                             "info",
@@ -1976,7 +2035,19 @@ async fn run_caption_overlay_burn(
                 }
                 match child.try_wait() {
                     Ok(Some(status)) if status.success() => return Ok(()),
-                    Ok(Some(status)) => return Err(format!("ffmpeg exited with {status}")),
+                    Ok(Some(status)) => {
+                        let tail = stderr_tail.collect().await;
+                        if let Some(tail) = tail.as_ref().map(|tail| tail.text())
+                            && !tail.is_empty()
+                        {
+                            tracing::warn!("Captioned copy FFmpeg ({status}) stderr:\n{tail}");
+                            state.emit_log(
+                                "warn",
+                                format!("Captioned copy FFmpeg ({status}) stderr:\n{tail}"),
+                            );
+                        }
+                        return Err(caption_burn_exit_reason(&status, tail.as_ref()));
+                    }
                     Ok(None) => {
                         tokio::select! {
                             _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
@@ -2797,6 +2868,7 @@ pub fn current_caption_overlays(slots: &CaptionOverlaySlots) -> CaptionOverlaySl
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn caption_overlay_targets_metadata(slots: &CaptionOverlaySlots) -> CaptionOverlayTargetsInfo {
     let guard = slots.inner.lock().expect("caption overlay slots lock");
     caption_overlay_targets_info(&guard)
@@ -11403,13 +11475,115 @@ mod tests {
 
         let args = caption_burn_ffmpeg_args(recording, list, &staging);
         assert_eq!(
-            &args[11..],
+            &args[args.len() - 3..],
             &[
                 OsString::from("-f"),
                 OsString::from("mp4"),
                 staging.as_os_str().to_owned(),
             ],
             "the explicit muxer must precede an extensionless private output"
+        );
+    }
+
+    #[test]
+    fn caption_burn_failure_reason_carries_ffmpegs_own_lines() {
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(0xffff_fffe)
+        };
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(254 << 8)
+        };
+        let bare = format!("ffmpeg exited with {status}");
+
+        let mut tail = crate::ffmpeg::FfmpegStderrTail::default();
+        tail.push(
+            b"[concat @ 0000016b] Impossible to open '\\\\0.png'\n\
+              Error opening input files: No such file or directory\n",
+        );
+        assert_eq!(
+            caption_burn_exit_reason(&status, Some(&tail)),
+            format!(
+                "{bare}: [concat @ 0000016b] Impossible to open '\\\\0.png' | \
+                 Error opening input files: No such file or directory"
+            )
+        );
+        // Nothing printed, or no tail at all: the bare status, as before.
+        assert_eq!(
+            caption_burn_exit_reason(&status, Some(&Default::default())),
+            bare
+        );
+        assert_eq!(caption_burn_exit_reason(&status, None), bare);
+    }
+
+    #[test]
+    fn caption_burn_keeps_stderr_to_errors_without_progress_lines() {
+        let args = caption_burn_ffmpeg_args(
+            std::path::Path::new("/tmp/Recording.mp4"),
+            std::path::Path::new("/tmp/frames/track.ffconcat"),
+            std::path::Path::new("/tmp/.Recording (captioned).mp4.partial"),
+        );
+        let first_input = args.iter().position(|arg| arg == "-i").unwrap();
+        let globals = &args[..first_input];
+        assert!(globals.iter().any(|arg| arg == "-nostats"), "{args:?}");
+        assert!(
+            globals
+                .windows(2)
+                .any(|pair| pair[0] == "-loglevel" && pair[1] == "error"),
+            "{args:?}"
+        );
+    }
+
+    /// Issue #1061: Windows publication returns a verbatim (`\\?\C:\…`)
+    /// recording path, and the frames dir, the concat list and the staging
+    /// output are all derived from it. FFmpeg's concat demuxer resolves the
+    /// list's bare `0.png` entries against a verbatim list path as `\\0.png`
+    /// and exits with ENOENT (0xfffffffe), so no captioned copy is made. Every
+    /// path the burn hands FFmpeg must be the plain spelling.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn caption_burn_hands_ffmpeg_no_verbatim_path_for_a_verbatim_recording() {
+        let recording = std::path::Path::new(r"\\?\C:\Users\me\Videos\Recording 12.mp4");
+        let frames_dir = caption_frame_request_dir(recording, "cues-2");
+        let list = frames_dir.join("track.ffconcat");
+        let staging = caption_burn_staging_path(recording, "owner-token");
+        assert!(
+            list.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+            "the fixture must reproduce the verbatim derivation"
+        );
+
+        let args = caption_burn_ffmpeg_args(recording, &list, &staging);
+        for arg in &args {
+            assert!(
+                !arg.to_string_lossy().starts_with(r"\\?\"),
+                "FFmpeg must never see a verbatim path: {arg:?} in {args:?}"
+            );
+        }
+        let after = |flag: &str, nth: usize| {
+            args.iter()
+                .enumerate()
+                .filter(|(_, arg)| *arg == flag)
+                .nth(nth)
+                .map(|(index, _)| args[index + 1].clone())
+        };
+        assert_eq!(
+            after("-i", 0),
+            Some(OsString::from(r"C:\Users\me\Videos\Recording 12.mp4"))
+        );
+        assert_eq!(
+            after("-i", 1),
+            Some(OsString::from(
+                r"C:\Users\me\Videos\.Recording 12.mp4.cues-2.caption-frames\track.ffconcat"
+            ))
+        );
+        assert_eq!(
+            args.last(),
+            Some(&OsString::from(
+                r"C:\Users\me\Videos\.Recording 12 (captioned).mp4.owner-token.partial"
+            ))
         );
     }
 
@@ -12057,6 +12231,7 @@ mod tests {
 
     #[tokio::test]
     async fn listen_block_ends_listening_only_and_never_a_presenting_caption_session() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
         let state = test_caption_app_state();
         let mut events = state.events.subscribe();
 

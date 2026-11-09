@@ -11,6 +11,7 @@
  */
 
 import type { RecordingStatus } from './backend'
+import { ipcErrorMessage } from './ipc-error-message'
 
 /** Sonner key for the start-failure toast: re-reporting updates it in place. */
 export const SESSION_START_FAILED_TOAST_ID = 'session-start-failed'
@@ -72,8 +73,9 @@ export function reconcileSessionStartResponse(
 }
 
 export function sessionStartFailureMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return message.trim() || "The session couldn't start."
+  // A start can be refused in main (the recordings folder check), and Electron
+  // wraps that rejection in transport noise the Session panel must not show.
+  return ipcErrorMessage(error).trim() || "The session couldn't start."
 }
 
 export function reduceSessionStartFailure(

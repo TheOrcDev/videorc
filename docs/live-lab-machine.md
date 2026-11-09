@@ -412,6 +412,9 @@ As the lab account, from `~/videorc`:
 # Display: a 1920x1080 headless output far to the right of the real screen.
 cp config/live-lab/linux/hyprland.videorc-lab.conf ~/.config/hypr/videorc-lab.conf
 echo 'source = ~/.config/hypr/videorc-lab.conf' >> ~/.config/hypr/hyprland.conf
+# A Lua config (~/.config/hypr/hyprland.lua, Omarchy on Hyprland 0.56+) takes
+# the Lua twin instead; require("hypr.videorc_lab") in hyprland.lua:
+#   cp config/live-lab/linux/hyprland.videorc-lab.lua ~/.config/hypr/videorc_lab.lua
 hyprctl reload && hyprctl output create headless videorc-lab
 pnpm live:hookup --lab-display videorc-lab
 
@@ -430,7 +433,9 @@ pactl get-default-sink; pactl get-default-source   # must be real devices, never
 The headless output must not hold focus (the doctor WARNs when it does): new
 windows and notifications land on the focused output. The harness focuses it
 only while it opens the card, makes the card fullscreen there (a run is
-refused when it cannot), then gives focus back. `systemd-inhibit` holds
+refused when it cannot), then gives focus back. On a Lua config Hyprland
+refuses the classic `hyprctl dispatch focusmonitor ...` form; the harness then
+sends the same dispatch as Lua (`hl.dsp.focus(...)`). `systemd-inhibit` holds
 sleep, idle and the lid for the run; polkit may refuse it outside the seat's
 active session (SSH, a user unit), which the run log says, and then the
 masked sleep targets and the stopped hypridle are what keep the box awake.
@@ -442,8 +447,9 @@ masked sleep targets and the stopped hypridle are what keep the box awake.
 # .sha256 (or release.json) next to it; else pass --sha256 <hex>:
 pnpm live:install --build file:~/Downloads/Videorc-<version>-linux-x64.AppImage
 
-# Or a branch built on this box:
-pnpm package:desktop:linux
+# Or a branch built on this box, as a test build (the harness drives the app
+# over CDP, which a plain packaged build never opens; live:install refuses one):
+VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop:linux
 pnpm live:install --build local:apps/desktop/release/linux-unpacked
 
 pnpm live:install --rollback
@@ -462,7 +468,9 @@ The AppImage is extracted (no FUSE) and the harness spawns its `videorc`
 directly, in its own process group, so the app PID is the one it started.
 Electron's sandbox then relies on unprivileged user namespaces, which Arch
 allows; if a distro refuses them (Ubuntu 24.04's AppArmor), the app fails at
-launch with a SUID sandbox error: that is a known gap.
+launch with a SUID sandbox error: that is a known gap. The AppImage's own
+AppRun adds `--no-sandbox` in that case (`docs/distribution.md`), but the
+harness does not start the app through AppRun.
 
 ### L6. Hookup, policy and doctor
 

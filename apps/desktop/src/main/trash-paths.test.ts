@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import { smokeTrashDirectory, smokeTrashItem, trashPaths } from './trash-paths'
@@ -68,8 +70,8 @@ describe('the smoke Trash stand-in (plan 209 S16)', () => {
 
     expect(mkdir).toHaveBeenCalledWith('/tmp/run/trash')
     expect(rename.mock.calls).toEqual([
-      ['/tmp/run/recordings/take.mp4', '/tmp/run/trash/42-1-take.mp4'],
-      ['/tmp/run/other/take.mp4', '/tmp/run/trash/42-2-take.mp4']
+      ['/tmp/run/recordings/take.mp4', join('/tmp/run/trash', '42-1-take.mp4')],
+      ['/tmp/run/other/take.mp4', join('/tmp/run/trash', '42-2-take.mp4')]
     ])
   })
 })

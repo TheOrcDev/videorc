@@ -17,14 +17,17 @@
 //      runs (the Notes window stays closed), the composer says so, and
 //      Activity shows the refusals as Buddy's.
 //   3. `/buddy move yourself to the top left` through `move_on_scene` (plan
-//      209 S11b): Buddy's rect lands top left. SKIPPED with a message while
-//      the catalog has no `move_on_scene` (the orchestrator re-runs it after
-//      PR B merges).
+//      209 S11b): Buddy's rect lands top left and the composer says so.
+//      SKIPPED with a message while the catalog has no `move_on_scene` (the
+//      orchestrator re-runs it after PR B merges).
 //   4. By voice, while recording: "Buddy, stop the recording." The planner
 //      answers `stop`; Buddy asks 'Stop the recording? Say "Buddy, yes".'
 //      and the recording runs on through a bare "Yes." (review fix 17: a yes
 //      to going live or stopping must name Buddy) until "Buddy, yes.", then
-//      stops (D14).
+//      stops (D14). The spoken half needs live captions: where the product
+//      says this platform can't caption at all (Linux today, see
+//      scripts/lib/captions-platform-skip.mjs), it SKIPs with the product's
+//      reason, and the typed start and a clean stop still run.
 
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -35,6 +38,10 @@ import { join, resolve } from 'node:path'
 
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
 import { startFakeApiRouter } from './lib/fake-api-router.mjs'
+import {
+  captionsPlatformUnavailableReason,
+  captionsSkipLine
+} from './lib/captions-platform-skip.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import {
   AI_CAPABILITIES_PATH,
@@ -164,6 +171,7 @@ const router = await startFakeApiRouter({
 let stopApp = async () => {}
 let passed = false
 const results = []
+const skippedParts = []
 try {
   const launch = await launchDevApp({
     env: {
@@ -352,6 +360,7 @@ try {
     const properties = Object.keys(move?.inputSchema?.properties ?? {})
     if (!move) {
       results.push('3 SKIPPED: the catalog has no move_on_scene yet (plan 209 S11b, PR B)')
+      skippedParts.push('3 move_on_scene')
       log('step 3: SKIPPED, the catalog has no move_on_scene yet; re-run after PR B merges')
     } else if (!move.buddy || !properties.includes('item') || !properties.includes('place')) {
       fail(
@@ -375,6 +384,9 @@ try {
           value: horizontal
         }
       })
+      // The rect moves before Buddy's answer comes back, and the composer
+      // refuses the next /buddy until it does: wait for it, as steps 1-2 do.
+      await composerSays('Moved Buddy to the top left.', 'what Buddy did')
       results.push(`3 move_on_scene: Buddy at ${JSON.stringify(rect)}`)
       log('step 3: /buddy moved Buddy to the top left')
     }
@@ -396,121 +408,145 @@ try {
     const captureSessionId = (await recording.promise).payload.sessionId
     log(`step 4: recording ${captureSessionId}, started by /buddy (typed: no spoken yes)`)
 
-    // Buddy listens: a fake chat session, captions, Buddy with consent.
-    await request(renderer, timeoutMs, 'cohost.settings.set', {
-      enabled: true,
-      listen: true,
-      wakeWordRequired: false
-    })
-    await request(renderer, timeoutMs, 'liveChat.start', {
-      sessionId: chatSessionId,
-      destinations: [{ platform: 'twitch', targetId: 'buddy-act', read: 'ready', write: 'ready' }],
-      fakes: [
-        {
-          platform: 'twitch',
-          targetId: 'buddy-act',
-          count: 2,
-          intervalMs: 250,
-          send: 'sent',
-          authors: ['ana_dev']
-        }
-      ]
-    })
-    await request(renderer, timeoutMs, 'captions.start', { language: 'en' })
-    const started = await request(renderer, timeoutMs, 'cohost.start', {
-      sessionId: chatSessionId,
-      consentToProcessChat: true,
-      streamTitle: 'Buddy act smoke'
-    })
-    if (started?.status !== 'listening') fail(`cohost.start: ${JSON.stringify(started)}`)
-    // Audio for the caption session, through main's debug bridge.
-    let pumping = true
-    const pump = (async () => {
-      captionFake.state.realtimePartialProgress = true
-      while (pumping) {
-        await command('backend-debug-rpc', {
-          method: 'audio.test.inject-pcm',
-          params: { sessionId: captureSessionId, durationMs: 200, rawPeak: 0.12 },
-          timeoutMs: 5_000
-        }).catch(() => undefined)
-        await sleep(1_000)
-      }
-    })()
-    try {
-      const say = async (text) => {
-        const reached = await waitUntil(`a caption client to hear "${text}"`, async () => {
-          const count = await captionFake.emitRealtimeFinal(text)
-          return { done: count > 0, value: count }
-        })
-        if (!reached) fail(`no caption client heard "${text}"`)
-      }
-      const before = fakeCohost.state.actRequests.length
-      fakeCohost.queueActAnswer({
-        answer: { calls: [{ tool: 'stop', args: {} }], line: 'Stopping the recording.' }
+    // Can this platform caption at all? The product's own answer, asked only
+    // here so it can't touch steps 1-3 on any platform.
+    const captionsUnavailable = await captionsPlatformUnavailableReason(
+      async (code) => (await command('eval-js', { code }))?.result
+    )
+    if (captionsUnavailable) log(`live captions are unavailable here: ${captionsUnavailable}`)
+
+    if (captionsUnavailable) {
+      // Buddy hears the room through live captions; with none on this
+      // platform there is nothing to say "Buddy, stop" into. The typed start
+      // above ran; end the recording cleanly and say what didn't run.
+      await request(renderer, timeoutMs, 'session.stop', {})
+      await waitUntil('the recording to stop', async () => {
+        const status = await request(renderer, timeoutMs, 'recording.status')
+        return { done: status?.state === 'idle', value: status }
       })
-      const asked = events.createWait(
-        'the D14 card',
-        (event) =>
-          event.event === 'cohost.state' &&
-          event.payload?.command?.kind === 'act' &&
-          event.payload.command.status === 'confirm' &&
-          String(event.payload.command.message).includes(STOP_QUESTION),
-        30_000
-      )
-      await say('Buddy, stop the recording.')
-      const record = await nextPlannerRequest(before, 'the spoken stop')
-      if (record.body.state?.activity !== 'recording') {
-        fail(`the planner state while recording: ${JSON.stringify(record.body.state)}`)
+      results.push('4 typed: start_recording by /buddy, no spoken yes asked')
+      results.push(`4 voice SKIPPED: ${captionsUnavailable}`)
+      skippedParts.push('4 voice')
+      log(captionsSkipLine('step 4', 'the spoken stop and spoken yes', captionsUnavailable))
+    } else {
+      // Buddy listens: a fake chat session, captions, Buddy with consent.
+      await request(renderer, timeoutMs, 'cohost.settings.set', {
+        enabled: true,
+        listen: true,
+        wakeWordRequired: false
+      })
+      await request(renderer, timeoutMs, 'liveChat.start', {
+        sessionId: chatSessionId,
+        destinations: [
+          { platform: 'twitch', targetId: 'buddy-act', read: 'ready', write: 'ready' }
+        ],
+        fakes: [
+          {
+            platform: 'twitch',
+            targetId: 'buddy-act',
+            count: 2,
+            intervalMs: 250,
+            send: 'sent',
+            authors: ['ana_dev']
+          }
+        ]
+      })
+      await request(renderer, timeoutMs, 'captions.start', { language: 'en' })
+      const started = await request(renderer, timeoutMs, 'cohost.start', {
+        sessionId: chatSessionId,
+        consentToProcessChat: true,
+        streamTitle: 'Buddy act smoke'
+      })
+      if (started?.status !== 'listening') fail(`cohost.start: ${JSON.stringify(started)}`)
+      // Audio for the caption session, through main's debug bridge.
+      let pumping = true
+      const pump = (async () => {
+        captionFake.state.realtimePartialProgress = true
+        while (pumping) {
+          await command('backend-debug-rpc', {
+            method: 'audio.test.inject-pcm',
+            params: { sessionId: captureSessionId, durationMs: 200, rawPeak: 0.12 },
+            timeoutMs: 5_000
+          }).catch(() => undefined)
+          await sleep(1_000)
+        }
+      })()
+      try {
+        const say = async (text) => {
+          const reached = await waitUntil(`a caption client to hear "${text}"`, async () => {
+            const count = await captionFake.emitRealtimeFinal(text)
+            return { done: count > 0, value: count }
+          })
+          if (!reached) fail(`no caption client heard "${text}"`)
+        }
+        const before = fakeCohost.state.actRequests.length
+        fakeCohost.queueActAnswer({
+          answer: { calls: [{ tool: 'stop', args: {} }], line: 'Stopping the recording.' }
+        })
+        const asked = events.createWait(
+          'the D14 card',
+          (event) =>
+            event.event === 'cohost.state' &&
+            event.payload?.command?.kind === 'act' &&
+            event.payload.command.status === 'confirm' &&
+            String(event.payload.command.message).includes(STOP_QUESTION),
+          30_000
+        )
+        await say('Buddy, stop the recording.')
+        const record = await nextPlannerRequest(before, 'the spoken stop')
+        if (record.body.state?.activity !== 'recording') {
+          fail(`the planner state while recording: ${JSON.stringify(record.body.state)}`)
+        }
+        const card = (await asked.promise).payload.command
+        // Nothing stops before the yes.
+        await sleep(3_000)
+        const status = await request(renderer, timeoutMs, 'recording.status')
+        if (status?.state !== 'recording' || status?.sessionId !== captureSessionId) {
+          fail(`the recording stopped before a spoken yes: ${JSON.stringify(status)}`)
+        }
+        const stopped = events.createWait(
+          'the recording to stop after the yes',
+          (event) =>
+            event.event === 'recording.status' &&
+            event.payload?.sessionId === captureSessionId &&
+            ['idle', 'stopping'].includes(event.payload?.state),
+          60_000
+        )
+        // The card never stays open asking: it finishes in place, or, when the
+        // stop ends the session Buddy runs with (here: the recording), Buddy
+        // stops and the card goes with it.
+        const finished = events.createWait(
+          'the card finishing or leaving with Buddy after the yes',
+          (event) =>
+            event.event === 'cohost.state' &&
+            ((event.payload?.command?.id === card.id &&
+              event.payload.command.status !== 'confirm') ||
+              (event.payload?.status === 'off' && event.payload?.command?.id !== card.id)),
+          60_000
+        )
+        // Review fix 17: a bare yes (a text-to-speech alert could say it)
+        // leaves the question open and the recording running.
+        await say('Yes.')
+        await sleep(3_000)
+        const afterBareYes = await request(renderer, timeoutMs, 'recording.status')
+        if (afterBareYes?.state !== 'recording' || afterBareYes?.sessionId !== captureSessionId) {
+          fail(`a bare "Yes." stopped the recording: ${JSON.stringify(afterBareYes)}`)
+        }
+        await say('Buddy, yes.')
+        await stopped.promise
+        const answered = (await finished.promise).payload
+        const ending =
+          answered.command?.id === card.id
+            ? answered.command.message
+            : 'the stop ended the session, Buddy stopped and the card went with it'
+        results.push(
+          `4 voice: "${STOP_QUESTION}" held the recording through "Yes." until "Buddy, yes." (${ending})`
+        )
+        log('step 4: a spoken stop waited for a spoken yes')
+      } finally {
+        pumping = false
+        await pump
       }
-      const card = (await asked.promise).payload.command
-      // Nothing stops before the yes.
-      await sleep(3_000)
-      const status = await request(renderer, timeoutMs, 'recording.status')
-      if (status?.state !== 'recording' || status?.sessionId !== captureSessionId) {
-        fail(`the recording stopped before a spoken yes: ${JSON.stringify(status)}`)
-      }
-      const stopped = events.createWait(
-        'the recording to stop after the yes',
-        (event) =>
-          event.event === 'recording.status' &&
-          event.payload?.sessionId === captureSessionId &&
-          ['idle', 'stopping'].includes(event.payload?.state),
-        60_000
-      )
-      // The card never stays open asking: it finishes in place, or, when the
-      // stop ends the session Buddy runs with (here: the recording), Buddy
-      // stops and the card goes with it.
-      const finished = events.createWait(
-        'the card finishing or leaving with Buddy after the yes',
-        (event) =>
-          event.event === 'cohost.state' &&
-          ((event.payload?.command?.id === card.id &&
-            event.payload.command.status !== 'confirm') ||
-            (event.payload?.status === 'off' && event.payload?.command?.id !== card.id)),
-        60_000
-      )
-      // Review fix 17: a bare yes (a text-to-speech alert could say it)
-      // leaves the question open and the recording running.
-      await say('Yes.')
-      await sleep(3_000)
-      const afterBareYes = await request(renderer, timeoutMs, 'recording.status')
-      if (afterBareYes?.state !== 'recording' || afterBareYes?.sessionId !== captureSessionId) {
-        fail(`a bare "Yes." stopped the recording: ${JSON.stringify(afterBareYes)}`)
-      }
-      await say('Buddy, yes.')
-      await stopped.promise
-      const answered = (await finished.promise).payload
-      const ending =
-        answered.command?.id === card.id
-          ? answered.command.message
-          : 'the stop ended the session, Buddy stopped and the card went with it'
-      results.push(
-        `4 voice: "${STOP_QUESTION}" held the recording through "Yes." until "Buddy, yes." (${ending})`
-      )
-      log('step 4: a spoken stop waited for a spoken yes')
-    } finally {
-      pumping = false
-      await pump
     }
   }
 
@@ -524,7 +560,11 @@ try {
 }
 
 if (passed) {
+  // A skipped part is said as SKIP; PASS covers only what ran.
+  const verdict = skippedParts.length
+    ? `PASS for every step that ran; SKIP ${skippedParts.join(', ')}`
+    : 'PASS'
   console.log(
-    `buddy-act smoke PASS\n${results.map((line) => `  ${line}`).join('\n')}\n  output: ${outputDirectory}`
+    `buddy-act smoke ${verdict}\n${results.map((line) => `  ${line}`).join('\n')}\n  output: ${outputDirectory}`
   )
 }

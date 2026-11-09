@@ -16,10 +16,9 @@ use chrono::Utc;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use crate::capture_health::{
-    CaptureHealthCameraEpoch, CaptureHealthScreenEpoch, CaptureHealthTransition, CaptureStage,
-    DEGRADED_RATE_FRACTION,
-};
+#[cfg(any(test, debug_assertions))]
+use crate::capture_health::{CaptureHealthCameraEpoch, CaptureHealthScreenEpoch};
+use crate::capture_health::{CaptureHealthTransition, CaptureStage, DEGRADED_RATE_FRACTION};
 use crate::compositor::compositor_status;
 use crate::diagnostics::{apply_capture_health, apply_capture_recovery_status};
 use crate::preview_camera::{
@@ -40,6 +39,8 @@ use crate::protocol::{
     CaptureRecoveryPhase, CaptureRecoverySource, CaptureRecoveryStage, CaptureRecoveryStatus,
     CaptureRecoveryTrigger, HealthLevel, PreviewCameraState, PreviewScreenState,
 };
+#[cfg(any(target_os = "macos", test))]
+use crate::screen_capture::WindowPresence;
 use crate::source_registry::SourceKey;
 use crate::state::AppState;
 
@@ -443,6 +444,272 @@ impl CaptureRecoveryRestartWatchdogArm {
         {
             let _ = sender.send(());
         }
+    }
+}
+
+/// Plan 219 S1: health codes for a captured window that is only out of sight.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const SCREEN_WINDOW_OUT_OF_SIGHT_CODE: &str = "screen-window-out-of-sight";
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const SCREEN_WINDOW_BACK_CODE: &str = "screen-window-back";
+/// How often a held window is checked for having been closed while out of
+/// sight: one window-server lookup each, so cheap, and a closed window then
+/// takes the normal restart (which ends in SourceMissing) within this delay.
+#[cfg(all(target_os = "macos", not(test)))]
+const SCREEN_OUT_OF_SIGHT_REPOLL_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const SCREEN_OUT_OF_SIGHT_REPOLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Polls a held window may sit back on screen while the episode stays open
+/// before its stall takes the normal restart. Frames that resume clear the
+/// episode through the Recovered edge, which needs
+/// `capture_health::RECOVERED_WINDOW_THRESHOLD` healthy 2 s windows (6-8 s);
+/// a window back for 12 s with no Recovered edge has a stream that did not
+/// resume, and only a restart brings that picture back.
+#[cfg(any(target_os = "macos", test))]
+const SCREEN_BACK_WITHOUT_FRAMES_POLLS: u32 = 6;
+
+/// Plan 219 S1: what a screen-delivery stall on a window source gets.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ScreenStallDecision {
+    /// Today's path: a generation-scoped automatic restart.
+    Restart,
+    /// The window is minimized, hidden or on another desktop. The running
+    /// stream resumes by itself when it is back (probed 2026-11-06), and a
+    /// restart could only end in SourceMissing: hold the generation, spend
+    /// no attempt, say so once.
+    HoldOutOfSight { name: String },
+}
+
+/// Pure: a stalled window that is only off screen holds; a window that is
+/// on screen, gone, or not a ScreenCaptureKit window at all restarts.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn screen_stall_decision(presence: Option<&WindowPresence>) -> ScreenStallDecision {
+    match presence {
+        Some(WindowPresence::OffScreen { name }) => {
+            ScreenStallDecision::HoldOutOfSight { name: name.clone() }
+        }
+        Some(WindowPresence::OnScreen { .. }) | Some(WindowPresence::Gone) | None => {
+            ScreenStallDecision::Restart
+        }
+    }
+}
+
+#[cfg(test)]
+static TEST_WINDOW_PRESENCE: StdMutex<Option<WindowPresence>> = StdMutex::new(None);
+
+/// Tests pick what the window server would say for every window scope.
+#[cfg(test)]
+pub(crate) fn set_test_window_presence(presence: Option<WindowPresence>) {
+    *TEST_WINDOW_PRESENCE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = presence;
+}
+
+/// Where the scope's window is, for a ScreenCaptureKit window scope; `None`
+/// for every other source (displays, cameras, Windows and Linux captures).
+#[cfg(any(target_os = "macos", test))]
+fn window_presence_for_scope(scope: &CaptureRecoveryScope) -> Option<WindowPresence> {
+    if scope.source != CaptureRecoverySource::Screen
+        || scope.source_key.kind != crate::source_registry::SourceKind::Window
+    {
+        return None;
+    }
+    let window_id = crate::screen_capture::parse_screencapturekit_window_id(&scope.source_key.id)?;
+    #[cfg(test)]
+    {
+        let _ = window_id;
+        TEST_WINDOW_PRESENCE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+    #[cfg(not(test))]
+    {
+        Some(crate::screen_capture::window_presence(window_id))
+    }
+}
+
+/// One warn per out-of-sight episode: the scope it was raised for, and the
+/// window's name for the matching "is back" notice.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutOfSightEpisode {
+    scope: CaptureRecoveryScope,
+    name: String,
+}
+
+#[cfg(any(target_os = "macos", test))]
+static SCREEN_OUT_OF_SIGHT_EPISODE: StdMutex<Option<OutOfSightEpisode>> = StdMutex::new(None);
+
+#[cfg(any(target_os = "macos", test))]
+fn out_of_sight_episode_is(scope: &CaptureRecoveryScope) -> bool {
+    SCREEN_OUT_OF_SIGHT_EPISODE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .is_some_and(|episode| episode.scope == *scope)
+}
+
+/// Ends the episode for this scope, returning the window's name when one
+/// was open.
+#[cfg(any(target_os = "macos", test))]
+fn take_out_of_sight_episode(scope: &CaptureRecoveryScope) -> Option<String> {
+    let mut episode = SCREEN_OUT_OF_SIGHT_EPISODE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if episode.as_ref().is_some_and(|open| open.scope == *scope) {
+        episode.take().map(|open| open.name)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn emit_screen_window_health_event(
+    state: &AppState,
+    level: HealthLevel,
+    code: &str,
+    message: &str,
+) {
+    // Attach to the capture session when one is running, like the screen
+    // capture's own notices; never wait for the recording lock from here.
+    let session_id = state
+        .recording
+        .try_lock()
+        .ok()
+        .and_then(|recording| recording.as_ref().map(|active| active.session_id.clone()));
+    let _ = crate::recording::emit_health_event(state, session_id.as_deref(), level, code, message);
+}
+
+/// Plan 219 S1: a screen-delivery stall on a window that is only out of sight
+/// is held, not restarted. Returns the coordinator's untouched status when it
+/// held, `None` when the normal restart path applies.
+#[cfg(any(target_os = "macos", test))]
+async fn hold_out_of_sight_window(
+    state: &AppState,
+    scope: &CaptureRecoveryScope,
+    event: &CaptureRecoveryHealthEvent,
+    driver: &Arc<dyn CaptureRecoveryDriver>,
+) -> Option<CaptureRecoveryStatus> {
+    let presence = window_presence_for_scope(scope);
+    let ScreenStallDecision::HoldOutOfSight { name } = screen_stall_decision(presence.as_ref())
+    else {
+        return None;
+    };
+    let first_in_episode = {
+        let mut episode = SCREEN_OUT_OF_SIGHT_EPISODE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if episode.as_ref().is_some_and(|open| open.scope == *scope) {
+            false
+        } else {
+            *episode = Some(OutOfSightEpisode {
+                scope: scope.clone(),
+                name: name.clone(),
+            });
+            true
+        }
+    };
+    if first_in_episode {
+        tracing::warn!(
+            source_id = %scope.source_key.id,
+            generation = scope.generation,
+            window = %name,
+            "screen delivery stalled on a window that is out of sight; holding the generation instead of restarting"
+        );
+        emit_screen_window_health_event(
+            state,
+            HealthLevel::Warn,
+            SCREEN_WINDOW_OUT_OF_SIGHT_CODE,
+            &WindowPresence::out_of_sight_paused_message(&name),
+        );
+        // A window closed while out of sight never resumes: watch for that
+        // and hand the stall to the normal restart, which ends in
+        // SourceMissing with the "closed" copy. A window back on screen
+        // whose stream stayed silent gets the same restart. The watch ends
+        // with the episode (frames back, or the generation replaced).
+        let state = state.clone();
+        let scope = scope.clone();
+        let event = event.clone();
+        let driver = Arc::clone(driver);
+        state.clone().spawn_process_task(async move {
+            let mut back_on_screen_polls = 0_u32;
+            loop {
+                tokio::time::sleep(SCREEN_OUT_OF_SIGHT_REPOLL_INTERVAL).await;
+                if state.process_shutdown_requested() || !out_of_sight_episode_is(&scope) {
+                    return;
+                }
+                let current =
+                    preview_screen_restart_snapshot(&state)
+                        .await
+                        .is_some_and(|current| {
+                            current.source_key == scope.source_key
+                                && current.generation == scope.generation
+                        });
+                if !current {
+                    take_out_of_sight_episode(&scope);
+                    return;
+                }
+                let reason = match window_presence_for_scope(&scope) {
+                    Some(WindowPresence::Gone) => "the held window was closed",
+                    Some(WindowPresence::OnScreen { .. }) => {
+                        back_on_screen_polls += 1;
+                        if back_on_screen_polls < SCREEN_BACK_WITHOUT_FRAMES_POLLS {
+                            continue;
+                        }
+                        "the held window is back on screen but its stream stayed silent"
+                    }
+                    Some(WindowPresence::OffScreen { .. }) | None => {
+                        back_on_screen_polls = 0;
+                        continue;
+                    }
+                };
+                tracing::warn!(
+                    source_id = %scope.source_key.id,
+                    generation = scope.generation,
+                    "{reason}; handing the stall to the normal restart"
+                );
+                take_out_of_sight_episode(&scope);
+                redispatch_health_event(state.clone(), event.clone(), driver).await;
+                return;
+            }
+        });
+    }
+    Some(capture_recovery_status(state).await)
+}
+
+/// The held stall handed back to the handler, through an explicitly `Send`
+/// boxed future: the handler's own future would otherwise have to contain
+/// itself (the hold's watch task calls it).
+#[cfg(any(target_os = "macos", test))]
+fn redispatch_health_event(
+    state: AppState,
+    event: CaptureRecoveryHealthEvent,
+    driver: Arc<dyn CaptureRecoveryDriver>,
+) -> Pin<Box<dyn Future<Output = CaptureRecoveryStatus> + Send>> {
+    Box::pin(handle_capture_health_transition_with_driver(
+        state, event, driver,
+    ))
+}
+
+/// Plan 219 S1: frames are back on a held window. Clears the episode and
+/// says so; the coordinator never changed, so nothing else to reset.
+#[cfg(any(target_os = "macos", test))]
+fn clear_out_of_sight_episode_on_recovery(state: &AppState, scope: &CaptureRecoveryScope) {
+    if let Some(name) = take_out_of_sight_episode(scope) {
+        tracing::info!(
+            source_id = %scope.source_key.id,
+            generation = scope.generation,
+            window = %name,
+            "the held window is back; frames resumed on the same generation"
+        );
+        emit_screen_window_health_event(
+            state,
+            HealthLevel::Info,
+            SCREEN_WINDOW_BACK_CODE,
+            &WindowPresence::back_message(&name),
+        );
     }
 }
 
@@ -2348,7 +2615,7 @@ fn emit_terminal_camera_recovery_warning(state: &AppState) {
         None,
         HealthLevel::Warn,
         "camera-degraded-restart-failed",
-        "The camera is delivering frames far below its target rate and automatic restarts did not recover it. Check the camera connection, or restart Videorc.",
+        "The camera is delivering frames far below its target rate and automatic restarts did not recover it. Reconnect the camera, or choose another camera.",
     );
 }
 
@@ -2848,6 +3115,8 @@ async fn handle_capture_health_transition_with_driver(
         return capture_recovery_status(&state).await;
     }
 
+    #[cfg(any(target_os = "macos", test))]
+    let repoll_event = event.clone();
     let CaptureRecoveryHealthEvent {
         compositor_run_id,
         sequence,
@@ -2863,6 +3132,11 @@ async fn handle_capture_health_transition_with_driver(
         } => {
             let (recovery_stage, scope) = match stage {
                 CaptureStage::CameraDelivery => {
+                    if state.preview_camera.lock().await.status.state
+                        == PreviewCameraState::Disconnected
+                    {
+                        return capture_recovery_status(&state).await;
+                    }
                     let scope = camera_epoch.map(|epoch| {
                         CaptureRecoveryScope::camera(epoch.source_key, epoch.generation)
                     });
@@ -2895,6 +3169,12 @@ async fn handle_capture_health_transition_with_driver(
                             });
                         if !current_matches {
                             return capture_recovery_status(&state).await;
+                        }
+                        #[cfg(any(target_os = "macos", test))]
+                        if let Some(held) =
+                            hold_out_of_sight_window(&state, sampled, &repoll_event, &driver).await
+                        {
+                            return held;
                         }
                     }
                     (CaptureRecoveryStage::ScreenDelivery, scope)
@@ -3013,6 +3293,11 @@ async fn handle_capture_health_transition_with_driver(
                 if !current_matches {
                     return capture_recovery_status(&state).await;
                 }
+                #[cfg(any(target_os = "macos", test))]
+                clear_out_of_sight_episode_on_recovery(
+                    &state,
+                    &CaptureRecoveryScope::screen(sampled.source_key, sampled.generation),
+                );
             }
             if !compositor_health_run_is_current(&state, &compositor_run_id).await {
                 return capture_recovery_status(&state).await;
@@ -5734,6 +6019,294 @@ mod tests {
             Some(CaptureStage::CameraDelivery.label()),
             "a delayed lifecycle task must not erase a newer camera latch"
         );
+    }
+
+    #[test]
+    fn a_stalled_window_holds_only_when_it_is_off_screen() {
+        let off = WindowPresence::OffScreen {
+            name: "Fixture Alpha - Alpha".to_string(),
+        };
+        assert_eq!(
+            screen_stall_decision(Some(&off)),
+            ScreenStallDecision::HoldOutOfSight {
+                name: "Fixture Alpha - Alpha".to_string()
+            }
+        );
+        let on = WindowPresence::OnScreen {
+            name: "Fixture Alpha - Alpha".to_string(),
+        };
+        assert_eq!(
+            screen_stall_decision(Some(&on)),
+            ScreenStallDecision::Restart
+        );
+        assert_eq!(
+            screen_stall_decision(Some(&WindowPresence::Gone)),
+            ScreenStallDecision::Restart
+        );
+        assert_eq!(screen_stall_decision(None), ScreenStallDecision::Restart);
+    }
+
+    fn screen_stall_event(
+        sequence: u64,
+        snapshot: &crate::preview_screen::PreviewScreenRestartSnapshot,
+    ) -> CaptureRecoveryHealthEvent {
+        CaptureRecoveryHealthEvent {
+            compositor_run_id: "run-a".to_string(),
+            sequence,
+            camera_mutation_epoch: None,
+            transition: CaptureHealthTransition::Degraded {
+                stage: CaptureStage::ScreenDelivery,
+                detail: "screen delivery stalled".to_string(),
+                camera_epoch: None,
+                screen_epoch: Some(CaptureHealthScreenEpoch {
+                    source_key: snapshot.source_key.clone(),
+                    generation: snapshot.generation,
+                }),
+            },
+        }
+    }
+
+    fn screen_recovered_event(
+        sequence: u64,
+        snapshot: &crate::preview_screen::PreviewScreenRestartSnapshot,
+    ) -> CaptureRecoveryHealthEvent {
+        CaptureRecoveryHealthEvent {
+            compositor_run_id: "run-a".to_string(),
+            sequence,
+            camera_mutation_epoch: None,
+            transition: CaptureHealthTransition::Recovered {
+                stage: CaptureStage::ScreenDelivery,
+                detail: "screen delivery recovered".to_string(),
+                camera_epoch: None,
+                screen_epoch: Some(CaptureHealthScreenEpoch {
+                    source_key: snapshot.source_key.clone(),
+                    generation: snapshot.generation,
+                }),
+            },
+        }
+    }
+
+    fn health_codes(events: &mut broadcast::Receiver<crate::protocol::ServerEvent>) -> Vec<String> {
+        let mut codes = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(event) if event.event == "health.event" => codes.push(format!(
+                    "{}:{}",
+                    event.payload["level"].as_str().unwrap_or(""),
+                    event.payload["code"].as_str().unwrap_or("")
+                )),
+                Ok(event) => codes.push(format!("event:{}", event.event)),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        codes.retain(|code| !code.starts_with("event:"));
+        codes
+    }
+
+    /// The committed recovery phases and the health codes, from one drain:
+    /// `recovery_event_phases` and `health_codes` each drop the other's
+    /// events.
+    fn recovery_phases_and_health_codes(
+        events: &mut broadcast::Receiver<crate::protocol::ServerEvent>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut phases = Vec::new();
+        let mut codes = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(event) if event.event == "capture.recovery.status" => phases.push(
+                    event.payload["phase"]
+                        .as_str()
+                        .expect("recovery event phase")
+                        .to_string(),
+                ),
+                Ok(event) if event.event == "health.event" => codes.push(format!(
+                    "{}:{}",
+                    event.payload["level"].as_str().unwrap_or(""),
+                    event.payload["code"].as_str().unwrap_or("")
+                )),
+                Ok(_) => {}
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        (phases, codes)
+    }
+
+    async fn install_test_window(
+        state: &AppState,
+        window_id: &str,
+    ) -> crate::preview_screen::PreviewScreenRestartSnapshot {
+        let video = crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Custom,
+            width: 8,
+            height: 4,
+            fps: 30,
+            bitrate_kbps: 2_000,
+        };
+        crate::preview_screen::test_install_live_screen_generation(state, window_id, 3, 1, &video)
+            .await;
+        preview_screen_restart_snapshot(state)
+            .await
+            .expect("test window snapshot")
+    }
+
+    /// Plan 219 S1, one test so the shared presence override stays ordered:
+    /// off screen holds (no restart, no attempt, one warn per episode, cleared
+    /// by the normal Recovered edge with no restart); gone restarts; on screen
+    /// restarts; a held window back on screen whose stream stayed silent
+    /// restarts. A restart is proven by the Restarting status the handler
+    /// commits, not by the status it returns: the scripted attempt is
+    /// immediate and runs on the process runtime, so it can be over, and the
+    /// coordinator Idle again, before the handler reads its status.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_window_out_of_sight_holds_the_generation_instead_of_restarting() {
+        let state = test_state();
+        install_test_compositor_run(&state, "run-a").await;
+        let snapshot = install_test_window(&state, "window:screencapturekit:40696").await;
+        let mut events = state.events.subscribe();
+        let driver = Arc::new(ScriptedRecoveryDriver::new(
+            [
+                CaptureRecoveryRestartOutcome::Superseded,
+                CaptureRecoveryRestartOutcome::Superseded,
+                CaptureRecoveryRestartOutcome::Superseded,
+            ],
+            [],
+        ));
+        let dyn_driver: Arc<dyn CaptureRecoveryDriver> = driver.clone();
+
+        // Off screen: held.
+        set_test_window_presence(Some(WindowPresence::OffScreen {
+            name: "Fixture Alpha - Alpha".to_string(),
+        }));
+        let status = handle_capture_health_transition_with_driver(
+            state.clone(),
+            screen_stall_event(1, &snapshot),
+            dyn_driver.clone(),
+        )
+        .await;
+        assert_eq!(status.phase, CaptureRecoveryPhase::Idle);
+        assert_eq!(status.attempts, 0);
+        assert_eq!(driver.restart_calls(), 0);
+        assert!(out_of_sight_episode_is(&CaptureRecoveryScope::screen(
+            snapshot.source_key.clone(),
+            snapshot.generation
+        )));
+        assert_eq!(
+            health_codes(&mut events),
+            vec!["warn:screen-window-out-of-sight".to_string()]
+        );
+        // The same episode again (a later stall edge): no second warn.
+        let status = handle_capture_health_transition_with_driver(
+            state.clone(),
+            screen_stall_event(2, &snapshot),
+            dyn_driver.clone(),
+        )
+        .await;
+        assert_eq!(status.phase, CaptureRecoveryPhase::Idle);
+        assert_eq!(driver.restart_calls(), 0);
+        assert!(health_codes(&mut events).is_empty());
+        assert_eq!(
+            preview_screen_restart_snapshot(&state).await.as_ref(),
+            Some(&snapshot),
+            "the generation is untouched"
+        );
+
+        // Frames back: the normal Recovered edge clears it, with no restart.
+        let status = handle_capture_health_transition_with_driver(
+            state.clone(),
+            screen_recovered_event(3, &snapshot),
+            dyn_driver.clone(),
+        )
+        .await;
+        assert_eq!(status.phase, CaptureRecoveryPhase::Idle);
+        assert_eq!(driver.restart_calls(), 0);
+        assert!(!out_of_sight_episode_is(&CaptureRecoveryScope::screen(
+            snapshot.source_key.clone(),
+            snapshot.generation
+        )));
+        assert_eq!(
+            health_codes(&mut events),
+            vec!["info:screen-window-back".to_string()]
+        );
+
+        // Gone: today's restart.
+        set_test_window_presence(Some(WindowPresence::Gone));
+        handle_capture_health_transition_with_driver(
+            state.clone(),
+            screen_stall_event(4, &snapshot),
+            dyn_driver.clone(),
+        )
+        .await;
+        // The attempt runs on the process runtime, not this test's: wait in
+        // real time.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while driver.restart_calls() < 1 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(driver.restart_calls(), 1);
+        let (phases, codes) = recovery_phases_and_health_codes(&mut events);
+        assert_eq!(phases.first().map(String::as_str), Some("restarting"));
+        assert!(
+            !codes.iter().any(|code| code.contains("screen-window")),
+            "a closed window is never reported as out of sight"
+        );
+
+        // On screen: unchanged, a restart.
+        let state = test_state();
+        install_test_compositor_run(&state, "run-a").await;
+        let snapshot = install_test_window(&state, "window:screencapturekit:40697").await;
+        let mut events = state.events.subscribe();
+        set_test_window_presence(Some(WindowPresence::OnScreen {
+            name: "Fixture Alpha - Alpha".to_string(),
+        }));
+        handle_capture_health_transition_with_driver(
+            state.clone(),
+            screen_stall_event(1, &snapshot),
+            dyn_driver.clone(),
+        )
+        .await;
+        // The attempt runs on the process runtime, not this test's: wait in
+        // real time.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while driver.restart_calls() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(driver.restart_calls(), 2);
+        let (phases, codes) = recovery_phases_and_health_codes(&mut events);
+        assert_eq!(phases.first().map(String::as_str), Some("restarting"));
+        assert!(
+            !codes.iter().any(|code| code.contains("screen-window")),
+            "a window on screen is never reported as out of sight"
+        );
+
+        // Held, then back on screen with no Recovered edge: the stream did
+        // not resume, so the watch hands the stall to the normal restart.
+        let state = test_state();
+        install_test_compositor_run(&state, "run-a").await;
+        let snapshot = install_test_window(&state, "window:screencapturekit:40698").await;
+        let scope = CaptureRecoveryScope::screen(snapshot.source_key.clone(), snapshot.generation);
+        set_test_window_presence(Some(WindowPresence::OffScreen {
+            name: "Fixture Alpha - Alpha".to_string(),
+        }));
+        let status = handle_capture_health_transition_with_driver(
+            state.clone(),
+            screen_stall_event(1, &snapshot),
+            dyn_driver.clone(),
+        )
+        .await;
+        assert_eq!(status.phase, CaptureRecoveryPhase::Idle);
+        assert!(out_of_sight_episode_is(&scope));
+        set_test_window_presence(Some(WindowPresence::OnScreen {
+            name: "Fixture Alpha - Alpha".to_string(),
+        }));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while driver.restart_calls() < 3 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(driver.restart_calls(), 3);
+        assert!(!out_of_sight_episode_is(&scope));
+        set_test_window_presence(None);
     }
 
     #[tokio::test]

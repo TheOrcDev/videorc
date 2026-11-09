@@ -5,12 +5,16 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::account::SessionState;
+use crate::live_chat::{LiveChatProviderState, LiveChatSnapshot};
 use crate::protocol::{
-    AiArtifactKind, AiArtifactStatus, AudioMeterSampleSnapshot, BackendHealth, BackendLogEvent,
-    DeviceList, DiagnosticStats, EntitlementsSnapshot, HealthEvent, RecordingStatus,
-    SessionLogEntry, SessionSummary,
+    AccountStatus, AiArtifactKind, AiArtifactStatus, AudioMeterSampleSnapshot, BackendHealth,
+    BackendLogEvent, DeviceList, DiagnosticStats, EntitlementsSnapshot, HealthEvent,
+    PreviewScreenSourceKind, PreviewScreenState, PreviewScreenStatus, RecordingStatus,
+    SessionLogEntry, SessionSummary, VideorcAccountSnapshot,
 };
 use crate::repair::GateStatus;
+use crate::screen_capture::DisplayFacts;
 
 // v2 (plan 024 S2): app.version + health.version now carry the DESKTOP app
 // version (threaded from Electron `app.getVersion()`), not the backend crate
@@ -51,6 +55,7 @@ pub struct SupportBundleExportInput {
     pub database_path: PathBuf,
     pub health: BackendHealth,
     pub devices: DeviceList,
+    pub displays: SupportBundleDisplays,
     pub last_audio_meter: Option<AudioMeterSampleSnapshot>,
     pub entitlements: EntitlementsSnapshot,
     pub recording: RecordingStatus,
@@ -62,6 +67,119 @@ pub struct SupportBundleExportInput {
     pub performance_check: Option<crate::protocol::PerformanceCheckResult>,
     /// The last 2 h of metrics journal lines; `None` while the journal is off.
     pub metrics_journal: Option<Vec<Value>>,
+    /// The Videorc account as the desktop holds it, against the secrets store
+    /// (plan 215 A6).
+    pub account: SupportBundleAccount,
+    /// The chat provider rows as they stand (plan 215 A6).
+    pub live_chat: SupportBundleLiveChat,
+}
+
+/// The Videorc account as the support bundle sees it (plan 215 A6): whether
+/// the app shows a signed-in account, whether a session token is on disk, and
+/// whether the secrets store could be read at all. The first two disagree
+/// exactly when a streamer "is signed in" while chat says sign in; the third
+/// tells an unreadable store from a signed-out one. Booleans only: never the
+/// token, never the identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundleAccount {
+    pub signed_in: bool,
+    pub token_present: bool,
+    pub store_readable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_error: Option<String>,
+}
+
+impl SupportBundleAccount {
+    pub fn from_state(account: &VideorcAccountSnapshot, session: &SessionState) -> Self {
+        Self {
+            signed_in: account.status == AccountStatus::SignedIn,
+            token_present: session.is_signed_in(),
+            store_readable: !matches!(session, SessionState::Unreadable(_)),
+            store_error: match session {
+                SessionState::Unreadable(error) => Some(error.clone()),
+                SessionState::SignedIn | SessionState::SignedOut => None,
+            },
+        }
+    }
+}
+
+/// The chat provider rows (plan 215 A6): which destination reads and sends,
+/// which waits on a sign-in, and the last error on file, with the session they
+/// belong to. Never the messages.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundleLiveChat {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub providers: Vec<LiveChatProviderState>,
+}
+
+impl SupportBundleLiveChat {
+    pub fn from_snapshot(snapshot: &LiveChatSnapshot) -> Self {
+        Self {
+            session_id: snapshot.session_id.clone(),
+            providers: snapshot.providers.clone(),
+        }
+    }
+}
+
+/// The Displays section (plan 213 F3): what macOS says of each display, the
+/// one the screen preview captures and at what size, and the last screen and
+/// camera capture log lines (never the whole log).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundleDisplays {
+    pub displays: Vec<DisplayFacts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured: Option<SupportBundleCapturedDisplay>,
+    pub capture_log: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundleCapturedDisplay {
+    pub source_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_id: Option<u32>,
+    pub state: PreviewScreenState,
+    /// The display's own pixel size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_height: Option<u32>,
+    /// The size the capture asks for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_height: Option<u32>,
+    /// The size its frames arrive at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_height: Option<u32>,
+}
+
+impl SupportBundleCapturedDisplay {
+    /// The display the screen preview captures; `None` while it captures a
+    /// window or nothing.
+    pub fn from_status(status: &PreviewScreenStatus) -> Option<Self> {
+        if status.source_kind != Some(PreviewScreenSourceKind::Screen) {
+            return None;
+        }
+        let source_id = status.source_id.clone()?;
+        Some(Self {
+            display_id: crate::screen_capture::parse_screencapturekit_display_id(&source_id),
+            source_id,
+            state: status.state.clone(),
+            native_width: status.native_width,
+            native_height: status.native_height,
+            requested_width: status.requested_width,
+            requested_height: status.requested_height,
+            actual_width: status.actual_width,
+            actual_height: status.actual_height,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,6 +190,8 @@ pub struct SupportBundle {
     pub app: SupportBundleApp,
     pub health: Value,
     pub devices: DeviceList,
+    pub displays: Value,
+    pub camera_connections: Vec<crate::device_watch::CameraConnectionEvent>,
     pub last_audio_meter: Option<AudioMeterSampleSnapshot>,
     pub entitlements: Value,
     pub recording: Value,
@@ -88,6 +208,11 @@ pub struct SupportBundle {
     pub metrics_journal: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub windows_mf_probe: Option<Value>,
+    /// Plan 215 A6: `{ signedIn, tokenPresent, storeReadable }`, so a bundle
+    /// shows an app that says signed in over a store with no token.
+    pub account: Value,
+    /// Plan 215 A6: the chat provider rows.
+    pub live_chat: Value,
     pub redaction_summary: SupportBundleRedactionSummary,
 }
 
@@ -214,7 +339,10 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
     let mut recording = serde_json::to_value(input.recording)?;
     let mut diagnostics = serde_json::to_value(input.diagnostics)?;
     let mut renderer_diagnostics = input.renderer_diagnostics;
+    let mut displays = serde_json::to_value(input.displays)?;
     let mut logs = serde_json::to_value(input.logs)?;
+    let mut account = serde_json::to_value(input.account)?;
+    let mut live_chat = serde_json::to_value(input.live_chat)?;
     let mut windows_mf_probe = match crate::windows_mf_probe::load_report(&input.database_path) {
         Ok(report) => report.map(serde_json::to_value).transpose()?,
         Err(_) => Some(
@@ -232,7 +360,12 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
     if let Some(value) = renderer_diagnostics.as_mut() {
         redact_value(value, &mut redaction_summary);
     }
+    redact_value(&mut displays, &mut redaction_summary);
     redact_value(&mut logs, &mut redaction_summary);
+    // Booleans pass the redactor untouched, so `tokenPresent` survives its
+    // "token" key; a store error is a message like any other.
+    redact_value(&mut account, &mut redaction_summary);
+    redact_value(&mut live_chat, &mut redaction_summary);
     let mut metrics_journal = input.metrics_journal.map(Value::Array);
     if let Some(lines) = metrics_journal.as_mut() {
         redact_value(lines, &mut redaction_summary);
@@ -256,6 +389,8 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
         },
         health,
         devices: input.devices,
+        displays,
+        camera_connections: crate::device_watch::recent_camera_connections(),
         last_audio_meter: input.last_audio_meter,
         entitlements,
         recording,
@@ -266,6 +401,8 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
         performance_check: input.performance_check,
         metrics_journal,
         windows_mf_probe,
+        account,
+        live_chat,
         redaction_summary,
     })
 }
@@ -325,12 +462,16 @@ fn redact_string(
         summary.url_credentials += 1;
         return Some(redacted);
     }
-    if let Some(redacted) = redact_inline_sensitive_text(text, summary) {
-        return Some(redacted);
+    // Both rules run: a raw error line can carry a credentialed URL and a
+    // home path at once (plan 216 A5, rendererDiagnostics.recentUserErrors).
+    let inline = redact_inline_sensitive_text(text, summary);
+    match redact_home_path(inline.as_deref().unwrap_or(text)) {
+        Some(redacted) => {
+            summary.home_paths += 1;
+            Some(redacted)
+        }
+        None => inline,
     }
-    let redacted = redact_home_path(text)?;
-    summary.home_paths += 1;
-    Some(redacted)
 }
 
 fn redact_sessions(
@@ -464,6 +605,8 @@ fn included_sections() -> Vec<String> {
         "app",
         "health",
         "devices",
+        "displays",
+        "cameraConnections",
         "lastAudioMeter",
         "entitlements",
         "recording",
@@ -472,6 +615,8 @@ fn included_sections() -> Vec<String> {
         "logs",
         "sessions",
         "performanceCheck",
+        "account",
+        "liveChat",
     ]
     .iter()
     .map(|section| (*section).to_string())
@@ -803,6 +948,14 @@ mod tests {
             "videorc-support-bundle-test-{}",
             uuid::Uuid::new_v4()
         ));
+        // Plan 216 A5: the renderer's error ring ships raw error text, which
+        // can carry a home path and a credentialed URL in one line.
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        let raw_user_error = format!(
+            "Live preview layout switch blocked after camera (15s): camera session never delivered a frame ({home}/Library/Logs/camera.log, https://user:password2@example.test/support)."
+        );
         let input = SupportBundleExportInput {
             output_directory: Some(directory.clone()),
             // Plan 024 S2: the renderer forwards the Electron app version.
@@ -818,7 +971,18 @@ mod tests {
                         "occurredAt": "2026-07-07T21:01:33Z"
                     }
                 ],
-                "debugUrl": "https://user:password@example.test/support"
+                "debugUrl": "https://user:password@example.test/support",
+                "recentUserErrors": [
+                    {
+                        "at": "2026-11-03T14:51:46Z",
+                        "action": "switch",
+                        "object": "the scene",
+                        "code": "layout-camera-not-ready",
+                        "kind": "known",
+                        "title": "Couldn't switch the scene",
+                        "raw": raw_user_error
+                    }
+                ]
             })),
             database_path: directory.join("videorc.sqlite3"),
             health: BackendHealth {
@@ -841,6 +1005,7 @@ mod tests {
                 devices: vec![],
                 warnings: vec![],
             },
+            displays: SupportBundleDisplays::default(),
             last_audio_meter: Some(AudioMeterSampleSnapshot {
                 microphone_id: Some("microphone:coreaudio:42".to_string()),
                 result: crate::protocol::AudioMeterResult {
@@ -869,6 +1034,11 @@ mod tests {
             sessions: vec![],
             performance_check: None,
             metrics_journal: None,
+            account: SupportBundleAccount::from_state(
+                &crate::account::signed_out_account(),
+                &SessionState::SignedOut,
+            ),
+            live_chat: SupportBundleLiveChat::default(),
         };
 
         let result = export_support_bundle(input).unwrap();
@@ -884,6 +1054,15 @@ mod tests {
         assert!(!text.contains("sk-test"));
         assert!(!text.contains("password@example"));
         assert!(text.contains("\"rendererDiagnostics\""));
+        assert!(text.contains("\"recentUserErrors\""));
+        assert!(text.contains("layout-camera-not-ready"));
+        assert!(text.contains("Couldn't switch the scene"));
+        assert!(!text.contains("password2@example"));
+        if !home.is_empty() {
+            assert!(!text.contains(&format!("{home}/Library/Logs")));
+            assert!(text.contains("~/Library/Logs/camera.log"));
+        }
+        assert!(text.contains("\"cameraConnections\""));
         assert!(text.contains("Cam Link 4K"));
         assert!(text.contains("MacBook Pro Camera"));
         assert!(!text.contains("videorc.sqlite3"));
@@ -920,6 +1099,48 @@ mod tests {
         assert_eq!(bundle.app.version, "0.9.16");
     }
 
+    // Plan 216 D3: main's record of the Preview watchdog's decisions rides in
+    // rendererDiagnostics.runtimeInfo; the bundle keeps it whole and redacts it.
+    #[test]
+    fn support_bundle_keeps_and_redacts_the_preview_watchdog_decisions() {
+        let mut input = minimal_input(None);
+        input.renderer_diagnostics = Some(json!({
+            "runtimeInfo": {
+                "firstFrameDecisions": [
+                    {
+                        "at": "2026-11-03T14:51:38.000Z",
+                        "watch": "presenting-watch",
+                        "decision": "heal",
+                        "action": "reset-native-path",
+                        "reason": "native presentation is not advancing",
+                        "evidence": { "brokenTicks": 9, "nativePresenting": true, "previewHold": null }
+                    },
+                    {
+                        "at": "2026-11-03T14:51:39.000Z",
+                        "watch": "presenter",
+                        "decision": "presenter-retired",
+                        "reason": "Presenter module failed: https://user:hunter2@example.test/helper",
+                        "evidence": { "driverKind": "helper-process", "fallbackWindowShown": true }
+                    }
+                ]
+            }
+        }));
+        let bundle = serde_json::to_value(build_support_bundle(input).unwrap()).unwrap();
+        let decisions = bundle["rendererDiagnostics"]["runtimeInfo"]["firstFrameDecisions"]
+            .as_array()
+            .expect("the decisions are kept");
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0]["action"], json!("reset-native-path"));
+        assert_eq!(decisions[0]["evidence"]["brokenTicks"], json!(9));
+        assert_eq!(
+            decisions[1]["evidence"]["driverKind"],
+            json!("helper-process")
+        );
+        let retired = decisions[1]["reason"].as_str().unwrap();
+        assert!(retired.starts_with("Presenter module failed: "));
+        assert!(!retired.contains("hunter2"), "{retired}");
+    }
+
     #[test]
     fn support_bundle_carries_metrics_journal_lines_only_when_the_journal_is_on() {
         let off = serde_json::to_value(build_support_bundle(minimal_input(None)).unwrap()).unwrap();
@@ -934,6 +1155,176 @@ mod tests {
         let on = serde_json::to_value(build_support_bundle(input).unwrap()).unwrap();
         assert_eq!(on["metricsJournal"][0]["schemaVersion"], json!(1));
         assert_eq!(on["metricsJournal"][0]["sessionId"], json!("session-1"));
+    }
+
+    fn screen_status(source_kind: &str, source_id: &str) -> PreviewScreenStatus {
+        serde_json::from_value(json!({
+            "state": "live",
+            "sourceId": source_id,
+            "sourceKind": source_kind,
+            "targetFps": 30,
+            "nativeWidth": 3440,
+            "nativeHeight": 1440,
+            "requestedWidth": 1920,
+            "requestedHeight": 804,
+            "actualWidth": 1920,
+            "actualHeight": 804,
+            "framesCaptured": 120,
+            "droppedFrames": 0,
+            "includeCursor": true,
+            "excludeCurrentProcessWindows": true,
+            "updatedAt": "2026-11-01T10:00:00Z",
+            "message": "Keynote — Secret Plans"
+        }))
+        .unwrap()
+    }
+
+    fn two_displays() -> Vec<DisplayFacts> {
+        vec![
+            DisplayFacts {
+                id: 1,
+                uuid: Some("37D8832A-2D66-02CA-B9F7-8F30A301B230".to_string()),
+                name: Some("Built-in Retina Display".to_string()),
+                frame: crate::screen_capture::DisplayFrame {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1512.0,
+                    height: 982.0,
+                },
+                pixel_width: 3024,
+                pixel_height: 1964,
+                scale: 2.0,
+                main: true,
+                mirrors: None,
+            },
+            DisplayFacts {
+                id: 2,
+                uuid: Some("9A1B0C3D-0000-4000-8000-00000000F213".to_string()),
+                name: Some("LG ULTRAWIDE".to_string()),
+                frame: crate::screen_capture::DisplayFrame {
+                    x: 1512.0,
+                    y: 0.0,
+                    width: 3440.0,
+                    height: 1440.0,
+                },
+                pixel_width: 3440,
+                pixel_height: 1440,
+                scale: 1.0,
+                main: false,
+                mirrors: Some(1),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_displays_section_names_each_display_and_the_captured_one_plan_213_f3() {
+        let mut input = minimal_input(None);
+        input.displays = SupportBundleDisplays {
+            displays: two_displays(),
+            captured: SupportBundleCapturedDisplay::from_status(&screen_status(
+                "screen",
+                "screen:screencapturekit:2",
+            )),
+            capture_log: vec![
+                "2026-11-01T10:00:00.000Z INFO videorc_backend::preview_screen: [videorc-capture-sizing] resize=true".to_string(),
+                "2026-11-01T10:00:01.000Z WARN videorc_backend::preview_screen: relay stream_key=live_abc123".to_string(),
+            ],
+        };
+
+        let bundle = serde_json::to_value(build_support_bundle(input).unwrap()).unwrap();
+
+        assert_eq!(
+            bundle["displays"],
+            json!({
+                "displays": [
+                    {
+                        "id": 1,
+                        "uuid": "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+                        "name": "Built-in Retina Display",
+                        "frame": { "x": 0.0, "y": 0.0, "width": 1512.0, "height": 982.0 },
+                        "pixelWidth": 3024,
+                        "pixelHeight": 1964,
+                        "scale": 2.0,
+                        "main": true
+                    },
+                    {
+                        "id": 2,
+                        "uuid": "9A1B0C3D-0000-4000-8000-00000000F213",
+                        "name": "LG ULTRAWIDE",
+                        "frame": { "x": 1512.0, "y": 0.0, "width": 3440.0, "height": 1440.0 },
+                        "pixelWidth": 3440,
+                        "pixelHeight": 1440,
+                        "scale": 1.0,
+                        "main": false,
+                        "mirrors": 1
+                    }
+                ],
+                "captured": {
+                    "sourceId": "screen:screencapturekit:2",
+                    "displayId": 2,
+                    "state": "live",
+                    "nativeWidth": 3440,
+                    "nativeHeight": 1440,
+                    "requestedWidth": 1920,
+                    "requestedHeight": 804,
+                    "actualWidth": 1920,
+                    "actualHeight": 804
+                },
+                "captureLog": [
+                    "2026-11-01T10:00:00.000Z INFO videorc_backend::preview_screen: [videorc-capture-sizing] resize=true",
+                    "2026-11-01T10:00:01.000Z WARN videorc_backend::preview_screen: relay <redacted:secret>"
+                ]
+            })
+        );
+        assert!(included_sections().contains(&"displays".to_string()));
+    }
+
+    #[test]
+    fn a_captured_window_is_no_captured_display_plan_213_f3() {
+        let window = screen_status("window", "window:screencapturekit:77");
+        assert_eq!(SupportBundleCapturedDisplay::from_status(&window), None);
+        let mut idle = screen_status("screen", "screen:screencapturekit:2");
+        idle.source_id = None;
+        assert_eq!(SupportBundleCapturedDisplay::from_status(&idle), None);
+    }
+
+    #[test]
+    fn the_displays_section_adds_no_window_title_plan_213_f3() {
+        let title = "Secret Plans";
+        let mut input = minimal_input(None);
+        input.devices.devices = vec![crate::protocol::Device {
+            app: None,
+            window_title: Some(title.to_string()),
+            display_uuid: None,
+            id: "window:screencapturekit:77".to_string(),
+            name: format!("Keynote — {title}"),
+            kind: crate::protocol::DeviceKind::Window,
+            status: crate::protocol::DeviceStatus::Available,
+            detail: None,
+            width: None,
+            height: None,
+        }];
+        let empty = serde_json::to_string(&build_support_bundle(input.clone()).unwrap()).unwrap();
+        assert!(empty.contains(title));
+        input.displays = SupportBundleDisplays {
+            displays: two_displays(),
+            // The window's status message carries its title; the section
+            // keeps sizes only.
+            captured: SupportBundleCapturedDisplay::from_status(&screen_status(
+                "screen",
+                "screen:screencapturekit:2",
+            )),
+            capture_log: vec![
+                "2026-11-01T10:00:00.000Z INFO videorc_backend::preview_screen: [capture-generation] source=screen source_id=window:screencapturekit:77".to_string(),
+            ],
+        };
+
+        let bundle = build_support_bundle(input).unwrap();
+        let displays = serde_json::to_string(&bundle.displays).unwrap();
+        let full = serde_json::to_string(&bundle).unwrap();
+
+        assert!(!displays.contains(title), "{displays}");
+        assert_eq!(full.matches(title).count(), empty.matches(title).count());
     }
 
     fn minimal_input(app_version: Option<String>) -> SupportBundleExportInput {
@@ -959,6 +1350,7 @@ mod tests {
                 devices: vec![],
                 warnings: vec![],
             },
+            displays: SupportBundleDisplays::default(),
             last_audio_meter: None,
             entitlements: current_entitlements(),
             recording: idle_status(),
@@ -967,6 +1359,139 @@ mod tests {
             sessions: vec![],
             performance_check: None,
             metrics_journal: None,
+            account: SupportBundleAccount::from_state(
+                &crate::account::signed_out_account(),
+                &SessionState::SignedOut,
+            ),
+            live_chat: SupportBundleLiveChat::default(),
         }
+    }
+
+    fn signed_in_account() -> VideorcAccountSnapshot {
+        VideorcAccountSnapshot {
+            status: AccountStatus::SignedIn,
+            username: Some("orc_dev".to_string()),
+            display_name: Some("Orc Dev".to_string()),
+            email: Some("orc@videorc.com".to_string()),
+            avatar_url: None,
+        }
+    }
+
+    /// Plan 215 A6: the bundle says whether the app shows a signed-in
+    /// account, whether a token is on disk and whether the store could be
+    /// read, as booleans that survive the redactor (`tokenPresent` carries a
+    /// "token" key). The streamer's case is the first row: signed in on
+    /// screen, no token on disk.
+    #[test]
+    fn the_account_section_tells_a_shown_sign_in_from_a_stored_token_plan_215_a6() {
+        let cases = [
+            (
+                signed_in_account(),
+                SessionState::SignedOut,
+                json!({ "signedIn": true, "tokenPresent": false, "storeReadable": true }),
+            ),
+            (
+                signed_in_account(),
+                SessionState::SignedIn,
+                json!({ "signedIn": true, "tokenPresent": true, "storeReadable": true }),
+            ),
+            (
+                crate::account::signed_out_account(),
+                SessionState::SignedOut,
+                json!({ "signedIn": false, "tokenPresent": false, "storeReadable": true }),
+            ),
+            (
+                crate::account::signed_out_account(),
+                SessionState::Unreadable(
+                    "Could not read secret store /Users/orcdev/Library/videorc-secrets.json: permission denied"
+                        .to_string(),
+                ),
+                json!({
+                    "signedIn": false,
+                    "tokenPresent": false,
+                    "storeReadable": false,
+                    "storeError": "Could not read secret store /Users/orcdev/Library/videorc-secrets.json: permission denied"
+                }),
+            ),
+        ];
+        for (account, session, expected) in cases {
+            let mut input = minimal_input(None);
+            input.account = SupportBundleAccount::from_state(&account, &session);
+            let bundle = build_support_bundle(input).unwrap();
+            let mut expected = expected;
+            // The redactor folds the home directory in a store error.
+            if let Some(Value::String(error)) = expected.get_mut("storeError")
+                && let Ok(home) = std::env::var("HOME")
+                && !home.is_empty()
+            {
+                *error = error.replace(&home, "~");
+            }
+            assert_eq!(bundle.account, expected, "{session:?}");
+            let text = serde_json::to_string(&bundle).unwrap();
+            assert!(
+                !text.contains("orc@videorc.com"),
+                "no identity in the bundle"
+            );
+            assert!(!text.contains("orc_dev"));
+        }
+        assert!(included_sections().contains(&"account".to_string()));
+    }
+
+    /// Plan 215 A6: the chat provider rows ride along, with the session they
+    /// belong to and never the messages; a row parked on the Videorc sign-in
+    /// is readable as such.
+    #[test]
+    fn the_live_chat_section_carries_the_provider_rows_plan_215_a6() {
+        use crate::live_chat::{
+            CommentsReadState, CommentsWriteState, LiveChatProviderConnectionState,
+        };
+        use crate::streaming::StreamPlatform;
+
+        let parked = LiveChatProviderState {
+            id: "x-target".to_string(),
+            platform: StreamPlatform::X,
+            target_id: Some("x-target".to_string()),
+            account_id: Some("742673143".to_string()),
+            account_label: Some("Ram".to_string()),
+            read: CommentsReadState::NeedsVideorcSignIn,
+            write: CommentsWriteState::Ready,
+            moderate: None,
+            state: LiveChatProviderConnectionState::Waiting,
+            message: crate::live_chat::X_CHAT_NEEDS_VIDEORC_SIGN_IN.to_string(),
+            last_connected_at: None,
+            last_message_at: None,
+            last_error: None,
+            retry_at: None,
+        };
+        let snapshot = LiveChatSnapshot {
+            session_id: Some("session-1".to_string()),
+            providers: vec![parked],
+            messages: Vec::new(),
+            unread_count: 0,
+            updated_at: "2026-11-03T12:00:00Z".to_string(),
+        };
+        let mut input = minimal_input(None);
+        input.live_chat = SupportBundleLiveChat::from_snapshot(&snapshot);
+
+        let bundle = build_support_bundle(input).unwrap();
+
+        assert_eq!(bundle.live_chat["sessionId"], json!("session-1"));
+        assert_eq!(bundle.live_chat["providers"].as_array().unwrap().len(), 1);
+        let row = &bundle.live_chat["providers"][0];
+        assert_eq!(row["platform"], json!("x"));
+        assert_eq!(row["read"], json!("needs-videorc-sign-in"));
+        assert_eq!(row["state"], json!("waiting"));
+        assert_eq!(
+            row["message"],
+            json!(crate::live_chat::X_CHAT_NEEDS_VIDEORC_SIGN_IN)
+        );
+        assert!(bundle.live_chat.get("messages").is_none());
+        // Between sessions: no session, the capability rows.
+        let between =
+            serde_json::to_value(build_support_bundle(minimal_input(None)).unwrap().live_chat)
+                .unwrap();
+        assert!(between.get("sessionId").is_none());
+        assert_eq!(between["providers"], json!([]));
+        assert!(included_sections().contains(&"liveChat".to_string()));
     }
 }

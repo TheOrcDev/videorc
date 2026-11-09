@@ -13,8 +13,10 @@ import type {
   SystemPermissionPane
 } from '@/lib/backend'
 import { NO_VALUE, formatMetric, plural } from '@/lib/format'
+import { cameraNoVideoLine, cameraSendsNoVideo } from '@/lib/source-status'
 import { previewSourceStateLabel, previewStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
+import type { RecentStreamDrops } from '@/lib/stream-health-attribution'
 import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
 
 // Health's checks and verdict (plan 174 S3.18, I-4, I-25, V-7). Every check
@@ -169,10 +171,14 @@ export function renderingCheck(stats: DiagnosticStats): CheckWords {
     : { value: 'Idle', tone: 'neutral' }
 }
 
+/**
+ * The camera and the screen. "Dropping frames" is present tense (#981): it
+ * reads the drop window, never the run totals, which the technical details
+ * still list. A static screen's idle frames are not drops (preview_screen.rs).
+ */
 export function sourcesCheck(
   stats: DiagnosticStats,
-  camera: Pick<PreviewCameraStatus, 'droppedFrames'>,
-  screen: Pick<PreviewScreenStatus, 'droppedFrames'>
+  recentDrops: Pick<RecentStreamDrops, 'capture'>
 ): CheckWords {
   if (stats.deviceDisconnected) {
     return { value: 'Device disconnected', tone: 'error' }
@@ -180,12 +186,7 @@ export function sourcesCheck(
   if (stats.duplicateCaptureSources.length) {
     return { value: 'Captured twice', tone: 'warn' }
   }
-  if (
-    stats.previewCameraDroppedFrames > 0 ||
-    stats.previewScreenDroppedFrames > 0 ||
-    camera.droppedFrames > 0 ||
-    screen.droppedFrames > 0
-  ) {
+  if (recentDrops.capture) {
     return { value: 'Dropping frames', tone: 'warn' }
   }
   if (stats.captureFps && stats.targetFps && stats.captureFps < stats.targetFps * 0.9) {
@@ -206,6 +207,27 @@ export function previewSourceCheck(
     return { value, tone: 'error' }
   }
   return { value, tone: 'neutral' }
+}
+
+/**
+ * The camera's check. Plan 216 D2: a camera that is on but sends no video
+ * is not "Live"; the verdict's advice names it (`cameraNoVideoAdvice`).
+ */
+export function cameraCheck(camera: Pick<PreviewCameraStatus, 'state' | 'noVideo'>): CheckWords {
+  if (cameraSendsNoVideo(camera)) {
+    return { value: 'No video', tone: 'warn' }
+  }
+  return previewSourceCheck(camera.state)
+}
+
+/** What to do about a camera that sends no video, by name; null otherwise. */
+export function cameraNoVideoAdvice(
+  camera: Pick<PreviewCameraStatus, 'state' | 'noVideo'>,
+  name: string | undefined
+): string | null {
+  return cameraSendsNoVideo(camera)
+    ? `${cameraNoVideoLine(name)} Close other apps that use it, or choose another camera in Sources.`
+    : null
 }
 
 export function previewCheck(
@@ -286,9 +308,11 @@ export function previewSpeedCheck({
 
   const targetFps = diagnosticStats.previewTargetFps ?? previewSurfaceStatus.targetFps
   const minimumSourceFps = targetFps * 0.9
+  // A camera that sends nothing isn't slow: the Camera check names it.
   if (
     shouldCheckCamera &&
     previewCameraStatus.state === 'live' &&
+    !cameraSendsNoVideo(previewCameraStatus) &&
     typeof previewCameraStatus.sourceFps === 'number' &&
     previewCameraStatus.sourceFps < minimumSourceFps
   ) {
@@ -431,6 +455,7 @@ export function fileRepairCheck(
 }
 
 export type HealthChecksInput = PreviewSpeedInput & {
+  recentStreamDrops: Pick<RecentStreamDrops, 'capture'>
   streamHealth: { speed?: number; droppedFrames?: number } | null
   streamTargets: readonly StreamTargetRuntime[]
 }
@@ -455,8 +480,8 @@ export function healthChecks(input: HealthChecksInput): HealthCheck[] {
     check('slowdown', 'Slowdown', slowdownCheck(stats.bottleneck)),
     check('encoder', 'Encoder', encoderCheck(stats, input.streamHealth)),
     check('rendering', 'Rendering', renderingCheck(stats)),
-    check('sources', 'Sources', sourcesCheck(stats, previewCameraStatus, previewScreenStatus)),
-    check('camera', 'Camera', previewSourceCheck(previewCameraStatus.state)),
+    check('sources', 'Sources', sourcesCheck(stats, input.recentStreamDrops)),
+    check('camera', 'Camera', cameraCheck(previewCameraStatus)),
     check('screen', 'Screen', previewSourceCheck(previewScreenStatus.state)),
     check(
       'preview',

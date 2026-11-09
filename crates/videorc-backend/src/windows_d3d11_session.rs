@@ -423,10 +423,11 @@ pub(crate) struct WindowsD3d11SessionRequest {
     pub(crate) supported_layout: bool,
     pub(crate) camera_required: bool,
     pub(crate) camera_source_available: bool,
-    pub(crate) explicit_scene: bool,
     /// Shipping scene semantics that do not yet have a D3D11 layer/input
     /// mapping. Keeping this explicit makes each future bounded `BgraUpload`
     /// source a selector capability change rather than a silent omission.
+    /// An explicit scene adds what `windows_d3d11_unmapped_scene_features`
+    /// names; its background, takeover, screen and camera layers are mapped.
     pub(crate) unsupported_scene_features: Vec<String>,
     pub(crate) media_foundation_selected: bool,
     pub(crate) record_enabled: bool,
@@ -469,6 +470,31 @@ pub(crate) enum WindowsD3d11SessionSelection {
     Disabled,
     Candidate(WindowsD3d11SessionPlan),
     NaturalFallback(WindowsD3d11NaturalFallback),
+}
+
+/// The visible layers of a requested scene the D3D11 scene plan cannot draw
+/// (#1067). The plan maps the background (picture or live), the image
+/// takeover, and screen and camera sources; a visible test pattern would be
+/// skipped and a window source would be drawn from the display, so either
+/// keeps the session on the compositor that draws them.
+pub(crate) fn windows_d3d11_unmapped_scene_features(
+    scene: &crate::protocol::Scene,
+) -> Vec<&'static str> {
+    use crate::protocol::SceneSourceKind;
+    let visible = |kind: SceneSourceKind| {
+        scene
+            .sources
+            .iter()
+            .any(|source| source.visible && source.kind == kind)
+    };
+    let mut features = Vec::new();
+    if visible(SceneSourceKind::TestPattern) {
+        features.push("test-pattern");
+    }
+    if visible(SceneSourceKind::Window) {
+        features.push("window-source");
+    }
+    features
 }
 
 fn fallback_or_required(
@@ -522,13 +548,6 @@ pub(crate) fn select_windows_d3d11_session(
             mode,
             "windows-d3d11-media-layout-unsupported",
             "the selected layout needs sources that are not yet mapped into the D3D11 scene plan",
-        );
-    }
-    if request.explicit_scene {
-        return fallback_or_required(
-            mode,
-            "windows-d3d11-media-explicit-scene-unsupported",
-            "explicit scene layers are not yet mapped into the D3D11 scene plan",
         );
     }
     if !request.unsupported_scene_features.is_empty() {
@@ -860,14 +879,18 @@ mod runtime {
     /// The Buddy's pet atlas per leg (plan 168 S-B4).
     const BUDDY_SPRITE_PRIMARY_SOURCE_ID: u64 = 16;
     const BUDDY_SPRITE_AUXILIARY_SOURCE_ID: u64 = 17;
-    /// Overlay stacking (plan 164 owner answer 7, plan 168 D9): captions,
-    /// then the Buddy (pet, then bubble), then the highlight card on top.
-    /// `build_windows_d3d11_scene_plan` sorts layers by z, so the numbers are
-    /// the order.
+    /// The chat box per leg (plan 215 G).
+    const CHAT_PRIMARY_SOURCE_ID: u64 = 18;
+    const CHAT_AUXILIARY_SOURCE_ID: u64 = 19;
+    /// Overlay stacking (plan 164 owner answer 7, plan 168 D9, plan 215 G):
+    /// captions, then the chat box, then the Buddy (pet, then bubble), then
+    /// the highlight card on top. `build_windows_d3d11_scene_plan` sorts
+    /// layers by z, so the numbers are the order.
     const CAPTION_Z_INDEX: i32 = 10;
-    const BUDDY_SPRITE_Z_INDEX: i32 = 11;
-    const BUDDY_Z_INDEX: i32 = 12;
-    const HIGHLIGHT_Z_INDEX: i32 = 13;
+    const CHAT_Z_INDEX: i32 = 11;
+    const BUDDY_SPRITE_Z_INDEX: i32 = 12;
+    const BUDDY_Z_INDEX: i32 = 13;
+    const HIGHLIGHT_Z_INDEX: i32 = 14;
     /// Banners per leg (plan 186 S4): `banners::BANNER_MAX_SHOWN` plus room
     /// for the ones still fading out. Ids 40.. are the primary leg's, 48.. the
     /// auxiliary's; z 6 to 9 sits under the captions.
@@ -898,6 +921,10 @@ mod runtime {
         generation: u64,
         authority: Option<crate::compositor::NativeSourceOutputLease>,
         bootstrap: Option<WindowsLiveSnapshot>,
+        /// #1067: the session's committed startup scene, drawn until the
+        /// source coordinator lists the session. Unlike `bootstrap` it is not
+        /// a recovery and never publishes a source binding.
+        startup: Option<WindowsLiveSnapshot>,
         events: tokio::sync::broadcast::Sender<crate::protocol::ServerEvent>,
         /// For the live background's budget notice (plan 190 S4).
         state: crate::state::AppState,
@@ -932,6 +959,7 @@ mod runtime {
                 generation: 0,
                 authority: None,
                 bootstrap: None,
+                startup: None,
                 events: state.events.clone(),
                 state: state.clone(),
             }
@@ -977,21 +1005,35 @@ mod runtime {
             }) {
                 return None;
             }
+            Self::snapshot_locked(
+                &camera,
+                &capture,
+                &mut compositor,
+                confirmed.confirmed,
+                confirmed.source_revision,
+            )
+        }
+        fn snapshot_locked(
+            camera: &crate::preview_camera::PreviewCameraRuntime,
+            capture: &crate::preview_screen::PreviewScreenRuntime,
+            compositor: &mut crate::compositor::CompositorRuntime,
+            confirmed: crate::protocol::SourceSelection,
+            source_revision: u64,
+        ) -> Option<WindowsLiveSnapshot> {
             let camera =
-                crate::preview_camera::available_frame_source_locked(&camera).filter(|source| {
+                crate::preview_camera::available_frame_source_locked(camera).filter(|source| {
                     source
                         .source_key()
-                        .is_some_and(|key| Some(&key.id) == confirmed.confirmed.camera_id.as_ref())
+                        .is_some_and(|key| Some(&key.id) == confirmed.camera_id.as_ref())
                 });
             let capture =
-                crate::preview_screen::available_frame_source_locked(&capture).filter(|source| {
+                crate::preview_screen::available_frame_source_locked(capture).filter(|source| {
                     source.source_key().is_some_and(|key| {
                         Some(&key.id)
                             == confirmed
-                                .confirmed
                                 .window_id
                                 .as_ref()
-                                .or(confirmed.confirmed.screen_id.as_ref())
+                                .or(confirmed.screen_id.as_ref())
                     })
                 });
             let edit = compositor.source_edit_snapshot()?;
@@ -1009,9 +1051,27 @@ mod runtime {
                 live_background_budget_notice,
                 camera,
                 capture,
-                confirmed: confirmed.confirmed,
-                source_revision: confirmed.source_revision,
+                confirmed,
+                source_revision,
             })
+        }
+        /// #1067: hold the scene the session just committed, so the pump's
+        /// ticks before the source coordinator lists the session (it starts
+        /// after the muxer runs) already draw its background and stage
+        /// instead of the bare layout. Locks in the publication order.
+        pub(crate) async fn with_startup_scene(
+            mut self,
+            requested: crate::protocol::SourceSelection,
+        ) -> Self {
+            let camera = self.camera.lock().await;
+            let capture = self.capture.lock().await;
+            let mut compositor = self.compositor.lock().await;
+            let startup = Self::snapshot_locked(&camera, &capture, &mut compositor, requested, 0);
+            drop(compositor);
+            drop(capture);
+            drop(camera);
+            self.startup = startup;
+            self
         }
         /// Plan 190 S4: the guard fell back to the poster (once per fall).
         fn notify_live_background_budget(&self) {
@@ -1076,6 +1136,10 @@ mod runtime {
     pub(crate) struct WindowsD3d11OverlayInput {
         pub(crate) captions: CaptionOverlaySlots,
         pub(crate) highlight: CaptionOverlaySlot,
+        /// The chat box (plan 215 G): the landscape raster, drawn on every
+        /// leg its plan carries like the card (the Windows session, like the
+        /// card's path here, has no portrait slot yet).
+        pub(crate) chat: CaptionOverlaySlot,
         /// The Buddy's bubble, one raster per target like captions (plan 164;
         /// the bubble only since plan 168).
         pub(crate) buddy: CaptionOverlaySlots,
@@ -1085,15 +1149,18 @@ mod runtime {
         pub(crate) caption_on_auxiliary: bool,
         pub(crate) highlight_on_primary: bool,
         pub(crate) highlight_on_auxiliary: bool,
+        pub(crate) chat_on_primary: bool,
+        pub(crate) chat_on_auxiliary: bool,
         pub(crate) buddy_on_primary: bool,
         pub(crate) buddy_on_auxiliary: bool,
-        /// Plan 205 S8: the program carries the highlight card / the Buddy
-        /// (`program_shows` over the layout at session start, like the leg
-        /// flags above; mid-session switches apply at the next start, as the
-        /// log says). It differs from "some leg burns it" only for a
-        /// buffer-only session, whose ring keeps the recording plan (D2)
-        /// while its Preview shows the idle program.
+        /// Plan 205 S8: the program carries the highlight card / the Buddy /
+        /// the chat box (`program_shows` over the layout at session start,
+        /// like the leg flags above; mid-session switches apply at the next
+        /// start, as the log says). It differs from "some leg burns it" only
+        /// for a buffer-only session, whose ring keeps the recording plan
+        /// (D2) while its Preview shows the idle program.
         pub(crate) highlight_in_program: bool,
+        pub(crate) chat_in_program: bool,
         pub(crate) buddy_in_program: bool,
         /// The banners' leg plan shape (plan 186 S4): each banner's switches
         /// pick its legs through `banners::banner_leg_carries`, live, so a
@@ -1549,6 +1616,7 @@ mod runtime {
             if plan.auxiliary.is_none()
                 && (overlays.caption_on_auxiliary
                     || overlays.highlight_on_auxiliary
+                    || overlays.chat_on_auxiliary
                     || overlays.buddy_on_auxiliary)
             {
                 return Err(
@@ -1960,6 +2028,18 @@ mod runtime {
         )
     }
 
+    /// Plan 215 G: the chat box's layers this tick, planned like the card's.
+    fn chat_targets(
+        plan: &WindowsD3d11SessionPlan,
+        input: &WindowsD3d11OverlayInput,
+    ) -> super::WindowsD3d11ItemTargets {
+        super::windows_d3d11_item_targets(
+            input.chat_on_primary,
+            plan.auxiliary.is_some() && input.chat_on_auxiliary,
+            input.chat_in_program,
+        )
+    }
+
     /// Plan 205 S8: the Buddy's layers (pet and bubble) this tick.
     fn buddy_targets(
         plan: &WindowsD3d11SessionPlan,
@@ -2255,9 +2335,11 @@ mod runtime {
     ) -> Result<Vec<WindowsD3d11OverlayFrame>, String> {
         let captions = current_caption_overlays(&input.captions);
         let highlight = current_caption_overlay(&input.highlight);
+        let chat = current_caption_overlay(&input.chat);
         let buddy = current_caption_overlays(&input.buddy);
         let caption_on = caption_targets(plan, input);
         let highlight_on = highlight_targets(plan, input);
+        let chat_on = chat_targets(plan, input);
         let buddy_on = buddy_targets(plan, input);
         let primary_dimensions =
             WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
@@ -2267,7 +2349,7 @@ mod runtime {
             .map(|video| WindowsD3d11OutputDimensions::new(video.width, video.height))
             .transpose()
             .map_err(|error| error.to_string())?;
-        let mut frames = Vec::with_capacity(6);
+        let mut frames = Vec::with_capacity(8);
 
         if let (Some(output_targets), Some(caption)) = (caption_on.primary_canvas, captions.primary)
         {
@@ -2307,6 +2389,34 @@ mod runtime {
                 output_dimensions,
                 safe_inset,
                 z_index: CAPTION_Z_INDEX,
+                bubble_anchor: None,
+            });
+        }
+        // Plan 215 G: the chat box, after the bars and under the Buddy and the
+        // card, inside its own rect (no safe inset: it yields to nothing).
+        if let (Some(output_targets), Some(overlay)) = (chat_on.primary_canvas, chat.clone()) {
+            frames.push(WindowsD3d11OverlayFrame {
+                source_id: CHAT_PRIMARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::ChatOverlay,
+                overlay,
+                output_targets,
+                output_dimensions: primary_dimensions,
+                safe_inset: 0,
+                z_index: CHAT_Z_INDEX,
+                bubble_anchor: None,
+            });
+        }
+        if let (Some(output_targets), Some(overlay), Some(output_dimensions)) =
+            (chat_on.auxiliary_canvas, chat, auxiliary_dimensions)
+        {
+            frames.push(WindowsD3d11OverlayFrame {
+                source_id: CHAT_AUXILIARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::ChatOverlay,
+                overlay,
+                output_targets,
+                output_dimensions,
+                safe_inset: 0,
+                z_index: CHAT_Z_INDEX,
                 bubble_anchor: None,
             });
         }
@@ -2402,6 +2512,14 @@ mod runtime {
             None;
         let resuming = live_sources.bootstrap.is_some();
         let mut committed = live_sources.bootstrap.take();
+        // #1067: before the coordinator lists the session, draw the scene
+        // the session committed. It only shapes the picture: the first fresh
+        // snapshot replaces it, and it is never observed as a publication.
+        let mut committed_is_startup = false;
+        if committed.is_none() {
+            committed = live_sources.startup.take();
+            committed_is_startup = committed.is_some();
+        }
         let mut camera = camera;
         let mut camera_identity = camera.as_ref().and_then(|input| {
             input
@@ -2531,6 +2649,7 @@ mod runtime {
                     current.source_revision = next.source_revision
                 });
                 committed = Some(next);
+                committed_is_startup = false;
             }
             if native_retire_required && native_retirement.is_none() {
                 match client.begin_stop_capture() {
@@ -3046,7 +3165,7 @@ mod runtime {
                     break;
                 }
             };
-            if let Some(committed) = committed.as_ref() {
+            if let Some(committed) = committed.as_ref().filter(|_| !committed_is_startup) {
                 live_sources.observe(
                     committed,
                     camera_frame.is_some(),
@@ -3337,6 +3456,9 @@ mod runtime {
                 mirror_x: layout.camera_mirror,
                 mask: windows_scene_mask(camera_mask(layout)),
                 effects: WindowsD3d11LayerEffects {
+                    brightness: layout.camera_look.brightness as f32,
+                    contrast: layout.camera_look.contrast as f32,
+                    saturation: layout.camera_look.saturation as f32,
                     chroma_key,
                     ..Default::default()
                 },
@@ -3493,6 +3615,21 @@ mod runtime {
                             WindowsD3d11SceneMask::None
                         },
                         effects: WindowsD3d11LayerEffects {
+                            brightness: if is_camera {
+                                layout.camera_look.brightness as f32
+                            } else {
+                                0.0
+                            },
+                            contrast: if is_camera {
+                                layout.camera_look.contrast as f32
+                            } else {
+                                1.0
+                            },
+                            saturation: if is_camera {
+                                layout.camera_look.saturation as f32
+                            } else {
+                                1.0
+                            },
                             chroma_key: is_camera.then(|| camera_chroma_key(layout)).flatten().map(
                                 |key| WindowsD3d11ChromaKey {
                                     key_rgb: key.key_rgb,
@@ -3987,6 +4124,7 @@ mod runtime {
         let input = WindowsD3d11OverlayInput {
             captions: crate::captions::new_caption_overlay_slots(),
             highlight: crate::captions::new_caption_overlay_slot(),
+            chat: crate::captions::new_caption_overlay_slot(),
             buddy: crate::captions::new_caption_overlay_slots(),
             buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
                 &crate::cohost::CohostPersona::default(),
@@ -3997,9 +4135,12 @@ mod runtime {
             caption_on_auxiliary: false,
             highlight_on_primary: false,
             highlight_on_auxiliary: false,
+            chat_on_primary: false,
+            chat_on_auxiliary: false,
             buddy_on_primary: true,
             buddy_on_auxiliary: true,
             highlight_in_program: false,
+            chat_in_program: false,
             buddy_in_program: true,
             banner_shape: crate::overlay_layout::OverlaySessionShape {
                 record_enabled: true,
@@ -4092,6 +4233,7 @@ mod runtime {
         let input = WindowsD3d11OverlayInput {
             captions: crate::captions::new_caption_overlay_slots(),
             highlight: crate::captions::new_caption_overlay_slot(),
+            chat: crate::captions::new_caption_overlay_slot(),
             buddy: crate::captions::new_caption_overlay_slots(),
             buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
                 &crate::cohost::CohostPersona::default(),
@@ -4102,9 +4244,12 @@ mod runtime {
             caption_on_auxiliary: true,
             highlight_on_primary: true,
             highlight_on_auxiliary: true,
+            chat_on_primary: true,
+            chat_on_auxiliary: true,
             buddy_on_primary: true,
             buddy_on_auxiliary: true,
             highlight_in_program: true,
+            chat_in_program: true,
             buddy_in_program: true,
             banner_shape: crate::overlay_layout::OverlaySessionShape {
                 record_enabled: true,
@@ -4135,6 +4280,13 @@ mod runtime {
             CaptionOverlayPosition::Top,
         )
         .unwrap();
+        // Plan 215 G: the chat box at its placed rect, like the card.
+        let chat_rect = OverlayRect::new(0.6, 0.1, 0.3, 0.44);
+        crate::captions::install_prepared_caption_overlay(
+            &input.chat,
+            crate::captions::prepare_caption_overlay(&png).unwrap(),
+            crate::chat_overlay::chat_overlay_placement(Some(chat_rect)),
+        );
         let buddy_rect = OverlayRect::new(0.15, 0.25, 0.25, 0.2);
         crate::buddy_overlay::install_buddy_overlay(
             &input.buddy,
@@ -4166,6 +4318,16 @@ mod runtime {
                     WindowsD3d11SceneSourceKind::CaptionOverlay
                 ),
                 (
+                    CHAT_PRIMARY_SOURCE_ID,
+                    CHAT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::ChatOverlay
+                ),
+                (
+                    CHAT_AUXILIARY_SOURCE_ID,
+                    CHAT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::ChatOverlay
+                ),
+                (
                     BUDDY_PRIMARY_SOURCE_ID,
                     BUDDY_Z_INDEX,
                     WindowsD3d11SceneSourceKind::BuddyOverlay
@@ -4187,23 +4349,45 @@ mod runtime {
                 ),
             ]
         );
-        const {
-            assert!(
-                CAPTION_Z_INDEX < BUDDY_SPRITE_Z_INDEX
-                    && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
-                    && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
-            )
-        };
+        const _: () = assert!(
+            CAPTION_Z_INDEX < CHAT_Z_INDEX
+                && CHAT_Z_INDEX < BUDDY_SPRITE_Z_INDEX
+                && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
+                && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
+        );
+        // Plan 215 G: the chat box lands in its placed rect on both legs, with
+        // no safe inset; the same geometry oracle as the CPU and Metal paths
+        // hugs the rect's right edge (its centre is right of the middle) and
+        // its top: a 200 px raster in 768..1152 lands at (952, 72).
+        let chat_primary = &frames[2];
+        assert_eq!(chat_primary.overlay.blit_rect(1280, 720), chat_rect);
+        assert_eq!(chat_primary.safe_inset, 0);
+        assert_eq!(
+            chat_primary.output_targets,
+            WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
+        );
+        assert_eq!(
+            frames[3].output_targets,
+            WindowsD3d11SceneOutputTargets::AUXILIARY
+        );
+        let (chat_transform, _) = super::windows_d3d11_overlay_layer_geometry(
+            (200, 100),
+            (1280, 720),
+            chat_primary.overlay.blit_rect(1280, 720),
+            0,
+        );
+        assert_eq!(chat_transform.x, 952.0 / 1280.0);
+        assert_eq!(chat_transform.y, 72.0 / 720.0);
         // Plan 205 S8: both legs burn the Buddy, so the Preview draws it once,
         // from the primary's layer (the Preview's canvas and sources are the
         // primary's); the stream leg's layer is the stream's alone.
-        let buddy_primary = &frames[2];
+        let buddy_primary = &frames[4];
         assert_eq!(
             buddy_primary.output_targets,
             WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
         );
         assert_eq!(
-            frames[3].output_targets,
+            frames[5].output_targets,
             WindowsD3d11SceneOutputTargets::AUXILIARY
         );
         assert_eq!(buddy_primary.overlay.blit_rect(1280, 720), buddy_rect);
@@ -4243,6 +4427,8 @@ mod runtime {
             vec![
                 CAPTION_PRIMARY_SOURCE_ID,
                 CAPTION_AUXILIARY_SOURCE_ID,
+                CHAT_PRIMARY_SOURCE_ID,
+                CHAT_AUXILIARY_SOURCE_ID,
                 BUDDY_PRIMARY_SOURCE_ID,
                 BUDDY_AUXILIARY_SOURCE_ID,
                 HIGHLIGHT_PRIMARY_SOURCE_ID,
@@ -4259,6 +4445,11 @@ mod runtime {
                     CAPTION_PRIMARY_SOURCE_ID,
                     CAPTION_Z_INDEX,
                     WindowsD3d11SceneSourceKind::CaptionOverlay
+                ),
+                (
+                    CHAT_PRIMARY_SOURCE_ID,
+                    CHAT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::ChatOverlay
                 ),
                 (
                     BUDDY_PRIMARY_SOURCE_ID,
@@ -4385,6 +4576,7 @@ mod runtime {
             let input = WindowsD3d11OverlayInput {
                 captions: crate::captions::new_caption_overlay_slots(),
                 highlight: crate::captions::new_caption_overlay_slot(),
+                chat: crate::captions::new_caption_overlay_slot(),
                 buddy: crate::captions::new_caption_overlay_slots(),
                 buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
                     &crate::cohost::CohostPersona::default(),
@@ -4395,9 +4587,12 @@ mod runtime {
                 caption_on_auxiliary: false,
                 highlight_on_primary: false,
                 highlight_on_auxiliary: false,
+                chat_on_primary: false,
+                chat_on_auxiliary: false,
                 buddy_on_primary: false,
                 buddy_on_auxiliary: shape.stream_enabled && shape.aux_leg == OverlayAuxLeg::Stream,
                 highlight_in_program: false,
+                chat_in_program: false,
                 buddy_in_program: crate::overlay_layout::program_shows(program_shape, true, false),
                 banner_shape: shape,
                 program_shape,
@@ -4696,6 +4891,109 @@ mod runtime {
         crate::preview_camera::stop_preview_camera(&state).await;
     }
 
+    /// #1067: the coordinator lists a session only after its muxer runs, so
+    /// the pump's first ticks have no committed snapshot. The startup scene
+    /// carries the scene the session committed (its background) and the
+    /// requested sources instead.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn windows_live_startup_scene_holds_the_committed_scene_before_the_coordinator() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = crate::state::AppState::new(
+            "fixture".into(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let layout = crate::protocol::default_layout_settings();
+        let video = crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Tutorial720p30,
+            width: 64,
+            height: 36,
+            fps: 30,
+            bitrate_kbps: 1000,
+        };
+        let mut scene = crate::scene::default_scene();
+        scene.background = Some(crate::protocol::EffectiveSceneBackground {
+            asset_id: "background-asset".into(),
+            managed_asset_path: String::new(),
+            fit: crate::protocol::BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: None,
+        });
+        crate::compositor::update_compositor_scene(
+            &state,
+            crate::protocol::CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(scene),
+                layout: layout.clone(),
+                active_screen: None,
+                transition_ms: None,
+            },
+        )
+        .await;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state, "camera:A", &layout, &video,
+        )
+        .await;
+        let requested = crate::protocol::SourceSelection {
+            camera_id: Some("camera:A".into()),
+            screen_id: None,
+            window_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
+
+        let plain = WindowsLiveSources::new(&state, "session");
+        assert!(
+            plain.snapshot().is_none(),
+            "the coordinator has not listed the session yet"
+        );
+        assert!(
+            plain.startup.is_none(),
+            "a session without a scene has none"
+        );
+
+        let sources = WindowsLiveSources::new(&state, "session")
+            .with_startup_scene(requested.clone())
+            .await;
+        let startup = sources.startup.as_ref().expect("startup scene");
+        assert!(
+            startup
+                .render_edit
+                .scenes()
+                .next()
+                .and_then(|scene| scene.background.as_ref())
+                .is_some_and(|background| background.asset_id == "background-asset"),
+            "the startup ticks draw the committed background"
+        );
+        assert_eq!(startup.confirmed, requested);
+        assert_eq!(startup.source_revision, 0);
+        assert!(
+            startup.camera.is_some(),
+            "the requested camera is the startup camera"
+        );
+
+        let other = WindowsLiveSources::new(&state, "session")
+            .with_startup_scene(crate::protocol::SourceSelection {
+                camera_id: Some("camera:B".into()),
+                ..requested
+            })
+            .await;
+        assert!(
+            other.startup.as_ref().unwrap().camera.is_none(),
+            "a source the session did not request is never drawn"
+        );
+        crate::preview_camera::stop_preview_camera(&state).await;
+    }
+
     fn publish_composition(
         textures: Vec<WindowsD3d11TicketedTexture>,
         primary_role: WindowsD3d11MediaRole,
@@ -4875,13 +5173,13 @@ mod tests {
         let zs: Vec<i32> = (0..6).map(windows_d3d11_banner_z_index).collect();
         assert_eq!(zs, vec![6, 7, 8, 9, 9, 9]);
         assert!(zs.windows(2).all(|pair| pair[0] <= pair[1]));
+        const { assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0) };
         const {
-            assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0);
             assert!(
                 WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
                 "captions draw at z 10"
-            );
-        }
+            )
+        };
     }
 
     fn draws_on(
@@ -5171,7 +5469,6 @@ mod tests {
             supported_layout: true,
             camera_required: false,
             camera_source_available: false,
-            explicit_scene: false,
             unsupported_scene_features: Vec::new(),
             media_foundation_selected: true,
             record_enabled: true,
@@ -5529,6 +5826,96 @@ mod tests {
     }
 
     #[test]
+    fn windows_d3d11_scene_with_a_background_stays_on_d3d11() {
+        use crate::protocol::{
+            BackgroundFit, EffectiveSceneBackground, SceneSource, SceneSourceKind, SceneTransform,
+        };
+        let full = SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        let source = |kind: SceneSourceKind, visible: bool| SceneSource {
+            id: format!("{kind:?}"),
+            name: format!("{kind:?}"),
+            kind,
+            device_id: Some("device".to_string()),
+            transform: full.clone(),
+            default_transform: full.clone(),
+            visible,
+            locked: false,
+        };
+        let mut scene = crate::scene::default_scene();
+        scene.sources = vec![
+            source(SceneSourceKind::Screen, true),
+            source(SceneSourceKind::Camera, true),
+        ];
+        scene.background = Some(EffectiveSceneBackground {
+            asset_id: "background-asset".to_string(),
+            managed_asset_path: "C:\\assets\\background.webp".to_string(),
+            fit: BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: None,
+        });
+        // The issue's case: a screen + camera scene with a picture
+        // background is fully mapped, so it is a D3D11 candidate.
+        assert!(windows_d3d11_unmapped_scene_features(&scene).is_empty());
+        let mut mapped = request();
+        mapped.unsupported_scene_features = windows_d3d11_unmapped_scene_features(&scene)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert!(matches!(
+            select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, mapped).unwrap(),
+            WindowsD3d11SessionSelection::Candidate(_)
+        ));
+
+        // Hidden layers draw nothing, so they never cost the session D3D11.
+        scene
+            .sources
+            .push(source(SceneSourceKind::TestPattern, false));
+        scene.sources.push(source(SceneSourceKind::Window, false));
+        assert!(windows_d3d11_unmapped_scene_features(&scene).is_empty());
+
+        // A visible layer the plan cannot draw is named, never dropped.
+        scene
+            .sources
+            .push(source(SceneSourceKind::TestPattern, true));
+        scene.sources.push(source(SceneSourceKind::Window, true));
+        assert_eq!(
+            windows_d3d11_unmapped_scene_features(&scene),
+            vec!["test-pattern", "window-source"]
+        );
+        let mut unmapped = request();
+        unmapped.unsupported_scene_features = windows_d3d11_unmapped_scene_features(&scene)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let WindowsD3d11SessionSelection::NaturalFallback(fallback) =
+            select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, unmapped).unwrap()
+        else {
+            panic!("an unmapped visible layer should use a named fallback");
+        };
+        assert_eq!(
+            fallback.code,
+            "windows-d3d11-media-scene-features-unsupported"
+        );
+        assert!(fallback.detail.contains("test-pattern, window-source"));
+    }
+
+    #[test]
     fn windows_d3d11_auto_names_layout_and_window_fallbacks() {
         let mut window = request();
         window.window_selected = true;
@@ -5540,18 +5927,6 @@ mod tests {
         assert_eq!(
             fallback.code,
             "windows-d3d11-media-window-capture-unsupported"
-        );
-
-        let mut scene = request();
-        scene.explicit_scene = true;
-        let WindowsD3d11SessionSelection::NaturalFallback(fallback) =
-            select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, scene).unwrap()
-        else {
-            panic!("explicit scene should use a named fallback");
-        };
-        assert_eq!(
-            fallback.code,
-            "windows-d3d11-media-explicit-scene-unsupported"
         );
 
         let mut overlay = request();
@@ -5779,8 +6154,9 @@ mod tests {
     }
 
     /// D7: the pet hanging off the canvas edge is clipped by the rasterizer
-    /// (its square stays whole), where an ordinary layer is squashed into
-    /// the canvas by the planner.
+    /// (its square stays whole). Since plan 215 E an ordinary layer is cut
+    /// the same way: the planner keeps its uncut box and never squashes it
+    /// into the canvas.
     #[test]
     fn windows_d3d11_buddy_sprite_clips_at_the_canvas_edge_instead_of_squashing() {
         use crate::windows_d3d11_compositor::{
@@ -5811,12 +6187,15 @@ mod tests {
             x + w > 1.0,
             "it hangs off the right edge; the rasterizer clips it"
         );
-        let mut squashed = layer;
-        squashed.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
-        squashed.effects.sprite = None;
-        let ordinary = plan_one_layer(squashed, (1280, 720));
+        let mut plain = layer;
+        plain.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
+        plain.effects.sprite = None;
+        let ordinary = plan_one_layer(plain, (1280, 720));
+        let [ordinary_x, _, ordinary_w, _] = ordinary.destination_normalized;
+        assert!((ordinary_x - 1200.0 / 1280.0).abs() < 1e-6);
         assert!(
-            ordinary.destination_normalized[0] + ordinary.destination_normalized[2] <= 1.0 + 1e-6
+            (ordinary_w - 120.0 / 1280.0).abs() < 1e-6,
+            "an ordinary layer is cut at the edge, never squashed (plan 215 E)"
         );
         // A sprite transform on any other kind is refused.
         let mut stray = layer;

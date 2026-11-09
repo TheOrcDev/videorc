@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  MAIN_ISOLATED_BACKEND_EVENTS,
   parseMainBackendWireMessage,
   parseMainBannerList,
   parseMainBannersChangedEvent,
@@ -8,7 +9,11 @@ import {
   parseMainCompositorStatusEvent,
   parseMainPreviewSurfaceStatus,
   parseMainPreviewSurfaceStatusEvent,
-  parseMainRecordingStatusEvent
+  parseMainRecordingStatusEvent,
+  parseMainScene,
+  parseMainSceneChangedEvent,
+  parseMainVirtualCameraChangedEvent,
+  parseMainVirtualCameraStatus
 } from './backend-event-message'
 
 describe('main backend event trust boundary', () => {
@@ -54,5 +59,81 @@ describe('main backend event trust boundary', () => {
     expect(() =>
       parseMainBackendWireMessage(JSON.stringify({ event: 'recording.status', payload: {} }))
     ).toThrow('recording.status')
+  })
+})
+
+describe('the Videorc Camera status on the main socket (plan 214 B3)', () => {
+  const ready = { on: true, available: true, state: 'ready', viewers: 0, platformStep: 'ready' }
+
+  it('validates the status and the changed event at use', () => {
+    expect(parseMainVirtualCameraStatus(ready)).toEqual(ready)
+    expect(parseMainVirtualCameraChangedEvent(ready)).toEqual(ready)
+    expect(() => parseMainVirtualCameraStatus({ on: true })).toThrow('virtualCamera.status')
+    expect(() => parseMainVirtualCameraChangedEvent({ ...ready, state: 'sleeping' })).toThrow(
+      'virtualCamera.changed'
+    )
+    expect(() => parseMainVirtualCameraChangedEvent(null)).toThrow('virtualCamera.changed')
+  })
+
+  it('never retires the socket over a bad camera status: the event is isolated', () => {
+    expect(MAIN_ISOLATED_BACKEND_EVENTS.has('virtualCamera.changed')).toBe(true)
+    const parsed = parseMainBackendWireMessage(
+      JSON.stringify({ event: 'virtualCamera.changed', payload: { on: 'yes' } })
+    )
+    expect(parsed).toEqual({ event: 'virtualCamera.changed', payload: { on: 'yes' } })
+  })
+})
+
+describe('the committed scene on the main socket (proof surface background)', () => {
+  const scene = {
+    id: 'scene:main',
+    name: 'Main',
+    sources: [],
+    outputs: [],
+    background: {
+      assetId: 'live-silk-satin',
+      managedAssetPath: 'videorc-asset://background/live-silk-satin.webp',
+      fit: 'fill',
+      scale: 100,
+      offsetX: 0,
+      offsetY: 0,
+      blurPx: 0,
+      dimPercent: 0,
+      saturationPercent: 100,
+      vignettePercent: 0,
+      visibilityPercent: 20,
+      live: { id: 'silk', look: 'satin', motion: 'calm' }
+    }
+  }
+
+  it('validates the scene and the changed event at use', () => {
+    expect(parseMainScene(scene)).toEqual(scene)
+    expect(parseMainSceneChangedEvent(scene)).toEqual(scene)
+    const { background: _background, ...withoutBackground } = scene
+    expect(parseMainSceneChangedEvent(withoutBackground)).toEqual(withoutBackground)
+    expect(() => parseMainScene({ id: 'scene:main' })).toThrow('scene.get')
+    expect(() => parseMainSceneChangedEvent({ ...scene, background: { assetId: 7 } })).toThrow(
+      'scene.changed'
+    )
+    expect(() =>
+      parseMainScene({ ...scene, background: { ...scene.background, fit: 'tile' } })
+    ).toThrow('backend.scene.get.result.background.fit')
+    expect(() =>
+      parseMainSceneChangedEvent({
+        ...scene,
+        background: { ...scene.background, live: { ...scene.background.live, id: 'lava' } }
+      })
+    ).toThrow('background.live.id')
+    expect(() =>
+      parseMainSceneChangedEvent({ ...scene, background: { ...scene.background, extra: true } })
+    ).toThrow('scene.changed')
+  })
+
+  it('never retires the socket over a bad scene: the event is isolated', () => {
+    expect(MAIN_ISOLATED_BACKEND_EVENTS.has('scene.changed')).toBe(true)
+    const parsed = parseMainBackendWireMessage(
+      JSON.stringify({ event: 'scene.changed', payload: { id: 7 } })
+    )
+    expect(parsed).toEqual({ event: 'scene.changed', payload: { id: 7 } })
   })
 })

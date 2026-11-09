@@ -30,6 +30,10 @@ export function SourceSwitchStatus({
       : (deviceList.devices.find((device) => device.id === pending?.deviceId)?.name ??
         pending?.deviceId))
   const health = state.snapshot?.health.find((item) => item.kind === kind)
+  // A source the session can't change keeps its picker disabled (every Linux
+  // source, plan 0024), so it can only be chosen again after Stop.
+  const changeable =
+    state.snapshot?.capabilities.find((item) => item.kind === kind)?.supported !== false
   const message =
     (state.error && (!state.errorKind || state.errorKind === kind) ? state.error : null) ??
     (state.checking
@@ -41,7 +45,9 @@ export function SourceSwitchStatus({
             ? 'Turning off…'
             : `Preparing ${targetName ?? 'source'}…`
         : health?.health === 'unavailable'
-          ? 'Source unavailable. Choose it again to retry, or choose another.'
+          ? changeable
+            ? 'Source unavailable. Choose it again to retry, or choose another.'
+            : 'Source unavailable. Stop, then choose it again or choose another.'
           : state.snapshot?.lastOperation?.kind === kind &&
               state.snapshot.lastOperation.stage === 'applied' &&
               !state.snapshot.lastOperation.outputObserved

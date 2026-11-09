@@ -964,7 +964,7 @@ pub fn build_ffmpeg_args(
         "error".to_string(),
         "-n".to_string(),
         "-i".to_string(),
-        input.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(input),
         "-map".to_string(),
         "0".to_string(),
         // Plan 200 C3: Videorc MP4s carry a `tmcd` timecode track and a
@@ -989,7 +989,7 @@ pub fn build_ffmpeg_args(
         "-progress".to_string(),
         "pipe:1".to_string(),
         "-nostats".to_string(),
-        output.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(output),
     ]);
     Ok(args)
 }
@@ -1208,7 +1208,7 @@ fn video_stream_hash(
             "-v",
             "error",
             "-i",
-            &path.display().to_string(),
+            &crate::ffmpeg::ffmpeg_file_path(path),
             "-map",
             "0:v",
             "-c",
@@ -1248,7 +1248,7 @@ fn decode_audio(
             "-v",
             "error",
             "-i",
-            &path.display().to_string(),
+            &crate::ffmpeg::ffmpeg_file_path(path),
             "-map",
             "0:a:0",
             "-f",
@@ -1666,6 +1666,7 @@ mod tests {
         default_layout_settings,
     };
     use crate::storage::{Database, NewSession};
+    use crate::test_temp_dir::TestTempDir;
     use tokio::sync::broadcast;
 
     #[test]
@@ -2353,11 +2354,7 @@ mod tests {
         // session protocol enum rejects — one such row broke sessions.list
         // (and recording) for every client. mp4-family derivatives follow the
         // import convention: file in mp4_path, container empty.
-        let base = std::env::temp_dir().join(format!(
-            "videorc-cleanup-mp4-container-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&base).unwrap();
+        let base = TestTempDir::new("cleanup-mp4-container");
         let source_path = base.join("source.mp4");
         let output_path = base.join("source - Noise Cleaned.mp4");
         std::fs::write(&source_path, b"source bytes").unwrap();

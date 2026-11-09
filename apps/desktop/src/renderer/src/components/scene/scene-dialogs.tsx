@@ -7,6 +7,7 @@ import { DevicePicker } from '@/components/device-picker'
 import type { KebabMenuItem } from '@/components/kebab-menu'
 import { NewSceneDialog } from '@/components/scene/new-scene-dialog'
 import { ShortcutRecorderField } from '@/components/shortcut-recorder'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -424,6 +425,11 @@ function SceneKeyDialog({
             Puts “{scene.name}” on stream from any app. Click the field and press the keys.
           </DialogDescription>
         </DialogHeader>
+        {runtimeInfo?.globalShortcutsUnavailable ? (
+          <Alert data-testid="scene-key-unavailable" variant="warning">
+            <AlertTitle>{runtimeInfo.globalShortcutsUnavailable}</AlertTitle>
+          </Alert>
+        ) : null}
         <FieldGroup variant="grouped">
           <ShortcutRecorderField
             id={`scene-key-${scene.id}`}
@@ -520,6 +526,7 @@ function SceneRepairDialog({
                   ...repair.sources,
                   screenId: device?.kind === 'screen' ? id : undefined,
                   screenName: device?.kind === 'screen' ? device.name : undefined,
+                  screenUuid: device?.kind === 'screen' ? device.displayUuid : undefined,
                   windowId: device?.kind === 'window' ? id : undefined,
                   windowName: device?.kind === 'window' ? device.name : undefined,
                   testPattern: false

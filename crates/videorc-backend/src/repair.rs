@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ffmpeg::ffmpeg_file_path;
 use crate::process_job::spawn_owned_std;
 
 pub const MAINTENANCE_CANCELLED: &str = "maintenance cancelled";
@@ -52,11 +53,13 @@ struct FfprobeStream {
     channels: Option<u32>,
     channel_layout: Option<String>,
     sample_rate: Option<String>,
+    bit_rate: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FfprobeFormat {
     duration: Option<String>,
+    bit_rate: Option<String>,
 }
 
 fn never_cancelled() -> bool {
@@ -147,6 +150,9 @@ pub struct VideoStreamInfo {
     pub nb_frames: Option<u64>,
     pub duration: Option<f64>,
     pub start_time: Option<f64>,
+    /// Stream bitrate in bits/s, when the container records one (Matroska
+    /// usually doesn't; `MediaProbe::format_bit_rate` covers it).
+    pub bit_rate: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -164,6 +170,8 @@ pub struct AudioStreamInfo {
 #[serde(rename_all = "camelCase")]
 pub struct MediaProbe {
     pub format_duration: Option<f64>,
+    /// The whole container's bitrate in bits/s (every stream together).
+    pub format_bit_rate: Option<u64>,
     pub video: Option<VideoStreamInfo>,
     pub audio: Vec<AudioStreamInfo>,
 }
@@ -189,6 +197,7 @@ pub fn parse_ffprobe_json(json: &str) -> Result<MediaProbe, String> {
             nb_frames: stream.nb_frames.as_deref().and_then(parse_u64),
             duration: stream.duration.as_deref().and_then(parse_f64),
             start_time: stream.start_time.as_deref().and_then(parse_f64),
+            bit_rate: stream.bit_rate.as_deref().and_then(parse_u64),
         });
 
     let audio = raw
@@ -209,12 +218,16 @@ pub fn parse_ffprobe_json(json: &str) -> Result<MediaProbe, String> {
         })
         .collect();
 
+    let format = raw.format;
     Ok(MediaProbe {
-        format_duration: raw
-            .format
-            .and_then(|format| format.duration)
-            .as_deref()
+        format_duration: format
+            .as_ref()
+            .and_then(|format| format.duration.as_deref())
             .and_then(parse_f64),
+        format_bit_rate: format
+            .as_ref()
+            .and_then(|format| format.bit_rate.as_deref())
+            .and_then(parse_u64),
         video,
         audio,
     })
@@ -240,8 +253,8 @@ pub fn probe_media_cancellable(
         "-show_streams",
         "-of",
         "json",
-        file_path,
     ]);
+    command.arg(ffmpeg_file_path(Path::new(file_path)));
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run ffprobe: {error}"))?;
     if !output.status.success() {
@@ -609,7 +622,7 @@ fn analyze_audio_balance_in(
     command.args(ffmpeg_window_input_args(window));
     command.args([
         "-i",
-        file_path,
+        &ffmpeg_file_path(Path::new(file_path)),
         "-map",
         "0:a:0",
         "-af",
@@ -709,7 +722,15 @@ fn detect_freezes_in(
     command.args(["-hide_banner", "-threads", "1", "-filter_threads", "1"]);
     command.args(ffmpeg_window_input_args(window));
     command.args([
-        "-i", file_path, "-map", "0:v:0", "-vf", &filter, "-f", "null", "-",
+        "-i",
+        &ffmpeg_file_path(Path::new(file_path)),
+        "-map",
+        "0:v:0",
+        "-vf",
+        &filter,
+        "-f",
+        "null",
+        "-",
     ]);
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run freezedetect: {error}"))?;
@@ -864,7 +885,14 @@ fn detect_repeated_frames_in(
     command.args(["-hide_banner", "-nostats", "-threads", "1"]);
     command.args(ffmpeg_window_input_args(window));
     command.args([
-        "-i", file_path, "-an", "-map", "0:v:0", "-f", "framemd5", "-",
+        "-i",
+        &ffmpeg_file_path(Path::new(file_path)),
+        "-an",
+        "-map",
+        "0:v:0",
+        "-f",
+        "framemd5",
+        "-",
     ]);
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run framemd5: {error}"))?;
@@ -965,7 +993,7 @@ fn detect_audio_gaps_in(
             format!("{:.3}%+{:.3}", window.start, window.duration),
         ]);
     }
-    command.arg(file_path);
+    command.arg(ffmpeg_file_path(Path::new(file_path)));
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run ffprobe audio packet scan: {error}"))?;
     if !output.status.success() {
@@ -998,6 +1026,10 @@ pub enum RepairVideoEncoder {
     H264VideoToolbox,
     /// Windows MediaFoundation H.264 (the bundled Windows LGPL build).
     H264MediaFoundation,
+    /// Cisco OpenH264 (the bundled Linux LGPL build, and Windows' second
+    /// choice). Software, with no quality mode: it encodes to the plan's
+    /// bitrate.
+    Libopenh264,
 }
 
 impl RepairVideoEncoder {
@@ -1007,14 +1039,16 @@ impl RepairVideoEncoder {
             RepairVideoEncoder::Libx264 => "libx264",
             RepairVideoEncoder::H264VideoToolbox => "h264_videotoolbox",
             RepairVideoEncoder::H264MediaFoundation => "h264_mf",
+            RepairVideoEncoder::Libopenh264 => "libopenh264",
         }
     }
 
     /// Encoder + quality args targeting visually-lossless output. Each encoder
     /// gets its own quality knob — `-crf` only exists on libx264, which is why
     /// the old hardcoded `libx264 -crf 18` failed on every bundled build with
-    /// "Unrecognized option 'crf'".
-    fn encode_args(self) -> Vec<String> {
+    /// "Unrecognized option 'crf'". `video_bitrate_kbps` is the target for
+    /// the encoder without one (libopenh264).
+    fn encode_args(self, video_bitrate_kbps: u32) -> Vec<String> {
         let args: &[&str] = match self {
             RepairVideoEncoder::Libx264 => &[
                 "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-threads", "1",
@@ -1030,20 +1064,65 @@ impl RepairVideoEncoder {
                 "-quality",
                 "90",
             ],
+            // Never skip a frame: a repair exists to keep every one. With no
+            // bitrate OpenH264 defaults to about 2 Mbps, so the plan's is
+            // always passed.
+            RepairVideoEncoder::Libopenh264 => &[
+                "-c:v",
+                "libopenh264",
+                "-rc_mode",
+                "bitrate",
+                "-allow_skip_frames",
+                "0",
+                "-profile:v",
+                "high",
+                "-threads",
+                "1",
+            ],
         };
         let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        if self == RepairVideoEncoder::Libopenh264 {
+            args.extend(["-b:v".to_string(), format!("{video_bitrate_kbps}k")]);
+        }
         args.extend(["-pix_fmt".to_string(), "yuv420p".to_string()]);
         args
     }
 }
 
 /// Preference order for repair transcodes: quality-controllable software x264
-/// first, then the platform hardware encoders the LGPL bundles ship.
-const REPAIR_ENCODER_PREFERENCE: [RepairVideoEncoder; 3] = [
+/// first, then the platform hardware encoders the LGPL bundles ship, then
+/// OpenH264 (Linux's bundle has no other encoder that runs without a device).
+const REPAIR_ENCODER_PREFERENCE: [RepairVideoEncoder; 4] = [
     RepairVideoEncoder::Libx264,
     RepairVideoEncoder::H264VideoToolbox,
     RepairVideoEncoder::H264MediaFoundation,
+    RepairVideoEncoder::Libopenh264,
 ];
+
+/// A repair's bitrate target never drops under this, whatever the source
+/// says (Clean cut's render floor).
+const REPAIR_MIN_VIDEO_KBPS: u32 = 2_000;
+/// Sources with no stream bitrate use this share of the container bitrate
+/// (per mille), as Clean cut's render does.
+const REPAIR_FORMAT_BITRATE_PER_MILLE: u64 = 950;
+
+/// The bitrate a repair re-encode targets when its encoder has no quality
+/// mode: the source video's own, so the repaired file keeps its quality and
+/// roughly its size.
+pub fn repair_video_bitrate_kbps(probe: &MediaProbe) -> u32 {
+    let from_stream = probe
+        .video
+        .as_ref()
+        .and_then(|video| video.bit_rate)
+        .map(|bits| bits / 1_000);
+    let from_format = probe
+        .format_bit_rate
+        .map(|bits| bits * REPAIR_FORMAT_BITRATE_PER_MILLE / 1_000 / 1_000);
+    let kbps = from_stream.or(from_format).unwrap_or(0);
+    u32::try_from(kbps)
+        .unwrap_or(u32::MAX)
+        .max(REPAIR_MIN_VIDEO_KBPS)
+}
 
 /// Parses encoder names from `ffmpeg -hide_banner -encoders` output. Lines look
 /// like ` V....D libx264   H.264 / AVC ...`; the first token is the capability
@@ -1171,6 +1250,9 @@ pub struct RepairPlan {
     /// The capability-probed encoder for transcode repairs (ignored on copy/remux
     /// plans). Selection guarantees it is real whenever `video` needs a transcode.
     pub video_encoder: RepairVideoEncoder,
+    /// The re-encode's bitrate for an encoder with no quality mode
+    /// (libopenh264); the others ignore it.
+    pub video_bitrate_kbps: u32,
 }
 
 /// Selects the max-quality FFmpeg repair plan, or `None` when nothing can/should be
@@ -1250,6 +1332,7 @@ pub fn select_repair_plan(
         // Only read when `video` transcodes, and transcodes are only planned when
         // the probe found an encoder; the fallback value is never executed.
         video_encoder: encoder.unwrap_or(RepairVideoEncoder::Libx264),
+        video_bitrate_kbps: repair_video_bitrate_kbps(probe),
     })
 }
 
@@ -1281,7 +1364,7 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
         "-filter_complex_threads".to_string(),
         "1".to_string(),
         "-i".to_string(),
-        input.to_string(),
+        ffmpeg_file_path(Path::new(input)),
         "-map".to_string(),
         "0".to_string(),
         "-map".to_string(),
@@ -1330,7 +1413,7 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
 
     if !video_filters.is_empty() {
         args.extend(["-vf".to_string(), video_filters.join(",")]);
-        args.extend(plan.video_encoder.encode_args());
+        args.extend(plan.video_encoder.encode_args(plan.video_bitrate_kbps));
         // Videorc records BT.709 video range; a re-encode must not lose the tags.
         args.extend(
             REPAIR_BT709_COLOR_TAG_ARGS
@@ -1363,7 +1446,7 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
     if faststart {
         args.extend(["-movflags".to_string(), "+faststart".to_string()]);
     }
-    args.push(output.to_string());
+    args.push(ffmpeg_file_path(Path::new(output)));
     args
 }
 
@@ -2662,6 +2745,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_stream_and_container_bitrates() {
+        let probe = parse_ffprobe_json(CLEAN_JSON).unwrap();
+        assert_eq!(probe.video.as_ref().unwrap().bit_rate, None);
+        assert_eq!(probe.format_bit_rate, None);
+
+        let json = r#"{
+            "streams": [
+                {"codec_type":"video","codec_name":"h264","width":1920,"height":1080,
+                 "bit_rate":"8123456"}
+            ],
+            "format": {"duration":"10.000000","bit_rate":"8300000"}
+        }"#;
+        let probe = parse_ffprobe_json(json).unwrap();
+        assert_eq!(probe.video.as_ref().unwrap().bit_rate, Some(8_123_456));
+        assert_eq!(probe.format_bit_rate, Some(8_300_000));
+        assert_eq!(probe.format_duration, Some(10.0));
+    }
+
+    #[test]
     fn confirmed_audio_loss_cannot_pass_or_be_repaired_as_a_valid_silent_track() {
         let probe = parse_ffprobe_json(CLEAN_JSON).unwrap();
         let mut expectations = QualityExpectations::default();
@@ -3085,6 +3187,7 @@ mod tests {
     fn probe_for_strategy() -> MediaProbe {
         MediaProbe {
             format_duration: Some(10.0),
+            format_bit_rate: Some(6_500_000),
             video: Some(VideoStreamInfo {
                 codec: "h264".to_string(),
                 width: 1920,
@@ -3094,6 +3197,7 @@ mod tests {
                 nb_frames: Some(300),
                 duration: Some(10.0),
                 start_time: Some(0.0),
+                bit_rate: None,
             }),
             audio: vec![AudioStreamInfo {
                 codec: "aac".to_string(),
@@ -3257,6 +3361,7 @@ mod tests {
             target_fps: 30.0,
             interpolated: false,
             video_encoder: RepairVideoEncoder::Libx264,
+            video_bitrate_kbps: 6_000,
         };
         let args = build_repair_args("in.mp4", "out.mp4", &plan);
         assert!(args.iter().any(|arg| arg == "fps=30"));
@@ -3273,6 +3378,7 @@ mod tests {
             audio,
             target_fps: 30.0,
             video_encoder: RepairVideoEncoder::Libx264,
+            video_bitrate_kbps: 6_000,
         }
     }
 
@@ -3496,6 +3602,7 @@ mod tests {
             target_fps: 30.0,
             interpolated: false,
             video_encoder: RepairVideoEncoder::Libx264,
+            video_bitrate_kbps: 6_000,
         };
         let args = build_repair_args("in.mp4", "out.mp4", &plan);
         assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "copy"));
@@ -3534,10 +3641,26 @@ mod tests {
             Some(RepairVideoEncoder::H264VideoToolbox)
         );
 
-        let lgpl_windows = vec!["aac".to_string(), "h264_mf".to_string()];
+        let lgpl_windows = vec![
+            "aac".to_string(),
+            "h264_mf".to_string(),
+            "libopenh264".to_string(),
+        ];
         assert_eq!(
             select_repair_encoder(&lgpl_windows),
             Some(RepairVideoEncoder::H264MediaFoundation)
+        );
+
+        // The bundled Linux build: OpenH264 and VAAPI (which needs a device),
+        // no x264. Before OpenH264 joined the list, Linux repaired nothing.
+        let lgpl_linux = vec![
+            "aac".to_string(),
+            "h264_vaapi".to_string(),
+            "libopenh264".to_string(),
+        ];
+        assert_eq!(
+            select_repair_encoder(&lgpl_linux),
+            Some(RepairVideoEncoder::Libopenh264)
         );
 
         assert_eq!(select_repair_encoder(&["aac".to_string()]), None);
@@ -3592,6 +3715,7 @@ mod tests {
                 target_fps: 30.0,
                 interpolated: false,
                 video_encoder: encoder,
+                video_bitrate_kbps: 6_000,
             };
             let args = build_repair_args("in.mp4", "out.mp4", &plan);
             assert!(
@@ -3607,6 +3731,74 @@ mod tests {
                     .any(|w| w[0] == "-pix_fmt" && w[1] == "yuv420p")
             );
         }
+    }
+
+    #[test]
+    fn openh264_repairs_keep_every_frame_at_the_plan_bitrate() {
+        let plan = RepairPlan {
+            video: VideoRepair::Interpolate,
+            audio: AudioRepair::Copy,
+            target_fps: 30.0,
+            interpolated: true,
+            video_encoder: RepairVideoEncoder::Libopenh264,
+            video_bitrate_kbps: 6_175,
+        };
+        let args = build_repair_args("in.mkv", "out.mkv", &plan);
+        let value = |flag: &str| {
+            args.windows(2)
+                .find(|w| w[0] == flag)
+                .map(|w| w[1].as_str())
+        };
+        assert_eq!(value("-c:v"), Some("libopenh264"));
+        assert_eq!(value("-rc_mode"), Some("bitrate"));
+        assert_eq!(value("-allow_skip_frames"), Some("0"));
+        assert_eq!(value("-b:v"), Some("6175k"));
+        assert_eq!(value("-threads"), Some("1"));
+        assert_eq!(value("-pix_fmt"), Some("yuv420p"));
+        assert_eq!(value("-color_primaries"), Some("bt709"));
+        assert!(!args.iter().any(|arg| arg == "-crf"), "{args:?}");
+    }
+
+    #[test]
+    fn only_openh264_takes_the_plan_bitrate() {
+        for encoder in [
+            RepairVideoEncoder::Libx264,
+            RepairVideoEncoder::H264VideoToolbox,
+            RepairVideoEncoder::H264MediaFoundation,
+        ] {
+            let args = encoder.encode_args(6_000);
+            assert!(!args.iter().any(|arg| arg == "-b:v"), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn repair_bitrate_follows_the_source_video() {
+        let mut probe = probe_for_strategy();
+        // Matroska: no stream bitrate, 95% of the container's.
+        assert_eq!(repair_video_bitrate_kbps(&probe), 6_175);
+
+        probe.video.as_mut().unwrap().bit_rate = Some(9_000_000);
+        assert_eq!(repair_video_bitrate_kbps(&probe), 9_000);
+
+        // A near-static screen recording still gets the floor.
+        probe.video.as_mut().unwrap().bit_rate = Some(300_000);
+        assert_eq!(repair_video_bitrate_kbps(&probe), 2_000);
+
+        probe.video.as_mut().unwrap().bit_rate = None;
+        probe.format_bit_rate = None;
+        assert_eq!(repair_video_bitrate_kbps(&probe), 2_000);
+
+        let plan = select_repair_plan(
+            &report_with(vec![QualityIssue::VariableFrameRate {
+                avg_fps: 24.0,
+                nominal_fps: 30.0,
+            }]),
+            &probe_for_strategy(),
+            &QualityExpectations::default(),
+            Some(RepairVideoEncoder::Libopenh264),
+        )
+        .unwrap();
+        assert_eq!(plan.video_bitrate_kbps, 6_175);
     }
 
     #[test]

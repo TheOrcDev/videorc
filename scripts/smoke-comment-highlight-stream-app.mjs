@@ -9,12 +9,14 @@ import { launchDevApp } from './lib/app-launcher.mjs'
 import {
   COMMENT_HIGHLIGHT_AVATAR_RGB,
   COMMENT_HIGHLIGHT_EMOTE_RGB,
+  analyzeChatBoxArtifact,
   analyzeCommentHighlightArtifact,
   captionStimulusPngBase64,
   classifyCommentHighlightResult,
   commentHighlightImagePngBase64,
   formatCommentHighlightArtifactSummary
 } from './lib/comment-highlight-artifact.mjs'
+import { mainWindowSizeVerdict, parseWindowSize, viewportChange } from './lib/main-window-size.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -37,6 +39,13 @@ const surface =
 const STUDIO_CHAT = '[data-testid="studio-chat"]'
 /** The preview card's rect while the section is away, to compare once it shows. */
 let studioPreviewBefore = null
+/** The viewport that rect was measured in: the comparison needs the same one. */
+let studioViewportBefore = null
+// Chat on stream (plan 215 G, D5): the default run also switches the chat box
+// on for the stream and proves the fake message (its emote and the box's
+// glass) lands in the box's rect on every stream leg. The legacy FFmpeg graph
+// carries no chat box, as it carries no highlight card.
+const checkChatBox = surface === 'stream-manager'
 
 const PREVIEW_CARD_RECT = `(() => {
   const card = document.querySelector('[data-videorc-preview-card]')
@@ -170,7 +179,7 @@ if (surface === 'studio') {
   })
 
   console.log(
-    `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels with the chatter's avatar and emote on the card; both legs of a dual-orientation stream and its recording carry the card; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
+    `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels with the chatter's avatar and emote on the card; both legs of a dual-orientation stream and its recording carry the card; the chat box (plan 215 G) showed the message whole (icon, padding and emote) in its rect on the stream-only and both dual-orientation stream legs; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
   )
 }
 
@@ -271,6 +280,16 @@ async function runScenario(ws, smoke, scenario, index) {
     : null
   // Stream-burned captions are refused beside a vertical leg.
   const requireCaption = !verticalTarget
+  // Not beside a top-corner card: the card's gate weighs its corner against
+  // the mirrored one, the chat box's top-left, and the box's glass would
+  // tip it. Stream-only and dual-orientation (bottom-left) cover both legs.
+  // The dual-orientation horizontal stream is the primary leg at the
+  // session's 1280x720, not the 1920 stream profile: a box painted for the
+  // profile's width was cropped there (its icon and first letters gone), and
+  // the gate reads the box's left edge so that cannot pass again.
+  const chatBox =
+    checkChatBox && !scenario.allowHighlightUnavailable && !scenario.anchor.startsWith('top-')
+  let layoutBefore = null
   const listener = spawnRtmpListener(target)
   const verticalListener = verticalTarget ? spawnRtmpListener(verticalTarget) : null
   let sessionActive = false
@@ -287,6 +306,19 @@ async function runScenario(ws, smoke, scenario, index) {
       }
     }
 
+    if (chatBox) {
+      // Off by default (D5): switch it on for the stream, as the Scene page does.
+      layoutBefore = await request(ws, timeoutMs, 'overlays.layout.get', {})
+      const layout = await request(ws, timeoutMs, 'overlays.layout.set', {
+        ...layoutBefore,
+        chat: { ...layoutBefore.chat, showOnStream: true, showInRecording: false }
+      })
+      if (layout?.chat?.showOnStream !== true) {
+        throw new Error(
+          `[${scenario.label}] chat on stream did not switch on: ${JSON.stringify(layout)}`
+        )
+      }
+    }
     const outputAuthorization = await smokeCommand(smoke, 'authorize-smoke-resource', {
       kind: 'output-directory',
       path: scenarioDirectory
@@ -438,6 +470,13 @@ async function runScenario(ws, smoke, scenario, index) {
       )
     }
 
+    if (chatBox) {
+      await assertChatBox(scenario, scenarioDirectory, target.receivedPath, {
+        rect: layoutBefore.chat.horizontal,
+        name: 'chat-box-artifact.json'
+      })
+    }
+
     if (verticalTarget) {
       assertArtifactFile(
         scenario.label,
@@ -481,6 +520,15 @@ async function runScenario(ws, smoke, scenario, index) {
         throw new Error(
           `[${scenario.label}] vertical comment-highlight artifact gate failed: ${verticalArtifact.failures.join('; ')} (report: ${verticalArtifactPath})`
         )
+      }
+      if (chatBox) {
+        // The portrait leg gets its own box, in the vertical rect.
+        await assertChatBox(scenario, scenarioDirectory, verticalTarget.receivedPath, {
+          rect: layoutBefore.chat.vertical,
+          name: 'chat-box-artifact-vertical.json',
+          sampleWidth: scenario.verticalLeg.width,
+          sampleHeight: scenario.verticalLeg.height
+        })
       }
     }
 
@@ -542,9 +590,36 @@ async function runScenario(ws, smoke, scenario, index) {
     }
     await requestSafe(ws, 'comments.highlight.clear', { sessionId })
     await requestSafe(ws, 'captions.overlay.clear', {})
+    await requestSafe(ws, 'chat.overlay.clear', {})
+    if (layoutBefore) await requestSafe(ws, 'overlays.layout.set', layoutBefore)
     await requestSafe(ws, 'liveChat.stop', {})
     await stopRtmpListener(listener)
     await stopRtmpListener(verticalListener)
+  }
+}
+
+/** The chat box (plan 215 G) on one received stream, whole: the fake
+ * message's emote, the leading YouTube icon and the box's glass padding
+ * before it, inside the chat rect, in enough sampled frames. A box the
+ * backend cropped at its left edge (painted for a wider canvas than the leg)
+ * has no icon, or one on the rect's edge, and fails. */
+async function assertChatBox(scenario, scenarioDirectory, filePath, options) {
+  const report = await analyzeChatBoxArtifact(filePath, {
+    ffmpegPath,
+    rect: options.rect,
+    ...(options.sampleWidth
+      ? { sampleWidth: options.sampleWidth, sampleHeight: options.sampleHeight }
+      : {})
+  })
+  const reportPath = join(scenarioDirectory, options.name)
+  writeFileSync(reportPath, JSON.stringify({ scenario, report }, null, 2))
+  console.log(
+    `[${scenario.label}] chat box: ${report.observations.boxFrames} frame(s) with the whole box (emote in ${report.observations.emoteFrames}, icon in ${report.observations.iconFrames}, padding before the icon in ${report.observations.paddingFrames} at most ${(report.observations.maxChatLeadingPaddingRatio * 100).toFixed(1)}% of the rect, glass in it ${report.observations.maxChatLeadingGlassRatio.toFixed(2)}; rect glass ${report.observations.maxChatDarkPixelRatio.toFixed(3)})`
+  )
+  if (!report.pass) {
+    throw new Error(
+      `[${scenario.label}] chat box artifact gate failed: ${report.failures.join('; ')} (report: ${reportPath})`
+    )
   }
 }
 
@@ -654,11 +729,10 @@ async function studioEval(smoke, code, params = {}) {
 /** Settings → General → Chat in Studio, then back to the Studio. */
 async function turnOnStudioChat(smoke) {
   // The main window's default size (D8): the section must fit there.
-  // VIDEORC_STUDIO_CHAT_WINDOW=800x560 checks a small window too (plan 0009).
-  const [width, height] = (process.env.VIDEORC_STUDIO_CHAT_WINDOW ?? '1180x780')
-    .split('x')
-    .map(Number)
-  await smokeCommand(smoke, 'resize-window', { width, height })
+  // VIDEORC_STUDIO_CHAT_WINDOW=960x660 checks the minimum too (plan 0009).
+  const requested = parseWindowSize(process.env.VIDEORC_STUDIO_CHAT_WINDOW)
+  await smokeCommand(smoke, 'resize-window', requested)
+  await assertMainWindowSize(smoke, requested)
   const result = await studioEval(
     smoke,
     `await openTab('settings', '#studio-chat')
@@ -673,10 +747,12 @@ async function turnOnStudioChat(smoke) {
      return {
        checked,
        section: Boolean(document.querySelector(${JSON.stringify(STUDIO_CHAT)})),
-       preview: ${PREVIEW_CARD_RECT}
+       preview: ${PREVIEW_CARD_RECT},
+       viewport: { width: window.innerWidth, height: window.innerHeight }
      }`
   )
   studioPreviewBefore = result?.preview ?? null
+  studioViewportBefore = result?.viewport ?? null
   if (result?.checked !== 'true') {
     throw new Error(`Chat in Studio did not turn on: ${JSON.stringify(result)}`)
   }
@@ -684,6 +760,35 @@ async function turnOnStudioChat(smoke) {
   if (result.section) {
     throw new Error('The Studio Chat section showed before the livestream went on air')
   }
+}
+
+/**
+ * The layout checks below hold at the size asked for. A tiling window manager
+ * (Hyprland) can keep its own tile, even below the app's minimum: stop there
+ * with both sizes instead of a layout verdict about the wrong window.
+ */
+async function assertMainWindowSize(smoke, requested) {
+  // X11 reports a requested size at once and corrects it when the window
+  // manager answers, so a size counts once two reads agree.
+  const deadline = Date.now() + 5000
+  let previous = null
+  let bounds = null
+  while (Date.now() < deadline) {
+    await sleep(250)
+    bounds = (await smokeCommand(smoke, 'main-window-state'))?.bounds ?? null
+    const settled =
+      previous && bounds && previous.width === bounds.width && previous.height === bounds.height
+    if (settled && mainWindowSizeVerdict({ requested, bounds }).ok) return
+    previous = bounds
+  }
+  const viewport = await studioEval(
+    smoke,
+    'return { width: window.innerWidth, height: window.innerHeight }'
+  )
+  const verdict = mainWindowSizeVerdict({ requested, bounds, viewport })
+  throw new Error(
+    verdict.message ?? `The main window did not settle at ${requested.width}x${requested.height}`
+  )
 }
 
 /** The Studio row for one message: its words, its accessible name and its phase. */
@@ -835,7 +940,14 @@ async function recordStudioChatEvidence(smoke, scenarioDirectory) {
   }
   await shoot('dark', 'dark')
   await shoot('light', 'light')
-  const evidence = { metrics, previewBefore: before, previewStill, inView, shots }
+  const evidence = {
+    metrics,
+    previewBefore: before,
+    viewportBefore: studioViewportBefore,
+    previewStill,
+    inView,
+    shots
+  }
   writeFileSync(
     join(scenarioDirectory, 'studio-chat-layout.json'),
     JSON.stringify(evidence, null, 2)
@@ -843,6 +955,11 @@ async function recordStudioChatEvidence(smoke, scenarioDirectory) {
   console.log(
     `[studio] layout at ${metrics?.window?.width}x${metrics?.window?.height}: preview unmoved=${previewStill}, section in view=${inView} (bottom ${Math.round(metrics?.section?.bottom ?? -1)} of ${Math.round(metrics?.pane?.bottom ?? -1)}); shots ${shots.dark}, ${shots.light}`
   )
+  // A window re-tiled between the two rects makes them incomparable.
+  const resized = viewportChange(studioViewportBefore, metrics?.window)
+  if (resized) {
+    throw new Error(`${resized} ${JSON.stringify(evidence)}`)
+  }
   if (!previewStill) {
     throw new Error(
       `The preview card moved when the Chat section appeared: ${JSON.stringify(evidence)}`

@@ -2,6 +2,7 @@ import { type AppIcon, SearchIcon, SyncIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 import { AccountMenu } from '@/components/account-menu'
+import { OwnBuddyIcon } from '@/components/own-buddy-icon'
 import { SectionLabel } from '@/components/section-label'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
@@ -194,6 +195,7 @@ export function Sidebar({
   active,
   activeStudioPanel,
   accountTier,
+  accountNeedsSignIn = false,
   onSelect,
   onSelectStudioPanel,
   onOpenSettings,
@@ -208,6 +210,8 @@ export function Sidebar({
   active: WorkspaceTab
   activeStudioPanel: StudioPanel | null
   accountTier: EntitlementTier | null
+  /** Chat or Buddy waits on the Videorc sign-in (plan 215 A5): a dot on the account button. */
+  accountNeedsSignIn?: boolean
   onSelect: (tab: WorkspaceTab) => void
   onSelectStudioPanel: (panel: StudioPanel) => void
   /** Opens Settings on a named tab (plan 064), or on the one used last. */
@@ -238,7 +242,8 @@ export function Sidebar({
   ): ReactElement => (
     <NavRow
       key={tab.id}
-      icon={tab.icon}
+      // The Buddy row wears the streamer's own Buddy, not the golem.
+      icon={tab.id === 'ai' ? OwnBuddyIcon : tab.icon}
       label={tab.label}
       isActive={active === tab.id}
       triggerId={tab.id}
@@ -343,6 +348,7 @@ export function Sidebar({
             dot on the trigger + the Health row); Health stays reachable here. */}
         <AccountMenu
           tier={accountTier}
+          needsSignIn={accountNeedsSignIn}
           statusTone={statusTone}
           statusLabel={statusLabel}
           statusPulse={statusPulse}

@@ -25,6 +25,10 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import {
+  incidentToneMissingFailure,
+  releaseBackendIncidentToneRefusal
+} from './lib/incident-ffmpeg-tone.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, DEFAULT_GATES, writeReports } from './lib/recording-analyzer.mjs'
@@ -32,12 +36,25 @@ import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { selectRecordingMatrixProfiles } from './lib/recording-matrix-profiles.mjs'
 import {
+  hardContentContract,
+  softwareSkipGates,
+  softwareSkipWarning
+} from './lib/recording-matrix-software-skip.mjs'
+import {
   countTransientFifoPauseMarkers,
   evaluateSharedRecordStreamPressure,
   evaluateTransientFifoPressure,
   missingRecordingMatrixResultFailures
 } from './lib/transient-fifo-pressure-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+
+// Every pass arms the debug-only FFmpeg tone (below). A release backend
+// ignores it and each combo would fail as a digital-zero dropout (#1089).
+const incidentToneRefusal = releaseBackendIncidentToneRefusal({ VIDEORC_INCIDENT_FFMPEG_TONE: '1' })
+if (incidentToneRefusal) {
+  console.error(`Recording matrix BLOCKED: ${incidentToneRefusal}`)
+  process.exit(2)
+}
 
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-recording-matrix-${Date.now()}`)
@@ -82,8 +99,8 @@ const MATRIX_GATES = Object.freeze({
   requireMotion: false,
   requireColorTags: true,
   requireValidLevel: true,
-  // The test tone is never silent, so any mid-take digital-zero run is a
-  // dropped audio packet (plan 056).
+  // Every pass opts into the debug FFmpeg tone below: without it, no-mic
+  // sessions carry paced silence. A digital-zero run in the tone is a dropout.
   requireNoDigitalZeroRuns: true,
   minDurationSeconds: (recordingMs / 1000) * (1 - DEFAULT_GATES.frameCountTolerance),
   requireKeyframeEvidence: true,
@@ -154,6 +171,11 @@ const TRANSIENT_FIFO_GATES = Object.freeze({
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY
 })
 
+// Hard content on OpenH264 skips frames on overshoot by design outside Linux
+// (recording-matrix-software-skip.mjs). Only the frame-skipping laws relax;
+// the 2 s keyframe cadence and the A/V stop tail stay gated.
+const SOFTWARE_SKIP_GATES = softwareSkipGates(MATRIX_GATES)
+
 /** The renderer's default ring, on and buffer-only, or off by its switch. */
 async function waitForStableRing(ws, label) {
   const deadline = Date.now() + 45_000
@@ -173,6 +195,7 @@ async function recordCombo({
   streamTarget = null,
   assertPreviewLiveness = false,
   stress = false,
+  hardContent = false,
   requireTransientFifoPressure = false,
   getTransientFifoPauseFiredCount = () => 0
 }) {
@@ -193,6 +216,15 @@ async function recordCombo({
   if (started.state !== 'recording') {
     throw new Error(`session.start state ${started.state}: ${started.message ?? ''}`)
   }
+  // The tone is decided at session start; any other way of losing it is
+  // named here once instead of as every combo's digital-zero failure.
+  const toneMissing = incidentToneMissingFailure(
+    await request(ws, timeoutMs, 'sessions.healthEvents.list', {
+      sessionId: started.sessionId,
+      limit: 120
+    })
+  )
+  if (toneMissing) throw new IncidentToneMissingError(`${combo.label}: ${toneMissing}`)
   let livenessFailure = null
   if (assertPreviewLiveness) {
     // The 0.9.44 regression starved the compositor mid-recording (encoder
@@ -307,18 +339,35 @@ async function recordCombo({
     throw new Error('recording produced no output file')
   }
 
+  const contract = hardContentContract({
+    stress,
+    hardContent,
+    encodeBackend: bridgeDiagnostics.encodeBackend,
+    platform: process.platform
+  })
   const quality = await analyzeRecording(outputPath, {
     ffmpegPath,
     ffprobePath,
     intendedFps: combo.fps,
     expectAudio: true,
-    gates: stress
-      ? STRESS_GATES
-      : requireTransientFifoPressure
-        ? TRANSIENT_FIFO_GATES
-        : MATRIX_GATES
+    gates:
+      contract === 'stress'
+        ? STRESS_GATES
+        : contract === 'software-skip'
+          ? SOFTWARE_SKIP_GATES
+          : requireTransientFifoPressure
+            ? TRANSIENT_FIFO_GATES
+            : MATRIX_GATES
   })
   writeReports(quality)
+  const softwareSkip =
+    contract === 'software-skip'
+      ? softwareSkipWarning({
+          label: `${combo.label}:hard`,
+          requestedFps: combo.fps,
+          observedFps: quality.metrics.observedFps
+        })
+      : null
 
   const failures = [...quality.verdict.failures]
   if (livenessFailure) {
@@ -343,7 +392,7 @@ async function recordCombo({
   }
   const observedFps = quality.metrics.observedFps
   if (
-    !stress &&
+    contract === 'full' &&
     !requireTransientFifoPressure &&
     observedFps != null &&
     Math.abs(observedFps - combo.fps) > combo.fps * 0.02
@@ -355,7 +404,8 @@ async function recordCombo({
     outputPath,
     sizeBytes: statSync(outputPath).size,
     failures,
-    warnings: quality.verdict.warnings,
+    warnings: softwareSkip ? [...quality.verdict.warnings, softwareSkip] : quality.verdict.warnings,
+    softwareSkipWarning: softwareSkip,
     metrics: quality.metrics,
     bridgeDiagnostics,
     transientFifoPauseFiredCount,
@@ -391,6 +441,7 @@ async function runPass({
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
         VIDEORC_SMOKE_STATE_DIR: outputDirectory,
         VIDEORC_USER_DATA_DIR: userDataDir,
+        VIDEORC_INCIDENT_FFMPEG_TONE: '1',
         ...extraEnv
       },
       timeoutMs,
@@ -436,6 +487,7 @@ async function runPass({
           streamTarget,
           assertPreviewLiveness,
           stress: combo.stress ?? false,
+          hardContent: passLabel === 'hard',
           requireTransientFifoPressure,
           getTransientFifoPauseFiredCount: () => transientFifoPauseFiredCount
         })
@@ -473,7 +525,14 @@ async function runPass({
         for (const failure of result.failures) {
           console.error(`  ❌ ${failure}`)
         }
+        if (result.softwareSkipWarning) {
+          console.log(`  WARN ${result.softwareSkipWarning}`)
+        }
       } catch (error) {
+        if (error instanceof IncidentToneMissingError) {
+          await request(ws, timeoutMs, 'session.stop').catch(() => {})
+          throw error
+        }
         passResults.push({ combo: label, failures: [String(error?.message ?? error)] })
         console.error(`Recording matrix [${label}] FAIL: ${String(error?.message ?? error)}`)
         // A start-time refusal leaves no live session; a mid-recording error may.
@@ -635,6 +694,9 @@ function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 }
 
+/** Ends the whole run: without the tone no audio gate below means anything. */
+class IncidentToneMissingError extends Error {}
+
 const results = []
 let launchedOk = false
 try {
@@ -645,8 +707,10 @@ try {
   // starvation, latency-contract kills) that the easy 64x64 pattern hides —
   // 0.9.44 shipped its mid-recording-crash regression through green gates
   // exactly that way. Preview must stay live THROUGH the recording.
-  // 1080p60 must hold FULL cadence under noise (proven headroom); 4K noise is
-  // beyond any real content, so 4K30 runs as a survival stress combo.
+  // 1080p60 must hold FULL cadence under noise on the hardware encoders
+  // (proven headroom); OpenH264 skips frames there by design outside Linux and
+  // is held to SOFTWARE_SKIP_GATES. 4K noise is beyond any real content, so 4K30 runs as
+  // a survival stress combo.
   if (HARD_COMBOS.length > 0) {
     results.push(
       ...(await runPass({
@@ -704,6 +768,10 @@ try {
     )
   }
 } catch (error) {
+  if (error instanceof IncidentToneMissingError) {
+    console.error(`Recording matrix stopped before its audio gates: ${error.message}`)
+    process.exit(1)
+  }
   console.error(`Recording matrix pass failed to launch: ${String(error?.message ?? error)}`)
 }
 

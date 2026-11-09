@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime};
 
@@ -68,10 +68,10 @@ use crate::protocol::{
     SceneSource, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
-    ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, SceneMaskTester,
+    ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, SceneMaskTester, SignedPixelRect,
     background_stage_margin, background_zoom_crop, camera_chroma_key, camera_mask,
-    chroma_key_alpha, chroma_key_despill, scene_crop_from_transform, scene_source_fit,
-    scene_source_rect_pixels, scene_source_render_transform,
+    chroma_key_alpha, chroma_key_despill, contain_rect_pixels, scene_crop_from_transform,
+    scene_source_fit, scene_source_rect_pixels, scene_source_render_transform,
 };
 #[cfg(target_os = "macos")]
 pub use crate::source_mask::SourceMask;
@@ -233,6 +233,12 @@ impl CompositorFrameExportHandle {
             fence_value: metadata.synchronization.fence_value,
             role: metadata.role,
         })
+    }
+
+    /// Plan 214: the texture lease ticket itself, for Videorc Camera's
+    /// staging readback (C3) whatever the role. `None` off Windows.
+    pub(crate) fn d3d11_texture_ticket(&self) -> Option<WindowsD3d11TextureLeaseTicket> {
+        self.d3d11_texture.clone()
     }
 
     #[allow(dead_code)]
@@ -481,6 +487,12 @@ pub struct CompositorRuntime {
     /// composes CPU pixels once and hands them over. Lives for the runtime,
     /// not per run, so a stale render cache still shares it.
     program_picture_waiters: ProgramPictureWaiters,
+    /// Plan 214 A2: holders who need pixels from the metadata-only preview
+    /// (Videorc Camera while an app holds it, D13). While it is non-zero the
+    /// no-GPU native-preview tick composes CPU pixels every tick, as it does
+    /// once for a picture waiter; the Metal path changes nothing. Lives for
+    /// the runtime, like the waiters, so a stale render cache shares it.
+    pixel_demand: Arc<AtomicU32>,
     /// Plan 157: Screen/Camera ISO stores while a separate-source capture runs.
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     preview_frame_lease_capacity: Arc<tokio::sync::Semaphore>,
@@ -686,6 +698,9 @@ pub struct CompositorStartParams {
     pub highlight_overlay_on_aux: bool,
     pub buddy_overlay_on_primary: bool,
     pub buddy_overlay_on_aux: bool,
+    /// Plan 215 G: the chat box's legs, planned like the highlight card's.
+    pub chat_overlay_on_primary: bool,
+    pub chat_overlay_on_aux: bool,
     /// The run is a buffer-only (Clips) session's own (plan 181), started
     /// fresh because no preview run could be armed in place (a cold launch
     /// starts the ring before the Preview): scene editor drafts follow it and
@@ -699,6 +714,7 @@ pub struct CompositorStartParams {
     /// picture for the rest.
     pub highlight_overlay_on_program: bool,
     pub buddy_overlay_on_program: bool,
+    pub chat_overlay_on_program: bool,
     /// Plan 212 S1: the run is a performance check's benchmark session's own
     /// (no preview run could be armed in place): its startup scene goes to
     /// `benchmark_scene`, the user's scene stays, and the Preview hold
@@ -767,12 +783,26 @@ pub struct CompositorLoopConfig {
     pub highlight_overlay_on_aux: bool,
     pub buddy_overlay_on_primary: bool,
     pub buddy_overlay_on_aux: bool,
+    /// Plan 215 G: the chat box's legs.
+    pub chat_overlay_on_primary: bool,
+    pub chat_overlay_on_aux: bool,
     /// Plan 205 S6: whether the program carries the item
     /// (`program_shows` for the Preview's shape). When the program carries
     /// an item the primary leg does not burn, the Preview composes its own
     /// picture (`preview_needs_program_leg`).
     pub highlight_overlay_on_program: bool,
     pub buddy_overlay_on_program: bool,
+    pub chat_overlay_on_program: bool,
+}
+
+/// Who holds the preview run (plan 214 A3). A capture (a session, Clips, a
+/// performance check) is strong: nothing arms over it. Videorc Camera's lease
+/// is weak: a capture arm replaces it in place, and the camera re-arms when
+/// that capture releases while a viewer still holds the camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositorLeaseKind {
+    Capture,
+    VirtualCamera,
 }
 
 /// Capture ownership of the preview compositor run.
@@ -780,6 +810,7 @@ pub struct CompositorLoopConfig {
 struct CompositorCaptureLease {
     session_id: String,
     run_id: String,
+    kind: CompositorLeaseKind,
     /// A buffer-only session's lease (plan 181): drafts keep following the run.
     replay_only: bool,
     /// The preview run's writable dimensions, parked here so bounds updates
@@ -799,6 +830,8 @@ pub struct CompositorArmParams {
     pub width: u32,
     pub height: u32,
     pub frame_consumer: CompositorFrameConsumer,
+    /// Plan 214 A3: a capture's strong lease, or Videorc Camera's weak one.
+    pub lease: CompositorLeaseKind,
     /// Plan 212 S1: the session is a performance check's benchmark
     /// (`SessionPurpose::PerformanceCheck`). See `CompositorCaptureLease`.
     pub benchmark: bool,
@@ -812,24 +845,32 @@ pub struct CompositorArmParams {
     pub highlight_overlay_on_aux: bool,
     pub buddy_overlay_on_primary: bool,
     pub buddy_overlay_on_aux: bool,
+    /// Plan 215 G: the chat box's legs.
+    pub chat_overlay_on_primary: bool,
+    pub chat_overlay_on_aux: bool,
     /// Plan 205 S6: the program's verdict for the Preview's shape (a
     /// buffer-only lease is idle for the Preview: either switch).
     pub highlight_overlay_on_program: bool,
     pub buddy_overlay_on_program: bool,
+    pub chat_overlay_on_program: bool,
 }
 
-/// The per-leg flags of the two layout-driven overlays (plan 164): the
-/// comment-highlight card and the Buddy. Captions keep their start-time plan.
-/// `*_on_program` (plan 205) is whether the program carries the item, which
-/// the Preview's own picture draws when the primary leg does not.
+/// The per-leg flags of the layout-driven overlays (plan 164): the
+/// comment-highlight card, the Buddy and (plan 215 G) the chat box. Captions
+/// keep their start-time plan. `*_on_program` (plan 205) is whether the
+/// program carries the item, which the Preview's own picture draws when the
+/// primary leg does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayLegFlags {
     pub highlight_on_primary: bool,
     pub highlight_on_aux: bool,
     pub buddy_on_primary: bool,
     pub buddy_on_aux: bool,
+    pub chat_on_primary: bool,
+    pub chat_on_aux: bool,
     pub highlight_on_program: bool,
     pub buddy_on_program: bool,
+    pub chat_on_program: bool,
 }
 
 impl OverlayLegFlags {
@@ -846,8 +887,11 @@ impl OverlayLegFlags {
             highlight_on_aux: false,
             buddy_on_primary: shows(&layout.buddy),
             buddy_on_aux: false,
+            chat_on_primary: shows(&layout.chat),
+            chat_on_aux: false,
             highlight_on_program: shows(&layout.highlight),
             buddy_on_program: shows(&layout.buddy),
+            chat_on_program: shows(&layout.chat),
         }
     }
 
@@ -875,8 +919,11 @@ impl OverlayLegFlags {
             highlight_on_aux: plans.highlight.aux,
             buddy_on_primary: plans.buddy.primary,
             buddy_on_aux: plans.buddy.aux,
+            chat_on_primary: plans.chat.primary,
+            chat_on_aux: plans.chat.aux,
             highlight_on_program: shows(&layout.highlight),
             buddy_on_program: shows(&layout.buddy),
+            chat_on_program: shows(&layout.chat),
         }
     }
 }
@@ -902,6 +949,9 @@ pub(crate) struct ProgramLegOverlays {
     pub highlight_on_program: bool,
     pub buddy_on_primary: bool,
     pub buddy_on_program: bool,
+    /// Plan 215 G: the chat box, planned like the card.
+    pub chat_on_primary: bool,
+    pub chat_on_program: bool,
     pub caption_on_primary: bool,
     pub caption_on_aux: bool,
 }
@@ -928,6 +978,7 @@ pub(crate) fn preview_needs_program_leg(
     let missing = |program: bool, primary: bool| program && !primary;
     missing(overlays.highlight_on_program, overlays.highlight_on_primary)
         || missing(overlays.buddy_on_program, overlays.buddy_on_primary)
+        || missing(overlays.chat_on_program, overlays.chat_on_primary)
         || missing(
             overlays.caption_on_primary || overlays.caption_on_aux,
             overlays.caption_on_primary,
@@ -1000,7 +1051,13 @@ pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> b
 /// run from a session's, under the same lock the arm takes.
 pub async fn update_idle_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> bool {
     let compositor = state.compositor.lock().await;
-    if compositor.capture_lease.is_some() {
+    // Plan 214 A3: Videorc Camera's lease is the idle run at the camera's
+    // canvas; the program it shows follows the stored layout like idle does.
+    if compositor
+        .capture_lease
+        .as_ref()
+        .is_some_and(|lease| lease.kind != CompositorLeaseKind::VirtualCamera)
+    {
         return false;
     }
     send_overlay_flags(&compositor, flags)
@@ -1016,8 +1073,11 @@ fn send_overlay_flags(compositor: &CompositorRuntime, flags: OverlayLegFlags) ->
         highlight_overlay_on_aux: flags.highlight_on_aux,
         buddy_overlay_on_primary: flags.buddy_on_primary,
         buddy_overlay_on_aux: flags.buddy_on_aux,
+        chat_overlay_on_primary: flags.chat_on_primary,
+        chat_overlay_on_aux: flags.chat_on_aux,
         highlight_overlay_on_program: flags.highlight_on_program,
         buddy_overlay_on_program: flags.buddy_on_program,
+        chat_overlay_on_program: flags.chat_on_program,
         ..current
     };
     if next == current {
@@ -1466,6 +1526,8 @@ struct CompositorRenderCache {
     // only the macOS program leg reads it; elsewhere the session draws the program
     program_frame_store: CompositorFrameStore,
     program_picture_waiters: ProgramPictureWaiters,
+    /// Plan 214 A2: see `CompositorRuntime::pixel_demand`.
+    pixel_demand: Arc<AtomicU32>,
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     snapshot: Option<CompositorSceneSnapshot>,
     simulcast_snapshot: Option<CompositorSceneSnapshot>,
@@ -1558,6 +1620,7 @@ impl CompositorRenderCache {
             stream_frame_store: compositor.stream_frame_store.clone(),
             program_frame_store: compositor.program_frame_store.clone(),
             program_picture_waiters: compositor.program_picture_waiters.clone(),
+            pixel_demand: compositor.pixel_demand.clone(),
             source_iso_frame_stores: compositor.source_iso_frame_stores.clone(),
             snapshot: snapshot.cloned(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
@@ -2375,6 +2438,8 @@ pub const EDITOR_DRAFT_REFUSED_CODE: &str = "editor-draft-refused";
 pub struct EditorDraft {
     pub source_id: String,
     pub transform: Option<CameraTransform>,
+    /// An ⌥-drag crop's live crop (plan 213 G2); `None` keeps the committed one.
+    pub crop: Option<crate::protocol::SceneCropDraft>,
     pub chrome: EditorChrome,
     pub refreshed_at: Instant,
     pub release_at_revision: Option<u64>,
@@ -2444,9 +2509,10 @@ fn editor_draft_applies(frame_consumer: CompositorFrameConsumer, has_stream_outp
 }
 
 /// Replace the named source's rect with the draft rect, keeping the committed
-/// crops (the same rule as `scene::apply_transform_override`). Other sources
-/// and a snapshot without that source are untouched, and a chrome-only draft
-/// (no `transform`) leaves every rect as committed.
+/// crops (the same rule as `scene::apply_transform_override`) unless the draft
+/// is an ⌥-drag crop, whose crop replaces them too (plan 213 G2). Other
+/// sources and a snapshot without that source are untouched, and a
+/// chrome-only draft (no `transform`) leaves every rect as committed.
 fn snapshot_with_editor_draft(
     snapshot: Option<CompositorSceneSnapshot>,
     draft: Option<&EditorDraft>,
@@ -2466,8 +2532,37 @@ fn snapshot_with_editor_draft(
         source.transform.y = transform.y;
         source.transform.width = transform.width;
         source.transform.height = transform.height;
+        if let Some(crop) = draft.crop {
+            source.transform.crop_left = crop.crop_left;
+            source.transform.crop_top = crop.crop_top;
+            source.transform.crop_right = crop.crop_right;
+            source.transform.crop_bottom = crop.crop_bottom;
+        }
     }
     Some(snapshot)
+}
+
+/// A draft crop under the same 95% ceiling per axis as a committed one, so a
+/// live crop never shows what the commit would refuse.
+fn sanitize_editor_draft_crop(
+    crop: crate::protocol::SceneCropDraft,
+) -> crate::protocol::SceneCropDraft {
+    let transform = crate::scene::sanitize_crop(SceneTransform {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+        crop_left: crop.crop_left,
+        crop_top: crop.crop_top,
+        crop_right: crop.crop_right,
+        crop_bottom: crop.crop_bottom,
+    });
+    crate::protocol::SceneCropDraft {
+        crop_left: transform.crop_left,
+        crop_top: transform.crop_top,
+        crop_right: transform.crop_right,
+        crop_bottom: transform.crop_bottom,
+    }
 }
 
 impl CompositorRuntime {
@@ -2498,6 +2593,7 @@ impl CompositorRuntime {
         self.editor_draft = Some(EditorDraft {
             source_id: params.source_id,
             transform: params.transform.map(sanitize_editor_draft_transform),
+            crop: params.crop.map(sanitize_editor_draft_crop),
             chrome: params.chrome,
             refreshed_at: now,
             release_at_revision: None,
@@ -2700,6 +2796,7 @@ mod editor_draft_tests {
                 width: 0.3,
                 height: 0.4,
             }),
+            crop: None,
             chrome: chrome(),
         }
     }
@@ -2718,6 +2815,7 @@ mod editor_draft_tests {
             transform: params(source_id)
                 .transform
                 .map(sanitize_editor_draft_transform),
+            crop: None,
             chrome: chrome(),
             refreshed_at: now,
             release_at_revision: None,
@@ -2777,6 +2875,43 @@ mod editor_draft_tests {
             snapshot_with_editor_draft(Some(snapshot(3)), None),
             Some(snapshot(3))
         );
+    }
+
+    #[test]
+    fn crop_editor_draft_shows_its_crop_under_the_committed_ceiling() {
+        // Plan 213 G2: an ⌥-drag on the screen's edge drafts its crop with
+        // its rect, so the Preview shows the crop before the commit lands.
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(3));
+        runtime.set_editor_draft(
+            SceneEditorDraftParams {
+                crop: Some(crate::protocol::SceneCropDraft {
+                    crop_left: 0.25,
+                    crop_top: 0.0,
+                    crop_right: 0.9,
+                    crop_bottom: f64::NAN,
+                }),
+                ..params("source:screen")
+            },
+            now,
+        );
+        let drafted = snapshot_with_editor_draft(Some(snapshot(3)), runtime.editor_draft.as_ref())
+            .expect("snapshot survives");
+        let screen = &drafted.scene.as_ref().unwrap().sources[0];
+        assert_eq!(
+            (screen.transform.x, screen.transform.width),
+            (0.1, 0.3),
+            "the rect is drafted with the crop"
+        );
+        assert!(
+            screen.transform.crop_left + screen.transform.crop_right <= 0.95 + 1e-9,
+            "the pair keeps the committed ceiling: {:?}",
+            screen.transform
+        );
+        assert!(screen.transform.crop_left > 0.2 && screen.transform.crop_right > 0.6);
+        assert_eq!(screen.transform.crop_top, 0.0);
+        assert_eq!(screen.transform.crop_bottom, 0.0, "NaN is no crop");
     }
 
     #[test]
@@ -3047,6 +3182,7 @@ mod editor_draft_tests {
         CompositorCaptureLease {
             session_id: "session".to_string(),
             run_id: "run".to_string(),
+            kind: CompositorLeaseKind::Capture,
             replay_only,
             benchmark: false,
             render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(1280, 720))),
@@ -3059,8 +3195,11 @@ mod editor_draft_tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         }
     }
@@ -3195,6 +3334,7 @@ mod editor_draft_tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -3579,6 +3719,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         stream_frame_store: None,
         program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         program_picture_waiters: Arc::default(),
+        pixel_demand: Arc::default(),
         source_iso_frame_stores: None,
         preview_frame_lease_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
         frame_evidence: VecDeque::new(),
@@ -3698,12 +3839,15 @@ async fn start_synthetic_compositor_with_lifecycle(
         highlight_overlay_on_aux: params.highlight_overlay_on_aux,
         buddy_overlay_on_primary: params.buddy_overlay_on_primary,
         buddy_overlay_on_aux: params.buddy_overlay_on_aux,
+        chat_overlay_on_primary: params.chat_overlay_on_primary,
+        chat_overlay_on_aux: params.chat_overlay_on_aux,
         // Plan 205 S6: the caller's program verdict. The idle run and a
         // session's own run pass the union of their legs; a buffer-only run
         // (the ring started before the Preview, so no run was armed in
         // place) passes the idle program, which its legs do not burn.
         highlight_overlay_on_program: params.highlight_overlay_on_program,
         buddy_overlay_on_program: params.buddy_overlay_on_program,
+        chat_overlay_on_program: params.chat_overlay_on_program,
     });
     let stream_frame_store = params
         .stream_output
@@ -4071,25 +4215,51 @@ pub async fn arm_compositor_for_capture(
         {
             return Err(CompositorArmRefusal::NoLiveRun);
         }
-        if compositor.capture_lease.is_some() {
-            return Err(CompositorArmRefusal::AlreadyLeased);
-        }
-        let Some(preview_config) = compositor
+        // Plan 214 A3: a capture arms over Videorc Camera's weak lease in
+        // place; the camera's lease never arms over anything.
+        let replaced_camera_lease = match compositor.capture_lease.as_ref() {
+            None => None,
+            Some(lease)
+                if lease.kind == CompositorLeaseKind::VirtualCamera
+                    && params.lease == CompositorLeaseKind::Capture =>
+            {
+                Some((lease.preview_config, lease.render_dimensions.clone()))
+            }
+            Some(_) => return Err(CompositorArmRefusal::AlreadyLeased),
+        };
+        let Some(current_config) = compositor
             .loop_config_tx
             .as_ref()
             .map(|config_tx| *config_tx.borrow())
         else {
             return Err(CompositorArmRefusal::NotPreviewOwned);
         };
-        if preview_config.frame_consumer != CompositorFrameConsumer::NativePreview
+        // What the release restores: the preview's own config, which the
+        // camera's lease parked when it armed.
+        let preview_config = replaced_camera_lease
+            .as_ref()
+            .map_or(current_config, |(config, _)| *config);
+        if current_config.frame_consumer != CompositorFrameConsumer::NativePreview
             || compositor.stream_frame_store.is_some()
             || compositor.source_iso_frame_stores.is_some()
-            || compositor.preview_render_dimensions.is_none()
+            || (replaced_camera_lease.is_none() && compositor.preview_render_dimensions.is_none())
         {
             return Err(CompositorArmRefusal::NotPreviewOwned);
         }
+        // The camera's lease is idle for drafts and the program shape: a
+        // buffer, never a recording or a stream (plan 181's rule).
+        let replay_only = params.replay_only || params.lease == CompositorLeaseKind::VirtualCamera;
+        // Plan 214: the camera's lease keeps the preview's own fps, as the
+        // handoff after a capture does. The camera repeats or drops frames
+        // on its own 30 fps clock, so a viewer never changes what the Studio
+        // Preview renders at.
+        let target_fps = if params.lease == CompositorLeaseKind::VirtualCamera {
+            current_config.target_fps
+        } else {
+            params.target_fps
+        };
         let next = CompositorLoopConfig {
-            target_fps: params.target_fps.clamp(30, 120),
+            target_fps: target_fps.clamp(30, 120),
             frame_consumer: params.frame_consumer,
             caption_overlay_on_primary: params.caption_overlay_on_primary,
             caption_overlay_on_aux: params.caption_overlay_on_aux,
@@ -4097,8 +4267,11 @@ pub async fn arm_compositor_for_capture(
             highlight_overlay_on_aux: params.highlight_overlay_on_aux,
             buddy_overlay_on_primary: params.buddy_overlay_on_primary,
             buddy_overlay_on_aux: params.buddy_overlay_on_aux,
+            chat_overlay_on_primary: params.chat_overlay_on_primary,
+            chat_overlay_on_aux: params.chat_overlay_on_aux,
             highlight_overlay_on_program: params.highlight_overlay_on_program,
             buddy_overlay_on_program: params.buddy_overlay_on_program,
+            chat_overlay_on_program: params.chat_overlay_on_program,
         };
         let config_sent = compositor
             .loop_config_tx
@@ -4107,10 +4280,13 @@ pub async fn arm_compositor_for_capture(
         if !config_sent {
             return Err(CompositorArmRefusal::NoLiveRun);
         }
-        let render_dimensions = compositor
-            .preview_render_dimensions
-            .take()
-            .expect("checked above");
+        let render_dimensions = match replaced_camera_lease {
+            Some((_, render_dimensions)) => render_dimensions,
+            None => compositor
+                .preview_render_dimensions
+                .take()
+                .expect("checked above"),
+        };
         render_dimensions.store(
             pack_render_dimensions(params.width.max(1), params.height.max(1)),
             Ordering::Relaxed,
@@ -4119,12 +4295,13 @@ pub async fn arm_compositor_for_capture(
         compositor.capture_lease = Some(CompositorCaptureLease {
             session_id: session_id.to_string(),
             run_id: run_id.clone(),
-            replay_only: params.replay_only,
+            kind: params.lease,
+            replay_only,
             render_dimensions,
             preview_config,
             benchmark: params.benchmark,
         });
-        if !params.replay_only {
+        if !replay_only {
             // Decision 4 (plan 058): a draft never reaches a recording or a
             // stream. With the ring on by default (plan 181) a draft may be
             // live on the run this session takes over, so it ends here; the
@@ -4137,12 +4314,18 @@ pub async fn arm_compositor_for_capture(
         compositor.status.target_fps = next.target_fps;
         compositor.status.frame_pipeline.consumer = Some(params.frame_consumer.label().to_string());
         compositor.status.updated_at = Utc::now().to_rfc3339();
-        compositor.status.message = Some("Preview compositor armed for capture.".to_string());
+        compositor.status.message = Some(match params.lease {
+            CompositorLeaseKind::Capture => "Preview compositor armed for capture.".to_string(),
+            CompositorLeaseKind::VirtualCamera => {
+                "Preview compositor armed for Videorc Camera.".to_string()
+            }
+        });
         (compositor.status.clone(), run_id)
     };
     crate::preview_surface::detach_preview_run_for_capture_lease(state, &run_id).await;
     tracing::info!(
-        "compositor {run_id} armed in place for session {session_id}: {}x{} @ {} fps, consumer {}",
+        "compositor {run_id} armed in place for session {session_id} ({:?}): {}x{} @ {} fps, consumer {}",
+        params.lease,
         status.width,
         status.height,
         status.target_fps,
@@ -4199,9 +4382,71 @@ pub async fn release_compositor_capture_lease(
         if lease.benchmark {
             compositor.benchmark_scene = None;
         }
-        let surface_live = surface.state == PreviewSurfaceState::Live
-            && compositor.render_task.is_some()
-            && compositor.stop_tx.is_some();
+        let run_alive = compositor.render_task.is_some() && compositor.stop_tx.is_some();
+        // Plan 214 A3: a capture's release hands the run to Videorc Camera
+        // when a viewer still holds the camera, in place and at the camera's
+        // canvas, instead of back to the surface and then to the camera.
+        let camera_canvas = (lease.kind != CompositorLeaseKind::VirtualCamera && run_alive)
+            .then(|| crate::virtual_camera_service::lease_wanted(state))
+            .flatten();
+        if let Some((camera_width, camera_height)) = camera_canvas {
+            let camera_config = CompositorLoopConfig {
+                target_fps: lease.preview_config.target_fps.clamp(30, 120),
+                frame_consumer: CompositorFrameConsumer::NativePreview,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: idle_overlays.highlight_on_primary,
+                highlight_overlay_on_aux: idle_overlays.highlight_on_aux,
+                buddy_overlay_on_primary: idle_overlays.buddy_on_primary,
+                buddy_overlay_on_aux: idle_overlays.buddy_on_aux,
+                highlight_overlay_on_program: idle_overlays.highlight_on_program,
+                buddy_overlay_on_program: idle_overlays.buddy_on_program,
+                chat_overlay_on_primary: idle_overlays.chat_on_primary,
+                chat_overlay_on_aux: idle_overlays.chat_on_aux,
+                chat_overlay_on_program: idle_overlays.chat_on_program,
+            };
+            let config_sent = compositor
+                .loop_config_tx
+                .as_ref()
+                .is_some_and(|config_tx| config_tx.send(camera_config).is_ok());
+            if config_sent {
+                lease.render_dimensions.store(
+                    pack_render_dimensions(camera_width.max(1), camera_height.max(1)),
+                    Ordering::Relaxed,
+                );
+                compositor.preview_resize_revision = None;
+                compositor.capture_lease = Some(CompositorCaptureLease {
+                    session_id: crate::virtual_camera::VIRTUAL_CAMERA_LEASE_SESSION_ID.to_string(),
+                    run_id: lease.run_id.clone(),
+                    kind: CompositorLeaseKind::VirtualCamera,
+                    replay_only: true,
+                    render_dimensions: lease.render_dimensions,
+                    preview_config: lease.preview_config,
+                    benchmark: false,
+                });
+                compositor.status.width = camera_width.max(1);
+                compositor.status.height = camera_height.max(1);
+                compositor.status.target_fps = camera_config.target_fps;
+                compositor.status.frame_pipeline.consumer =
+                    Some(camera_config.frame_consumer.label().to_string());
+                compositor.status.updated_at = Utc::now().to_rfc3339();
+                compositor.status.message =
+                    Some("Preview compositor armed for Videorc Camera.".to_string());
+                let status = compositor.status.clone();
+                drop(compositor);
+                prepare_idle_buddy(state, idle_overlays, (status.width, status.height));
+                tracing::info!(
+                    "compositor {} handed to Videorc Camera after session {session_id}: {}x{} @ {} fps",
+                    status.run_id.as_deref().unwrap_or("unknown-run"),
+                    status.width,
+                    status.height,
+                    status.target_fps
+                );
+                state.emit_event("compositor.status", status.clone());
+                return Some(status);
+            }
+        }
+        let surface_live = surface.state == PreviewSurfaceState::Live && run_alive;
         if !surface_live {
             CompositorLeaseRelease::Stop(lease.run_id)
         } else {
@@ -4211,8 +4456,11 @@ pub async fn release_compositor_capture_lease(
                 highlight_overlay_on_aux: idle_overlays.highlight_on_aux,
                 buddy_overlay_on_primary: idle_overlays.buddy_on_primary,
                 buddy_overlay_on_aux: idle_overlays.buddy_on_aux,
+                chat_overlay_on_primary: idle_overlays.chat_on_primary,
+                chat_overlay_on_aux: idle_overlays.chat_on_aux,
                 highlight_overlay_on_program: idle_overlays.highlight_on_program,
                 buddy_overlay_on_program: idle_overlays.buddy_on_program,
+                chat_overlay_on_program: idle_overlays.chat_on_program,
                 ..lease.preview_config
             };
             let config_sent = compositor
@@ -4451,6 +4699,17 @@ fn end_preview_hold_if_releasing(compositor: &mut CompositorRuntime) -> bool {
 #[cfg(test)]
 pub(crate) async fn compositor_preview_hold_active(state: &AppState) -> bool {
     state.compositor.lock().await.preview_hold.is_some()
+}
+
+/// Plan 214 A3: whether Videorc Camera's weak lease holds the run now.
+pub async fn compositor_virtual_camera_lease_active(state: &AppState) -> bool {
+    state
+        .compositor
+        .lock()
+        .await
+        .capture_lease
+        .as_ref()
+        .is_some_and(|lease| lease.kind == CompositorLeaseKind::VirtualCamera)
 }
 
 /// Run id currently leased to a capture, if any.
@@ -4874,6 +5133,14 @@ pub(crate) struct ProgramPicture {
     pub rgb: Vec<u8>,
 }
 
+/// Plan 214 A2: the runtime's pixel-demand counter, for a holder that needs
+/// the metadata-only preview to compose pixels (Videorc Camera). The counter
+/// lives for the runtime, so one handle serves every run.
+pub(crate) async fn pixel_demand(state: &AppState) -> crate::virtual_camera::PixelDemand {
+    let compositor = state.compositor.lock().await;
+    crate::virtual_camera::PixelDemand::from_counter(compositor.pixel_demand.clone())
+}
+
 /// The newest program frame's sequence, without reading its pixels.
 pub(crate) async fn latest_program_sequence(state: &AppState) -> Option<u64> {
     let compositor = state.compositor.lock().await;
@@ -5087,7 +5354,7 @@ impl StartupBarrierAccumulator {
     fn observe(
         &mut self,
         evidence: CompositorFrameEvidence,
-        started_at: Instant,
+        started_at: tokio::time::Instant,
     ) -> StartupBarrierObservation {
         if evidence.has_real_source && self.first_source_frame_ms.is_none() {
             self.first_source_frame_ms = Some(started_at.elapsed().as_millis() as u64);
@@ -5155,7 +5422,7 @@ impl StartupBarrierAccumulator {
         StartupBarrierObservation::Pending
     }
 
-    fn ready_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+    fn ready_result(&self, started_at: tokio::time::Instant) -> CompositorStartupBarrierResult {
         CompositorStartupBarrierResult {
             ready: true,
             wait_ms: started_at.elapsed().as_millis() as u64,
@@ -5169,7 +5436,7 @@ impl StartupBarrierAccumulator {
         }
     }
 
-    fn timeout_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+    fn timeout_result(&self, started_at: tokio::time::Instant) -> CompositorStartupBarrierResult {
         let wait_ms = started_at.elapsed().as_millis() as u64;
         // Cadence-only: the compositor IS producing usable frames, just
         // not three in a row inside the budget. Anything structural, or
@@ -5205,7 +5472,10 @@ pub async fn wait_for_compositor_startup_frames(
     state: &AppState,
     params: CompositorStartupBarrierParams,
 ) -> CompositorStartupBarrierResult {
-    let started_at = Instant::now();
+    // The barrier's clock is tokio's, like its polling sleeps: under a test's
+    // paused time its deadline and the wait it reports advance with the
+    // frames the test publishes, not with the host's load (#1076).
+    let started_at = tokio::time::Instant::now();
     let mut accumulator = StartupBarrierAccumulator::new(params);
 
     // Seed from frames the compositor already produced (instant-record P3): a
@@ -5278,7 +5548,9 @@ pub fn frame_history_proves_live_sources(
         // judged at its own canvas size.
         accumulator.params.width = evidence.width;
         accumulator.params.height = evidence.height;
-        if accumulator.observe(*evidence, now) == StartupBarrierObservation::Ready {
+        if accumulator.observe(*evidence, tokio::time::Instant::from_std(now))
+            == StartupBarrierObservation::Ready
+        {
             return Some(accumulator.frames_observed);
         }
     }
@@ -5551,6 +5823,17 @@ async fn update_compositor_scene_with_selection_and_prepare_hook(
             active_image_source.as_ref(),
             background_image_source.as_ref(),
         );
+        {
+            // Plan 216 B2: the last known capture sizes, until the next tick
+            // refreshes them.
+            let status = &mut compositor.status;
+            fill_scene_source_sizes(
+                &mut status.scene_sources,
+                &status.sources,
+                status.width,
+                status.height,
+            );
+        }
         compositor.status.image_cache = compositor.image_sources.status();
         compositor.status.updated_at = Utc::now().to_rfc3339();
         compositor.carry_source_edit_proof(state, &snapshot, false);
@@ -5894,6 +6177,13 @@ impl CompositorRuntime {
         edit.primary =
             snapshot_with_transition(Some(edit.primary), self.scene_transition.as_ref(), now)?;
         Some(edit)
+    }
+
+    /// The program scene the compositor composes right now, if one is
+    /// installed (plan 216 A2: a change that keeps a source the program
+    /// already composes never waits for that source).
+    pub(crate) fn composed_program_scene(&self) -> Option<&Scene> {
+        self.scene.as_ref()?.scene.as_ref()
     }
 
     pub(crate) fn source_edit_snapshot(&self) -> Option<CompositorSourceEdit> {
@@ -6503,8 +6793,11 @@ async fn run_synthetic_compositor_loop(
         mut highlight_overlay_on_aux,
         mut buddy_overlay_on_primary,
         mut buddy_overlay_on_aux,
+        mut chat_overlay_on_primary,
+        mut chat_overlay_on_aux,
         mut highlight_overlay_on_program,
         mut buddy_overlay_on_program,
+        mut chat_overlay_on_program,
     } = *config_rx.borrow_and_update();
     let mut pending_loop_config: Option<CompositorLoopConfig> = None;
     let mut loop_config_closed = false;
@@ -6635,8 +6928,11 @@ async fn run_synthetic_compositor_loop(
             highlight_overlay_on_aux = next.highlight_overlay_on_aux;
             buddy_overlay_on_primary = next.buddy_overlay_on_primary;
             buddy_overlay_on_aux = next.buddy_overlay_on_aux;
+            chat_overlay_on_primary = next.chat_overlay_on_primary;
+            chat_overlay_on_aux = next.chat_overlay_on_aux;
             highlight_overlay_on_program = next.highlight_overlay_on_program;
             buddy_overlay_on_program = next.buddy_overlay_on_program;
+            chat_overlay_on_program = next.chat_overlay_on_program;
             tracing::info!(
                 "compositor {run_id} loop config swapped in place: {} fps, consumer {}",
                 target_fps,
@@ -6760,6 +7056,10 @@ async fn run_synthetic_compositor_loop(
                         highlight_overlay_on_aux,
                         buddy_overlay_on_primary,
                         buddy_overlay_on_aux,
+                        ChatOverlayLegs {
+                            primary: chat_overlay_on_primary,
+                            aux: chat_overlay_on_aux,
+                        },
                         LiveBackgroundLeg {
                             tick: crate::live_background::LiveBackgroundTick::new(
                                 ticked_at,
@@ -6774,6 +7074,7 @@ async fn run_synthetic_compositor_loop(
                             gpu: &mut program_gpu_compositor,
                             highlight_on_program: highlight_overlay_on_program,
                             buddy_on_program: buddy_overlay_on_program,
+                            chat_on_program: chat_overlay_on_program,
                             presenting: preview_surface_active,
                         },
                     )
@@ -6961,6 +7262,7 @@ async fn run_synthetic_compositor_loop(
                             .as_ref()
                             .map(|source| f64::from(source.target_fps()))
                             .filter(|fps| fps.is_finite() && *fps > 0.0);
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let (mut camera_producer, exact_frameless_zombie) = if camera_is_consumed {
                             match preview_camera_restart_snapshot(&state).await {
                                 Some(snapshot) => {
@@ -7004,6 +7306,7 @@ async fn run_synthetic_compositor_loop(
                         } else {
                             (None, false)
                         };
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let mut camera_fresh_serves = fetch.camera_fresh_serves;
                         #[cfg(debug_assertions)]
                         if let Some(producer) = camera_producer.as_mut()
@@ -7029,6 +7332,7 @@ async fn run_synthetic_compositor_loop(
                             producer.frame_store_publications = stall.frame_store_publications;
                         }
                         let screen_is_consumed = capture_needs.screen;
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let (screen_target_fps, mut screen_producer) = if screen_is_consumed {
                             match preview_screen_restart_snapshot(&state).await {
                                 Some(snapshot) => {
@@ -7062,6 +7366,7 @@ async fn run_synthetic_compositor_loop(
                         } else {
                             (None, None)
                         };
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let mut screen_fresh_serves = fetch.screen_fresh_serves;
                         #[cfg(debug_assertions)]
                         if let Some(producer) = screen_producer.as_mut()
@@ -7415,16 +7720,36 @@ struct CompositorPublishResult {
     timings: CompositorPublishTimings,
 }
 
+/// Plan 215 G: which encoded legs draw the chat box this tick, from the loop
+/// configuration (the same plan the highlight card's two flags carry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ChatOverlayLegs {
+    primary: bool,
+    aux: bool,
+}
+
+impl ChatOverlayLegs {
+    /// No leg draws the chat box (every test of the publish path that is not
+    /// about it, and the default until the layout turns it on).
+    #[cfg(test)]
+    const OFF: Self = Self {
+        primary: false,
+        aux: false,
+    };
+}
+
 /// Plan 205 S6: the program leg's working set for one tick: its compositor
 /// (built on the first tick the leg is wanted, dropped on the first it is
-/// not), the program's verdict for the two layout-driven items, and whether
-/// a Preview surface is live to show the picture (no surface, no twin).
+/// not), the program's verdict for the layout-driven items, and whether a
+/// Preview surface is live to show the picture (no surface, no twin).
 struct ProgramLeg<'a> {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     // only the macOS program leg composes; elsewhere the session draws the program
     gpu: &'a mut Option<GpuCompositor>,
     highlight_on_program: bool,
     buddy_on_program: bool,
+    /// Plan 215 G: the chat box in the program.
+    chat_on_program: bool,
     presenting: bool,
 }
 
@@ -7437,6 +7762,7 @@ impl<'a> ProgramLeg<'a> {
             gpu,
             highlight_on_program: false,
             buddy_on_program: false,
+            chat_on_program: false,
             presenting: false,
         }
     }
@@ -7657,12 +7983,11 @@ fn cpu_live_background_source(
 }
 
 /// Plan 190 S5: stop the Linux live background thread when composition stops
-/// (the idle preview composes no pixels) or the live background leaves.
+/// (the idle preview composes no pixels) or the live background leaves, and
+/// take down its status: a poster status holds no thread (fix plan 0007).
 fn release_cpu_live_background(slot: &mut Option<Box<LiveBackgroundGpuRenderer>>) {
     #[cfg(target_os = "linux")]
-    if let Some(renderer) = slot.as_mut()
-        && renderer.holds_resources()
-    {
+    if let Some(renderer) = slot.as_mut() {
         renderer.release();
     }
     #[cfg(not(target_os = "linux"))]
@@ -7793,6 +8118,7 @@ struct PreparedGpuSource<'a> {
     /// Camera chroma key; forces `blend` semantics via the shader's computed
     /// alpha, so keyed camera quads set both.
     chroma_key: Option<crate::metal_compositor::GpuChromaKey>,
+    camera_look: Option<[f32; 3]>,
     /// A turned quad (the Buddy sprite, plan 168 S-B2); see `GpuSource`.
     corners: Option<[[f32; 2]; 4]>,
     sampler: crate::metal_compositor::GpuSourceSampler,
@@ -7843,6 +8169,7 @@ impl<'a> PreparedGpuSource<'a> {
             mask: scene_mask_into_metal(self.mask),
             blend: self.blend,
             chroma_key: self.chroma_key,
+            camera_look: self.camera_look,
             corners: self.corners,
             sampler: self.sampler,
             opacity: self.opacity,
@@ -8032,10 +8359,36 @@ fn push_overlay_gpu_source_at<'a>(
         // its alpha-0 pixels overwrite the frame as an opaque black box.
         blend: true,
         chroma_key: None,
+        camera_look: None,
         corners: None,
         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
         opacity: 1.0,
     });
+}
+
+/// The chat box's content namespace in the Metal texture cache (plan 215 G):
+/// its own, like the caption bar's (2) and the card's (3), so a box and a
+/// card of the same revision and size never alias.
+#[cfg(target_os = "macos")]
+const CHAT_OVERLAY_CONTENT_NAMESPACE: u64 = 10;
+
+/// The chat box on the Metal path (plan 215 G): after the caption bar, before
+/// the Buddy and the card, as the CPU path draws it.
+#[cfg(target_os = "macos")]
+fn push_chat_overlay_gpu_source<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    inputs: &CompositorRenderInputs<'a>,
+) {
+    if let Some(overlay) = inputs.chat_overlay {
+        push_caption_overlay_gpu_source(
+            prepared_sources,
+            overlay,
+            inputs.width,
+            inputs.height,
+            CHAT_OVERLAY_CONTENT_NAMESPACE,
+            0,
+        );
+    }
 }
 
 // The pet atlas's key-addressed Metal slot (D8) must be the namespace the
@@ -8107,6 +8460,7 @@ fn push_banner_gpu_sources<'a>(
             // show what is beneath.
             blend: true,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Linear,
             opacity: draw.opacity,
@@ -8201,6 +8555,7 @@ fn push_buddy_sprite_gpu_source<'a>(
         // the linear filter's edge clean.
         blend: true,
         chroma_key: None,
+        camera_look: None,
         corners: Some(corners),
         sampler: crate::metal_compositor::GpuSourceSampler::Linear,
         opacity: draw.opacity,
@@ -8420,6 +8775,7 @@ fn push_editor_chrome_gpu_sources<'a>(
             // picture through, not stamp opaque boxes.
             blend: true,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -8520,6 +8876,7 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Linear,
                     opacity: 1.0,
@@ -8568,6 +8925,7 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                     opacity: 1.0,
@@ -8631,6 +8989,7 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -8652,6 +9011,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
+        push_chat_overlay_gpu_source(&mut prepared_sources, inputs);
         push_buddy_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
@@ -8711,6 +9071,7 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -8732,6 +9093,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
+        push_chat_overlay_gpu_source(&mut prepared_sources, inputs);
         push_buddy_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
@@ -8824,6 +9186,11 @@ fn try_gpu_compose_with_chrome(
                         chroma_key: camera_chroma_key(layout)
                             .as_ref()
                             .and_then(scene_chroma_key_into_metal),
+                        camera_look: (!layout.camera_look.is_neutral()).then_some([
+                            layout.camera_look.brightness as f32,
+                            layout.camera_look.contrast as f32,
+                            layout.camera_look.saturation as f32,
+                        ]),
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8855,6 +9222,7 @@ fn try_gpu_compose_with_chrome(
                         mask: camera_mask(layout),
                         blend: false,
                         chroma_key: None,
+                        camera_look: None,
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8912,6 +9280,7 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        camera_look: None,
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8943,6 +9312,7 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        camera_look: None,
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8981,6 +9351,7 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                     opacity: 1.0,
@@ -9008,6 +9379,7 @@ fn try_gpu_compose_with_chrome(
             safe_inset,
         );
     }
+    push_chat_overlay_gpu_source(&mut prepared_sources, inputs);
     push_buddy_gpu_sources(&mut prepared_sources, inputs);
     if let Some(overlay) = inputs.highlight_overlay {
         push_caption_overlay_gpu_source(
@@ -9217,6 +9589,26 @@ fn synthetic_hard_content_enabled() -> bool {
     })
 }
 
+/// Plan 218: the thin-uplink smoke paints its noise as constant blocks this
+/// many pixels wide at full canvas resolution
+/// (`VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN`, off by default). The default
+/// quarter-canvas noise is scaled up by the compositor's linear sampler, which
+/// turns every pixel into a gradient the H.264 encoder cannot bring under
+/// about 6.5 Mbps at 1080p30 even at its highest quantizer, so no bitrate
+/// target binds it; hard-edged 32 px blocks encode at about 4.3 Mbps under a
+/// 6 Mbps target and follow a 3 Mbps target to 2.8 Mbps (the on-box
+/// VideoToolbox sweep, 2026-11-05), while every block still changes every
+/// frame.
+fn synthetic_hard_content_grain() -> Option<usize> {
+    static GRAIN: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *GRAIN.get_or_init(|| {
+        std::env::var("VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|grain| (2..=256).contains(grain))
+    })
+}
+
 fn xorshift64(state: &mut u64) -> u64 {
     let mut value = *state;
     value ^= value << 13;
@@ -9231,18 +9623,41 @@ fn synthetic_hard_content_bgra(
     canvas_width: u32,
     canvas_height: u32,
 ) -> SyntheticTestPatternBgra {
-    let width = (canvas_width as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 960);
-    let height = (canvas_height as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 960);
-    let mut bytes = vec![0; width * height * 4];
     // Deterministic per (frame, run): reproducible artifacts, zero skip blocks.
     let mut rng = sequence.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
-    for pixel in bytes.as_chunks_mut::<4>().0 {
-        let noise = xorshift64(&mut rng);
-        pixel[0] = noise as u8;
-        pixel[1] = (noise >> 8) as u8;
-        pixel[2] = (noise >> 16) as u8;
-        pixel[3] = 255;
-    }
+    let (width, height, mut bytes) = match synthetic_hard_content_grain() {
+        Some(grain) => {
+            let width = (canvas_width as usize).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 3840);
+            let height = (canvas_height as usize).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 2160);
+            let cells = width.div_ceil(grain);
+            let mut cell_colors = vec![[0u8; 3]; cells * height.div_ceil(grain)];
+            for color in cell_colors.iter_mut() {
+                let noise = xorshift64(&mut rng);
+                *color = [noise as u8, (noise >> 8) as u8, (noise >> 16) as u8];
+            }
+            let mut bytes = vec![0; width * height * 4];
+            for (y, row) in bytes.chunks_exact_mut(width * 4).enumerate() {
+                for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                    let color = cell_colors[(y / grain) * cells + x / grain];
+                    pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
+                }
+            }
+            (width, height, bytes)
+        }
+        None => {
+            let width = (canvas_width as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 960);
+            let height = (canvas_height as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 960);
+            let mut bytes = vec![0; width * height * 4];
+            for pixel in bytes.as_chunks_mut::<4>().0 {
+                let noise = xorshift64(&mut rng);
+                pixel[0] = noise as u8;
+                pixel[1] = (noise >> 8) as u8;
+                pixel[2] = (noise >> 16) as u8;
+                pixel[3] = 255;
+            }
+            (width, height, bytes)
+        }
+    };
     crate::synthetic_diagnostic::overlay_frame_markers(
         &mut bytes,
         width,
@@ -9363,11 +9778,17 @@ fn gpu_compositor_frame(
 // Placement is a flat description of one draw: geometry in, shader vec4s out.
 // Bundling the eight scalars into structs would add indirection at ~10 call
 // sites for no reuse.
+//
+// Plan 215 E2 (D2): the quad is the UNCUT box, so `dest` may start left of
+// or above the canvas (negative) and run past its right or bottom (past 1).
+// The rasterizer clips what hangs off, and the crop and every mask read the
+// quad's own uv, so a source bigger than the canvas keeps its true picture
+// and shape; nothing squashes it onto the canvas.
 #[allow(clippy::too_many_arguments)]
 fn gpu_source_placement(
     source_width: u32,
     source_height: u32,
-    rect: PixelRect,
+    rect: impl Into<SignedPixelRect>,
     contain: bool,
     crop: SceneCrop,
     pan: (f64, f64),
@@ -9380,8 +9801,8 @@ fn gpu_source_placement(
     let source_width = f64::from(source_width.max(1));
     let source_height = f64::from(source_height.max(1));
     let dest = [
-        (f64::from(fit.x) / output_width) as f32,
-        (f64::from(fit.y) / output_height) as f32,
+        (fit.x as f64 / output_width) as f32,
+        (fit.y as f64 / output_height) as f32,
         (f64::from(fit.width) / output_width) as f32,
         (f64::from(fit.height) / output_height) as f32,
     ];
@@ -9661,9 +10082,14 @@ async fn publish_compositor_frame(
     highlight_overlay_on_aux: bool,
     buddy_overlay_on_primary: bool,
     buddy_overlay_on_aux: bool,
+    chat_overlay: ChatOverlayLegs,
     live: LiveBackgroundLeg<'_>,
     program_leg: ProgramLeg<'_>,
 ) -> CompositorPublishResult {
+    let ChatOverlayLegs {
+        primary: chat_overlay_on_primary,
+        aux: chat_overlay_on_aux,
+    } = chat_overlay;
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
     render_cache.refresh_nonblocking(state);
@@ -9881,6 +10307,16 @@ async fn publish_compositor_frame(
     let simulcast_highlight_overlay = stream_output
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
+    // Plan 215 G: the chat box, one raster per orientation like the card. Read
+    // only while some leg or the program draws it, so a box the renderer left
+    // behind costs an idle run nothing.
+    let chat_wanted = chat_overlay_on_primary || chat_overlay_on_aux || program_leg.chat_on_program;
+    let chat_overlay = chat_wanted
+        .then(|| crate::captions::current_caption_overlay(&state.chat_overlay))
+        .flatten();
+    let simulcast_chat_overlay = stream_output
+        .filter(|output| output.composes_simulcast_scene && chat_overlay_on_aux)
+        .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_chat_overlay));
     // Plan 205 D4: the primary leg draws the Buddy only while its plan
     // carries it (the idle run's plan is the program, so a Buddy on for an
     // output shows on the live canvas). The Scene editor holding or dragging
@@ -9905,6 +10341,11 @@ async fn publish_compositor_frame(
                 highlight_on_program: program_leg.highlight_on_program,
                 buddy_on_primary: buddy_overlay_on_primary,
                 buddy_on_program: program_leg.buddy_on_program,
+                // The program leg draws the box only while the renderer
+                // has pushed one: an empty slot is not a reason to compose
+                // a second picture.
+                chat_on_primary: chat_overlay_on_primary || chat_overlay.is_none(),
+                chat_on_program: program_leg.chat_on_program,
                 caption_on_primary: caption_overlay_on_primary,
                 caption_on_aux: caption_overlay_on_aux,
             },
@@ -9958,6 +10399,9 @@ async fn publish_compositor_frame(
     let mut metadata_only_preview = false;
     // Agents waiting for this metadata-only preview to compose pixels once.
     let mut picture_waiters = Vec::new();
+    // Plan 214 A2: Videorc Camera (or another holder) needs pixels from the
+    // metadata-only preview every tick while an app holds the camera.
+    let mut pixel_demanded = false;
     {
         let inputs = CompositorRenderInputs {
             sequence,
@@ -9978,6 +10422,7 @@ async fn publish_compositor_frame(
             } else {
                 None
             },
+            chat_overlay: chat_overlay.as_ref().filter(|_| chat_overlay_on_primary),
             buddy_overlay: caption_overlay_for_output(
                 &buddy_overlays,
                 crate::captions::CaptionOverlayTarget::Primary,
@@ -10039,6 +10484,7 @@ async fn publish_compositor_frame(
                             .lock()
                             .unwrap_or_else(|p| p.into_inner()),
                     );
+                    pixel_demanded = render_cache.pixel_demand.load(Ordering::Acquire) > 0;
                     let _ = reason;
                 } else if cfg!(target_os = "macos") {
                     compositor_fallback_reason = Some(reason.to_string());
@@ -10046,7 +10492,9 @@ async fn publish_compositor_frame(
                     let _ = reason;
                 }
                 if !retain_previous_native_frame
-                    && (frame_consumer.composes_cpu_pixels() || !picture_waiters.is_empty())
+                    && (frame_consumer.composes_cpu_pixels()
+                        || !picture_waiters.is_empty()
+                        || pixel_demanded)
                 {
                     bytes = {
                         let mut store = frame_store
@@ -10149,6 +10597,15 @@ async fn publish_compositor_frame(
         } else {
             highlight_overlay.as_ref()
         };
+        // Plan 215 G: the vertical leg takes its own portrait chat box (D5);
+        // the same-scene stream leg shares the landscape raster.
+        let aux_chat_overlay = if !chat_overlay_on_aux {
+            None
+        } else if stream_output.composes_simulcast_scene {
+            simulcast_chat_overlay.as_ref()
+        } else {
+            chat_overlay.as_ref()
+        };
         let aux_buddy = buddy_overlay_on_aux.then(|| {
             buddy_leg_frame(
                 state,
@@ -10214,6 +10671,7 @@ async fn publish_compositor_frame(
                 caption_overlay_on_aux,
             ),
             highlight_overlay: aux_highlight_overlay,
+            chat_overlay: aux_chat_overlay,
             // The bubble is rasterized per target like the caption bar (plan
             // 164 S-C2), so the auxiliary leg always has its own raster; the
             // pet has its own atlas per leg (plan 168 D5).
@@ -10356,6 +10814,7 @@ async fn publish_compositor_frame(
                 screen_frame: leg_screen_frame,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 // A source take is the source alone: no Buddy and no banners
                 // either (plan 157), whatever the Combined legs carry.
                 buddy_overlay: None,
@@ -10437,6 +10896,9 @@ async fn publish_compositor_frame(
         let twin_highlight = highlight_overlay
             .as_ref()
             .filter(|_| program_leg.highlight_on_program);
+        let twin_chat = chat_overlay
+            .as_ref()
+            .filter(|_| program_leg.chat_on_program);
         let twin_bubble = program_leg
             .buddy_on_program
             .then(|| {
@@ -10482,6 +10944,7 @@ async fn publish_compositor_frame(
             screen_frame: primary_screen_frame,
             caption_overlay: twin_caption,
             highlight_overlay: twin_highlight,
+            chat_overlay: twin_chat,
             buddy_overlay: twin_bubble,
             buddy_leg: twin_buddy.as_ref(),
             banners: &twin_banners,
@@ -10758,6 +11221,10 @@ struct CompositorRenderInputs<'a> {
     /// Comment-highlight card (Comments upgrade S2) — its own slot, composited
     /// after the caption bar; top vs bottom keeps them from overlapping.
     highlight_overlay: Option<&'a crate::captions::CaptionOverlay>,
+    /// The chat box (plan 215 G): the last five messages, composited after
+    /// the caption bar and BEFORE the Buddy and the highlight card, so a
+    /// character and the one urgent card stay on top of a standing panel.
+    chat_overlay: Option<&'a crate::captions::CaptionOverlay>,
     /// The Buddy's bubble raster (plan 168 D16; plan 164 Phase C's avatar
     /// raster before): composited after the pet and BEFORE the highlight
     /// card, so the card wins an overlap (owner answer 7: the most urgent
@@ -10914,6 +11381,9 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
                 inputs.height,
             ),
         );
+    }
+    if let Some(overlay) = inputs.chat_overlay {
+        composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
     }
     if let Some(sprite) = inputs.buddy_leg.and_then(|leg| leg.sprite.as_ref()) {
         crate::buddy_sprite::blit_sprite_affine_to_yuv420p(
@@ -11154,6 +11624,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         screen_frame,
         caption_overlay: _,
         highlight_overlay: _,
+        chat_overlay: _,
         buddy_overlay: _,
         buddy_leg: _,
         banners: _,
@@ -11207,6 +11678,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         )
@@ -11274,6 +11746,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: false,
                             mask: SceneMask::None,
                             chroma_key: None,
+                            camera_look: crate::protocol::CameraLook::default(),
                             linear: false,
                         },
                     )
@@ -11296,6 +11769,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: false,
                             mask: SceneMask::None,
                             chroma_key: None,
+                            camera_look: crate::protocol::CameraLook::default(),
                             linear: false,
                         },
                     )
@@ -11327,6 +11801,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: snapshot.layout.camera_mirror,
                             mask: camera_mask(&snapshot.layout),
                             chroma_key: camera_chroma_key(&snapshot.layout),
+                            camera_look: snapshot.layout.camera_look,
                             // Plan 200 D3: a scaled camera reads bilinear (CPU agrees
                             // with the Metal linear sampler in kind).
                             linear: true,
@@ -11354,7 +11829,7 @@ fn render_unavailable_source_rect(
     bytes: &mut [u8],
     width: u32,
     height: u32,
-    rect: PixelRect,
+    rect: impl Into<SignedPixelRect>,
     mask: SceneMask,
 ) {
     blit_rgba_to_yuv420p(
@@ -11375,6 +11850,7 @@ fn render_unavailable_source_rect(
             mirror_x: false,
             mask,
             chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
             linear: false,
         },
     );
@@ -11520,8 +11996,23 @@ fn try_update_compositor_status(
         metrics.metal_target_handoff,
     );
     compositor.status.sources = metrics.sources;
+    {
+        // Plan 216 B2: every scene source carries its picture size.
+        let status = &mut compositor.status;
+        fill_scene_source_sizes(
+            &mut status.scene_sources,
+            &status.sources,
+            status.width,
+            status.height,
+        );
+    }
+    // Plan 214 A4: what Videorc Camera's output did (0 while off).
+    let camera = state.virtual_camera.counters().unwrap_or_default();
     compositor.status.frame_pipeline = CompositorFramePipelineStatus {
         preview_synthetic_refused: compositor.preview_backstop.refused(),
+        virtual_camera_pushed: camera.pushed,
+        virtual_camera_repeated: camera.repeated,
+        virtual_camera_convert_ms_max: camera.convert_us_max as f64 / 1000.0,
         ..metrics.frame_pipeline
     };
     // Plan 190: how the live background draws, and what it holds (0 while off).
@@ -11655,12 +12146,28 @@ struct SourceRenderOptions {
     /// Camera chroma key from the shared spec; keyed pixels blend fractionally
     /// into the frame instead of overwriting (mirrors the Metal shader keyer).
     chroma_key: Option<ChromaKeySpec>,
+    camera_look: crate::protocol::CameraLook,
     /// Plan 200 D3: a scaled draw reads bilinear, like the Metal compositor's
     /// linear sampler for scaled draws; a 1:1 draw stays point-sampled. Only
     /// the camera asks for it: the CPU compositor is the production path on
     /// Windows and Linux, and a full-frame bilinear screen would spend the
     /// per-pixel budget Linux plan 0014 won back (see `map_source_axis`).
     linear: bool,
+}
+
+fn camera_look_rgb(r: u8, g: u8, b: u8, look: crate::protocol::CameraLook) -> (u8, u8, u8) {
+    if look.is_neutral() {
+        return (r, g, b);
+    }
+    let rgb = [r, g, b].map(|value| f64::from(value) / 255.0);
+    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let [r, g, b] = rgb.map(|value| {
+        ((y + look.brightness + (look.contrast - 1.0) * (y - 0.5) + look.saturation * (value - y))
+            .clamp(0.0, 1.0)
+            * 255.0)
+            .round() as u8
+    });
+    (r, g, b)
 }
 
 struct RgbaSource<'a> {
@@ -11688,6 +12195,7 @@ pub(crate) fn render_camera_overlay_bgra(
     contain: bool,
     mirror_x: bool,
     mask: SceneMask,
+    look: crate::protocol::CameraLook,
     output: &mut Vec<u8>,
 ) -> bool {
     let source = RgbaSource {
@@ -11738,6 +12246,7 @@ pub(crate) fn render_camera_overlay_bgra(
                     continue;
                 };
                 let (r, g, b, alpha) = read_source_rgba(&source, source_x, source_y);
+                let (r, g, b) = camera_look_rgb(r, g, b, look);
                 let offset = dest_x * 4;
                 row[offset] = b;
                 row[offset + 1] = g;
@@ -11826,6 +12335,7 @@ fn render_scene_background_with_cache(
             mirror_x: false,
             mask: SceneMask::None,
             chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
             linear: false,
         },
     );
@@ -11971,6 +12481,10 @@ fn scene_content_rect_pixels(stage_margin: f64, width: u32, height: u32) -> Pixe
         width,
         height,
     )
+    // The inset stage lies inside the canvas by construction; the
+    // intersection only turns the uncut box into an on-canvas rect.
+    .and_then(|rect| rect.intersect_canvas(width, height))
+    .map(|cut| cut.visible)
     .unwrap_or(PixelRect {
         x: 0,
         y: 0,
@@ -11997,7 +12511,7 @@ fn render_synthetic_source_rect(
     sequence: u64,
     canvas_width: u32,
     canvas_height: u32,
-    rect: PixelRect,
+    rect: SignedPixelRect,
     bytes: &mut [u8],
     hard_content: bool,
 ) {
@@ -12021,6 +12535,7 @@ fn render_synthetic_source_rect(
             mirror_x: false,
             mask: SceneMask::None,
             chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
             linear: false,
         },
     );
@@ -12276,12 +12791,17 @@ fn composite_straight_alpha_at(
     }
 }
 
+/// Draws `source` fitted into `rect` (plan 215 E2: the UNCUT box, which may
+/// hang off the canvas) and paints only the part of it on the canvas: the
+/// source is fitted to the whole box, and the canvas edge cuts what hangs
+/// off, never squashes it. Returns false when the source cannot be drawn;
+/// a box with nothing on the canvas draws nothing and is still `true`.
 fn blit_rgba_to_yuv420p(
     source: &RgbaSource<'_>,
     dest: &mut [u8],
     canvas_width: u32,
     canvas_height: u32,
-    rect: PixelRect,
+    rect: impl Into<SignedPixelRect>,
     options: SourceRenderOptions,
 ) -> bool {
     if source.width == 0 || source.height == 0 || source.bytes.len() < source_pixel_len(source) {
@@ -12297,17 +12817,26 @@ fn blit_rgba_to_yuv420p(
     ) else {
         return false;
     };
+    // The part of the fitted box on the canvas, and how much of its left and
+    // top the canvas edge cut off (the source window starts that far in).
+    let Some(cut) = fit
+        .rect()
+        .intersect_canvas(canvas_width.max(1), canvas_height.max(1))
+    else {
+        return true;
+    };
     let canvas_width = canvas_width.max(1) as usize;
     let canvas_height = canvas_height.max(1) as usize;
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
     let uv_height = canvas_height.div_ceil(2);
-    let draw_left = fit.x as usize;
-    let draw_top = fit.y as usize;
-    let draw_right = fit.x.saturating_add(fit.width).min(canvas_width as u32) as usize;
-    let draw_bottom = fit.y.saturating_add(fit.height).min(canvas_height as u32) as usize;
+    let draw_left = cut.visible.x as usize;
+    let draw_top = cut.visible.y as usize;
+    let draw_right = draw_left + cut.visible.width as usize;
+    let draw_bottom = draw_top + cut.visible.height as usize;
     if options.mask == SceneMask::None
         && options.chroma_key.is_none()
+        && options.camera_look.is_neutral()
         && !options.mirror_x
         && fit.source_x == 0.0
         && fit.source_y == 0.0
@@ -12321,10 +12850,8 @@ fn blit_rgba_to_yuv420p(
             dest,
             canvas_width,
             canvas_height,
-            draw_left,
-            draw_top,
-            draw_right,
-            draw_bottom,
+            (draw_left, draw_top, draw_right, draw_bottom),
+            (cut.cut_left as usize, cut.cut_top as usize),
         );
         return true;
     }
@@ -12341,17 +12868,20 @@ fn blit_rgba_to_yuv420p(
     }
 
     // Chroma key: resolve the source pixel to (rgb after despill, key alpha).
-    // None means the pixel keys fully out. Without a spec every pixel is the
-    // historical opaque overwrite (alpha 255) — byte-identical to before.
+    // None means the pixel keys fully out. Grade after despill, keeping the
+    // original pixel's key alpha unchanged.
     let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
-        let Some(spec) = options.chroma_key.as_ref() else {
-            return Some((r, g, b, 255));
+        let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
+            let alpha = chroma_key_alpha(spec, r, g, b);
+            if alpha == 0 {
+                return None;
+            }
+            let (r, g, b) = chroma_key_despill(spec, r, g, b);
+            (r, g, b, alpha)
+        } else {
+            (r, g, b, 255)
         };
-        let key_alpha = chroma_key_alpha(spec, r, g, b);
-        if key_alpha == 0 {
-            return None;
-        }
-        let (r, g, b) = chroma_key_despill(spec, r, g, b);
+        let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
         Some((r, g, b, key_alpha))
     };
 
@@ -12487,18 +13017,18 @@ struct LinearTap {
 /// across the source, exactly as `map_source_column` flips its one texel.
 fn linear_source_tap(
     dest: u32,
-    fit_origin: u32,
+    fit_origin: i64,
     fit_extent: u32,
     source_origin: f64,
     source_extent: f64,
     source_len: u32,
     mirror: bool,
 ) -> Option<LinearTap> {
-    if dest < fit_origin || fit_extent == 0 || source_len == 0 {
+    if fit_extent == 0 || source_len == 0 {
         return None;
     }
-    let local = f64::from(dest - fit_origin);
-    if local >= f64::from(fit_extent) {
+    let local = (i64::from(dest) - fit_origin) as f64;
+    if local < 0.0 || local >= f64::from(fit_extent) {
         return None;
     }
     let last = f64::from(source_len - 1);
@@ -12569,14 +13099,17 @@ fn blit_linear_rgba_to_yuv420p(
     let uv_width = canvas_width.div_ceil(2);
     let uv_height = canvas_height.div_ceil(2);
     let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
-        let Some(spec) = options.chroma_key.as_ref() else {
-            return Some((r, g, b, 255));
+        let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
+            let alpha = chroma_key_alpha(spec, r, g, b);
+            if alpha == 0 {
+                return None;
+            }
+            let (r, g, b) = chroma_key_despill(spec, r, g, b);
+            (r, g, b, alpha)
+        } else {
+            (r, g, b, 255)
         };
-        let key_alpha = chroma_key_alpha(spec, r, g, b);
-        if key_alpha == 0 {
-            return None;
-        }
-        let (r, g, b) = chroma_key_despill(spec, r, g, b);
+        let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
         Some((r, g, b, key_alpha))
     };
     let uv_left = draw_left / 2;
@@ -12698,16 +13231,16 @@ fn blit_linear_rgba_to_yuv420p(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The 1:1 copy: `draw` is the on-canvas part of the box and `cut` how many
+/// source pixels the canvas edge cut off its left and top (plan 215 E2), so
+/// the first drawn column reads source column `cut.0`, not 0.
 fn blit_untransformed_rgba_to_yuv420p(
     source: &RgbaSource<'_>,
     dest: &mut [u8],
     canvas_width: usize,
     canvas_height: usize,
-    draw_left: usize,
-    draw_top: usize,
-    draw_right: usize,
-    draw_bottom: usize,
+    (draw_left, draw_top, draw_right, draw_bottom): (usize, usize, usize, usize),
+    (cut_left, cut_top): (usize, usize),
 ) {
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
@@ -12725,11 +13258,11 @@ fn blit_untransformed_rgba_to_yuv420p(
                 .enumerate()
                 .for_each(|(relative_y, row)| {
                     let dest_y = draw_top + relative_y;
-                    let source_y = (dest_y - draw_top) as u32;
+                    let source_y = (dest_y - draw_top + cut_top) as u32;
                     for (dest_x, output) in
                         row.iter_mut().enumerate().take(draw_right).skip(draw_left)
                     {
-                        let source_x = (dest_x - draw_left) as u32;
+                        let source_x = (dest_x - draw_left + cut_left) as u32;
                         let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
                         if a >= 16 {
                             // Luma only (plan 191).
@@ -12745,9 +13278,9 @@ fn blit_untransformed_rgba_to_yuv420p(
                 .enumerate()
                 .for_each(|(relative_y, (u_row, v_row))| {
                     let uv_y = uv_top + relative_y;
-                    let source_y = (uv_y * 2).saturating_sub(draw_top) as u32;
+                    let source_y = ((uv_y * 2).saturating_sub(draw_top) + cut_top) as u32;
                     for uv_x in uv_left..uv_right {
-                        let source_x = (uv_x * 2).saturating_sub(draw_left) as u32;
+                        let source_x = ((uv_x * 2).saturating_sub(draw_left) + cut_left) as u32;
                         let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
                         if a >= 16 {
                             let (u_value, v_value) = rgb_to_uv(r, g, b);
@@ -12760,16 +13293,31 @@ fn blit_untransformed_rgba_to_yuv420p(
     );
 }
 
+/// Where a source lands: its fitted box in canvas pixels (signed, uncut: the
+/// box may hang off the canvas, plan 215 E2) and the source window drawn
+/// into it.
 #[derive(Debug, Clone, Copy)]
 struct SourceFit {
-    x: u32,
-    y: u32,
+    x: i64,
+    y: i64,
     width: u32,
     height: u32,
     source_x: f64,
     source_y: f64,
     source_width: f64,
     source_height: f64,
+}
+
+impl SourceFit {
+    /// The fitted box, uncut.
+    fn rect(&self) -> SignedPixelRect {
+        SignedPixelRect {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        }
+    }
 }
 
 /// Fill-mode pan for a scene source: which part of the cover-crop aspect
@@ -12790,11 +13338,12 @@ fn source_cover_pan(kind: &SceneSourceKind, layout: &LayoutSettings) -> (f64, f6
 fn source_fit(
     source_width: u32,
     source_height: u32,
-    rect: PixelRect,
+    rect: impl Into<SignedPixelRect>,
     contain: bool,
     crop: SceneCrop,
     pan: (f64, f64),
 ) -> Option<SourceFit> {
+    let rect = rect.into();
     if rect.width == 0 || rect.height == 0 || source_width == 0 || source_height == 0 {
         return None;
     }
@@ -12805,20 +13354,15 @@ fn source_fit(
     let source_aspect = source_w / source_h;
     let rect_aspect = f64::from(rect.width) / f64::from(rect.height);
     if contain {
-        let (width, height) = if source_aspect > rect_aspect {
-            let width = rect.width;
-            let height = (f64::from(width) / source_aspect).round().max(1.0) as u32;
-            (width, height.min(rect.height))
-        } else {
-            let height = rect.height;
-            let width = (f64::from(height) * source_aspect).round().max(1.0) as u32;
-            (width.min(rect.width), height)
-        };
+        // Plan 216 B1: the one contain rule, shared with the Scene stage
+        // through `scene_geometry::scene_picture_rect_pixels`, so the box the
+        // stage draws is the picture this draws.
+        let fitted = contain_rect_pixels(source_w, source_h, rect);
         Some(SourceFit {
-            x: rect.x + (rect.width - width) / 2,
-            y: rect.y + (rect.height - height) / 2,
-            width,
-            height,
+            x: fitted.x,
+            y: fitted.y,
+            width: fitted.width,
+            height: fitted.height,
             source_x,
             source_y,
             source_width: source_w,
@@ -12882,16 +13426,16 @@ fn map_source_pixel(
 /// the 1080p CPU compositor rendered 8 fps at ~470 % on ogre).
 fn map_source_axis(
     dest: u32,
-    fit_origin: u32,
+    fit_origin: i64,
     fit_extent: u32,
     source_origin: f64,
     source_extent: f64,
     source_len: u32,
 ) -> Option<u32> {
-    if dest < fit_origin || fit_extent == 0 {
+    if fit_extent == 0 {
         return None;
     }
-    let local = f64::from(dest - fit_origin) / f64::from(fit_extent);
+    let local = (i64::from(dest) - fit_origin) as f64 / f64::from(fit_extent);
     if !(0.0..=1.0).contains(&local) {
         return None;
     }
@@ -12942,17 +13486,11 @@ fn map_source_row(dest_y: u32, source: &RgbaSource<'_>, fit: &SourceFit) -> Opti
 }
 
 /// A blit's mask resolved against its fitted rect, built once per blit and
-/// tested per pixel (plan 191).
+/// tested per pixel (plan 191). The rect is the UNCUT fit (plan 215 E2), so
+/// a mask on a box that hangs off the canvas keeps its true shape and the
+/// canvas edge cuts the shape.
 fn source_mask_tester(mask: SceneMask, fit: &SourceFit) -> SceneMaskTester {
-    SceneMaskTester::new(
-        mask,
-        PixelRect {
-            x: fit.x,
-            y: fit.y,
-            width: fit.width,
-            height: fit.height,
-        },
-    )
+    SceneMaskTester::new(mask, fit.rect())
 }
 
 #[cfg(test)]
@@ -12990,6 +13528,7 @@ fn read_source_rgba(source: &RgbaSource<'_>, x: u32, y: u32) -> (u8, u8, u8, u8)
 
 fn camera_state_name(state: &PreviewCameraState) -> &'static str {
     match state {
+        PreviewCameraState::Disconnected => "disconnected",
         PreviewCameraState::DeviceMissing => "device-missing",
         PreviewCameraState::PermissionNeeded => "permission-needed",
         PreviewCameraState::Starting => "starting",
@@ -13155,6 +13694,50 @@ fn compositor_scene_sources(
     sources
 }
 
+/// Plan 216 B2: the scene sources' picture sizes, so the Scene stage can
+/// draw each source's box on its picture (`scene_picture_rect_pixels`). A
+/// live source's size is its capture's frame size (`CompositorSourceStatus`,
+/// from the latest frame or the capture status); the test pattern is drawn
+/// at the canvas size. A capture that has not reported a size yet leaves
+/// the last known one; the image entries (a screen image, a background)
+/// carry their own.
+fn fill_scene_source_sizes(
+    scene_sources: &mut [CompositorSceneSourceStatus],
+    sources: &[CompositorSourceStatus],
+    canvas_width: u32,
+    canvas_height: u32,
+) {
+    let size_of = |wanted: &dyn Fn(&CompositorSourceKind) -> bool| {
+        sources
+            .iter()
+            .find(|source| wanted(&source.kind))
+            .and_then(|source| Some((source.width?, source.height?)))
+    };
+    for scene_source in scene_sources {
+        let size = match scene_source.kind {
+            CompositorSceneSourceKind::Camera => {
+                size_of(&|kind| matches!(kind, CompositorSourceKind::Camera))
+            }
+            CompositorSceneSourceKind::Screen | CompositorSceneSourceKind::Window => {
+                size_of(&|kind| {
+                    matches!(
+                        kind,
+                        CompositorSourceKind::Screen | CompositorSourceKind::Window
+                    )
+                })
+            }
+            CompositorSceneSourceKind::TestPattern => Some((canvas_width, canvas_height)),
+            CompositorSceneSourceKind::ScreenImage | CompositorSceneSourceKind::BackgroundImage => {
+                continue;
+            }
+        };
+        if let Some((width, height)) = size {
+            scene_source.width = Some(width);
+            scene_source.height = Some(height);
+        }
+    }
+}
+
 fn image_file_revision(path: &Path) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
     let modified_ns = metadata
@@ -13260,7 +13843,7 @@ fn active_source_iso_capture_needs(
 /// Derives the ISO leg from confirmed capture selection, including sources
 /// omitted by the primary preset. It is visible and full-frame, under a layout
 /// that contains (never crops), draws no bubble mask, no chroma key and no
-/// background. Mirror is preserved (it is the camera's own orientation).
+/// background. Mirror and look are preserved (the camera's own settings).
 /// `None` when the role is unselected. Generic scenes without selection
 /// authority retain their device-bound source behavior.
 fn source_iso_snapshot(
@@ -13338,6 +13921,9 @@ fn source_iso_snapshot(
     layout.camera_shape = crate::protocol::CameraShape::Rectangle;
     layout.camera_chroma_key_enabled = false;
     layout.vertical_screen_framing = crate::protocol::VerticalScreenFraming::default();
+    // The Screen file is the raw source for editing (plan 213 D5): whole,
+    // never filled or cropped like the scene's screen.
+    layout.horizontal_screen_framing = crate::protocol::HorizontalScreenFraming::default();
     Some(CompositorSceneSnapshot {
         synthetic_hard_content: false,
         selected_sources: snapshot.selected_sources.clone(),
@@ -13640,6 +14226,7 @@ mod tests {
                 stream_frame_store: None,
                 program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
                 program_picture_waiters: Arc::default(),
+                pixel_demand: Arc::default(),
                 source_iso_frame_stores: Some(stores.clone()),
                 snapshot: Some(snapshot),
                 simulcast_snapshot: None,
@@ -13728,6 +14315,11 @@ mod tests {
         snapshot.layout.camera_offset_x = 12;
         snapshot.layout.camera_chroma_key_enabled = true;
         snapshot.layout.camera_mirror = true;
+        snapshot.layout.camera_look = crate::protocol::CameraLook {
+            brightness: 0.05,
+            contrast: 1.1,
+            saturation: 0.8,
+        };
         if let Some(scene) = snapshot.scene.as_mut() {
             for source in scene.sources.iter_mut() {
                 if matches!(source.kind, SceneSourceKind::Camera) {
@@ -13774,7 +14366,77 @@ mod tests {
             camera.layout.camera_mirror,
             "mirror is the camera's own orientation"
         );
+        assert_eq!(camera.layout.camera_look, snapshot.layout.camera_look);
         assert_eq!(camera.revision, snapshot.revision);
+    }
+
+    #[test]
+    fn source_iso_screen_leg_records_the_whole_uncropped_screen() {
+        // Plan 213 G5 (D5): the Screen file is the raw source for editing.
+        // A scene that crops its screen and fills it in landscape still
+        // records the whole screen, uncropped and fitted, on the Screen leg,
+        // whether the selection is known or only the scene's own source.
+        use crate::scene_geometry::screen_crop_fixture::{CYAN, MAGENTA, RED, WHITE, sample_pixel};
+        let mut cropped = screen_crop_fixture_snapshot();
+        cropped.layout.horizontal_screen_framing = crate::protocol::HorizontalScreenFraming::Fill;
+        cropped.layout.source_transform_overrides.insert(
+            "source:base".to_string(),
+            crate::protocol::SourceTransformOverride {
+                crop_left: 0.25,
+                crop_top: 0.25,
+                crop_right: 0.25,
+                crop_bottom: 0.25,
+                ..crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                    x: 0.25,
+                    y: 0.25,
+                    width: 0.5,
+                    height: 0.5,
+                })
+            },
+        );
+        let mut selected = cropped.clone();
+        selected.selected_sources = Some(SourceSelection {
+            screen_id: Some("screen-1".to_string()),
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        });
+        let frame = screen_crop_fixture_frame();
+        for snapshot in [cropped, selected] {
+            let iso = source_iso_snapshot(Some(&snapshot), SourceIsoRole::Screen)
+                .expect("screen ISO snapshot");
+            let source = &iso.scene.as_ref().expect("scene").sources[0];
+            assert_eq!(source.transform, full_frame_transform(), "no box, no crop");
+            assert_eq!(
+                iso.layout.horizontal_screen_framing,
+                crate::protocol::HorizontalScreenFraming::Fit
+            );
+            assert!(iso.layout.source_transform_overrides.is_empty());
+            assert_eq!(
+                scene_source_fit(&SceneSourceKind::Screen, &iso.layout),
+                SceneFit::Contain
+            );
+
+            // And it draws so: every edge of the picture reaches the file.
+            let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+            render_compositor_yuv420p_frame(screen_crop_inputs(&iso, &frame, 128, 72), &mut bytes);
+            for (point, [r, g, b]) in [
+                ((0.05, 0.50), RED),
+                ((0.95, 0.50), WHITE),
+                ((0.50, 0.05), MAGENTA),
+                ((0.50, 0.95), CYAN),
+            ] {
+                let (x, y) = sample_pixel(point, 128, 72);
+                let (expected, _, _) = rgb_to_yuv(r, g, b);
+                let luma = bytes[y * 128 + x];
+                assert!(
+                    (i16::from(luma) - i16::from(expected)).abs() <= 8,
+                    "the Screen file shows {:?} at {point:?}: Y {luma} vs {expected}",
+                    [r, g, b]
+                );
+            }
+        }
     }
 
     #[test]
@@ -14164,6 +14826,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -14289,6 +14952,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14334,6 +14998,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear,
             },
         ));
@@ -14499,6 +15164,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14563,6 +15229,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -14576,6 +15243,187 @@ mod tests {
             render_compositor_yuv420p_frame(inputs, &mut zeroed);
             render_compositor_yuv420p_frame(inputs, &mut dirty);
             assert_eq!(dirty, zeroed, "{width}x{height}");
+        }
+    }
+
+    fn camera_look_reference(rgb: [u8; 3], look: crate::protocol::CameraLook) -> [u8; 3] {
+        let rgb = rgb.map(|v| f64::from(v) / 255.0);
+        let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+        rgb.map(|v| {
+            ((y + look.brightness + (look.contrast - 1.0) * (y - 0.5) + look.saturation * (v - y))
+                .clamp(0.0, 1.0)
+                * 255.0)
+                .round() as u8
+        })
+    }
+
+    #[test]
+    fn camera_look_cpu_and_metal_agree_with_float_law() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
+                .unwrap();
+        let palette: Vec<[u8; 3]> = serde_json::from_value(fixture["pixels"].clone()).unwrap();
+        let (width, height) = (palette.len() as u32 * 4, 4);
+        #[cfg(target_os = "macos")]
+        let gpu = new_gpu_compositor(false);
+        let mut snapshot = test_scene_snapshot(LayoutPreset::CameraOnly, None, Some("camera-look"));
+        snapshot.layout.camera_look = serde_json::from_value(fixture["look"].clone()).unwrap();
+        let mut bgra = Vec::new();
+        let mut expected = Vec::new();
+        for _ in 0..height {
+            for &rgb in &palette {
+                for _ in 0..4 {
+                    bgra.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+                    expected.push(camera_look_reference(rgb, snapshot.layout.camera_look));
+                }
+            }
+        }
+        let camera =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width,
+                height,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: bgra,
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
+        let inputs = CompositorRenderInputs {
+            sequence: 1,
+            width,
+            height,
+            snapshot: Some(&snapshot),
+            camera_frame: Some(&camera),
+            active_image_source: None,
+            background_image_source: None,
+            screen_frame: None,
+            caption_overlay: None,
+            highlight_overlay: None,
+            chat_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+            live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
+        };
+        let mut cpu = vec![0; raw_yuv420p_len(width, height)];
+        render_compositor_yuv420p_frame(inputs, &mut cpu);
+        let decode_cpu = |pixel: usize| {
+            let uv =
+                (pixel / width as usize / 2) * (width as usize / 2) + (pixel % width as usize / 2);
+            let y_len = (width * height) as usize;
+            let (b, g, r) = crate::color::ycbcr_bt709_video_to_bgr(
+                cpu[pixel],
+                cpu[y_len + uv],
+                cpu[y_len + y_len / 4 + uv],
+            );
+            [r, g, b]
+        };
+        let mut cpu_max = 0;
+        for (pixel, reference) in expected.iter().enumerate() {
+            for (actual, expected) in decode_cpu(pixel).into_iter().zip(reference) {
+                cpu_max = cpu_max.max(i16::from(actual).abs_diff(i16::from(*expected)));
+            }
+        }
+        assert!(cpu_max <= 2, "CPU vs float law: {cpu_max}/255");
+        eprintln!("camera look CPU vs float law: {cpu_max}/255");
+        #[cfg(target_os = "macos")]
+        {
+            let Some(mut gpu) = gpu else {
+                eprintln!("skipping Metal: no Metal device");
+                return;
+            };
+            let output =
+                try_gpu_compose(Some(&mut gpu), &inputs, true).expect("camera Metal compose");
+            let pixels = gpu
+                .latest_target_pixel_buffer()
+                .and_then(|target| target.copy_bgra())
+                .expect("Metal target readback");
+            let mut metal_max = 0;
+            let mut parity_max = 0;
+            for (pixel, reference) in expected.iter().enumerate() {
+                let offset = pixel * 4;
+                let metal = [pixels[offset + 2], pixels[offset + 1], pixels[offset]];
+                for ((actual, expected), cpu) in
+                    metal.into_iter().zip(reference).zip(decode_cpu(pixel))
+                {
+                    metal_max = metal_max.max(i16::from(actual).abs_diff(i16::from(*expected)));
+                    parity_max = parity_max.max(i16::from(actual).abs_diff(i16::from(cpu)));
+                }
+            }
+            assert!(metal_max <= 2, "Metal vs float law: {metal_max}/255");
+            assert!(parity_max <= 2, "CPU vs Metal: {parity_max}/255");
+            assert!(
+                cpu.iter()
+                    .zip(&output.yuv)
+                    .all(|(a, b)| a.abs_diff(*b) <= 2)
+            );
+            eprintln!(
+                "camera look Metal vs float law: {metal_max}/255; CPU vs Metal: {parity_max}/255"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_look_preserves_original_key_alpha_in_both_cpu_samplers() {
+        let look = crate::protocol::CameraLook {
+            brightness: 0.1,
+            contrast: 1.2,
+            saturation: 0.0,
+        };
+        for (side, linear) in [(2, false), (4, true)] {
+            for rgb in [[0, 255, 0], [128, 128, 128]] {
+                let source = [rgb[0], rgb[1], rgb[2], 255].repeat(side * side);
+                let mut output = blue_yuv_canvas_2x2();
+                assert!(blit_rgba_to_yuv420p(
+                    &RgbaSource {
+                        bytes: &source,
+                        width: side as u32,
+                        height: side as u32,
+                        format: SourcePixelFormat::Rgba
+                    },
+                    &mut output,
+                    2,
+                    2,
+                    PixelRect {
+                        x: 0,
+                        y: 0,
+                        width: 2,
+                        height: 2
+                    },
+                    SourceRenderOptions {
+                        crop: SceneCrop::none(),
+                        pan: (0.0, 0.0),
+                        contain: false,
+                        mirror_x: false,
+                        mask: SceneMask::None,
+                        chroma_key: Some(chroma_key_test_spec()),
+                        camera_look: look,
+                        linear
+                    },
+                ));
+                if rgb[1] == 255 {
+                    assert_eq!(
+                        output,
+                        blue_yuv_canvas_2x2(),
+                        "grade must not move the key (linear={linear})"
+                    );
+                } else {
+                    let [r, g, b] = camera_look_reference(rgb, look);
+                    let (y, u, v) = rgb_to_yuv(r, g, b);
+                    assert_eq!(
+                        output,
+                        vec![y, y, y, y, u, v],
+                        "foreground grade (linear={linear})"
+                    );
+                }
+            }
         }
     }
 
@@ -14631,6 +15479,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: Some(chroma_key_test_spec()),
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14691,6 +15540,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: Some(spec),
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14719,6 +15569,7 @@ mod tests {
                     mask: SourceMask::None,
                     blend: true,
                     chroma_key: scene_chroma_key_into_metal(&spec),
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                     opacity: 1.0,
@@ -14751,6 +15602,395 @@ mod tests {
             partial_alpha > 0 && partial_alpha < 255,
             "fixture pixel must ramp, got {partial_alpha}"
         );
+    }
+
+    /// Plan 213 G1: the cropped-screen fixture as a Freeform scene on a
+    /// Screen only canvas, the one screen source carrying the fixture's box
+    /// and crop.
+    fn screen_crop_fixture_snapshot() -> CompositorSceneSnapshot {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::ScreenOnly;
+        layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        let transform = crate::scene_geometry::screen_crop_fixture::transform();
+        CompositorSceneSnapshot {
+            synthetic_hard_content: false,
+            selected_sources: None,
+            revision: 1,
+            scene: Some(Scene {
+                id: "scene:screen-crop".to_string(),
+                name: "Screen crop".to_string(),
+                sources: vec![SceneSource {
+                    id: "source:base".to_string(),
+                    name: "Screen capture".to_string(),
+                    kind: SceneSourceKind::Screen,
+                    device_id: Some("screen-1".to_string()),
+                    transform: transform.clone(),
+                    default_transform: transform,
+                    visible: true,
+                    locked: false,
+                }],
+                outputs: Vec::new(),
+                background: None,
+            }),
+            layout,
+            active_screen: None,
+        }
+    }
+
+    /// The crop fixture's scene with the bigger-than-canvas box instead
+    /// (plan 215 E2): the same screen source, uncropped, 150% of the canvas
+    /// with a quarter past every edge.
+    fn screen_beyond_canvas_fixture_snapshot() -> CompositorSceneSnapshot {
+        let mut snapshot = screen_crop_fixture_snapshot();
+        let transform = crate::scene_geometry::screen_beyond_canvas_fixture::transform();
+        let source = &mut snapshot.scene.as_mut().expect("scene").sources[0];
+        source.transform = transform.clone();
+        source.default_transform = transform;
+        snapshot
+    }
+
+    fn screen_crop_fixture_frame() -> FrameHandle<PreviewScreenPixelFormat> {
+        use crate::scene_geometry::screen_crop_fixture::{
+            SOURCE_HEIGHT, SOURCE_WIDTH, source_bgra,
+        };
+        crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+            storage: crate::frame_store::FrameStorage::untracked(),
+            sequence: 1,
+            width: SOURCE_WIDTH,
+            height: SOURCE_HEIGHT,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes: source_bgra(),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            source_d3d11_texture: None,
+            recycle_pool: None,
+            captured_at: Instant::now(),
+        })
+    }
+
+    fn screen_crop_inputs<'a>(
+        snapshot: &'a CompositorSceneSnapshot,
+        screen_frame: &'a FrameHandle<PreviewScreenPixelFormat>,
+        width: u32,
+        height: u32,
+    ) -> CompositorRenderInputs<'a> {
+        CompositorRenderInputs {
+            sequence: 1,
+            width,
+            height,
+            snapshot: Some(snapshot),
+            active_image_source: None,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: Some(screen_frame),
+            caption_overlay: None,
+            highlight_overlay: None,
+            chat_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+            live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
+        }
+    }
+
+    /// Every fixture sample's Y, U and V on a YUV420p frame, within the
+    /// rounding two linear colour conversions leave.
+    fn assert_screen_crop_samples(path: &str, yuv: &[u8], width: u32, height: u32) {
+        use crate::scene_geometry::screen_crop_fixture::expected_samples;
+        assert_yuv_samples(path, yuv, width, height, &expected_samples());
+    }
+
+    fn assert_screen_beyond_canvas_samples(path: &str, yuv: &[u8], width: u32, height: u32) {
+        use crate::scene_geometry::screen_beyond_canvas_fixture::expected_samples;
+        assert_yuv_samples(path, yuv, width, height, &expected_samples());
+    }
+
+    fn assert_yuv_samples(
+        path: &str,
+        yuv: &[u8],
+        width: u32,
+        height: u32,
+        samples: &[((f64, f64), [u8; 3])],
+    ) {
+        use crate::scene_geometry::screen_crop_fixture::sample_pixel;
+        assert_eq!(
+            yuv.len(),
+            raw_yuv420p_len(width, height),
+            "{path}: frame size"
+        );
+        let (w, h) = (width as usize, height as usize);
+        let (chroma_w, chroma_h) = (w.div_ceil(2), h.div_ceil(2));
+        for &(point, [r, g, b]) in samples {
+            let (x, y) = sample_pixel(point, width, height);
+            let expected = rgb_to_yuv(r, g, b);
+            let chroma = (y / 2) * chroma_w + x / 2;
+            let actual = (
+                yuv[y * w + x],
+                yuv[w * h + chroma],
+                yuv[w * h + chroma_w * chroma_h + chroma],
+            );
+            let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 8;
+            assert!(
+                close(actual.0, expected.0)
+                    && close(actual.1, expected.1)
+                    && close(actual.2, expected.2),
+                "{path}: at {point:?} ({x}, {y}) expected {:?} (YUV {expected:?}), got YUV {actual:?}",
+                [r, g, b]
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_compositor_draws_the_screen_crop_fixture() {
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+        render_compositor_yuv420p_frame(screen_crop_inputs(&snapshot, &frame, 128, 72), &mut bytes);
+        assert_screen_crop_samples("cpu", &bytes, 128, 72);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_compositor_draws_the_screen_crop_fixture_or_skips() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let composed = try_gpu_compose(
+            Some(&mut gpu),
+            &screen_crop_inputs(&snapshot, &frame, 128, 72),
+            true,
+        )
+        .expect("the cropped screen composes on Metal");
+        assert_screen_crop_samples("metal", &composed.yuv, 128, 72);
+    }
+
+    /// The aux leg (a record + stream session's stream leg on macOS) re-renders
+    /// the program snapshot at its own canvas through its own publisher: the
+    /// crop must land there too, on the CPU fallback and on Metal.
+    #[test]
+    fn auxiliary_leg_draws_the_screen_crop_fixture() {
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut gpu = new_gpu_compositor(false);
+        let mut legs = vec![("aux cpu", None)];
+        if let Some(gpu) = gpu.as_mut() {
+            legs.push(("aux metal", Some(gpu)));
+        } else {
+            eprintln!("aux metal: skipped, no GPU compositor here");
+        }
+        for (path, gpu) in legs {
+            let store = Arc::new(std::sync::Mutex::new(FrameStore::new(2)));
+            publish_auxiliary_compositor_frame(
+                1,
+                Instant::now(),
+                Instant::now(),
+                store.clone(),
+                screen_crop_inputs(&snapshot, &frame, 64, 36),
+                gpu,
+                CompositorFrameConsumer::RawYuvEncoder,
+                &[],
+                3,
+            );
+            let published = store.lock().unwrap().latest().expect("aux frame");
+            assert_eq!((published.width, published.height), (64, 36), "{path}");
+            assert_screen_crop_samples(path, &published.bytes, 64, 36);
+        }
+    }
+
+    /// Plan 215 E2 (D2): a box bigger than the canvas is cut at the edge,
+    /// never squashed, on the CPU path.
+    #[test]
+    fn cpu_compositor_cuts_the_screen_beyond_the_canvas() {
+        let snapshot = screen_beyond_canvas_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+        render_compositor_yuv420p_frame(screen_crop_inputs(&snapshot, &frame, 128, 72), &mut bytes);
+        assert_screen_beyond_canvas_samples("cpu", &bytes, 128, 72);
+    }
+
+    /// Metal draws the uncut quad and the GPU clips it (plan 215 E2).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_compositor_cuts_the_screen_beyond_the_canvas_or_skips() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let snapshot = screen_beyond_canvas_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let composed = try_gpu_compose(
+            Some(&mut gpu),
+            &screen_crop_inputs(&snapshot, &frame, 128, 72),
+            true,
+        )
+        .expect("the oversized screen composes on Metal");
+        assert_screen_beyond_canvas_samples("metal", &composed.yuv, 128, 72);
+    }
+
+    /// The aux leg (a record + stream session's stream leg on macOS) cuts
+    /// the same way at its own canvas, on the CPU fallback and on Metal.
+    #[test]
+    fn auxiliary_leg_cuts_the_screen_beyond_the_canvas() {
+        let snapshot = screen_beyond_canvas_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut gpu = new_gpu_compositor(false);
+        let mut legs = vec![("aux cpu", None)];
+        if let Some(gpu) = gpu.as_mut() {
+            legs.push(("aux metal", Some(gpu)));
+        } else {
+            eprintln!("aux metal: skipped, no GPU compositor here");
+        }
+        for (path, gpu) in legs {
+            let store = Arc::new(std::sync::Mutex::new(FrameStore::new(2)));
+            publish_auxiliary_compositor_frame(
+                1,
+                Instant::now(),
+                Instant::now(),
+                store.clone(),
+                screen_crop_inputs(&snapshot, &frame, 64, 36),
+                gpu,
+                CompositorFrameConsumer::RawYuvEncoder,
+                &[],
+                3,
+            );
+            let published = store.lock().unwrap().latest().expect("aux frame");
+            assert_eq!((published.width, published.height), (64, 36), "{path}");
+            assert_screen_beyond_canvas_samples(path, &published.bytes, 64, 36);
+        }
+    }
+
+    /// Plan 215 E2: the Screen ISO file stays the raw, whole screen when the
+    /// scene's box is bigger than the canvas (the box never reaches the ISO
+    /// leg; plan 213 D5's rule holds).
+    #[test]
+    fn source_iso_screen_leg_ignores_a_box_beyond_the_canvas() {
+        use crate::scene_geometry::screen_crop_fixture::{CYAN, MAGENTA, RED, WHITE, sample_pixel};
+        let snapshot = screen_beyond_canvas_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let iso = source_iso_snapshot(Some(&snapshot), SourceIsoRole::Screen)
+            .expect("screen ISO snapshot");
+        let source = &iso.scene.as_ref().expect("scene").sources[0];
+        assert_eq!(source.transform, full_frame_transform(), "no box");
+        let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+        render_compositor_yuv420p_frame(screen_crop_inputs(&iso, &frame, 128, 72), &mut bytes);
+        for (point, [r, g, b]) in [
+            ((0.05, 0.50), RED),
+            ((0.95, 0.50), WHITE),
+            ((0.50, 0.05), MAGENTA),
+            ((0.50, 0.95), CYAN),
+        ] {
+            let (x, y) = sample_pixel(point, 128, 72);
+            let (expected, _, _) = rgb_to_yuv(r, g, b);
+            let luma = bytes[y * 128 + x];
+            assert!(
+                (i16::from(luma) - i16::from(expected)).abs() <= 8,
+                "the Screen file shows {:?} at {point:?}: Y {luma} vs {expected}",
+                [r, g, b]
+            );
+        }
+    }
+
+    /// Plan 215 E2: the CPU blit's source window starts where the canvas
+    /// edge cut the box, on the general, the bilinear and the 1:1 paths,
+    /// and a box with nothing on the canvas draws nothing.
+    #[test]
+    fn cpu_blit_starts_the_source_window_where_the_canvas_cut_the_box() {
+        // A 4x4 source whose rows are 0, 1, 2, 3 (as the red channel), drawn
+        // 1:1 at (-2, -1): the canvas's (0, 0) shows source (2, 1).
+        let source_bytes: Vec<u8> = (0..4u8)
+            .flat_map(|y| (0..4u8).map(move |x| [0, 0, x * 60 + y, 255]))
+            .flatten()
+            .collect();
+        let source = RgbaSource {
+            bytes: &source_bytes,
+            width: 4,
+            height: 4,
+            format: SourcePixelFormat::Bgra,
+        };
+        let options = |linear: bool, mask: SceneMask| SourceRenderOptions {
+            crop: SceneCrop::none(),
+            pan: (0.0, 0.0),
+            contain: false,
+            mirror_x: false,
+            mask,
+            chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
+            linear,
+        };
+        let expected_y = |x: u8, y: u8| rgb_to_y(x * 60 + y, 0, 0);
+        let one_to_one = SignedPixelRect {
+            x: -2,
+            y: -1,
+            width: 4,
+            height: 4,
+        };
+        for (path, options) in [
+            ("1:1", options(false, SceneMask::None)),
+            (
+                "general",
+                options(false, SceneMask::Rounded { radius_pct: 0 }),
+            ),
+            ("bilinear", options(true, SceneMask::None)),
+        ] {
+            let mut bytes = vec![0; raw_yuv420p_len(4, 4)];
+            assert!(blit_rgba_to_yuv420p(
+                &source, &mut bytes, 4, 4, one_to_one, options
+            ));
+            // Visible: source columns 2..4 at canvas 0..2, rows 1..4 at 0..3.
+            assert_eq!(bytes[0], expected_y(2, 1), "{path}: canvas (0, 0)");
+            assert_eq!(bytes[1], expected_y(3, 1), "{path}: canvas (1, 0)");
+            assert_eq!(bytes[2 * 4], expected_y(2, 3), "{path}: canvas (0, 2)");
+            assert_eq!(bytes[2], 0, "{path}: nothing right of the box");
+            assert_eq!(bytes[3 * 4], 0, "{path}: nothing below the box");
+        }
+        // The bilinear path is 1:1 here, so it read point samples; scale the
+        // box 2x to make it resample, and the cut shifts with it.
+        let scaled = SignedPixelRect {
+            x: -4,
+            y: -2,
+            width: 8,
+            height: 8,
+        };
+        let mut bytes = vec![0; raw_yuv420p_len(4, 4)];
+        assert!(blit_rgba_to_yuv420p(
+            &source,
+            &mut bytes,
+            4,
+            4,
+            scaled,
+            options(true, SceneMask::None)
+        ));
+        // Canvas (1, 1) is box (5, 3) -> source centre (2.25, 1.25): mostly
+        // source (2, 1), a shade toward (3, 2).
+        #[allow(clippy::identity_op, reason = "row * stride + column names the pixel")]
+        let centre = bytes[1 * 4 + 1];
+        assert!(
+            (i16::from(centre) - i16::from(expected_y(2, 1))).abs() <= 24,
+            "bilinear: {centre} vs {}",
+            expected_y(2, 1)
+        );
+        // Nothing on the canvas: nothing drawn, and still a draw.
+        let mut bytes = vec![7; raw_yuv420p_len(4, 4)];
+        assert!(blit_rgba_to_yuv420p(
+            &source,
+            &mut bytes,
+            4,
+            4,
+            SignedPixelRect {
+                x: 4,
+                y: 0,
+                width: 4,
+                height: 4,
+            },
+            options(false, SceneMask::None)
+        ));
+        assert!(bytes.iter().all(|&byte| byte == 7));
     }
 
     #[test]
@@ -14815,6 +16055,31 @@ mod tests {
         assert_eq!(crop, [0.5, 0.25, 0.0, 0.25]);
     }
 
+    /// Plan 215 E2: the quad is the uncut box, so a box past the canvas
+    /// edge places below 0 and past 1 and the GPU clips it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gpu_source_placement_reports_the_uncut_quad_past_the_canvas() {
+        let (dest, crop) = gpu_source_placement(
+            64,
+            36,
+            SignedPixelRect {
+                x: -32,
+                y: -18,
+                width: 192,
+                height: 108,
+            },
+            true,
+            SceneCrop::none(),
+            (0.0, 0.0),
+            128,
+            72,
+        )
+        .expect("gpu placement");
+        assert_eq!(dest, [-0.25, -0.25, 1.5, 1.5]);
+        assert_eq!(crop, [0.0, 0.0, 0.0, 0.0]);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn gpu_source_placement_reports_contain_inset_as_quad() {
@@ -14866,6 +16131,7 @@ mod tests {
             false,
             true,
             SceneMask::None,
+            crate::protocol::CameraLook::default(),
             &mut mirrored,
         ));
         assert_eq!(
@@ -14886,6 +16152,7 @@ mod tests {
             false,
             false,
             SceneMask::Circle,
+            crate::protocol::CameraLook::default(),
             &mut circle,
         ));
         assert_eq!(circle[3], 0, "top-left corner must be transparent");
@@ -14980,6 +16247,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15003,6 +16271,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15099,6 +16368,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15235,6 +16505,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15342,6 +16613,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15390,6 +16662,7 @@ mod tests {
                 false,
                 false,
                 false,
+                ChatOverlayLegs::OFF,
                 LiveBackgroundLeg::unmeasured(&mut None),
                 ProgramLeg::off(&mut None),
             )
@@ -15441,6 +16714,7 @@ mod tests {
                 false,
                 false,
                 false,
+                ChatOverlayLegs::OFF,
                 LiveBackgroundLeg::unmeasured(&mut None),
                 ProgramLeg::off(&mut None),
             )
@@ -15507,6 +16781,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -15542,6 +16817,7 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -15677,6 +16953,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -15775,6 +17052,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -15827,6 +17105,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -15879,6 +17158,43 @@ mod tests {
         assert_eq!(latest_frame_bytes_len(&store), 0);
     }
 
+    /// Plan 214 A2: while Videorc Camera (or another holder) holds the pixel
+    /// demand, the no-GPU native preview composes CPU pixels every tick, as
+    /// it does once for a picture waiter; released, it is metadata-only
+    /// again (the Linux plan-0014 idle cost stays zero with the camera off).
+    #[tokio::test]
+    async fn metadata_only_preview_composes_pixels_while_demand_is_held() {
+        let state = test_state();
+        let mut live_sources = CompositorLiveSources::default();
+        let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
+        publish_native_preview_tick_without_gpu(&state, 1, &mut live_sources, &mut render_cache)
+            .await;
+        let store = compositor_frame_store(&state).await;
+        assert_eq!(latest_frame_bytes_len(&store), 0);
+
+        let demand = pixel_demand(&state).await;
+        let guard = demand.hold();
+        publish_native_preview_tick_without_gpu(&state, 2, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(latest_frame_bytes_len(&store), raw_yuv420p_len(16, 8));
+        publish_native_preview_tick_without_gpu(&state, 3, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(
+            latest_frame_bytes_len(&store),
+            raw_yuv420p_len(16, 8),
+            "every tick while the demand is held, not once"
+        );
+
+        drop(guard);
+        publish_native_preview_tick_without_gpu(&state, 4, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(
+            latest_frame_bytes_len(&store),
+            0,
+            "released: metadata frames again"
+        );
+    }
+
     #[tokio::test]
     async fn metadata_only_preview_picture_gives_up_without_a_tick() {
         let state = test_state();
@@ -15917,6 +17233,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -15952,6 +17269,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -16045,6 +17363,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -16132,6 +17451,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -16190,6 +17510,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -16215,6 +17536,52 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    /// Stops the state's synthetic compositor run when a test unwinds
+    /// (#1069). A failed assertion otherwise drops the test runtime, whose
+    /// blocking pool waits forever for the thread running
+    /// `run_synthetic_compositor_loop`, which nothing told to stop: the
+    /// failure is never reported and the test just runs on. Declared right
+    /// after the state so it drops last, the guard signals the current run's
+    /// stop channel and waits for its worker, so the panic reports instead.
+    /// A test that returns normally has stopped its run itself; the guard
+    /// then finds nothing to do.
+    struct StopSyntheticRunOnDrop {
+        state: AppState,
+    }
+
+    impl StopSyntheticRunOnDrop {
+        fn new(state: AppState) -> Self {
+            Self { state }
+        }
+    }
+
+    impl Drop for StopSyntheticRunOnDrop {
+        fn drop(&mut self) {
+            // Drop cannot await: the runtime lock is tried until the loop
+            // lets go of it (it holds the lock for one frame's bookkeeping
+            // at most), and the worker is joined by polling its handle.
+            let deadline = Instant::now() + COMPOSITOR_WORKER_STOP_TIMEOUT;
+            let task = loop {
+                if let Ok(mut compositor) = self.state.compositor.try_lock() {
+                    if let Some(stop_tx) = compositor.stop_tx.take() {
+                        let _ = stop_tx.send(true);
+                    }
+                    break compositor.render_task.take();
+                }
+                if Instant::now() >= deadline {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let Some(task) = task else {
+                return;
+            };
+            while !task.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
 
     fn tiny_video() -> VideoSettings {
@@ -16299,8 +17666,11 @@ mod tests {
             highlight_on_aux: false,
             buddy_on_primary: false,
             buddy_on_aux: true,
+            chat_on_primary: false,
+            chat_on_aux: false,
             highlight_on_program: true,
             buddy_on_program: true,
+            chat_on_program: false,
         };
         // No live run: nothing to swap; the next session reads the layout.
         assert!(!update_overlay_flags(&state, flags).await);
@@ -16313,8 +17683,11 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         });
         state.compositor.lock().await.loop_config_tx = Some(loop_config_tx);
         assert!(update_overlay_flags(&state, flags).await);
@@ -16376,8 +17749,11 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         });
         let supervisor_state = state.clone();
         let supervisor = state.spawn_process_task(run_compositor_health_supervisor(
@@ -17254,7 +18630,10 @@ mod tests {
                 camera_sequence,
                 screen_sequence,
                 has_image_source,
-                published_at: Instant::now(),
+                // Stamped from tokio's clock: under paused time the gaps the
+                // barrier measures are exactly the writer's sleeps, however
+                // late the host runs them. On a running clock this is now.
+                published_at: tokio::time::Instant::now().into_std(),
             });
     }
 
@@ -17269,6 +18648,7 @@ mod tests {
     #[tokio::test]
     async fn synthetic_compositor_reports_render_cadence() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -17285,9 +18665,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -17326,6 +18709,7 @@ mod tests {
     #[tokio::test]
     async fn compositor_publishes_auxiliary_stream_output_store() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -17347,9 +18731,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -17422,6 +18809,7 @@ mod tests {
     #[tokio::test]
     async fn simulcast_bound_aux_composes_its_own_vertical_scene() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -17445,9 +18833,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -17671,6 +19062,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -17707,7 +19099,7 @@ mod tests {
         assert!(stream.metadata.has_metal_iosurface_target());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_waits_for_consecutive_target_real_frames() {
         let state = test_state();
         let writer_state = state.clone();
@@ -17739,7 +19131,7 @@ mod tests {
         assert_eq!(result.timeout_reason, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_requires_stable_frame_cadence_when_configured() {
         let state = test_state();
         let writer_state = state.clone();
@@ -17964,7 +19356,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_blocks_unstable_frame_cadence_when_configured() {
         let state = test_state();
         let writer_state = state.clone();
@@ -18016,7 +19408,7 @@ mod tests {
     /// Cadence matrix: the owner's 166/100/90ms hiccup pattern is unsteady
     /// under a tight budget (cadence-only, with the last three gaps on record)
     /// and clean under the 200ms production budget, at 30 and at 60fps.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_reports_gap_history_and_cadence_only_for_hiccups() {
         for (label, budget_ms, expect_ready) in [
             ("30fps/tight", 71_u64, false),
@@ -18104,7 +19496,7 @@ mod tests {
     /// A stall is never cadence-only: no frame at all, or frames that stop
     /// advancing the required camera, report zero/one fresh frame and no
     /// cadence violation so the caller refuses instead of recording.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_stalls_are_not_cadence_only() {
         let silent = wait_for_compositor_startup_frames(
             &test_state(),
@@ -18177,7 +19569,7 @@ mod tests {
 
     /// A resolution block AFTER usable frames wins over earlier cadence
     /// misses: the latest observation decides, so this is never cadence-only.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_structural_block_after_hiccups_is_not_cadence_only() {
         let state = test_state();
         let writer_state = state.clone();
@@ -18227,7 +19619,7 @@ mod tests {
         assert_eq!(startup_gap_history_label(&[]), "none");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_requires_advancing_camera_frames() {
         let state = test_state();
         let writer_state = state.clone();
@@ -18266,7 +19658,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_accepts_advancing_camera_frames() {
         let state = test_state();
         let writer_state = state.clone();
@@ -18449,6 +19841,7 @@ mod tests {
     #[tokio::test]
     async fn compositor_start_replaces_stale_frame_store() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let old_store = compositor_frame_store(&state).await;
         {
             let mut store = old_store
@@ -18480,9 +19873,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -18495,6 +19891,7 @@ mod tests {
     #[tokio::test]
     async fn rapid_compositor_replacement_awaits_the_previous_blocking_worker() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let params = |width| CompositorStartParams {
             benchmark: false,
             target_fps: 60,
@@ -18509,9 +19906,12 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             replay_only: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         };
 
         let first = start_synthetic_compositor(state.clone(), params(64)).await;
@@ -18543,9 +19943,12 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             replay_only: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         }
     }
 
@@ -18556,6 +19959,7 @@ mod tests {
             width,
             height,
             frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            lease: CompositorLeaseKind::Capture,
             replay_only: false,
             caption_overlay_on_primary: true,
             caption_overlay_on_aux: false,
@@ -18563,8 +19967,11 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         }
     }
 
@@ -18595,6 +20002,7 @@ mod tests {
     #[tokio::test]
     async fn arm_compositor_for_capture_keeps_the_run_and_swaps_the_loop_config() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
         let preview_run_id = preview.run_id.clone().expect("preview run id");
         let before = wait_for_frame_dimensions(&state, 64, 36, 0).await;
@@ -18677,8 +20085,11 @@ mod tests {
                 highlight_on_aux: false,
                 buddy_on_primary: false,
                 buddy_on_aux: false,
+                chat_on_primary: false,
+                chat_on_aux: false,
                 highlight_on_program: true,
                 buddy_on_program: false,
+                chat_on_program: false,
             },
             "the shipped layout: highlight on both, Buddy off"
         );
@@ -18691,6 +20102,7 @@ mod tests {
         assert!(!idle.buddy_on_aux);
 
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -18699,6 +20111,7 @@ mod tests {
                 buddy_overlay_on_primary: idle.buddy_on_primary,
                 highlight_overlay_on_program: idle.highlight_on_program,
                 buddy_overlay_on_program: idle.buddy_on_program,
+                chat_overlay_on_program: idle.chat_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -18757,8 +20170,11 @@ mod tests {
                     highlight_on_aux: replanned.highlight.aux,
                     buddy_on_primary: replanned.buddy.primary,
                     buddy_on_aux: replanned.buddy.aux,
+                    chat_on_primary: replanned.chat.primary,
+                    chat_on_aux: replanned.chat.aux,
                     highlight_on_program: true,
                     buddy_on_program: true,
+                    chat_on_program: false,
                 }
             )
             .await
@@ -18799,6 +20215,7 @@ mod tests {
         );
 
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -18809,6 +20226,7 @@ mod tests {
                 buddy_overlay_on_primary: flags.buddy_on_primary,
                 highlight_overlay_on_program: flags.highlight_on_program,
                 buddy_overlay_on_program: flags.buddy_on_program,
+                chat_overlay_on_program: flags.chat_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -18832,6 +20250,8 @@ mod tests {
                     highlight_on_program: config.highlight_overlay_on_program,
                     buddy_on_primary: config.buddy_overlay_on_primary,
                     buddy_on_program: config.buddy_overlay_on_program,
+                    chat_on_primary: config.chat_overlay_on_primary,
+                    chat_on_program: config.chat_overlay_on_program,
                     caption_on_primary: false,
                     caption_on_aux: false,
                 },
@@ -18857,6 +20277,7 @@ mod tests {
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 buddy_overlay_on_primary: record.buddy_on_primary,
                 buddy_overlay_on_program: record.buddy_on_program,
+                chat_overlay_on_program: record.chat_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -18875,6 +20296,7 @@ mod tests {
     #[tokio::test]
     async fn a_layout_saved_at_idle_swaps_the_idle_runs_flags() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let idle = idle_overlay_flags(&state);
         assert!(!idle.buddy_on_primary);
         start_synthetic_compositor(
@@ -18885,6 +20307,7 @@ mod tests {
                 buddy_overlay_on_primary: idle.buddy_on_primary,
                 highlight_overlay_on_program: idle.highlight_on_program,
                 buddy_overlay_on_program: idle.buddy_on_program,
+                chat_overlay_on_program: idle.chat_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -18958,6 +20381,7 @@ mod tests {
     #[tokio::test]
     async fn a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
         // The user's scene: one plain test pattern (the only source a test
         // can draw), committed the way the idle Preview commits it.
@@ -19029,12 +20453,10 @@ mod tests {
             )
             .await
         );
-        let benchmark_frame = wait_for_frame_dimensions(&state, 128, 72, before.sequence).await;
-        assert_eq!(
-            benchmark_frame.scene_revision,
-            Some(11),
-            "the barrier reads the benchmark scene's revision"
-        );
+        // The arm resizes the loop at once and the commit lands a tick or
+        // two later, so a frame of the user's scene at the benchmark's size
+        // is possible in between: the wait names the revision too.
+        wait_for_frame_dimensions_at_revision(&state, 128, 72, Some(11), before.sequence).await;
         {
             let compositor = state.compositor.lock().await;
             assert_eq!(compositor.status.scene_revision, Some(10));
@@ -19108,8 +20530,7 @@ mod tests {
             )
             .await
         );
-        let fresh_frame = wait_for_frame_dimensions(&state, 128, 72, 0).await;
-        assert_eq!(fresh_frame.scene_revision, Some(12));
+        wait_for_frame_dimensions_at_revision(&state, 128, 72, Some(12), 0).await;
         {
             let compositor = state.compositor.lock().await;
             assert_ne!(
@@ -19131,6 +20552,48 @@ mod tests {
         }
         stop_compositor(&state).await;
         assert!(state.compositor.lock().await.benchmark_scene.is_none());
+    }
+
+    /// #1069: a failed assertion while a synthetic run is live reports as a
+    /// failure instead of hanging the whole test binary in the runtime's
+    /// blocking-pool shutdown (the guard stops the run as the test unwinds).
+    #[tokio::test]
+    #[should_panic(expected = "a failure during a live synthetic run reports")]
+    async fn a_panic_during_a_live_synthetic_run_reports_instead_of_hanging() {
+        let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
+        start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+        wait_for_frame_dimensions(&state, 64, 36, 0).await;
+        panic!("a failure during a live synthetic run reports");
+    }
+
+    /// The first frame at `width`x`height` that also carries `revision`: a
+    /// run resized in place (or started) before a scene commit renders the
+    /// previous scene at the new size until the commit reaches it.
+    async fn wait_for_frame_dimensions_at_revision(
+        state: &AppState,
+        width: u32,
+        height: u32,
+        revision: Option<u64>,
+        after_sequence: u64,
+    ) -> CompositorFrameEvidence {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let latest = compositor_latest_frame_evidence(state).await;
+            if let Some(evidence) = latest
+                && evidence.width == width
+                && evidence.height == height
+                && evidence.scene_revision == revision
+                && evidence.sequence > after_sequence
+            {
+                return evidence;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "compositor never published a {width}x{height} frame at revision {revision:?} after {after_sequence} (latest {latest:?})"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn wait_for_frame_at_revision(
@@ -19164,6 +20627,7 @@ mod tests {
     #[tokio::test]
     async fn arm_compositor_for_capture_refuses_non_preview_runs() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         assert_eq!(
             arm_compositor_for_capture(&state, "s", arm_params(128, 72)).await,
             Err(CompositorArmRefusal::NoLiveRun)
@@ -19211,6 +20675,7 @@ mod tests {
     #[tokio::test]
     async fn stopping_a_leased_run_clears_the_lease() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
         let run_id = preview.run_id.expect("preview run id");
         arm_compositor_for_capture(&state, "session-arm", arm_params(128, 72))
@@ -19228,6 +20693,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_shutdown_joins_the_compositor_blocking_worker() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -19244,9 +20710,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -19269,6 +20738,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_compositor_starts_serialize_the_full_worker_handoff() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let params = |width| CompositorStartParams {
             benchmark: false,
             target_fps: 60,
@@ -19283,9 +20753,12 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             replay_only: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         };
         let (left, right) = tokio::join!(
             start_synthetic_compositor(state.clone(), params(64)),
@@ -19306,6 +20779,7 @@ mod tests {
     #[tokio::test]
     async fn compositor_restart_publishes_requested_recording_dimensions_after_preview_size() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -19322,9 +20796,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -19363,9 +20840,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -19690,6 +21170,89 @@ mod tests {
         );
     }
 
+    /// Plan 216 B2: the streamer's 2228x1440 display reaches the stage as
+    /// the screen source's own size; the camera gets its frame size, the
+    /// test pattern the canvas, and the image entries keep their own.
+    #[test]
+    fn scene_source_statuses_carry_the_capture_sizes() {
+        let scene_source =
+            |id: &str, kind: CompositorSceneSourceKind| CompositorSceneSourceStatus {
+                id: id.to_string(),
+                name: id.to_string(),
+                kind,
+                state: "referenced".to_string(),
+                device_id: None,
+                visible: true,
+                transform: full_frame_transform(),
+                fit: CompositorSceneSourceFit::Contain,
+                mirror: false,
+                shape: None,
+                image_path: None,
+                file_revision: None,
+                width: None,
+                height: None,
+                message: None,
+            };
+        let capture =
+            |kind: CompositorSourceKind, size: Option<(u32, u32)>| CompositorSourceStatus {
+                kind,
+                state: "live".to_string(),
+                source_id: None,
+                sequence: None,
+                width: size.map(|(width, _)| width),
+                height: size.map(|(_, height)| height),
+                source_fps: None,
+                frame_age_ms: None,
+                message: None,
+            };
+        let mut scene_sources = vec![
+            scene_source("source:base", CompositorSceneSourceKind::Screen),
+            scene_source("source:camera", CompositorSceneSourceKind::Camera),
+            scene_source("source:pattern", CompositorSceneSourceKind::TestPattern),
+            CompositorSceneSourceStatus {
+                width: Some(7680),
+                height: Some(4320),
+                ..scene_source(
+                    "background-image:1",
+                    CompositorSceneSourceKind::BackgroundImage,
+                )
+            },
+        ];
+        fill_scene_source_sizes(
+            &mut scene_sources,
+            &[
+                capture(CompositorSourceKind::Camera, Some((1280, 720))),
+                capture(CompositorSourceKind::Screen, Some((2228, 1440))),
+            ],
+            2560,
+            1440,
+        );
+        let size = |id: &str| {
+            let source = scene_sources.iter().find(|source| source.id == id).unwrap();
+            (source.width, source.height)
+        };
+        assert_eq!(size("source:base"), (Some(2228), Some(1440)));
+        assert_eq!(size("source:camera"), (Some(1280), Some(720)));
+        assert_eq!(size("source:pattern"), (Some(2560), Some(1440)));
+        assert_eq!(size("background-image:1"), (Some(7680), Some(4320)));
+
+        // A capture without a size yet keeps the last known one; a window
+        // capture sizes a window source.
+        let mut again = scene_sources.clone();
+        again[0].kind = CompositorSceneSourceKind::Window;
+        fill_scene_source_sizes(
+            &mut again,
+            &[
+                capture(CompositorSourceKind::Camera, None),
+                capture(CompositorSourceKind::Window, Some((1200, 1600))),
+            ],
+            2560,
+            1440,
+        );
+        assert_eq!((again[0].width, again[0].height), (Some(1200), Some(1600)));
+        assert_eq!((again[1].width, again[1].height), (Some(1280), Some(720)));
+    }
+
     #[test]
     fn decoded_image_cache_obeys_resident_byte_budget_and_never_evicts_pins() {
         fn source(name: &str, revision: u64) -> CompositorImageSource {
@@ -19868,6 +21431,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -19952,6 +21516,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: caption,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -20051,6 +21616,7 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -20065,6 +21631,7 @@ mod tests {
             CompositorRenderInputs {
                 caption_overlay: Some(&caption),
                 highlight_overlay: Some(&highlight),
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -20435,6 +22002,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: highlight,
+                chat_overlay: None,
                 buddy_overlay: buddy,
                 buddy_leg: None,
                 banners: &[],
@@ -20548,6 +22116,207 @@ mod tests {
         );
     }
 
+    /// Plan 215 G1: the chat box's twin of the parity fixture above. A
+    /// 1280x720 test-pattern scene with a 200x160 blue chat box at the chat
+    /// rect (0.1, 0.1, 0.3, 0.44) and a 200x100 red highlight card at
+    /// (0.15, 0.2, 0.25, 0.2), overlapping the box's lower part, renders
+    /// through CPU and Metal; the two agree on every pixel of the two rects
+    /// and their 2 px border (within ±2 per channel against each path's own
+    /// clean render), and the card wins the overlap on both paths (the box
+    /// is drawn after the caption bar and before the card).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_blit_the_same_chat_overlay_rect() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let (canvas_w, canvas_h) = (1280_u32, 720_u32);
+        let layout = crate::protocol::default_layout_settings();
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: true,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: canvas_w,
+                height: canvas_h,
+                fps: 30,
+                bitrate_kbps: 6000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
+            selected_sources: None,
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        };
+        let chat = test_caption_overlay(
+            200,
+            160,
+            [0, 0, 255, 255],
+            crate::chat_overlay::chat_overlay_placement(Some(
+                crate::overlay_layout::OverlayRect::new(0.1, 0.1, 0.3, 0.44),
+            )),
+        );
+        let highlight = test_caption_overlay(
+            200,
+            100,
+            [255, 0, 0, 255],
+            OverlayPlacement::new(
+                Some(crate::overlay_layout::OverlayRect::new(
+                    0.15, 0.2, 0.25, 0.2,
+                )),
+                crate::captions::CaptionOverlayPosition::Top,
+            ),
+        );
+        let chat_box = overlay_draw_rect(&chat, 1280, 720, 0);
+        let card = overlay_draw_rect(&highlight, 1280, 720, 0);
+        // The chat rect is a top-left box (128..512 x 72..389); the raster
+        // hugs its top-left corner. The card sits at 192..392 x 144..244,
+        // inside the box's lower-left part.
+        assert_eq!(chat_box, (128, 72, 328, 232));
+        assert_eq!(card, (192, 144, 392, 244));
+        fn inputs<'a>(
+            snapshot: &'a CompositorSceneSnapshot,
+            chat: Option<&'a crate::captions::CaptionOverlay>,
+            highlight: Option<&'a crate::captions::CaptionOverlay>,
+            sequence: u64,
+        ) -> CompositorRenderInputs<'a> {
+            CompositorRenderInputs {
+                sequence,
+                width: 1280,
+                height: 720,
+                snapshot: Some(snapshot),
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: None,
+                highlight_overlay: highlight,
+                chat_overlay: chat,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
+                live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
+            }
+        }
+        let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(inputs(&snapshot, None, None, 1), &mut cpu_clean);
+        let mut cpu = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(
+            inputs(&snapshot, Some(&chat), Some(&highlight), 1),
+            &mut cpu,
+        );
+        let metal_clean = try_gpu_compose(Some(&mut gpu), &inputs(&snapshot, None, None, 1), true)
+            .expect("clean scene renders on Metal")
+            .yuv;
+        let metal = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(&snapshot, Some(&chat), Some(&highlight), 1),
+            true,
+        )
+        .expect("chat scene renders on Metal")
+        .yuv;
+        assert_eq!(metal.len(), cpu.len());
+
+        let (red_y, red_u, red_v) = rgb_to_yuv(255, 0, 0);
+        let (blue_y, blue_u, blue_v) = rgb_to_yuv(0, 0, 255);
+        let width = canvas_w as usize;
+        let height = canvas_h as usize;
+        let (uv_width, uv_height) = (width.div_ceil(2), height.div_ceil(2));
+        let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
+        let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 2;
+        let inside = |rect: (usize, usize, usize, usize), x: usize, y: usize| {
+            (rect.0..rect.2).contains(&x) && (rect.1..rect.3).contains(&y)
+        };
+        let (left, top) = (chat_box.0.min(card.0), chat_box.1.min(card.1));
+        let (right, bottom) = (chat_box.2.max(card.2), chat_box.3.max(card.3));
+        for y in top - 2..bottom + 2 {
+            for x in left - 2..right + 2 {
+                let index = y * width + x;
+                // The card is on top of the chat box where they overlap.
+                let expected = if inside(card, x, y) {
+                    Some(red_y)
+                } else if inside(chat_box, x, y) {
+                    Some(blue_y)
+                } else {
+                    None
+                };
+                match expected {
+                    Some(luma) => {
+                        assert!(
+                            close(cpu[index], luma),
+                            "cpu luma at {x},{y}: {}",
+                            cpu[index]
+                        );
+                        assert!(
+                            close(metal[index], luma),
+                            "metal luma at {x},{y}: {}",
+                            metal[index]
+                        );
+                    }
+                    None => {
+                        assert!(
+                            close(cpu[index], cpu_clean[index]),
+                            "cpu border luma changed at {x},{y}"
+                        );
+                        assert!(
+                            close(metal[index], metal_clean[index]),
+                            "metal border luma changed at {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+        // Chroma, sampled strictly inside each overlay's exclusive area (half
+        // resolution): the box's top part above the card, and the card's
+        // part right of the box.
+        let chroma = |rect: (usize, usize, usize, usize), u: u8, v: u8, name: &str| {
+            for uv_y in (rect.1 + 2) / 2..(rect.3 - 2) / 2 {
+                for uv_x in (rect.0 + 2) / 2..(rect.2 - 2) / 2 {
+                    let uv_index = uv_y * uv_width + uv_x;
+                    for (plane, expected, start) in [("u", u, u_start), ("v", v, v_start)] {
+                        assert!(
+                            close(cpu[start + uv_index], expected),
+                            "cpu {name} {plane} at {uv_x},{uv_y}"
+                        );
+                        assert!(
+                            close(metal[start + uv_index], expected),
+                            "metal {name} {plane} at {uv_x},{uv_y}"
+                        );
+                    }
+                }
+            }
+        };
+        chroma(
+            (chat_box.0, chat_box.1, chat_box.2, card.1),
+            blue_u,
+            blue_v,
+            "chat",
+        );
+        chroma((chat_box.2, card.1, card.2, card.3), red_u, red_v, "card");
+        // The overlap itself is the card's red on both paths.
+        chroma(
+            (card.0, card.1, chat_box.2, chat_box.3),
+            red_u,
+            red_v,
+            "overlap",
+        );
+    }
+
     #[test]
     fn highlight_overlay_pixels_land_only_inside_the_anchor_rect() {
         // 64x32: margin = round(32 * 0.04) = 1 on both axes; card 8x4.
@@ -20564,6 +22333,7 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -20595,6 +22365,7 @@ mod tests {
             render_compositor_yuv420p_frame(
                 CompositorRenderInputs {
                     highlight_overlay: Some(&highlight),
+                    chat_overlay: None,
                     buddy_overlay: None,
                     buddy_leg: None,
                     banners: &[],
@@ -20705,6 +22476,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -20729,6 +22501,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -20769,6 +22542,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -20800,6 +22574,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -20898,6 +22673,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21000,6 +22776,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21114,6 +22891,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21374,6 +23152,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21589,6 +23368,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -21703,6 +23483,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -22066,6 +23847,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    ChatOverlayLegs::OFF,
                     LiveBackgroundLeg::unmeasured(&mut None),
                     ProgramLeg::off(&mut None),
                 )
@@ -22086,8 +23868,11 @@ mod tests {
                     presented_at,
                     Duration::from_secs_f64(1.0 / f64::from(video.fps)),
                 );
-                // Both inputs deliver current audio from the moment Record starts.
-                let started = Instant::now();
+                // Both inputs deliver current audio from the moment Record
+                // starts: the presentation the epoch came from, not a wall
+                // clock read after it, which a loaded host stretches past the
+                // half-tick allowance below (#1076).
+                let started = presented_at;
                 for (microphone, system) in [(true, false), (false, true), (true, true)] {
                     for packet_frames in [128, 480, 512, 960] {
                         let case = format!(
@@ -22292,6 +24077,7 @@ mod buddy_sprite_tests {
             screen_frame: None,
             caption_overlay: caption,
             highlight_overlay: highlight,
+            chat_overlay: None,
             buddy_overlay: bubble,
             buddy_leg,
             banners: &[],
@@ -22704,6 +24490,7 @@ mod buddy_sprite_tests {
         EditorDraft {
             source_id: source_id.to_string(),
             transform,
+            crop: None,
             chrome: EditorChrome {
                 selected: CameraTransform {
                     x: 0.0,
@@ -23006,6 +24793,7 @@ mod banner_tests {
             screen_frame: None,
             caption_overlay: caption,
             highlight_overlay: highlight,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners,
@@ -23679,6 +25467,7 @@ mod banner_tests {
                 width: dragged.w,
                 height: dragged.h,
             }),
+            crop: None,
             chrome: chrome.clone(),
             refreshed_at: now,
             release_at_revision: None,
@@ -23992,6 +25781,8 @@ mod program_leg_tests {
             highlight_on_program: flags.highlight_on_program,
             buddy_on_primary: flags.buddy_on_primary,
             buddy_on_program: flags.buddy_on_program,
+            chat_on_primary: flags.chat_on_primary,
+            chat_on_program: flags.chat_on_program,
             caption_on_primary: captions.0,
             caption_on_aux: captions.1,
         }
@@ -24223,7 +26014,10 @@ mod program_leg_tests {
         stream_output: Option<CompositorAuxiliaryOutput>,
         buddy_on_primary: bool,
         buddy_on_aux: bool,
+        chat_on_primary: bool,
+        chat_on_aux: bool,
         buddy_on_program: bool,
+        chat_on_program: bool,
         presenting: bool,
     }
 
@@ -24251,11 +26045,16 @@ mod program_leg_tests {
             false,
             tick.buddy_on_primary,
             tick.buddy_on_aux,
+            ChatOverlayLegs {
+                primary: tick.chat_on_primary,
+                aux: tick.chat_on_aux,
+            },
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg {
                 gpu: tick.program_gpu,
                 highlight_on_program: false,
                 buddy_on_program: tick.buddy_on_program,
+                chat_on_program: tick.chat_on_program,
                 presenting: tick.presenting,
             },
         )
@@ -24299,6 +26098,9 @@ mod program_leg_tests {
                     buddy_on_primary,
                     buddy_on_aux: false,
                     buddy_on_program,
+                    chat_on_primary: false,
+                    chat_on_aux: false,
+                    chat_on_program: false,
                     presenting,
                 },
             )
@@ -24335,6 +26137,7 @@ mod program_leg_tests {
             compositor.capture_lease = Some(CompositorCaptureLease {
                 session_id: "clips".to_string(),
                 run_id: "test-run".to_string(),
+                kind: CompositorLeaseKind::Capture,
                 replay_only: true,
                 benchmark: false,
                 render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(WIDTH, HEIGHT))),
@@ -24354,7 +26157,10 @@ mod program_leg_tests {
                 stream_output: None,
                 buddy_on_primary: false,
                 buddy_on_aux: false,
+                chat_on_primary: false,
+                chat_on_aux: false,
                 buddy_on_program: true,
+                chat_on_program: false,
                 presenting: true,
             },
         )
@@ -24450,7 +26256,10 @@ mod program_leg_tests {
                 stream_output: Some(stream_output),
                 buddy_on_primary: false,
                 buddy_on_aux: true,
+                chat_on_primary: false,
+                chat_on_aux: false,
                 buddy_on_program: true,
+                chat_on_program: false,
                 presenting: true,
             },
         )
@@ -24510,7 +26319,10 @@ mod program_leg_tests {
                     stream_output: None,
                     buddy_on_primary: false,
                     buddy_on_aux: false,
+                    chat_on_primary: false,
+                    chat_on_aux: false,
                     buddy_on_program: on,
+                    chat_on_program: false,
                     presenting: true,
                 },
             )
@@ -24571,8 +26383,11 @@ mod program_leg_tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: true,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: true,
+            chat_overlay_on_program: false,
         }
     }
 
@@ -24584,8 +26399,11 @@ mod program_leg_tests {
                 highlight_on_aux: false,
                 buddy_on_primary: false,
                 buddy_on_aux: false,
+                chat_on_primary: false,
+                chat_on_aux: false,
                 highlight_on_program: false,
                 buddy_on_program: false,
+                chat_on_program: false,
             }
         }
     }
@@ -24746,6 +26564,7 @@ mod live_background_metal_tests {
             screen_frame: Some(screen),
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -25149,6 +26968,7 @@ mod live_background_metal_tests {
                 false,
                 false,
                 false,
+                ChatOverlayLegs::OFF,
                 LiveBackgroundLeg::pinned_at(&mut self.slot, at),
                 ProgramLeg::off(&mut None),
             )
@@ -25528,6 +27348,7 @@ mod live_background_metal_tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -25810,15 +27631,11 @@ mod background_yuv_cache_tests {
 #[cfg(test)]
 mod live_background_cpu_tests {
     use std::sync::Arc;
-    #[cfg(not(target_os = "linux"))]
     use std::time::Instant;
 
     use super::*;
-    use crate::live_background::CpuLiveFrame;
-    #[cfg(not(target_os = "linux"))]
     use crate::live_background::runtime::sync as sync_live_background;
-    #[cfg(not(target_os = "linux"))]
-    use crate::live_background::{LiveBackgroundBoard, LiveBackgroundTick};
+    use crate::live_background::{CpuLiveFrame, LiveBackgroundBoard, LiveBackgroundTick};
     use crate::protocol::{
         LiveBackgroundId, LiveBackgroundMotion, LiveBackgroundRendering, LiveBackgroundSpec,
     };
@@ -25894,6 +27711,75 @@ mod live_background_cpu_tests {
         assert!(slot.is_none());
         release_cpu_live_background(&mut slot);
         assert!(slot.is_none());
+    }
+
+    /// A Linux renderer with a poster status up, as the forced preflight
+    /// leaves it (no thread, no GPU).
+    #[cfg(target_os = "linux")]
+    fn renderer_showing_the_poster(
+        board: &Arc<LiveBackgroundBoard>,
+    ) -> Option<Box<LiveBackgroundGpuRenderer>> {
+        let now = Instant::now();
+        let mut runtime = None;
+        sync_live_background(&mut runtime, Some(&spec()), now);
+        let input =
+            runtime
+                .unwrap()
+                .frame_input(&background(), board, LiveBackgroundTick::unmeasured(now));
+        let mut renderer = Box::new(LiveBackgroundGpuRenderer::new(Arc::clone(board)));
+        let forced = Some(crate::protocol::LiveBackgroundStillReason::Forced);
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        assert!(!renderer.holds_resources());
+        Some(renderer)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn board_rendering(board: &LiveBackgroundBoard) -> Option<LiveBackgroundRendering> {
+        board.snapshot().0.map(|status| status.rendering)
+    }
+
+    /// Fix plan 0007: when composition stops (the idle Linux preview composes
+    /// nothing) or the run ends, the renderer takes down the status it put
+    /// up; nothing else would, so the idle preview kept the take's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stopped_cpu_live_background_takes_down_its_status() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        // A poster status holds no thread: release still takes it down.
+        let mut slot = renderer_showing_the_poster(&board);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        release_cpu_live_background(&mut slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+        release_cpu_live_background(&mut slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+        // A session's run ends and drops its renderer.
+        let slot = renderer_showing_the_poster(&board);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        drop(slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+    }
+
+    /// The run that replaces an ending one may report first; the ending
+    /// run's renderer leaves that status up.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ending_runs_renderer_leaves_the_next_runs_status_up() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let ending = renderer_showing_the_poster(&board);
+        let next = renderer_showing_the_poster(&board);
+        drop(ending);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        drop(next);
+        assert_eq!(board.snapshot(), (None, 0, 0));
     }
 
     #[cfg(not(target_os = "linux"))]

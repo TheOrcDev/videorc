@@ -181,6 +181,24 @@ fn terminal(message: impl Into<String>) -> anyhow::Error {
     XChatTerminalFailure(message.into()).into()
 }
 
+/// The Videorc sign-in is missing or no longer accepted (plan 215 A1). Not a
+/// failure and not retried: the connector parks, and Sign in attaches it
+/// again (A4). The words name Videorc, never X, because X is fine.
+#[derive(Debug)]
+struct XChatNeedsVideorcSignIn(String);
+
+impl std::fmt::Display for XChatNeedsVideorcSignIn {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for XChatNeedsVideorcSignIn {}
+
+fn needs_videorc_sign_in(message: impl Into<String>) -> anyhow::Error {
+    XChatNeedsVideorcSignIn(message.into()).into()
+}
+
 pub fn x_chat_message(has_x_account: bool) -> &'static str {
     if has_x_account {
         "X live chat can be read and sent for native X broadcasts."
@@ -267,6 +285,36 @@ pub async fn run_x_chat_connector(
             return;
         }
 
+        // Plan 215 A1: the relay waits on the Videorc sign-in. Not a failure
+        // (X is fine) and not a retry: the row parks in words that name
+        // Videorc, and Sign in attaches the connector again (A4).
+        if let Some(parked) = error.downcast_ref::<XChatNeedsVideorcSignIn>() {
+            if follows_live {
+                crate::audience::set_named_follows(&state, &session_id, StreamPlatform::X, false);
+            }
+            state.emit_log(
+                "warn",
+                format!("X live chat is waiting for the Videorc sign-in: {parked}"),
+            );
+            let _ = crate::recording::emit_health_event(
+                &state,
+                Some(&session_id),
+                crate::protocol::HealthLevel::Warn,
+                "x-live-chat-needs-videorc-sign-in",
+                &parked.0,
+            );
+            crate::live_chat::set_provider_needs_videorc_sign_in_and_emit(
+                &state,
+                &session_id,
+                session_generation,
+                StreamPlatform::X,
+                config.target_id.as_deref(),
+                &parked.0,
+            )
+            .await;
+            return;
+        }
+
         let storage_terminal = error
             .downcast_ref::<LiveChatPersistenceFailure>()
             .filter(|failure| failure.is_terminal())
@@ -350,12 +398,18 @@ async fn run_x_chat_session(
     follows_live: &mut bool,
 ) -> Result<()> {
     ensure_active_session(state, session_id, session_generation).await?;
-    let session_token = config
-        .overrides
-        .session_token
-        .clone()
-        .or_else(crate::account::stored_session_token)
-        .ok_or_else(|| terminal("Sign in to your Videorc account to receive X comments."))?;
+    // Plan 215 A1: no token is the parked state, in words that name Videorc.
+    // A store that cannot be read is a real failure with its error, never
+    // "signed out": a streamer who is signed in must not be told to sign in.
+    let session_token = match config.overrides.session_token.clone() {
+        Some(token) => token,
+        None => crate::account::session_token().map_err(|state| match state {
+            crate::account::SessionState::Unreadable(error) => {
+                terminal(format!("Couldn't read the Videorc sign-in: {error}"))
+            }
+            _ => needs_videorc_sign_in(crate::live_chat::X_CHAT_NEEDS_VIDEORC_SIGN_IN),
+        })?,
+    };
     let credentials = match config.overrides.credentials.clone() {
         Some(credentials) => credentials,
         None => crate::x_live::x_livestream_credentials()
@@ -623,14 +677,14 @@ impl RelayClient {
         }
         let (code, message) = crate::videorc_api::read_error_code_and_message(response).await;
         match code.as_str() {
-            "unauthorized" => Err(terminal(
-                "Your Videorc sign-in expired. Sign in again to receive X comments.",
+            "unauthorized" => Err(needs_videorc_sign_in(
+                crate::live_chat::X_CHAT_SIGN_IN_EXPIRED,
             )),
             "x-chat-bind-rejected" => Err(terminal(
                 "X did not confirm this account. Re-authorize X Live to receive X comments.",
             )),
-            _ if status.as_u16() == 401 => Err(terminal(
-                "Your Videorc sign-in expired. Sign in again to receive X comments.",
+            _ if status.as_u16() == 401 => Err(needs_videorc_sign_in(
+                crate::live_chat::X_CHAT_SIGN_IN_EXPIRED,
             )),
             // Everything else (relay not configured, binding lost, 5xx, rate
             // limits) can heal without the user, so the connector retries.
@@ -895,8 +949,11 @@ fn follow_event_to_message(
     })
 }
 
+/// The mock relay and its helpers are crate-visible so `live_chat.rs` can
+/// drive a real X connector through the relay (plan 215 A4: the reattach
+/// after the Videorc sign-in).
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -913,16 +970,18 @@ mod tests {
     };
     use crate::storage::Database;
 
-    const SESSION_TOKEN: &str = "desktop-session-token";
+    pub(crate) const SESSION_TOKEN: &str = "desktop-session-token";
     const WEBHOOK_ID: &str = "2090847910112202752";
     const X_USER_ID: &str = "742673143";
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MockMode {
+    pub(crate) enum MockMode {
         Deliver,
         /// Reads with a cursor answer 500 this many times, then deliver.
         FailReads(usize),
         BindRejected,
+        /// The relay refuses the session (a 401): the Videorc sign-in is
+        /// gone or expired, whatever bearer the connector sends.
         SignedOut,
         SubscriptionRejected,
         /// X refuses only the `follow.follow` subscription (plan 071).
@@ -936,10 +995,12 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct MockState {
-        mode: MockMode,
-        bind_calls: Arc<AtomicUsize>,
-        bind_authorizations: Arc<Mutex<Vec<String>>>,
+    pub(crate) struct MockState {
+        /// Switchable mid-test (plan 215 A4): a relay that refused the
+        /// session accepts it again once the streamer has signed in.
+        mode: Arc<std::sync::Mutex<MockMode>>,
+        pub(crate) bind_calls: Arc<AtomicUsize>,
+        pub(crate) bind_authorizations: Arc<Mutex<Vec<String>>>,
         read_calls: Arc<AtomicUsize>,
         read_queries: Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>,
         unbind_calls: Arc<AtomicUsize>,
@@ -949,10 +1010,30 @@ mod tests {
         release: Arc<Notify>,
     }
 
-    struct MockServer {
-        base_url: String,
-        state: MockState,
-        shutdown: oneshot::Sender<()>,
+    impl MockState {
+        fn mode(&self) -> MockMode {
+            *self
+                .mode
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+    }
+
+    pub(crate) struct MockServer {
+        pub(crate) base_url: String,
+        pub(crate) state: MockState,
+        pub(crate) shutdown: oneshot::Sender<()>,
+    }
+
+    impl MockServer {
+        /// Change how the relay answers from now on.
+        pub(crate) fn set_mode(&self, mode: MockMode) {
+            *self
+                .state
+                .mode
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
+        }
     }
 
     fn relay_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
@@ -975,7 +1056,7 @@ mod tests {
         Json(body): Json<Value>,
     ) -> (StatusCode, Json<Value>) {
         state.bind_calls.fetch_add(1, Ordering::SeqCst);
-        if !bearer_is_valid(&headers) || state.mode == MockMode::SignedOut {
+        if !bearer_is_valid(&headers) || state.mode() == MockMode::SignedOut {
             return relay_error(StatusCode::UNAUTHORIZED, "unauthorized");
         }
         state.bind_authorizations.lock().await.push(
@@ -984,7 +1065,7 @@ mod tests {
                 .unwrap_or_default()
                 .to_string(),
         );
-        if state.mode == MockMode::BindRejected {
+        if state.mode() == MockMode::BindRejected {
             return relay_error(StatusCode::FORBIDDEN, "x-chat-bind-rejected");
         }
         (
@@ -1053,7 +1134,8 @@ mod tests {
             );
         };
         let call = state.read_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        match state.mode {
+        let mode = state.mode();
+        match mode {
             MockMode::FailReads(failures) if call <= failures => {
                 return relay_error(StatusCode::INTERNAL_SERVER_ERROR, "internal-error");
             }
@@ -1063,12 +1145,12 @@ mod tests {
         }
         if after == "41" {
             let mut events = vec![relay_event("message-1")];
-            if state.mode == MockMode::DeliverFollows {
+            if mode == MockMode::DeliverFollows {
                 // The same person twice: an unfollow and a refollow.
                 events.push(follow_relay_event("-7953119945885597316", "555"));
                 events.push(follow_relay_event("-7953119945885597317", "555"));
             }
-            if state.mode == MockMode::DeliverHost {
+            if mode == MockMode::DeliverHost {
                 // The streamer's own send, echoed back by XAA (plan 095).
                 let mut host = relay_event("message-host");
                 host["author"]["id"] = json!(X_USER_ID);
@@ -1096,7 +1178,7 @@ mod tests {
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.starts_with("OAuth "));
-        if !signed || state.mode == MockMode::SubscriptionRejected {
+        if !signed || state.mode() == MockMode::SubscriptionRejected {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "title": "Unauthorized", "detail": "Unauthorized" })),
@@ -1110,7 +1192,7 @@ mod tests {
         State(state): State<MockState>,
         Json(body): Json<Value>,
     ) -> (StatusCode, Json<Value>) {
-        if state.mode == MockMode::FollowRejected && body["event_type"] == "follow.follow" {
+        if state.mode() == MockMode::FollowRejected && body["event_type"] == "follow.follow" {
             return (
                 StatusCode::FORBIDDEN,
                 Json(json!({ "title": "Forbidden", "detail": "Forbidden" })),
@@ -1170,13 +1252,13 @@ mod tests {
         (StatusCode::OK, Json(json!({ "data": { "deleted": true } })))
     }
 
-    async fn spawn_mock_server(mode: MockMode, subscriptions: Vec<Value>) -> MockServer {
+    pub(crate) async fn spawn_mock_server(mode: MockMode, subscriptions: Vec<Value>) -> MockServer {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("mock listener");
         let addr = listener.local_addr().expect("mock address");
         let state = MockState {
-            mode,
+            mode: Arc::new(std::sync::Mutex::new(mode)),
             bind_calls: Arc::new(AtomicUsize::new(0)),
             bind_authorizations: Arc::new(Mutex::new(Vec::new())),
             read_calls: Arc::new(AtomicUsize::new(0)),
@@ -1227,7 +1309,7 @@ mod tests {
         }
     }
 
-    fn mock_config(server: &MockServer) -> XChatConfig {
+    pub(crate) fn mock_config(server: &MockServer) -> XChatConfig {
         XChatConfig {
             broadcast_id: "1NGarompkEqJj".to_string(),
             target_id: Some("x-target".to_string()),
@@ -1240,7 +1322,7 @@ mod tests {
         }
     }
 
-    fn test_state() -> AppState {
+    pub(crate) fn test_state() -> AppState {
         let (events, _) = broadcast::channel(32);
         AppState::new(
             "test-token".to_string(),
@@ -1308,6 +1390,31 @@ mod tests {
             assert!(
                 std::time::Instant::now() <= deadline,
                 "timed out waiting for X message {provider_message_id}"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// A delivered message shows in the coordinator before its batch is
+    /// durable, so a test that stops the connector waits for the row first.
+    async fn wait_for_persisted_message(
+        state: &AppState,
+        provider_message_id: &str,
+    ) -> LiveChatMessage {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(message) = state
+                .database
+                .list_live_chat_messages("session-1")
+                .unwrap()
+                .into_iter()
+                .find(|message| message.provider_message_id == provider_message_id)
+            {
+                return message;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for durable X message {provider_message_id}"
             );
             sleep(Duration::from_millis(10)).await;
         }
@@ -1632,6 +1739,8 @@ mod tests {
         let host_message = wait_for_message(&state, "message-host").await;
         let provider =
             wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
+        let persisted = wait_for_persisted_message(&state, "message-host").await;
+        let persisted_viewer = wait_for_persisted_message(&state, "message-1").await;
         connector.abort();
         let _ = server.shutdown.send(());
 
@@ -1644,21 +1753,7 @@ mod tests {
         // connected account) is stored as the host, like the other platforms.
         assert_eq!(host_message.author_id.as_deref(), Some(X_USER_ID));
         assert_eq!(host_message.author_roles, vec!["owner".to_string()]);
-        let persisted = state
-            .database
-            .list_live_chat_messages("session-1")
-            .unwrap()
-            .into_iter()
-            .find(|message| message.provider_message_id == "message-host")
-            .expect("the host message is persisted");
         assert_eq!(persisted.author_roles, vec!["owner".to_string()]);
-        let persisted_viewer = state
-            .database
-            .list_live_chat_messages("session-1")
-            .unwrap()
-            .into_iter()
-            .find(|message| message.provider_message_id == "message-1")
-            .expect("the viewer message is persisted");
         assert_eq!(persisted_viewer.author_roles, vec!["member".to_string()]);
 
         // Only a one-shot signed header is handed to the relay, never a token.
@@ -2046,7 +2141,6 @@ mod tests {
     async fn rejected_identity_proof_fails_terminally_without_retrying() {
         for (mode, expected) in [
             (MockMode::BindRejected, "Re-authorize X Live"),
-            (MockMode::SignedOut, "Sign in again"),
             (MockMode::SubscriptionRejected, "Re-authorize X Live"),
         ] {
             let server = spawn_mock_server(mode, Vec::new()).await;
@@ -2074,13 +2168,56 @@ mod tests {
         }
     }
 
+    /// A stored session the relay refuses (a 401) parks the connector the
+    /// same way (plan 215 A1): the fix is the same Sign in, and A4 attaches
+    /// it again. One bind, no retry, no failure on file.
     #[tokio::test]
-    async fn missing_videorc_sign_in_is_a_truthful_terminal_state() {
+    async fn a_rejected_videorc_sign_in_parks_the_connector_with_the_reason() {
+        for (mode, token) in [
+            (MockMode::Deliver, "stale-token"),
+            (MockMode::SignedOut, SESSION_TOKEN),
+        ] {
+            let server = spawn_mock_server(mode, Vec::new()).await;
+            let state = test_state();
+            let session_generation = start_test_session(&state, "session-1").await;
+            let mut config = mock_config(&server);
+            config.overrides.session_token = Some(token.to_string());
+
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                run_x_chat_connector(
+                    state.clone(),
+                    "session-1".to_string(),
+                    session_generation,
+                    config,
+                ),
+            )
+            .await
+            .expect("the connector parks on a refused sign-in");
+            let _ = server.shutdown.send(());
+
+            let provider =
+                wait_for_provider_state(&state, LiveChatProviderConnectionState::Waiting).await;
+            assert_eq!(provider.read, CommentsReadState::NeedsVideorcSignIn);
+            assert_eq!(provider.message, crate::live_chat::X_CHAT_SIGN_IN_EXPIRED);
+            assert_eq!(provider.last_error, None);
+            assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 1);
+            assert!(failure_events(&state, "session-1").is_empty());
+        }
+    }
+
+    /// Plan 215 A1: a streamer saw "Sign in to your Videorc account to
+    /// receive X comments." as a Failed X row while X itself was fine (the
+    /// row even read "Reading chat as Ram"). A missing Videorc sign-in is its
+    /// own state, in words that name Videorc, and never a failure: nothing
+    /// is broken, and one sign-in brings chat (A4).
+    #[tokio::test]
+    async fn a_missing_videorc_sign_in_is_named_and_is_not_a_failure() {
         let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;
         let state = test_state();
         let session_generation = start_test_session(&state, "session-1").await;
         let mut config = mock_config(&server);
-        config.overrides.session_token = Some("stale-token".to_string());
+        config.overrides.session_token = None;
 
         tokio::time::timeout(
             Duration::from_secs(3),
@@ -2092,12 +2229,55 @@ mod tests {
             ),
         )
         .await
-        .expect("terminal failure stops the connector");
+        .expect("the connector parks without a sign-in");
         let _ = server.shutdown.send(());
 
-        let provider =
-            wait_for_provider_state(&state, LiveChatProviderConnectionState::Failed).await;
-        assert!(provider.message.contains("Sign in again"));
+        let provider = wait_for_provider_settled(&state).await;
+        assert_eq!(provider.message, "Sign in to Videorc to read X chat.");
+        assert_eq!(
+            provider.message,
+            crate::live_chat::X_CHAT_NEEDS_VIDEORC_SIGN_IN
+        );
+        assert_eq!(
+            provider.read,
+            CommentsReadState::NeedsVideorcSignIn,
+            "a missing sign-in is its own state, not a failure"
+        );
+        assert_eq!(provider.state, LiveChatProviderConnectionState::Waiting);
+        assert_eq!(provider.last_error, None);
+        assert_eq!(
+            serde_json::to_value(provider.read).unwrap(),
+            serde_json::json!("needs-videorc-sign-in")
+        );
+        assert!(
+            failure_events(&state, "session-1").is_empty(),
+            "no X failure is on file: X is fine"
+        );
+        assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The X row once the connector has stopped connecting.
+    async fn wait_for_provider_settled(state: &AppState) -> LiveChatProviderState {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(provider) =
+                current_status(state)
+                    .await
+                    .providers
+                    .into_iter()
+                    .find(|provider| {
+                        provider.platform == StreamPlatform::X
+                            && provider.state != LiveChatProviderConnectionState::Connecting
+                    })
+            {
+                return provider;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for the X provider to settle"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]

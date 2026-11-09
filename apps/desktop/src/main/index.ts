@@ -1,5 +1,16 @@
 import { createAppIconHandler } from './app-icons'
 import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
+import {
+  cameraExtensionBindingFromModule,
+  cameraExtensionShouldActivateForSwitch,
+  createCameraExtensionController,
+  platformReportForCameraExtension,
+  shouldActivateCameraExtensionAtLaunch,
+  type CameraExtensionController,
+  type CameraExtensionState
+} from './camera-extension'
+import { runVirtualCameraAction } from './virtual-camera-action'
+import { runLinuxLoadModule } from './virtual-camera-linux-setup'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
 import {
@@ -31,7 +42,9 @@ import type {
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
   SessionMediaGrantResult,
-  ShortcutRecorderArmResult
+  ShortcutRecorderArmResult,
+  VirtualCameraActionResult,
+  VirtualCameraStatus
 } from '../shared/backend'
 import {
   SESSION_MEDIA_HOST,
@@ -88,7 +101,7 @@ import {
   type ServerResponse as HttpResponse
 } from 'node:http'
 import { createRequire } from 'node:module'
-import { homedir, release } from 'node:os'
+import { constants as osConstants, homedir, release } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -132,7 +145,11 @@ import {
 import { runBackendInterruptingAction } from './interruption-actions'
 import { AccountSignInTransactions } from './account-sign-in-transactions'
 import { ProviderOAuthCallbacks } from './provider-oauth-callbacks'
-import { GlobalShortcutGate, unregisterGlobalShortcutsWhenReady } from './global-shortcut-lifecycle'
+import {
+  GlobalShortcutGate,
+  globalShortcutsUnavailableReason,
+  unregisterGlobalShortcutsWhenReady
+} from './global-shortcut-lifecycle'
 import {
   createSafeStoragePersistenceCodec,
   type SecurePersistenceCodec
@@ -215,7 +232,10 @@ import {
   parseMainPreviewSurfaceStatus,
   parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatus,
-  parseMainRecordingStatusEvent
+  parseMainRecordingStatusEvent,
+  parseMainScene,
+  parseMainSceneChangedEvent,
+  parseMainVirtualCameraChangedEvent
 } from './backend-event-message'
 import {
   fallbackPreviewSurfaceCanvas,
@@ -234,7 +254,8 @@ import {
   previewSurfaceBackgroundLayer,
   previewSurfaceLiveBackgroundLibraryScript,
   previewSurfaceLiveBackgroundLogLine,
-  previewSurfaceLiveBackgroundStatusFromConsoleLine
+  previewSurfaceLiveBackgroundStatusFromConsoleLine,
+  previewSurfaceStatusBackground
 } from './preview-surface-live-background'
 import { livePosterManifest } from '../shared/live-background-catalog'
 import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
@@ -273,13 +294,18 @@ import {
   type ResourceCapabilityKind,
   type ResourceSelection
 } from './resource-capabilities'
-import { PersistentDirectoryAuthority } from './persistent-directory-authority'
+import {
+  DirectoryUnavailableError,
+  outputDirectoryUnavailableMessage,
+  PersistentDirectoryAuthority
+} from './persistent-directory-authority'
 import {
   buildAllowsPackagedTestHooks,
   ignoreInspectorSignal,
   refusePackagedTestHooks
 } from './packaged-test-hooks'
 import { SmokeAppQuitGuard } from './smoke-app-quit-guard'
+import { smokeRaiseWindowPlacement } from './smoke-raise-window-level'
 import { PreviewLifecycleSmokeEvidence } from './preview-lifecycle-smoke-evidence'
 import {
   PACKAGED_SMOKE_COMMAND_NAMES,
@@ -291,6 +317,7 @@ import {
   validateSmokeBackendRpcRequest,
   validateSmokeCommentsSnapshotParams,
   validateSmokeCommentsDeltaParams,
+  validateSmokeProofSurfaceInputEvents,
   validateSmokeResourceAuthorization
 } from './smoke-command-security'
 import { runTimedBoundsStorm, timeSmokeAction } from './smoke-window-bounds-storm'
@@ -320,6 +347,7 @@ import {
   appendBackendCrashRecord,
   backendCrashLogPath,
   buildBackendCrashRecord,
+  classifyBackendExit,
   describeBackendCrashRecord,
   readBackendCrashLog,
   shouldRecordBackendExit
@@ -345,6 +373,11 @@ import {
   shouldPersistGpuFallback,
   writeGpuFallbackState
 } from './gpu-fallback'
+import {
+  installLinuxTerminationSignalTakeover,
+  type LinuxTerminationSignal,
+  type LinuxTerminationSignalTakeover
+} from './linux-termination-signals'
 import {
   backgroundThrottlingFor,
   electronBackgroundPolicyFromEnv,
@@ -390,17 +423,27 @@ import {
 } from './managed-asset-renderer-probe'
 import { PreviewSupervisorModel, previewWindowTargetAction } from './preview-supervisor'
 import {
+  aspectFitRect,
   composeDockedScreenRect,
   decideDockVisibility,
+  initialPreviewWindowMode,
+  inWindowDockedRect,
   parseDockSlotReport,
   parsePreviewWindowMode,
   previewWindowClosePrefs,
+  previewWindowExternalResizePolicy,
+  usableDockSlotSize,
   type DockHiddenReason,
   type DockSlot,
   type DockSlotReport,
   type PreviewWindowMode
 } from './preview-dock'
-import { InWindowProofSurface, type ProofSurfaceHost } from './in-window-proof-surface'
+import {
+  InWindowProofSurface,
+  proofSurfaceHostNote,
+  type ProofSurfaceHost
+} from './in-window-proof-surface'
+import { executeProofSurfaceScript, settleWithProofSurface } from './proof-surface-call'
 import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_FETCH_TIMEOUT_MS,
@@ -481,9 +524,15 @@ import {
 } from './window-glass'
 import {
   applyVideorcWindowCaptureProtection,
+  releaseVideorcWindowCaptureProtection,
+  streamManagerHideMethod,
   type VideorcWindowRole,
   WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
 } from './window-capture-protection'
+import {
+  COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION,
+  commentsWindowHiddenFromStreamPreference
+} from './comments-window-prefs'
 import {
   assessProofPresentationWatch,
   assessProofSourceFrame,
@@ -494,17 +543,22 @@ import {
   nativePreviewFirstFrameWatchdogEnabled,
   nativePreviewProofWatchdogEnabled,
   PREVIEW_HOLD_REASON,
-  previewHoldHandback,
+  firstFrameStandDownHandback,
+  firstFrameStandDownReason,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
+  proofSourceLiveReason,
+  proofSourceStalledReason,
   proofWatchdogRendererReadAllowed,
   WatchdogTickOwnership,
   type FirstFrameLedger,
   type FirstFrameSnapshot,
+  type FirstFrameStandDown,
   type PresentingAssessment,
   type PresentingWatchState,
   type WatchdogRunToken
 } from './native-preview-first-frame'
+import { FirstFrameDecisionLog, firstFrameSnapshotEvidence } from './first-frame-decisions'
 import { NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT } from './native-preview-proof-poller-runtime'
 import { PREVIEW_SURFACE_STAGE_RUNTIME_SCRIPT } from './preview-surface-stage'
 import {
@@ -586,7 +640,13 @@ import {
   previewSurfaceNativeDrawableMatchesBounds,
   sanitizeRendererPreviewSurfaceStatus
 } from '../shared/native-preview-bounds'
-import { withTrustedPreviewWindowStacking } from './native-preview-window-stacking'
+import {
+  previewDockedInsideMainWindow,
+  proofSurfaceHostedInWindowOn,
+  proofSurfaceParentWindow,
+  withTrustedPreviewWindowStacking,
+  type NativePreviewRealSurfaceDriverKind
+} from './native-preview-window-stacking'
 import {
   accountCoalescedPreviewFrame,
   accountSkippedPreviewFrame
@@ -639,13 +699,13 @@ import type {
   OAuthCallbackEnvelope,
   ObsSetup,
   PreviewSurfaceCompositorUpdateParams,
+  NativePreviewHostWindow,
   PreviewSurfaceBounds,
   PreviewSurfaceSceneLayer,
   PreviewSurfaceSceneLayerKind,
   PreviewSurfaceSceneState,
   PreviewSurfaceSceneUpdateParams,
   PreviewSurfaceStatus,
-  PreviewHoldReason,
   MediaAccessSnapshot,
   MediaAccessStatus,
   PermissionRecheckResult,
@@ -667,7 +727,9 @@ import type {
   VideorcAccountSnapshot,
   ViewerSample,
   RecordingStatus,
-  OverlayLayout
+  OverlayLayout,
+  EffectiveSceneBackground,
+  Scene
 } from '../shared/backend'
 import { previewProgramShape } from '../shared/preview-program'
 import {
@@ -727,12 +789,23 @@ let mainWindow: BrowserWindow | null = null
 // record/stream/mic with the app unfocused. Off unless the user configures
 // accelerators in Settings; every set call replaces the previous set.
 // The gate also suspends them while the Settings shortcut recorder is armed.
-const globalShortcutGate = new GlobalShortcutGate(globalShortcut, (action) => {
-  const window = mainWindow
-  if (window && !window.isDestroyed() && isGlobalShortcutAction(action)) {
-    sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
-  }
+// Linux on Wayland can't hold one at all: the gate registers nothing there and
+// every result, like runtime info, says why. Electron resolves the ozone
+// platform before this script runs.
+const globalShortcutsUnavailable = globalShortcutsUnavailableReason({
+  platform: process.platform,
+  ozonePlatform: app.commandLine.getSwitchValue('ozone-platform')
 })
+const globalShortcutGate = new GlobalShortcutGate(
+  globalShortcut,
+  (action) => {
+    const window = mainWindow
+    if (window && !window.isDestroyed() && isGlobalShortcutAction(action)) {
+      sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
+    }
+  },
+  globalShortcutsUnavailable
+)
 
 function setGlobalShortcuts(shortcuts: GlobalShortcutsConfig): GlobalShortcutsResult {
   // One spelling per platform: a pre-062 hand-typed `Cmd+…` binds Ctrl off
@@ -821,6 +894,8 @@ let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
 let commentsHighlightAnchorValue: CommentHighlightAnchor | undefined
 let commentsAutoShowActivityValue: boolean | undefined
+/** Hide from stream (plan 215 D6), loaded lazily from prefs like the anchor. */
+let commentsHiddenFromStreamValue: boolean | undefined
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
@@ -967,6 +1042,11 @@ let previewSurfaceBanners: readonly Banner[] = []
 // draws the Buddy's layer while the program carries it (its two switches).
 // Kept across reconnects; a new connection re-reads `overlays.layout.get`.
 let previewSurfaceOverlayLayout: OverlayLayout | null = null
+// The committed scene's background from the same socket (`scene.get`, then
+// `scene.changed`): the compositor status names the program's background but
+// not its look, so the proof surface draws this one while the status names
+// it. Undefined until main hears the scene; kept across reconnects.
+let previewSurfaceCommittedBackground: EffectiveSceneBackground | null | undefined
 let nativePreviewCommittedCompositorScene: PreviewSurfaceSceneState | null = null
 let nativePreviewCommittedCompositorRunId: string | undefined
 const nativePreviewCompositorRunAuthority = new NativePreviewRunAuthority()
@@ -1031,42 +1111,55 @@ function installCaptureProtectionSmokeMarker(window: BrowserWindow, role: Videor
   captureProtectionMarkerStates.set(window, false)
   const color = WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS[role]
   window.webContents.on('did-finish-load', () => {
-    if (window.isDestroyed() || window.webContents.isDestroyed()) {
-      return
-    }
-    captureProtectionMarkerStates.set(window, false)
-    const markerId = `videorc-capture-protection-marker-${role}`
-    void window.webContents
-      .executeJavaScript(
-        `(() => {
-          const markerId = ${JSON.stringify(markerId)};
-          const role = ${JSON.stringify(role)};
-          const color = ${JSON.stringify(color)};
-          let marker = document.getElementById(markerId);
-          if (!marker) {
-            marker = document.createElement('div');
-            marker.id = markerId;
-            document.documentElement.appendChild(marker);
-          }
-          marker.dataset.videorcCaptureProtectionRole = role;
-          marker.style.cssText =
-            'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
-            color;
-          return { role, color, installed: true };
-        })()`,
-        true
-      )
-      .then((result) => {
-        captureProtectionMarkerStates.set(
-          window,
-          result?.installed === true && result?.role === role && result?.color === color
-        )
-      })
-      .catch((error) => {
-        captureProtectionMarkerStates.set(window, false)
-        safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
-      })
+    void paintCaptureProtectionSmokeMarker(window, role, color)
   })
+}
+
+/**
+ * Paints one window edge to edge in a marker colour the artifact gates look
+ * for: the Windows stream smoke's role colours at load (above), and the
+ * macOS invisibility smokes' red on request (plan 215 C5, the Stream
+ * Manager; Notes paints its own through `?smokeMarker=1`). Resolves whether
+ * the marker took, and remembers it for the window-state commands.
+ */
+async function paintCaptureProtectionSmokeMarker(
+  window: BrowserWindow,
+  role: VideorcWindowRole,
+  color: string
+): Promise<boolean> {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) {
+    return false
+  }
+  captureProtectionMarkerStates.set(window, false)
+  const markerId = `videorc-capture-protection-marker-${role}`
+  try {
+    const result = await window.webContents.executeJavaScript(
+      `(() => {
+        const markerId = ${JSON.stringify(markerId)};
+        const role = ${JSON.stringify(role)};
+        const color = ${JSON.stringify(color)};
+        let marker = document.getElementById(markerId);
+        if (!marker) {
+          marker = document.createElement('div');
+          marker.id = markerId;
+          document.documentElement.appendChild(marker);
+        }
+        marker.dataset.videorcCaptureProtectionRole = role;
+        marker.style.cssText =
+          'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
+          color;
+        return { role, color, installed: true };
+      })()`,
+      true
+    )
+    const installed = result?.installed === true && result?.role === role && result?.color === color
+    captureProtectionMarkerStates.set(window, installed)
+    return installed
+  } catch (error) {
+    captureProtectionMarkerStates.set(window, false)
+    safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
+    return false
+  }
 }
 
 const captureProtectionMarkerStates = new WeakMap<BrowserWindow, boolean>()
@@ -1223,6 +1316,7 @@ const glassStyle: GlassStyle = resolveGlassStyle(process.env.VIDEORC_GLASS_STYLE
 let clearGlassFailureLogged = false
 let gpuProcessCrashCount = 0
 let gpuFallbackPersistedThisLaunch = false
+let linuxTerminationSignals: LinuxTerminationSignalTakeover | null = null
 // A dead renderer leaves its window empty, and child-process-gone never fires
 // for renderers: without this line a support bundle says nothing (plan 082).
 app.on('render-process-gone', (_event, contents, details) => {
@@ -1241,6 +1335,7 @@ app.on('render-process-gone', (_event, contents, details) => {
   )
 })
 app.on('child-process-gone', (_event, details) => {
+  linuxTerminationSignals?.childProcessGone(details)
   // Every abnormal child exit is worth a support-bundle line; GPU crashes
   // additionally drive the persisted software-rendering fallback.
   if (details.type !== 'GPU' || !isGpuCrashReason(details.reason)) {
@@ -1388,7 +1483,164 @@ if (windowAppearanceLoad.unavailableReason && process.platform === 'darwin') {
     `Window appearance pin unavailable; Preview paints the solid palette: ${windowAppearanceLoad.unavailableReason}`
   )
 }
-type NativePreviewRealSurfaceDriverKind = 'in-process' | 'external-module' | 'helper-process'
+// Plan 214 B3: the Videorc Camera system extension, activated from this
+// process (macOS looks it up in the requester's bundle). The controller holds
+// the last state and reports every change to the backend
+// (`virtualCamera.platform.report`), whose status the Output page shows. The
+// camera switch itself is the backend's (plan 214 A4, D4): main reads it at
+// every backend READY (`reconcileCameraExtensionWithBackend`) and on
+// `virtualCamera.changed`, and activates the extension when it turns on.
+// Off never deactivates (D12).
+let cameraExtensionController: CameraExtensionController | undefined
+function cameraExtension(): CameraExtensionController {
+  if (!cameraExtensionController) {
+    let binding = null
+    if (process.platform === 'darwin' && nativePreviewInProcessModuleResolution.path) {
+      try {
+        binding = cameraExtensionBindingFromModule(
+          requireNativePreviewRealSurfaceModule(nativePreviewInProcessModuleResolution.path)
+        )
+      } catch (error) {
+        safeConsole.warn(`Videorc Camera extension binding unavailable: ${errorMessage(error)}`)
+      }
+    }
+    cameraExtensionController = createCameraExtensionController({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      binding,
+      log: (line) => logBackend('info', line),
+      onState: (state) => {
+        void reportCameraExtensionToBackend(state)
+      }
+    })
+  }
+  return cameraExtensionController
+}
+/** Plan 214 B3's last step: one extension state to the backend, never fatal. */
+async function reportCameraExtensionToBackend(state: CameraExtensionState): Promise<void> {
+  const report = platformReportForCameraExtension(state, {
+    platform: process.platform,
+    isPackaged: app.isPackaged
+  })
+  if (!report) {
+    return
+  }
+  try {
+    await requestBackendAdmin('virtualCamera.platform.report', { ...report })
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Videorc Camera's extension state did not reach the backend: ${errorMessage(error)}`
+    )
+  }
+}
+/**
+ * Plan 214 D1: Linux's Load module. Main says `setting-up` while polkit's
+ * dialog and modprobe run. On a refusal it hands the step back to the
+ * backend's probe (`needs-setup`), so the button stays and the Output page
+ * shows the refusal's words from this result. A `failed` report here would
+ * stand until the box changed (`ProbeMemory`): after a cancelled password
+ * prompt, the switch would lock with no way to retry. Once the device is
+ * there, the probe settles `ready` on its own.
+ */
+async function loadVideorcCameraModule(): Promise<VirtualCameraActionResult> {
+  await reportVirtualCameraPlatformStep('setting-up')
+  const result = await runLinuxLoadModule()
+  if (!result.ok) {
+    await reportVirtualCameraPlatformStep('needs-setup')
+  }
+  return result.message === undefined
+    ? { ok: result.ok }
+    : { ok: result.ok, message: result.message }
+}
+async function reportVirtualCameraPlatformStep(
+  platformStep: 'setting-up' | 'needs-setup'
+): Promise<void> {
+  try {
+    await requestBackendAdmin('virtualCamera.platform.report', { platformStep })
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Videorc Camera's setup step did not reach the backend: ${errorMessage(error)}`
+    )
+  }
+}
+/**
+ * Plan 214 D4: the saved camera switch lives in the backend's settings store;
+ * `virtualCamera.status` answers it once the backend is ready. False when the
+ * backend cannot answer (the extension then waits for `virtualCamera.changed`).
+ */
+async function cameraExtensionSwitchOnAtLaunch(): Promise<boolean> {
+  try {
+    const status = await requestBackendAdmin<VirtualCameraStatus>('virtualCamera.status')
+    return status.on === true
+  } catch (error) {
+    logBackend('warn', `Could not read the Videorc Camera switch: ${errorMessage(error)}`)
+    return false
+  }
+}
+/**
+ * The switch as main last saw it (null until the backend answered once).
+ * Only an off-to-on edge activates: `virtualCamera.changed` also fires for
+ * the extension's own reports and the sink's health, and a failed
+ * activation must not retry itself on its own `failed` report.
+ */
+let lastVirtualCameraSwitchOn: boolean | null = null
+/**
+ * At every backend READY (a launch or a backend restart): the backend learns
+ * where the extension is, and a switch saved on activates the extension when
+ * no request is live (Apple: as early as possible, so an update replaces the
+ * installed copy).
+ */
+async function reconcileCameraExtensionWithBackend(): Promise<void> {
+  if (process.platform !== 'darwin') {
+    return
+  }
+  const controller = cameraExtension()
+  await reportCameraExtensionToBackend(controller.state())
+  if (!controller.availability().available) {
+    return
+  }
+  const switchOn = await cameraExtensionSwitchOnAtLaunch()
+  // A fresh backend is a fresh read of the switch: whatever main saw before
+  // its restart no longer counts as "already on".
+  const shouldActivate = cameraExtensionShouldActivateForSwitch(
+    { on: switchOn },
+    controller.state().phase,
+    null
+  )
+  lastVirtualCameraSwitchOn = switchOn
+  if (shouldActivate) {
+    logBackend('info', 'Videorc Camera is on in the saved settings; activating its extension.')
+    void controller.activate()
+  }
+}
+/** `virtualCamera.changed`: the switch turning on at runtime activates the extension. */
+function acceptVirtualCameraStatus(parse: () => VirtualCameraStatus): void {
+  let status: VirtualCameraStatus
+  try {
+    status = parse()
+  } catch (error) {
+    logBackend('warn', `Main dropped a Videorc Camera status: ${errorMessageText(error)}`)
+    return
+  }
+  if (process.platform !== 'darwin') {
+    return
+  }
+  const controller = cameraExtension()
+  const shouldActivate =
+    controller.availability().available &&
+    cameraExtensionShouldActivateForSwitch(
+      status,
+      controller.state().phase,
+      lastVirtualCameraSwitchOn
+    )
+  lastVirtualCameraSwitchOn = status.on
+  if (shouldActivate) {
+    logBackend('info', 'Videorc Camera switched on; activating its extension.')
+    void controller.activate()
+  }
+}
 const nativePreviewRealSurfaceDriverLoad = loadNativePreviewPrimaryDriver()
 const NATIVE_PREVIEW_HANDOFF_SAMPLE_LIMIT = 900
 const NATIVE_PREVIEW_MAIN_SCENE_MISMATCH_MESSAGE_MS = 250
@@ -1451,8 +1703,11 @@ let firstFrameLastHint: string | null | undefined
 // Plan 212 S5: whether the floating Preview's strip says a check holds the
 // picture. `undefined`: nothing published to this window's document yet.
 let previewWindowStripHeld: boolean | undefined
-/** Plan 212 S2: the hold the last watchdog tick saw, for the hand-back. */
-let firstFrameLastPreviewHold: PreviewHoldReason | null = null
+/**
+ * What made the last watchdog tick stand down (plan 212 S2: a Preview hold;
+ * plan 213 D: the docked surface hidden on purpose), for the hand-back.
+ */
+let firstFrameLastStandDown: FirstFrameStandDown = { previewHold: null, dockHidden: null }
 const firstFrameTickOwnership = new WatchdogTickOwnership()
 const firstFrameProofRendererReads = new ProofWatchdogRendererReadSingleFlight<Record<
   string,
@@ -1466,6 +1721,9 @@ let firstFrameWatchdogMode: 'first-frame' | 'presenting-watch' = 'first-frame'
 let presentingWatch: PresentingWatchState = emptyPresentingWatch()
 let presentingWatchLastKind: PresentingAssessment['kind'] = 'presenting'
 let nativePreviewProofPendingStartedAtMs: number | null = null
+// Plan 216 D3: the watchdog's last decisions and what it saw, for the support
+// bundle (runtimeInfo.firstFrameDecisions); its log lines never reach it.
+const firstFrameDecisions = new FirstFrameDecisionLog()
 
 function startFirstFrameWatchdog(): void {
   stopFirstFrameWatchdog()
@@ -1477,7 +1735,7 @@ function startFirstFrameWatchdog(): void {
   firstFrameLastPresentedFrameId = null
   firstFrameLastHint = undefined
   previewWindowStripHeld = undefined
-  firstFrameLastPreviewHold = null
+  firstFrameLastStandDown = { previewHold: null, dockHidden: null }
   firstFrameWatchdogMode = 'first-frame'
   presentingWatch = emptyPresentingWatch()
   presentingWatchLastKind = 'presenting'
@@ -1752,6 +2010,7 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
         setFirstFrameStatus('met', reason)
         updatePreviewWindowWaitDetail(null)
         logBackend('info', '[proof-preview] presentation watchdog is live')
+        firstFrameDecisions.record({ watch: 'proof-preview', decision: 'met', reason })
       }
     } else if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
       const pendingElapsedMs = Math.max(0, nowMs - pendingStartedAtMs)
@@ -1763,6 +2022,16 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowWaitDetail(reason)
       logBackend('warn', `[proof-preview] ${reason}`)
+      firstFrameDecisions.record({
+        watch: 'proof-preview',
+        decision: 'fallback',
+        reason,
+        evidence: {
+          sourceFrameHistoryComplete,
+          sourceFrameAgeMs: sourceFrameAgeMs ?? null,
+          pendingElapsedMs
+        }
+      })
     }
 
     syncPreviewSupervisorSurface(
@@ -1812,15 +2081,19 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
     }
     // Plan 212 S2: under a Preview hold the compositor's frames advance on
     // the benchmark's canvas while no present-driving event is due, so the
-    // quiet socket is not a stalled pump. When the hold ends, the clock and
-    // the heartbeat start fresh before anything is judged.
+    // quiet socket is not a stalled pump. Plan 213 D: a docked surface hidden
+    // on purpose (another page, a scrolled-away slot, a dialog over it)
+    // presents nothing, which is not a broken chain either. When the hold
+    // ends, or the surface shows again, the clock and the heartbeat start
+    // fresh before anything is judged.
     const previewHold = compositor?.previewHold ?? null
-    const handback = previewHoldHandback({
-      previousHold: firstFrameLastPreviewHold,
-      hold: previewHold,
+    const standDown: FirstFrameStandDown = { previewHold, dockHidden: firstFrameDockHidden() }
+    const handback = firstFrameStandDownHandback({
+      previous: firstFrameLastStandDown,
+      current: standDown,
       nowMs: Date.now()
     })
-    firstFrameLastPreviewHold = previewHold
+    firstFrameLastStandDown = standDown
     if (handback) {
       firstFrameWatchdogStartedAtMs = handback.startedAtMs
       firstFrameLedger = emptyFirstFrameLedger()
@@ -1840,7 +2113,8 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
       compositorSceneRevision: compositor?.sceneRevision ?? null,
       compositorFrameSceneRevision: compositor?.frameSceneRevision ?? null,
       metalTargetPresent: Boolean(compositor?.metalTargetIosurfaceId),
-      previewHold
+      previewHold,
+      dockHidden: standDown.dockHidden
     }
 
     if (firstFrameWatchdogMode === 'presenting-watch') {
@@ -1861,6 +2135,11 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
       case 'met':
         setFirstFrameStatus('met')
         updatePreviewWindowWaitDetail(null)
+        firstFrameDecisions.record({
+          watch: 'first-frame',
+          decision: 'met',
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
         // Contract met ≠ done: keep ticking as the presenting watch so a
         // mid-session stall (dead pump, suspended helper, lost surface)
         // self-heals instead of showing the placeholder until relaunch.
@@ -1876,12 +2155,25 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
         setFirstFrameStatus('healing', assessment.reason)
         updatePreviewWindowWaitDetail(assessment.reason)
         logBackend('info', `[first-frame] healing: ${assessment.action}: ${assessment.reason}`)
+        firstFrameDecisions.record({
+          watch: 'first-frame',
+          decision: 'heal',
+          action: assessment.action,
+          reason: assessment.reason,
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
         runFirstFrameHealingAction(assessment.action, compositor)
         return
       case 'fallback':
         setFirstFrameStatus('fallback', assessment.reason)
         updatePreviewWindowWaitDetail(`Preview could not start natively: ${assessment.reason}`)
         logBackend('warn', `[first-frame] contract failed: ${assessment.reason}`)
+        firstFrameDecisions.record({
+          watch: 'first-frame',
+          decision: 'fallback',
+          reason: assessment.reason,
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
         stopFirstFrameWatchdog(watchdogRun)
         return
     }
@@ -1898,6 +2190,13 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
 function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
   const { assessment, watch } = assessPresenting(snapshot, presentingWatch, FIRST_FRAME_TICK_MS)
   presentingWatch = watch
+  if (firstFrameStandDownReason(snapshot) != null) {
+    // Standing down (a hold, a hidden dock) is neither a stall nor a
+    // recovery: the status and the last kind carry over, so the picture
+    // showing again never flaps the status or logs a recovery that did not
+    // happen, and a stall declared before it is still the state after it.
+    return
+  }
   const kindChanged = assessment.kind !== presentingWatchLastKind
   presentingWatchLastKind = assessment.kind
 
@@ -1907,6 +2206,11 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
         setFirstFrameStatus('met')
         updatePreviewWindowWaitDetail(null)
         logBackend('info', '[preview-watch] presenting recovered')
+        firstFrameDecisions.record({
+          watch: 'presenting-watch',
+          decision: 'recovered',
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
       }
       return
     case 'observing':
@@ -1917,6 +2221,16 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
       setFirstFrameStatus('healing', assessment.reason)
       updatePreviewWindowWaitDetail(assessment.reason)
       logBackend('info', `[preview-watch] healing: ${assessment.action}: ${assessment.reason}`)
+      firstFrameDecisions.record({
+        watch: 'presenting-watch',
+        decision: 'heal',
+        action: assessment.action,
+        reason: assessment.reason,
+        evidence: firstFrameSnapshotEvidence(snapshot, {
+          brokenTicks: watch.brokenTicks,
+          stallElapsedMs: watch.stallElapsedMs
+        })
+      })
       runFirstFrameHealingAction(assessment.action, null)
       return
     case 'stalled':
@@ -1924,6 +2238,15 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
         setFirstFrameStatus('fallback', assessment.reason)
         updatePreviewWindowWaitDetail(`Preview stalled: ${assessment.reason}`)
         logBackend('warn', `[preview-watch] stalled after healing exhausted: ${assessment.reason}`)
+        firstFrameDecisions.record({
+          watch: 'presenting-watch',
+          decision: 'stalled',
+          reason: assessment.reason,
+          evidence: firstFrameSnapshotEvidence(snapshot, {
+            brokenTicks: watch.brokenTicks,
+            stallElapsedMs: watch.stallElapsedMs
+          })
+        })
       }
       return
   }
@@ -2736,6 +3059,9 @@ let previewWindowModeLoaded = false
 // close-while-docked never persists the slot rect as the floating frame.
 let previewWindowFloatingFrame: Electron.Rectangle | null = null
 let previewDockSlot: DockSlotReport | null = null
+// The last size a slot report measured: the in-window dock keeps the idle
+// program at this size while no slot shows (inWindowDockedRect).
+let previewDockLastSlotSize: { width: number; height: number } | null = null
 // Bumped on every dock engage; slot reports answering an older epoch are stale
 // (measured before the redock) and are dropped.
 let previewDockEpoch = 0
@@ -2801,11 +3127,15 @@ function applyPreviewWindowAspect(window: BrowserWindow): void {
   conformPreviewWindowToAspect(window)
 }
 
-// setAspectRatio only constrains USER drag-resizes; macOS tiling, third-party
-// window managers, and programmatic setBounds all bypass it and can squeeze the
-// window. This backstop runs on every resize: keep the width and re-derive the
-// video height, falling back to height-derived width when that would overflow
-// the display's work area. Guarded because setContentSize re-emits 'resize'.
+// setAspectRatio only constrains USER drag-resizes; tiling, third-party window
+// managers, and programmatic setBounds all bypass it and can squeeze the
+// window. This backstop keeps the width and re-derives the video height,
+// falling back to height-derived width when that would overflow the display's
+// work area. Guarded because setContentSize re-emits 'resize'. The app's own
+// aspect changes run it everywhere; an EXTERNAL resize runs it only where
+// previewWindowExternalResizePolicy says so (plan 213 D4): on macOS the window
+// keeps a tiler's size and the video is drawn aspect-fit inside, because
+// setting the size back made AeroSpace re-tile, and so on, every time.
 let conformingPreviewWindow = false
 
 function conformPreviewWindowToAspect(window: BrowserWindow): void {
@@ -2849,12 +3179,22 @@ function previewWindowVideoBounds(window: BrowserWindow): Electron.Rectangle {
   // Docked mode has no drag bar (the window cannot be dragged); the video fills
   // the whole slot-sized content rect.
   const barHeight = previewWindowMode === 'docked' ? 0 : PREVIEW_WINDOW_BAR_HEIGHT
-  return {
+  const region = {
     x: contentBounds.x,
     y: contentBounds.y + barHeight,
     width: contentBounds.width,
     height: Math.max(1, contentBounds.height - barHeight)
   }
+  // A floating window a window manager sized off the output aspect keeps that
+  // size on macOS (plan 213 D4); the video is the largest output-aspect rect
+  // inside, centred, with the window's glass as bars.
+  if (
+    previewWindowMode !== 'docked' &&
+    previewWindowExternalResizePolicy(process.platform) === 'fit-inside'
+  ) {
+    return aspectFitRect(region, previewWindowAspectRatio())
+  }
+  return region
 }
 
 // Window frame, open/closed choice, always-on-top, and floating/docked mode
@@ -2869,9 +3209,15 @@ type PreviewWindowPrefs = {
 
 // Mode is module state so the placement helpers can consult it synchronously,
 // hydrated from prefs once (lazily, so early callers agree with openPreviewWindow).
+// A new install starts stuck to the app (plan 213 D5); a saved choice wins.
 function currentPreviewWindowMode(): PreviewWindowMode {
   if (!previewWindowModeLoaded) {
-    previewWindowMode = parsePreviewWindowMode(loadPreviewWindowPrefs().mode)
+    const prefs = loadPreviewWindowPrefs()
+    previewWindowMode = initialPreviewWindowMode(prefs.mode, {
+      scripted: !previewWindowAutoRestoreEnabled,
+      // Any remembered Preview state means this Mac ran Videorc before.
+      existingInstall: Object.keys(prefs).length > 0
+    })
     previewWindowModeLoaded = true
   }
   return previewWindowMode
@@ -3353,8 +3699,11 @@ function restoreNotesWindowOnLaunch(): void {
 // --- Stream Manager window (code name: comments) ------------------------------
 // The live dashboard in its own OS window (plan 055): chat, activity, stats
 // and Buddy, relayed from the main renderer. Plain BrowserWindow with no
-// native surface. It is NOT capture-protected (owner call, 2026-08-19: only
-// Notes is), so Studio closes it during a recording that would capture it.
+// native surface. It is NOT capture-protected by default (owner call,
+// 2026-08-19: only Notes is), so Studio closes it during a recording that
+// would capture it. Plan 215 D6 adds the streamer's choice: with Hide from
+// stream on, macOS leaves it out of Videorc's own capture filter and Windows
+// turns content protection on; it is then part of the show no more.
 type CommentsWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
@@ -3362,6 +3711,9 @@ type CommentsWindowPrefs = {
   /** Auto-show Activity celebrations on stream (plan 156). Default off. */
   autoShowActivity?: boolean
   alwaysOnTopPreferenceVersion?: number
+  /** Hide from stream (plan 215 D6). Default off; counts only with its version. */
+  hiddenFromStream?: boolean
+  hiddenFromStreamPreferenceVersion?: number
   open?: boolean
   /** 2 once the frame moved off the old Chat default (plan 055, S8). */
   layoutVersion?: number
@@ -3463,6 +3815,51 @@ function setCommentsWindowAutoShowActivity(on: unknown): CommentsWindowState {
   return commentsWindowState()
 }
 
+// Hide from stream (plan 215 D6): read with the window closed too (the Studio
+// renderer builds the capture exclusion list from it, and ⌘K flips it), so it
+// loads lazily from prefs. A file from before the switch, or a forged value,
+// lands on OFF (`commentsWindowHiddenFromStreamPreference`).
+function commentsHiddenFromStream(): boolean {
+  commentsHiddenFromStreamValue ??=
+    commentsWindowHiddenFromStreamPreference(loadCommentsWindowPrefs())
+  return commentsHiddenFromStreamValue
+}
+
+// The switch applies live. Windows is the one platform where content
+// protection is how the window hides (`streamManagerHideMethod`), so the
+// open window's protection follows the value there and nowhere else: on
+// macOS our own capture filter leaves it out (the Studio renderer sends the
+// window's id with the next screen start), and Linux cannot hide it, which
+// the state says through `hideFromStreamMethod`.
+function setCommentsWindowHiddenFromStream(hidden: unknown): CommentsWindowState {
+  commentsHiddenFromStreamValue = hidden === true
+  applyCommentsWindowCaptureProtection()
+  saveCommentsWindowPrefs({
+    hiddenFromStream: commentsHiddenFromStreamValue,
+    hiddenFromStreamPreferenceVersion: COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION
+  })
+  emitCommentsWindowState()
+  return commentsWindowState()
+}
+
+function applyCommentsWindowCaptureProtection(): void {
+  const window = commentsWindow
+  if (!window || window.isDestroyed()) {
+    commentsWindowContentProtected = false
+    return
+  }
+  const hiddenFromStream = commentsHiddenFromStream()
+  const result = applyVideorcWindowCaptureProtection(window, 'comments', {
+    hiddenFromStream,
+    onFailure: (reason) =>
+      safeConsole.warn(`Chat window content protection could not be enabled: ${reason}`)
+  })
+  commentsWindowContentProtected =
+    result.state === 'not-required'
+      ? releaseVideorcWindowCaptureProtection(window)
+      : result.protected
+}
+
 function commentsWindowIsOpen(): boolean {
   return Boolean(commentsWindow && !commentsWindow.isDestroyed() && !commentsWindowClosing)
 }
@@ -3486,6 +3883,8 @@ function commentsWindowState(message?: string): CommentsWindowState {
     bounds: open ? window!.getBounds() : null,
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
+    hiddenFromStream: commentsHiddenFromStream(),
+    hideFromStreamMethod: streamManagerHideMethod(process.platform),
     highlightAnchor: commentsHighlightAnchor(),
     autoShowActivity: commentsAutoShowActivity(),
     protected: open ? commentsWindowContentProtected : false,
@@ -3556,7 +3955,8 @@ function buddyActionCommand(
     }
     return { requestId, kind, text: trimmed, state, sessionId }
   }
-  if (kind === 'buddy-show-on-stream') {
+  // Plan 215 G: Chat on stream needs no live session either; it is a switch.
+  if (kind === 'buddy-show-on-stream' || kind === 'chat-show-on-stream') {
     const { showOnStream } = value as { showOnStream?: unknown }
     if (typeof showOnStream !== 'boolean') {
       return new Error('Show on stream needs true or false.')
@@ -4035,10 +4435,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
-  commentsWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'comments', {
-    onFailure: (reason) =>
-      safeConsole.warn(`Chat window content protection could not be enabled: ${reason}`)
-  }).protected
+  applyCommentsWindowCaptureProtection()
   installCaptureProtectionSmokeMarker(window, 'comments')
   commentsWindowAlwaysOnTop = commentsWindowAlwaysOnTopPreference(prefs)
   if (commentsWindowAlwaysOnTop) {
@@ -4417,6 +4814,13 @@ function previewWindowState(): PreviewWindowState {
   }
 }
 
+// Plan 213 D: why the docked surface is hidden on purpose right now, for the
+// first-frame and presenting watchdogs; null while it shows, and always for a
+// floating Preview, whose own window never hides the surface on purpose.
+function firstFrameDockHidden(): DockHiddenReason | null {
+  return currentPreviewWindowMode() === 'docked' ? dockVisibilityDecision().hiddenReason : null
+}
+
 function dockVisibilityDecision(): ReturnType<typeof decideDockVisibility> {
   return decideDockVisibility({
     slot: previewDockSlot,
@@ -4428,14 +4832,47 @@ function dockVisibilityDecision(): ReturnType<typeof decideDockVisibility> {
     mainWindowFullScreen: Boolean(
       mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()
     ),
+    surfaceInsideMainWindow: previewDockedInWindow(),
     overlayOpen: previewDockOverlayOpen
   })
 }
 
-// Linux docks the proof surface INTO the main window (in-window-proof-surface.ts);
-// the preview BrowserWindow stays hidden and only owns the lifecycle.
+// The docked surface lives INSIDE the main window, and the preview
+// BrowserWindow stays hidden and only owns the lifecycle: on Linux and macOS
+// the proof surface is a view in the window (in-window-proof-surface.ts); on
+// macOS the in-process CAMetalLayer is a sublayer of the main window's own
+// view at the slot (plan 213 D3), so there is one window, as in OBS, nothing a
+// tiling window manager can move on its own, and no window hit-testing between
+// the mouse and the Scene canvas (plan 216 D4). The helper-process and
+// external drivers still need the child window they order above
+// (native-preview-window-stacking.ts has the rule and its tests).
 function previewDockedInWindow(): boolean {
-  return proofSurfaceHostedInWindow && currentPreviewWindowMode() === 'docked'
+  return previewDockedInsideMainWindow({
+    mode: currentPreviewWindowMode(),
+    platform: process.platform,
+    driverKind: nativePreviewRealSurfaceDriverKind
+  })
+}
+
+function nativePreviewLayerHostedInMainWindow(): boolean {
+  return process.platform === 'darwin' && nativePreviewRealSurfaceDriverKind === 'in-process'
+}
+
+// Which app window hosts the in-process layer right now; the driver attaches
+// to its handle and names it in status (never a silent change of host).
+function nativePreviewHostWindow(): NativePreviewHostWindow {
+  return currentPreviewWindowMode() === 'docked' && nativePreviewLayerHostedInMainWindow()
+    ? 'main'
+    : 'preview'
+}
+
+// The dock's host follows the driver: when the in-process layer comes or goes
+// (a failure, a retry, the helper fallback) the stuck Preview must move between
+// the main window's view and its child window, with the matching visibility.
+function reconcileDockedPreviewHost(): void {
+  if (currentPreviewWindowMode() === 'docked' && previewWindowIsOpenForSurface()) {
+    queueDockedPreviewPlacement()
+  }
 }
 
 // What the user sees of the preview: the window itself, or for an in-window
@@ -4447,17 +4884,23 @@ function previewWindowPresentedVisible(window: BrowserWindow): boolean {
   return window.isVisible() && !window.isMinimized()
 }
 
-// The Studio/Scene slot in main-window content terms. Before the first report
-// (and after every epoch bump) there is no slot: a 1x1 rect at the content
-// origin keeps the placement push flowing so visible:false reaches the surface.
+// The Studio/Scene slot in main-window content terms. With no slot rect (no
+// report yet, after an epoch bump, or another tab) a rect at the content origin
+// keeps the placement push flowing so visible:false reaches the surface. It
+// keeps the last slot's size (else the hidden lifecycle window's): the backend
+// sizes the idle program from these bounds, and a 1x1 rect made the program a
+// single pixel off Studio, which is what an agent's get_picture read.
 function inWindowDockedVideoBounds(): Electron.Rectangle | null {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return null
   }
-  const content = mainWindow.getContentBounds()
-  return previewDockSlot
-    ? composeDockedScreenRect(previewDockSlot, content)
-    : { x: content.x, y: content.y, width: 1, height: 1 }
+  const lifecycleWindow =
+    previewWindow && !previewWindow.isDestroyed() ? previewWindow.getContentBounds() : null
+  return inWindowDockedRect(
+    previewDockSlot,
+    mainWindow.getContentBounds(),
+    previewDockLastSlotSize ?? lifecycleWindow
+  )
 }
 
 // The docked placement hot path: recompute the docked window frame from the
@@ -4489,9 +4932,10 @@ function applyDockedPreviewPlacement(): void {
   }
   const decision = dockVisibilityDecision()
   if (previewDockedInWindow()) {
-    // Wayland would ignore a frame for the preview window anyway: it stays
-    // hidden, and the placement push moves the in-window surface to the slot
-    // (visible or not, per the same predicate).
+    // The lifecycle window stays hidden (Wayland would ignore its frame; on
+    // macOS it would be a second window for a window manager to move), and
+    // the placement push moves the in-window surface to the slot (visible or
+    // not, per the same predicate).
     if (window.isVisible()) {
       window.hide()
     }
@@ -4544,6 +4988,16 @@ function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBo
   const contentBounds = state.contentBounds
   const visible = state.visible && (visibleOverride ?? true)
   const orderAboveWindowId = previewWindowGlobalId()
+  // The in-process layer is placed inside its host window (plan 213 D2): the
+  // video rect in the host's content coordinates, plus the host's height.
+  // Only macOS has that layer; elsewhere the fields would describe nothing.
+  const hostWindow =
+    process.platform !== 'darwin'
+      ? null
+      : nativePreviewHostWindow() === 'main'
+        ? mainWindow
+        : previewWindow
+  const hostContent = hostWindow && !hostWindow.isDestroyed() ? hostWindow.getContentBounds() : null
   return {
     screenX: contentBounds.x,
     screenY: contentBounds.y,
@@ -4551,6 +5005,13 @@ function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBo
     height: contentBounds.height,
     scaleFactor: state.scaleFactor,
     screenHeight: state.screenHeight,
+    ...(hostContent
+      ? {
+          hostX: contentBounds.x - hostContent.x,
+          hostY: contentBounds.y - hostContent.y,
+          hostHeight: hostContent.height
+        }
+      : {}),
     visible,
     // Docked previews clip to the studio slot's rounded panel (--radius-panel,
     // 12pt); the floating window stays square. CALayer radii are in points.
@@ -4786,11 +5247,15 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   applyPreviewWindowAspect(window)
   savePreviewWindowPrefs({ open: true })
 
-  // Re-conform first so any squeeze that escaped the user-resize aspect lock
-  // (tiling, window managers, programmatic setBounds) is corrected before the
-  // placement push below feeds bounds to the native surface.
+  // Windows: re-conform first so any squeeze that escaped the user-resize
+  // aspect lock (tiling, programmatic setBounds) is corrected before the
+  // placement push below feeds bounds to the native surface. macOS keeps the
+  // size and fits the video inside it (plan 213 D4, previewWindowVideoBounds).
   window.on('resize', () => {
-    if (previewWindow === window) {
+    if (
+      previewWindow === window &&
+      previewWindowExternalResizePolicy(process.platform) === 'conform-window'
+    ) {
       conformPreviewWindowToAspect(window)
     }
   })
@@ -5033,6 +5498,7 @@ function reportPreviewDockSlot(raw: unknown): PreviewWindowState {
   // the exact race that made the 2026-06-09 glue attempt resurface bounds.
   if (report && report.epoch === previewDockEpoch) {
     previewDockSlot = report
+    previewDockLastSlotSize = usableDockSlotSize(report) ?? previewDockLastSlotSize
     queueDockedPreviewPlacement()
   }
   return previewWindowState()
@@ -5243,7 +5709,7 @@ async function loadNativePreviewSurfaceHtml(surfaceWindow: ProofSurfaceHost): Pr
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const htmlPath = writeNativePreviewSurfaceHtmlShell()
     try {
-      await surfaceWindow.loadFile(htmlPath)
+      await settleWithProofSurface(surfaceWindow, () => surfaceWindow.loadFile(htmlPath))
       return
     } catch (error) {
       lastError = error
@@ -5463,12 +5929,23 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
   }
   const suppressFramePolling =
     nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true
-  const backgroundLayer = existingPreviewBackgroundLayer()
-  const backgroundStageMargin = backgroundLayer
-    ? (nativePreviewSurfaceScene?.backgroundStageMargin ??
-      nativePreviewCommittedCompositorScene?.backgroundStageMargin ??
-      0)
-    : 0
+  // The program's background, drawn and inset as the recording draws it. A
+  // background main has not heard of yet keeps the surface's layer and stage.
+  const statusBackground = previewSurfaceStatusBackground(
+    status.sceneSources ?? [],
+    previewSurfaceCommittedBackground
+  )
+  const backgroundLayer =
+    statusBackground === undefined
+      ? existingPreviewBackgroundLayer()
+      : previewSurfaceBackgroundLayer(statusBackground ?? undefined, fileUrlFromPath)
+  const backgroundStageMargin = !backgroundLayer
+    ? 0
+    : statusBackground === undefined
+      ? (nativePreviewSurfaceScene?.backgroundStageMargin ??
+        nativePreviewCommittedCompositorScene?.backgroundStageMargin ??
+        0)
+      : previewProofBackgroundStageMargin(statusBackground)
   const layers: PreviewSurfaceSceneLayer[] = [
     ...(backgroundLayer ? [backgroundLayer] : []),
     ...(status.sceneSources ?? []).filter(compositorSceneSourceIsPreviewLayer).map((source) => ({
@@ -5730,6 +6207,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         let framePollingSuppressed = false;
         let framePollingIntervalMs = 40;
         let framePollingMaxWidth = 1920;
+        let framePollingCeilingWidth = 1920;
         let proofSurfaceSuspended = false;
         let animationFrameId = null;
         let compositorStatus = null;
@@ -5754,13 +6232,51 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           return String(next * 100) + '%';
         }
 
-        function profiledFrameUrl(url) {
+        // The device pixels a source layer's frame is actually drawn across:
+        // the <img> box (already widened by any crop) narrowed by its
+        // object-fit to the frame's aspect. Null while the layer has no
+        // laid-out box (hidden, not yet attached).
+        function displayedFramePixelWidth(image) {
+          if (!image || typeof image.getBoundingClientRect !== 'function') {
+            return null;
+          }
+          const box = image.getBoundingClientRect();
+          if (!(box.width > 0) || !(box.height > 0)) {
+            return null;
+          }
+          let width = box.width;
+          const naturalWidth = image.naturalWidth;
+          const naturalHeight = image.naturalHeight;
+          const fit = image.style.objectFit;
+          if (naturalWidth > 0 && naturalHeight > 0 && fit !== 'fill') {
+            const fitted = box.height * (naturalWidth / naturalHeight);
+            width = fit === 'cover' ? Math.max(box.width, fitted) : Math.min(box.width, fitted);
+          }
+          const dpr = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+            ? window.devicePixelRatio
+            : 1;
+          const pixels = Math.ceil(width * dpr);
+          return Number.isFinite(pixels) && pixels > 0 ? pixels : null;
+        }
+
+        // displayedWidth (source layers only): ask the backend for exactly the
+        // width the frame is drawn at, so Chromium shows its pixels 1:1. The
+        // profile width is quantized up in 160 px steps from a surface width
+        // main measured at its last geometry push, and the main process's
+        // hint is floored at 1280: a docked Preview grown from 941 to 1320 px
+        // kept asking for 960 and Chromium stretched it, blurring every pixel
+        // of a screen share. A measured layer is bounded only by the profile's
+        // own ceiling (1920).
+        function profiledFrameUrl(url, displayedWidth) {
           try {
             const parsed = new URL(url);
             const requested = Number(parsed.searchParams.get('maxWidth'));
-            const maxWidth = Number.isFinite(requested) && requested > 0
-              ? Math.min(requested, framePollingMaxWidth)
-              : framePollingMaxWidth;
+            const measured = typeof displayedWidth === 'number' && displayedWidth > 0;
+            const maxWidth = measured
+              ? Math.min(displayedWidth, framePollingCeilingWidth)
+              : Number.isFinite(requested) && requested > 0
+                ? Math.min(requested, framePollingMaxWidth)
+                : framePollingMaxWidth;
             parsed.searchParams.set('maxWidth', String(Math.max(1, Math.round(maxWidth))));
             return parsed.toString();
           } catch {
@@ -5768,10 +6284,22 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           }
         }
 
-        function frameRequestUrl(url, poller) {
-          const profiled = profiledFrameUrl(url);
+        function frameRequestUrl(url, poller, displayedWidth) {
+          const profiled = profiledFrameUrl(url, displayedWidth);
           try {
             const parsed = new URL(profiled);
+            // A new width needs the current frame resent even when the source
+            // has not advanced (a still screen sends no PipeWire frames), so a
+            // resized Preview never keeps the old size's pixels. The old
+            // size's cursor is dropped, not skipped once: if the first request
+            // at the new width fails, its retry must still ask for a frame
+            // instead of getting a 204 for the frame drawn at the old size.
+            const maxWidth = parsed.searchParams.get('maxWidth');
+            if (poller.requestedMaxWidth !== maxWidth) {
+              poller.generation = null;
+              poller.sequence = null;
+            }
+            poller.requestedMaxWidth = maxWidth;
             if (
               typeof poller.generation === 'string' &&
               poller.generation.length > 0 &&
@@ -5940,6 +6468,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (Number.isFinite(maxWidth) && maxWidth >= 1) {
             framePollingMaxWidth = Math.round(maxWidth);
           }
+          const ceilingWidth = Number(profile?.ceilingWidth);
+          framePollingCeilingWidth = Number.isFinite(ceilingWidth) && ceilingWidth >= 1
+            ? Math.round(ceilingWidth)
+            : framePollingMaxWidth;
         }
 
         function startFramePolling(id, kind, image, url) {
@@ -5985,10 +6517,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             poller.abortController = abortController;
             try {
               markProofPollerRequestStarted(poller);
-              const response = await fetch(frameRequestUrl(url, poller), {
-                cache: 'no-store',
-                signal: abortController.signal
-              });
+              const response = await fetch(
+                frameRequestUrl(url, poller, displayedFramePixelWidth(poller.image)),
+                {
+                  cache: 'no-store',
+                  signal: abortController.signal
+                }
+              );
               if (poller.cancelled) {
                 return;
               }
@@ -6659,11 +7194,37 @@ function surfaceWindowPlacement(bounds: PreviewSurfaceBounds): {
   }
 }
 
-// Linux hosts the proof surface inside its window (in-window-proof-surface.ts):
-// Wayland compositors ignore the absolute frames a separate surface window and
-// the docked preview window ask for, so both landed wherever the compositor
-// chose — centred over the app, or re-tiled under Hyprland.
-const proofSurfaceHostedInWindow = process.platform === 'linux'
+function proofSurfaceParent(): BrowserWindow | null {
+  return proofSurfaceParentWindow({
+    dockedInMainWindow: previewDockedInWindow(),
+    mainWindow,
+    previewWindow
+  })
+}
+
+// Re-parented only where the surface is about to show: the dock's host changes
+// with Pop out / Stick to app and with the driver, and moving a shown child
+// onto a hidden window would bring that window up too.
+function syncProofSurfaceParent(surface: ProofSurfaceHost): void {
+  if (!(surface instanceof BrowserWindow)) {
+    return
+  }
+  const parent = proofSurfaceParent()
+  if (parent && surface.getParentWindow() !== parent) {
+    surface.setParentWindow(parent)
+  }
+}
+
+// Linux and macOS host the proof surface inside its window
+// (in-window-proof-surface.ts). Linux: Wayland compositors ignore the absolute
+// frames a separate surface window and the docked preview window ask for, so
+// both landed wherever the compositor chose — centred over the app, or
+// re-tiled under Hyprland. macOS (plan 216 D4): the separate fallback windows
+// over the Scene canvas were asked to ignore the mouse, and on a streamer's
+// macOS no press or drag crossed them while the arrow keys moved the source;
+// the in-window view forwards its mouse to the canvas instead. Windows keeps
+// the separate opaque window (native-preview-window-stacking.ts says why).
+const proofSurfaceHostedInWindow = proofSurfaceHostedInWindowOn(process.platform)
 
 function proofSurfaceWebPreferences(): Electron.WebPreferences {
   return {
@@ -6676,16 +7237,17 @@ function proofSurfaceWebPreferences(): Electron.WebPreferences {
 
 function createProofSurfaceBrowserWindow(): BrowserWindow {
   const surfaceWindow = new BrowserWindow({
-    // The fallback surface is a child of the preview window: it stacks above
-    // it and moves with it like one app.
-    parent: previewWindow ?? mainWindow ?? undefined,
+    // The fallback surface is a child of the window the Preview is seen in:
+    // it stacks above it and moves with it like one app.
+    parent: proofSurfaceParent() ?? undefined,
     frame: false,
     // Transparency requires the GPU compositor on Windows — with a broken
     // GPU process (Windows Insider builds) a transparent window composites
     // NOTHING and the preview reads as a blank canvas even though the <img>
     // polling underneath is fully software-safe. Off macOS the surface is
-    // opaque over a solid dark base; macOS keeps transparency (its real
-    // preview path is the CAMetalLayer helper anyway).
+    // opaque over a solid dark base; macOS kept transparency while it used
+    // this window (its docked fallback is an in-window view since plan 216
+    // D4; the branches stay for the helper-process diagnostic path).
     transparent: isMac,
     focusable: false,
     skipTaskbar: true,
@@ -6709,7 +7271,10 @@ function createProofSurfaceBrowserWindow(): BrowserWindow {
 
 // The docked surface sits in the main window over the Studio slot or Scene
 // canvas; the floating one sits in the preview window under its drag strip.
-// Content protection is a no-op on Linux, and the host window carries its own.
+// The proof-surface role never asks for content protection (the separate
+// window's call was a no-op for it on every platform, window-capture-
+// protection.ts), and the host window carries its own. The opaque base is
+// what the hidden lifecycle window's dark body gave the transparent window.
 function createInWindowProofSurface(): InWindowProofSurface {
   return new InWindowProofSurface({
     createView: () => {
@@ -6794,7 +7359,8 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       if (proofPollingSuppressed) {
         await waitForNativePreviewSurfaceScript(surfaceWindow)
         if (!surfaceWindow.isDestroyed() && previewWindowSurfaceGenerationIsCurrent(generation)) {
-          await surfaceWindow.webContents.executeJavaScript(
+          await executeProofSurfaceScript(
+            surfaceWindow,
             'window.__videorcSetFramePollingSuppressed?.(true)',
             true
           )
@@ -6804,7 +7370,8 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       if (nativePreviewSurfaceScene) {
         await waitForNativePreviewSurfaceScript(surfaceWindow)
         if (!surfaceWindow.isDestroyed() && previewWindowSurfaceGenerationIsCurrent(generation)) {
-          await surfaceWindow.webContents.executeJavaScript(
+          await executeProofSurfaceScript(
+            surfaceWindow,
             `window.__videorcSetPreviewScene?.(${jsonForInlineScript(nativePreviewSurfaceScene)})`,
             true
           )
@@ -6889,6 +7456,7 @@ async function createNativePreviewSurface(
   }
   nativePreviewSurfaceWindow.setBounds(rect)
   if (placement.visible && !nativeSurfaceOwnsPlacement()) {
+    syncProofSurfaceParent(nativePreviewSurfaceWindow)
     nativePreviewSurfaceWindow.showInactive()
   } else if (!placement.visible) {
     nativePreviewSurfaceWindow.hide()
@@ -6901,7 +7469,7 @@ async function createNativePreviewSurface(
     nativePreviewSurfaceScene
       ? 'Electron proof scene preview surface.'
       : 'Synthetic Electron proof preview surface.'
-  }${proofSurfaceHostedInWindow ? ' Hosted inside the app window (Wayland cannot place a separate surface window).' : ''}`
+  }${proofSurfaceHostedInWindow ? proofSurfaceHostNote(process.platform) : ''}`
   nativePreviewSurfaceStatus = {
     ...(preserveNativeSurface ? nativePreviewSurfaceStatus : {}),
     state: 'live',
@@ -6940,6 +7508,9 @@ async function createNativePreviewSurface(
     nativePreviewHostAttached: preserveNativeSurface
       ? nativePreviewSurfaceStatus.nativePreviewHostAttached
       : false,
+    nativePreviewHostWindow: preserveNativeSurface
+      ? nativePreviewSurfaceStatus.nativePreviewHostWindow
+      : undefined,
     ...nativePreviewPlacementStatusFields(),
     bounds,
     startedAt: nativePreviewSurfaceStatus.startedAt ?? new Date().toISOString(),
@@ -6980,6 +7551,7 @@ async function updateNativePreviewSurfaceBounds(
   const rect = placement.rect
   nativePreviewSurfaceWindow.setBounds(rect)
   if (placement.visible && !nativeSurfaceOwnsPlacement()) {
+    syncProofSurfaceParent(nativePreviewSurfaceWindow)
     if (!nativePreviewSurfaceWindow.isVisible()) {
       nativePreviewSurfaceWindow.showInactive()
     }
@@ -7007,6 +7579,9 @@ async function updateNativePreviewSurfaceBounds(
     nativePreviewHostAttached: preserveNativeSurface
       ? nativePreviewSurfaceStatus.nativePreviewHostAttached
       : false,
+    nativePreviewHostWindow: preserveNativeSurface
+      ? nativePreviewSurfaceStatus.nativePreviewHostWindow
+      : undefined,
     ...nativePreviewPlacementStatusFields(),
     bounds,
     updatedAt: new Date().toISOString()
@@ -7043,6 +7618,9 @@ async function showNativePreviewProofSurfaceIfVisible(): Promise<void> {
   }
   const placement = surfaceWindowPlacement(bounds)
   nativePreviewSurfaceWindow.setBounds(placement.rect)
+  if (placement.visible) {
+    syncProofSurfaceParent(nativePreviewSurfaceWindow)
+  }
   if (placement.visible && !nativePreviewSurfaceWindow.isVisible()) {
     nativePreviewSurfaceWindow.showInactive()
   }
@@ -7192,6 +7770,7 @@ async function setNativePreviewSurfacesVisible(visible: boolean): Promise<void> 
 // considered only when its explicit diagnostic fallback flag is enabled.
 async function disableNativePreviewRealSurfaceDriver(reason: string): Promise<void> {
   const driver = nativePreviewRealSurfaceDriver
+  const driverKind = nativePreviewRealSurfaceDriverKind
   nativePreviewRealSurfaceDriver = null
   nativePreviewRealSurfaceDriverKind = null
   nativePreviewRealSurfaceInvalidActivationCount = 0
@@ -7202,12 +7781,23 @@ async function disableNativePreviewRealSurfaceDriver(reason: string): Promise<vo
   nativePreviewHelperDriverRetryAtMs = retryAtMs
   nativePreviewNativeOwnsProofPollingSuppression = false
   nativePreviewNativeFailureFallbackActive = previewWindowIsOpenForSurface()
+  firstFrameDecisions.record({
+    watch: 'presenter',
+    decision: 'presenter-retired',
+    reason,
+    evidence: {
+      driverKind,
+      hadDriver: driver != null,
+      fallbackWindowShown: nativePreviewNativeFailureFallbackActive
+    }
+  })
   clearNativePreviewNativePlacementAuthority()
   try {
     driver?.stop?.()
   } catch {
     // The helper is already unreachable; nothing left to tear down.
   }
+  reconcileDockedPreviewHost()
   if (nativePreviewNativeFailureFallbackActive) {
     nativePreviewSurfaceStatus = nativePreviewDriverFailureFallbackStatus(
       nativePreviewSurfaceStatus,
@@ -7323,7 +7913,8 @@ async function applyNativePreviewSurfaceScene(
     }
     const sceneJson = jsonForInlineScript(nativePreviewSurfaceScene)
     if (nativePreviewSurfaceWindow === surfaceWindow && !surfaceWindow.isDestroyed()) {
-      await surfaceWindow.webContents.executeJavaScript(
+      await executeProofSurfaceScript(
+        surfaceWindow,
         `window.__videorcSetPreviewScene?.(${sceneJson})`,
         true
       )
@@ -7385,6 +7976,30 @@ function acceptPreviewSurfaceOverlayLayout(read: () => OverlayLayout, source: st
   })
 }
 
+// The committed scene's background (`scene.get` on connect, then
+// `scene.changed`): the proof surface draws it while the compositor status
+// names it. A new background forgets the committed compositor scene, because
+// a status already at the new revision may have committed without it; the
+// next status then commits the scene with its background.
+function acceptPreviewSurfaceSceneBackground(read: () => Scene, source: string): void {
+  let scene: Scene
+  try {
+    scene = read()
+  } catch (error) {
+    logBackend('warn', `Main dropped an invalid ${source} payload: ${errorMessageText(error)}`)
+    return
+  }
+  const background = scene.background ?? null
+  if (JSON.stringify(background) === JSON.stringify(previewSurfaceCommittedBackground ?? null)) {
+    if (previewSurfaceCommittedBackground === undefined) {
+      previewSurfaceCommittedBackground = background
+    }
+    return
+  }
+  previewSurfaceCommittedBackground = background
+  nativePreviewCommittedCompositorScene = null
+}
+
 async function updateNativePreviewSurfaceBanners(): Promise<PreviewSurfaceStatus> {
   const generation = previewWindowSurfaceGeneration()
   return runNativePreviewSurfaceMutation(
@@ -7426,7 +8041,8 @@ async function applyNativePreviewSurfaceBanners(generation: number): Promise<Pre
   }
   // The latest scene: a compositor present may have replaced it meanwhile,
   // and every builder already reads the new list.
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcSetPreviewScene?.(${jsonForInlineScript(nativePreviewSurfaceScene)})`,
     true
   )
@@ -7667,7 +8283,8 @@ async function presentNativePreviewSurfaceCompositor(
     // status channel. Present + metrics happen in ONE script round trip.
     const statusJson = jsonForInlineScript(nativePreviewProofPresentStatus(effectiveStatus))
     if (nativePreviewSurfaceWindow === surfaceWindow && !surfaceWindow.isDestroyed()) {
-      metrics = await surfaceWindow.webContents.executeJavaScript(
+      metrics = await executeProofSurfaceScript(
+        surfaceWindow,
         `${sceneScript}window.__videorcSetCompositorStatus?.(${statusJson});` +
           `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
         true
@@ -7749,16 +8366,27 @@ async function presentNativePreviewSurfaceCompositor(
   })
   if (proofSourceAssessment === 'met') {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'met') {
-      setFirstFrameStatus('met', 'Windows preview pixels are live.')
+      setFirstFrameStatus('met', proofSourceLiveReason(process.platform))
       updatePreviewWindowWaitDetail(null)
       logBackend('info', '[proof-preview] source frame delivery is live')
+      firstFrameDecisions.record({
+        watch: 'proof-preview',
+        decision: 'met',
+        reason: proofSourceLiveReason(process.platform)
+      })
     }
   } else if (proofSourceAssessment === 'stalled') {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
-      const reason = `Windows preview source frames have not advanced for ${Math.round(sourceFrameAgeMs ?? 0)}ms; keeping the last good frame while polling retries.`
+      const reason = proofSourceStalledReason(process.platform, sourceFrameAgeMs ?? 0)
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowWaitDetail(reason)
       logBackend('warn', `[proof-preview] ${reason}`)
+      firstFrameDecisions.record({
+        watch: 'proof-preview',
+        decision: 'stalled',
+        reason,
+        evidence: { sourceFrameAgeMs: sourceFrameAgeMs ?? null }
+      })
     }
   }
   syncPreviewSupervisorSurface(
@@ -8422,7 +9050,8 @@ async function syncNativePreviewProofPollingProfile(): Promise<void> {
     nativePreviewAppliedProofPollingProfile = null
     return
   }
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcSetFramePollingProfile?.(${jsonForInlineScript(profile)})`,
     true
   )
@@ -8509,7 +9138,8 @@ async function setNativePreviewProofAnimationSuspended(suspended: boolean): Prom
     nativePreviewProofAnimationSuspended = null
     return
   }
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcSetProofSurfaceSuspended?.(${suspended ? 'true' : 'false'})`,
     true
   )
@@ -8538,7 +9168,8 @@ async function syncNativePreviewProofPollingSuppression(): Promise<boolean> {
   ) {
     return nativePreviewProofPollingIsSuppressed()
   }
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcSetFramePollingSuppressed?.(${desired ? 'true' : 'false'})`,
     true
   )
@@ -8564,7 +9195,8 @@ async function readNativePreviewSurfaceMetricsAfterPaint(
   ) {
     return null
   }
-  return surfaceWindow.webContents.executeJavaScript(
+  return executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
     true
   )
@@ -8870,7 +9502,8 @@ async function waitForNativePreviewSurfaceScript(
       if (surfaceWindow.isDestroyed()) {
         return
       }
-      lastState = await surfaceWindow.webContents.executeJavaScript(
+      lastState = await executeProofSurfaceScript(
+        surfaceWindow,
         'typeof window.__videorcSetPreviewScene',
         true
       )
@@ -9010,15 +9643,18 @@ function loadNativePreviewPrimaryDriver(): NativePreviewPrimaryDriverLoad {
   const loaded = loadNativePreviewInProcessDriver({
     modulePath: nativePreviewInProcessModuleResolution.path,
     loadModule: (modulePath) => requireNativePreviewRealSurfaceModule(modulePath),
-    getNativeWindowHandle: nativePreviewWindowHandle
+    getNativeWindowHandle: nativePreviewWindowHandle,
+    getNativeHostWindow: nativePreviewHostWindow
   })
   return loaded.driver
     ? { driver: loaded.driver, kind: 'in-process' }
     : { driver: null, unavailableReason: loaded.unavailableReason }
 }
 
+// The NSView the in-process layer attaches to: the main window's while the
+// Preview is stuck to the app (plan 213 D3), the Preview window's otherwise.
 function nativePreviewWindowHandle(): Buffer | null {
-  const window = previewWindow
+  const window = nativePreviewHostWindow() === 'main' ? mainWindow : previewWindow
   return window && !window.isDestroyed() ? window.getNativeWindowHandle() : null
 }
 
@@ -9037,6 +9673,7 @@ function ensureNativePreviewRealSurfaceDriver(): NativePreviewRealSurfaceDriver 
     nativePreviewRealSurfaceDriverKind = primary.kind
     nativePreviewRealSurfaceDriverUnavailableReason = undefined
     nativePreviewHelperProcessDriverResolved = false
+    reconcileDockedPreviewHost()
     return primary.driver
   }
   nativePreviewRealSurfaceDriverUnavailableReason = primary.unavailableReason
@@ -9060,6 +9697,7 @@ function ensureNativePreviewRealSurfaceDriver(): NativePreviewRealSurfaceDriver 
   nativePreviewRealSurfaceDriver = helperDriver.driver
   nativePreviewRealSurfaceDriverKind = 'helper-process'
   nativePreviewRealSurfaceDriverUnavailableReason = undefined
+  reconcileDockedPreviewHost()
   return nativePreviewRealSurfaceDriver
 }
 
@@ -9334,6 +9972,20 @@ function protectedOAuthPersistenceCodec(): SecurePersistenceCodec {
     oauthPersistenceCodec = createSafeStoragePersistenceCodec(safeStorage)
   }
   return oauthPersistenceCodec
+}
+
+// A removable drive that was unplugged takes the chosen folder with it: say so
+// by name instead of passing Node's ENOENT through to the Record toast.
+function resolveOutputDirectoryHandle(directoryHandleId: unknown): string {
+  try {
+    return outputDirectoryAuthority().resolve(directoryHandleId)
+  } catch (error) {
+    if (error instanceof DirectoryUnavailableError) {
+      console.warn('[output-directory] the chosen recordings folder is unavailable', error.cause)
+      throw new Error(outputDirectoryUnavailableMessage(error.displayName), { cause: error })
+    }
+    throw error
+  }
 }
 
 function outputDirectoryAuthority(): PersistentDirectoryAuthority {
@@ -9735,7 +10387,10 @@ function resolveCargoBinary(): string {
 }
 
 function devCargoEnvOverrides(): Record<string, string> {
-  if (app.isPackaged) {
+  // Incremental is off for the macOS arm64 stale-serde link bug. Elsewhere the
+  // dev app follows the developer's Cargo setting, so it does not fight a
+  // terminal build over the fingerprint and force a full backend rebuild.
+  if (app.isPackaged || process.platform !== 'darwin') {
     return {}
   }
 
@@ -9958,10 +10613,13 @@ function recordBackendExit(
   runtime: BackendRuntime,
   code: number | null,
   signal: NodeJS.Signals | null,
-  intentional: boolean,
+  markedByMain: boolean,
   attempt: number | null
 ): void {
-  if (!shouldRecordBackendExit({ intentional, code, signal })) {
+  // Read the mark at the exit itself: main sets it before any signal it sends,
+  // so the exit event can never land ahead of it.
+  const exit = classifyBackendExit({ markedByMain, code, signal, platform: process.platform })
+  if (!shouldRecordBackendExit({ cause: exit.cause, code })) {
     return
   }
   const evidence = backendGenerationEvidence.get(runtime)
@@ -9972,7 +10630,8 @@ function recordBackendExit(
     signal,
     attempt,
     uptimeMs: evidence ? Date.now() - evidence.startedAtMs : 0,
-    intentional,
+    intentional: exit.intentional,
+    windowsStatus: exit.windowsStatus,
     stderrTail: evidence?.stderrTail.snapshot() ?? []
   })
   try {
@@ -10357,16 +11016,27 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   const previewSurfaceStatusRequestId = `main-preview-surface-status-${Date.now()}`
   const bannersListRequestId = `main-banners-list-${Date.now()}`
   const overlayLayoutRequestId = `main-overlay-layout-${Date.now()}`
+  const sceneRequestId = `main-scene-${Date.now()}`
   let previewSurfaceStatusRequestGeneration: number | null = null
   backendEventSocket = socket
   socket.onopen = () => {
     if (backendEventSocket === socket) {
       logBackend('info', 'Main process connected to backend events.')
       // Plan 186: the proof surface draws the showing banners; plan 205 S9:
-      // and the Buddy's layer while its switches put it in the program.
-      const includedEvents = ['recording.status', 'banners.changed', 'overlays.layout']
+      // and the Buddy's layer while its switches put it in the program; and
+      // the committed scene's background.
+      const includedEvents = [
+        'recording.status',
+        'banners.changed',
+        'overlays.layout',
+        'scene.changed'
+      ]
       if (process.platform === 'win32') {
         includedEvents.push('preview.surface.status')
+      }
+      if (process.platform === 'darwin') {
+        // Plan 214 B3: the camera switch turning on activates the extension.
+        includedEvents.push('virtualCamera.changed')
       }
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
@@ -10400,6 +11070,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             socket.send(
               JSON.stringify({ id: overlayLayoutRequestId, method: 'overlays.layout.get' })
             )
+            socket.send(JSON.stringify({ id: sceneRequestId, method: 'scene.get' }))
             if (process.platform === 'win32') {
               previewSurfaceStatusRequestGeneration = previewWindowSurfaceGeneration()
               socket.send(
@@ -10461,6 +11132,17 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             )
           }
         }
+        if (parsed.id === sceneRequestId) {
+          // Never fatal: the background is a drawing, not capture state.
+          if (parsed.ok === true) {
+            acceptPreviewSurfaceSceneBackground(() => parseMainScene(parsed.payload), 'scene.get')
+          } else {
+            logBackend(
+              'warn',
+              `Main could not read the committed scene: ${parsed.error?.message ?? 'unknown error'}`
+            )
+          }
+        }
         // Responses to fire-and-forget present reports are deliberately ignored.
         return
       }
@@ -10481,6 +11163,17 @@ function connectBackendEventSocket(connection: BackendConnection): void {
           () => parseMainOverlayLayoutEvent(parsed.payload),
           'overlays.layout'
         )
+        return
+      }
+      if (parsed.event === 'scene.changed') {
+        acceptPreviewSurfaceSceneBackground(
+          () => parseMainSceneChangedEvent(parsed.payload),
+          'scene.changed'
+        )
+        return
+      }
+      if (parsed.event === 'virtualCamera.changed') {
+        acceptVirtualCameraStatus(() => parseMainVirtualCameraChangedEvent(parsed.payload))
         return
       }
       if (parsed.event === 'preview.surface.status') {
@@ -10561,6 +11254,9 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_background_path',
   'resource.admin.preview_surface_bounds',
   'overlays.layout.migrate_highlight_anchor',
+  // Plan 214 B3: the saved camera switch, and main's word on the extension.
+  'virtualCamera.status',
+  'virtualCamera.platform.report',
   // Plan 168 S-A3: register a pet pack folder main just copied.
   'cohost.pet.import',
   // Plan 170 D18: the videorc://buddy deep link syncs, uses and polls.
@@ -10919,6 +11615,7 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
           safeConsole.log(`[smoke] backend-ready ${publicBackendConnectionJson(backendConnection)}`)
         }
         connectBackendEventSocket(backendAdminConnection)
+        void reconcileCameraExtensionWithBackend()
         const rendererConnection = backendConnection
         const adminConnection = backendAdminConnection
         backendAuthorityReady = Promise.all([
@@ -11741,6 +12438,15 @@ async function runSmokePreviewMotionCommand(
       throw new Error('Preview window must be open before exercising proof fallback.')
     }
     await disableNativePreviewRealSurfaceDriver('Smoke requested explicit proof fallback.')
+    // Plan 216 C: a probe that drives a real mouse over the fallback needs it
+    // to outlast the retry cooldown, or the next host command brings the
+    // native presenter back mid-drag. `restore-native-preview-driver` ends
+    // the hold.
+    if (typeof params.holdMs === 'number' && Number.isFinite(params.holdMs) && params.holdMs > 0) {
+      const retryAtMs = Date.now() + Math.min(params.holdMs, 10 * 60_000)
+      nativePreviewPrimaryDriverRetryAtMs = retryAtMs
+      nativePreviewHelperDriverRetryAtMs = retryAtMs
+    }
     const window = nativePreviewSurfaceWindow
     return {
       exists: Boolean(window && !window.isDestroyed()),
@@ -11751,6 +12457,50 @@ async function runSmokePreviewMotionCommand(
         ? surfaceWindowPlacement(nativePreviewSurfaceStatus.bounds)
         : null,
       status: nativePreviewSurfaceStatus
+    }
+  }
+
+  // Plan 216 C: the presenting watchdog's `reset-native-path`, run on request.
+  // The retry cooldowns clear and the presenter is resolved again, so a probe
+  // that forced the proof fallback leaves the app back on its native path.
+  if (command === 'restore-native-preview-driver') {
+    if (!previewWindowIsOpenForSurface()) {
+      throw new Error('Preview window must be open before restoring the native presenter.')
+    }
+    await resetNativePreviewRealSurfaceDriver('Smoke restored the native presenter.')
+    return {
+      ...previewWindowState(),
+      realDriverActive: Boolean(nativePreviewRealSurfaceDriver),
+      realDriverKind: nativePreviewRealSurfaceDriverKind,
+      nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind,
+      transport: nativePreviewSurfaceStatus.transport
+    }
+  }
+
+  // Plan 216 C: drive the fallback surface through its own web contents, the
+  // way real mouse input reaches a view (Chromium input pipeline, then
+  // `before-mouse-event`), on a host that refuses HID posting (no
+  // Accessibility grant for the probe terminal). Points are surface-local.
+  if (command === 'send-input-to-proof-surface') {
+    const surface = nativePreviewSurfaceWindow
+    if (!surface || surface.isDestroyed() || surface.webContents.isDestroyed()) {
+      throw new Error('Proof surface is not open.')
+    }
+    const events = validateSmokeProofSurfaceInputEvents(params.events)
+    if (!events) {
+      throw new Error('Invalid proof-surface input events.')
+    }
+    for (const event of events) {
+      surface.webContents.sendInputEvent(event)
+      await delay(30)
+    }
+    return {
+      sent: events.length,
+      hostedInWindow: surface instanceof InWindowProofSurface,
+      forwardedInput:
+        surface instanceof InWindowProofSurface ? surface.forwardedInputCounts() : null,
+      lastObserved: surface instanceof InWindowProofSurface ? surface.lastObservedInput() : null,
+      bounds: surface.getBounds()
     }
   }
 
@@ -11794,6 +12544,15 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    if (previewDockedInWindow()) {
+      // The lifecycle window of an in-window dock stays hidden: a window
+      // manager moving it on its own (plan 213 D1, wm-displaces-child) moves
+      // nothing the user sees, and placement re-derives from the main window
+      // and the slot.
+      queueDockedPreviewPlacement()
+      emitPreviewWindowState()
+      return previewWindowState()
+    }
     showSmokeWindow(previewWindow, params)
     previewWindow.moveTop()
     if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
@@ -11962,11 +12721,18 @@ async function runSmokePreviewMotionCommand(
       ...smokeNativeWindowIdentity(previewWindow),
       // macOS: a docked window must cast no shadow (applyDockedPreviewChrome).
       hasShadow: previewWindow && !previewWindow.isDestroyed() ? previewWindow.hasShadow() : null,
+      // The Preview BrowserWindow itself is on screen (as opposed to `visible`,
+      // what the user sees of the preview): an in-window dock keeps it hidden.
+      previewWindowShown:
+        previewWindow && !previewWindow.isDestroyed() ? previewWindow.isVisible() : null,
+      windowContentBounds:
+        previewWindow && !previewWindow.isDestroyed() ? previewWindow.getContentBounds() : null,
       surface: {
         exists: Boolean(surface && !surface.isDestroyed()),
         visible: Boolean(surface && !surface.isDestroyed() && surface.isVisible()),
         bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null,
-        // Linux: the surface is a view inside this window, not a window of its own.
+        // Linux and macOS: the surface is a view inside this window, not a
+        // window of its own (plan 216 C asserts 'main' on the proof fallback).
         hostedInWindow:
           surface instanceof InWindowProofSurface
             ? surface.hostWindow() === mainWindow
@@ -11975,6 +12741,8 @@ async function runSmokePreviewMotionCommand(
                 ? 'preview'
                 : 'detached'
             : null,
+        forwardedInput:
+          surface instanceof InWindowProofSurface ? surface.forwardedInputCounts() : null,
         ...smokeNativeWindowIdentity(surface instanceof BrowserWindow ? surface : null),
         captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(
           surface instanceof BrowserWindow ? surface : null
@@ -11994,6 +12762,8 @@ async function runSmokePreviewMotionCommand(
         framePollingSuppressed: nativePreviewSurfaceStatus.framePollingSuppressed,
         nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind,
         nativePreviewHostAttached: nativePreviewSurfaceStatus.nativePreviewHostAttached,
+        nativePreviewHostWindow: nativePreviewSurfaceStatus.nativePreviewHostWindow,
+        bounds: nativePreviewSurfaceStatus.bounds ?? null,
         firstFrameContract: nativePreviewSurfaceStatus.firstFrameContract,
         firstFrameReason: nativePreviewSurfaceStatus.firstFrameReason,
         sourcePixelsPresent: nativePreviewSurfaceStatus.sourcePixelsPresent,
@@ -12121,9 +12891,39 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'comments-window-state') {
+    // The client area too: a framed Windows window's outer bounds include its
+    // invisible resize border, so the renderer is narrower than `bounds`.
+    const window = commentsWindow
     return {
       ...commentsWindowState(),
+      contentBounds: commentsWindowIsOpen() && window ? window.getContentBounds() : null,
       ...smokeNativeWindowIdentity(commentsWindow)
+    }
+  }
+
+  // Hide from stream (plan 215 C5): the invisibility smoke flips the switch
+  // before and during a recording, exactly as the status bar does.
+  if (command === 'comments-window-set-hidden-from-stream') {
+    return setCommentsWindowHiddenFromStream(params.hidden === true)
+  }
+
+  // The invisibility smoke's marker: the window painted edge to edge in a
+  // colour the artifact gate looks for (red by default, the Notes smoke's).
+  if (command === 'comments-window-set-smoke-marker') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return commentsWindowState('Chat window is not open.')
+    }
+    const color =
+      typeof params.color === 'string' && /^#[0-9a-f]{6}$/i.test(params.color)
+        ? params.color
+        : '#ff0000'
+    const markerInstalled = await paintCaptureProtectionSmokeMarker(window, 'comments', color)
+    return {
+      ...commentsWindowState(),
+      ...smokeNativeWindowIdentity(window),
+      markerInstalled,
+      markerColor: color
     }
   }
 
@@ -12600,6 +13400,7 @@ async function runSmokePreviewMotionCommand(
           statsMenuItems,
           menuOpenAfter: Boolean(document.querySelector('[role="menu"]')),
           windowWidth: window.innerWidth,
+          numberFormatLocale: new Intl.NumberFormat().resolvedOptions().locale,
           documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 0.5,
           header: box(header),
           headerItems: visibleDescendants(header),
@@ -13309,6 +14110,9 @@ async function runSmokePreviewMotionCommand(
   // Lifts one app window just above the floating backdrop and reports where it
   // is, so a probe can shoot exactly its rect. `focus: true` also makes it key;
   // probes leave it off so the run never steals the user's focus.
+  // `level: 'screen-saver'` lifts it above the invisibility smokes' native
+  // motion stimulus instead (plan 215 C5), so the recording can see the
+  // window whenever the capture filter lets it through.
   // close-backdrop-window restores every lifted window's own level.
   if (command === 'raise-window') {
     const role = typeof params.role === 'string' ? params.role : ''
@@ -13316,6 +14120,7 @@ async function runSmokePreviewMotionCommand(
     if (!target || target.isDestroyed()) {
       throw new Error(`No open window for role: ${role}`)
     }
+    const placement = smokeRaiseWindowPlacement(params.level)
     // Every other app window drops below the floating backdrop: a window's
     // glass blurs whatever sits directly behind it, so an overlapping app
     // window would be measured instead of the backdrop.
@@ -13327,7 +14132,7 @@ async function runSmokePreviewMotionCommand(
       }
     }
     smokeRaisedWindowRoles.set(target, role)
-    target.setAlwaysOnTop(true, 'floating', 1)
+    target.setAlwaysOnTop(true, placement.level, placement.relativeLevel)
     if (params.focus === true) {
       target.show()
       target.focus()
@@ -13338,6 +14143,7 @@ async function runSmokePreviewMotionCommand(
     const match = /^window:(\d+):/.exec(target.getMediaSourceId())
     return {
       role,
+      level: placement.level,
       bounds: target.getBounds(),
       windowId: match ? Number(match[1]) : null,
       focused: target.isFocused(),
@@ -13406,6 +14212,22 @@ async function runSmokePreviewMotionCommand(
   // Allocator-level memory attribution (PartitionAlloc/V8/mojo/cc per process)
   // via Chromium memory-infra dumps — the only window into renderer memory
   // that lives OUTSIDE the V8 heap. Probes diff two dumps to find leaks.
+  // Plan 214 B3: the extension's state for the packaged smoke (F1/F2); only a
+  // signed build in the Applications folder can activate.
+  if (command === 'camera-extension') {
+    const action = params.action
+    if (action === 'activate') {
+      return cameraExtension().activate()
+    }
+    if (action === 'deactivate') {
+      return cameraExtension().deactivate()
+    }
+    return {
+      availability: cameraExtension().availability(),
+      state: cameraExtension().state()
+    }
+  }
+
   if (command === 'memory-infra-dump') {
     const seconds = typeof params.seconds === 'number' ? Math.min(20, params.seconds) : 6
     await contentTracing.startRecording({
@@ -13554,6 +14376,7 @@ function smokePreviewSceneParams(
     sideBySideSplit: '60-40',
     sideBySideCameraSide: 'right',
     verticalScreenFraming: 'fill',
+    horizontalScreenFraming: 'fit',
     arrangementMode: 'preset',
     sourceTransformOverrides: {}
   }
@@ -13649,6 +14472,24 @@ function smokeCompositorStatusFromSceneParams(
               fileRevision: params.activeScreen.status === 'ready' ? 'smoke-revision' : undefined,
               width: params.activeScreen.status === 'ready' ? 1280 : undefined,
               height: params.activeScreen.status === 'ready' ? 720 : undefined
+            }
+          ]
+        : []),
+      // The compositor names the program's background the way the backend
+      // does; the proof surface keeps the smoke's layer for it.
+      ...(params.scene?.background
+        ? [
+            {
+              id: `background-image:${params.scene.background.assetId}`,
+              name: 'Background',
+              kind: 'background-image' as const,
+              state: 'live',
+              visible: true,
+              transform: fullFrameTransform(),
+              fit:
+                params.scene.background.fit === 'fit' ? ('contain' as const) : ('cover' as const),
+              mirror: false,
+              imagePath: params.scene.background.managedAssetPath
             }
           ]
         : [])
@@ -14620,7 +15461,9 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
       retryAttempts: gpuFallbackState?.retryAttempts ?? gpuFallbackLaunchState?.retryAttempts ?? 0
     },
     backendCrashes: backendCrashRecords,
+    firstFrameDecisions: firstFrameDecisions.snapshot(),
     windowGlass: mainWindowGlassInfo(),
+    globalShortcutsUnavailable,
     env: process.env
   })
 }
@@ -14667,7 +15510,7 @@ async function revealSelectedResource(
   if (kind !== 'output-directory') {
     throw new Error('Only output-directory handles can be revealed by this operation.')
   }
-  const path = outputDirectoryAuthority().resolve(directoryHandleId)
+  const path = resolveOutputDirectoryHandle(directoryHandleId)
   shell.showItemInFolder(path)
 }
 
@@ -15011,7 +15854,7 @@ async function checkDirectoryFactsForCapability(
 }
 
 async function authorizeOutputDirectory(directoryHandleId: unknown): Promise<ResourceSelection> {
-  const path = outputDirectoryAuthority().resolve(directoryHandleId)
+  const path = resolveOutputDirectoryHandle(directoryHandleId)
   const handle = {
     directoryHandleId: String(directoryHandleId),
     displayName: basename(path) || path
@@ -16085,6 +16928,19 @@ app.whenReady().then(async () => {
   }
 
   installRendererSessionPermissions(session.defaultSession)
+  // Plan 214 B3: Apple asks for the activation as early as possible so an
+  // update replaces the installed extension at launch. The saved switch is
+  // the backend's and arrives at its READY (`reconcileCameraExtensionWithBackend`);
+  // only the lab aid VIDEORC_CAMERA_EXTENSION_ACTIVATE_AT_LAUNCH=1 is known here.
+  if (
+    shouldActivateCameraExtensionAtLaunch({
+      availability: cameraExtension().availability(),
+      switchOn: false,
+      env: process.env
+    })
+  ) {
+    void cameraExtension().activate()
+  }
   moveLegacyBuddyAssetsOnce()
   scheduleStaleHttpCacheCleanup()
   // Plan 209 D20 and review #8: a Linux or Windows agent app runs the bridge
@@ -16166,6 +17022,20 @@ app.whenReady().then(async () => {
   })
   secureIpcHandle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
     openSystemPermissions(pane)
+  )
+  // Plan 214 E: Videorc Camera's actions. Linux's module load (D1) is
+  // `loadModule`; Windows' setup (C2) plugs in as `setUp` with the Windows
+  // follow-up PR, and until then answers "Not available on this computer."
+  secureIpcHandle('virtual-camera:action', (_event, action: unknown) =>
+    runVirtualCameraAction(action, {
+      platform: process.platform,
+      openExternal: (url) => shell.openExternal(url),
+      deactivateCameraExtension: () => cameraExtension().deactivate(),
+      loadModule: () => loadVideorcCameraModule(),
+      platformHidden: async () =>
+        (await requestBackendAdmin<VirtualCameraStatus>('virtualCamera.status')).platformStep ===
+        'unsupported'
+    })
   )
   secureIpcHandle('system:request-media-access', (_event, pane: 'camera' | 'microphone') =>
     requestMediaAccessNative(pane)
@@ -16345,6 +17215,9 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:get-state', () => commentsWindowState())
   secureIpcHandle('comments-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setCommentsWindowAlwaysOnTop(Boolean(alwaysOnTop))
+  )
+  secureIpcHandle('comments-window:set-hidden-from-stream', (_event, hidden: unknown) =>
+    setCommentsWindowHiddenFromStream(hidden)
   )
   secureIpcHandle('comments-window:set-highlight-anchor', (_event, anchor: unknown) =>
     setCommentsWindowHighlightAnchor(anchor)
@@ -16684,6 +17557,27 @@ app.whenReady().then(async () => {
       mainWindow.show()
       mainWindow.focus()
       sendElectronEvent(mainWindow.webContents, 'livestream:open-destination', { targetId })
+      return true
+    }
+  )
+  // Plan 215 A3: "Sign in to Videorc" on a chat row that waits on it. Main
+  // shows the main window and asks it to start the sign-in it owns (the same
+  // door as the sidebar's Sign in); the Chat window never sees the authorize
+  // URL or the intent.
+  secureIpcHandle(
+    'comments-window:sign-in-videorc',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can ask for the Videorc sign-in.')
+      }
+      commentsCommandRequestId(value)
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+        return false
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      sendElectronEvent(mainWindow.webContents, 'account:sign-in-request', undefined)
       return true
     }
   )
@@ -17139,16 +18033,64 @@ app.on('window-all-closed', () => {
   }
 })
 
-// Smoke/performance harnesses stop the isolated process group with SIGTERM.
-// Keep these listeners installed for the entire drain: a repeated signal must
-// remain routed through Electron's prevented before-quit path instead of
-// restoring Node's default immediate process termination while export runs.
-installPersistentBackendShutdownSignalHandlers(process, (signal) => {
+function requestSignalledQuit(signal: string): void {
   logBackend('info', `Received ${signal}; requesting graceful app shutdown.`)
   // A signal is never the person's quit: it must not wait on a question.
   liveExitGuard.allow('quit')
   app.quit()
-})
+}
+
+// Smoke/performance harnesses stop the isolated process group with SIGTERM.
+// Keep these listeners installed for the entire drain: a repeated signal must
+// remain routed through Electron's prevented before-quit path instead of
+// restoring Node's default immediate process termination while export runs.
+//
+// On Linux the same signal also reaches Chromium's helpers, and Chromium
+// aborts while relaunching them, so Linux takes the signals over once the app
+// is ready (linux-termination-signals.ts). It installs nothing before that:
+// Electron's own handler replaces any listener added before `ready`, and a
+// listener left from then would keep Node from taking the signal back.
+if (process.platform === 'linux') {
+  void app.whenReady().then(() => {
+    linuxTerminationSignals = installLinuxTerminationSignalTakeover({
+      source: process,
+      browserPid: process.pid,
+      listHelpers: () => app.getAppMetrics().map(({ pid, type }) => ({ pid, type })),
+      readProcStat: (pid) => {
+        try {
+          return readFileSync(`/proc/${pid}/stat`, 'utf8')
+        } catch {
+          return null
+        }
+      },
+      requestQuit: requestSignalledQuit,
+      beforeEnd: endBackendWithSignalledApp,
+      raise: (signal) => {
+        process.kill(process.pid, signal)
+        // The default action has ended the process by now; this only runs if
+        // something still holds the signal.
+        setTimeout(() => app.exit(128 + osConstants.signals[signal]), 1000)
+      },
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (handle) => clearInterval(handle as NodeJS.Timeout),
+      now: () => Date.now()
+    })
+  })
+} else {
+  installPersistentBackendShutdownSignalHandlers(process, requestSignalledQuit)
+}
+
+function endBackendWithSignalledApp(signal: LinuxTerminationSignal, reason: string): void {
+  logBackend(
+    'warn',
+    `Received ${signal} with Chromium's helpers (${reason}); ending now, before Chromium aborts relaunching them. The backend finalizes the recording on its own SIGTERM.`
+  )
+  // The signal usually reached the backend too; a second SIGTERM is ignored
+  // there. Only a child that has not exited still owns its PID.
+  if (backendProcess && backendProcess.exitCode === null && backendProcess.signalCode === null) {
+    backendProcess.kill('SIGTERM')
+  }
+}
 
 previewLifecycleEvidence.bindBeforeQuit(app, {
   onPrevented: () => {

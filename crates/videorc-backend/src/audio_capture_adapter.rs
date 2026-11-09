@@ -1235,21 +1235,30 @@ pub(crate) fn resolve_dshow_video_name(inventory: &str, selected: &str) -> Resul
 }
 
 fn resolve_dshow_kind(inventory: &str, selected: &str, kind: &str) -> Result<String> {
-    let mut audio: Vec<(String, Option<String>)> = Vec::new();
-    let mut current_audio = false;
+    // Every alternative name a device lists, in FFmpeg's order. One device can
+    // list several: a USB camera behind the Windows Camera Frame Server has its
+    // own `@device_pnp_` moniker and a `@device_sw_` proxy after it.
+    let mut devices: Vec<(String, Vec<String>)> = Vec::new();
+    let mut current = false;
     for line in inventory.lines() {
         if line.contains("Alternative name") {
-            if current_audio && let Some((_, alternate)) = audio.last_mut() {
-                *alternate = quoted_name(line);
+            if current
+                && let Some((_, alternates)) = devices.last_mut()
+                && let Some(alternate) = quoted_name(line)
+            {
+                alternates.push(alternate);
             }
         } else if line.contains("(audio)") || line.contains("(video)") {
-            current_audio = line.contains(kind);
-            if current_audio && let Some(name) = quoted_name(line) {
-                audio.push((name, None));
+            current = line.contains(kind);
+            if current && let Some(name) = quoted_name(line) {
+                devices.push((name, Vec::new()));
             }
         }
     }
-    let matching: Vec<_> = audio.iter().filter(|(name, _)| name == selected).collect();
+    let matching: Vec<_> = devices
+        .iter()
+        .filter(|(name, _)| name == selected)
+        .collect();
     if matching.len() != 1 {
         return Err(WorkerStartError::new(
             WorkerStartFailureKind::DeviceNotInInventory,
@@ -1257,18 +1266,30 @@ fn resolve_dshow_kind(inventory: &str, selected: &str, kind: &str) -> Result<Str
         )
         .into());
     }
-    let target = matching[0].1.as_deref().unwrap_or(selected);
+    let target = preferred_dshow_moniker(&matching[0].1).unwrap_or(selected);
     if target.is_empty()
         || target.contains(['\0', '\r', '\n', ':', '='])
-        || audio
+        || devices
             .iter()
-            .filter(|(_, alternate)| alternate.as_deref() == Some(target))
+            .filter(|(_, alternates)| alternates.iter().any(|alternate| alternate == target))
             .count()
             > 1
     {
         bail!("The selected DirectShow alternative name is ambiguous");
     }
     Ok(target.into())
+}
+
+/// The moniker to open a device by: its own `@device_pnp_` interface when it
+/// lists one, else the first it lists. A `@device_sw_` Frame Server proxy
+/// listed after the PnP moniker can fail to open with an I/O error while the
+/// device itself works; the last-listed name used to win.
+fn preferred_dshow_moniker(alternates: &[String]) -> Option<&str> {
+    alternates
+        .iter()
+        .find(|alternate| alternate.starts_with("@device_pnp_"))
+        .or_else(|| alternates.first())
+        .map(String::as_str)
 }
 fn quoted_name(line: &str) -> Option<String> {
     let first = line.find('"')?;
@@ -1685,18 +1706,23 @@ fn assemble_pcm(
             if stop.load(Ordering::Acquire) {
                 return Ok(());
             }
+            // Receive before judging the deadline: after this thread was
+            // descheduled, PCM that arrived in time is already queued.
+            match raw.recv_timeout(Duration::from_millis(5)) {
+                Ok(bytes) => {
+                    queued.extend(bytes);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("Capture PCM ended in a partial timestamped packet")
+                }
+            }
             if Instant::now() >= deadline {
                 bail!(
                     "Capture PCM did not match its timestamp metadata within {}ms",
                     match_budget.as_millis()
                 );
-            }
-            match raw.recv_timeout(Duration::from_millis(5)) {
-                Ok(bytes) => queued.extend(bytes),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    bail!("Capture PCM ended in a partial timestamped packet")
-                }
             }
         }
         let bytes: Vec<_> = queued.drain(..wanted).collect();
@@ -2328,7 +2354,7 @@ mod tests {
         let (position, captured) = place(&mut timeline, 1_920 + 1_920);
         assert_eq!(captured, 1_920 + 1_920);
         assert!(
-            position <= 1_920 + 1_920 && position >= 1_920 + 1_920 - 2 * PULSE_SLEW_FRAMES,
+            (1_920 + 1_920 - 2 * PULSE_SLEW_FRAMES..=1_920 + 1_920).contains(&position),
             "{position}"
         );
         assert_eq!(place(&mut timeline, 2_880 + 1_920).0, position + 960);
@@ -2542,7 +2568,8 @@ mod tests {
         for packet in 0..2_000_i64 {
             // A sound card 200 ppm slow against the wall clock, plus a
             // 15 ms stall every 100 packets that the next ones catch up.
-            stamp += 480 + 480 * 200 / 1_000_000 + 1;
+            let drift = 480 * 200 / 1_000_000;
+            stamp += 480 + drift + 1;
             let late = if packet % 100 == 50 { 720 } else { 0 };
             let (_, captured) = timeline.place(stamp + late, 480);
             if let Some(previous) = previous {
@@ -2633,9 +2660,12 @@ mod tests {
             drop(meta_tx);
             let (raw_tx, raw_rx) = mpsc::channel();
             let bytes = bytes.clone();
+            let started = Instant::now();
             let sender = thread::spawn(move || {
                 thread::sleep(late);
+                let sent = Instant::now();
                 let _ = raw_tx.send(bytes);
+                sent
             });
             let (out_tx, out_rx) = mpsc::sync_channel(4);
             let stats = Arc::new(AudioCaptureStats::default());
@@ -2648,19 +2678,31 @@ mod tests {
                 &AtomicBool::new(false),
                 &stats,
             );
-            sender.join().unwrap();
-            (result, out_rx.try_iter().collect::<Vec<_>>())
+            let arrived_after = sender.join().unwrap().saturating_duration_since(started);
+            (result, out_rx.try_iter().collect::<Vec<_>>(), arrived_after)
         };
-        let wall_us = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-        let pts = i64::try_from(i128::from(wall_us - 10_000) * 48_000 / 1_000_000).unwrap();
-        let (result, frames) = run(
-            CaptureProtocol::Pulse,
-            ClockPair::sample().unwrap(),
-            vec![pcm(0, pts, 480)],
-        );
+        // A loaded CI host (macOS runners, the full suite in parallel) can
+        // oversleep the 130 ms past the whole 250 ms budget; that attempt
+        // proves nothing about the budget, so it is retried. A miss with the
+        // PCM inside the budget still fails.
+        let mut attempts = 0;
+        let (result, frames) = loop {
+            attempts += 1;
+            let wall_us = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+            let pts = i64::try_from(i128::from(wall_us - 10_000) * 48_000 / 1_000_000).unwrap();
+            let (result, frames, arrived_after) = run(
+                CaptureProtocol::Pulse,
+                ClockPair::sample().unwrap(),
+                vec![pcm(0, pts, 480)],
+            );
+            let host_overslept = arrived_after >= PULSE_MAX_CAPTURE_AGE;
+            if !(host_overslept && result.is_err()) || attempts == 5 {
+                break (result, frames);
+            }
+        };
         assert!(
             result.as_ref().map_or_else(
                 |error| error.to_string().contains("stopped producing"),
@@ -2671,7 +2713,7 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].samples, vec![0.25; 960]);
         // macOS and Windows keep their 100 ms match budget.
-        let (result, frames) = run(
+        let (result, frames, _) = run(
             CaptureProtocol::AvFoundation,
             pair(Instant::now()),
             vec![metadata(), pcm(0, 0, 480)],
@@ -2898,6 +2940,42 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A Logitech C920 behind the Windows Camera Frame Server, as FFmpeg lists
+    /// it: its PnP moniker, then a `@device_sw_` proxy that failed to open
+    /// with an I/O error. The PnP moniker is the one opened.
+    #[test]
+    fn dshow_device_with_several_monikers_opens_its_pnp_interface() {
+        let pnp = r"@device_pnp_\\?\usb#vid_046d&pid_0892&mi_00#6&2800b706&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+        let proxy = r"@device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}\{A3FCE0F5-3493-419F-958A-ABA1250EC20B}";
+        let inventory = format!(
+            r#"[in#0 @ 0000020120b34800] "Pixel 8 (Windows Virtual Camera)" (video)
+[in#0 @ 0000020120b34800]   Alternative name "@device_pnp_\\?\swd#vcamdevapi#2033cab0#{{65e8773d-8f56-11d0-a3b9-00a0c9223196}}\{{fcebba03-9d13-4c13-9940-cc84fcd132d1}}"
+[in#0 @ 0000020120b34800] "HD Pro Webcam C920" (video)
+[in#0 @ 0000020120b34800]   Alternative name "{pnp}"
+[in#0 @ 0000020120b34800]   Alternative name "{proxy}"
+[in#0 @ 0000020120b34800] "Microphone (HD Pro Webcam C920)" (audio)
+[in#0 @ 0000020120b34800]   Alternative name "@device_cm_{{33D9A762-90C8-11D0-BD43-00A0C911CE86}}\wave_{{3591E315-4041-4D55-B0EA-11C8E316F691}}""#
+        );
+        assert_eq!(
+            resolve_dshow_video_name(&inventory, "HD Pro Webcam C920").unwrap(),
+            pnp
+        );
+        assert_eq!(
+            resolve_dshow_name(&inventory, "Microphone (HD Pro Webcam C920)").unwrap(),
+            r"@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{3591E315-4041-4D55-B0EA-11C8E316F691}"
+        );
+        // Without a PnP moniker the first one listed is opened, not the last.
+        let no_pnp = "[dshow] \"Cam\" (video)\n[dshow] Alternative name \"@device_sw_first\"\n[dshow] Alternative name \"@device_sw_second\"\n";
+        assert_eq!(
+            resolve_dshow_video_name(no_pnp, "Cam").unwrap(),
+            "@device_sw_first"
+        );
+        // A moniker another device also lists is still refused.
+        let shared =
+            format!("{inventory}\n[dshow] \"Other\" (video)\n[dshow] Alternative name \"{pnp}\"\n");
+        assert!(resolve_dshow_video_name(&shared, "HD Pro Webcam C920").is_err());
     }
 
     #[test]

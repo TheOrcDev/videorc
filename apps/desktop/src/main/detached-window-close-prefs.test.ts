@@ -4,6 +4,11 @@ import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
 
+import {
+  COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION,
+  commentsWindowHiddenFromStreamPreference
+} from './comments-window-prefs'
+
 // Every detached window reopens at launch when its prefs say `open: true`
 // (restore<Name>WindowOnLaunch), so its close handler must keep `open` as it
 // was when quitting closes it: `previewWindowClosePrefs(frame, closingForQuit())`.
@@ -46,5 +51,56 @@ describe('detached window close prefs (main/index.ts)', () => {
     for (const name of ['preview', 'notes', 'comments', 'captions']) {
       expect(source.indexOf(`${name}Window.close()`, from)).toBeGreaterThan(flag)
     }
+  })
+})
+
+// Plan 215 C1: Hide from stream is remembered in comments-window.json with a
+// version, like the pin. A file from before the switch (no field), a bare
+// `true` without its version, or a forged value all load as off: the
+// 2026-08-19 rule (the Stream Manager is on stream) stays the default.
+describe('Stream Manager: Hide from stream preference (comments-window.json)', () => {
+  it('loads as off from an old or forged file and on only under its version', () => {
+    expect(commentsWindowHiddenFromStreamPreference({})).toBe(false)
+    expect(commentsWindowHiddenFromStreamPreference({ hiddenFromStream: true })).toBe(false)
+    expect(
+      commentsWindowHiddenFromStreamPreference({
+        hiddenFromStream: 'true',
+        hiddenFromStreamPreferenceVersion: COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION
+      })
+    ).toBe(false)
+    expect(
+      commentsWindowHiddenFromStreamPreference({
+        hiddenFromStream: true,
+        hiddenFromStreamPreferenceVersion: COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION + 1
+      })
+    ).toBe(false)
+    expect(
+      commentsWindowHiddenFromStreamPreference({
+        hiddenFromStream: true,
+        hiddenFromStreamPreferenceVersion: COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION
+      })
+    ).toBe(true)
+    expect(
+      commentsWindowHiddenFromStreamPreference({
+        hiddenFromStream: false,
+        hiddenFromStreamPreferenceVersion: COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION
+      })
+    ).toBe(false)
+  })
+
+  it('is read through that rule and written with its version (main/index.ts)', () => {
+    const reader = source.indexOf('function commentsHiddenFromStream(')
+    expect(reader).toBeGreaterThan(-1)
+    expect(source.slice(reader, reader + 400)).toContain(
+      'commentsWindowHiddenFromStreamPreference('
+    )
+    const setter = source.indexOf('function setCommentsWindowHiddenFromStream(')
+    expect(setter).toBeGreaterThan(-1)
+    expect(source.slice(setter, setter + 800)).toContain(
+      'hiddenFromStreamPreferenceVersion: COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION'
+    )
+    // The open path applies the remembered switch before the window shows.
+    const open = closeHandlers('Comments')
+    expect(open).toContain('applyCommentsWindowCaptureProtection()')
   })
 })

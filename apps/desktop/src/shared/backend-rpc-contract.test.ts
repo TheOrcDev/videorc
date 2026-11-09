@@ -25,10 +25,15 @@ import type {
   AudienceSnapshot,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
-  StreamTargetsSnapshot
+  StreamTargetsSnapshot,
+  VirtualCameraPlatformStep,
+  VirtualCameraStatus
 } from './backend'
 import {
   parseBackendWireMessage,
+  cameraSelectionDiagnosticsSchema,
+  cameraConnectionHistoryEntrySchema,
+  supportBundleAccountSchema,
   runtimeValidatedBackendRpcMethods,
   validateMainOwnedPreviewSurfaceBoundsParams,
   validateBackendEventPayload,
@@ -112,6 +117,9 @@ describe('backend RPC contract', () => {
     // The standby microphone between sessions carries no session.
     const standby = { microphone: { peakDb: -30, rmsDb: -36 }, masterClippedSamples: 0 }
     expect(validateBackendEventPayload('audio.levels', standby)).toEqual(standby)
+    // Issue 1064: the silence watchdog's report rides the levels while true.
+    const silent = { ...levels, microphone: { peakDb: -120, rmsDb: -120 }, microphoneSilent: true }
+    expect(validateBackendEventPayload('audio.levels', silent)).toEqual(silent)
     for (const malformed of [
       { ...levels, sessionId: null },
       { ...levels, microphone: { peakDb: -12, rmsDb: -20, extra: 1 } },
@@ -119,6 +127,7 @@ describe('backend RPC contract', () => {
       { ...levels, microphone: { peakDb: 60, rmsDb: -20 } },
       { ...levels, microphone: null },
       { ...levels, masterClippedSamples: -1 },
+      { ...levels, microphoneSilent: 'yes' },
       { ...levels, unknown: true }
     ]) {
       expect(() => validateBackendEventPayload('audio.levels', malformed)).toThrow()
@@ -494,6 +503,32 @@ describe('backend RPC contract', () => {
         limits: { ...snapshot.limits, recording: { maxWidth: 3840 } }
       })
     ).toThrow('maxHeight')
+  })
+
+  // Plan 215 A5: the backend says when the account changes, and why. A
+  // session-expired reason is the sign-out the server made.
+  it('strictly validates the account.changed event', () => {
+    const expired = { account: { status: 'signed-out' }, reason: 'session-expired' }
+    expect(validateBackendEventPayload('account.changed', expired)).toEqual(expired)
+    const signedIn = {
+      account: {
+        status: 'signed-in',
+        username: 'orc_dev',
+        displayName: 'Orc Dev',
+        email: 'orc@videorc.com'
+      },
+      reason: 'signed-in'
+    }
+    expect(validateBackendEventPayload('account.changed', signedIn)).toEqual(signedIn)
+    expect(() =>
+      validateBackendEventPayload('account.changed', { ...expired, reason: 'expired' })
+    ).toThrow('reason')
+    expect(() =>
+      validateBackendEventPayload('account.changed', { ...expired, token: 'never' })
+    ).toThrow('token must be a known field')
+    expect(() => validateBackendEventPayload('account.changed', { reason: 'signed-out' })).toThrow(
+      'account'
+    )
   })
 
   it('types and exactly validates provider OAuth callback completion', () => {
@@ -917,7 +952,8 @@ describe('backend RPC contract', () => {
         cameraOffsetY: 0,
         sideBySideSplit: '50-50',
         sideBySideCameraSide: 'left',
-        verticalScreenFraming: 'fill'
+        verticalScreenFraming: 'fill',
+        horizontalScreenFraming: 'fit'
       },
       transitionMs: 320
     }
@@ -937,6 +973,18 @@ describe('backend RPC contract', () => {
     expect(validateBackendRpcParams('scene.layout.apply_live', layoutParams)).toEqual(layoutParams)
     expect(validateBackendRpcParams('scene.layout.apply_preview', layoutParams)).toEqual(
       layoutParams
+    )
+    // Plan 213 F1: the chosen display's UUID rides the sources as renderer intent.
+    const withDisplayUuid = {
+      ...layoutParams,
+      sources: {
+        ...layoutParams.sources,
+        screenUuid: '37D8832A-2D66-02CA-B9F7-8F30A301B230',
+        wantedScreenUuid: '6C1A9E2B-58F4-4D0E-9B7A-2F3C4D5E6F70'
+      }
+    }
+    expect(validateBackendRpcParams('scene.layout.apply_preview', withDisplayUuid)).toEqual(
+      withDisplayUuid
     )
     expect(() =>
       validateBackendRpcParams('scene.layout.apply_live', { ...layoutParams, transitionMs: 2000 })
@@ -3418,6 +3466,29 @@ describe('banner backend wire contract (plan 186)', () => {
   })
 })
 
+describe('display identity contracts (plan 213 F1)', () => {
+  it('accepts a display UUID on a listed display, never null', () => {
+    const display = {
+      displayUuid: '37D8832A-2D66-02CA-B9F7-8F30A301B230',
+      id: 'screen:screencapturekit:1',
+      name: 'Built-in Retina Display · 3024 × 1964',
+      kind: 'screen',
+      status: 'available',
+      width: 3024,
+      height: 1964
+    }
+    const payload = { devices: [display], warnings: [] }
+    expect(validateBackendRpcResult('devices.list', payload)).toEqual(payload)
+    expect(validateBackendEventPayload('devices.changed', payload)).toEqual(payload)
+    expect(() =>
+      validateBackendRpcResult('devices.list', {
+        devices: [{ ...display, displayUuid: null }],
+        warnings: []
+      })
+    ).toThrow()
+  })
+})
+
 describe('app window source contracts (plan 210 S1)', () => {
   it('accepts legacy and app-aware devices, rejecting null metadata', () => {
     const device = {
@@ -3599,5 +3670,218 @@ describe('performance check non-recorded reason', () => {
         lastRunNotRecorded: 'unknown'
       })
     ).toThrow()
+  })
+})
+
+it('accepts disconnected camera status and the support camera story', () => {
+  const status = {
+    state: 'disconnected',
+    cameraId: 'iphone',
+    deviceUniqueId: 'stable-id',
+    targetFps: 30,
+    framesCaptured: 5,
+    droppedFrames: 0,
+    updatedAt: '2026-11-01T12:00:00Z',
+    message: 'iPhone disconnected'
+  }
+  expect(validateBackendEventPayload('preview.camera.status', status)).toEqual(status)
+  const selection = { wantedCameraId: 'iphone', usedCameraId: 'builtin', state: 'live' }
+  expect(cameraSelectionDiagnosticsSchema.parse(selection)).toEqual(selection)
+  const edge = {
+    deviceType: 'AVCaptureDeviceTypeContinuityCamera',
+    transport: 0,
+    uniqueId: 'stable-id',
+    name: 'iPhone',
+    connected: false,
+    timestamp: status.updatedAt
+  }
+  expect(cameraConnectionHistoryEntrySchema.parse(edge)).toEqual(edge)
+  expect(() => cameraConnectionHistoryEntrySchema.parse({ ...edge, timestamp: null })).toThrow()
+})
+
+// Plan 215 A6: the bundle tells a shown sign-in from a stored token, as
+// booleans; an unreadable store carries its error and nothing else.
+it('accepts the support bundle account section and refuses a token in it', () => {
+  const shownButNoToken = { signedIn: true, tokenPresent: false, storeReadable: true }
+  expect(supportBundleAccountSchema.parse(shownButNoToken)).toEqual(shownButNoToken)
+  const unreadable = {
+    signedIn: false,
+    tokenPresent: false,
+    storeReadable: false,
+    storeError: 'secrets store: permission denied'
+  }
+  expect(supportBundleAccountSchema.parse(unreadable)).toEqual(unreadable)
+  expect(() => supportBundleAccountSchema.parse({ ...shownButNoToken, token: 'never' })).toThrow(
+    'token must be a known field'
+  )
+  expect(() => supportBundleAccountSchema.parse({ signedIn: true, tokenPresent: false })).toThrow(
+    'storeReadable'
+  )
+})
+
+it('keeps a live camera that sends no video (plan 216 D2)', () => {
+  const status = {
+    state: 'live',
+    cameraId: 'camera:builtin',
+    targetFps: 30,
+    framesCaptured: 0,
+    droppedFrames: 0,
+    updatedAt: '2026-11-03T14:51:46Z',
+    noVideo: true
+  }
+  expect(validateBackendEventPayload('preview.camera.status', status)).toEqual(status)
+  expect(() =>
+    validateBackendEventPayload('preview.camera.status', { ...status, noVideo: 'yes' })
+  ).toThrow()
+})
+
+describe('Camera low-light compensation wire contract (issue #1066)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/camera-low-light.json', import.meta.url),
+      'utf8'
+    )
+  ) as {
+    getParams: unknown
+    setParams: unknown
+    keepsFrameRate: unknown
+    compensating: unknown
+    unsupported: unknown
+    rejectedParams: unknown[]
+    rejectedSetParams: unknown[]
+    rejectedStates: unknown[]
+  }
+
+  it('accepts the fixture params and states, field for field', () => {
+    expect(validateBackendRpcParams('camera.lowLight.get', fixture.getParams)).toEqual(
+      fixture.getParams
+    )
+    expect(validateBackendRpcParams('camera.lowLight.set', fixture.setParams)).toEqual(
+      fixture.setParams
+    )
+    for (const state of [fixture.keepsFrameRate, fixture.compensating, fixture.unsupported]) {
+      expect(validateBackendRpcResult('camera.lowLight.get', state)).toEqual(state)
+      expect(validateBackendRpcResult('camera.lowLight.set', state)).toEqual(state)
+    }
+  })
+
+  it('rejects an empty id, a missing or null flag and a forged field', () => {
+    for (const bad of fixture.rejectedParams) {
+      expect(() => validateBackendRpcParams('camera.lowLight.get', bad)).toThrow()
+    }
+    for (const bad of fixture.rejectedSetParams) {
+      expect(() => validateBackendRpcParams('camera.lowLight.set', bad)).toThrow()
+    }
+    for (const bad of fixture.rejectedStates) {
+      expect(() => validateBackendRpcResult('camera.lowLight.get', bad)).toThrow()
+    }
+  })
+})
+
+describe('Videorc Camera wire contract (plan 214 A4)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/virtual-camera.json', import.meta.url),
+      'utf8'
+    )
+  ) as {
+    off: unknown
+    unavailableNoSink: unknown
+    unavailableHidden: unknown
+    needsApproval: unknown
+    needsSetup: unknown
+    ready: unknown
+    streaming: unknown
+    streamingUnknownViewers: unknown
+    setParams: unknown
+    platformReportParams: unknown
+    platformReportParamsBare: unknown
+    rejected: unknown[]
+  }
+
+  it('accepts every fixture state on the RPC results and the event, field for field', () => {
+    for (const state of [
+      fixture.off,
+      fixture.unavailableNoSink,
+      fixture.unavailableHidden,
+      fixture.needsApproval,
+      fixture.needsSetup,
+      fixture.ready,
+      fixture.streaming,
+      fixture.streamingUnknownViewers
+    ]) {
+      expect(validateBackendRpcResult('virtualCamera.status', state)).toEqual(state)
+      expect(validateBackendRpcResult('virtualCamera.set', state)).toEqual(state)
+      expect(validateBackendRpcResult('virtualCamera.platform.report', state)).toEqual(state)
+      expect(validateBackendEventPayload('virtualCamera.changed', state)).toEqual(state)
+    }
+    // Owner, 2026-11-03: a hidden platform is exactly `platformStep: unsupported`;
+    // the Output page shows no section on it.
+    expect(fixture.unavailableHidden).toMatchObject({
+      available: false,
+      state: 'unavailable',
+      platformStep: 'unsupported'
+    })
+    expect(validateBackendRpcParams('virtualCamera.set', fixture.setParams)).toEqual(
+      fixture.setParams
+    )
+    expect(validateBackendRpcParams('virtualCamera.set', { on: false })).toEqual({ on: false })
+    expect(
+      validateBackendRpcParams('virtualCamera.platform.report', fixture.platformReportParams)
+    ).toEqual(fixture.platformReportParams)
+    expect(
+      validateBackendRpcParams('virtualCamera.platform.report', fixture.platformReportParamsBare)
+    ).toEqual(fixture.platformReportParamsBare)
+  })
+
+  it('rejects a null field, an unknown state, a forged field and a missing flag', () => {
+    for (const bad of fixture.rejected) {
+      expect(() => validateBackendRpcResult('virtualCamera.status', bad)).toThrow()
+      expect(() => validateBackendEventPayload('virtualCamera.changed', bad)).toThrow()
+    }
+    expect(() =>
+      validateBackendRpcResult('virtualCamera.status', {
+        on: false,
+        available: true,
+        state: 'off',
+        extra: 1
+      })
+    ).toThrow()
+    for (const bad of [{}, { on: 'yes' }, { on: null }, { on: true, extra: true }]) {
+      expect(() => validateBackendRpcParams('virtualCamera.set', bad)).toThrow()
+    }
+    for (const bad of [{}, { platformStep: 'done' }, { platformStep: 'ready', message: null }]) {
+      expect(() => validateBackendRpcParams('virtualCamera.platform.report', bad)).toThrow()
+    }
+  })
+
+  it('keeps the camera counters inside the bounded framePipeline payload', () => {
+    const pinned = JSON.parse(
+      readFileSync(
+        new URL('../../../../protocol-fixtures/high-risk-contracts.json', import.meta.url),
+        'utf8'
+      )
+    ) as { compositorStatus: { stoppedWire: Record<string, unknown> } }
+    const stopped = pinned.compositorStatus.stoppedWire
+    const status = {
+      ...stopped,
+      framePipeline: {
+        ...(stopped.framePipeline as Record<string, unknown>),
+        virtualCameraPushed: 300,
+        virtualCameraRepeated: 12,
+        virtualCameraConvertMsMax: 2.5
+      }
+    }
+    expect(validateBackendEventPayload('compositor.status', status)).toEqual(status)
+  })
+
+  it('types the three methods and the event', () => {
+    expectTypeOf<BackendRpcParams<'virtualCamera.set'>>().toEqualTypeOf<{ on: boolean }>()
+    expectTypeOf<BackendRpcResult<'virtualCamera.status'>>().toEqualTypeOf<VirtualCameraStatus>()
+    expectTypeOf<BackendRpcParams<'virtualCamera.platform.report'>>().toEqualTypeOf<{
+      platformStep: VirtualCameraPlatformStep
+      message?: string
+    }>()
+    expectTypeOf<BackendEventMap['virtualCamera.changed']>().toEqualTypeOf<VirtualCameraStatus>()
   })
 })

@@ -41,11 +41,22 @@ electronFuses:
   enableNodeCliInspectArguments: false
   onlyLoadAppFromAsar: true
 
+# Plan 214 B2: embeds and signs the Videorc Camera extension (macOS only; a
+# no-op elsewhere). See the comment on mac.entitlements below and
+# docs/releases/macos-signing.md, "Videorc Camera".
+afterPack: ../../scripts/electron-builder-after-pack-macos.cjs
+
 # Shared across platforms. Platform-specific resources live under mac:/win:
 # because electron-builder CONCATENATES global + platform extraResources
 # (it does not override) — a global entry with a mac-only path breaks the
 # Windows build and vice versa.
 extraResources:
+  - from: ../../licenses/rnnoise-rs
+    to: licenses/rnnoise-rs
+    filter:
+      - LICENSE.txt
+      - UPSTREAM-NOTICES.txt
+      - SOURCE.txt
   - from: src/renderer/src/assets/videorc-logo.png
     to: videorc-logo.png
   - from: src/renderer/src/assets/backgrounds
@@ -105,8 +116,38 @@ mac:
         - source-patches/**/*
   hardenedRuntime: true
   icon: build-resources/icon.icns
-  entitlements: build-resources/entitlements.mac.plist
-  entitlementsInherit: build-resources/entitlements.mac.plist
+  # Plan 214 B2 (Videorc Camera; shape proven by spike P0a on macOS 26, SIP on,
+  # notarized). The app and its helpers no longer share one plist:
+  # - `entitlements` (the app itself) is GENERATED on every macOS pack by the
+  #   afterPack hook (top of this file) into the gitignored build/ dir: the five
+  #   keys of build-resources/entitlements.mac.plist, plus the restricted
+  #   com.apple.developer.system-extension.install, the app group and the
+  #   application/team identifiers ONLY when VIDEORC_MACOS_PROFILE_APP is set
+  #   (the one Developer ID profile, for the app). A restricted key without its
+  #   embedded profile gets the app killed by AMFI at launch, so the hook never
+  #   writes it without the profile. @electron/osx-sign applies this plist to
+  #   the top-level app only (app-builder-lib macPackager getOptionsForFile:
+  #   `filePath === appPath`), i.e. to the main executable.
+  # - `entitlementsInherit` signs everything else: every nested Mach-O, Electron's
+  #   frameworks and helpers, crashpad, ShipIt, and the bare binaries in
+  #   Contents/Resources (videorc-backend, preview helper, videorc-mcp, the .node
+  #   addon, ffmpeg). Exactly the five pre-camera keys, never a restricted one: a
+  #   binary without a profile dies at exec with SIGKILL, silently.
+  # - `signIgnore` keeps @electron/osx-sign away from the extension's Mach-O:
+  #   osx-sign walks Mach-O files, .app and .framework bundles but never treats
+  #   a .systemextension as a bundle, so it would re-sign the binary as a bare
+  #   file with the inherit plist and break the seal. The hook signs the whole
+  #   .systemextension with its own two entitlements (app sandbox, app group;
+  #   no profile) before the app is signed, so the app seals it as nested code.
+  # osx-sign signs nested code deepest first and the app last, never --deep.
+  # The app profile is embedded by the hook (Contents/embedded.provisionprofile;
+  # osx-sign keeps an existing one), not through `provisioningProfile`: that key
+  # cannot be conditional in YAML and electron-builder fails when the file it
+  # names is missing (no-profile builds).
+  entitlements: build/camera-extension/entitlements.mac.app.plist
+  entitlementsInherit: build-resources/entitlements.mac.inherit.plist
+  signIgnore:
+    - /Contents/Library/SystemExtensions/
   # Signed + notarized for Developer ID distribution. The cert is the keychain's
   # "Developer ID Application: Uros Miric (C2PA37RB58)" — electron-builder
   # auto-detects it. In electron-builder 26 `notarize` is a boolean; the notary
@@ -119,6 +160,7 @@ mac:
   # The unsigned `dist`/`package` scripts override this to false.
   notarize: true
   extendInfo:
+    NSCameraUseContinuityCameraDeviceType: true
     NSCameraUsageDescription: Videorc uses the camera for creator overlays when you select a camera source.
     NSMicrophoneUsageDescription: Videorc uses the microphone when you select a microphone for recording or streaming.
     NSScreenCaptureDescription: Videorc captures your screen or selected windows only when you start a recording or stream.
@@ -154,6 +196,10 @@ win:
     # extraResources); agent apps point at resources\videorc-mcp.exe.
     - from: ../../target/release/videorc-mcp.exe
       to: videorc-mcp.exe
+    # The WER module the backend registers beside itself so heap-corruption
+    # (fail-fast) crashes still leave a minidump; see crates/videorc-wer-helper.
+    - from: ../../target/release/videorc_wer_helper.dll
+      to: videorc_wer_helper.dll
     - from: ../../vendor/ffmpeg/windows-x64
       to: ffmpeg
       filter:
@@ -213,6 +259,19 @@ linux:
   target:
     - dir
     - AppImage
+
+# The AppImage runtime. Electron Builder 26's default ("0.0.0", the AppImageKit
+# runtime) dlopens libfuse.so.2, which stock Ubuntu 24.04 does not install (it
+# ships FUSE 3), so the AppImage stopped at "AppImages require FUSE to run"
+# there. 1.0.2 is the static AppImage type2-runtime (20251108): FUSE is linked
+# in and it mounts through fusermount3. `--appimage-extract`, which the release
+# validator and the live-lab installer use, works the same. Its AppRun adds
+# --no-sandbox where unprivileged user namespaces are refused (the AppRun hunk
+# in patches/app-builder-lib@26.8.1.patch); with this toolset the bundled
+# videorc.desktop runs `AppRun %U` and leaves the flag to that probe (the
+# AppImageTarget hunk).
+toolsets:
+  appimage: '1.0.2'
 
 # Install window, designed in Dmgly. The background already carries the
 # "Drag to Applications" text, the arrow and both label pills; Finder supplies

@@ -7,7 +7,15 @@ import { defaultCaptureConfig } from '@/lib/capture'
 import { QuickSettings } from './quick-settings'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  useStudioChat: () => ({
+    liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
+    chatNewCount: 0
+  }),
+  useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
+  useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
+}))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: vi.fn() })
 }))
@@ -91,6 +99,12 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     // Captions is a door to its page there (plan 174 S3.2, B-13), not a switch row.
     expect(rowLabels(captions ?? '')).toEqual([])
     expect(captions).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
+    // Chat's door sits right under Captions, built like it (plan 213 B1).
+    expect(
+      [
+        ...(captions ?? '').matchAll(/data-slot="navigable-row"[\s\S]*?<span[^>]*>([^<]+)<\/span>/g)
+      ].map((match) => match[1])
+    ).toEqual(['Captions', 'Chat'])
   })
 
   it('opens Screen and Camera with one click: the row control is the dropdown', () => {

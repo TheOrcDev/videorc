@@ -56,6 +56,7 @@ const PREVIEW_SOURCE_STATE_LABELS: Record<PreviewCameraState | PreviewScreenStat
   // The preview's `device-missing` / `source-missing` is also its idle state
   // (plan 173): a connected source whose preview is not running reports it,
   // so it reads "Not running", never "Not found".
+  disconnected: 'Disconnected',
   'device-missing': 'Not running',
   'source-missing': 'Not running',
   failed: 'Failed'
@@ -164,11 +165,13 @@ type ChatProviderInput = Pick<LiveChatProviderState, 'state' | 'read' | 'write' 
  * and its destination badges (H-13): the connection first, then what chat
  * can't do. "Read-only" (never "receive-only"), "Reconnect to send", "Off"
  * when chat is turned off, "Needs Sign in" when a stream key can't bring chat
- * (plan 213 J1) and "Unavailable" when the platform has none for this stream
- * (never "Idle").
+ * (plan 213 J1), "Needs Videorc sign-in" when the relay waits on the Videorc
+ * account (plan 215 A1) and "Unavailable" when the platform has none for this
+ * stream (never "Idle").
  */
 export function chatStateLabel(provider: ChatProviderInput): string {
   if (provider.read === 'needs-sign-in') return 'Needs Sign in'
+  if (provider.read === 'needs-videorc-sign-in') return 'Needs Videorc sign-in'
   switch (provider.state) {
     case 'failed':
       return 'Failed'
@@ -196,7 +199,10 @@ export function chatStateLabel(provider: ChatProviderInput): string {
  * The microphone meter's state, for its data attribute and the probes. The
  * words a streamer hears come from `micSignalLabel`.
  */
-export type MicMonitorState = 'live' | 'monitoring' | 'muted' | 'idle'
+export type MicMonitorState = 'live' | 'monitoring' | 'muted' | 'silent' | 'idle'
+
+/** Issue 1064: the word for a session microphone that captures digital silence. */
+export const MIC_SILENT_LABEL = 'Silent'
 
 const MIC_SIGNAL_LABELS: Record<MicMonitorState, string> = {
   // A microphone delivering sound is "Receiving", with or without a session:
@@ -204,10 +210,13 @@ const MIC_SIGNAL_LABELS: Record<MicMonitorState, string> = {
   live: SOURCE_RECEIVING_LABEL,
   monitoring: SOURCE_RECEIVING_LABEL,
   muted: 'Muted',
+  // Issue 1064: the session's bus reads nothing but digital silence from an
+  // unmuted microphone, so the meter must not say "Receiving".
+  silent: MIC_SILENT_LABEL,
   idle: 'No signal'
 }
 
-/** The microphone meter's state in a word: "Receiving", "Muted", "No signal". */
+/** The microphone meter's state in a word: "Receiving", "Muted", "Silent", "No signal". */
 export function micSignalLabel(state: MicMonitorState): string {
   return MIC_SIGNAL_LABELS[state]
 }

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import type { LiveChatMessage, LiveChatProviderState } from '@/lib/backend'
-import { studioChatOn, studioChatShows } from '@/lib/studio-chat'
+import {
+  chatDoorNewLabel,
+  chatNewSinceSeen,
+  chatSeenMark,
+  studioChatOn,
+  studioChatShows
+} from '@/lib/studio-chat'
 import {
   STUDIO_CHAT_CONNECTED,
   STUDIO_CHAT_NO_CHAT,
@@ -141,5 +147,59 @@ describe('studioChatNotice', () => {
     expect(studioChatNotice([provider({ state: 'failed', read: 'failed', message: ' ' })])).toBe(
       null
     )
+  })
+})
+
+// Plan 213 B1: the Studio's Chat row, a door to the Stream Manager that says
+// how much chat arrived since the streamer last had it showing.
+describe('chatNewSinceSeen', () => {
+  const live = (messages: LiveChatMessage[]) => ({ sessionId: 's1', messages })
+
+  it('counts every chat message on this livestream before the Stream Manager ever showed', () => {
+    const chat = live([message('m1'), message('m2'), message('f1', 'follow')])
+    expect(chatNewSinceSeen(chat, null)).toBe(2)
+  })
+
+  it('counts only what arrived after the mark, never activity', () => {
+    const seen = chatSeenMark(live([message('m1'), message('m2')]))
+    expect(seen).toEqual({ sessionId: 's1', lastSeenId: 'm2' })
+    const later = live([message('m1'), message('m2'), message('m3'), message('f1', 'follow')])
+    expect(chatNewSinceSeen(later, seen)).toBe(1)
+    expect(chatNewSinceSeen(live([message('m1'), message('m2')]), seen)).toBe(0)
+  })
+
+  it('counts the whole view for a mark from another livestream or one that left the view', () => {
+    const chat = live([message('m3'), message('m4')])
+    expect(chatNewSinceSeen(chat, { sessionId: 's0', lastSeenId: 'm4' })).toBe(2)
+    expect(chatNewSinceSeen(chat, { sessionId: 's1', lastSeenId: 'gone' })).toBe(2)
+  })
+
+  it('is nothing with no livestream', () => {
+    expect(chatNewSinceSeen({ sessionId: undefined, messages: [message('m1')] }, null)).toBe(0)
+  })
+})
+
+describe('chatDoorNewLabel', () => {
+  const chat = { sessionId: 's1', providers: [provider()] }
+
+  it('says what is new while a livestream with chat is on air', () => {
+    expect(chatDoorNewLabel({ recording: LIVE, snapshot: chat, newCount: 3 })).toBe('3 new')
+    expect(chatDoorNewLabel({ recording: LIVE, snapshot: chat, newCount: 0 })).toBe('0 new')
+  })
+
+  it('is the door otherwise: idle, recording only, or a livestream with no chat', () => {
+    for (const recording of [{ state: 'idle' }, { state: 'recording' }]) {
+      expect(chatDoorNewLabel({ recording, snapshot: chat, newCount: 3 })).toBeNull()
+    }
+    expect(
+      chatDoorNewLabel({ recording: LIVE, snapshot: { ...chat, providers: [] }, newCount: 3 })
+    ).toBeNull()
+    expect(
+      chatDoorNewLabel({
+        recording: LIVE,
+        snapshot: { ...chat, sessionId: undefined },
+        newCount: 3
+      })
+    ).toBeNull()
   })
 })

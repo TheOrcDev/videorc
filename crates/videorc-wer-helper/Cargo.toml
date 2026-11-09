@@ -1,0 +1,14 @@
+[package]
+name = "videorc-wer-helper"
+version = "0.9.0"
+edition = "2024"
+publish = false
+description = "Windows Error Reporting runtime-exception module: writes a minidump of a videorc-backend crash that never reaches its in-process filter (heap corruption, fail-fast)."
+
+[lib]
+# cdylib: the DLL WerFault.exe loads. rlib: the registration layout the
+# backend shares with it.
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_ErrorReporting", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_Threading"] }

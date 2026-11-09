@@ -53,6 +53,12 @@ jobs:
           opt-level = 0
           TOML
           cat "$HOME/.cargo/config.toml"
+          # At opt-level 0 the RPC dispatcher's unoptimized frame alone
+          # outgrows the 2 MiB default thread stack, so every test that calls
+          # it (and the sentinel backend's tokio workers) overflows. Give
+          # those threads the 8 MiB the macOS backend thread already gets
+          # (BACKEND_THREAD_STACK_BYTES); opt-level 2 builds need ~256 KiB.
+          echo "RUST_MIN_STACK=8388608" >> "$GITHUB_ENV"
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -93,7 +99,14 @@ jobs:
         run: cargo fmt --check --all
 
       - name: Clippy
-        run: cargo clippy -p videorc-backend -- -D warnings
+        # --all-targets lints the test code too (#1070).
+        run: cargo clippy -p videorc-backend --all-targets -- -D warnings
+
+      - name: Clippy (release)
+        # Release compiles out the debug_assertions-only smoke paths, so code
+        # only they reach goes dead or unused there; the dev clippy above
+        # cannot see it (#1070).
+        run: cargo clippy --release -p videorc-backend -- -D warnings
 
       - name: Compile tests
         # Split from the run so a slow compile and a hung test are told apart.
@@ -115,6 +128,14 @@ jobs:
 
       - name: Install dependencies for process/memory sentinel
         run: pnpm install --frozen-lockfile
+
+      - name: Videorc Camera extension build and Swift tests
+        # Plan 214: without this the Swift extension first compiles inside a
+        # release or lab-candidate build. --test builds the debug bundle,
+        # checks its identifiers and entitlements, and runs the pure Swift
+        # unit tests. No profile, no signing identity, no activation.
+        timeout-minutes: 15
+        run: pnpm test:camera-extension
 
       - name: Short no-device process/memory sentinel
         run: pnpm smoke:process-memory:sentinel
@@ -191,6 +212,9 @@ jobs:
 
       - name: Node logic tests
         run: pnpm test:scripts
+
+      - name: Source reconciliation smoke
+        run: pnpm smoke:sources
 
   js-skip:
     name: JS (format + lint + tests)

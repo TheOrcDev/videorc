@@ -12,6 +12,7 @@ import {
   rememberFreeform,
   rememberedFreeform,
   restoreLayoutUndo,
+  sourceOverrideOf,
   takeLayoutUndo,
   type FreeformMemory,
   type LayoutUndoEntry
@@ -33,8 +34,8 @@ const freeform = (
 
 const NO_CROP = { cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }
 const sceneSources = [
-  { id: 'source:base', transform: { ...base(0), ...NO_CROP } },
-  { id: 'source:camera', transform: { ...camera(0.7), ...NO_CROP } }
+  { id: 'source:base', kind: 'screen' as const, transform: { ...base(0), ...NO_CROP } },
+  { id: 'source:camera', kind: 'camera' as const, transform: { ...camera(0.7), ...NO_CROP } }
 ]
 
 describe('Freeform memory (plan 174, C-4)', () => {
@@ -198,6 +199,100 @@ describe('freeformEntryPatch', () => {
     expect(freeformEntryPatch('horizontal', sources)).toEqual({
       arrangementMode: 'freeform',
       sourceTransformOverrides: freeformEntryOverrides(rememberedFreeform(), 'horizontal', sources)
+    })
+  })
+})
+
+describe('sourceOverrideOf (plan 213 G2)', () => {
+  const transform = {
+    x: 0.1,
+    y: 0.2,
+    width: 0.5,
+    height: 0.4,
+    cropLeft: 0.25,
+    cropTop: 0,
+    cropRight: 0,
+    cropBottom: 0.1
+  }
+
+  it("saves the screen's box with the sides it crops", () => {
+    expect(sourceOverrideOf({ kind: 'screen', transform })).toEqual({
+      x: 0.1,
+      y: 0.2,
+      width: 0.5,
+      height: 0.4,
+      cropLeft: 0.25,
+      cropBottom: 0.1
+    })
+    expect(sourceOverrideOf({ kind: 'window', transform })).toHaveProperty('cropLeft', 0.25)
+  })
+
+  it('saves the camera and the test pattern as their box only', () => {
+    // The camera's crop is its zoom and pan, never part of its box.
+    for (const kind of ['camera', 'test-pattern'] as const)
+      expect(sourceOverrideOf({ kind, transform })).toEqual({
+        x: 0.1,
+        y: 0.2,
+        width: 0.5,
+        height: 0.4
+      })
+  })
+
+  it('an uncropped screen keeps the four-field box it had before crops', () => {
+    expect(
+      sourceOverrideOf({
+        kind: 'screen',
+        transform: { ...transform, cropLeft: 0, cropBottom: 0 }
+      })
+    ).toEqual({ x: 0.1, y: 0.2, width: 0.5, height: 0.4 })
+  })
+})
+
+// Plan 216 B6 (D2): Freeform starts a screen at its picture, so the box the
+// stage shows is the one Freeform stores from the first moment.
+describe('Freeform starts at the picture (plan 216 B6)', () => {
+  // The streamer's MacBook display Fit on a full-canvas preset frame on
+  // 2560x1440: the picture is 2228x1440 px, centred.
+  const picture: CameraTransform = { x: 166 / 2560, y: 0, width: 2228 / 2560, height: 1 }
+  const fullFrame = {
+    id: 'source:base',
+    kind: 'screen' as const,
+    transform: { x: 0, y: 0, width: 1, height: 1, ...NO_CROP }
+  }
+  // The Scene page looks the source up by id and answers for a screen on
+  // Fit with a known size; here the base source is that screen.
+  const entryBox = (source: { id: string }): CameraTransform | null =>
+    source.id === 'source:base' || source.id === 'source:fresh' ? picture : null
+
+  it('seeds a screen with no memory at its picture, and the camera where it is', () => {
+    const overrides = freeformEntryOverrides(
+      {},
+      'horizontal',
+      [fullFrame, sceneSources[1]],
+      entryBox
+    )
+    expect(overrides['source:base']).toEqual(picture)
+    expect(overrides['source:camera']).toEqual(camera(0.7))
+  })
+
+  it('keeps a remembered arrangement over the picture', () => {
+    const memory: FreeformMemory = { horizontal: { 'source:base': base(0.1) } }
+    const overrides = freeformEntryOverrides(memory, 'horizontal', [fullFrame], entryBox)
+    expect(overrides['source:base']).toEqual(base(0.1))
+  })
+
+  it('falls back to the frame without an entry box, as before', () => {
+    expect(freeformEntryOverrides({}, 'horizontal', [fullFrame])['source:base']).toEqual({
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1
+    })
+    // The patch reads the window's memory, which earlier tests filled for
+    // source:base: a source it never saw starts at its picture.
+    const fresh = { ...fullFrame, id: 'source:fresh' }
+    expect(freeformEntryPatch('horizontal', [fresh], entryBox).sourceTransformOverrides).toEqual({
+      'source:fresh': picture
     })
   })
 })

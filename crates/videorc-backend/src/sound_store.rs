@@ -316,11 +316,11 @@ fn decode_with_ffmpeg(ffmpeg_path: &str, source: &Path, destination: &Path) -> R
         .arg("-hide_banner")
         .args(["-v", "error"])
         .arg("-i")
-        .arg(source)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(source))
         .args(["-map", "0:a:0", "-vn", "-ac", "2", "-ar", "48000"])
         .args(["-t", SOUND_DECODE_CAP_SECONDS])
         .args(["-c:a", "pcm_s16le", "-f", "wav"])
-        .arg(destination);
+        .arg(crate::ffmpeg::ffmpeg_path_arg(destination));
     let output = match output_owned_std_with_timeout(&mut command, SOUND_DECODE_TIMEOUT) {
         Ok(output) => output,
         Err(error) => {
@@ -603,11 +603,10 @@ pub(crate) fn on_sounds_changed(state: &AppState) -> Result<SoundboardState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_temp_dir::TestTempDir;
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("videorc-sounds-{label}-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(label: &str) -> TestTempDir {
+        TestTempDir::new(&format!("sounds-{label}"))
     }
 
     fn database_in(dir: &Path) -> Database {
@@ -971,7 +970,8 @@ mod tests {
             database.insert_sound(new(1_000)).unwrap_err().to_string(),
             REFUSAL_SOUND_TOO_MANY
         );
-        let full = database_in(&temp_dir("caps-total"));
+        let full_dir = temp_dir("caps-total");
+        let full = database_in(&full_dir);
         for _ in 0..10 {
             full.insert_sound(new(29_000)).unwrap();
         }

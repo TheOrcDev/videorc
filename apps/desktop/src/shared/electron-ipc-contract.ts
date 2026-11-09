@@ -185,6 +185,7 @@ export const electronInvokeApiMethods = {
   'comments-window:toggle': 'toggleCommentsWindow',
   'comments-window:get-state': 'getCommentsWindowState',
   'comments-window:set-always-on-top': 'setCommentsWindowAlwaysOnTop',
+  'comments-window:set-hidden-from-stream': 'setCommentsWindowHiddenFromStream',
   'comments-window:set-highlight-anchor': 'setCommentsWindowHighlightAnchor',
   'comments-window:set-auto-show-activity': 'setCommentsWindowAutoShowActivity',
   'comments-window:push-snapshot': 'pushCommentsSnapshot',
@@ -220,6 +221,8 @@ export const electronInvokeApiMethods = {
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
   'comments-window:open-destination': 'openDestinationFromCommentsWindow',
+  // Plan 215 A3: "Sign in to Videorc" on a chat row, started by the main window.
+  'comments-window:sign-in-videorc': 'signInToVideorcFromCommentsWindow',
   'comments-window:moderation': 'moderateFromCommentsWindow',
   'comments-window:moderation-result-push': 'pushModerationResult',
   'comments-window:viewers-push': 'pushViewerSample',
@@ -244,6 +247,7 @@ export const electronInvokeApiMethods = {
   'captions-window:push-lines': 'pushCaptionLines',
   'captions-window:get-lines': 'getCaptionLines',
   'system:open-permissions': 'openSystemPermissions',
+  'virtual-camera:action': 'virtualCameraAction',
   'system:media-access-status': 'getMediaAccessStatus',
   'system:request-media-access': 'requestMediaAccess',
   'system:request-screen-access': 'requestScreenAccess',
@@ -344,6 +348,8 @@ export interface ElectronIpcEventMap {
   'shortcut:navigate': string
   'buddy:deep-link': BuddyDeepLinkNavigation
   'livestream:open-destination': DestinationNavigation
+  /** Plan 215 A3: the Stream Manager asked for the Videorc sign-in; the shell starts it. */
+  'account:sign-in-request': undefined
   'shortcut:modifier': boolean
   'window:visible': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
@@ -397,6 +403,7 @@ export const electronEventChannels = [
   'shortcut:navigate',
   'buddy:deep-link',
   'livestream:open-destination',
+  'account:sign-in-request',
   'shortcut:modifier',
   'window:visible',
   'app:front-changed',
@@ -840,7 +847,10 @@ const previewBoundsSchema = objectSchema(
     cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(nonNegativeSafeIntegerSchema),
-    elevated: optionalSchema(booleanSchema)
+    elevated: optionalSchema(booleanSchema),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -886,6 +896,21 @@ const cameraTransformSchema = objectSchema(
   { allowUnknown: false }
 )
 
+// A freeform box; the screen's crop rides along when it has one (plan 213 G2).
+const sourceTransformOverrideSchema = objectSchema(
+  {
+    x: numberSchema(),
+    y: numberSchema(),
+    width: numberSchema(),
+    height: numberSchema(),
+    cropLeft: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropTop: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropRight: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropBottom: optionalSchema(numberSchema({ min: 0, max: 1 }))
+  },
+  { allowUnknown: false }
+)
+
 const layoutSettingsSchema = objectSchema(
   {
     layoutPreset: enumSchema(LAYOUT_PRESET_VALUES),
@@ -896,6 +921,16 @@ const layoutSettingsSchema = objectSchema(
     cameraShape: enumSchema(['rectangle', 'rounded', 'circle']),
     cameraCornerRadiusPct: numberSchema(),
     cameraAspect: enumSchema(['source', 'square', 'portrait']),
+    cameraLook: optionalSchema(
+      objectSchema(
+        {
+          brightness: numberSchema({ min: -0.25, max: 0.25 }),
+          contrast: numberSchema({ min: 0.5, max: 1.5 }),
+          saturation: numberSchema({ min: 0, max: 2 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraChromaKeyEnabled: booleanSchema,
     cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
     cameraChromaKeySimilarityPct: numberSchema(),
@@ -910,6 +945,7 @@ const layoutSettingsSchema = objectSchema(
     sideBySideSplit: enumSchema(['50-50', '60-40', '70-30']),
     sideBySideCameraSide: enumSchema(['left', 'right']),
     verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit'])),
+    horizontalScreenFraming: optionalSchema(enumSchema(['fit', 'fill'])),
     arrangementMode: optionalSchema(enumSchema(['preset', 'freeform'])),
     sourceVisibility: optionalSchema(
       objectSchema(
@@ -917,7 +953,9 @@ const layoutSettingsSchema = objectSchema(
         { allowUnknown: false }
       )
     ),
-    sourceTransformOverrides: optionalSchema(recordSchema(cameraTransformSchema, { maxKeys: 16 }))
+    sourceTransformOverrides: optionalSchema(
+      recordSchema(sourceTransformOverrideSchema, { maxKeys: 16 })
+    )
   },
   { allowUnknown: false }
 )
@@ -1097,6 +1135,7 @@ const previewSurfaceStatusFieldsSchema = objectSchema(
         'backend-d3d11-presenter'
       ])
     ),
+    nativePreviewHostWindow: optionalSchema(enumSchema(['main', 'preview'])),
     bounds: optionalSchema(previewBoundsSchema),
     updatedAt: stringSchema({ minLength: 1, maxLength: 128 })
   },
@@ -1610,6 +1649,8 @@ const specificRuntimeInvokeContracts = {
   ),
   // Plan 156: the Activity auto-show switch is one boolean, nothing else.
   'comments-window:set-auto-show-activity': invokeContract(tupleSchema([booleanSchema])),
+  // Plan 215 D6: Hide from stream is one boolean, nothing else.
+  'comments-window:set-hidden-from-stream': invokeContract(tupleSchema([booleanSchema])),
   // Plan 140, S5: the window names a platform and nothing else. Main picks
   // the scopes, so a forged command can never widen what is requested.
   'comments-window:reconnect-scopes': invokeContract(
@@ -1641,6 +1682,12 @@ const specificRuntimeInvokeContracts = {
         { allowUnknown: false }
       )
     ]),
+    booleanSchema
+  ),
+  // Plan 215 A3: "Sign in to Videorc" carries nothing but its request id;
+  // main shows the main window, which starts the sign-in it owns.
+  'comments-window:sign-in-videorc': invokeContract(
+    tupleSchema([objectSchema({ requestId: boundedIdentifier }, { allowUnknown: false })]),
     booleanSchema
   ),
   // Plan 140, S6: one manual removal or one card answer, relayed to Studio.
@@ -1734,6 +1781,18 @@ const specificRuntimeInvokeContracts = {
     ]),
     objectSchema(
       { added: booleanSchema, message: stringSchema({ minLength: 1, maxLength: 512 }) },
+      { allowUnknown: false }
+    )
+  ),
+  // Plan 214 E: one named Videorc Camera action in; whether it ran and, when
+  // it didn't, a plain sentence.
+  'virtual-camera:action': invokeContract(
+    tupleSchema([enumSchema(['open-approval-settings', 'remove', 'set-up', 'load-module'])]),
+    objectSchema(
+      {
+        ok: booleanSchema,
+        message: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 }))
+      },
       { allowUnknown: false }
     )
   ),
@@ -2021,6 +2080,8 @@ const specificRuntimeEventSchemas = {
     { targetId: stringSchema({ minLength: 1, maxLength: 128 }) },
     { allowUnknown: false }
   ),
+  // Plan 215 A3: the ask carries nothing; the shell owns the sign-in.
+  'account:sign-in-request': undefinedSchema,
   // Whether the command modifier is physically down. Main is the only place
   // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
   // never receives those chords — nor, in practice, the keyup that ends them.

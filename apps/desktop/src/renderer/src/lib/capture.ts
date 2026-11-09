@@ -1,3 +1,5 @@
+import { windowsBridgeEnvelopeRefusal } from './bridge-envelope'
+import { normalizeCameraLook } from './camera-look'
 import type { GlobalShortcutsConfig } from '../../../shared/backend'
 import { formatBitrate, formatResolution, formatVideoQuality, resolutionName } from './format-video'
 import { normalizeLayoutFramingMemory, type LayoutFramingMemory } from './layout-framing-memory'
@@ -7,6 +9,7 @@ import type {
   CaptionStyleId,
   AutomaticSourceFallbackEvent,
   AutomaticSourceFallbackSourceKind,
+  CameraLook,
   CameraTransform,
   CameraTransformMode,
   Device,
@@ -18,7 +21,9 @@ import type {
   SideBySideSplit,
   SimulcastParams,
   StreamOutputOrientation,
+  SourceCrop,
   SourceSelection,
+  SourceTransformOverride,
   StreamingSettings,
   StreamPlatform,
   StoreManualStreamKeyResult,
@@ -38,6 +43,7 @@ import {
 import { STREAM_PLATFORMS } from '../../../shared/stream-platforms'
 
 export type SettingsState = {
+  cameraLooks?: Record<string, CameraLook>
   /** Human-readable picker label only; never a filesystem path. */
   outputDirectory: string
   outputDirectoryHandle?: string
@@ -1049,8 +1055,21 @@ export const streamPlatformOutputCapabilities: Record<
 export function videoProfileCompatibility(
   config: Pick<CaptureConfig, 'recordEnabled' | 'streamEnabled' | 'video'> & {
     streaming?: StreamingSettings
-  }
+  },
+  platform?: string
 ): VideoProfileCompatibility {
+  // Issue #1062: on Windows an output outside the encoder bridge's envelope
+  // is refused by the backend (software OpenH264 cannot hold it), so the
+  // Output page and Go Live say so first, in the same words.
+  const envelopeRefusal = windowsBridgeEnvelopeRefusal({
+    platform,
+    recordEnabled: config.recordEnabled,
+    streamEnabled: config.streamEnabled,
+    video: config.video
+  })
+  if (envelopeRefusal) {
+    return { blockingReason: envelopeRefusal, warning: null }
+  }
   // Video-profile / streaming guardrails removed per owner (2026-06-24): 4K
   // livestreaming (YouTube 4K30), higher-bitrate and non-YouTube stream outputs
   // ship now, so the app no longer pre-blocks these profiles. Platforms and the
@@ -1466,11 +1485,13 @@ export const defaultCaptureConfig: CaptureConfig = {
     sideBySideSplit: '70-30',
     sideBySideCameraSide: 'right',
     verticalScreenFraming: 'fill',
+    horizontalScreenFraming: 'fit',
     arrangementMode: 'preset',
     sourceTransformOverrides: {},
     sourceVisibility: { camera: true, capture: true }
   },
   audio: {
+    microphoneNoiseSuppression: 'off',
     microphoneGainDb: 0,
     microphoneMuted: false,
     // Pure manual trim: structural A/V alignment happens in the backend (the audio
@@ -1664,6 +1685,8 @@ export function normalizeAudioSettings(audio: unknown): AudioSettings {
   // (Comments stay out of these object literals: the bundler keeps those in
   // the eager Studio chunk.)
   return {
+    microphoneNoiseSuppression:
+      candidate.microphoneNoiseSuppression === 'rnnoise' ? 'rnnoise' : 'off',
     microphoneGainDb: clampNumber(
       candidate.microphoneGainDb,
       defaultCaptureConfig.audio.microphoneGainDb,
@@ -1909,7 +1932,9 @@ export function normalizeSourceVisibility(raw: unknown): { camera: boolean; capt
 }
 
 export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
-  const candidate = layout && typeof layout === 'object' ? (layout as Partial<LayoutSettings>) : {}
+  const { cameraLook: storedLook, ...candidate } =
+    layout && typeof layout === 'object' ? (layout as Partial<LayoutSettings>) : {}
+  const cameraLook = normalizeCameraLook(storedLook)
   const cameraTransform = normalizeCameraTransform(candidate.cameraTransform)
   const cameraTransformMode: CameraTransformMode =
     candidate.cameraTransformMode === 'custom' && cameraTransform ? 'custom' : 'preset'
@@ -1917,6 +1942,7 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
   return {
     ...defaultCaptureConfig.layout,
     ...candidate,
+    ...(cameraLook ? { cameraLook } : {}),
     layoutPreset: isLayoutPreset(candidate.layoutPreset)
       ? candidate.layoutPreset
       : (typeof candidate.layoutPreset === 'string' &&
@@ -2006,6 +2032,10 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
     verticalScreenFraming: isVerticalScreenFraming(candidate.verticalScreenFraming)
       ? candidate.verticalScreenFraming
       : defaultCaptureConfig.layout.verticalScreenFraming,
+    horizontalScreenFraming:
+      candidate.horizontalScreenFraming === 'fill'
+        ? 'fill'
+        : defaultCaptureConfig.layout.horizontalScreenFraming,
     arrangementMode: candidate.arrangementMode === 'freeform' ? 'freeform' : 'preset',
     sourceTransformOverrides: normalizeSourceTransformOverrides(candidate.sourceTransformOverrides),
     sourceVisibility: normalizeSourceVisibility(candidate.sourceVisibility)
@@ -2014,18 +2044,39 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
 
 /** Keep only well-formed override entries; anything else falls back to the
  * base arrangement for that source instead of poisoning the scene commit. */
-function normalizeSourceTransformOverrides(overrides: unknown): Record<string, CameraTransform> {
+function normalizeSourceTransformOverrides(
+  overrides: unknown
+): Record<string, SourceTransformOverride> {
   if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
     return {}
   }
-  const normalized: Record<string, CameraTransform> = {}
+  const normalized: Record<string, SourceTransformOverride> = {}
   for (const [sourceId, value] of Object.entries(overrides as Record<string, unknown>)) {
     const transform = normalizeCameraTransform(value)
     if (sourceId && transform) {
-      normalized[sourceId] = transform
+      normalized[sourceId] = { ...transform, ...normalizeSourceCrop(value) }
     }
   }
   return normalized
+}
+
+const SOURCE_CROP_SIDES = ['cropLeft', 'cropTop', 'cropRight', 'cropBottom'] as const
+
+/**
+ * A screen's saved crop (plan 213 G2): each side clamped to the backend's 95%
+ * ceiling, and a side that crops nothing left out, as the backend writes it,
+ * so a box saved before crops existed keeps its exact shape.
+ */
+export function normalizeSourceCrop(value: unknown): Partial<SourceCrop> {
+  const candidate = (value && typeof value === 'object' ? value : {}) as Partial<
+    Record<keyof SourceCrop, unknown>
+  >
+  const crop: Partial<SourceCrop> = {}
+  for (const side of SOURCE_CROP_SIDES) {
+    const amount = Number(candidate[side])
+    if (Number.isFinite(amount) && amount > 0) crop[side] = Math.min(amount, 0.95)
+  }
+  return crop
 }
 
 export function normalizeVideoSettings(video: unknown): VideoSettings {
@@ -2373,6 +2424,7 @@ export function applyStoredManualStreamKeyResult(
 }
 
 export function persistableCaptureConfig(config: CaptureConfig): CaptureConfig {
+  const { cameraLook: _cameraLook, ...layout } = config.layout
   // Plan 213 E1: a stand-in is for this session; the pick is what persists.
   const { testPattern: _testPattern, ...sources } = wantedSourceSelection(config.sources)
   const targets = config.streaming.targets.map((item) => {
@@ -2391,6 +2443,7 @@ export function persistableCaptureConfig(config: CaptureConfig): CaptureConfig {
   const primary = streaming.targets.find((target) => target.platform === config.rtmpPreset)
   return {
     ...config,
+    layout,
     sources,
     streaming,
     rtmpServerUrl:
@@ -2562,13 +2615,24 @@ export function preparedXCompletionTargets(streaming: StreamingSettings): Stream
   )
 }
 
-function findRememberedSource(
+export function findRememberedSource(
   sourceId: string | undefined,
   sourceName: string | undefined,
-  devices: Device[]
+  devices: readonly Device[],
+  displayUuid?: string
 ): Device | undefined {
+  // Plan 213 F1: a display's UUID outlives the id macOS gives it, so it
+  // decides first; a match under another id is the same display. A display
+  // with another UUID is another display, whatever its id or name.
+  const display = displayUuid
+    ? devices.find((device) => device.displayUuid === displayUuid)
+    : undefined
+  if (display) {
+    return display
+  }
+  const candidates = displayUuid ? devices.filter((device) => !device.displayUuid) : devices
   if (sourceId) {
-    const exact = devices.find((device) => device.id === sourceId)
+    const exact = candidates.find((device) => device.id === sourceId)
     if (exact) {
       return exact
     }
@@ -2579,7 +2643,15 @@ function findRememberedSource(
     return undefined
   }
 
-  return devices.find((device) => device.name.trim() === normalizedName)
+  return (
+    candidates.find((device) => device.name.trim() === normalizedName) ??
+    // 0.18.0 saved this tag even when the name already said iPhone. Keep
+    // those picks working after an id change, behind id and exact-name matches.
+    candidates.find(
+      (device) =>
+        device.kind === 'camera' && `${device.name.trim()} · iPhone camera` === normalizedName
+    )
+  )
 }
 
 function sourceIdentityFor(device: Device | undefined): { id?: string; name?: string } {
@@ -2763,6 +2835,7 @@ export function buildCaptureSources(
     ...next,
     screenId: selected?.kind === 'screen' ? captureId : undefined,
     screenName: selected?.kind === 'screen' ? selected.name : undefined,
+    screenUuid: selected?.kind === 'screen' ? selected.displayUuid : undefined,
     windowId: selected?.kind === 'window' ? captureId : undefined,
     windowName: selected?.kind === 'window' ? selected.name : undefined,
     // Plan 0002 (release test 146): None is a choice that must outlive
@@ -2771,6 +2844,7 @@ export function buildCaptureSources(
     // Plan 213 E1: a new pick replaces the one a stand-in was holding for.
     wantedScreenId: undefined,
     wantedScreenName: undefined,
+    wantedScreenUuid: undefined,
     wantedWindowId: undefined,
     wantedWindowName: undefined,
     testPattern: false
@@ -2807,12 +2881,14 @@ const SOURCE_KIND_FIELDS = {
   capture: [
     'screenId',
     'screenName',
+    'screenUuid',
     'windowId',
     'windowName',
     'captureOff',
     'testPattern',
     'wantedScreenId',
     'wantedScreenName',
+    'wantedScreenUuid',
     'wantedWindowId',
     'wantedWindowName'
   ],
@@ -2846,6 +2922,8 @@ export interface ReconcileSourceSelectionOptions {
    * even when the pick behind it is connected again.
    */
   holdStandIns?: boolean
+  /** A running disconnected camera keeps its last frame until it reconnects. */
+  disconnectedCameraId?: string
 }
 
 export function reconcileSourceSelection(
@@ -2909,6 +2987,7 @@ export function reconcileSourceSelection(
   if (nextSources.testPattern) {
     nextSources.screenId = undefined
     nextSources.screenName = undefined
+    nextSources.screenUuid = undefined
     nextSources.windowId = undefined
     nextSources.windowName = undefined
   } else if (nextSources.captureOff === true && !nextSources.screenId && !nextSources.windowId) {
@@ -2916,6 +2995,7 @@ export function reconcileSourceSelection(
     // to the first screen here re-selected it on every scene click and device
     // refresh, and on Linux that opened the compositor's share dialog.
     nextSources.screenName = undefined
+    nextSources.screenUuid = undefined
     nextSources.windowName = undefined
   } else {
     // Plan 213 E1: the pick is what the user chose, which a stand-in may be
@@ -2928,19 +3008,30 @@ export function reconcileSourceSelection(
         ? selectableCaptureDevices.find((device) => device.id === usingId)
         : undefined
     const rememberedCapture =
-      heldStandIn ?? findRememberedSource(pick.id, pick.name, selectableCaptureDevices)
+      heldStandIn ??
+      findRememberedSource(
+        pick.id,
+        pick.name,
+        selectableCaptureDevices.filter((device) => device.kind === pick.kind),
+        pick.displayUuid
+      )
     const holdingCapture = options.holdStandIns && pick.standIn
     const selectedCapture = holdingCapture
       ? selectableCaptureDevices.find((device) => device.id === usingId)
       : (rememberedCapture ?? defaultCaptureDevice)
     const standIn = holdingCapture || (!rememberedCapture && Boolean(pick.id || pick.name))
+    // Plan 213 F1: a display found by its UUID under a new id takes that id,
+    // silently; it is the same display.
     nextSources.screenId = selectedCapture?.kind === 'screen' ? selectedCapture.id : undefined
     nextSources.screenName = selectedCapture?.kind === 'screen' ? selectedCapture.name : undefined
+    nextSources.screenUuid =
+      selectedCapture?.kind === 'screen' ? selectedCapture.displayUuid : undefined
     nextSources.windowId = selectedCapture?.kind === 'window' ? selectedCapture.id : undefined
     nextSources.windowName = selectedCapture?.kind === 'window' ? selectedCapture.name : undefined
     nextSources.captureOff = undefined
     nextSources.wantedScreenId = standIn && pick.kind === 'screen' ? pick.id : undefined
     nextSources.wantedScreenName = standIn && pick.kind === 'screen' ? pick.name : undefined
+    nextSources.wantedScreenUuid = standIn && pick.kind === 'screen' ? pick.displayUuid : undefined
     nextSources.wantedWindowId = standIn && pick.kind === 'window' ? pick.id : undefined
     nextSources.wantedWindowName = standIn && pick.kind === 'window' ? pick.name : undefined
   }
@@ -2958,14 +3049,29 @@ export function reconcileSourceSelection(
     ? undefined
     : (heldCamera ?? findRememberedSource(cameraPick.id, cameraPick.name, cameras))
   const holdingCamera = options.holdStandIns && cameraPick.standIn && !cameraOff
+  const disconnectedCamera =
+    options.disconnectedCameraId === nextSources.cameraId &&
+    nextSources.cameraId &&
+    (holdingCamera || !cameraPick.standIn || !rememberedCamera)
+      ? {
+          id: nextSources.cameraId,
+          name: nextSources.cameraName ?? 'Camera',
+          kind: 'camera' as const,
+          status: 'unavailable' as const
+        }
+      : undefined
   const selectedCamera = cameraOff
     ? undefined
-    : holdingCamera
-      ? cameras.find((device) => device.id === nextSources.cameraId)
-      : (rememberedCamera ?? cameras[0])
+    : (disconnectedCamera ??
+      (holdingCamera
+        ? cameras.find((device) => device.id === nextSources.cameraId)
+        : (rememberedCamera ?? cameras[0])))
   const cameraStandIn =
     !cameraOff &&
-    (holdingCamera || (!rememberedCamera && Boolean(cameraPick.id || cameraPick.name)))
+    (holdingCamera ||
+      (disconnectedCamera
+        ? cameraPick.standIn
+        : !rememberedCamera && Boolean(cameraPick.id || cameraPick.name)))
   nextSources.cameraOff = cameraOff ? true : undefined
   nextSources.wantedCameraId = cameraStandIn ? cameraPick.id : undefined
   nextSources.wantedCameraName = cameraStandIn ? cameraPick.name : undefined
@@ -3018,6 +3124,8 @@ type WantedSource = {
   kind: 'screen' | 'window' | 'camera'
   id?: string
   name?: string
+  /** A display pick's UUID (plan 213 F1). */
+  displayUuid?: string
   /** A stand-in is in use (or nothing is) for this pick. */
   standIn: boolean
 }
@@ -3037,12 +3145,21 @@ function wantedCapture(sources: SourceSelection): WantedSource {
       kind: 'screen',
       id: sources.wantedScreenId,
       name: sources.wantedScreenName,
+      displayUuid: sources.wantedScreenUuid,
       standIn: true
     }
   }
-  return sources.windowId
-    ? { kind: 'window', id: sources.windowId, name: sources.windowName, standIn: false }
-    : { kind: 'screen', id: sources.screenId, name: sources.screenName, standIn: false }
+  if (sources.windowId) {
+    return { kind: 'window', id: sources.windowId, name: sources.windowName, standIn: false }
+  }
+  return {
+    kind: 'screen',
+    id: sources.screenId,
+    name: sources.screenName,
+    // A UUID left over without its display's id or name is no pick.
+    displayUuid: sources.screenId || sources.screenName ? sources.screenUuid : undefined,
+    standIn: false
+  }
 }
 
 function wantedCamera(sources: SourceSelection): WantedSource {
@@ -3060,6 +3177,7 @@ export function wantedSourceSelection(sources: SourceSelection): SourceSelection
   const {
     wantedScreenId: _screenId,
     wantedScreenName: _screenName,
+    wantedScreenUuid: _screenUuid,
     wantedWindowId: _windowId,
     wantedWindowName: _windowName,
     wantedCameraId: _cameraId,
@@ -3070,6 +3188,7 @@ export function wantedSourceSelection(sources: SourceSelection): SourceSelection
   if (capture.standIn) {
     next.screenId = capture.kind === 'screen' ? capture.id : undefined
     next.screenName = capture.kind === 'screen' ? capture.name : undefined
+    next.screenUuid = capture.kind === 'screen' ? capture.displayUuid : undefined
     next.windowId = capture.kind === 'window' ? capture.id : undefined
     next.windowName = capture.kind === 'window' ? capture.name : undefined
   }
@@ -3104,7 +3223,8 @@ export function sourceStandIn(
     findRememberedSource(
       pick.id,
       pick.name,
-      devices.filter((device) => device.kind === pick.kind && device.status === 'available')
+      devices.filter((device) => device.kind === pick.kind && device.status === 'available'),
+      pick.displayUuid
     )
   )
   return { kind: pick.kind, wantedName: pick.name, usingName, available }
@@ -3114,15 +3234,23 @@ export function sourceSelectionChangeEvents(
   previous: SourceSelection,
   next: SourceSelection
 ): AutomaticSourceFallbackEvent[] {
+  // Plan 213 F1: the same display under a new id is no change to report.
+  const sameDisplay =
+    !previous.windowId &&
+    !next.windowId &&
+    Boolean(previous.screenUuid) &&
+    previous.screenUuid === next.screenUuid
   const events = [
-    sourceChangeEvent(
-      'capture',
-      previous.windowId ?? previous.screenId,
-      previous.windowName ?? previous.screenName,
-      next.windowId ?? next.screenId,
-      next.windowName ?? next.screenName,
-      previous.wantedWindowId ?? previous.wantedScreenId
-    ),
+    sameDisplay
+      ? undefined
+      : sourceChangeEvent(
+          'capture',
+          previous.windowId ?? previous.screenId,
+          previous.windowName ?? previous.screenName,
+          next.windowId ?? next.screenId,
+          next.windowName ?? next.screenName,
+          previous.wantedWindowId ?? previous.wantedScreenId
+        ),
     sourceChangeEvent(
       'camera',
       previous.cameraId,
@@ -3154,7 +3282,9 @@ function sourceChangeEvent(
   if (!previousId && !previousName) {
     return undefined
   }
-  if (previousId === nextId && previousName === nextName) {
+  // The same device under a new name (a window's title, a display's size,
+  // plan 213 F1) is no fallback.
+  if (previousId === nextId && (previousId || previousName === nextName)) {
     return undefined
   }
 

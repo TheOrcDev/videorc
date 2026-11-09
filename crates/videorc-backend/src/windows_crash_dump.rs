@@ -12,6 +12,13 @@
 //! `EXCEPTION_CONTINUE_SEARCH` so the process still terminates with the
 //! original exception code and the supervisor's restart/crash-record path is
 //! unchanged.
+//!
+//! The filter never runs for fail-fast terminations (heap corruption,
+//! 0xC0000374), so `install` also registers `videorc_wer_helper.dll` with
+//! WER, which dumps those from WerFault.exe. That registration clears an
+//! inherited SEM_NOGPFAULTERRORBOX error-mode bit, with which WER skips the
+//! process entirely: a backend started by cargo or Node inherits it (0x3,
+//! 0x8003); the packaged Electron app hands over 0x8001, which lacks it.
 
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -65,6 +72,32 @@ pub fn install() {
     let previous = unsafe { SetUnhandledExceptionFilter(Some(write_dump_filter)) };
     let _ = PREVIOUS_FILTER.set(previous);
     tracing::info!(path = %path.display(), "[crash-dump] native crash dumps enabled");
+    register_wer_helper(&directory);
+}
+
+/// Fail-fast terminations (heap corruption, 0xC0000374) never run the filter
+/// above: the 2026-11-01 field bundle had five such exits and no dump file.
+/// WER still sees them, so the helper DLL beside this exe is registered to
+/// write `videorc-backend-<pid>-wer.dmp` into the same directory from
+/// WerFault.exe. A dev run without the DLL built only loses that coverage.
+fn register_wer_helper(directory: &std::path::Path) {
+    let helper = match std::env::current_exe() {
+        Ok(exe) => exe.with_file_name(videorc_wer_helper::HELPER_DLL_NAME),
+        Err(error) => {
+            tracing::warn!(error = %error, "[crash-dump] cannot locate the WER helper");
+            return;
+        }
+    };
+    match videorc_wer_helper::register(&helper, directory) {
+        Ok(inherited_error_mode) => tracing::info!(
+            helper = %helper.display(),
+            inherited_error_mode = format_args!("{inherited_error_mode:#x}"),
+            "[crash-dump] WER helper registered for fail-fast crashes"
+        ),
+        Err(reason) => tracing::warn!(
+            "[crash-dump] fail-fast crashes (heap corruption) will leave no dump: {reason}"
+        ),
+    }
 }
 
 /// Longest the crashing thread waits for the dump. A crash can happen while

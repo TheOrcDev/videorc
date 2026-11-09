@@ -19,6 +19,10 @@ import {
   COMMENTS_SEND_TIMING_CONTRACT
 } from '../apps/desktop/src/shared/comments-command-timing.ts'
 import { probeCommentsArrivals } from './lib/comments-arrival-probe.mjs'
+import {
+  commentsWindowContentWidth,
+  commentsWindowFrameWidthFor
+} from './lib/comments-window-bounds.mjs'
 import { probeCommentsTotals } from './lib/comments-totals-probe.mjs'
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
 
@@ -946,12 +950,15 @@ async function layoutAt(width, options = {}) {
   // A single setBounds from a much smaller frame can land 2px wide on Linux
   // without a window manager (420 → 1280 measured 1282). Ask again; a second
   // setBounds at the same size is what later passes already do.
+  // Size the client, not the frame: Windows' outer bounds include the resize
+  // border (1280 requested measured 1266 inside). macOS asks for `width`.
+  const frameWidth = commentsWindowFrameWidthFor(width, await smokeCommand('comments-window-state'))
   let laidOut = { ok: false, last: null }
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    await smokeCommand('comments-window-set-bounds', { width, height: 640 })
+    await smokeCommand('comments-window-set-bounds', { width: frameWidth, height: 640 })
     await waitFor(
       () => smokeCommand('comments-window-state'),
-      (s) => s.bounds && Math.abs(s.bounds.width - width) <= 1,
+      (s) => s.bounds && Math.abs(commentsWindowContentWidth(s) - width) <= 1,
       5000
     )
     laidOut = await waitFor(

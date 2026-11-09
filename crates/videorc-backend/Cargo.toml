@@ -27,12 +27,16 @@ if-addrs = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
 libc = "0.2"
 rayon = "1"
+rnnoise = { package = "rnnoise-rs", git = "https://github.com/TheOrcDev/rnnoise-rs", rev = "c915940e94e2ec1ca07a1af22c769a33c3fb1ce6", default-features = false }
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], default-features = false }
 # Plan 209: Videorc MCP for AI agents. The server side only (JSON-RPC over
 # Streamable HTTP, stateless); the client apps speak stdio through
 # `videorc-mcp`, which hand-rolls its small loop.
-rmcp = { version = "3.8", default-features = false, features = ["server", "transport-streamable-http-server"] }
-rusqlite = { version = "0.37", features = ["bundled", "trace"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "transport-streamable-http-server"] }
+# rusqlite 0.38 made u64/usize ToSql/FromSql opt-in; `fallible_uint` keeps the
+# 0.37 impls (bind and read through i64, erroring out of range) that the
+# marker and scheduled-event `revision` columns and page limits rely on.
+rusqlite = { version = "0.41", features = ["bundled", "trace", "fallible_uint"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"
@@ -50,13 +54,14 @@ block2 = "0.6.1"
 coreaudio = { package = "coreaudio-rs", version = "0.14.2" }
 dispatch2 = "0.3.1"
 objc2 = { version = "0.6.4", features = ["exception"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSColor", "NSGraphics", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSColor", "NSGraphics", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow", "objc2-quartz-core"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVVideoSettings", "dispatch2", "objc2-core-media", "objc2-core-video"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFDate", "CFNumber", "CFRunLoop"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFDate", "CFNumber", "CFRunLoop", "CFUUID"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGWindow", "CGImage"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
-objc2-core-media = { version = "0.3.2", default-features = false, features = ["CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2", "objc2-core-audio-types", "objc2-core-video"] }
-objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "objc2-metal", "objc2-io-surface"] }
+# `CMSimpleQueue` and `CMSync`: Videorc Camera's sink queue and host-clock PTS (plan 214 B4).
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSimpleQueue", "CMSync", "CMTime", "objc2", "objc2-core-audio-types", "objc2-core-video"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "objc2-metal", "objc2-io-surface"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSValue", "NSNotification", "NSOperation", "block2"] }
 objc2-io-surface = { version = "0.3.2", default-features = false, features = ["IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2-core-foundation"] }
 # `objc2-core-foundation` exposes MTLCommandBuffer GPUStartTime/GPUEndTime: the
@@ -78,8 +83,10 @@ khronos-egl = { version = "6", features = ["dynamic"] }
 glow = "0.16"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62.2", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 windows-core = "0.62.2"
+# Registered at startup so WER dumps crashes the in-process filter never sees.
+videorc-wer-helper = { path = "../videorc-wer-helper" }
 
 [dev-dependencies]
 tokio = { version = "1.48", features = ["test-util"] }

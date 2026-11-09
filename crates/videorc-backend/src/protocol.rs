@@ -205,6 +205,27 @@ pub struct VideorcAccountSnapshot {
     pub avatar_url: Option<String>,
 }
 
+/// Why the desktop's Videorc account changed (plan 215 A5). `SessionExpired`
+/// is the sign-out the server made: a refresh answered 401, so the stored
+/// session was dropped. Mirrored in `shared/backend.ts` (`AccountChangeReason`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountChangeReason {
+    SignedIn,
+    SignedOut,
+    SessionExpired,
+}
+
+/// The `account.changed` event (plan 215 A5): the account as the backend now
+/// holds it, and why it changed. Mirrored in `shared/backend.ts`
+/// (`AccountChangedEvent`) and the `backend-rpc-contract.ts` event schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountChangedEvent {
+    pub account: VideorcAccountSnapshot,
+    pub reason: AccountChangeReason,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendLogEvent {
@@ -227,6 +248,10 @@ pub struct Device {
     pub app: Option<DeviceApp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_title: Option<String>,
+    /// A display's UUID (plan 213 F1), the identity that survives a
+    /// reconnect; macOS can hand the same display a new id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_uuid: Option<String>,
     pub id: String,
     pub name: String,
     pub kind: DeviceKind,
@@ -332,6 +357,14 @@ pub struct RecordingStatus {
     /// on the wire for every other session.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replay_only: bool,
+    /// Plan 215 D1: whether a scene edit (a source's position, size or crop)
+    /// committed from now on reaches this session's picture. The compositor
+    /// paths read the installed scene every tick; the legacy FFmpeg graph is
+    /// static, so `scene.source.transform.update`, `.nudge` and `.reset` are
+    /// refused there (`scene-edit-refused`) and the Scene page keeps its
+    /// lock. Absent on the wire while nothing runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepts_live_scene_edits: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -454,9 +487,35 @@ impl Default for SourceVisibility {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLook {
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
+}
+
+impl Default for CameraLook {
+    fn default() -> Self {
+        Self {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+        }
+    }
+}
+
+impl CameraLook {
+    pub fn is_neutral(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutSettings {
+    #[serde(default, skip_serializing_if = "CameraLook::is_neutral")]
+    pub camera_look: CameraLook,
     #[serde(default = "default_layout_preset")]
     pub layout_preset: LayoutPreset,
     #[serde(default = "default_camera_transform_mode")]
@@ -520,6 +579,11 @@ pub struct LayoutSettings {
     /// the renderer contract — serde null trap).
     #[serde(default)]
     pub vertical_screen_framing: VerticalScreenFraming,
+    /// How the SCREEN is framed in the landscape screen scenes (Screen +
+    /// camera, Screen only, and Freeform over them), plan 213 G3. Non-optional
+    /// with a default on purpose (serde null trap).
+    #[serde(default)]
+    pub horizontal_screen_framing: HorizontalScreenFraming,
     /// Preset (default) composes the fixed `layout_preset` arrangement.
     /// Freeform composes the screen + camera base and applies
     /// `source_transform_overrides` — the "arrange it yourself" mode.
@@ -533,7 +597,7 @@ pub struct LayoutSettings {
     /// Non-optional with a default on purpose (serde null trap); serializes
     /// as an empty object, never null.
     #[serde(default)]
-    pub source_transform_overrides: std::collections::BTreeMap<String, CameraTransform>,
+    pub source_transform_overrides: std::collections::BTreeMap<String, SourceTransformOverride>,
     /// Legacy layouts show both roles. Hidden roles still keep selected IDs.
     #[serde(default)]
     pub source_visibility: SourceVisibility,
@@ -563,6 +627,21 @@ pub enum VerticalScreenFraming {
     #[default]
     Fill,
     Fit,
+}
+
+/// Screen framing for the landscape screen scenes (plan 213 G3).
+///
+/// `Fit` (the default) shows the whole screen, with bars when its shape
+/// differs from the frame: nothing on a shared screen is cut. `Fill` fills the
+/// frame and centre-crops what does not fit, which makes a screen of another
+/// shape (an ultrawide through a virtual display) as big as it can be.
+/// Side by side always fills, and the vertical scenes keep their own field.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HorizontalScreenFraming {
+    #[default]
+    Fit,
+    Fill,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -678,6 +757,69 @@ pub struct CameraTransform {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+/// One source's Freeform box. The screen-side source also keeps its crop
+/// (plan 213 G2), as fractions of its own picture; a side that crops nothing
+/// is left out of the wire, so a box saved before crops existed reads and
+/// writes back unchanged. The camera ignores these: its crop is its zoom and
+/// pan.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTransformOverride {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_left: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_top: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_right: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_bottom: f64,
+}
+
+fn crop_side_is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+impl SourceTransformOverride {
+    /// The box alone, with no crop.
+    #[cfg(test)]
+    pub fn from_box(transform: CameraTransform) -> Self {
+        Self {
+            x: transform.x,
+            y: transform.y,
+            width: transform.width,
+            height: transform.height,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        }
+    }
+
+    pub fn camera_box(&self) -> CameraTransform {
+        CameraTransform {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+/// A live crop for the Scene editor's draft (plan 213 G2): the ⌥-drag on a
+/// screen's edge shows its crop on the Preview before the commit lands.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneCropDraft {
+    pub crop_left: f64,
+    pub crop_top: f64,
+    pub crop_right: f64,
+    pub crop_bottom: f64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1034,6 +1176,9 @@ pub struct SceneEditorDraftParams {
     pub source_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform: Option<CameraTransform>,
+    /// An ⌥-drag crop's live crop; absent keeps the committed crop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<SceneCropDraft>,
     pub chrome: EditorChrome,
 }
 
@@ -1132,6 +1277,7 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         camera_shape: CameraShape::Rectangle,
         camera_corner_radius_pct: default_camera_corner_radius_pct(),
         camera_aspect: default_camera_aspect(),
+        camera_look: Default::default(),
         camera_chroma_key_enabled: false,
         camera_chroma_key_color: default_camera_chroma_key_color(),
         camera_chroma_key_similarity_pct: default_camera_chroma_key_similarity_pct(),
@@ -1146,6 +1292,7 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         side_by_side_split: default_side_by_side_split(),
         side_by_side_camera_side: default_side_by_side_camera_side(),
         vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+        horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
         arrangement_mode: ArrangementMode::Preset,
         source_transform_overrides: std::collections::BTreeMap::new(),
         source_visibility: Default::default(),
@@ -1338,6 +1485,8 @@ pub struct ReplayStateEvent {
     /// True when the session exists only for the buffer (no file, no stream).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replay_only: bool,
+    /// Why the ring is `error`, or `off` when it did not start: a session
+    /// that failed, or the software encoder guard's refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Segment files in the ring after the last prune pass (diagnostics and
@@ -1520,9 +1669,19 @@ impl CaptionsSessionParams {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MicrophoneNoiseSuppression {
+    #[default]
+    Off,
+    Rnnoise,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
+    #[serde(default)]
+    pub microphone_noise_suppression: MicrophoneNoiseSuppression,
     #[serde(default)]
     pub microphone_gain_db: f32,
     #[serde(default)]
@@ -1545,6 +1704,7 @@ pub struct AudioSettings {
 impl Default for AudioSettings {
     fn default() -> Self {
         Self {
+            microphone_noise_suppression: Default::default(),
             microphone_gain_db: 0.0,
             microphone_muted: false,
             microphone_sync_offset_ms: default_microphone_sync_offset_ms(),
@@ -1583,6 +1743,8 @@ pub fn clamp_system_audio_gain_db(gain_db: f32) -> f32 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProcessingUpdateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_noise_suppression: Option<MicrophoneNoiseSuppression>,
     pub session_id: String,
     pub microphone_gain_db: f32,
     pub microphone_muted: bool,
@@ -1597,9 +1759,12 @@ pub struct AudioProcessingUpdateParams {
     pub system_audio_echo_guard: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProcessingUpdateResult {
+    pub microphone_noise_suppression: MicrophoneNoiseSuppression,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_noise_suppression: Option<MicrophoneNoiseSuppression>,
     pub applied: bool,
     pub session_id: String,
     pub microphone_gain_db: f32,
@@ -1876,6 +2041,11 @@ pub struct AudioLevelsEvent {
     /// Samples the mix clipped since the previous event.
     #[serde(default)]
     pub master_clipped_samples: u64,
+    /// Issue 1064: the session's microphone silence watchdog reports the
+    /// captured microphone as digital silence. Sent only while true, so the
+    /// standby microphone and older readings keep their shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub microphone_silent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1924,6 +2094,53 @@ pub struct StreamHealth {
     #[serde(default)]
     pub duplicated_frames: Option<u64>,
     pub created_at: String,
+}
+
+/// Plan 218 S2: the live stream's delivery over a rolling window, emitted
+/// with `diagnostics.stats` while a stream runs. `degraded` is true while
+/// more than 10 % of the stream's frames were skipped before encode over the
+/// last 30 s, and clears once the window is back under 5 %; `degraded_since`
+/// is the RFC 3339 time the current degraded span started. The renderer
+/// shows "Your stream is running at {delivered} of {target} fps" while
+/// `degraded` holds and stays quiet otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDeliveryState {
+    pub target_fps: u32,
+    /// Frames the stream encoder produced per second over the window.
+    pub delivered_fps: f64,
+    /// Share of the window's frames skipped before encode, 0 to 100.
+    pub drop_percent: f64,
+    /// How much history the figures cover; 30 once the window is full.
+    pub window_seconds: f64,
+    pub degraded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_since: Option<String>,
+    /// Plan 218 S3a: the stream encoder's bitrate right now and as chosen,
+    /// when a dedicated stream encoder adapts it (macOS VideoToolbox).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_bitrate_kbps: Option<u32>,
+    /// True while the bitrate sits at its floor (half the chosen bitrate):
+    /// the stream will not go lower; fewer destinations is the next step.
+    #[serde(default)]
+    pub at_floor: bool,
+    /// Fifo overflows FFmpeg reported on the session's legs so far: each one
+    /// skipped seconds of video for that destination's viewers.
+    #[serde(default)]
+    pub uplink_overflows: u64,
+}
+
+/// Plan 218 S2: one destination's fifo overflow count for the support
+/// bundle. Carries the platform and label only; never a URL or a key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamLegOverflowCount {
+    pub target_id: String,
+    pub platform: String,
+    pub label: String,
+    pub overflows: u64,
 }
 
 /// The encoder a recording session actually requested. Hardware encoders may still fall
@@ -2741,21 +2958,52 @@ pub struct DiagnosticStats {
     pub stream_output_fps: Option<u32>,
     #[serde(default)]
     pub stream_output_bitrate_kbps: Option<u32>,
-    /// Latest measured FFmpeg output bitrate for the active stream.
+    /// The stream's measured video bitrate over the last encoder window
+    /// (plan 218 S2): the bytes the stream encoder produced, not FFmpeg's
+    /// progress figure. FFmpeg reports its first output only: the recording
+    /// file when one is written (see `recording_measured_bitrate_kbps`), and
+    /// nothing at all when that output is an RTMP leg. Audio is not included;
+    /// the chosen stream bitrate it compares against is the video's too.
     #[serde(default)]
     pub stream_measured_bitrate_kbps: Option<f64>,
-    /// Lowest non-zero measured output bitrate observed in this stream session.
+    /// Lowest non-zero measured stream video bitrate observed this session.
     #[serde(default)]
     pub stream_measured_bitrate_min_kbps: Option<f64>,
-    /// Highest non-zero measured output bitrate observed in this stream session.
+    /// Highest non-zero measured stream video bitrate observed this session.
     #[serde(default)]
     pub stream_measured_bitrate_max_kbps: Option<f64>,
-    /// Cumulative bytes emitted by FFmpeg for this stream process generation.
+    /// Cumulative encoded video bytes the stream encoder handed to FFmpeg.
     #[serde(default)]
     pub stream_output_total_bytes: u64,
+    /// FFmpeg's progress bitrate for the recording file, when one is written
+    /// (plan 218 S2). Video plus audio, as the container sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_measured_bitrate_kbps: Option<f64>,
+    /// FFmpeg's progress `total_size` for the recording file.
+    #[serde(default)]
+    pub recording_output_total_bytes: u64,
     /// Cumulative frames FFmpeg reports duplicating for this stream process generation.
     #[serde(default)]
     pub stream_duplicated_frames: u64,
+    /// Plan 218 S2: how the live stream is delivering, over a rolling 30 s
+    /// window, while a stream runs. Replaces the once-per-session
+    /// `stream-output-pressure` notice. Absent without a stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_delivery: Option<StreamDeliveryState>,
+    /// Plan 218 S2: per-destination fifo overflow counts (no URLs or keys),
+    /// so a support bundle names the leg whose connection fell short.
+    /// Absent until a leg overflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_leg_overflows: Option<Vec<StreamLegOverflowCount>>,
+    /// Plan 218 S2: the session's destinations, for the support bundle. The
+    /// count of legs FFmpeg streams to, and their platforms in leg order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_destination_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_destination_platforms: Option<Vec<String>>,
+    /// Plan 218 S2: the microphone sync offset the session started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_sync_offset_ms: Option<i32>,
     /// Number of distinct production VideoToolbox output encoders active for the session.
     #[serde(default)]
     pub encoder_bridge_active_video_toolbox_output_encoders: u64,
@@ -2869,6 +3117,23 @@ pub struct DiagnosticStats {
     /// Stream-leg FIFO enqueue max wait for split-output sessions.
     #[serde(default)]
     pub encoder_bridge_stream_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    /// Plan 218 S2: the stream writer's own figures, kept apart from the
+    /// recording writer's (the generic fields keep whichever writer reported
+    /// last). P95 time to write one encoded stream access unit into FFmpeg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_video_toolbox_fifo_write_p95_ms: Option<f64>,
+    /// P95 age of the stream queue's oldest frame, sampled every writer tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_queue_age_p95_ms: Option<f64>,
+    /// Stream ticks coalesced because the queue reached its depth limit.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_depth_trips: u64,
+    /// Stream ticks coalesced because the oldest frame reached the age limit.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_age_trips: u64,
+    /// Which limit tripped last: `depth` or `age`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_queue_last_trip: Option<String>,
     pub encoder_bridge_error: Option<String>,
     /// Which encoder the active session actually requested — proves hardware vs software
     /// encode (previously unrecorded).
@@ -3445,6 +3710,7 @@ pub struct RecordingTimelineSnapshot {
     pub marks: Vec<RecordingTimelineMark>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderBridgeSyntheticParams {
@@ -3457,6 +3723,7 @@ pub struct EncoderBridgeSyntheticParams {
     pub bitrate_kbps: Option<u32>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderBridgeSyntheticResult {
@@ -3532,6 +3799,16 @@ pub struct PreviewSurfaceBounds {
     // past it; absent/0 = square (floating window, legacy callers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corner_radius: Option<f64>,
+    // Where the in-process CAMetalLayer sits inside its host window (plan 213
+    // D2): the surface's top-left origin in the host's content coordinates and
+    // the host content's height, in points. Mirrors
+    // apps/desktop/src/shared/backend.ts; absent = legacy callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_height: Option<f64>,
 }
 
 /// Validated opaque HWND identity used only by Electron main and the backend
@@ -3815,7 +4092,7 @@ pub struct CompositorImageCacheStatus {
     pub evictions: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompositorFramePipelineStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3844,6 +4121,21 @@ pub struct CompositorFramePipelineStatus {
     /// the wire, so a run without one sends exactly what it sent before.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub preview_synthetic_refused: u64,
+    /// Plan 214 A4: what Videorc Camera's output did this process: frames
+    /// pushed to the platform camera, pushes that repeated the previous frame
+    /// (the run was slower than 30 fps), and the slowest CPU fit in
+    /// milliseconds (0 on the zero-copy Metal path). 0 is left off the wire,
+    /// so a run with the camera off sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub virtual_camera_pushed: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub virtual_camera_repeated: u64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub virtual_camera_convert_ms_max: f64,
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -4105,6 +4397,35 @@ pub enum CompositorState {
     Failed,
 }
 
+/// `camera.lowLight.get` (issue #1066): which camera to describe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLowLightParams {
+    pub camera_id: String,
+}
+
+/// `camera.lowLight.set` (issue #1066): turn a camera's low-light
+/// compensation on or off. Saved per camera and written to the device now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLowLightSetParams {
+    pub camera_id: String,
+    pub compensation: bool,
+}
+
+/// A camera's low-light compensation (issue #1066). On, the camera may
+/// lengthen exposure past one frame in low light and drop to half its frame
+/// rate; off (the default), it keeps its frame rate and the picture is
+/// darker. `supported` is false where Videorc cannot set it: off Windows,
+/// and on cameras whose driver has no auto-exposure-priority control.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraLowLightState {
+    pub camera_id: String,
+    pub supported: bool,
+    pub compensation: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewCameraStartParams {
@@ -4155,6 +4476,12 @@ pub struct PreviewCameraStatus {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Plan 216 D2: `Some(true)` while the session has acked Live but has sent
+    /// no frame for longer than `CAMERA_FIRST_FRAME_REUSE_GRACE` (the
+    /// frameless-zombie rule capture recovery uses). Absent otherwise, so
+    /// Sources and Health can name a camera that is on but sends no video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_video: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -4169,6 +4496,7 @@ pub struct CameraCapabilityFormat {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewCameraState {
+    Disconnected,
     Starting,
     Live,
     PermissionNeeded,
@@ -4389,9 +4717,9 @@ pub struct SessionListItem {
     /// `combined`, `screen` or `camera` (plan 157); absent on ordinary rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_role: Option<String>,
-    /// A take Videorc stopped in the middle of (crash, killed backend, power
-    /// loss): `recovered` once its MKV was finalized to an MP4 on the next
-    /// start, `failed` when that did not work. Absent on every other row.
+    /// A take that ended early (a crash, a killed backend, a power loss, or a
+    /// recording that failed mid-take): `recovered` once its MKV was finalized
+    /// to an MP4, `failed` when that did not work. Absent on every other row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interruption_recovery: Option<String>,
 }
@@ -5046,6 +5374,98 @@ pub struct ScreenPrivacy {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenHideParams {
     pub reason: ScreenPrivacyReason,
+}
+
+/// Videorc Camera (plan 214 A4): where the camera is, as every surface
+/// reads it. `off` is only ever a healthy camera that is off; a platform
+/// report (`needs-approval`, `needs-setup`, a failure) outranks the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VirtualCameraState {
+    Off,
+    /// The switch is on and the camera is starting (the extension is being
+    /// activated, the sink is connecting).
+    Installing,
+    /// macOS: the user must allow the Camera Extension in System Settings.
+    NeedsApproval,
+    /// Windows: the one-time elevated setup has not run (D8); Linux: the
+    /// v4l2loopback module is missing or not loaded (D9).
+    NeedsSetup,
+    /// On, connected, no app holds the camera yet.
+    Ready,
+    /// On and at least one app holds the camera.
+    Streaming,
+    /// Cannot run here, or the sink lost the device; `message` says why.
+    Unavailable,
+}
+
+/// What main reports about the platform's half of the camera (plan 214 A4):
+/// the macOS extension's activation (B3) or the Windows setup step (C2).
+/// Never guessed by the backend; absent until main reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VirtualCameraPlatformStep {
+    Installing,
+    NeedsApproval,
+    /// The extension replaces after a reboot (`willCompleteAfterReboot`).
+    NeedsReboot,
+    Ready,
+    /// Activation or setup failed; the report's `message` carries the reason.
+    Failed,
+    NeedsSetup,
+    SettingUp,
+    /// The platform cannot host a camera (Windows 10, no Camera Extensions).
+    Unsupported,
+}
+
+/// Videorc Camera's status (plan 214 A4). `virtualCamera.status` returns it,
+/// `virtualCamera.changed` carries it on every change. Absent fields are
+/// omitted, never `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraStatus {
+    /// The saved switch (D4).
+    pub on: bool,
+    /// Whether the camera can run on this computer at all.
+    pub available: bool,
+    pub state: VirtualCameraState,
+    /// Apps holding the camera, when the platform can count them (D13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewers: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_step: Option<VirtualCameraPlatformStep>,
+    /// Plain copy for the status line, present when there is something to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl Default for VirtualCameraStatus {
+    fn default() -> Self {
+        Self {
+            on: false,
+            available: true,
+            state: VirtualCameraState::Off,
+            viewers: None,
+            platform_step: None,
+            message: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraSetParams {
+    pub on: bool,
+}
+
+/// `virtualCamera.platform.report` (admin socket only): main's report of the
+/// platform step, with a plain reason when it failed or needs the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraPlatformReportParams {
+    pub platform_step: VirtualCameraPlatformStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6813,6 +7233,7 @@ mod tests {
             sounds: None,
             master: None,
             master_clipped_samples: 0,
+            microphone_silent: false,
         };
         assert_eq!(
             serde_json::to_value(&event).unwrap(),
@@ -6822,6 +7243,18 @@ mod tests {
                 "masterClippedSamples": 0
             })
         );
+        // Issue 1064: the watchdog's report rides the event only while true.
+        let silent = AudioLevelsEvent {
+            microphone_silent: true,
+            ..event.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(&silent).unwrap()["microphoneSilent"],
+            serde_json::json!(true)
+        );
+        let decoded: AudioLevelsEvent =
+            serde_json::from_value(serde_json::to_value(&event).unwrap()).unwrap();
+        assert!(!decoded.microphone_silent);
         // The standby microphone has no session: the key is omitted, not null.
         let standby = AudioLevelsEvent {
             session_id: None,
@@ -7371,9 +7804,11 @@ mod tests {
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+            horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
+            camera_look: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,
@@ -7530,6 +7965,55 @@ mod tests {
     }
 
     #[test]
+    fn shared_microphone_noise_suppression_contract_and_defaults() {
+        let fixture = shared_high_risk_contract_fixture_value("/microphoneNoiseSuppression");
+        let settings: AudioSettings =
+            serde_json::from_value(fixture["audioSettings"].clone()).unwrap();
+        assert_eq!(
+            settings.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Rnnoise
+        );
+        let legacy: AudioSettings =
+            serde_json::from_value(fixture["legacyAudioSettings"].clone()).unwrap();
+        assert_eq!(
+            legacy.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Off
+        );
+        let update: AudioProcessingUpdateParams =
+            serde_json::from_value(fixture["update"].clone()).unwrap();
+        assert_eq!(
+            update.microphone_noise_suppression,
+            Some(MicrophoneNoiseSuppression::Rnnoise)
+        );
+        let legacy: AudioProcessingUpdateParams =
+            serde_json::from_value(fixture["legacyUpdate"].clone()).unwrap();
+        assert_eq!(legacy.microphone_noise_suppression, None);
+        assert!(
+            serde_json::from_value::<AudioSettings>(
+                serde_json::json!({"microphoneNoiseSuppression":"unknown"})
+            )
+            .is_err()
+        );
+        for key in ["applied", "unavailable"] {
+            let result: AudioProcessingUpdateResult =
+                serde_json::from_value(fixture[key].clone()).unwrap();
+            let wire = serde_json::to_value(&result).unwrap();
+            assert_eq!(
+                wire["microphoneNoiseSuppression"],
+                fixture[key]["microphoneNoiseSuppression"]
+            );
+            assert_eq!(
+                wire["confirmedMicrophoneNoiseSuppression"],
+                fixture[key]["confirmedMicrophoneNoiseSuppression"]
+            );
+            assert_eq!(
+                serde_json::from_value::<AudioProcessingUpdateResult>(wire).unwrap(),
+                result
+            );
+        }
+    }
+
+    #[test]
     fn shared_high_risk_contract_fixture_preserves_preview_bounds_and_stacking() {
         let wire = shared_high_risk_contract_fixture_value("/previewSurfaceBounds/wire");
         let expected = shared_high_risk_contract_fixture_value("/previewSurfaceBounds/normalized");
@@ -7611,11 +8095,38 @@ mod tests {
 
     #[test]
     fn shared_high_risk_contract_fixture_matches_layout_and_scene_defaults() {
+        let look_wire = shared_high_risk_contract_fixture_value("/cameraLook");
+        let look: CameraLook = serde_json::from_value(look_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(look).unwrap(), look_wire);
+        let mut graded = default_layout_settings();
+        graded.camera_look = look;
+        let wire = serde_json::to_value(&graded).unwrap();
+        assert_eq!(wire["cameraLook"], look_wire);
+        assert_eq!(
+            serde_json::from_value::<LayoutSettings>(wire).unwrap(),
+            graded
+        );
+        assert!(
+            serde_json::to_value(default_layout_settings())
+                .unwrap()
+                .get("cameraLook")
+                .is_none()
+        );
         let legacy_layout = shared_high_risk_contract_fixture_value("/layout/legacyWire");
         assert!(legacy_layout.get("sourceVisibility").is_none());
         let expected_layout = shared_high_risk_contract_fixture_value("/layout/normalized");
         let layout: LayoutSettings = serde_json::from_value(legacy_layout).unwrap();
         assert_eq!(serde_json::to_value(layout).unwrap(), expected_layout);
+
+        // Plan 213 G2: a freeform screen's crop rides its box both ways, and
+        // the camera's uncropped box keeps its four fields.
+        let cropped = shared_high_risk_contract_fixture_value("/layout/freeformCrop");
+        let layout: LayoutSettings = serde_json::from_value(cropped.clone()).unwrap();
+        assert_eq!(
+            layout.source_transform_overrides["source:base"].crop_left,
+            0.25
+        );
+        assert_eq!(serde_json::to_value(layout).unwrap(), cropped);
 
         let scene_wire = shared_high_risk_contract_fixture_value("/scene/wire");
         let scene: Scene = serde_json::from_value(scene_wire.clone()).unwrap();
@@ -7626,12 +8137,23 @@ mod tests {
     fn shared_high_risk_contract_fixture_matches_recording_status_defaults() {
         let wire = shared_high_risk_contract_fixture_value("/recordingStatus/wire");
         let status: RecordingStatus = serde_json::from_value(wire.clone()).unwrap();
+        // Plan 215 D1: a running session says whether a source moved now
+        // reaches its picture.
+        assert_eq!(status.accepts_live_scene_edits, Some(true));
         assert_eq!(serde_json::to_value(status).unwrap(), wire);
+
+        // A session on the legacy FFmpeg graph composes a fixed picture.
+        let fixed = shared_high_risk_contract_fixture_value("/recordingStatus/fixedSceneWire");
+        let status: RecordingStatus = serde_json::from_value(fixed.clone()).unwrap();
+        assert_eq!(status.accepts_live_scene_edits, Some(false));
+        assert_eq!(serde_json::to_value(status).unwrap(), fixed);
 
         let minimal = shared_high_risk_contract_fixture_value("/recordingStatus/minimalWire");
         let expected =
             shared_high_risk_contract_fixture_value("/recordingStatus/minimalNormalized");
         let status: RecordingStatus = serde_json::from_value(minimal).unwrap();
+        // Nothing running: no flag at all, on the wire or off it.
+        assert_eq!(status.accepts_live_scene_edits, None);
         assert_eq!(serde_json::to_value(status).unwrap(), expected);
 
         // Plan 069: the one mixed track reports its sources; an unmixed track

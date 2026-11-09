@@ -92,13 +92,18 @@ pub fn list_v4l2_cameras(roots: &V4l2Roots, access: impl Fn(&Path) -> NodeAccess
 
     nodes
         .into_iter()
-        .map(|(_, node, sysfs)| {
+        .filter_map(|(_, node, sysfs)| {
             let dev_path = roots.dev.join(&node);
             let device_path = stable_path_for(&roots.by_id, &node).unwrap_or(dev_path.clone());
             let name = read_trimmed(&sysfs.join("name"))
                 .map(|name| name.trim_end_matches(':').trim().to_string())
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| node.clone());
+            // Plan 214 A5: never list Videorc Camera (the loopback device,
+            // by its card_label) as a source of itself.
+            if crate::virtual_camera::is_videorc_camera_linux(&name) {
+                return None;
+            }
             let (status, detail) = match access(&dev_path) {
                 NodeAccess::Ok => (
                     DeviceStatus::Available,
@@ -116,9 +121,10 @@ pub fn list_v4l2_cameras(roots: &V4l2Roots, access: impl Fn(&Path) -> NodeAccess
                     format!("{} is listed in sysfs but cannot be opened.", dev_path.display()),
                 ),
             };
-            Device {
+            Some(Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: linux_v4l2_camera_id(&device_path.to_string_lossy()),
                 name,
                 kind: DeviceKind::Camera,
@@ -126,7 +132,7 @@ pub fn list_v4l2_cameras(roots: &V4l2Roots, access: impl Fn(&Path) -> NodeAccess
                 detail: Some(detail),
                 width: None,
                 height: None,
-            }
+            })
         })
         .collect()
 }
@@ -246,6 +252,8 @@ mod tests {
             ("video0", "FaceTime HD Camera (Built-in): ", "0"),
             ("video1", "FaceTime HD Camera (Built-in): ", "1"),
             ("video2", "USB Cam", "0"),
+            // Plan 214 A5: Videorc Camera's own loopback device, never listed.
+            ("video42", "Videorc Camera", "0"),
         ] {
             std::fs::create_dir_all(sysfs.join(node)).unwrap();
             std::fs::write(sysfs.join(node).join("name"), format!("{name}\n")).unwrap();
@@ -298,6 +306,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(devices.len(), 2, "{devices:?}");
+        assert!(
+            devices.iter().all(|device| device.name != "Videorc Camera"),
+            "Videorc Camera is never a source of itself (plan 214 A5): {devices:?}"
+        );
         assert_eq!(devices[0].name, "FaceTime HD Camera (Built-in)");
         assert_eq!(devices[0].kind, DeviceKind::Camera);
         assert_eq!(devices[0].status, DeviceStatus::Available);

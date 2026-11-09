@@ -1881,7 +1881,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(ChatSenderConfig::Fake(FakeChatSendBehavior::Sent)),
-            &[twitch.clone()],
+            std::slice::from_ref(&twitch),
         )
         .await;
         let removed = request(&state, request_for(&twitch, ModerationSource::Agent))
@@ -1906,7 +1906,7 @@ mod tests {
             &state,
             StreamPlatform::Youtube,
             Some(ChatSenderConfig::Fake(FakeChatSendBehavior::Sent)),
-            &[youtube.clone()],
+            std::slice::from_ref(&youtube),
         )
         .await;
         let pending = request(&state, request_for(&youtube, ModerationSource::Agent))

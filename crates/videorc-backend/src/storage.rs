@@ -1547,8 +1547,11 @@ fn session_deletion_quarantine_directory<'a>(
 }
 
 /// Creates the private quarantine folder before the move. `false` means the
-/// name is taken by something that is not a real folder, so the file stays
-/// where it is instead of following a link out of the recordings folder.
+/// name is taken by a link, so the file stays where it is instead of
+/// following it out of the recordings folder. A plain file at the name is an
+/// error, so the deletion stays retryable: Unix already fails opening the
+/// quarantine path under it (`ENOTDIR`), but Windows reports that as not
+/// found and reaches this check.
 fn ensure_session_deletion_quarantine_directory(
     original_path: &Path,
     quarantine_path: &Path,
@@ -1569,7 +1572,21 @@ fn ensure_session_deletion_quarantine_directory(
             });
         }
     }
-    Ok(std::fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.file_type().is_dir()))
+    let file_type = std::fs::symlink_metadata(directory)
+        .with_context(|| {
+            format!(
+                "Could not inspect deletion quarantine {}",
+                directory.display()
+            )
+        })?
+        .file_type();
+    if file_type.is_file() {
+        bail!(
+            "Deletion quarantine {} is a file, not a folder",
+            directory.display()
+        );
+    }
+    Ok(file_type.is_dir())
 }
 
 /// Best effort: once its file is gone (trashed or renamed back), the empty
@@ -1595,6 +1612,7 @@ fn distinct_nonempty_paths<const N: usize>(paths: [Option<String>; N]) -> Vec<St
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(unused_variables))]
 fn sync_directory(directory: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -1680,6 +1698,13 @@ impl Database {
 
     pub fn path(&self) -> &PathBuf {
         &self.path
+    }
+
+    /// One key per opened database, shared by its clones. Tests run in one
+    /// process on parallel threads, so a scratch path for an in-memory
+    /// database keyed on the process id alone is shared by every test.
+    pub fn instance_key(&self) -> usize {
+        Arc::as_ptr(&self.conn) as usize
     }
 
     pub fn create_session(&self, session: &NewSession) -> Result<()> {
@@ -6651,6 +6676,13 @@ impl Database {
         Ok(())
     }
 
+    /// Removes one app setting; a missing key is not an error.
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn import_screen_image(&self, image_path: &str, ffmpeg_path: &str) -> Result<StreamScreen> {
         self.import_screen_image_with_optimizer(image_path, |source, destination| {
             optimize_screen_image(source, destination, ffmpeg_path)
@@ -10123,7 +10155,7 @@ fn optimize_screen_image(
             "1",
         ])
         .arg("-i")
-        .arg(source_path)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(source_path))
         .arg("-filter_complex")
         .arg(filter)
         .arg("-map")
@@ -10131,7 +10163,7 @@ fn optimize_screen_image(
         .arg("-frames:v")
         .arg("1")
         .args(["-threads", "1"])
-        .arg(destination_path);
+        .arg(crate::ffmpeg::ffmpeg_path_arg(destination_path));
     let output = output_owned_std_with_timeout(&mut command, SCREEN_IMAGE_OPTIMIZER_TIMEOUT)
         .with_context(|| {
             format!(
@@ -11122,6 +11154,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use crate::test_temp_dir::TestTempDir;
+
     use crate::live_chat::{
         CommentsSendOperation, CommentsSendOperationPhase, DestinationDelivery,
         DestinationDeliveryPhase, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
@@ -11247,13 +11281,14 @@ mod tests {
         }
     }
 
-    fn file_database() -> (Database, PathBuf) {
-        let directory =
-            std::env::temp_dir().join(format!("videorc-storage-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).unwrap();
+    /// The guard comes first so it drops after the database (Windows cannot
+    /// remove a folder holding an open SQLite file).
+    fn file_database() -> (TestTempDir, Database, PathBuf) {
+        let directory = TestTempDir::new("storage-test");
         let path = directory.join("videorc.sqlite3");
         // The app's open path, WAL journaling included (plan 191).
-        (Database::open_file_for_tests(&path), path)
+        let database = Database::open_file_for_tests(&path);
+        (directory, database, path)
     }
 
     fn create_owned_mp4_staging_directory(
@@ -11369,16 +11404,15 @@ mod tests {
         assert_file_object_identity_survives_write_and_rename();
     }
 
-    fn temp_screen_image(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("videorc-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn temp_screen_image(name: &str) -> (TestTempDir, PathBuf) {
+        let dir = TestTempDir::new("test");
         let path = dir.join(name);
         std::fs::write(&path, b"not a real image").unwrap();
-        path
+        (dir, path)
     }
 
     fn import_stub_screen(database: &Database, name: &str) -> StreamScreen {
-        let path = temp_screen_image(name);
+        let (_dir, path) = temp_screen_image(name);
         database
             .import_screen_image_with_optimizer(path.to_str().unwrap(), |_, destination| {
                 std::fs::write(destination, b"optimized").unwrap();
@@ -11660,7 +11694,7 @@ mod tests {
             at: format!("2026-10-04T10:{:02}:{:02}Z", n / 60, n % 60),
             trigger: crate::cohost::CohostUtteranceTriggerKind::Greeting,
             text: format!("Welcome, Fan{n}!"),
-            source: (n % 2 == 0).then_some(CohostReportPostSource::Line),
+            source: n.is_multiple_of(2).then_some(CohostReportPostSource::Line),
         };
         for n in 0..=COHOST_REPORT_SAID_CAP {
             assert!(database.append_cohost_report_said("s-1", said(n)).unwrap());
@@ -12089,9 +12123,7 @@ mod tests {
 
     #[test]
     fn source_iso_reservations_survive_restart_and_reconcile_once() {
-        let dir =
-            std::env::temp_dir().join(format!("videorc-iso-restart-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestTempDir::new("iso-restart");
         let path = dir.join("take.sqlite3");
         {
             let database = Database::open_file_for_tests(&path);
@@ -12319,9 +12351,11 @@ mod tests {
                 side_by_side_split: SideBySideSplit::SeventyThirty,
                 side_by_side_camera_side: SideBySideCameraSide::Right,
                 vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+                horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
                 arrangement_mode: crate::protocol::ArrangementMode::Preset,
                 source_transform_overrides: std::collections::BTreeMap::new(),
                 source_visibility: Default::default(),
+                camera_look: Default::default(),
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -12670,9 +12704,11 @@ mod tests {
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+            horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
+            camera_look: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,
@@ -12794,10 +12830,15 @@ mod tests {
                 .unwrap();
         }
 
-        database.conn.lock().unwrap().trace_v2(
-            TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(count_session_list_statement),
-        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_session_list_statement),
+            )
+            .unwrap();
         for limit in [1, 20, 200] {
             SESSION_LIST_TRACED_STATEMENTS.store(0, Ordering::Relaxed);
             let started = std::time::Instant::now();
@@ -12851,7 +12892,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                None::<fn(TraceEvent<'_>)>,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -13012,10 +13057,15 @@ mod tests {
         }
 
         SESSION_SIZE_WRITEBACK_STATEMENTS.store(0, Ordering::Relaxed);
-        database.conn.lock().unwrap().trace_v2(
-            TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(count_session_size_writeback_statement),
-        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_session_size_writeback_statement),
+            )
+            .unwrap();
         let page = database
             .list_session_items_page(None, fixtures.len())
             .unwrap();
@@ -13023,7 +13073,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                None::<fn(TraceEvent<'_>)>,
+            )
+            .unwrap();
 
         let expected_total = fixtures
             .iter()
@@ -14296,7 +14350,7 @@ mod tests {
 
     #[test]
     fn startup_replays_a_persisted_finalization_recovery() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         database
             .create_session(&sample_session("session-recovery"))
             .unwrap();
@@ -14339,7 +14393,7 @@ mod tests {
 
     #[test]
     fn startup_replays_write_ahead_intent_before_mp4_export_as_owned_mkv() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -14387,7 +14441,7 @@ mod tests {
 
     #[test]
     fn startup_cleans_owned_mp4_directory_after_crash_before_ffmpeg_writes() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let preferred_mp4 = directory.join("recording.mp4");
@@ -14443,7 +14497,7 @@ mod tests {
 
     #[test]
     fn startup_cleans_owned_mp4_directory_after_crash_during_ffmpeg_write() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let preferred_mp4 = directory.join("recording.mp4");
@@ -14502,7 +14556,7 @@ mod tests {
 
     #[test]
     fn startup_retires_journaled_mp4_candidate_collision_without_touching_candidate() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let candidate = directory.join("recording.mp4");
@@ -14571,7 +14625,7 @@ mod tests {
 
     #[test]
     fn startup_adopts_published_mp4_through_owned_directory_then_cleans_workspace() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let published = directory.join("recording.mp4");
@@ -14646,7 +14700,7 @@ mod tests {
 
     #[test]
     fn startup_rehomes_and_adopts_identity_matched_mp4_when_original_workspace_is_missing() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let published = directory.join("recording.mp4");
@@ -14729,7 +14783,7 @@ mod tests {
 
     #[test]
     fn startup_rehomes_but_never_adopts_replaced_mp4_when_original_workspace_is_missing() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let published = directory.join("recording.mp4");
@@ -14805,7 +14859,7 @@ mod tests {
 
     #[test]
     fn startup_retains_replaced_staging_directory_and_candidate_then_retires_recovery() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let candidate = directory.join("recording.mp4");
@@ -14883,7 +14937,7 @@ mod tests {
 
     #[test]
     fn startup_discards_object_bound_partial_mp4_after_interrupted_export() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -14944,7 +14998,7 @@ mod tests {
 
     #[test]
     fn startup_retains_replaced_partial_mp4_and_its_recovery_record() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -15002,7 +15056,7 @@ mod tests {
 
     #[test]
     fn startup_adopts_identity_matched_mp4_published_before_db_commit() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -15060,7 +15114,7 @@ mod tests {
 
     #[test]
     fn startup_publishes_identity_matched_mp4_staged_before_a_crash() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -15113,7 +15167,7 @@ mod tests {
 
     #[test]
     fn startup_restores_a_raced_staging_replacement_instead_of_adopting_it() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -15169,7 +15223,7 @@ mod tests {
 
     #[test]
     fn startup_falls_back_to_mkv_without_adopting_or_deleting_a_replaced_mp4() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -15222,7 +15276,7 @@ mod tests {
 
     #[test]
     fn startup_clears_committed_mp4_path_after_rejecting_replacement() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let fixture = create_committed_mp4_recovery_fixture(
             &database,
@@ -15254,7 +15308,7 @@ mod tests {
 
     #[test]
     fn startup_clears_committed_mp4_path_after_published_file_disappears() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let fixture = create_committed_mp4_recovery_fixture(
             &database,
@@ -15282,7 +15336,7 @@ mod tests {
 
     #[test]
     fn stale_recovery_never_clears_a_newer_committed_mp4_path() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let fixture = create_committed_mp4_recovery_fixture(
             &database,
@@ -15329,7 +15383,7 @@ mod tests {
 
     #[test]
     fn startup_never_deletes_a_replacement_at_the_finalized_mkv_path() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -15382,7 +15436,7 @@ mod tests {
 
     #[test]
     fn startup_never_deletes_same_content_replacement_at_finalized_mkv_path() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let replacement = directory.join("replacement.mkv");
@@ -15462,7 +15516,7 @@ mod tests {
 
     #[test]
     fn legacy_recovery_persists_generated_mkv_cleanup_path_before_the_move() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let output = directory.join("recording.mkv");
         let staging = directory.join(".recording.partial.mp4");
@@ -15542,7 +15596,7 @@ mod tests {
 
     #[test]
     fn startup_cleans_object_bound_copy_interrupted_before_content_binding() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".interrupted.partial");
         let final_path = directory.join("interrupted.mp4");
@@ -15582,7 +15636,7 @@ mod tests {
 
     #[test]
     fn startup_quarantines_unbound_copy_without_path_only_deletion() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".unbound.partial");
         let final_path = directory.join("unbound.mp4");
@@ -15613,7 +15667,7 @@ mod tests {
 
     #[test]
     fn cancellation_reloads_identity_bound_operation_before_cleanup() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".cancel.partial");
         let final_path = directory.join("cancel.mp4");
@@ -15654,7 +15708,7 @@ mod tests {
 
     #[test]
     fn startup_discards_an_unowned_published_library_file() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".orphan.partial");
         let final_path = directory.join("orphan.mp4");
@@ -15684,7 +15738,7 @@ mod tests {
 
     #[test]
     fn startup_never_removes_a_raced_external_destination() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".raced.partial");
         let final_path = directory.join("raced.mp4");
@@ -15715,7 +15769,7 @@ mod tests {
 
     #[test]
     fn startup_never_cleans_up_a_replacement_installed_after_publication() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".published.partial");
         let final_path = directory.join("published.mp4");
@@ -15747,7 +15801,7 @@ mod tests {
 
     #[test]
     fn startup_discards_an_owned_row_instead_of_adopting_a_replacement() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".owned-replaced.partial");
         let final_path = directory.join("owned-replaced.mp4");
@@ -15784,7 +15838,7 @@ mod tests {
 
     #[test]
     fn startup_publishes_staged_library_bytes_for_an_owned_row() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".owned.partial");
         let final_path = directory.join("owned.mp4");
@@ -15817,7 +15871,7 @@ mod tests {
 
     #[test]
     fn startup_publishes_object_bound_library_bytes_after_mtime_drift() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".owned-mtime.partial");
         let final_path = directory.join("owned-mtime.mp4");
@@ -15866,7 +15920,7 @@ mod tests {
 
     #[test]
     fn startup_never_adopts_a_raced_library_staging_replacement() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".owned-raced.partial");
         let final_path = directory.join("owned-raced.mp4");
@@ -15897,7 +15951,7 @@ mod tests {
 
     #[test]
     fn startup_keeps_a_completed_library_row_and_clears_its_journal() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".done.partial");
         let final_path = directory.join("done.mp4");
@@ -15929,7 +15983,7 @@ mod tests {
 
     #[test]
     fn startup_never_adopts_a_same_sample_replacement_for_a_completed_row() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let staging = directory.join(".same-sample.partial");
         let replacement = directory.join("same-sample-replacement.mp4");
@@ -16009,7 +16063,7 @@ mod tests {
 
     #[test]
     fn deleting_a_recording_also_deletes_its_repair_backup() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let mp4 = directory.join("recording.mp4");
         std::fs::write(&mp4, b"repaired recording").unwrap();
@@ -16075,7 +16129,7 @@ mod tests {
 
     #[test]
     fn deleting_a_stopped_early_separate_file_removes_its_empty_private_folder() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let hidden = directory.join(".videorc-iso-delete-test");
         std::fs::create_dir(&hidden).unwrap();
@@ -16109,7 +16163,7 @@ mod tests {
 
     #[test]
     fn the_stored_size_is_the_published_mp4s_after_an_export() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let mkv = directory.join("take.mkv");
         let mp4 = directory.join("take.mp4");
@@ -16155,7 +16209,7 @@ mod tests {
 
     #[test]
     fn two_phase_session_delete_hides_then_retries_failed_trash_paths() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let media_path = directory.join("recording.mkv");
         std::fs::write(&media_path, b"recording").unwrap();
@@ -16244,7 +16298,7 @@ mod tests {
 
     #[test]
     fn delete_quarantine_never_trashes_a_replacement_at_the_original_path() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let media_path = directory.join("replacement.mp4");
         std::fs::write(&media_path, b"original recording").unwrap();
@@ -16408,7 +16462,7 @@ mod tests {
 
     #[test]
     fn delete_quarantine_restores_a_mismatch_instead_of_trashing_it() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let media_path = directory.join("quarantine-replaced.mp4");
         std::fs::write(&media_path, b"owned recording").unwrap();
@@ -16471,7 +16525,7 @@ mod tests {
 
     #[test]
     fn delete_quarantine_moves_files_under_their_names_and_completion_removes_the_folders() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap();
         let mp4 = directory.join("videorc-session-named.mp4");
         let mkv = directory.join("videorc-session-named.mkv");
@@ -16622,7 +16676,7 @@ mod tests {
 
     #[test]
     fn delete_quarantine_folder_survives_a_restart_before_and_after_the_move() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let directory = database_path.parent().unwrap().to_path_buf();
         let media_path = directory.join("videorc-session-restart.mp4");
         std::fs::write(&media_path, b"owned recording").unwrap();
@@ -17004,7 +17058,7 @@ mod tests {
 
     #[test]
     fn blocked_screen_optimizer_does_not_block_session_finalization_commit() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         database
             .create_session(&sample_session("finalize-during-screen-import"))
             .unwrap();
@@ -17054,7 +17108,7 @@ mod tests {
 
     #[test]
     fn blocked_session_delete_identity_probe_does_not_block_finalization_commit() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let media_path = database_path.parent().unwrap().join("delete-probe.mkv");
         std::fs::write(&media_path, b"recording").unwrap();
         let mut deleting = sample_session("delete-probe");
@@ -17115,7 +17169,7 @@ mod tests {
 
     #[test]
     fn blocked_session_delete_completion_probe_does_not_block_finalization_commit() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let media_path = database_path.parent().unwrap().join("delete-complete.mkv");
         std::fs::write(&media_path, b"recording").unwrap();
         let mut deleting = sample_session("delete-complete");
@@ -17184,7 +17238,7 @@ mod tests {
     #[test]
     fn imported_screen_images_reject_unsupported_formats() {
         let database = test_database();
-        let path = temp_screen_image("notes.txt");
+        let (_dir, path) = temp_screen_image("notes.txt");
 
         let error = database
             .import_screen_image_with_optimizer(path.to_str().unwrap(), |_, _| {
@@ -17265,7 +17319,7 @@ mod tests {
 
     #[test]
     fn persisted_screen_path_outside_managed_root_is_pathless_missing_everywhere() {
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let screen = import_stub_screen(&database, "break.png");
         let outside = database_path.parent().unwrap().join("outside-screen.png");
         std::fs::write(&outside, b"must survive").unwrap();
@@ -17303,7 +17357,7 @@ mod tests {
 
     #[test]
     fn persisted_screen_nonregular_target_is_missing_and_never_removed() {
-        let (database, _) = file_database();
+        let (_dir, database, _) = file_database();
         let screen = import_stub_screen(&database, "break.png");
         let managed_path = PathBuf::from(&screen.image_path);
         std::fs::remove_file(&managed_path).unwrap();
@@ -17324,7 +17378,7 @@ mod tests {
     fn persisted_screen_symlink_and_managed_root_symlink_are_rejected() {
         use std::os::unix::fs::symlink;
 
-        let (database, database_path) = file_database();
+        let (_dir, database, database_path) = file_database();
         let screen = import_stub_screen(&database, "break.png");
         let managed_path = PathBuf::from(&screen.image_path);
         let outside = database_path.parent().unwrap().join("outside.png");

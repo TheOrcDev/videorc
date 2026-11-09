@@ -990,6 +990,8 @@ mod tests {
                         "Live at rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}"
                     )),
                     redacted_url: Some("rtmps://a.rtmp.youtube.com/live2/••••".to_string()),
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 },
                 StreamTargetRuntime {
                     target_id: "twitch-main".to_string(),
@@ -998,6 +1000,8 @@ mod tests {
                     state: StreamTargetState::Reconnecting,
                     message: Some(format!("rtmp://live.twitch.tv/app/{TWITCH_KEY} retrying")),
                     redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 },
                 StreamTargetRuntime {
                     target_id: "kick-main".to_string(),
@@ -1008,6 +1012,8 @@ mod tests {
                         "rtmps://fa723fc1b171.global-contribute.live-video.net/app/{KICK_KEY}"
                     )),
                     redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 },
             ],
         })

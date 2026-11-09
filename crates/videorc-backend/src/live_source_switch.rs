@@ -1223,6 +1223,7 @@ mod tests {
         let device = Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: "camera:stable".into(),
             name: "Camera".into(),
             kind: DeviceKind::Camera,

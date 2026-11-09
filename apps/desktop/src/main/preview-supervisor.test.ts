@@ -231,6 +231,45 @@ describe('PreviewSupervisorModel', () => {
     })
   })
 
+  it('lets the D3D11 presenter claim a window whose proof surface failed first', () => {
+    const model = new PreviewSupervisorModel({ platform: 'win32' })
+    model.openWindow()
+    model.windowOpened()
+    model.requestSurface()
+    model.surfaceFailed({
+      generation: 1,
+      message: 'Electron proof preview surface frame polling is enabled.'
+    })
+
+    expect(
+      model.surfaceLive({
+        generation: 1,
+        transport: 'd3d11-shared-texture',
+        backing: 'directcomposition-swapchain',
+        nativePreviewHostKind: 'backend-d3d11-presenter'
+      })
+    ).toMatchObject({
+      lifecycleState: 'surface-live',
+      surfaceRequested: true,
+      surfaceActive: true,
+      transport: 'd3d11-shared-texture',
+      lastError: undefined
+    })
+  })
+
+  it('keeps a failed surface failed once its window is closing', () => {
+    const model = supervisor()
+    model.openWindow()
+    model.windowOpened()
+    model.requestSurface()
+    model.surfaceFailed({ generation: 1, message: 'surface failed' })
+    const closing = model.closeWindow()
+
+    model.surfaceLive(metalLive(1))
+    model.surfaceFallback(1, 'late fallback')
+    expect(model.snapshot()).toEqual(closing)
+  })
+
   it('fails crossed platform pairs closed into the proof fallback', () => {
     const model = new PreviewSupervisorModel({ platform: 'win32' })
     model.openWindow()

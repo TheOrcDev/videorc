@@ -28,7 +28,8 @@ export function finalizationFailed(session: FinalizationRow): boolean {
   return session.finalizationState === 'failed'
 }
 
-/** Badge copy for a take Videorc recovered after it stopped mid-recording;
+/** Badge copy for a take that ended early and was recovered as MP4 (after a
+ * crash, or a recording that failed mid-take, such as on a full disk);
  * `null` on every other row. */
 export function interruptedTakeBadge(
   session: FinalizationRow
@@ -37,7 +38,7 @@ export function interruptedTakeBadge(
   return {
     label: 'Recovered',
     detail:
-      'Videorc stopped during this recording. Everything up to that moment was saved as MP4; the original MKV is kept.'
+      'This recording ended early. Everything up to that moment was saved as MP4; the original MKV is kept.'
   }
 }
 

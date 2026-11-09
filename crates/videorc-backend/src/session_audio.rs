@@ -28,6 +28,16 @@ pub const PLAYOUT_DELAY: Duration = Duration::from_millis(50);
 /// buffers arrive 22-52 ms after their last sample (S0), so 50 ms would place
 /// about 31% of them behind the cursor.
 pub const SYSTEM_AUDIO_PLAYOUT_DELAY: Duration = Duration::from_millis(150);
+/// Noise reduction reads this far past the chunk it renders. A session whose
+/// deadline is [`PLAYOUT_DELAY`] adds it, so turning noise reduction on keeps
+/// the same late-arrival budget for the microphone.
+pub const MICROPHONE_DENOISE_PLAYOUT_HEADROOM: Duration = Duration::from_micros(
+    crate::microphone_denoise::DELAY_SAMPLES as u64 * 1_000_000 / NATIVE_AUDIO_SAMPLE_RATE as u64,
+);
+const _: () = assert!(
+    SYSTEM_AUDIO_PLAYOUT_DELAY.as_micros()
+        >= PLAYOUT_DELAY.as_micros() + MICROPHONE_DENOISE_PLAYOUT_HEADROOM.as_micros()
+);
 /// The enable/disable envelope for a mixed source and the microphone handoff
 /// ramp: 5 ms at 48 kHz.
 const RAMP_FRAMES: u16 = 240;
@@ -185,6 +195,23 @@ impl AudioTimeline {
         self.generation = generation;
     }
 
+    /// Transfer only accepted post-cutover PCM when a candidate becomes live.
+    /// Candidate preparation must not affect the active source's health.
+    fn record_buffered_capture_evidence(
+        &self,
+        stats: &AudioCaptureStats,
+        totals: &AudioCaptureStats,
+    ) {
+        for packet in &self.packets {
+            let peak = packet
+                .samples
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+            stats.record_capture_evidence(packet.frames(), peak);
+            totals.record_capture_evidence(packet.frames(), peak);
+        }
+    }
+
     pub fn discard_before(&mut self, floor: u64) {
         while let Some(packet) = self.packets.front_mut() {
             if packet.start >= floor {
@@ -275,6 +302,17 @@ impl AudioTimeline {
         self.render_with_provenance().samples
     }
 
+    fn account_prepared_chunk(&mut self, raw: &mut RenderedPcm, captured: &[bool]) {
+        for (actual, prepared) in raw.captured.iter_mut().zip(captured) {
+            if *actual && !*prepared {
+                self.counters.captured_frames -= 1;
+                self.counters.generated_frames += 1;
+                self.counters.discarded_frames += 1;
+                *actual = false;
+            }
+        }
+    }
+
     fn account_stale_chunk(&mut self, chunk: &RenderedPcm, stale_from: Option<usize>) {
         if let Some(from) = stale_from {
             let captured = chunk
@@ -287,6 +325,30 @@ impl AudioTimeline {
             self.counters.generated_frames += captured;
             self.counters.discarded_frames += captured;
         }
+    }
+
+    /// Copy source PCM without advancing the output cursor. RNNoise needs two
+    /// future hops; the bus's existing playout headroom supplies them.
+    fn peek_source(&self, start: u64, horizon: Option<u64>) -> RenderedPcm {
+        let end = (start + CHUNK_FRAMES as u64).min(horizon.unwrap_or(u64::MAX));
+        let mut output = RenderedPcm {
+            samples: vec![0.0; CHUNK_FRAMES * 2],
+            captured: vec![false; CHUNK_FRAMES],
+        };
+        for packet in &self.packets {
+            let from = packet.start.max(start);
+            let to = packet.end().min(end);
+            if from >= to {
+                continue;
+            }
+            let input = ((from - packet.start) * 2) as usize;
+            let offset = ((from - start) * 2) as usize;
+            let length = ((to - from) * 2) as usize;
+            output.samples[offset..offset + length]
+                .copy_from_slice(&packet.samples[input..input + length]);
+            output.captured[(from - start) as usize..(to - start) as usize].fill(true);
+        }
+        output
     }
 
     fn render_with_provenance(&mut self) -> RenderedPcm {
@@ -342,6 +404,15 @@ use crate::audio::{
 use crate::sound_mix::{SoundVoices, VoiceStart};
 
 const WRITE_DEADLINE: Duration = Duration::from_secs(5);
+/// How long one chunk may wait on a FIFO that accepts no PCM before the
+/// output counts as wedged. FFmpeg reads the session audio and the video in
+/// one process, so the audio waits as long as the video writers do (plan
+/// 087). Five seconds ended the audio during a six-second freeze the video
+/// waited out: FFmpeg saw its audio input end, `apad` filled the `-shortest`
+/// queue with silence, and FFmpeg exited about 20 s later with ENOSPC, taking
+/// the recording and the stream with it (ogre, 2026-11-04 and 2026-11-06).
+/// Stop still ends a blocked write at once, and its drain has its own deadline.
+const OUTPUT_WRITE_DEADLINE: Duration = crate::encoder_bridge::OUTPUT_WEDGED_TIMEOUT;
 const EPOCH_DEADLINE: Duration = Duration::from_secs(30);
 static OWNED_WRITERS: AtomicU64 = AtomicU64::new(0);
 
@@ -415,9 +486,15 @@ impl std::error::Error for ProducerPoolBusy {}
 
 static PRODUCER_CLOSED: OnceLock<(std::sync::Mutex<()>, std::sync::Condvar)> = OnceLock::new();
 fn wait_for_producer_cleanup(count: &AtomicU64, deadline: Instant) -> bool {
+    wait_for_producer_cleanup_to(count, 0, deadline)
+}
+
+/// Waits until at most `kept` producers remain on `count`: a bus that handed
+/// its microphone to the next session (#1068) waits only for the rest.
+fn wait_for_producer_cleanup_to(count: &AtomicU64, kept: u64, deadline: Instant) -> bool {
     let (mutex, closed) = PRODUCER_CLOSED.get_or_init(Default::default);
     let mut guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
-    while count.load(Ordering::Acquire) != 0 {
+    while count.load(Ordering::Acquire) > kept {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return false;
@@ -1347,6 +1424,170 @@ pub struct OutputStallReport {
     pub lost_ms: u64,
 }
 
+/// Issue 1064: what the microphone silence watchdog reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicrophoneSilenceChange {
+    /// The selected, unmuted, live microphone captured nothing but digital
+    /// silence for the watchdog's hold.
+    Silent,
+    /// Sound came back after such a run.
+    Recovered,
+}
+
+/// Issue 1064: a microphone that delivers frames holding no sound at all (a
+/// Windows DirectShow device returning 1-LSB silence while the renderer's own
+/// analyser heard the room). The loss flow never sees it: frames arrive and
+/// the timeline places them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicrophoneSilenceEvent {
+    pub change: MicrophoneSilenceChange,
+    pub generation: u64,
+    pub device_name: String,
+    /// Recording-window time of the change.
+    pub after_ms: u64,
+    /// How long the captured microphone had been silent: the hold when it is
+    /// reported, the whole run once sound returns.
+    pub silent_ms: u64,
+}
+
+/// Noise reduction refused or failed a microphone frame (non-finite or past
+/// its headroom, or a non-finite model output). The bus wrote exact zeros for
+/// the microphone over that stretch instead of untreated audio, and nothing
+/// else on the bus noticed: system audio, sounds and the live controls went
+/// on. One event per episode; an episode ends after
+/// [`MICROPHONE_DENOISE_EPISODE_RECOVERY`] of clean processing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicrophoneDenoiseSilencedEvent {
+    pub generation: u64,
+    pub device_name: String,
+    /// Recording-window time of the first silenced chunk.
+    pub after_ms: u64,
+    /// The processor's refusal, for the log.
+    pub reason: &'static str,
+}
+
+/// How long noise reduction must process clean input after a refusal before
+/// the next refusal is a new episode, so a driver that keeps sending bad
+/// frames raises one event, not one per chunk.
+pub(crate) const MICROPHONE_DENOISE_EPISODE_RECOVERY: Duration = Duration::from_secs(1);
+
+/// Issue 1064: captured microphone samples under this peak are digital
+/// silence (-80 dBFS: three 16-bit steps). A real room, however quiet, sits
+/// far above it; a 1-LSB DirectShow device sits 10 dB under it.
+pub(crate) const MICROPHONE_SILENCE_FLOOR: f32 = 1.0e-4;
+/// How long the captured microphone stays under the floor before it is
+/// reported, and how long sound must stay above it before the report ends.
+pub(crate) const MICROPHONE_SILENCE_HOLD: Duration = Duration::from_secs(3);
+const MICROPHONE_SILENCE_RECOVERY_HOLD: Duration = Duration::from_millis(500);
+
+/// A silence verdict for one chunk of captured microphone PCM, with the length
+/// of the silent run it reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MicrophoneSilenceVerdict {
+    Silent { silent_ms: u64 },
+    Recovered { silent_ms: u64 },
+}
+
+impl MicrophoneSilenceVerdict {
+    fn change(self) -> MicrophoneSilenceChange {
+        match self {
+            Self::Silent { .. } => MicrophoneSilenceChange::Silent,
+            Self::Recovered { .. } => MicrophoneSilenceChange::Recovered,
+        }
+    }
+
+    fn silent_ms(self) -> u64 {
+        match self {
+            Self::Silent { silent_ms } | Self::Recovered { silent_ms } => silent_ms,
+        }
+    }
+}
+
+/// Issue 1064: the microphone silence watchdog, across chunks. It counts
+/// captured frames only (timeline fill is the loss flow's), and only while the
+/// chunk is eligible: a microphone selected, not muted by the user, its input
+/// live, the bus not draining. Ineligible chunks reset the counting without
+/// changing the report, so a mute never raises it and never ends it.
+#[derive(Debug, Default)]
+pub(crate) struct MicrophoneSilenceWatchdog {
+    /// Captured frames under the floor in the current run.
+    silent_frames: u64,
+    /// Captured frames above the floor since the run, while reported silent.
+    sounding_frames: u64,
+    silent: bool,
+}
+
+impl MicrophoneSilenceWatchdog {
+    pub(crate) fn is_silent(&self) -> bool {
+        self.silent
+    }
+
+    /// The current run of silence, in milliseconds.
+    pub(crate) fn silent_ms(&self) -> u64 {
+        self.silent_frames * 1_000 / u64::from(NATIVE_AUDIO_SAMPLE_RATE)
+    }
+
+    /// One chunk: `peak` is its loudest captured sample and `captured_frames`
+    /// how many frames the device really delivered.
+    pub(crate) fn observe(
+        &mut self,
+        peak: f32,
+        captured_frames: u64,
+        eligible: bool,
+    ) -> Option<MicrophoneSilenceVerdict> {
+        if !eligible || captured_frames == 0 {
+            self.silent_frames = 0;
+            self.sounding_frames = 0;
+            return None;
+        }
+        let hold_frames = |hold: Duration| {
+            (hold.as_secs_f64() * f64::from(NATIVE_AUDIO_SAMPLE_RATE)).round() as u64
+        };
+        if peak < MICROPHONE_SILENCE_FLOOR {
+            self.sounding_frames = 0;
+            self.silent_frames += captured_frames;
+            if !self.silent && self.silent_frames >= hold_frames(MICROPHONE_SILENCE_HOLD) {
+                self.silent = true;
+                return Some(MicrophoneSilenceVerdict::Silent {
+                    silent_ms: self.silent_ms(),
+                });
+            }
+            return None;
+        }
+        if !self.silent {
+            self.silent_frames = 0;
+            return None;
+        }
+        // A click in a silent run is not sound coming back: the run keeps its
+        // length until sound has held for the recovery hold.
+        self.sounding_frames += captured_frames;
+        if self.sounding_frames >= hold_frames(MICROPHONE_SILENCE_RECOVERY_HOLD) {
+            let silent_ms = self.silent_ms();
+            self.silent = false;
+            self.silent_frames = 0;
+            self.sounding_frames = 0;
+            return Some(MicrophoneSilenceVerdict::Recovered { silent_ms });
+        }
+        None
+    }
+}
+
+/// The loudest captured sample of a rendered chunk and how many of its frames
+/// the device delivered (the rest is timeline fill).
+fn captured_peak(raw: &RenderedPcm) -> (f32, u64) {
+    let mut peak = 0.0_f32;
+    let mut captured = 0_u64;
+    for (frame, samples) in raw.captured.iter().zip(raw.samples.chunks_exact(2)) {
+        if *frame {
+            captured += 1;
+            for sample in samples {
+                peak = peak.max(sample.abs());
+            }
+        }
+    }
+    (peak, captured)
+}
+
 #[derive(Debug)]
 pub struct AudioObservation {
     pub generation: u64,
@@ -1355,13 +1596,23 @@ pub struct AudioObservation {
     pub captured_frames: u64,
     pub dropped_frames: u64,
     pub live_peak: f32,
+    #[cfg(test)]
     pub session_peak: f32,
+    /// Raw microphone peak for capture health, before any bus processing.
+    pub capture_session_peak: f32,
+    /// Valid source frames received, independent of output placement.
+    pub received_capture_frames: u64,
     pub elapsed_secs: Option<f64>,
     pub input_state: NativeAudioInputState,
     pub source_loss_after_ms: Option<u64>,
     pub losses: Vec<SourceLoss>,
     pub recoveries: Vec<SourceRecovery>,
     pub output_stalls: Vec<OutputStallReport>,
+    /// Issue 1064: the silence watchdog's changes since the last observation.
+    pub silence_events: Vec<MicrophoneSilenceEvent>,
+    /// Noise reduction episodes that silenced the microphone since the last
+    /// observation (one per episode).
+    pub denoise_events: Vec<MicrophoneDenoiseSilencedEvent>,
 }
 
 /// Test-only view of every frame the bus offers the caption tap.
@@ -1443,6 +1694,9 @@ pub struct BusLevels {
     /// The chunk as written: what the recording and the stream get.
     pub master: Option<crate::protocol::AudioLevelReading>,
     pub master_clipped_samples: u64,
+    /// Issue 1064: the silence watchdog's current report, so the meter's
+    /// status word and its level come from the same reading.
+    pub microphone_silent: bool,
 }
 
 impl BusLevels {
@@ -1470,6 +1724,13 @@ struct AudioShared {
     losses: VecDeque<SourceLoss>,
     recoveries: VecDeque<SourceRecovery>,
     output_stalls: VecDeque<OutputStallReport>,
+    /// Issue 1064: the silence watchdog's changes, drained by the sampler.
+    silence_events: VecDeque<MicrophoneSilenceEvent>,
+    /// Issue 1064: the watchdog's current report, read with the levels.
+    microphone_silent: bool,
+    /// Noise reduction episodes not yet observed, drained by the sampler and
+    /// claimed by the finalizer after the bus has joined.
+    denoise_events: VecDeque<MicrophoneDenoiseSilencedEvent>,
     system: SystemShared,
     system_stats: Arc<AudioCaptureStats>,
     mix_clipped_samples: u64,
@@ -1477,6 +1738,12 @@ struct AudioShared {
     /// Plan 157: per-source PCM taps (microphone → Camera file, system →
     /// Screen file). `None` on every session without separate recordings.
     source_taps: Option<Arc<crate::source_audio_tap::SourceAudioTaps>>,
+    /// #1068: where the microphone goes when this bus ends, instead of
+    /// closing. Set by [`SessionAudio::offer_microphone_handover`].
+    microphone_handover: Option<HandoverOffer>,
+    /// The bus handed its microphone to [`MicrophoneHandover`]; the writer
+    /// then does not wait for that producer to close.
+    microphone_carried: bool,
     #[cfg(test)]
     caption_observer: Option<CaptionObserver>,
     #[cfg(test)]
@@ -1717,6 +1984,153 @@ pub async fn prepare_initial_adapter(
     })
 }
 
+/// #1068: a running microphone carried from a session that is ending to the
+/// session that replaces it. A Record pressed while Clips runs stops the Clips
+/// session first; without this its bus closed the microphone and the new
+/// session opened the same device again, about 1 s of every Windows Record.
+///
+/// The hand-over opens a window ([`Self::open`]) and offers it to the ending
+/// bus ([`SessionAudio::offer_microphone_handover`]). At its end the bus moves
+/// its live producer here instead of retiring it, if the window is still the
+/// current one. The new session takes it for the same device
+/// ([`Self::take`]); whatever it does not take closes when the window closes
+/// ([`Self::close`]). Frames queued while no bus reads are stale by then and
+/// the next bus discards them, as it does for every source at attach.
+#[derive(Default)]
+pub struct MicrophoneHandover {
+    inner: std::sync::Mutex<HandoverSlot>,
+}
+
+#[derive(Default)]
+struct HandoverSlot {
+    generation: u64,
+    open: bool,
+    carried: Option<(String, InitialAudioSource)>,
+}
+
+/// The ending bus's side of an open [`MicrophoneHandover`] window.
+struct HandoverOffer {
+    slot: Arc<MicrophoneHandover>,
+    generation: u64,
+    device_id: String,
+    /// The bus's producer count; the carried producer's permit stays on it and
+    /// the next bus adopts it with the source.
+    count: Arc<AtomicU64>,
+}
+
+impl MicrophoneHandover {
+    /// Opens a new window, closing (and dropping) anything an earlier one
+    /// still holds. Returns the window's generation.
+    fn open(&self) -> u64 {
+        let (generation, previous) = {
+            let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            slot.generation += 1;
+            slot.open = true;
+            (slot.generation, slot.carried.take())
+        };
+        drop(previous);
+        generation
+    }
+
+    /// The bus parks its producer here. Refused (and handed back) once the
+    /// window it was offered has closed or been replaced.
+    #[must_use]
+    fn install(
+        &self,
+        generation: u64,
+        producer: ManagedProducer,
+        count: Arc<AtomicU64>,
+    ) -> Option<ManagedProducer> {
+        let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if !slot.open || slot.generation != generation || slot.carried.is_some() {
+            return Some(producer);
+        }
+        let device_id = producer.device_id.clone();
+        slot.carried = Some((
+            device_id,
+            InitialAudioSource {
+                source: InitialInput::Owned { producer, count },
+            },
+        ));
+        None
+    }
+
+    /// The carried microphone when it is `device_id`. Another device stays
+    /// until the window closes.
+    pub fn take(&self, device_id: &str) -> Option<InitialAudioSource> {
+        let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.carried.as_ref()?.0 != device_id {
+            return None;
+        }
+        slot.carried.take().map(|(_, source)| source)
+    }
+
+    /// Closes the window: a microphone nobody took closes now, and a bus that
+    /// ends later closes its own. Returns true when one was dropped.
+    pub fn close(&self) -> bool {
+        let previous = {
+            let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            slot.open = false;
+            slot.generation += 1;
+            slot.carried.take()
+        };
+        let dropped = previous.is_some();
+        drop(previous);
+        dropped
+    }
+
+    /// The producers parked here, for [`cleanup_pending`]'s standby count.
+    pub fn owned_producer_count(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .carried
+            .as_ref()
+            .map_or(0, |(_, source)| source.owned_producer_count())
+    }
+}
+
+/// #1068: hands the bus's microphone to an open [`MicrophoneHandover`]
+/// window. Returns the producer when it stays, for the usual retire. Only a
+/// producer that is still running, still has its receiver and is the offered
+/// device moves.
+#[must_use]
+fn carry_microphone(
+    producer: ManagedProducer,
+    receiver: Option<mpsc::Receiver<AudioFrame>>,
+    shared: &std::sync::Mutex<AudioShared>,
+) -> Option<ManagedProducer> {
+    let Some(offer) = shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .microphone_handover
+        .take()
+    else {
+        return Some(producer);
+    };
+    let (Some(receiver), true, true) = (
+        receiver,
+        producer.device_id == offer.device_id,
+        producer.completion.as_ref().is_some_and(|c| c.running()),
+    ) else {
+        return Some(producer);
+    };
+    let mut producer = producer;
+    producer.receiver = Some(receiver);
+    if let Some(refused) = offer
+        .slot
+        .install(offer.generation, producer, offer.count.clone())
+    {
+        return Some(refused);
+    }
+    shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .microphone_carried = true;
+    tracing::info!("Session audio handed its live microphone to the next session.");
+    None
+}
+
 pub struct SessionAudio {
     pub fifo_path: PathBuf,
     handle: AudioSwitchHandle,
@@ -1782,13 +2196,18 @@ impl SessionAudio {
             captured_frames: stats.captured_frames(),
             dropped_frames: stats.dropped_frames(),
             live_peak: stats.live_peak(),
+            #[cfg(test)]
             session_peak: stats.session_peak(),
+            capture_session_peak: stats.capture_session_peak(),
+            received_capture_frames: stats.received_capture_frames(),
             elapsed_secs: stats.recording_window_elapsed_secs(),
             input_state: shared.stats.input_state(),
             source_loss_after_ms: shared.stats.source_loss_after_ms(),
             losses: shared.losses.drain(..).collect(),
             recoveries: shared.recoveries.drain(..).collect(),
             output_stalls: shared.output_stalls.drain(..).collect(),
+            silence_events: shared.silence_events.drain(..).collect(),
+            denoise_events: shared.denoise_events.drain(..).collect(),
         }
     }
     pub fn switch_handle(&self) -> AudioSwitchHandle {
@@ -1873,6 +2292,31 @@ impl SessionAudio {
             .source_taps = Some(taps);
     }
 
+    /// #1068: opens a hand-over window on `slot` and asks this bus to park its
+    /// microphone there when it ends, instead of closing it. Offered only when
+    /// the bus's selected microphone is `device_id`, the device the next
+    /// session opens; returns whether it was. Call before the stop.
+    pub fn offer_microphone_handover(
+        &self,
+        slot: &Arc<MicrophoneHandover>,
+        device_id: &str,
+    ) -> bool {
+        let mut shared = self.handle.shared.lock().unwrap_or_else(|p| p.into_inner());
+        let selected = shared.owner_present
+            && shared.status.selected_input
+            && shared.status.device_id.as_deref() == Some(device_id);
+        if !selected || self.handle.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        shared.microphone_handover = Some(HandoverOffer {
+            slot: slot.clone(),
+            generation: slot.open(),
+            device_id: device_id.to_string(),
+            count: self.handle.producer_count.clone(),
+        });
+        true
+    }
+
     pub fn request_stop(&self) {
         self.request_stop_at(Instant::now());
     }
@@ -1885,6 +2329,9 @@ impl SessionAudio {
         stats.mark_stopped();
         stats.finish_recording_window();
         self.totals().finish_recording_window();
+    }
+    pub fn processing_settings(&self) -> AudioProcessingSettings {
+        self.processing_settings.load()
     }
     pub fn update_processing_settings(&self, settings: AudioProcessingSettings) {
         self.processing_settings.update(settings);
@@ -1903,6 +2350,18 @@ impl SessionAudio {
 }
 
 impl AudioSwitchHandle {
+    /// The noise reduction episodes no observation has drained. Retained by
+    /// finalization across SessionAudio Drop, so an episode racing Stop
+    /// cannot disappear after the pre-teardown stats snapshot.
+    pub fn claim_denoise_events(&self) -> Vec<MicrophoneDenoiseSilencedEvent> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .denoise_events
+            .drain(..)
+            .collect()
+    }
+
     /// Plan 092 Phase C: the level readings since the previous call, emptying
     /// the windows. The `audio.levels` sampler holds this handle, so reading
     /// levels never takes the recording lock.
@@ -1915,6 +2374,7 @@ impl AudioSwitchHandle {
                 .unwrap()
                 .boundary("levels-before-take", &shared);
         }
+        let microphone_silent = shared.microphone_silent;
         let levels = &mut shared.levels;
         let reading = BusLevels {
             microphone: levels.microphone.take(),
@@ -1922,6 +2382,7 @@ impl AudioSwitchHandle {
             sounds: levels.sounds.take(),
             master: levels.master.take(),
             master_clipped_samples: std::mem::take(&mut levels.master_clipped_samples),
+            microphone_silent,
         };
         #[cfg(test)]
         if let Some(observation) = &shared.mix_observation {
@@ -2249,11 +2710,16 @@ pub fn attach_prepared_with(
         losses: VecDeque::new(),
         recoveries: VecDeque::new(),
         output_stalls: VecDeque::new(),
+        silence_events: VecDeque::new(),
+        microphone_silent: false,
+        denoise_events: VecDeque::new(),
         system: SystemShared::default(),
         system_stats: Arc::new(AudioCaptureStats::default()),
         mix_clipped_samples: 0,
         levels: BusLevelWindows::default(),
         source_taps: None,
+        microphone_handover: None,
+        microphone_carried: false,
         #[cfg(test)]
         caption_observer: None,
         #[cfg(test)]
@@ -2286,6 +2752,7 @@ pub fn attach_prepared_with(
         draining: draining.clone(),
     };
     let system_settings = AudioProcessingSettingsHandle::new(AudioProcessingSettings {
+        noise_suppression: Default::default(),
         gain_db: crate::protocol::clamp_system_audio_gain_db(options.system_gain_db),
         muted: false,
     });
@@ -2369,7 +2836,13 @@ pub fn attach_prepared_with(
             tracing::warn!("Session audio transport ended: {error}");
         }
         let cleanup_deadline = Instant::now() + WRITE_DEADLINE;
-        if !wait_for_producer_cleanup(&producer_count, cleanup_deadline) {
+        let carried = u64::from(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .microphone_carried,
+        );
+        if !wait_for_producer_cleanup_to(&producer_count, carried, cleanup_deadline) {
             tracing::warn!(
                 "Microphone owner remains quarantined after 5s; next session admission is fenced until actual close."
             );
@@ -2733,6 +3206,7 @@ fn ingest_pending(
     placement: Placement,
     delay_frames: u64,
     stats: &AudioCaptureStats,
+    totals: &AudioCaptureStats,
     activity: &mut SourceActivity,
 ) -> bool {
     let epoch = placement.epoch;
@@ -2769,6 +3243,15 @@ fn ingest_pending(
                     timeline.losses.discarded_duplicate += frames;
                     continue;
                 };
+                // Capture health follows valid source delivery, even when output
+                // placement drops PCM during a stall. Never use the processed
+                // meter to diagnose a silent or permission-blocked device.
+                let peak = frame
+                    .samples
+                    .iter()
+                    .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+                stats.record_capture_evidence(frame.frame_count() as u64, peak);
+                totals.record_capture_evidence(frame.frame_count() as u64, peak);
                 match timeline.push_outcome(generation, start, resample_frame(frame, frames)) {
                     PushOutcome::Placed => {
                         activity.placed = now;
@@ -3153,11 +3636,27 @@ struct MixFixtureGateState {
     armed: bool,
     rendered: u64,
     delivered: [u64; 2],
+    /// Frames past the rendered chunk every source must also have sent.
+    lookahead: u64,
     failure: Option<String>,
 }
 
 #[cfg(test)]
 impl MixFixtureGate {
+    /// A microphone-only fixture with noise reduction on: render also waits
+    /// for the model's lookahead, which the bus reads past the chunk.
+    fn microphone_with_denoise_lookahead() -> Self {
+        Self {
+            state: std::sync::Mutex::new(MixFixtureGateState {
+                // No system source feeds this fixture; never wait for one.
+                delivered: [0, u64::MAX],
+                lookahead: crate::microphone_denoise::DELAY_SAMPLES as u64,
+                ..Default::default()
+            }),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
     fn arm(&self) {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).armed = true;
         self.changed.notify_all();
@@ -3203,8 +3702,9 @@ impl MixFixtureGate {
     }
 
     fn permit_packet(&self, end: u64, stop: &AtomicBool) -> io::Result<bool> {
-        // More than the next complete 480-frame chunk plus either fixture's
-        // 512/960-frame packet, but far below the production one-second cap.
+        // More than the next complete 480-frame chunk, the 960-frame noise
+        // reduction lookahead and either fixture's 512/960-frame packet, but
+        // far below the production one-second cap.
         self.wait_for(stop, None, |state| {
             state.armed && end <= state.rendered + 4096
         })
@@ -3235,7 +3735,7 @@ impl MixFixtureGate {
                 && state
                     .delivered
                     .iter()
-                    .all(|end| *end >= cursor + CHUNK_FRAMES as u64)
+                    .all(|end| *end >= cursor + CHUNK_FRAMES as u64 + state.lookahead)
         })?;
         Ok(())
     }
@@ -4479,6 +4979,7 @@ impl SystemAudioHandle {
     /// the microphone gain). Clamped to the shared -24..=+12 dB range.
     pub fn set_gain_db(&self, gain_db: f32) {
         self.settings.update(AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: crate::protocol::clamp_system_audio_gain_db(gain_db),
             muted: false,
         });
@@ -5064,8 +5565,15 @@ fn run_bus(
     let mut system_retired = Vec::new();
     let shared = context.shared;
     let sound_commands = context.sound_commands;
+    // Held here, not in the loop, so it outlives every exit of the loop (a
+    // killed FFmpeg ends it with a write error) and can travel with a carried
+    // microphone (#1068).
+    let mut receiver = producer
+        .as_mut()
+        .and_then(|producer| producer.receiver.take());
     let result = run_bus_owned(
         &mut producer,
+        &mut receiver,
         path,
         video_epoch,
         commands,
@@ -5095,9 +5603,17 @@ fn run_bus(
     while let Ok(command) = sound_commands.try_recv() {
         refuse_sound_command(command);
     }
-    if let Some(producer) = producer {
+    if let Some(producer) = producer
+        && let Some(producer) = carry_microphone(producer, receiver.take(), shared)
+    {
         retired.push(producer.retire());
     }
+    // An offer the bus could not take up (the microphone already left on its
+    // retire list, or never matched) must not outlive it.
+    shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .microphone_handover = None;
     for completion in retired {
         if matches!(
             completion.closed.try_recv(),
@@ -5129,6 +5645,7 @@ fn cancel_drain_observation(observe: &mut Option<OutputObservation>) {
 
 fn retire_draining_sources(
     producer: &mut Option<ManagedProducer>,
+    receiver: &mut Option<mpsc::Receiver<AudioFrame>>,
     pending: &mut Option<PendingHandoff>,
     commands: &mpsc::Receiver<AudioSwitchCommand>,
     shared: &std::sync::Mutex<AudioShared>,
@@ -5144,9 +5661,14 @@ fn retire_draining_sources(
             .push((id, completion.state.clone()));
         retired.push(completion);
     };
-    if let Some(owner) = producer.take() {
+    // A silent drain ends capture here; a carried microphone (#1068) leaves
+    // with its receiver for the next session instead.
+    if let Some(owner) = producer.take()
+        && let Some(owner) = carry_microphone(owner, receiver.take(), shared)
+    {
         retire(owner);
     }
+    *receiver = None;
     let mut cancel = |mut command: AudioSwitchCommand| {
         if let Some(owner) = command.candidate.take() {
             retire(owner);
@@ -5170,6 +5692,7 @@ fn retire_draining_sources(
 #[allow(clippy::too_many_arguments)]
 fn run_bus_owned(
     producer: &mut Option<ManagedProducer>,
+    receiver: &mut Option<mpsc::Receiver<AudioFrame>>,
     path: &std::path::Path,
     video_epoch: Option<Arc<OnceLock<Instant>>>,
     commands: mpsc::Receiver<AudioSwitchCommand>,
@@ -5202,14 +5725,13 @@ fn run_bus_owned(
     // Plan 189: the soundboard's voices. Idle, they render nothing and the
     // chunk takes the same microphone-only path.
     let mut sound_voices = SoundVoices::new();
+    // Issue 1064: digital silence from a live microphone, across chunks.
+    let mut silence_watchdog = MicrophoneSilenceWatchdog::default();
     let system_stats = shared
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .system_stats
         .clone();
-    let mut receiver = producer
-        .as_mut()
-        .and_then(|producer| producer.receiver.take());
     let mut producer_stats = producer.as_ref().map(|producer| producer.stats.clone());
     let mut stats = shared
         .lock()
@@ -5286,6 +5808,7 @@ fn run_bus_owned(
     let mut timeline = AudioTimeline::new().with_delay_headroom(timing.microphone_delay_frames);
     timeline.select_generation(0);
     let mut generation = 0;
+    let mut microphone_denoise = MicrophoneDenoiseTimeline::new();
     let mut pending: Option<PendingHandoff> = None;
     let mut observe: Option<OutputObservation> = None;
     let mut activity = SourceActivity::new(Instant::now());
@@ -5332,8 +5855,8 @@ fn run_bus_owned(
             // ramps out and retires on its own list at the chunk end, so a
             // closing system capture never blocks the microphone path. Stop
             // afterwards runs the bounded drain above over this silence.
-            retire_draining_sources(producer, &mut pending, &commands, shared, retired);
-            receiver = None;
+            retire_draining_sources(producer, receiver, &mut pending, &commands, shared, retired);
+            *receiver = None;
             producer_stats = None;
             timeline.select_generation(generation);
             cancel_drain_observation(&mut observe);
@@ -5415,6 +5938,7 @@ fn run_bus_owned(
                 placement,
                 timing.microphone_delay_frames,
                 &stats,
+                &totals,
                 &mut activity,
             );
             loss_reason = microphone_loss_reason(
@@ -5426,7 +5950,7 @@ fn run_bus_owned(
         }
         match loss_reason {
             Some(SourceLossReason::CaptureStopped) => {
-                receiver = None;
+                *receiver = None;
                 microphone_fault = TimelineFault::default();
                 {
                     let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
@@ -5644,7 +6168,7 @@ fn run_bus_owned(
                             retired.push(completion);
                         }
                         *producer = handoff.command.candidate.take();
-                        receiver = producer
+                        *receiver = producer
                             .as_mut()
                             .and_then(|producer| producer.receiver.take());
                         producer_stats = producer.as_ref().map(|producer| producer.stats.clone());
@@ -5656,6 +6180,7 @@ fn run_bus_owned(
                         microphone_fault = TimelineFault::default();
                         stats = Arc::new(AudioCaptureStats::default());
                         stats.reset_recording_window();
+                        timeline.record_buffered_capture_evidence(&stats, &totals);
                         if producer.is_none() {
                             stats.mark_silent();
                         } else {
@@ -5755,11 +6280,43 @@ fn run_bus_owned(
         let start = timeline.cursor();
         #[cfg(test)]
         let mix_before = MixCounterSnapshot::capture(&timeline, system.as_ref(), diagnostics);
+        let microphone_controls = settings.load();
+        let prepared = microphone_denoise.prepare_or_silence(
+            &timeline,
+            microphone_controls,
+            drain.as_ref().map(|drain| drain.target),
+            producer.is_some(),
+        );
         let mut raw = timeline.render_with_provenance();
+        // A frame noise reduction refused silences the microphone for this
+        // chunk and the stage re-syncs; nothing else on the bus notices.
+        // Reported once per episode, through the sampler like the silence
+        // watchdog's events (and claimed by the finalizer after the join).
+        if let Some(reason) = prepared.report {
+            let after_ms =
+                (stats.recording_window_elapsed_secs().unwrap_or_default() * 1_000.0) as u64;
+            let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
+            let event = MicrophoneDenoiseSilencedEvent {
+                generation,
+                device_name: shared.status.device_name.clone(),
+                after_ms,
+                reason,
+            };
+            tracing::warn!(
+                after_ms = after_ms,
+                "Noise reduction silenced microphone \"{}\": {reason}.",
+                event.device_name
+            );
+            shared.denoise_events.push_back(event);
+        }
+        let mut wet = prepared.wet;
+        let wet_captured = prepared.captured;
         if ramp_old {
+            ramp_through_zero(&mut wet, false);
             ramp_through_zero(&mut raw.samples, false);
         }
         if ramp_in {
+            ramp_through_zero(&mut wet, true);
             ramp_through_zero(&mut raw.samples, true);
         }
         let mut system_raw = system.as_mut().map(|slot| {
@@ -5786,6 +6343,11 @@ fn run_bus_owned(
                 start,
                 source_end.saturating_add(timing.microphone_delay_frames),
             );
+            silence_after_source_boundary(
+                &mut wet,
+                start,
+                source_end.saturating_add(timing.microphone_delay_frames),
+            );
             if let Some(system_raw) = system_raw.as_mut() {
                 silence_after_source_boundary(
                     &mut system_raw.samples,
@@ -5804,6 +6366,60 @@ fn run_bus_owned(
             voice_fold = VoiceFold::default();
         }
         let microphone_fold = voice_fold.plan(&raw.samples, 2);
+        // Issue 1064: the captured chunk, before the gain and mute the user
+        // controls, feeds the silence watchdog. A ramp chunk, a draining bus,
+        // a muted or absent microphone and an input that is not live are
+        // ineligible: the mute is the user's, the loss and reopen flows own
+        // the rest.
+        {
+            let (peak, captured_frames) = captured_peak(&raw);
+            let eligible = producer.is_some()
+                && !ramp_in
+                && !ramp_old
+                && !draining.load(Ordering::Acquire)
+                && !settings.load().muted
+                && stats.input_state() == NativeAudioInputState::Live;
+            if let Some(verdict) = silence_watchdog.observe(peak, captured_frames, eligible) {
+                let after_ms =
+                    (stats.recording_window_elapsed_secs().unwrap_or_default() * 1_000.0) as u64;
+                let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
+                shared.microphone_silent = silence_watchdog.is_silent();
+                let event = MicrophoneSilenceEvent {
+                    change: verdict.change(),
+                    generation,
+                    device_name: shared.status.device_name.clone(),
+                    after_ms,
+                    silent_ms: verdict.silent_ms(),
+                };
+                match event.change {
+                    MicrophoneSilenceChange::Silent => tracing::warn!(
+                        after_ms = after_ms,
+                        "Microphone \"{}\" captured only digital silence for {} ms.",
+                        event.device_name,
+                        event.silent_ms
+                    ),
+                    MicrophoneSilenceChange::Recovered => tracing::info!(
+                        after_ms = after_ms,
+                        "Microphone \"{}\" has sound again after {} ms of silence.",
+                        event.device_name,
+                        event.silent_ms
+                    ),
+                }
+                shared.silence_events.push_back(event);
+            }
+        }
+        let prepared_samples = microphone_denoise
+            .select(
+                &raw,
+                &wet,
+                &wet_captured,
+                microphone_controls,
+                microphone_fold,
+            )
+            .map(|selected| {
+                timeline.account_prepared_chunk(&mut raw, &selected.captured);
+                selected.samples
+            });
         let mixing = system_raw.is_some() || sounds_raw.is_some();
         let write_started = Instant::now();
         let mut deferred_health = Vec::new();
@@ -5815,8 +6431,15 @@ fn run_bus_owned(
                 write_stop.store(true, Ordering::Release);
             }
             if draining.load(Ordering::Acquire) {
-                retire_draining_sources(producer, &mut pending, &commands, shared, retired);
-                receiver = None;
+                retire_draining_sources(
+                    producer,
+                    receiver,
+                    &mut pending,
+                    &commands,
+                    shared,
+                    retired,
+                );
+                *receiver = None;
                 producer_stats = None;
             }
             // The FIFO reader is behind. Keep ingesting so a bursty reader
@@ -5845,6 +6468,7 @@ fn run_bus_owned(
                     placement,
                     timing.microphone_delay_frames,
                     &stats,
+                    &totals,
                     &mut activity,
                 );
             }
@@ -5869,10 +6493,11 @@ fn run_bus_owned(
                     silence.as_slice()
                 }
             };
-            write_mixed_chunk_with_clock(
+            write_prepared_mixed_chunk_with_clock(
                 &mut file,
-                &raw.samples,
+                prepared_samples.as_deref().unwrap_or(&raw.samples),
                 settings,
+                prepared_samples.is_some(),
                 microphone_fold,
                 system_samples,
                 system_settings,
@@ -5885,10 +6510,11 @@ fn run_bus_owned(
             )
             .map(ChunkOutcome::Mixed)
         } else {
-            write_chunk_with_clock(
+            write_prepared_chunk_with_clock(
                 &mut file,
-                &raw.samples,
+                prepared_samples.as_deref().unwrap_or(&raw.samples),
                 settings,
+                prepared_samples.is_some(),
                 microphone_fold,
                 limiter,
                 &write_stop,
@@ -5970,6 +6596,9 @@ fn run_bus_owned(
         timeline.account_stale_chunk(&raw, stale_from);
         if let Some(from) = stale_from {
             timeline.losses.stale_written += (CHUNK_FRAMES - from) as u64;
+            // The written suffix was intentionally silenced. Do not let its
+            // recurrent/filter history reappear in later recovered output.
+            microphone_denoise.generation = None;
         }
         #[cfg(test)]
         if ramp_old {
@@ -6136,6 +6765,230 @@ fn run_bus_owned(
     Ok(())
 }
 
+/// What the denoise stage hands the bus for one output chunk.
+struct PreparedDenoise {
+    /// The wet (denoised, gained) stereo chunk; exact zeros where the stage
+    /// silenced it.
+    wet: Vec<f32>,
+    /// Per frame: the wet sample comes from captured input.
+    captured: Vec<bool>,
+    /// A silenced episode began on this chunk: the processor's refusal, to
+    /// report once.
+    report: Option<&'static str>,
+}
+
+impl PreparedDenoise {
+    fn silent(report: Option<&'static str>) -> Self {
+        Self {
+            wet: vec![0.0; CHUNK_FRAMES * 2],
+            captured: vec![false; CHUNK_FRAMES],
+            report,
+        }
+    }
+}
+
+/// Stateful work occurs once per source interval, before any output retry.
+/// Only two future input provenance blocks are retained. Late PCM cannot
+/// replace an input that has already advanced recurrent state.
+struct MicrophoneDenoiseTimeline {
+    processor: Option<crate::microphone_denoise::RnnoiseProcessor>,
+    generation: Option<u64>,
+    expected_output: u64,
+    discarded_behind_cap: u64,
+    next_input: u64,
+    provenance: VecDeque<Vec<bool>>,
+    fold: VoiceFold,
+    wet_mix: f32,
+    /// A refusal was reported and the stage has not yet processed
+    /// [`MICROPHONE_DENOISE_EPISODE_RECOVERY`] of clean input since.
+    silenced_episode: bool,
+    /// Frames processed cleanly since the last refusal.
+    clean_frames: u64,
+}
+
+impl MicrophoneDenoiseTimeline {
+    fn new() -> Self {
+        Self {
+            processor: None,
+            generation: None,
+            expected_output: 0,
+            discarded_behind_cap: 0,
+            next_input: 0,
+            provenance: VecDeque::new(),
+            fold: VoiceFold::default(),
+            wet_mix: 0.0,
+            silenced_episode: false,
+            clean_frames: 0,
+        }
+    }
+
+    /// Never fails: a refused or failed frame silences the chunk while On and
+    /// the stage re-syncs from the next one, the way a generation change or
+    /// a discard already does. The bus, system audio and sounds never notice.
+    fn prepare_or_silence(
+        &mut self,
+        timeline: &AudioTimeline,
+        settings: AudioProcessingSettings,
+        horizon: Option<u64>,
+        producer_present: bool,
+    ) -> PreparedDenoise {
+        let enabled =
+            settings.noise_suppression == crate::protocol::MicrophoneNoiseSuppression::Rnnoise;
+        // A session that stays Off never constructs the model or runs it.
+        // The first On constructs it from the model `microphone_denoise::prewarm`
+        // parsed off this thread; once enabled, the stage retains adaptive
+        // history through subsequent bypasses.
+        let activated = self.processor.is_some() || enabled;
+        if !(activated && (producer_present || !timeline.packets.is_empty())) {
+            // Preserve any captured stop/EOF tail, but never run a model on a
+            // no-input/system-only bus, even when RNNoise remains selected.
+            self.generation = None;
+            return PreparedDenoise::silent(None);
+        }
+        match self.prepare(timeline, settings, horizon) {
+            Ok((wet, captured)) => {
+                let recovery = (MICROPHONE_DENOISE_EPISODE_RECOVERY.as_secs_f64()
+                    * f64::from(NATIVE_AUDIO_SAMPLE_RATE))
+                .round() as u64;
+                self.clean_frames = self.clean_frames.saturating_add(CHUNK_FRAMES as u64);
+                if self.clean_frames >= recovery {
+                    self.silenced_episode = false;
+                }
+                PreparedDenoise {
+                    wet,
+                    captured,
+                    report: None,
+                }
+            }
+            Err(reason) => {
+                // While On the chunk is exact zeros, never untreated audio:
+                // the model forgets the bad input and the next chunk re-syncs
+                // as after a discard. Off keeps its dry output; the reset is
+                // the whole consequence, and no episode is reported.
+                if let Some(processor) = self.processor.as_mut() {
+                    processor.reset();
+                }
+                self.generation = None;
+                self.clean_frames = 0;
+                let report = (enabled && !self.silenced_episode).then_some(reason);
+                if report.is_some() {
+                    self.silenced_episode = true;
+                }
+                PreparedDenoise::silent(report)
+            }
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        timeline: &AudioTimeline,
+        settings: AudioProcessingSettings,
+        horizon: Option<u64>,
+    ) -> Result<(Vec<f32>, Vec<bool>), &'static str> {
+        let start = timeline.cursor();
+        // Discarding queued audio leaves cursor/generation unchanged, but
+        // invalidates both consumed lookahead and recurrent/filter history.
+        if self.generation != Some(timeline.generation)
+            || self.expected_output != start
+            || self.discarded_behind_cap != timeline.losses.discarded_behind_cap
+        {
+            if let Some(processor) = self.processor.as_mut() {
+                processor.reset();
+            }
+            self.generation = Some(timeline.generation);
+            self.discarded_behind_cap = timeline.losses.discarded_behind_cap;
+            self.next_input = start;
+            self.provenance.clear();
+            self.fold = VoiceFold::default();
+        }
+        let processor = self
+            .processor
+            .get_or_insert_with(crate::microphone_denoise::RnnoiseProcessor::new);
+        let mut wet = [0.0; CHUNK_FRAMES];
+        while self.next_input <= start + crate::microphone_denoise::DELAY_SAMPLES as u64 {
+            let input = timeline.peek_source(self.next_input, horizon);
+            let gain = crate::audio::db_to_gain(settings.gain_db);
+            let fold = self.fold.plan(&input.samples, 2);
+            let mono = std::array::from_fn(|i| {
+                fold.fold(
+                    input.samples[i * 2],
+                    input.samples[i * 2 + 1],
+                    i,
+                    CHUNK_FRAMES,
+                ) * gain
+            });
+            wet = processor.process_frame(&mono)?;
+            self.provenance.push_back(input.captured);
+            self.next_input += CHUNK_FRAMES as u64;
+        }
+        self.expected_output = start + CHUNK_FRAMES as u64;
+        let captured = self
+            .provenance
+            .pop_front()
+            .expect("one prepared source interval");
+        Ok((
+            wet.iter().flat_map(|sample| [*sample, *sample]).collect(),
+            captured,
+        ))
+    }
+
+    /// Gain is already captured in the wet frame; safety mute is applied later
+    /// by the writer using the latest control value. Off steady-state bypasses
+    /// this method's output and retains the legacy writer byte for byte.
+    fn select(
+        &mut self,
+        raw: &RenderedPcm,
+        wet: &[f32],
+        wet_captured: &[bool],
+        settings: AudioProcessingSettings,
+        fold: FoldPlan,
+    ) -> Option<RenderedPcm> {
+        let enabled =
+            settings.noise_suppression == crate::protocol::MicrophoneNoiseSuppression::Rnnoise;
+        if !enabled && self.wet_mix == 0.0 {
+            return None;
+        }
+        let dry_gain = crate::audio::db_to_gain(settings.gain_db);
+        let direction = if enabled { 1.0 } else { -1.0 };
+        let mut output = Vec::with_capacity(raw.samples.len());
+        let mut captured = Vec::with_capacity(raw.captured.len());
+        for (index, (dry, wet)) in raw
+            .samples
+            .chunks_exact(2)
+            .zip(wet.chunks_exact(2))
+            .enumerate()
+        {
+            self.wet_mix = (self.wet_mix + direction / RAMP_FRAMES as f32).clamp(0.0, 1.0);
+            // At full wet the dry term is zero by construction, not by
+            // multiplication: a non-finite raw sample times zero is NaN, and
+            // nothing non-finite may reach a writer, tap, meter or limiter.
+            // Mid-ramp a non-finite dry sample counts as silence for the
+            // same reason.
+            let dry = if self.wet_mix < 1.0 {
+                let dry = fold.fold(dry[0], dry[1], index, CHUNK_FRAMES)
+                    * dry_gain
+                    * (1.0 - self.wet_mix);
+                if dry.is_finite() { dry } else { 0.0 }
+            } else {
+                0.0
+            };
+            let sample = dry + wet[0] * self.wet_mix;
+            output.extend([sample, sample]);
+            // A blend is captured when either nonzero contribution comes
+            // from capture. The dry-only suffix of a bypass ramp stays real
+            // PCM even if that interval arrived too late for wet lookahead.
+            captured.push(
+                (self.wet_mix < 1.0 && raw.captured[index])
+                    || (self.wet_mix > 0.0 && wet_captured[index]),
+            );
+        }
+        Some(RenderedPcm {
+            samples: output,
+            captured,
+        })
+    }
+}
+
 enum ChunkOutcome {
     Microphone(MicrophoneWrite),
     Mixed(MixedWrite),
@@ -6163,16 +7016,48 @@ struct MicrophoneWrite {
     limiter: PeakLimiter,
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn write_chunk_with_clock(
+    file: &mut impl Write,
+    raw: &[f32],
+    settings: &AudioProcessingSettingsHandle,
+    fold: FoldPlan,
+    limiter: PeakLimiter,
+    stop: &AtomicBool,
+    draining: &AtomicBool,
+    now: impl FnMut() -> Instant,
+    wait: impl FnMut(),
+) -> io::Result<MicrophoneWrite> {
+    write_prepared_chunk_with_clock(
+        file, raw, settings, false, fold, limiter, stop, draining, now, wait,
+    )
+}
+
+/// Denoised PCM already carries the gain it was captured with; mute still
+/// follows the latest control on every write attempt.
+fn writer_controls(
+    settings: &AudioProcessingSettingsHandle,
+    prepared: bool,
+) -> AudioProcessingSettings {
+    let mut controls = settings.load();
+    if prepared {
+        controls.gain_db = 0.0;
+    }
+    controls
+}
+
 /// The microphone-only write path: the pre-mixer writer plus the peak
 /// limiter (plan 200 A2). Under the ceiling with an idle limiter the bytes
 /// are exactly the pre-mixer writer's. `fold` is planned once per chunk, so a
 /// re-render under new controls folds the chunk the same way; like the mixed
 /// path, each attempt re-limits from the limiter state at the chunk start.
 #[allow(clippy::too_many_arguments)]
-fn write_chunk_with_clock(
+fn write_prepared_chunk_with_clock(
     file: &mut impl Write,
     raw: &[f32],
     settings: &AudioProcessingSettingsHandle,
+    prepared: bool,
     fold: FoldPlan,
     limiter: PeakLimiter,
     stop: &AtomicBool,
@@ -6188,7 +7073,8 @@ fn write_chunk_with_clock(
         raw.len(),
         |from| {
             // Unclamped: the limiter, not a clamp at full scale, holds it.
-            let mut samples = fold_interleaved_f32(raw, 2, settings.load(), fold, false);
+            let mut samples =
+                fold_interleaved_f32(raw, 2, writer_controls(settings, prepared), fold, false);
             // The ingredient is clamped, as `mix_chunk` clamps it.
             for (ingredient, sample) in microphone[from..].iter_mut().zip(&samples[from..]) {
                 *ingredient = sample.clamp(-1.0, 1.0);
@@ -6232,14 +7118,14 @@ struct MixedWrite {
     limiter: PeakLimiter,
 }
 
-/// The mixed write path. Controls are re-read before every write attempt, as
-/// on the microphone path; each attempt re-mixes the whole chunk from the
-/// limiter state at the chunk start, and only the unwritten suffix changes.
+/// Retry mixing immutable prepared microphone PCM, with latest downstream mute
+/// and system controls. DSP state never advances from this callback.
 #[allow(clippy::too_many_arguments)]
-fn write_mixed_chunk_with_clock(
+fn write_prepared_mixed_chunk_with_clock(
     file: &mut impl Write,
     microphone_raw: &[f32],
     microphone_settings: &AudioProcessingSettingsHandle,
+    prepared: bool,
     microphone_fold: FoldPlan,
     system_raw: &[f32],
     system_settings: &AudioProcessingSettingsHandle,
@@ -6261,7 +7147,7 @@ fn write_mixed_chunk_with_clock(
         |from| {
             let mixed = mix_chunk(
                 microphone_raw,
-                microphone_settings.load(),
+                writer_controls(microphone_settings, prepared),
                 microphone_fold,
                 system_raw,
                 system_settings.load(),
@@ -6316,7 +7202,7 @@ fn write_rendered_chunk(
     mut wait: impl FnMut(),
 ) -> io::Result<WrittenChunk> {
     let started = now();
-    let deadline = started + WRITE_DEADLINE;
+    let deadline = started + OUTPUT_WRITE_DEADLINE;
     let mut bytes = vec![0; samples * 4];
     let mut written = 0;
     let mut stale_from = None;
@@ -6377,6 +7263,160 @@ fn write_rendered_chunk(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        MICROPHONE_SILENCE_FLOOR, MICROPHONE_SILENCE_HOLD, MicrophoneSilenceVerdict,
+        MicrophoneSilenceWatchdog,
+    };
+
+    /// Feeds the watchdog `seconds` of eligible chunks at `peak`, returning
+    /// the verdicts it raised.
+    fn feed(
+        watchdog: &mut MicrophoneSilenceWatchdog,
+        peak: f32,
+        seconds: f64,
+        eligible: bool,
+    ) -> Vec<MicrophoneSilenceVerdict> {
+        let chunks = (seconds * f64::from(super::NATIVE_AUDIO_SAMPLE_RATE)
+            / super::CHUNK_FRAMES as f64)
+            .round() as usize;
+        (0..chunks)
+            .filter_map(|_| watchdog.observe(peak, super::CHUNK_FRAMES as u64, eligible))
+            .collect()
+    }
+
+    /// Issue 1064: a 1-LSB DirectShow microphone (-90 dBFS) is reported after
+    /// the hold, once, and the report ends once sound has held.
+    #[test]
+    fn silence_watchdog_reports_digital_silence_after_the_hold_and_recovers() {
+        let mut watchdog = MicrophoneSilenceWatchdog::default();
+        let lsb = 1.0 / 32_768.0;
+        let hold = MICROPHONE_SILENCE_HOLD.as_secs_f64();
+        assert!(feed(&mut watchdog, lsb, hold - 0.1, true).is_empty());
+        assert!(!watchdog.is_silent());
+        assert_eq!(
+            feed(&mut watchdog, lsb, 0.2, true),
+            vec![MicrophoneSilenceVerdict::Silent { silent_ms: 3_000 }]
+        );
+        assert!(watchdog.is_silent());
+        // Silence goes on: reported once, never again.
+        assert!(feed(&mut watchdog, lsb, 10.0, true).is_empty());
+        // A click is not sound coming back.
+        assert!(feed(&mut watchdog, 0.3, 0.1, true).is_empty());
+        assert!(feed(&mut watchdog, lsb, 1.0, true).is_empty());
+        assert!(watchdog.is_silent());
+        // Half a second of the room is.
+        let verdicts = feed(&mut watchdog, 0.01, 0.6, true);
+        assert_eq!(verdicts.len(), 1, "{verdicts:?}");
+        assert!(matches!(
+            verdicts[0],
+            MicrophoneSilenceVerdict::Recovered { silent_ms } if silent_ms >= 14_000
+        ));
+        assert!(!watchdog.is_silent());
+        // And it can be reported again after another hold.
+        assert_eq!(feed(&mut watchdog, 0.0, hold + 0.1, true).len(), 1);
+    }
+
+    /// A quiet room is not digital silence: its floor sits above -80 dBFS.
+    #[test]
+    fn silence_watchdog_ignores_a_quiet_room() {
+        let mut watchdog = MicrophoneSilenceWatchdog::default();
+        // -70 dBFS: a very quiet room, well under the meter's floor.
+        let quiet = 3.2e-4;
+        assert!(quiet > MICROPHONE_SILENCE_FLOOR);
+        assert!(feed(&mut watchdog, quiet, 30.0, true).is_empty());
+        assert!(!watchdog.is_silent());
+        // Alternating near-silence and room noise never accumulates a hold.
+        for _ in 0..20 {
+            assert!(feed(&mut watchdog, 0.0, 2.0, true).is_empty());
+            assert!(feed(&mut watchdog, quiet, 0.05, true).is_empty());
+        }
+        assert!(!watchdog.is_silent());
+    }
+
+    /// A mute, no microphone, a lost input or a draining bus are ineligible:
+    /// they neither raise the report nor end it.
+    #[test]
+    fn silence_watchdog_skips_ineligible_chunks_and_timeline_fill() {
+        let mut watchdog = MicrophoneSilenceWatchdog::default();
+        assert!(feed(&mut watchdog, 0.0, 60.0, false).is_empty());
+        assert!(!watchdog.is_silent());
+        // Timeline fill (no captured frames) counts for nothing either way.
+        for _ in 0..1_000 {
+            assert_eq!(watchdog.observe(0.0, 0, true), None);
+        }
+        assert!(!watchdog.is_silent());
+        // A mute in the middle of a run restarts the hold.
+        assert!(feed(&mut watchdog, 0.0, 2.0, true).is_empty());
+        assert!(feed(&mut watchdog, 0.0, 1.0, false).is_empty());
+        assert!(feed(&mut watchdog, 0.0, 2.0, true).is_empty());
+        assert_eq!(feed(&mut watchdog, 0.0, 1.1, true).len(), 1);
+        assert!(watchdog.is_silent());
+        // A mute while reported silent keeps the report: unmuting into the
+        // same silence raises nothing new, and the mute never "recovers" it.
+        assert!(feed(&mut watchdog, 0.0, 5.0, false).is_empty());
+        assert!(watchdog.is_silent());
+        assert!(feed(&mut watchdog, 0.0, 5.0, true).is_empty());
+        assert!(watchdog.is_silent());
+    }
+
+    #[test]
+    fn captured_peak_reads_captured_frames_only() {
+        let raw = super::RenderedPcm {
+            samples: vec![0.5, -0.5, 0.0, 0.0, 0.0, 0.25],
+            captured: vec![false, true, true],
+        };
+        assert_eq!(super::captured_peak(&raw), (0.25, 2));
+        let fill = super::RenderedPcm {
+            samples: vec![0.9, 0.9],
+            captured: vec![false],
+        };
+        assert_eq!(super::captured_peak(&fill), (0.0, 0));
+    }
+
+    #[test]
+    fn capture_health_ignores_preroll_stale_invalid_and_duplicate_packets() {
+        let now = Instant::now();
+        let epoch = now - Duration::from_millis(100);
+        let (sender, receiver) = mpsc::channel();
+        let mut valid = frame(0.0, 480);
+        valid.timestamp_micros = 1_000_000;
+        valid.captured_at = now;
+        let mut preroll = valid.clone();
+        preroll.captured_at = epoch - Duration::from_millis(1);
+        preroll.samples.fill(0.9);
+        let mut stale = preroll.clone();
+        stale.captured_at = now - MAX_FRAME_AGE - Duration::from_secs(1);
+        let mut invalid = valid.clone();
+        invalid.samples[0] = f32::NAN;
+        let mut duplicate = valid.clone();
+        duplicate.samples.fill(0.9);
+        for packet in [preroll, stale, invalid, valid, duplicate] {
+            sender.send(packet).unwrap();
+        }
+        let mut timeline = AudioTimeline::new();
+        let stats = AudioCaptureStats::default();
+        let totals = AudioCaptureStats::default();
+        ingest_pending(
+            &receiver,
+            &mut timeline,
+            &mut None,
+            0,
+            Placement {
+                epoch,
+                playout_delay: PLAYOUT_DELAY,
+                output_behind: false,
+            },
+            0,
+            &stats,
+            &totals,
+            &mut SourceActivity::new(now),
+        );
+        assert_eq!(stats.received_capture_frames(), 480);
+        assert_eq!(stats.capture_session_peak(), 0.0);
+        assert_eq!(totals.received_capture_frames(), 480);
+        assert_eq!(totals.capture_session_peak(), 0.0);
+    }
+
     #[test]
     fn arriving_microphone_frames_rejected_by_timeline_are_not_callback_loss() {
         let now = Instant::now();
@@ -6413,8 +7453,12 @@ mod tests {
             },
             0,
             &stats,
+            &AudioCaptureStats::default(),
             &mut activity,
         ));
+        assert_eq!(stats.received_capture_frames(), 480);
+        assert_eq!(stats.capture_session_peak(), 0.25);
+        assert_eq!(stats.captured_frames(), 0);
         assert_eq!(timeline.losses().dropped_ahead_of_cap, 480);
         assert_eq!(timeline.losses().dropped_output_behind, 0);
         assert_eq!(activity.placed, old);
@@ -6819,6 +7863,7 @@ mod tests {
                 };
                 self.bytes.extend_from_slice(&bytes[..count]);
                 self.settings.update(AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 6.0,
                     muted: true,
                 });
@@ -6829,6 +7874,7 @@ mod tests {
             }
         }
         let settings = AudioProcessingSettingsHandle::new(AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 6.0,
             muted: false,
         });
@@ -6928,7 +7974,7 @@ mod tests {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now.get(),
-            || now.set(now.get() + WRITE_DEADLINE),
+            || now.set(now.get() + OUTPUT_WRITE_DEADLINE),
         );
         assert_eq!(result.err().unwrap().kind(), io::ErrorKind::TimedOut);
         assert!(writer.bytes.is_empty());
@@ -6952,6 +7998,56 @@ mod tests {
         assert!(writer.bytes.is_empty());
     }
 
+    /// Ogre, 2026-11-06 (`smoke:multistream-endurance` session B): FFmpeg
+    /// frozen for six seconds stopped reading the session audio. The video
+    /// writers waited it out; the audio gave up at five seconds and FFmpeg
+    /// later died on `apad` silence. The chunk now waits as long as the video
+    /// and goes out as stale silence once the reader drains again.
+    #[test]
+    fn a_six_second_freeze_is_waited_out_as_stale_silence() {
+        struct FrozenUntil<'a> {
+            bytes: Vec<u8>,
+            now: &'a std::cell::Cell<Instant>,
+            resume_at: Instant,
+        }
+        impl Write for FrozenUntil<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.now.get() < self.resume_at {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let started = Instant::now();
+        let now = std::cell::Cell::new(started);
+        let settings = AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
+        let mut writer = FrozenUntil {
+            bytes: vec![],
+            now: &now,
+            resume_at: started + Duration::from_secs(6),
+        };
+        let written = write_chunk_with_clock(
+            &mut writer,
+            &[0.8; 960],
+            &settings,
+            FoldPlan::one_shot(&[0.8; 960], 2),
+            PeakLimiter::default(),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            || now.get(),
+            || now.set(now.get() + Duration::from_millis(10)),
+        )
+        .expect("a six-second freeze is a stall the session waits out")
+        .written;
+        assert_eq!(writer.bytes.len(), 960 * 4);
+        assert!(written.samples.iter().all(|sample| *sample == 0.0));
+        assert_eq!(written.stale_from, Some(0));
+    }
+
     #[test]
     fn silent_drain_overrides_late_unmute_and_preserves_partial_pcm_frame() {
         struct Partial<'a> {
@@ -6969,6 +8065,7 @@ mod tests {
                 self.bytes.extend_from_slice(&bytes[..count]);
                 self.draining.store(true, Ordering::Release);
                 self.settings.update(AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 24.0,
                     muted: false,
                 });
@@ -7170,6 +8267,7 @@ mod tests {
                     let captured = session.stats().captured_frames();
                     let elapsed = session.stats().recording_window_elapsed_secs();
                     session.update_processing_settings(AudioProcessingSettings {
+                        noise_suppression: Default::default(),
                         gain_db: 24.0,
                         muted: false,
                     });
@@ -7282,19 +8380,274 @@ mod tests {
         assert_eq!(count.load(Ordering::Acquire), 0);
     }
 
+    /// A FIFO with a reader that forwards each chunk's samples until
+    /// `close` is set or the writer closes.
+    fn handover_pcm_reader(
+        tag: &str,
+    ) -> (
+        PathBuf,
+        Arc<AtomicBool>,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
+        thread::JoinHandle<()>,
+    ) {
+        use std::io::Read;
+        let path = crate::audio::native_audio_fifo_path(&format!(
+            "handover-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        crate::audio::create_native_audio_fifo(&path).unwrap();
+        let reader_path = path.clone();
+        let close = Arc::new(AtomicBool::new(false));
+        let reader_close = close.clone();
+        let (chunks, received) = tokio::sync::mpsc::unbounded_channel();
+        let reader = thread::spawn(move || {
+            let Ok(mut file) = std::fs::File::open(reader_path) else {
+                return;
+            };
+            while !reader_close.load(Ordering::Acquire) {
+                let mut bytes = [0_u8; CHUNK_FRAMES * 8];
+                if file.read_exact(&mut bytes).is_err() {
+                    break;
+                }
+                let samples = bytes
+                    .chunks_exact(4)
+                    .map(|value| f32::from_le_bytes(value.try_into().unwrap()))
+                    .collect();
+                let _ = chunks.send(samples);
+            }
+        });
+        (path, close, received, reader)
+    }
+
+    async fn await_captured_pcm(received: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let samples = received.recv().await.expect("reader ended before PCM");
+                if samples.iter().all(|sample| *sample > 0.1) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("captured PCM");
+    }
+
+    /// #1068: a Clips session that ends with a hand-over offered parks its
+    /// running microphone instead of closing it, on every way a bus ends, and
+    /// the next session's bus records from it without reopening anything.
+    #[tokio::test]
+    async fn a_carried_microphone_outlives_its_bus_and_feeds_the_next_session() {
+        const MIC: &str = "microphone:dshow:Test Mic";
+        for exit in ["stop", "silent-drain", "reader-exit"] {
+            let slot = Arc::new(MicrophoneHandover::default());
+            let count = Arc::new(AtomicU64::new(0));
+            let producer = paced_test_producer(MIC, 0.5, count.clone(), None).await;
+            let mut completion = producer.completion.as_ref().unwrap().state.clone();
+            let (path, close_reader, mut received, reader) = handover_pcm_reader("clips");
+            let clips = attach_prepared(
+                Some(InitialAudioSource {
+                    source: InitialInput::Owned {
+                        producer,
+                        count: count.clone(),
+                    },
+                }),
+                path,
+                None,
+                AudioProcessingSettings::default(),
+                Duration::from_secs(1),
+            );
+            await_captured_pcm(&mut received).await;
+            assert!(
+                !clips.offer_microphone_handover(&slot, "microphone:dshow:Other"),
+                "{exit}: offered a microphone the next session does not open"
+            );
+            assert!(clips.offer_microphone_handover(&slot, MIC), "{exit}");
+            match exit {
+                "stop" => clips.request_stop(),
+                "silent-drain" => assert!(clips.request_silent_drain()),
+                _ => close_reader.store(true, Ordering::Release),
+            }
+            let ended = Instant::now();
+            drop(clips);
+            // The writer does not wait out its 5 s quarantine for a producer
+            // it handed on.
+            assert!(
+                ended.elapsed() < Duration::from_secs(3),
+                "{exit}: bus end waited {:?}",
+                ended.elapsed()
+            );
+            close_reader.store(true, Ordering::Release);
+            reader.join().unwrap();
+            assert_eq!(
+                *completion.borrow(),
+                ProducerCompletion::Running,
+                "{exit}: the carried microphone closed"
+            );
+            assert_eq!(count.load(Ordering::Acquire), 1, "{exit}");
+            assert_eq!(slot.owned_producer_count(), 1, "{exit}");
+            assert!(slot.take("microphone:dshow:Other").is_none(), "{exit}");
+            let carried = slot.take(MIC).expect("carried microphone");
+            assert_eq!(slot.owned_producer_count(), 0, "{exit}");
+
+            let (path, close_reader, mut received, reader) = handover_pcm_reader("record");
+            let record = attach_prepared(
+                Some(carried),
+                path,
+                None,
+                AudioProcessingSettings::default(),
+                Duration::from_secs(1),
+            );
+            await_captured_pcm(&mut received).await;
+            assert_eq!(record.status().device_id.as_deref(), Some(MIC), "{exit}");
+            drop(record);
+            close_reader.store(true, Ordering::Release);
+            reader.join().unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while *completion.borrow() == ProducerCompletion::Running {
+                    completion.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("the next session closes the carried microphone");
+            assert_eq!(*completion.borrow(), ProducerCompletion::Closed, "{exit}");
+            assert_eq!(count.load(Ordering::Acquire), 0, "{exit}");
+        }
+    }
+
+    /// A window that closed before the bus ended (the new session failed or
+    /// gave up waiting) gets nothing: the bus closes its microphone as it
+    /// always did, and nothing is left open.
+    #[tokio::test]
+    async fn a_closed_handover_window_closes_the_microphone_with_its_bus() {
+        const MIC: &str = "microphone:dshow:Test Mic";
+        let slot = Arc::new(MicrophoneHandover::default());
+        let count = Arc::new(AtomicU64::new(0));
+        let producer = paced_test_producer(MIC, 0.5, count.clone(), None).await;
+        let mut completion = producer.completion.as_ref().unwrap().state.clone();
+        let (path, close_reader, mut received, reader) = handover_pcm_reader("closed");
+        let clips = attach_prepared(
+            Some(InitialAudioSource {
+                source: InitialInput::Owned {
+                    producer,
+                    count: count.clone(),
+                },
+            }),
+            path,
+            None,
+            AudioProcessingSettings::default(),
+            Duration::from_secs(1),
+        );
+        await_captured_pcm(&mut received).await;
+        assert!(clips.offer_microphone_handover(&slot, MIC));
+        assert!(!slot.close(), "nothing carried yet");
+        drop(clips);
+        close_reader.store(true, Ordering::Release);
+        reader.join().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *completion.borrow() == ProducerCompletion::Running {
+                completion.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the microphone closes with its bus");
+        assert_eq!(*completion.borrow(), ProducerCompletion::Closed);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert_eq!(slot.owned_producer_count(), 0);
+        assert!(slot.take(MIC).is_none());
+    }
+
+    /// A carried microphone the new session never took (it opened another
+    /// device, or failed before the microphone) closes with the window.
+    #[tokio::test]
+    async fn an_unclaimed_carried_microphone_closes_with_the_window() {
+        const MIC: &str = "microphone:dshow:Test Mic";
+        let slot = Arc::new(MicrophoneHandover::default());
+        let count = Arc::new(AtomicU64::new(0));
+        let producer = paced_test_producer(MIC, 0.5, count.clone(), None).await;
+        let mut completion = producer.completion.as_ref().unwrap().state.clone();
+        let (path, close_reader, mut received, reader) = handover_pcm_reader("unclaimed");
+        let clips = attach_prepared(
+            Some(InitialAudioSource {
+                source: InitialInput::Owned {
+                    producer,
+                    count: count.clone(),
+                },
+            }),
+            path,
+            None,
+            AudioProcessingSettings::default(),
+            Duration::from_secs(1),
+        );
+        await_captured_pcm(&mut received).await;
+        assert!(clips.offer_microphone_handover(&slot, MIC));
+        drop(clips);
+        close_reader.store(true, Ordering::Release);
+        reader.join().unwrap();
+        assert_eq!(slot.owned_producer_count(), 1);
+        assert_eq!(*completion.borrow(), ProducerCompletion::Running);
+        assert!(slot.close(), "the window dropped the carried microphone");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *completion.borrow() == ProducerCompletion::Running {
+                completion.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the unclaimed microphone closes");
+        assert_eq!(*completion.borrow(), ProducerCompletion::Closed);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert_eq!(slot.owned_producer_count(), 0);
+    }
+
     #[cfg(unix)]
     #[test]
     fn absent_input_keeps_one_pipe_open_with_truthful_silence_through_stop() {
         use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
         let path =
             std::env::temp_dir().join(format!("videorc-silent-bus-{}.fifo", uuid::Uuid::new_v4()));
         crate::fifo::create(&path).unwrap();
-        let reader_path = path.clone();
+        // macOS can leave a blocking FIFO read parked after every writer
+        // closes. Open nonblocking before attach, and explicitly signal when
+        // SessionAudio Drop has finished instead of relying on EOF wakeup.
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let writer_stopped = Arc::new(AtomicBool::new(false));
+        let reader_stop = writer_stopped.clone();
+        let (reader_finished, finished) = mpsc::sync_channel(1);
         let reader = thread::spawn(move || {
-            let mut file = std::fs::File::open(reader_path).unwrap();
-            let mut bytes = vec![];
-            file.read_to_end(&mut bytes).unwrap();
-            bytes
+            let result = (|| -> io::Result<Vec<u8>> {
+                let mut bytes = vec![];
+                let mut buffer = [0_u8; 16_384];
+                loop {
+                    // Read the flag before the read: an empty read that
+                    // follows a stop the writer had already signalled means
+                    // every byte it wrote has been drained.
+                    let stopped = reader_stop.load(Ordering::Acquire);
+                    match file.read(&mut buffer) {
+                        Ok(0) => {
+                            if stopped {
+                                return Ok(bytes);
+                            }
+                        }
+                        Ok(count) => {
+                            bytes.extend_from_slice(&buffer[..count]);
+                            continue;
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if stopped {
+                                return Ok(bytes);
+                            }
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error) => return Err(error),
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+            })();
+            let _ = reader_finished.send(result);
         });
         let session = attach(
             None,
@@ -7308,17 +8661,27 @@ mod tests {
             thread::yield_now();
         }
         let status = session.status();
+        let input_before_stop = session.input_state();
+        session.request_stop();
+        let input_after_stop = session.input_state();
+        let selected_after_stop = session.has_selected_input();
+        let loss_after_stop = session.claim_source_loss_event();
+        drop(session);
+        writer_stopped.store(true, Ordering::Release);
+        let bytes = finished
+            .recv_timeout(Duration::from_secs(2))
+            .expect("owned FIFO reader finishes after writer stop")
+            .expect("FIFO read succeeds");
+        reader.join().unwrap();
+        // Assert only after both owners have closed, including failure paths.
         assert!(status.sample_cursor >= 960);
-        assert_eq!(session.input_state(), NativeAudioInputState::Silent);
+        assert_eq!(input_before_stop, NativeAudioInputState::Silent);
         assert!(!status.selected_input);
         assert_eq!(status.counters.captured_frames, 0);
         assert_eq!(status.counters.generated_frames, status.sample_cursor);
-        session.request_stop();
-        assert_eq!(session.input_state(), NativeAudioInputState::Stopped);
-        assert!(!session.has_selected_input());
-        assert_eq!(session.claim_source_loss_event(), None);
-        drop(session);
-        let bytes = reader.join().unwrap();
+        assert_eq!(input_after_stop, NativeAudioInputState::Stopped);
+        assert!(!selected_after_stop);
+        assert_eq!(loss_after_stop, None);
         assert!(bytes.len() >= 960 * 8);
         assert!(bytes.iter().all(|byte| *byte == 0));
     }
@@ -7467,6 +8830,15 @@ mod tests {
         assert!(handoff.ready());
         assert_eq!(handoff.pcm.counters.discarded_frames, 240);
         assert!(handoff.pcm.packets.iter().all(|packet| packet.start >= 960));
+        let committed = AudioCaptureStats::default();
+        let totals = AudioCaptureStats::default();
+        handoff
+            .pcm
+            .record_buffered_capture_evidence(&committed, &totals);
+        assert_eq!(committed.received_capture_frames(), 560);
+        assert_eq!(committed.capture_session_peak(), 0.8);
+        assert_eq!(totals.received_capture_frames(), 560);
+        assert_eq!(totals.capture_session_peak(), 0.8);
         let chunk = handoff.pcm.render_chunk();
         assert_eq!(&chunk[..120], &vec![-0.8; 120]);
         assert_eq!(&chunk[120..], &vec![0.7; 840]);
@@ -7861,6 +9233,7 @@ mod tests {
             0.8,
             false,
             Some(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: -3.0,
                 muted: true,
             }),
@@ -7869,6 +9242,7 @@ mod tests {
         .0
         .unwrap();
         session.update_processing_settings(AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: -3.0,
             muted: false,
         });
@@ -7966,6 +9340,11 @@ mod tests {
         );
         assert!(observation.captured_frames >= 960);
         assert!(observation.session_peak >= 0.39);
+        assert!(observation.capture_session_peak >= 0.39);
+        assert!(observation.received_capture_frames > 0);
+        let removed = session.observation(false);
+        assert_eq!(removed.capture_session_peak, 0.0);
+        assert_eq!(removed.received_capture_frames, 0);
         let count = session.handle.producer_count.clone();
         drop(session);
         assert_eq!(count.load(Ordering::Acquire), 0);
@@ -9331,6 +10710,7 @@ mod mix_tests {
 
     fn fixture_settings() -> AudioProcessingSettings {
         AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 3.0,
             muted: false,
         }
@@ -10201,6 +11581,282 @@ mod mix_tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rnnoise_capture_health_stays_raw_while_output_is_suppressed() {
+        use crate::protocol::MicrophoneNoiseSuppression;
+        for (mode, gain_db, muted, amplitude) in [
+            (MicrophoneNoiseSuppression::Rnnoise, 0.0, false, 0.001),
+            (MicrophoneNoiseSuppression::Off, -24.0, false, 0.001),
+            (MicrophoneNoiseSuppression::Off, 0.0, true, 0.001),
+            (MicrophoneNoiseSuppression::Rnnoise, 0.0, false, 0.0),
+        ] {
+            let epoch = Instant::now() + Duration::from_millis(100);
+            // A second past the observation, so a gated render never waits
+            // for a packet the fixture does not have.
+            let packets = signal_packets(epoch, 0, 96_000, 480, |position| {
+                let sample =
+                    amplitude * (std::f32::consts::TAU * 1000.0 * position as f32 / 48_000.0).sin();
+                (sample, sample)
+            });
+            let settings = AudioProcessingSettings {
+                gain_db,
+                muted,
+                noise_suppression: mode,
+            };
+            let bus = if amplitude == 0.0 {
+                start_bus(epoch, Some(packets), settings, system_options()).await
+            } else {
+                // RNNoise reads two 10 ms frames past the chunk it renders. A
+                // fixture thread that sends both late hands the model
+                // zero-filled input, and after that silence it passes the
+                // tone's return at about unity gain, which this meter reads
+                // as 0.001. Render waits for the lookahead instead.
+                let options = SessionAudioOptions::default();
+                let mut observation = MixTestObservation::new(epoch, options.playout_delay);
+                observation.fixture_gate =
+                    Some(Arc::new(MixFixtureGate::microphone_with_denoise_lookahead()));
+                start_bus_observed(
+                    epoch,
+                    Some(packets),
+                    settings,
+                    options,
+                    None,
+                    Some(Arc::new(std::sync::Mutex::new(observation))),
+                )
+                .await
+            };
+            if amplitude == 0.0 {
+                let system = bus.session.system_audio();
+                let producer = prepare_system(
+                    &system,
+                    signal_packets(epoch, 0, 48_000, 960, |_| (0.2, -0.2)),
+                    quiet_failure(),
+                )
+                .await;
+                bus.session.attach_system(producer).await.unwrap();
+            }
+            bus.wait_for_frames(36_000).await;
+            let live = bus.session.observation(false);
+            let finalizing = bus.session.observation(true);
+            let (bytes, _) = bus.finish();
+            assert!(live.received_capture_frames >= 36_000, "{live:?}");
+            assert_eq!(live.capture_session_peak, amplitude, "{live:?}");
+            assert_eq!(finalizing.capture_session_peak, amplitude, "{finalizing:?}");
+            assert!(finalizing.received_capture_frames >= live.received_capture_frames);
+            assert!(
+                live.session_peak < 0.001,
+                "mode={mode:?}: processed meter remains quiet: {live:?}"
+            );
+            // Match the observation window. Stop drains later model output,
+            // which is not part of the health snapshot asserted above.
+            let samples = decode(&bytes);
+            let output_peak = samples[..36_000 * 2]
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+            if amplitude == 0.0 {
+                assert!(output_peak > 0.1, "system audio must be present");
+            } else {
+                assert!(output_peak < 0.001, "mode={mode:?}, peak={output_peak}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rnnoise_paced_stall_recovers_microphone_and_system_without_old_history() {
+        for mixed in [false, true] {
+            let epoch = Instant::now() + Duration::from_millis(100);
+            let voice = crate::echo_guard::fixtures::speech(15.0, 17, 0.4);
+            let microphone = signal_packets(epoch, 0, 48_000 * 15, 480, |i| (voice[i], voice[i]));
+            let (bus, _) = start_observed_bus(
+                epoch,
+                Some(microphone),
+                AudioProcessingSettings {
+                    noise_suppression: crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+                    ..Default::default()
+                },
+                if mixed {
+                    system_options()
+                } else {
+                    SessionAudioOptions::default()
+                },
+                Some((72_000, Duration::from_secs(3))),
+            )
+            .await;
+            let system = bus.session.system_audio();
+            if mixed {
+                let producer = prepare_system(
+                    &system,
+                    signal_packets(epoch, 0, 48_000 * 15, 960, |_| (0.1, -0.1)),
+                    quiet_failure(),
+                )
+                .await;
+                bus.session.attach_system(producer).await.unwrap();
+            }
+            let (losses, stalls, state, caught_up) = observe_until_stall_reported(&bus).await;
+            bus.wait_for_frames(caught_up + 96_000).await;
+            assert!(bus.session.microphone_owner_present());
+            if mixed {
+                assert!(system.observation().attached);
+                assert_eq!(system.claim_loss(), None);
+            }
+            let (bytes, status) = bus.finish();
+            let samples = decode(&bytes);
+            assert!(losses.is_empty());
+            assert_eq!(state, NativeAudioInputState::Live);
+            assert!(!stalls.is_empty());
+            assert!(
+                status.counters.generated_frames > 4800,
+                "stale output becomes generated silence"
+            );
+            // RNNoise strongly attenuates this synthetic voice. Require real
+            // output above float cancellation residue, not a quality score.
+            let before_peak = samples[..72_000 * 2]
+                .chunks_exact(2)
+                .map(|frame| ((frame[0] + frame[1]) * 0.5).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                before_peak > 1e-5,
+                "processed microphone is audible before stall: {before_peak}"
+            );
+            let recovered = &samples[(caught_up + 48_000) * 2..(caught_up + 96_000) * 2];
+            let microphone_peak = recovered
+                .chunks_exact(2)
+                .map(|frame| ((frame[0] + frame[1]) * 0.5).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                microphone_peak > 1e-5,
+                "fresh processed microphone recovers: {microphone_peak}"
+            );
+            for frame in recovered.chunks_exact(2) {
+                let expected_difference = if mixed { 0.2 } else { 0.0 };
+                assert!(
+                    (frame[0] - frame[1] - expected_difference).abs() < 1e-5,
+                    "system stereo contribution survives recovery"
+                );
+            }
+        }
+    }
+
+    /// Frames noise reduction refuses (65.0, past the +36 dBFS headroom)
+    /// while it is On: the bus keeps running, system audio keeps flowing,
+    /// the microphone is exact zeros over that stretch and not counted as
+    /// captured, nothing non-finite is written, the model recovers, and one
+    /// event reports each episode (a refusal within a second of the last
+    /// is the same episode).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rnnoise_refused_frames_silence_the_microphone_and_keep_the_bus_running() {
+        const FIRST: usize = 48_000;
+        const SECOND: usize = 120_000;
+        const THIRD: usize = 134_400;
+        const BURST: usize = 4_800;
+        let bad = |position: usize| {
+            (FIRST..FIRST + BURST).contains(&position)
+                || (SECOND..SECOND + BURST).contains(&position)
+                || (THIRD..THIRD + BURST).contains(&position)
+        };
+        let epoch = Instant::now() + Duration::from_millis(100);
+        let voice = crate::echo_guard::fixtures::speech(4.0, 17, 0.4);
+        let microphone = signal_packets(epoch, 0, 48_000 * 4, 480, |i| {
+            if bad(i) {
+                (65.0, 65.0)
+            } else {
+                (voice[i], voice[i])
+            }
+        });
+        let bus = start_bus(
+            epoch,
+            Some(microphone),
+            AudioProcessingSettings {
+                noise_suppression: crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+                ..Default::default()
+            },
+            system_options(),
+        )
+        .await;
+        let system = bus.session.system_audio();
+        system.set_echo_guard(false);
+        let producer = prepare_system(
+            &system,
+            signal_packets(epoch, 0, 48_000 * 4, 960, |_| (0.1, -0.1)),
+            quiet_failure(),
+        )
+        .await;
+        bus.session.attach_system(producer).await.unwrap();
+        bus.wait_for_frames(THIRD + BURST + 24_000).await;
+        let live = bus.session.observation(false);
+        assert!(
+            system.observation().attached,
+            "system audio stays in the mix"
+        );
+        assert!(bus.session.microphone_owner_present());
+        let (bytes, status) = bus.finish();
+        let samples = decode(&bytes);
+        assert_eq!(live.input_state, NativeAudioInputState::Live);
+        assert_eq!(
+            live.denoise_events.len(),
+            2,
+            "one event per episode: {:?}",
+            live.denoise_events
+        );
+        assert!(
+            live.denoise_events
+                .iter()
+                .all(|event| event.reason.contains("non-finite or exceeds")),
+            "{:?}",
+            live.denoise_events
+        );
+        assert!(live.denoise_events[0].after_ms < live.denoise_events[1].after_ms);
+        assert!(
+            samples.iter().all(|sample| sample.is_finite()),
+            "nothing non-finite is written"
+        );
+        assert!(
+            status.counters.discarded_frames >= BURST as u64,
+            "silenced frames are not counted as captured: {:?}",
+            status.counters
+        );
+        let microphone = |frame: &[f32]| (frame[0] + frame[1]) * 0.5;
+        let peak_between = |from: usize, to: usize| {
+            samples[from * 2..to * 2]
+                .chunks_exact(2)
+                .map(|frame| microphone(frame).abs())
+                .fold(0.0_f32, f32::max)
+        };
+        // RNNoise strongly attenuates this synthetic voice. Require real
+        // output above float cancellation residue, not a quality score.
+        let before = peak_between(24_000, FIRST - 960);
+        assert!(
+            before > 1e-5,
+            "processed microphone before the fault: {before}"
+        );
+        // The silenced stretch: the bad hops plus the two chunks whose
+        // lookahead held the first of them. The microphone is exact zeros
+        // and the system stereo signal is written unchanged beside it.
+        for (from, to) in [
+            (FIRST - 960, FIRST + BURST),
+            (SECOND - 960, SECOND + BURST),
+            (THIRD - 960, THIRD + BURST),
+        ] {
+            for (index, frame) in samples[from * 2..to * 2].chunks_exact(2).enumerate() {
+                assert!(
+                    microphone(frame).abs() < 1e-6,
+                    "microphone is silenced at {}: {frame:?}",
+                    from + index
+                );
+                assert!(
+                    (frame[0] - frame[1] - 0.2).abs() < 1e-5,
+                    "system audio keeps flowing at {}: {frame:?}",
+                    from + index
+                );
+            }
+        }
+        let recovered = peak_between(FIRST + BURST + 24_000, SECOND - 960);
+        assert!(
+            recovered > 1e-5,
+            "fresh processed microphone recovers: {recovered}"
+        );
+    }
+
     /// The same stall with system audio mixed: neither source is lost, and
     /// both are back after it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10811,6 +12467,7 @@ mod mix_tests {
             epoch,
             Some(microphone),
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 12.0,
                 muted: false,
             },
@@ -12145,12 +13802,14 @@ mod mix_tests {
         let mixed = mix_chunk(
             &stereo(0.2, 0.1, 480),
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: -6.0,
                 muted: false,
             },
             FoldPlan::one_shot(&stereo(0.2, 0.1, 480), 2),
             &stereo(0.3, -0.1, 480),
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 6.0,
                 muted: false,
             },
@@ -12165,6 +13824,7 @@ mod mix_tests {
                 &stereo(0.2, 0.1, 480),
                 2,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: -6.0,
                     muted: false
                 }
@@ -12186,6 +13846,7 @@ mod mix_tests {
         let muted_mic = mix_chunk(
             &stereo(0.4, 0.4, 480),
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 0.0,
                 muted: true,
             },
@@ -12203,6 +13864,7 @@ mod mix_tests {
             FoldPlan::one_shot(&stereo(0.4, 0.4, 480), 2),
             &stereo(0.3, 0.2, 480),
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 0.0,
                 muted: true,
             },
@@ -12294,6 +13956,7 @@ mod mix_tests {
     fn a_mic_under_the_ceiling_writes_exactly_the_unlimited_bytes() {
         // +3 dB on a 0.6 tone peaks at 0.85, under the 0.891 ceiling.
         let settings = AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 3.0,
             muted: false,
         };
@@ -12314,6 +13977,7 @@ mod mix_tests {
         let (muted, _, _) = write_mic_only(
             &raw,
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 3.0,
                 muted: true,
             },
@@ -12326,6 +13990,7 @@ mod mix_tests {
                     chunk,
                     2,
                     AudioProcessingSettings {
+                        noise_suppression: Default::default(),
                         gain_db: 3.0,
                         muted: true,
                     },
@@ -12343,6 +14008,7 @@ mod mix_tests {
         // +12 dB on a 0.5 tone peaks near 2.0: the old path clamped it at
         // full scale, flat-topping every peak.
         let settings = AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 12.0,
             muted: false,
         };
@@ -12368,6 +14034,7 @@ mod mix_tests {
         // signal whether or not anything is mixed: the clamped ingredient,
         // not the limited output.
         let settings = AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 12.0,
             muted: false,
         };
@@ -12622,5 +14289,554 @@ mod mix_tests {
             "one system producer at a time"
         );
         assert_eq!(microphone.load(Ordering::Acquire), 2);
+    }
+}
+
+#[cfg(test)]
+mod rnnoise_bus_tests {
+    use super::*;
+    use crate::protocol::MicrophoneNoiseSuppression;
+
+    fn timeline(samples: &[f32]) -> AudioTimeline {
+        let mut timeline = AudioTimeline::new();
+        assert!(timeline.push(0, 0, frame(samples)));
+        timeline
+    }
+    fn frame(samples: &[f32]) -> AudioFrame {
+        AudioFrame {
+            timestamp_micros: 0,
+            captured_at: Instant::now(),
+            sample_rate: 48000,
+            channels: 2,
+            samples: samples.iter().flat_map(|s| [*s, *s]).collect(),
+        }
+    }
+    fn controls(gain_db: f32) -> AudioProcessingSettings {
+        AudioProcessingSettings {
+            gain_db,
+            muted: false,
+            noise_suppression: MicrophoneNoiseSuppression::Rnnoise,
+        }
+    }
+    fn signal(length: usize) -> Vec<f32> {
+        (0..length)
+            .map(|i| (i as f32 * 0.071).sin() * 0.12)
+            .collect()
+    }
+
+    /// Queues `input` as the next source hop (two hops ahead of the cursor,
+    /// as the bus's playout headroom keeps it), prepares the chunk at the
+    /// cursor and renders it. The prepare consumes the hop just queued.
+    fn hop(
+        timeline: &mut AudioTimeline,
+        stage: &mut MicrophoneDenoiseTimeline,
+        next: &mut u64,
+        input: &[f32],
+        settings: AudioProcessingSettings,
+    ) -> PreparedDenoise {
+        assert!(timeline.push(0, *next, frame(input)));
+        *next += input.len() as u64;
+        let prepared = stage.prepare_or_silence(timeline, settings, None, true);
+        timeline.render_with_provenance();
+        prepared
+    }
+
+    /// A frame the processor refuses (NaN here, a frame past the headroom
+    /// below) silences that chunk with exact zeros and no captured
+    /// provenance, the stage re-syncs as after a discard, the model recovers
+    /// on clean input, and the episode is reported once until a second of
+    /// clean processing has passed.
+    #[test]
+    fn rnnoise_invalid_input_silences_the_chunk_and_reports_once_per_episode() {
+        let mut timeline = AudioTimeline::new();
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        stage.wet_mix = 1.0;
+        let on = controls(0.0);
+        assert!(timeline.push(0, 0, frame(&signal(960))));
+        let mut next = 960;
+        let mut peak = 0.0_f32;
+        for _ in 0..40 {
+            let prepared = hop(&mut timeline, &mut stage, &mut next, &signal(480), on);
+            assert!(prepared.report.is_none());
+            peak = prepared.wet.iter().fold(peak, |peak, s| peak.max(s.abs()));
+        }
+        assert!(peak > 0.001, "wet output before the fault: {peak}");
+
+        // `push` refuses a non-finite packet, so the corrupt hop is queued
+        // directly; the prepare reads it through the lookahead.
+        timeline.packets.push_back(QueuedPcm {
+            start: next,
+            samples: vec![f32::NAN; 960],
+        });
+        next += 480;
+        let prepared = stage.prepare_or_silence(&timeline, on, None, true);
+        timeline.render_with_provenance();
+        let reason = prepared.report.expect("the first refusal is reported");
+        assert!(reason.contains("non-finite"), "{reason}");
+        assert!(prepared.wet.iter().all(|s| *s == 0.0), "exact zeros");
+        assert!(
+            prepared.captured.iter().all(|c| !c),
+            "a silenced chunk is not captured"
+        );
+        assert!(stage.generation.is_none(), "the stage re-syncs");
+        assert!(stage.silenced_episode);
+
+        // The corrupt hop stays in the lookahead for two more chunks: still
+        // zeros, still the same episode.
+        for _ in 0..2 {
+            let prepared = hop(&mut timeline, &mut stage, &mut next, &signal(480), on);
+            assert!(prepared.report.is_none(), "one event per episode");
+            assert!(prepared.wet.iter().all(|s| *s == 0.0));
+            assert!(prepared.captured.iter().all(|c| !c));
+        }
+        // Clean input: the fresh model produces wet output again.
+        let mut peak = 0.0_f32;
+        for _ in 0..50 {
+            let prepared = hop(&mut timeline, &mut stage, &mut next, &signal(480), on);
+            assert!(prepared.report.is_none());
+            assert!(prepared.wet.iter().all(|s| s.is_finite()));
+            peak = prepared.wet.iter().fold(peak, |peak, s| peak.max(s.abs()));
+        }
+        assert!(peak > 0.001, "wet output after recovery: {peak}");
+        // A frame past the headroom half a second later is the same episode.
+        let prepared = hop(&mut timeline, &mut stage, &mut next, &[65.0; 480], on);
+        assert!(
+            prepared.report.is_none(),
+            "same episode: nothing new to say"
+        );
+        assert!(prepared.wet.iter().all(|s| *s == 0.0));
+        assert!(prepared.captured.iter().all(|c| !c));
+        for _ in 0..2 {
+            let prepared = hop(&mut timeline, &mut stage, &mut next, &signal(480), on);
+            assert!(prepared.report.is_none());
+            assert!(prepared.wet.iter().all(|s| *s == 0.0));
+        }
+        // More than a second of clean processing ends the episode.
+        for _ in 0..110 {
+            assert!(
+                hop(&mut timeline, &mut stage, &mut next, &signal(480), on)
+                    .report
+                    .is_none()
+            );
+        }
+        assert!(!stage.silenced_episode);
+        let prepared = hop(&mut timeline, &mut stage, &mut next, &[65.0; 480], on);
+        assert!(
+            prepared.report.is_some(),
+            "a refusal after a second of clean input is a new episode"
+        );
+        assert!(prepared.wet.iter().all(|s| *s == 0.0));
+    }
+
+    /// Off with the model retained: a refused frame only resets the model.
+    /// The dry chunk is written unchanged and no episode is reported.
+    #[test]
+    fn rnnoise_invalid_input_while_off_only_resets_and_keeps_the_dry_chunk() {
+        let mut timeline = AudioTimeline::new();
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        assert!(timeline.push(0, 0, frame(&signal(960))));
+        let mut next = 960;
+        for _ in 0..5 {
+            hop(
+                &mut timeline,
+                &mut stage,
+                &mut next,
+                &signal(480),
+                controls(0.0),
+            );
+        }
+        assert!(stage.processor.is_some());
+        let off = AudioProcessingSettings::default();
+        for _ in 0..5 {
+            let prepared = hop(&mut timeline, &mut stage, &mut next, &signal(480), off);
+            assert!(prepared.report.is_none());
+        }
+        assert!(timeline.push(0, next, frame(&[65.0; 480])));
+        for chunk in 0..3 {
+            let prepared = stage.prepare_or_silence(&timeline, off, None, true);
+            let raw = timeline.render_with_provenance();
+            assert!(prepared.report.is_none(), "Off reports no episode");
+            assert!(!stage.silenced_episode);
+            assert!(
+                stage.generation.is_none(),
+                "the model forgets the bad input"
+            );
+            assert!(
+                stage.processor.is_some(),
+                "the model stays warm for the next On"
+            );
+            assert!(prepared.wet.iter().all(|s| *s == 0.0));
+            let fold = FoldPlan::one_shot(&raw.samples, 2);
+            assert!(
+                stage
+                    .select(&raw, &prepared.wet, &prepared.captured, off, fold)
+                    .is_none(),
+                "the dry chunk is written as is"
+            );
+            assert!(
+                raw.captured.iter().all(|c| *c),
+                "dry provenance is untouched"
+            );
+            if chunk == 2 {
+                assert_eq!(raw.samples[0], 65.0, "the hot frame itself stays dry");
+            }
+        }
+    }
+
+    /// At full wet the dry term is zero by construction: a non-finite raw
+    /// sample never reaches the writer through `NaN * 0`.
+    #[test]
+    fn rnnoise_full_wet_select_never_multiplies_a_non_finite_dry_sample() {
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        stage.wet_mix = 1.0;
+        let raw = RenderedPcm {
+            samples: vec![f32::NAN; 960],
+            captured: vec![true; 480],
+        };
+        let wet = vec![0.0; 960];
+        let captured = vec![false; 480];
+        let fold = FoldPlan::one_shot(&[0.0; 960], 2);
+        let selected = stage
+            .select(&raw, &wet, &captured, controls(0.0), fold)
+            .unwrap();
+        assert!(selected.samples.iter().all(|s| *s == 0.0));
+        assert!(selected.captured.iter().all(|c| !c));
+    }
+
+    /// Mid-ramp the dry term still counts, but a non-finite dry sample is
+    /// silence there too.
+    #[test]
+    fn rnnoise_ramping_select_treats_a_non_finite_dry_sample_as_silence() {
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        let mut samples = vec![0.25; 960];
+        samples[0] = f32::NAN;
+        samples[1] = f32::NAN;
+        samples[200] = f32::INFINITY;
+        let raw = RenderedPcm {
+            samples,
+            captured: vec![true; 480],
+        };
+        let wet = vec![0.0; 960];
+        let captured = vec![false; 480];
+        let fold = FoldPlan::one_shot(&[0.25; 960], 2);
+        let selected = stage
+            .select(&raw, &wet, &captured, controls(0.0), fold)
+            .unwrap();
+        assert!(selected.samples.iter().all(|s| s.is_finite()));
+        assert_eq!(selected.samples[0], 0.0, "the NaN frame is silence");
+        assert!(
+            selected.samples[400] > 0.0,
+            "the ramp still carries the clean dry signal"
+        );
+    }
+
+    #[test]
+    fn rnnoise_source_indexed_output_matches_direct_dsp_and_exact_stop_horizon() {
+        let samples = signal(4807);
+        let mut timeline = timeline(&samples);
+        let mut prepared = MicrophoneDenoiseTimeline::new();
+        let mut actual = Vec::new();
+        let mut direct = crate::microphone_denoise::RnnoiseProcessor::new();
+        let mut expected = Vec::new();
+        for chunk in samples.chunks(480) {
+            let mut input = [0.0; 480];
+            for (to, from) in input.iter_mut().zip(chunk) {
+                *to = *from * crate::audio::db_to_gain(6.0);
+            }
+            expected.extend(direct.process_frame(&input).unwrap());
+        }
+        for _ in 0..2 {
+            expected.extend(direct.process_frame(&[0.0; 480]).unwrap());
+        }
+        while timeline.cursor() < samples.len() as u64 {
+            let start = timeline.cursor();
+            let (wet, _) = prepared
+                .prepare(
+                    &timeline,
+                    AudioProcessingSettings {
+                        muted: true,
+                        ..controls(6.0)
+                    },
+                    Some(samples.len() as u64),
+                )
+                .unwrap();
+            assert_eq!(
+                timeline.cursor(),
+                start,
+                "lookahead must not move output clock"
+            );
+            assert_eq!(prepared.provenance.len(), 2, "bounded lookahead");
+            actual.extend(wet.chunks_exact(2).map(|frame| frame[0]));
+            timeline.render_with_provenance();
+        }
+        assert_eq!(actual, expected[960..960 + actual.len()]);
+        assert_eq!(actual.len(), samples.len().div_ceil(480) * 480);
+    }
+
+    #[test]
+    fn rnnoise_first_activation_is_source_aligned_and_subsequent_bypass_stays_warm() {
+        let samples = signal(4800);
+        let mut captured = timeline(&samples);
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        for _ in 0..3 {
+            stage.prepare_or_silence(&captured, AudioProcessingSettings::default(), None, true);
+            assert!(
+                stage.processor.is_none(),
+                "default Off must not initialize or run a model"
+            );
+            captured.render_with_provenance();
+        }
+        let start = captured.cursor() as usize;
+        let actual = stage
+            .prepare_or_silence(&captured, controls(0.0), None, true)
+            .wet;
+        let mut direct = crate::microphone_denoise::RnnoiseProcessor::new();
+        let mut expected = [0.0; 480];
+        for chunk in samples[start..start + 1440].chunks_exact(480) {
+            let input: [f32; 480] = chunk.try_into().unwrap();
+            expected = direct.process_frame(&input).unwrap();
+        }
+        assert_eq!(
+            actual
+                .chunks_exact(2)
+                .map(|frame| frame[0])
+                .collect::<Vec<_>>(),
+            expected
+        );
+        captured.render_with_provenance();
+        let next = stage.next_input;
+        stage.prepare_or_silence(&captured, AudioProcessingSettings::default(), None, true);
+        assert_eq!(
+            stage.next_input,
+            next + 480,
+            "bypass after first activation retains history"
+        );
+    }
+
+    #[test]
+    fn rnnoise_no_input_stays_cold_and_retired_source_tail_is_processed() {
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        let empty = AudioTimeline::new();
+        for _ in 0..5 {
+            let wet = stage
+                .prepare_or_silence(&empty, controls(0.0), None, false)
+                .wet;
+            assert!(wet.iter().all(|s| *s == 0.0));
+        }
+        assert!(stage.processor.is_none());
+        let mut captured = timeline(&signal(480));
+        stage.prepare_or_silence(&captured, controls(0.0), Some(480), false);
+        assert!(
+            stage.processor.is_some(),
+            "captured tail survives producer retirement"
+        );
+        captured.render_with_provenance();
+        let cursor = stage.next_input;
+        let wet = stage
+            .prepare_or_silence(&captured, controls(0.0), Some(480), false)
+            .wet;
+        assert_eq!(
+            stage.next_input, cursor,
+            "empty source does not advance DSP"
+        );
+        assert!(wet.iter().all(|s| *s == 0.0));
+        assert!(stage.generation.is_none());
+    }
+
+    #[test]
+    fn rnnoise_generation_reset_cannot_emit_old_voice() {
+        let mut timeline = timeline(&signal(4800));
+        let mut prepared = MicrophoneDenoiseTimeline::new();
+        prepared.prepare(&timeline, controls(0.0), None).unwrap();
+        timeline.render_with_provenance();
+        timeline.select_generation(1);
+        let (wet, captured) = prepared.prepare(&timeline, controls(0.0), None).unwrap();
+        assert!(wet.iter().all(|s| *s == 0.0));
+        assert!(captured.iter().all(|s| !s));
+    }
+
+    #[test]
+    fn rnnoise_gain_is_consumed_once_and_future_missing_input_is_not_replayed() {
+        let mut timeline = timeline(&signal(480));
+        let mut prepared = MicrophoneDenoiseTimeline::new();
+        prepared.prepare(&timeline, controls(0.0), None).unwrap();
+        timeline.render_with_provenance();
+        // This capture is on time for output but arrived after the DSP needed
+        // that source interval. Its provenance must remain generated silence.
+        assert!(timeline.push(0, 480, frame(&signal(1440))));
+        let (_, captured) = prepared.prepare(&timeline, controls(12.0), None).unwrap();
+        assert!(captured.iter().all(|s| !s));
+        assert_eq!(prepared.next_input, 1920);
+        assert_eq!(prepared.provenance.len(), 2);
+    }
+
+    #[test]
+    fn rnnoise_discarded_lookahead_cannot_reappear_and_fresh_capture_recovers() {
+        let mut timeline = AudioTimeline::new();
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        assert!(timeline.push(0, 0, frame(&signal(960))));
+        for hop in 0..100 {
+            assert!(timeline.push(0, (hop + 2) * 480, frame(&signal(480))));
+            stage.prepare(&timeline, controls(0.0), None).unwrap();
+            timeline.render_with_provenance();
+        }
+        // Warm the real model with captured lookahead, then discard it without
+        // changing generation or the output cursor, as the stalled bus does.
+        let start = timeline.cursor();
+        assert!(timeline.push(0, start, frame(&signal(1920))));
+        stage.prepare(&timeline, controls(0.0), None).unwrap();
+        timeline.render_with_provenance();
+        let cursor = timeline.cursor();
+        timeline.discard_before(start + 1920);
+        assert_eq!(timeline.cursor(), cursor);
+        assert_eq!(timeline.losses.discarded_behind_cap, 1440);
+        let counters = timeline.counters();
+        for _ in 0..3 {
+            let (wet, captured) = stage.prepare(&timeline, controls(0.0), None).unwrap();
+            assert!(
+                wet.iter().all(|sample| *sample == 0.0),
+                "no discarded voice or filter tail"
+            );
+            assert!(captured.iter().all(|captured| !captured));
+            timeline.render_with_provenance();
+        }
+        assert_eq!(
+            timeline.counters.generated_frames - counters.generated_frames,
+            1440
+        );
+        assert_eq!(timeline.counters.captured_frames, counters.captured_frames);
+        let next = timeline.cursor();
+        assert!(timeline.push(0, next, frame(&signal(4800))));
+        let mut peak = 0.0_f32;
+        for _ in 0..10 {
+            let (wet, _) = stage.prepare(&timeline, controls(0.0), None).unwrap();
+            peak = wet.iter().fold(peak, |peak, value| peak.max(value.abs()));
+            timeline.render_with_provenance();
+        }
+        assert!(
+            peak > 0.001,
+            "fresh microphone recovers after discard: {peak}"
+        );
+    }
+
+    #[test]
+    fn rnnoise_bypass_ramp_keeps_late_dry_capture_provenance() {
+        let mut timeline = timeline(&signal(480));
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        stage.wet_mix = 1.0;
+        stage.prepare(&timeline, controls(0.0), None).unwrap();
+        timeline.render_with_provenance();
+        assert!(timeline.push(0, 480, frame(&signal(1440))));
+        let (wet, wet_captured) = stage.prepare(&timeline, controls(0.0), None).unwrap();
+        assert!(wet_captured.iter().all(|captured| !captured));
+        let mut raw = timeline.render_with_provenance();
+        let before = timeline.counters();
+        let fold = FoldPlan::one_shot(&raw.samples, 2);
+        let selected = stage
+            .select(
+                &raw,
+                &wet,
+                &wet_captured,
+                AudioProcessingSettings::default(),
+                fold,
+            )
+            .unwrap();
+        timeline.account_prepared_chunk(&mut raw, &selected.captured);
+        assert!(
+            raw.captured.iter().all(|captured| *captured),
+            "every ramp frame contains captured dry PCM"
+        );
+        assert_eq!(
+            timeline.counters(),
+            before,
+            "captured dry is never discarded"
+        );
+        for i in 240..480 {
+            let expected = fold.fold(raw.samples[i * 2], raw.samples[i * 2 + 1], i, 480);
+            assert_eq!(selected.samples[i * 2], expected);
+        }
+    }
+
+    #[test]
+    fn rnnoise_off_keeps_legacy_pcm_and_toggle_crossfade_is_bounded() {
+        let settings = AudioProcessingSettings::default();
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        assert!(
+            stage.processor.is_none(),
+            "no model allocation for an idle bus"
+        );
+        let raw = RenderedPcm {
+            samples: vec![0.25; 960],
+            captured: vec![true; 480],
+        };
+        let wet = vec![-0.25; 960];
+        let captured = vec![true; 480];
+        let fold = FoldPlan::one_shot(&raw.samples, 2);
+        assert!(
+            stage
+                .select(&raw, &wet, &captured, settings, fold)
+                .is_none()
+        );
+        let enabled = stage
+            .select(&raw, &wet, &captured, controls(0.0), fold)
+            .unwrap();
+        assert!(enabled.samples[0] < 0.25 && enabled.samples[0] > 0.24);
+        assert_eq!(*enabled.samples.last().unwrap(), -0.25);
+        let disabled = stage.select(&raw, &wet, &captured, settings, fold).unwrap();
+        assert_eq!(*disabled.samples.last().unwrap(), 0.25);
+        assert!(
+            stage
+                .select(&raw, &wet, &captured, settings, fold)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rnnoise_prepared_retry_keeps_gain_fixed_but_latest_mute_wins() {
+        struct PartialWriter {
+            controls: AudioProcessingSettingsHandle,
+            bytes: Vec<u8>,
+            first: bool,
+        }
+        impl Write for PartialWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let length = if self.first { 8 } else { bytes.len() };
+                self.bytes.extend_from_slice(&bytes[..length]);
+                if self.first {
+                    self.first = false;
+                    self.controls.update(AudioProcessingSettings {
+                        muted: true,
+                        ..controls(24.0)
+                    });
+                }
+                Ok(length)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let settings = AudioProcessingSettingsHandle::new(controls(12.0));
+        let mut writer = PartialWriter {
+            controls: settings.clone(),
+            bytes: Vec::new(),
+            first: true,
+        };
+        let written = write_prepared_chunk_with_clock(
+            &mut writer,
+            &[0.2; 960],
+            &settings,
+            true,
+            FoldPlan::one_shot(&[0.2; 960], 2),
+            PeakLimiter::default(),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            Instant::now,
+            || {},
+        )
+        .unwrap()
+        .written;
+        assert_eq!(&written.samples[..2], &[0.2; 2]);
+        assert!(written.samples[2..].iter().all(|s| *s == 0.0));
+        assert_eq!(writer.bytes.len(), 960 * 4);
     }
 }

@@ -27,3 +27,7 @@ apps/desktop/dist/
 # Private per-machine agent routing config — never ship
 /CLAUDE.md
 .neon
+
+# Plan 214: SwiftPM scratch dirs if the camera extension package is opened in Xcode
+apps/desktop/camera-extension/.build/
+apps/desktop/camera-extension/.swiftpm/
