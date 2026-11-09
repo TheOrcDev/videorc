@@ -8914,7 +8914,11 @@ async fn apply_active_screen_output(
     }
     // Standby preview uses the same compositor. Publish the takeover there
     // before changing the authoritative persisted pointer.
+    let watched = active_screen.clone();
     update_compositor_active_screen(state, active_screen).await;
+    // Plan 223: the watchdog guards on this takeover from its cache, never
+    // from a SQLite read on the tick (a rollback passes back through here).
+    crate::watchdog::observe_takeover(state, watched.as_ref());
     Ok(())
 }
 

@@ -1326,8 +1326,10 @@ impl AppState {
     ) -> Self {
         let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
             .then(|| database.path().with_extension("oauth-pending.json"));
-        // Plan 223: the watchdog's settings, read once at startup.
+        // Plan 223: the watchdog's settings and the active takeover, read
+        // once at startup; the Screens transition keeps the takeover current.
         let watchdog_settings = crate::watchdog::load_settings(&database);
+        let watchdog_takeover = crate::watchdog::load_takeover(&database);
         // Plan 172 D5: the default Buddy wears its bundled pack when it ships.
         let cohost_settings = crate::cohost_library::alive::default_buddy_alive(
             &database,
@@ -1459,7 +1461,7 @@ impl AppState {
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             community: crate::community_service::new_slot(),
-            watchdog: crate::watchdog::new_slot(watchdog_settings),
+            watchdog: crate::watchdog::new_slot(watchdog_settings, watchdog_takeover),
             live_chat_moderation: crate::live_chat_moderation::new_moderation_slot(),
             account_session: Arc::new(tokio::sync::Mutex::new(
                 crate::account::restore_persisted_account(),

@@ -665,6 +665,17 @@ Nothing in Phases 1 to 4 starts before the three notes say go.
   later (plan 184 X1).
 - The object store is the owner's choice (OQ7). The web signs a short-lived
   download URL; the runner writes with a node-scoped key.
+- 2026-11-08: Neon became the whole backend (plan 184 D9), and **the
+  recordings stay on R2 ⚑**.
+  - Neon Object Storage keys are scoped to a whole branch. They can't be
+    limited to `talk/<user>/<show>/`, and their `expires_at` isn't
+    enforced.
+  - Neon's presigned URLs are single PUTs, so every multipart part would
+    need the web mid-show.
+  - Objects stop at 10 GiB, less than a 12-hour show.
+  - R2's temporary credentials do all of this, and R2 downloads are free
+    (plan 184 Outside facts).
+  - Revisit when Neon offers prefix-scoped, expiring credentials.
 
 ### D11. Audio mix without echo
 
@@ -814,8 +825,8 @@ writes it down.
 
 One LiveKit Cloud project, two API keys (one for tokens and the server API,
 one as the webhook signing key). The self-host move is plan 184 X8. The
-runner's hidden participant is billed like anyone else; the metering counts
-it (W-G4).
+runner's participant is billed like anyone else; the metering counts it
+(W-G4).
 
 ## Wire shape (additive)
 
@@ -839,7 +850,10 @@ repos.
     [camera, microphone]` (plus `screen_share`, `screen_share_audio` after
     "Allow screen share"), `canPublishData: false`, name = the typed name,
     TTL 10 min;
-  - runner: `roomJoin`, `hidden: true`, `canSubscribe`, `canPublish`
+  - runner: `roomJoin`, `hidden: false` (changed 2026-11-08 from `hidden: true`:
+    LiveKit makes a hidden participant's tracks invisible, so the host could
+    never subscribe to the return; spike `docs/spike-rooms-2026-11.md` in the
+    runner repo), `canSubscribe`, `canPublish`
     (the return), `canPublishSources: [camera, microphone]`, TTL the show's
     limit (12.5 h).
 
@@ -1120,7 +1134,7 @@ S0b says renderer publishing is good enough; the churn run is clean.
 
 ### Phase 2: runner (`videorc-cloud`)
 
-- **R-G1. Room input.** `crates/runner/src/room.rs`: join hidden with the
+- **R-G1. Room input.** `crates/runner/src/room.rs`: join with the (visible)
   runner token, subscribe to the high layer of on-stage identities only
   (plus the screen track), decode VP8 to I420 into a latest-wins store per
   track (the S0a shape), PCM per track into the mix's ring, the
@@ -1153,9 +1167,11 @@ S0b says renderer publishing is good enough; the churn run is clean.
     image again.
 - **R-G5. The return.** The runner publishes the program as a camera-source
   video track (720p30 VP8, no simulcast) and an audio track into the room;
-  `return.set` turns it off. Guests never subscribe to it (their token's
-  page code never asks; the runner's identity is `hidden`, so they can't see
-  it anyway).
+  `return.set` turns it off. Guests never receive it: the runner sets LiveKit
+  track subscription permissions on the return so only `host:<showId>` (later
+  the phone and producers) may subscribe, which the server enforces; and every
+  client leaves the `runner:` identity out of people lists, tiles and counts
+  (decision 2026-11-08, plan 221 U3).
   - **Done when** the host harness sees the return within 700 ms of a flash
     on a guest's tile.
 - **R-G6. Cloud recording.** `recording.start/stop`: a second FFmpeg
@@ -1414,7 +1430,8 @@ Stop and ask the owner when:
    **Recommended: yes.**
 7. **Object store for cloud recordings (D10)**: the R2 account the releases
    already use, or a separate bucket and account? **Recommended: a separate
-   R2 bucket under the same account, with its own scoped key.**
+   R2 bucket under the same account, with its own scoped key.** Re-checked
+   2026-11-08 after Neon became the backend: still R2 (D10).
 8. **Invite while live (D18)**: inviting into a running talk show is in;
    solo → talk mid-stream is out for v1? **Recommended: yes.**
 9. **Consent line (D13)**: "This show goes out live on {platforms} and may
@@ -1430,7 +1447,8 @@ Stop and ask the owner when:
   draft PRs (desktop #727 rebased onto `origin/main`, web #85, `videorc-cloud`
   #1), at least one media node provisioned with DNS and TLS (plan 184 I1,
   I5), deploys (I3), watching and alerts (I4), the rollout switches, and the
-  owner's blockers answered: Hetzner, DNS, a LiveKit Cloud project, Creem
+  owner's blockers answered: a VM-host account (plan 184 D9; Hetzner until
+  2026-11-08), DNS, a LiveKit Cloud project, Creem
   Max products, and the YouTube compliance answer updated for stream keys
   passing through the cloud (plan 184 D15). Without a node there is nothing
   for the runner to run on; without LiveKit there is no room.

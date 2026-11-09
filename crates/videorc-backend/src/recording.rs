@@ -3175,11 +3175,18 @@ pub struct ActiveLivePreview {
 }
 
 impl ActiveRecording {
-    /// Plan 223: what the watchdog's tick needs from the session, read in
-    /// one go under the recording lock.
+    /// The session carries a stream leg (`stream` or `record+stream`); the
+    /// mode is fixed for the session's life.
+    pub(crate) fn streams(&self) -> bool {
+        self.mode.contains("stream")
+    }
+
+    /// Plan 223: what the watchdog's tick needs from the session, copied in
+    /// one go under the recording lock: a mode check, the applied mute and
+    /// the destination legs. No I/O.
     pub(crate) fn watchdog_facts(&self) -> crate::watchdog::SessionFacts {
         crate::watchdog::SessionFacts {
-            live: self.mode.contains("stream"),
+            live: self.streams(),
             mic_muted: self
                 .native_audio
                 .as_ref()
@@ -10986,15 +10993,23 @@ struct SessionMonitorContext {
 /// times a second as `audio.levels`. It reads through a cloned bus handle, so
 /// the hot path never takes the recording lock, and checks once a second that
 /// the session is still the active one. A window with no samples sends nothing.
+///
+/// Plan 223: the same once-a-second lock copies the watchdog's facts, and
+/// while the session streams the watchdog ticks on them. A record-only
+/// session never ticks (plan 221 Q7): no second lock, no cloud read, no
+/// database query on a runtime thread while it records.
 async fn stream_audio_levels_during_recording(state: AppState, session_id: String) {
-    let handle = {
+    let (handle, mut live) = {
         let recording = state.recording.lock().await;
         match recording.as_ref() {
-            Some(active) if active.session_id == session_id => active
-                .native_audio
-                .as_ref()
-                .map(|audio| audio.switch_handle()),
-            _ => None,
+            Some(active) if active.session_id == session_id => (
+                active
+                    .native_audio
+                    .as_ref()
+                    .map(|audio| audio.switch_handle()),
+                active.streams(),
+            ),
+            _ => (None, false),
         }
     };
     let Some(handle) = handle else {
@@ -11006,21 +11021,33 @@ async fn stream_audio_levels_during_recording(state: AppState, session_id: Strin
     loop {
         ticker.tick().await;
         ticks = ticks.wrapping_add(1);
-        if ticks.is_multiple_of(AUDIO_LEVELS_LIVENESS_TICKS) {
+        let facts = if ticks.is_multiple_of(AUDIO_LEVELS_LIVENESS_TICKS) {
             let recording = state.recording.lock().await;
-            if !recording
-                .as_ref()
-                .is_some_and(|active| active.session_id == session_id)
-            {
-                drop(recording);
-                crate::watchdog::session_ended(&state, &session_id);
-                return;
+            match recording.as_ref() {
+                Some(active) if active.session_id == session_id => Some(active.watchdog_facts()),
+                _ => {
+                    drop(recording);
+                    crate::watchdog::session_ended(&state, &session_id);
+                    return;
+                }
             }
-        }
+        } else {
+            None
+        };
         let levels = handle.take_levels();
-        crate::watchdog::observe_levels(&state, &session_id, &levels);
-        if ticks.is_multiple_of(AUDIO_LEVELS_LIVENESS_TICKS) {
-            watchdog_tick(&state, &session_id).await;
+        if live {
+            crate::watchdog::observe_levels(&state, &session_id, &levels);
+        }
+        if let Some(facts) = facts {
+            if facts.live {
+                live = true;
+                watchdog_tick(&state, &session_id, facts).await;
+            } else if live {
+                // The stream leg is gone while the recording goes on: the
+                // watch ends with it, as it would with the session.
+                live = false;
+                crate::watchdog::session_ended(&state, &session_id);
+            }
         }
         if let Some(event) = audio_levels_event(&session_id, levels) {
             state.emit_event("audio.levels", event);
@@ -11028,22 +11055,22 @@ async fn stream_audio_levels_during_recording(state: AppState, session_id: Strin
     }
 }
 
-/// Plan 223 A1: once a second the watchdog gets the session's facts (the
-/// applied mute, whether it streams, the destination legs), the cloud's
-/// program block, the active takeover and a luma sample of the stream
-/// leg's frame (A7), then runs its checks. Nothing here waits on the
-/// watchdog; the facts are gathered under the locks the loop already takes.
-async fn watchdog_tick(state: &AppState, session_id: &str) {
-    let facts = {
-        let recording = state.recording.lock().await;
-        match recording.as_ref() {
-            Some(active) if active.session_id == session_id => Some(active.watchdog_facts()),
-            _ => None,
-        }
-    };
-    let Some(mut facts) = facts else {
+/// Plan 223 A1: once a second while the session streams, with the facts the
+/// levels task copied under the recording lock (the applied mute, the
+/// destination legs), the tick adds the cloud's program block, the active
+/// takeover from the watchdog's cache and a luma sample of the stream leg's
+/// frame (A7), then runs the checks. Nothing here waits on the watchdog,
+/// takes the recording lock or reads the database. Record-only facts leave
+/// at once (plan 221 Q7): a 2-vCPU Windows runner has no runtime thread to
+/// spare for a SQLite read while it records.
+async fn watchdog_tick(
+    state: &AppState,
+    session_id: &str,
+    mut facts: crate::watchdog::SessionFacts,
+) {
+    if !facts.live {
         return;
-    };
+    }
     {
         let cloud = state
             .cloud_show
@@ -11052,14 +11079,8 @@ async fn watchdog_tick(state: &AppState, session_id: &str) {
         facts.cloud_show = cloud.carries_session(session_id);
         facts.cloud = cloud.watchdog_signal(session_id);
     }
-    facts.takeover = state
-        .database
-        .active_stream_screen()
-        .ok()
-        .flatten()
-        .map(|screen| (screen.id, screen.image_path));
-    if facts.live
-        && crate::watchdog::program_luma_due(state)
+    facts.takeover = crate::watchdog::takeover_snapshot(state);
+    if crate::watchdog::program_luma_due(state)
         && let Some(store) =
             crate::compositor::compositor_program_frame_store_for_stream(state).await
         && let Some(luma) = crate::preview_debug_sample::program_mean_luma(&store)
@@ -36225,6 +36246,85 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    /// Plan 221 Q7 ("warn while only recording: not in v1"): a record-only
+    /// session's facts never start a watch, so its once-a-second tick runs
+    /// no check, takes no cloud lock and reads no database. The same stub
+    /// with a stream leg does start one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_record_only_session_never_ticks_the_watchdog() {
+        let state = test_state();
+        let record_only = test_active_recording_stub("record-only");
+        assert_eq!(record_only.mode, "record");
+        assert!(!record_only.streams());
+        let facts = record_only.watchdog_facts();
+        assert!(!facts.live);
+
+        for _ in 0..3 {
+            watchdog_tick(&state, "record-only", facts.clone()).await;
+        }
+        assert!(!crate::watchdog::watching(&state, "record-only"));
+        assert_eq!(crate::watchdog::alerts_view(&state).session_id, None);
+
+        let mut streaming = test_active_recording_stub("record-and-stream");
+        streaming.mode = "record+stream".to_string();
+        assert!(streaming.streams());
+        let facts = streaming.watchdog_facts();
+        assert!(facts.live);
+        watchdog_tick(&state, "record-and-stream", facts).await;
+        assert!(crate::watchdog::watching(&state, "record-and-stream"));
+        assert_eq!(
+            crate::watchdog::alerts_view(&state).session_id.as_deref(),
+            Some("record-and-stream")
+        );
+    }
+
+    /// Plan 223: the tick's takeover is the watchdog's cache, which the
+    /// Screens transition refreshes, never a SQLite read on the runtime
+    /// thread: an active screen that sits in the store alone is invisible
+    /// to the tick until the transition observes it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_watchdog_tick_reads_the_takeover_from_its_cache_not_the_store() {
+        let state = test_state();
+        let dir = crate::test_temp_dir::TestTempDir::new("watchdog-tick-takeover");
+        let source = dir.join("brb.png");
+        std::fs::write(&source, b"not a real image").unwrap();
+        let screen = state
+            .database
+            .import_screen_image_with_optimizer(source.to_str().unwrap(), |_, destination| {
+                std::fs::write(destination, b"optimized").unwrap();
+                Ok(())
+            })
+            .unwrap();
+        state.database.activate_stream_screen(&screen.id).unwrap();
+        assert!(
+            state.database.active_stream_screen().unwrap().is_some(),
+            "the store holds an active Ready screen"
+        );
+
+        let mut streaming = test_active_recording_stub("live");
+        streaming.mode = "stream".to_string();
+        let facts = streaming.watchdog_facts();
+
+        watchdog_tick(&state, "live", facts.clone()).await;
+        assert_eq!(
+            crate::watchdog::watched_takeover(&state, "live"),
+            None,
+            "the store alone never reaches the tick"
+        );
+
+        crate::watchdog::observe_takeover(&state, Some(&screen));
+        watchdog_tick(&state, "live", facts.clone()).await;
+        assert_eq!(
+            crate::watchdog::watched_takeover(&state, "live").as_deref(),
+            Some(screen.id.as_str())
+        );
+
+        crate::watchdog::observe_takeover(&state, None);
+        watchdog_tick(&state, "live", facts).await;
+        assert_eq!(crate::watchdog::watched_takeover(&state, "live"), None);
+        crate::watchdog::session_ended(&state, "live");
     }
 
     /// Plan 181: only the Clips buffer yields to an update install; a real

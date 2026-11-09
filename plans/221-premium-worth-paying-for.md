@@ -182,6 +182,24 @@ The owner said "put all to that pr we have". So:
   - each plan's own default-off flags where it has them.
 - Only the owner's merges and switch flips ship it.
 
+### U8. Neon is the backend; the media nodes go to a VM host (2026-11-08) ⚑
+
+- **2026-11-08, the owner**: "we don't want to use hetzner".
+  - A check showed that Neon Functions can't run the media layer: they
+    run Node.js only, accept HTTP, SSE and WebSockets only, and may be
+    evicted.
+  - The owner then chose "Neon + a VM host": "Neon is now the whole
+    backend, they have everything".
+- **Neon holds all data and backend services.** The runner, node agent
+  and MediaMTX don't change, and move to a VM host.
+- **Recommended host: DigitalOcean CPU-Optimized droplets, owner to
+  confirm.** The alternatives are OVHcloud, Vultr and Fly.io.
+- **Cloud recordings stay on R2**: Neon Object Storage keys can't be
+  limited to one show's prefix.
+- **The reasoning and facts** are in plan 184 D9 and Outside facts, and
+  plan 222 D8, I1 and I3. Costs are in plan 185 (private).
+- **What it replaced**: Hetzner bare metal (plan 184 D9, 2026-10-16).
+
 ## Order of work
 
 ```
@@ -220,7 +238,7 @@ Y (the YouTube answer), LiveKit Cloud, Creem, the recordings bucket, and live te
 | 222 | 3. 4K30 streams | Stream directly with one toast, until a node has NVENC or S0d measures 4K |
 | 222 | 4. Web unreachable with a remembered show | Stream directly after one toast; Go Live never blocks on the web |
 | 222 | 5. Creem refunds and interval switches | Yes to both, after a Creem test-mode run (owner) |
-| 222 | 6. First node | One CPU box in Falkenstein or Nuremberg now, a second before the cohort (owner buys) |
+| 222 | 6. First node | One CPU node (CPU-Optimized, 8 dedicated vCPUs) in FRA1 on the VM host now, a second before the cohort (owner opens the account). Was a Hetzner box in Falkenstein or Nuremberg until U8 (2026-11-08) |
 | 222 | 7. US node | On the two-week measurement (D8) |
 | 222 | 8. Beta cohort | 10 to 20 Premium accounts the owner names, for two weeks |
 | 222 | 9. Premium's hours | Raise them so the cloud is Premium's headline. The figure is in plan 185 (U4) |
@@ -239,7 +257,7 @@ Y (the YouTube answer), LiveKit Cloud, Creem, the recordings bucket, and live te
 | 224 | 4. Where invites live | A Guests tab on the Livestream page |
 | 224 | 5. Preview during a talk show | Hide it and show the Show stage, pending S0b |
 | 224 | 6. Guest screen share | Off per guest until the host allows it |
-| 224 | 7. Recording storage | A separate R2 bucket under the same account, with its own scoped key (owner creates) |
+| 224 | 7. Recording storage | A separate R2 bucket under the same account, with its own scoped key (owner creates). Kept after U8: Neon Object Storage keys can't be limited to a show's prefix |
 | 224 | 8. Invite while live | Into a running talk show: yes. Solo to talk show mid-stream: not in v1 |
 | 224 | 9. Consent line | "This show goes out live on {platforms} and may be recorded. Your camera and voice are part of it." |
 | 225 | 1 to 14 | Every recommended answer in plan 225's Open questions. Sync (10) is built last, and only if H4's legal read allows it |
@@ -248,9 +266,12 @@ Y (the YouTube answer), LiveKit Cloud, Creem, the recordings bucket, and live te
 
 The work around each item carries on. Each item blocks only what it names.
 
-1. **A Hetzner account and API token.** Blocks 222 I1 to I3 (real nodes)
-   and everything after it that needs a public node: 222 A, and 224 S-G3
-   and S-G4.
+1. **A VM-host account and API token** (U8: DigitalOcean CPU-Optimized
+   droplets recommended, owner to confirm the host; was a Hetzner account
+   until 2026-11-08). Blocks 222 I1 to I3 (real nodes) and everything
+   after it that needs a public node: 222 A, and 224 S-G3 and S-G4. 222
+   I3's binaries bucket is on Neon Object Storage now (a Neon project and
+   its keys).
 2. **DNS for `*.live.videorc.com`** and its TLS. Blocks the same.
 3. **A LiveKit Cloud project and its keys, set in Vercel env.** Blocks
    224's hosted rooms. Until then, the work runs on a local

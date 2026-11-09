@@ -1,13 +1,20 @@
 //! The stream watchdog (plan 223): Videorc sees what viewers see.
 //!
-//! The backend owns the alerts (D2). Once a second, from the session's
-//! `audio.levels` task, the runtime gathers the signals that already exist
-//! (the master mix, the applied mute, the encoder's stall notices, plan
-//! 161's destination states, the platforms' answers, the runner's `program`
-//! block, chat) and runs the checks. Every transition becomes a health
-//! event, the `watchdog.alerts` event, and for a critical or warning alert
-//! a phone push (D2). The renderer draws the cards and asks main for the
-//! system notification; a hidden renderer never silences a check.
+//! The backend owns the alerts (D2). Once a second while the session
+//! streams, from the session's `audio.levels` task, the runtime gathers the
+//! signals that already exist (the master mix, the applied mute, the
+//! encoder's stall notices, plan 161's destination states, the platforms'
+//! answers, the runner's `program` block, chat) and runs the checks. Every
+//! transition becomes a health event, the `watchdog.alerts` event, and for a
+//! critical or warning alert a phone push (D2). The renderer draws the cards
+//! and asks main for the system notification; a hidden renderer never
+//! silences a check.
+//!
+//! A record-only session never ticks (plan 221 Q7: "warn while only
+//! recording: not in v1"); the one check it keeps is the 1064 microphone
+//! silence report, which the recording's own sampler sends in. The tick
+//! itself touches no lock but the watchdog's and reads no database: the
+//! takeover it guards on is a cache the Screens transition refreshes.
 
 pub mod alerts;
 pub mod chat_signals;
@@ -23,7 +30,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::protocol::HealthLevel;
+use crate::protocol::{HealthLevel, StreamScreen, StreamScreenStatus};
 use crate::state::AppState;
 use crate::streaming::{StreamTargetRuntime, StreamTargetState};
 
@@ -159,16 +166,22 @@ pub struct WatchdogRuntime {
     session: Option<SessionWatch>,
     /// The renderer's last `watchdog.idle.report`, and when it arrived.
     system_idle: Option<(Duration, Instant)>,
+    /// The active takeover (screen id, image path) as the Screens
+    /// transition last applied it: seeded from the store at startup and
+    /// refreshed by `observe_takeover`, so the tick never reads SQLite on
+    /// a runtime thread.
+    takeover: Option<(String, String)>,
 }
 
 impl WatchdogRuntime {
-    pub fn new(settings: WatchdogSettings) -> Self {
+    pub fn new(settings: WatchdogSettings, takeover: Option<(String, String)>) -> Self {
         let thresholds = thresholds_for(&settings);
         Self {
             settings,
             thresholds,
             session: None,
             system_idle: None,
+            takeover,
         }
     }
 
@@ -203,8 +216,30 @@ fn thresholds_for(settings: &WatchdogSettings) -> Thresholds {
     })
 }
 
-pub fn new_slot(settings: WatchdogSettings) -> WatchdogSlot {
-    Arc::new(Mutex::new(WatchdogRuntime::new(settings)))
+pub fn new_slot(settings: WatchdogSettings, takeover: Option<(String, String)>) -> WatchdogSlot {
+    Arc::new(Mutex::new(WatchdogRuntime::new(settings, takeover)))
+}
+
+/// The persisted active takeover, read once at startup to seed the cache;
+/// from then on `observe_takeover` keeps it current.
+pub fn load_takeover(database: &crate::storage::Database) -> Option<(String, String)> {
+    match database.active_stream_screen() {
+        Ok(screen) => takeover_of(screen.as_ref()),
+        Err(error) => {
+            tracing::warn!("Could not read the active Screen for the watchdog: {error:#}");
+            None
+        }
+    }
+}
+
+/// A takeover the viewers see: a Ready screen with an image. A missing or
+/// retired screen draws nothing, so it guards nothing.
+fn takeover_of(screen: Option<&StreamScreen>) -> Option<(String, String)> {
+    screen
+        .filter(|screen| {
+            screen.status == StreamScreenStatus::Ready && !screen.image_path.is_empty()
+        })
+        .map(|screen| (screen.id.clone(), screen.image_path.clone()))
 }
 
 pub fn load_settings(database: &crate::storage::Database) -> WatchdogSettings {
@@ -248,8 +283,21 @@ pub fn set_settings(
 
 // --- Observations ---------------------------------------------------------
 
-/// Every 50 ms from the session's `audio.levels` sampler: the loudest
-/// reading of each line this second.
+/// The Screens transition applied this takeover to the output (main.rs
+/// `apply_active_screen_output`: activate, clear, delete, retire, and the
+/// rollback of a failed persist). The tick reads this cache instead of the
+/// store.
+pub fn observe_takeover(state: &AppState, screen: Option<&StreamScreen>) {
+    lock(&state.watchdog).takeover = takeover_of(screen);
+}
+
+/// The cached active takeover: (screen id, image path).
+pub fn takeover_snapshot(state: &AppState) -> Option<(String, String)> {
+    lock(&state.watchdog).takeover.clone()
+}
+
+/// Every 50 ms from the session's `audio.levels` sampler while it streams:
+/// the loudest reading of each line this second.
 pub fn observe_levels(
     state: &AppState,
     session_id: &str,
@@ -284,8 +332,19 @@ pub fn observe_health_event(state: &AppState, session_id: Option<&str>, code: &s
     let now = Instant::now();
     let announce = {
         let mut runtime = lock(&state.watchdog);
-        let Some(watch) = runtime.watch_mut(session_id) else {
-            return;
+        // Issue 1064: the microphone's silence report is adopted for every
+        // session, a record-only one too. That session never ticks (plan
+        // 221 Q7), so the report starts its watch; a live session's watch
+        // already exists, and a stale report never replaces another
+        // session's.
+        let watch = match code {
+            crate::recording::MICROPHONE_SILENT_CODE if runtime.session.is_none() => {
+                runtime.watch_or_start(session_id)
+            }
+            _ => match runtime.watch_mut(session_id) {
+                Some(watch) => watch,
+                None => return,
+            },
         };
         match code {
             crate::encoder_bridge::STREAM_OUTPUT_STALLED_CODE => {
@@ -657,6 +716,26 @@ pub fn session_ended(state: &AppState, session_id: &str) {
     }
 }
 
+/// Whether this session has a watch (a tick or a 1064 report started it).
+#[cfg(test)]
+pub(crate) fn watching(state: &AppState, session_id: &str) -> bool {
+    lock(&state.watchdog)
+        .session
+        .as_ref()
+        .is_some_and(|watch| watch.session_id == session_id)
+}
+
+/// The takeover the session's watch guards on, as the last tick saw it.
+#[cfg(test)]
+pub(crate) fn watched_takeover(state: &AppState, session_id: &str) -> Option<String> {
+    lock(&state.watchdog)
+        .session
+        .as_ref()
+        .filter(|watch| watch.session_id == session_id)
+        .and_then(|watch| watch.takeover.as_ref())
+        .map(|active| active.screen_id.clone())
+}
+
 // --- RPCs -----------------------------------------------------------------
 
 pub fn alerts_view(state: &AppState) -> WatchdogAlertsView {
@@ -942,5 +1021,129 @@ mod tests {
             .save_setting(settings::WATCHDOG_SETTINGS_KEY, &saved)
             .unwrap();
         assert_eq!(load_settings(&database), saved);
+    }
+
+    fn test_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
+
+    fn ready_screen(id: &str, image_path: &str) -> StreamScreen {
+        StreamScreen {
+            id: id.to_string(),
+            name: format!("Screen {id}"),
+            image_path: image_path.to_string(),
+            thumbnail_path: None,
+            sort_order: 1,
+            status: StreamScreenStatus::Ready,
+            created_at: "2026-11-09T00:00:00Z".to_string(),
+            updated_at: "2026-11-09T00:00:00Z".to_string(),
+        }
+    }
+
+    /// The tick's takeover is the cache the Screens transition fills, and
+    /// only a Ready screen with an image counts as one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_takeover_cache_follows_the_screens_transition() {
+        let state = test_state();
+        assert_eq!(
+            takeover_snapshot(&state),
+            None,
+            "a fresh store has no takeover"
+        );
+
+        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")));
+        assert_eq!(
+            takeover_snapshot(&state),
+            Some(("brb".to_string(), "/tmp/brb.png".to_string()))
+        );
+
+        let mut missing = ready_screen("gone", "");
+        missing.status = StreamScreenStatus::Missing;
+        observe_takeover(&state, Some(&missing));
+        assert_eq!(
+            takeover_snapshot(&state),
+            None,
+            "a missing image draws nothing"
+        );
+
+        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")));
+        observe_takeover(&state, None);
+        assert_eq!(takeover_snapshot(&state), None, "clear ends the takeover");
+    }
+
+    /// At startup the cache is seeded from the store once, so a takeover
+    /// that survives a relaunch guards the first stream's ticks too.
+    #[test]
+    fn the_takeover_cache_is_seeded_from_the_store_at_startup() {
+        let database = crate::storage::Database::open_in_memory_for_tests();
+        assert_eq!(load_takeover(&database), None);
+        let dir = crate::test_temp_dir::TestTempDir::new("watchdog-takeover");
+        let source = dir.join("brb.png");
+        std::fs::write(&source, b"not a real image").unwrap();
+        let screen = database
+            .import_screen_image_with_optimizer(source.to_str().unwrap(), |_, destination| {
+                std::fs::write(destination, b"optimized").unwrap();
+                Ok(())
+            })
+            .unwrap();
+        database.activate_stream_screen(&screen.id).unwrap();
+        let seeded = load_takeover(&database).expect("the active screen seeds the cache");
+        assert_eq!(seeded.0, screen.id);
+        assert_eq!(seeded.1, screen.image_path);
+        database.clear_active_stream_screen().unwrap();
+        assert_eq!(load_takeover(&database), None);
+    }
+
+    /// Issue 1064 on a record-only session: no tick ever starts its watch
+    /// (plan 221 Q7), so the microphone's silence report starts one with the
+    /// recording's wording, the recovery clears it, and a report naming
+    /// another session never replaces the watch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_record_only_mic_silent_report_opens_and_clears_without_a_tick() {
+        let state = test_state();
+        assert!(!watching(&state, "take"));
+        observe_health_event(
+            &state,
+            Some("take"),
+            crate::recording::MICROPHONE_SILENT_CODE,
+            "The microphone has been silent for 20 seconds.",
+        );
+        let view = alerts_view(&state);
+        assert_eq!(view.session_id.as_deref(), Some("take"));
+        assert_eq!(view.alerts.len(), 1);
+        assert_eq!(view.alerts[0].check, WatchdogCheck::MicSilent);
+        assert_eq!(
+            view.alerts[0].title,
+            "Your microphone is silent in the recording"
+        );
+
+        observe_health_event(
+            &state,
+            Some("other"),
+            crate::recording::MICROPHONE_SILENT_CODE,
+            "stale",
+        );
+        assert!(
+            watching(&state, "take"),
+            "a stale report never replaces the watch"
+        );
+        assert!(!watching(&state, "other"));
+
+        observe_health_event(
+            &state,
+            Some("take"),
+            crate::recording::MICROPHONE_SIGNAL_RECOVERED_CODE,
+            "Sound is back.",
+        );
+        assert!(alerts_view(&state).alerts.is_empty());
+
+        session_ended(&state, "take");
+        assert!(!watching(&state, "take"));
     }
 }

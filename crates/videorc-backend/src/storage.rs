@@ -6998,7 +6998,7 @@ impl Database {
         Ok(draft)
     }
 
-    fn import_screen_image_with_optimizer<F>(
+    pub(crate) fn import_screen_image_with_optimizer<F>(
         &self,
         image_path: &str,
         optimize: F,
