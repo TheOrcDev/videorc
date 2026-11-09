@@ -309,7 +309,8 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Open Library',
       'Open Settings',
       'Open Health',
-      'Open Upcoming events'
+      'Open Upcoming events',
+      'Open Guests'
     ])
     await act(async () => item('Open Scene').click())
     expect(nav.openStudioPanel).toHaveBeenCalledExactlyOnceWith('layouts')
