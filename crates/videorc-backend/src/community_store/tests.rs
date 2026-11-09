@@ -1656,3 +1656,124 @@ fn the_memory_pass_facts_about_a_linked_person_leave_youtube_out() {
         vec![("twitch:ada".to_string(), StreamPlatform::Twitch)]
     );
 }
+
+/// The review of 2026-11-09, F8: nothing derived from a YouTube account
+/// outlives its 30 days (D3). Kim, YouTube only, tipped on day 1 and
+/// chatted five days running (a 5th-stream milestone, best 5 in a row);
+/// once days 1 and 2 are past the window, the tip, the milestone and the
+/// best run are recomputed from the three days left. And support is per
+/// account (D4): a split gives each side its own back.
+#[test]
+fn youtube_derived_support_milestones_and_best_run_leave_with_the_attendance() {
+    let database = Database::open_in_memory_for_tests();
+    for (index, day_of_month) in (1..=5u32).enumerate() {
+        let at = day(2026, 9, day_of_month);
+        let session_id = format!("s{day_of_month}");
+        database
+            .community_record_stream(&session_id, at, &[StreamPlatform::Youtube])
+            .unwrap();
+        let mut row = facts(&chat(
+            &session_id,
+            StreamPlatform::Youtube,
+            "kim",
+            "Kim",
+            index as u32,
+            at,
+        ));
+        if day_of_month == 1 {
+            row.support.tips.insert("USD".to_string(), 20_000_000);
+        }
+        if day_of_month == 5 {
+            row.celebrate = Some(ViewerMilestone {
+                kind: ViewerMilestoneKind::Streams,
+                value: 5,
+            });
+        }
+        database.community_record_batch(&[row], at).unwrap();
+    }
+    let kim = person_of(&database, StreamPlatform::Youtube, "kim");
+    assert_eq!((kim.streams, kim.in_a_row, kim.best_in_a_row), (5, 5, 5));
+    assert_eq!(kim.support.tips.get("USD"), Some(&20_000_000));
+    assert_eq!(kim.milestones, vec!["streams-5".to_string()]);
+    // Day 33 after the first chat: days 1 and 2 leave the window.
+    assert_eq!(database.community_prune(day(2026, 10, 3)).unwrap(), 0);
+    let kim = person_of(&database, StreamPlatform::Youtube, "kim");
+    assert_eq!((kim.streams, kim.in_a_row, kim.best_in_a_row), (3, 3, 3));
+    assert!(kim.support.is_empty(), "the day-1 tip left: {:?}", kim.support);
+    assert!(
+        kim.milestones.is_empty(),
+        "a 5th-stream milestone three streams cannot justify: {:?}",
+        kim.milestones
+    );
+    // A Twitch person keeps the best run and the milestones for good.
+    database
+        .community_record_stream("t1", day(2026, 9, 1), &[StreamPlatform::Twitch])
+        .unwrap();
+    let mut cheer = facts(&chat(
+        "t1",
+        StreamPlatform::Twitch,
+        "ada",
+        "Ada",
+        9,
+        day(2026, 9, 1),
+    ));
+    cheer.support.bits = 100;
+    cheer.celebrate = Some(ViewerMilestone {
+        kind: ViewerMilestoneKind::Row,
+        value: 3,
+    });
+    database
+        .community_record_batch(&[cheer], day(2026, 9, 1))
+        .unwrap();
+    let mut kicks = facts(&chat(
+        "t1",
+        StreamPlatform::Kick,
+        "ada-k",
+        "Ada",
+        10,
+        day(2026, 9, 1),
+    ));
+    kicks.support.kicks = 50;
+    database
+        .community_record_batch(&[kicks], day(2026, 9, 1))
+        .unwrap();
+    assert_eq!(database.community_prune(day(2026, 10, 3)).unwrap(), 0);
+    let ada = person_of(&database, StreamPlatform::Twitch, "ada");
+    assert_eq!(ada.milestones, vec!["row-3".to_string()]);
+    assert_eq!(ada.support.bits, 100);
+    // Linked: the union; split: each side's own support comes back (D4).
+    let kick = person_of(&database, StreamPlatform::Kick, "ada-k");
+    database
+        .community_link(&ada.id, &kick.id, CommunityLinkKind::Manual, day(2026, 10, 4))
+        .unwrap();
+    let linked = person_of(&database, StreamPlatform::Twitch, "ada");
+    assert_eq!((linked.support.bits, linked.support.kicks), (100, 50));
+    database
+        .community_unlink("kick:ada-k", day(2026, 10, 5))
+        .unwrap();
+    let twitch = person_of(&database, StreamPlatform::Twitch, "ada");
+    let kick = person_of(&database, StreamPlatform::Kick, "ada-k");
+    assert_eq!((twitch.support.bits, twitch.support.kicks), (100, 0));
+    assert_eq!((kick.support.bits, kick.support.kicks), (0, 50));
+    // The export carries the rows, and a round trip keeps them.
+    let file = database.community_export(day(2026, 10, 6)).unwrap();
+    let ada_export = file
+        .people
+        .iter()
+        .find(|person| person.accounts.iter().any(|a| a.account_key == "twitch:ada"))
+        .unwrap();
+    assert_eq!(ada_export.accounts[0].support.len(), 1);
+    assert_eq!(ada_export.accounts[0].support[0].support.bits, 100);
+    let other = Database::open_in_memory_for_tests();
+    other.community_import(&file, day(2026, 10, 7)).unwrap();
+    assert_eq!(
+        person_of(&other, StreamPlatform::Twitch, "ada").support.bits,
+        100
+    );
+    other.community_import(&file, day(2026, 10, 8)).unwrap();
+    assert_eq!(
+        person_of(&other, StreamPlatform::Twitch, "ada").support.bits,
+        100,
+        "a second import doubles nothing"
+    );
+}

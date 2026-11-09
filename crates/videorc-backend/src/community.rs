@@ -714,6 +714,62 @@ pub fn in_a_row(history: &PersonHistory, streams: &[KnownStream]) -> u32 {
     run
 }
 
+/// The longest run of streams chatted in, in a row, over the streams that
+/// reached one of the person's platforms (F8). A YouTube-only person's
+/// `best_in_a_row` is recomputed to this at every refresh, so it never
+/// outlives the 30-day history it came from (D3).
+pub fn best_in_a_row(history: &PersonHistory, streams: &[KnownStream]) -> u32 {
+    let mut ordered: Vec<&KnownStream> = streams
+        .iter()
+        .filter(|stream| {
+            stream
+                .platforms
+                .iter()
+                .any(|platform| history.platforms.contains(platform))
+        })
+        .collect();
+    ordered.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| b.session_id.cmp(&a.session_id))
+    });
+    let mut best = 0u32;
+    let mut run = 0u32;
+    for stream in ordered {
+        if history
+            .attended
+            .iter()
+            .any(|(id, _)| *id == stream.session_id)
+        {
+            run = run.saturating_add(1);
+            best = best.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+
+/// The celebrated milestones a YouTube-only person's recomputed counts
+/// still justify (F8): a stream or in-a-row milestone no higher than the
+/// counts, and never an anniversary (D3). The rest are forgotten with the
+/// attendance that earned them.
+pub fn milestones_within(celebrated: &[String], streams: u32, best_in_a_row: u32) -> Vec<String> {
+    celebrated
+        .iter()
+        .filter(|key| {
+            if let Some(value) = key.strip_prefix("streams-") {
+                value.parse::<u32>().is_ok_and(|value| value <= streams)
+            } else if let Some(value) = key.strip_prefix("row-") {
+                value.parse::<u32>().is_ok_and(|value| value <= best_in_a_row)
+            } else {
+                false
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 /// Days since the last chat when it was [`BACK_AFTER_DAYS`] or more ago (D7);
 /// never for a YouTube-only person, whose data is at most 30 days old.
 pub fn away_days(history: &PersonHistory, now: DateTime<Utc>) -> Option<u32> {
@@ -1295,6 +1351,24 @@ mod tests {
         let mut back = history.clone();
         back.attended.push(("s6".into(), day(2026, 10, 6)));
         assert_eq!(in_a_row(&back, &with_miss), 1);
+        // F8: the best run over the whole history, and the milestones the
+        // recomputed counts still justify.
+        assert_eq!(best_in_a_row(&back, &with_miss), 3);
+        assert_eq!(best_in_a_row(&history, &streams), 3);
+        assert_eq!(
+            milestones_within(
+                &[
+                    "streams-5".into(),
+                    "streams-10".into(),
+                    "row-3".into(),
+                    "row-5".into(),
+                    "year-2026".into()
+                ],
+                7,
+                3
+            ),
+            vec!["streams-5".to_string(), "row-3".to_string()]
+        );
     }
 
     #[test]
