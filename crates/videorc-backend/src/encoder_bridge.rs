@@ -2631,6 +2631,15 @@ fn media_foundation_writer_drain_timeout(stop_requested: bool, full_timeout: Dur
     }
 }
 
+/// #1074: a Stop that arrives while the final drain is already waiting (an
+/// encoder error ended the writer loop first, so the drain started with the
+/// full bound) pulls the deadline in to the Stop bound from that moment. It
+/// never moves a deadline out.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn media_foundation_drain_deadline_after_stop(deadline: Instant, stop_seen_at: Instant) -> Instant {
+    deadline.min(stop_seen_at + MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 enum MediaFoundationDrainVerdict {
@@ -6178,14 +6187,29 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         // #1074: FFmpeg sees the video EOF only when this thread closes the
         // pipe after the drain, so after Stop the drain must end well inside
         // Stop's TERM fallback, or a stuck encoder costs the whole take.
-        let stop_requested = stop.load(Ordering::Relaxed)
-            || graceful_stop_at
-                .as_ref()
-                .and_then(|at| at.boundary())
-                .is_some();
+        let stop_requested_now = || {
+            stop.load(Ordering::Relaxed)
+                || graceful_stop_at
+                    .as_ref()
+                    .and_then(|at| at.boundary())
+                    .is_some()
+        };
+        let stop_requested = stop_requested_now();
         let drain_timeout =
             media_foundation_writer_drain_timeout(stop_requested, MEDIA_FOUNDATION_DRAIN_TIMEOUT);
-        match encoder.drain_within(drain_timeout).and_then(|drain| {
+        // A Stop that lands mid-drain must bound the drain too, or a drain
+        // an encoder error started holds the full 5 s past Stop's fallback.
+        let mut late_stop_at: Option<Instant> = None;
+        let drained = encoder.drain_within_until(drain_timeout, |now, deadline| {
+            if late_stop_at.is_none() && !stop_requested && stop_requested_now() {
+                late_stop_at = Some(now);
+            }
+            late_stop_at.map_or(deadline, |at| {
+                media_foundation_drain_deadline_after_stop(deadline, at)
+            })
+        });
+        let stop_requested = stop_requested || late_stop_at.is_some() || stop_requested_now();
+        match drained.and_then(|drain| {
             let verdict = media_foundation_drain_verdict(
                 stop_requested,
                 drain.complete,
@@ -6209,6 +6233,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                         role = encoder_bridge_output_role_label(output_queue_policy.role),
                         dropped_frames = frames,
                         timeout_ms = drain_timeout.as_millis() as u64,
+                        stop_arrived_mid_drain = late_stop_at.is_some(),
                         "Media Foundation encoder did not return its last frames after Stop; they were dropped so the recording could finish"
                     );
                     Ok(())
@@ -10135,6 +10160,26 @@ mod tests {
         assert_eq!(
             media_foundation_writer_drain_timeout(true, Duration::from_millis(200)),
             Duration::from_millis(200)
+        );
+    }
+
+    #[test]
+    fn a_stop_that_arrives_mid_drain_pulls_the_drain_deadline_in() {
+        // #1074 review: an encoder error started the drain with the full 5 s
+        // bound, then Stop arrived 300 ms in. The drain must end 1 s after
+        // Stop, inside Stop's TERM fallback, not 5 s after it started.
+        let start = Instant::now();
+        let full_deadline = start + Duration::from_secs(5);
+        let stop_at = start + Duration::from_millis(300);
+        assert_eq!(
+            media_foundation_drain_deadline_after_stop(full_deadline, stop_at),
+            stop_at + MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT
+        );
+        // A deadline already sooner than the Stop bound is never extended.
+        let near_deadline = start + Duration::from_millis(500);
+        assert_eq!(
+            media_foundation_drain_deadline_after_stop(near_deadline, stop_at),
+            near_deadline
         );
     }
 

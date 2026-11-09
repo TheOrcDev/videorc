@@ -1079,6 +1079,17 @@ impl MediaFoundationH264Encoder {
     /// whether the frames it never returned are a failure. An incomplete
     /// drain leaves the encoder undrained, so `Drop` flushes them away.
     pub fn drain_within(&mut self, timeout: Duration) -> Result<MediaFoundationDrain> {
+        self.drain_within_until(timeout, |_, deadline| deadline)
+    }
+
+    /// [`Self::drain_within`], but `deadline_now(now, deadline)` runs on every
+    /// poll and may pull the deadline in while the drain waits (#1074: a Stop
+    /// that arrives mid-drain).
+    pub fn drain_within_until(
+        &mut self,
+        timeout: Duration,
+        mut deadline_now: impl FnMut(Instant, Instant) -> Instant,
+    ) -> Result<MediaFoundationDrain> {
         if self.drained {
             return Ok(MediaFoundationDrain {
                 frames: Vec::new(),
@@ -1110,10 +1121,15 @@ impl MediaFoundationH264Encoder {
                     )
                 })?;
         }
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
         let mut output = Vec::new();
         let mut drain_complete = false;
-        while Instant::now() < deadline {
+        loop {
+            let now = Instant::now();
+            deadline = deadline_now(now, deadline);
+            if now >= deadline {
+                break;
+            }
             match self.next_event()? {
                 Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
                     output.extend(self.process_one_output()?);
