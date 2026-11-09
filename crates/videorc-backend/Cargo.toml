@@ -32,8 +32,11 @@ reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], de
 # Plan 209: Videorc MCP for AI agents. The server side only (JSON-RPC over
 # Streamable HTTP, stateless); the client apps speak stdio through
 # `videorc-mcp`, which hand-rolls its small loop.
-rmcp = { version = "3.8", default-features = false, features = ["server", "transport-streamable-http-server"] }
-rusqlite = { version = "0.37", features = ["bundled", "trace"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "transport-streamable-http-server"] }
+# rusqlite 0.38 made u64/usize ToSql/FromSql opt-in; `fallible_uint` keeps the
+# 0.37 impls (bind and read through i64, erroring out of range) that the
+# marker and scheduled-event `revision` columns and page limits rely on.
+rusqlite = { version = "0.41", features = ["bundled", "trace", "fallible_uint"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"

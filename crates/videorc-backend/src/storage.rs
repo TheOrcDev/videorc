@@ -12828,10 +12828,15 @@ mod tests {
                 .unwrap();
         }
 
-        database.conn.lock().unwrap().trace_v2(
-            TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(count_session_list_statement),
-        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_session_list_statement),
+            )
+            .unwrap();
         for limit in [1, 20, 200] {
             SESSION_LIST_TRACED_STATEMENTS.store(0, Ordering::Relaxed);
             let started = std::time::Instant::now();
@@ -12885,7 +12890,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                None::<fn(TraceEvent<'_>)>,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -13046,10 +13055,15 @@ mod tests {
         }
 
         SESSION_SIZE_WRITEBACK_STATEMENTS.store(0, Ordering::Relaxed);
-        database.conn.lock().unwrap().trace_v2(
-            TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(count_session_size_writeback_statement),
-        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_session_size_writeback_statement),
+            )
+            .unwrap();
         let page = database
             .list_session_items_page(None, fixtures.len())
             .unwrap();
@@ -13057,7 +13071,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                None::<fn(TraceEvent<'_>)>,
+            )
+            .unwrap();
 
         let expected_total = fixtures
             .iter()
