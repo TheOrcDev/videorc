@@ -639,16 +639,22 @@ pub fn cleared_toast(alert: &WatchdogAlert) -> String {
 }
 
 /// The destination's label from a card title ("YouTube has been down for
-/// 0:20" → "YouTube"; "Streaming to Twitch (main) stopped" → "Twitch (main)").
-fn destination_label(title: &str) -> String {
+/// 0:20" → "YouTube"; "Streaming to Twitch (main) stopped" → "Twitch (main)";
+/// "Twitch (main) isn't receiving your stream" → "Twitch (main)").
+pub(crate) fn destination_label(title: &str) -> String {
     if let Some(rest) = title.strip_prefix("Streaming to ") {
         return rest.trim_end_matches(" stopped").to_string();
     }
-    if let Some(index) = title.find(" has been down") {
-        return title[..index].to_string();
-    }
-    if let Some(index) = title.find(" reports ") {
-        return title[..index].to_string();
+    for marker in [
+        " has been down",
+        " isn't receiving",
+        " ended the broadcast",
+        " reports ",
+        " is back",
+    ] {
+        if let Some(index) = title.find(marker) {
+            return title[..index].to_string();
+        }
     }
     title.to_string()
 }

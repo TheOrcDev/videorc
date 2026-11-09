@@ -6,7 +6,9 @@
 
 use serde_json::{Value, json};
 
-use super::alerts::{AlertSeverity, Transition, WatchdogAlert, WatchdogCheck, cleared_toast};
+use super::alerts::{
+    AlertSeverity, Transition, WatchdogAlert, WatchdogCheck, cleared_toast, destination_label,
+};
 
 /// `POST /api/alerts/notify`.
 pub const ALERTS_NOTIFY_PATH: &str = "/api/alerts/notify";
@@ -24,8 +26,71 @@ pub fn pushes(transition: &Transition) -> bool {
 }
 
 /// The push's title and body (plan 223, "Phone push form"): the card's
-/// words without the livestream suffix, and the clock line.
+/// words without the livestream suffix, and the clock line. A destination
+/// label the streamer typed as a host ("rtmp.example.com", "my.server.tv")
+/// would read as an address to the web and fail the push with a 400 (L7):
+/// the push names the platform instead, in the title and the body.
 pub fn push_words(alert: &WatchdogAlert, resolved: bool) -> (String, String) {
+    let (title, body) = push_card_words(alert, resolved);
+    match host_shaped_label(alert) {
+        Some(label) => {
+            let name = platform_name(alert.platform.as_deref());
+            (title.replace(&label, name), body.replace(&label, name))
+        }
+        None => (title, body),
+    }
+}
+
+/// The destination's label on the card when it is shaped like a host.
+fn host_shaped_label(alert: &WatchdogAlert) -> Option<String> {
+    if !matches!(
+        alert.check,
+        WatchdogCheck::DestinationDown | WatchdogCheck::PlatformHealth
+    ) {
+        return None;
+    }
+    let label = destination_label(&alert.title);
+    (!label.is_empty() && label != alert.title && looks_like_host(&label)).then_some(label)
+}
+
+/// The web's bare-host rule (`lib/alerts/push.ts`): dotted labels with a
+/// letter-only last part of two or more characters, an IPv4 address, or
+/// a port suffix. "Twitch (main)" and "My server" are not hosts.
+fn looks_like_host(label: &str) -> bool {
+    let lower = label.trim().to_ascii_lowercase();
+    if lower.contains("://") || lower.contains("rtmp:") || lower.contains("rtmps:") || lower.contains("www.") {
+        return true;
+    }
+    let bare = lower.split(':').next().unwrap_or("");
+    let parts: Vec<&str> = bare.split('.').collect();
+    if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+        return false;
+    }
+    let ipv4 = parts.len() == 4 && parts.iter().all(|part| part.parse::<u8>().is_ok());
+    let last = parts[parts.len() - 1];
+    let domain = last.len() >= 2
+        && last.chars().all(|ch| ch.is_ascii_alphabetic())
+        && parts
+            .iter()
+            .all(|part| part.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'));
+    ipv4 || domain
+}
+
+/// The platform's name for a push, from the alert's platform id.
+fn platform_name(platform: Option<&str>) -> &'static str {
+    match platform {
+        Some("youtube") => "YouTube",
+        Some("twitch") => "Twitch",
+        Some("kick") => "Kick",
+        Some("x") => "X",
+        Some("facebook") => "Facebook",
+        Some("tiktok") => "TikTok",
+        Some("instagram") => "Instagram",
+        _ => "Custom destination",
+    }
+}
+
+fn push_card_words(alert: &WatchdogAlert, resolved: bool) -> (String, String) {
     if resolved {
         return (cleared_toast(alert), "Cleared.".to_string());
     }
@@ -278,6 +343,75 @@ mod tests {
             "Said \u{201c}hi\u{201d}.",
         );
         assert_eq!(push_words(&quoted, false).1, "Said hi.");
+    }
+
+    /// L7: a custom destination labelled with its host would be refused by
+    /// the web as an address; the push names the platform, in the title,
+    /// the all-down detail and the clear. Labels that are names stay.
+    #[test]
+    fn a_host_shaped_label_becomes_the_platform_name_in_the_push() {
+        let mut down = alert(
+            WatchdogCheck::DestinationDown,
+            AlertSeverity::Warning,
+            "rtmp.example.com has been down for 0:20",
+            "Videorc is retrying every 2 seconds. Viewers there see nothing until it's back.",
+        );
+        down.platform = Some("custom".to_string());
+        down.target_id = Some("custom-1".to_string());
+        let body = notify_body(&Transition::Opened(down.clone())).unwrap();
+        assert_eq!(body["title"], "Custom destination has been down for 0:20");
+        assert!(!body.to_string().contains("example.com"));
+        let cleared = notify_body(&Transition::Cleared(down)).unwrap();
+        assert_eq!(cleared["title"], "Custom destination is back");
+
+        let mut all = alert(
+            WatchdogCheck::DestinationDown,
+            AlertSeverity::Critical,
+            "Nobody is receiving your stream",
+            "Every destination is down. Videorc can't reconnect my.server.tv:1935 without a gap on the others. Keep going, or end the livestream and go live again.",
+        );
+        all.target_id = Some("all".to_string());
+        let body = notify_body(&Transition::Opened(all)).unwrap();
+        assert_eq!(body["title"], "Nobody is receiving your stream");
+        assert!(
+            !body["body"].as_str().unwrap().contains("my.server.tv"),
+            "{body}"
+        );
+
+        let mut stopped = alert(
+            WatchdogCheck::DestinationDown,
+            AlertSeverity::Warning,
+            "Streaming to 192.168.1.20 stopped",
+            "Videorc can't reconnect 192.168.1.20 without a gap on the others. Keep going, or end the livestream and go live again.",
+        );
+        stopped.platform = Some("custom".to_string());
+        let body = notify_body(&Transition::Opened(stopped)).unwrap();
+        assert_eq!(body["title"], "Streaming to Custom destination stopped");
+        assert!(!body["body"].as_str().unwrap().contains("192.168"));
+
+        let named = alert(
+            WatchdogCheck::DestinationDown,
+            AlertSeverity::Warning,
+            "Twitch (main) has been down for 0:20",
+            "Videorc is retrying every 2 seconds.",
+        );
+        let body = notify_body(&Transition::Opened(named)).unwrap();
+        assert_eq!(body["title"], "Twitch (main) has been down for 0:20");
+        let mut named_custom = alert(
+            WatchdogCheck::DestinationDown,
+            AlertSeverity::Warning,
+            "My server has been down for 0:20",
+            "x",
+        );
+        named_custom.platform = Some("custom".to_string());
+        let body = notify_body(&Transition::Opened(named_custom)).unwrap();
+        assert_eq!(body["title"], "My server has been down for 0:20");
+        assert!(looks_like_host("a.rtmp.youtube.com"));
+        assert!(looks_like_host("live.twitch.tv"));
+        assert!(looks_like_host("10.0.0.5"));
+        assert!(!looks_like_host("Twitch (main)"));
+        assert!(!looks_like_host("Studio B"));
+        assert!(!looks_like_host("v2.0"));
     }
 
     #[test]
