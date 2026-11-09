@@ -22748,6 +22748,134 @@ mod tests {
         )
     }
 
+    /// Plan 224 C-G6 (review L9: the `session.start` refusal and the
+    /// no-local-target test): while a room is open, Record and Go Live work
+    /// through it. A `session.start` with a stream target, and the solo
+    /// Resume, are refused before any resource or target is built, so no
+    /// local leg ever streams beside the runner's.
+    #[tokio::test]
+    async fn session_start_is_refused_while_a_room_is_open_and_builds_no_local_target() {
+        let state = test_state();
+        let mut runner = cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_talk", true);
+        for kind in [SessionStartKind::GoLive, SessionStartKind::CloudResume] {
+            let response = start_session_command(
+                &state,
+                ClientCommand {
+                    id: "start-1".to_string(),
+                    method: "session.start".to_string(),
+                    params: json!({
+                        "streaming": { "targets": [{
+                            "id": "youtube-main", "platform": "youtube", "label": "YouTube",
+                            "enabled": true, "authMode": "stream-key",
+                            "serverUrl": "rtmp://a.rtmp.youtube.com/live2", "streamKey": "abcd-efgh"
+                        }] }
+                    }),
+                },
+                BackendRole::Renderer,
+                kind,
+            )
+            .await;
+            assert!(!response.ok, "{kind:?}");
+            assert_eq!(
+                response.error.as_ref().map(|error| error.code.as_str()),
+                Some("cloud-talk-show-open"),
+                "{kind:?}"
+            );
+        }
+        assert!(
+            state.recording.lock().await.is_none(),
+            "no local session, so no StreamTarget beside the runner's legs"
+        );
+        assert!(
+            runner.try_recv().is_err(),
+            "nothing reached the runner either"
+        );
+    }
+
+    /// Plan 224 C-G7 and review L6 (L9's overlay forks): a takeover in a
+    /// talk show on air goes to the runner's `takeover` slot, full frame,
+    /// each output its own render, with no TTL; taking it down clears both.
+    #[tokio::test]
+    async fn a_takeover_on_a_talk_show_on_air_goes_to_the_runner_per_output() {
+        use base64::Engine as _;
+        let state = test_state();
+        let mut runner = cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_talk", true);
+        let dir =
+            std::env::temp_dir().join(format!("videorc-talk-takeover-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("brb.png");
+        image::RgbaImage::from_pixel(160, 90, image::Rgba([0, 128, 255, 255]))
+            .save(&path)
+            .unwrap();
+        let screen = protocol::StreamScreen {
+            id: "brb".to_string(),
+            name: "Be right back".to_string(),
+            image_path: path.to_string_lossy().into_owned(),
+            thumbnail_path: None,
+            sort_order: 0,
+            status: protocol::StreamScreenStatus::Ready,
+            created_at: "2026-11-09T10:00:00Z".to_string(),
+            updated_at: "2026-11-09T10:00:00Z".to_string(),
+        };
+        let leftover =
+            |runner: &mut tokio::sync::mpsc::UnboundedReceiver<cloud_show::ControlRequest>| {
+                let mut frames = Vec::new();
+                while let Ok(intent) = runner.try_recv() {
+                    frames.push(intent.answer_for_tests(None));
+                }
+                frames
+            };
+        let answer = async {
+            let mut frames = Vec::new();
+            for _ in 0..2 {
+                let intent = runner.recv().await.expect("a takeover intent");
+                frames.push(intent.answer_for_tests(None));
+            }
+            frames
+        };
+        let (applied, frames) =
+            tokio::join!(apply_active_screen_output(&state, Some(screen)), answer);
+        applied.unwrap();
+        let full = json!({ "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 });
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.set");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+            assert_eq!(frame["rect"], full);
+            assert!(
+                frame.get("ttlSeconds").is_none(),
+                "a takeover stays until cleared"
+            );
+        }
+        let vertical = base64::engine::general_purpose::STANDARD
+            .decode(frames[1]["pngBase64"].as_str().unwrap())
+            .unwrap();
+        let vertical = image::load_from_memory(&vertical).unwrap();
+        assert_eq!(
+            (vertical.width(), vertical.height()),
+            (1080, 1920),
+            "the 9:16 output gets a 9:16 render (L6)"
+        );
+        assert!(leftover(&mut runner).is_empty(), "one intent per output");
+
+        let answer = async {
+            let mut frames = Vec::new();
+            for _ in 0..2 {
+                let intent = runner.recv().await.expect("a takeover clear");
+                frames.push(intent.answer_for_tests(None));
+            }
+            frames
+        };
+        let (cleared, frames) = tokio::join!(apply_active_screen_output(&state, None), answer);
+        cleared.unwrap();
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.clear");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Plan 215 A5 (D7): the account change goes out as one event the
     /// renderer's strict contract accepts, with the reason; the sign-out the
     /// server made is `session-expired`. Desktop sockets only: it is not a

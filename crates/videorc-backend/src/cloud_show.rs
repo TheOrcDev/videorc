@@ -1276,6 +1276,21 @@ pub(crate) struct ControlRequest {
     ack: Option<(String, AckSender)>,
 }
 
+#[cfg(test)]
+impl ControlRequest {
+    /// Test support: what a test's stand-in runner received, acked `ok` or
+    /// refused with `refusal`.
+    pub(crate) fn answer_for_tests(self, refusal: Option<&str>) -> Value {
+        if let Some((_, waiter)) = self.ack {
+            let _ = waiter.send(match refusal {
+                None => Ok(None),
+                Some(problem) => Err(problem.to_string()),
+            });
+        }
+        self.frame
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveShow {
     pub(crate) record: ShowRecord,

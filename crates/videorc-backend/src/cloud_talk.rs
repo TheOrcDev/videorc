@@ -1983,6 +1983,47 @@ pub fn talk_show_create_refusal(error: &CloudApiError) -> Option<&'static str> {
     }
 }
 
+/// Test support for the RPC forks (C-G6, C-G7): a talk show open on
+/// `show_id`, on air when `live`, with the control socket replaced by a
+/// channel the test reads and acks (`ControlRequest::answer_for_tests`).
+#[cfg(test)]
+pub(crate) fn open_talk_show_for_tests(
+    slot: &crate::cloud_show::CloudShowSlot,
+    show_id: &str,
+    live: bool,
+) -> tokio::sync::mpsc::UnboundedReceiver<crate::cloud_show::ControlRequest> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut runtime = lock(slot);
+    runtime.show = Some(ActiveShow {
+        record: serde_json::from_value(json!({ "id": show_id, "kind": "talk", "status": "live" }))
+            .expect("a show record"),
+        control: serde_json::from_value(
+            json!({ "url": "wss://node.test/control", "token": "vcs1.test" }),
+        )
+        .expect("a show control"),
+        ingest: None,
+        session_id: None,
+        destinations: Vec::new(),
+        handed_over: false,
+        hold_image_png_base64: None,
+        resuming: false,
+    });
+    let mut talk = TalkShowState::new(
+        RoomSettingsRecord {
+            title: String::new(),
+            platforms: Vec::new(),
+            open_door: false,
+            limits: TalkLimits::default(),
+        },
+        None,
+        show_id,
+    );
+    talk.live = live;
+    runtime.talk = Some(talk);
+    runtime.control_tx = Some(tx);
+    rx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
