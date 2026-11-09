@@ -93,6 +93,25 @@ const CAMERA_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS: f64 = 0.000_001;
 
+/// The native thread never answered its start. A thread that outlived the
+/// startup timeout is stopped next, and its stop path keeps the DirectShow
+/// modes cached for this camera, so a timeout forgets them here: whatever
+/// made the start that slow (a replugged or re-driven device) may have
+/// changed them. A deliberate stop disconnects the channel instead, and keeps
+/// the cache.
+fn native_camera_startup_unanswered(
+    error: std_mpsc::RecvTimeoutError,
+    device_unique_id: &str,
+) -> NativeCameraStartup {
+    #[cfg(target_os = "windows")]
+    if error == std_mpsc::RecvTimeoutError::Timeout {
+        windows::forget_dshow_modes(device_unique_id);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (error, device_unique_id);
+    NativeCameraStartup::Failed("Timed out while starting native camera preview.".to_string())
+}
+
 fn native_camera_preview_thread_startup_timeout() -> Duration {
     // FFmpeg-fed cameras (DirectShow, V4L2) pay a child spawn plus device
     // negotiation per attempt before the first frame.
@@ -1680,14 +1699,11 @@ async fn start_registered_preview_camera(
         }
     }
 
+    let startup_camera = unique_id.clone();
     let startup = tokio::task::spawn_blocking(move || {
         startup_rx
             .recv_timeout(native_camera_preview_thread_startup_timeout())
-            .unwrap_or_else(|_| {
-                NativeCameraStartup::Failed(
-                    "Timed out while starting native camera preview.".to_string(),
-                )
-            })
+            .unwrap_or_else(|error| native_camera_startup_unanswered(error, &startup_camera))
     })
     .await
     .unwrap_or_else(|error| {
@@ -4696,6 +4712,56 @@ fn classify_windows_dshow_mode_probe(stderr: &str) -> WindowsDshowModeProbe {
     }
 }
 
+/// #1068 step 3: the modes each DirectShow camera advertised, by moniker, for
+/// the life of the backend. The `-list_options` probe cost about 1.45 s of
+/// every Windows camera start (C920 behind the Frame Server) while the ordered
+/// lane waited; a camera's modes don't change while it stays plugged in. Only
+/// a probe that listed modes is kept, and a start that finds no working mode
+/// or hits a device error forgets the camera, so the next start probes again.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Default)]
+struct DshowModeCache {
+    modes: StdMutex<std::collections::HashMap<String, DshowAdvertisedVideoModes>>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl DshowModeCache {
+    /// The camera's remembered modes, or the probe's answer (remembered when
+    /// it listed modes). The flag says whether the probe was skipped.
+    fn probe_through(
+        &self,
+        camera: &str,
+        probe: impl FnOnce() -> WindowsDshowModeProbe,
+    ) -> (WindowsDshowModeProbe, bool) {
+        if let Some(modes) = self
+            .modes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(camera)
+            .cloned()
+        {
+            return (WindowsDshowModeProbe::Modes(modes), true);
+        }
+        let probed = probe();
+        if let WindowsDshowModeProbe::Modes(modes) = &probed {
+            self.modes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(camera.to_string(), modes.clone());
+        }
+        (probed, false)
+    }
+
+    /// Drops the camera's modes; its next start probes again.
+    fn forget(&self, camera: &str) -> bool {
+        self.modes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(camera)
+            .is_some()
+    }
+}
+
 /// DirectShow failures no other capture mode can fix: retrying them only
 /// burns the start budget.
 #[cfg(any(target_os = "windows", test))]
@@ -5207,7 +5273,15 @@ mod windows {
         // 720p30 for MJPEG while their uncompressed DirectShow mode tops out
         // at 5-10 fps. Retain the exact-rate and negotiated-default fallbacks
         // for cameras that do not expose MJPEG.
-        let probe = probe_dshow_advertised_video_modes(&config);
+        let (probe, cached) = windows_dshow_mode_cache().probe_through(&config.unique_id, || {
+            probe_dshow_advertised_video_modes(&config)
+        });
+        if cached {
+            tracing::info!(
+                camera = %config.unique_id,
+                "[camera-modes] reusing the modes this camera advertised earlier; probe skipped"
+            );
+        }
         if stop_flag.load(Ordering::Acquire) {
             return;
         }
@@ -5217,6 +5291,7 @@ mod windows {
             WindowsDshowModeProbe::ModeIndependentError(reason) => {
                 // Busy, missing or refused: every capture mode would fail the
                 // same way, so spend none of the start budget on them.
+                windows_dshow_mode_cache().forget(&config.unique_id);
                 tracing::warn!(
                     camera = %config.unique_id,
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
@@ -5298,6 +5373,9 @@ mod windows {
             .last()
             .cloned()
             .unwrap_or_else(|| "no capture mode was attempted".to_string());
+        // Modes remembered from an earlier start may be what failed here (a
+        // different driver, a replugged device): probe again next time.
+        windows_dshow_mode_cache().forget(&config.unique_id);
         let _ = startup_tx.send(NativeCameraStartup::Failed(format!(
             "Windows camera preview found no working capture mode after {} attempt(s) in {} ms; last: {summary}",
             failures.len(),
@@ -5314,6 +5392,22 @@ mod windows {
             (Some((width, height)), None) => format!("MJPEG {width}x{height}"),
             (None, Some(fps)) => format!("default format @{fps}"),
             (None, None) => "negotiated default format".to_string(),
+        }
+    }
+
+    pub(super) fn windows_dshow_mode_cache() -> &'static DshowModeCache {
+        static CACHE: std::sync::OnceLock<DshowModeCache> = std::sync::OnceLock::new();
+        CACHE.get_or_init(DshowModeCache::default)
+    }
+
+    /// For a start whose native thread outlived the startup timeout; see
+    /// `native_camera_startup_unanswered`.
+    pub(super) fn forget_dshow_modes(camera: &str) {
+        if windows_dshow_mode_cache().forget(camera) {
+            tracing::info!(
+                camera,
+                "[camera-modes] forgot this camera's cached modes after its start timed out"
+            );
         }
     }
 
@@ -9902,6 +9996,82 @@ Error opening input file video=HP HD Camera."#;
             classify_windows_dshow_mode_probe(HP_HD_CAMERA_LIST_OPTIONS),
             WindowsDshowModeProbe::Modes(_)
         ));
+    }
+
+    /// A start whose native thread outlived the startup timeout is stopped,
+    /// and the thread's stop path keeps the cache, so the timeout forgets the
+    /// camera's modes. A deliberate stop (the channel disconnects) keeps them.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_timed_out_windows_camera_start_forgets_its_cached_modes() {
+        let cache = windows::windows_dshow_mode_cache();
+        let listing = || classify_windows_dshow_mode_probe(HP_HD_CAMERA_LIST_OPTIONS);
+        for camera in ["@device_pnp_timed_out_start", "@device_pnp_stopped_start"] {
+            let _ = cache.probe_through(camera, listing);
+            assert!(cache.probe_through(camera, listing).1, "{camera} is cached");
+        }
+
+        let startup = native_camera_startup_unanswered(
+            std_mpsc::RecvTimeoutError::Timeout,
+            "@device_pnp_timed_out_start",
+        );
+        assert!(matches!(startup, NativeCameraStartup::Failed(_)));
+        assert!(
+            !cache.forget("@device_pnp_timed_out_start"),
+            "a timed-out start must forget the camera's modes"
+        );
+
+        let _ = native_camera_startup_unanswered(
+            std_mpsc::RecvTimeoutError::Disconnected,
+            "@device_pnp_stopped_start",
+        );
+        assert!(
+            cache.forget("@device_pnp_stopped_start"),
+            "a deliberately stopped start keeps the camera's modes"
+        );
+    }
+
+    /// #1068 step 3: a camera's `-list_options` probe runs once; later starts
+    /// reuse its modes until a failed start forgets them. Only a listing is
+    /// kept, never an unreadable or error result.
+    #[test]
+    fn windows_dshow_mode_probe_runs_once_per_camera_until_forgotten() {
+        let cache = DshowModeCache::default();
+        let probes = std::cell::Cell::new(0);
+        let listing = || {
+            probes.set(probes.get() + 1);
+            classify_windows_dshow_mode_probe(HP_HD_CAMERA_LIST_OPTIONS)
+        };
+        let (first, cached) = cache.probe_through("@device_pnp_cam", listing);
+        assert!(matches!(first, WindowsDshowModeProbe::Modes(_)) && !cached);
+        let (second, cached) = cache.probe_through("@device_pnp_cam", listing);
+        assert!(cached, "the second start reuses the modes");
+        assert_eq!(first, second);
+        assert_eq!(probes.get(), 1);
+
+        // Another camera has its own entry.
+        let (_, cached) = cache.probe_through("@device_pnp_other", listing);
+        assert!(!cached);
+        assert_eq!(probes.get(), 2);
+
+        // A failed start forgets; the next start probes again.
+        assert!(cache.forget("@device_pnp_cam"));
+        assert!(!cache.forget("@device_pnp_cam"));
+        let (_, cached) = cache.probe_through("@device_pnp_cam", listing);
+        assert!(!cached);
+        assert_eq!(probes.get(), 3);
+
+        // Unreadable and mode-independent results are never kept.
+        for answer in [
+            WindowsDshowModeProbe::Unreadable,
+            WindowsDshowModeProbe::ModeIndependentError("Access is denied".into()),
+        ] {
+            let expected = format!("{answer:?}");
+            let (probed, cached) = cache.probe_through("@device_pnp_flaky", || answer);
+            assert_eq!(format!("{probed:?}"), expected);
+            assert!(!cached);
+            assert!(!cache.forget("@device_pnp_flaky"), "{expected} was cached");
+        }
     }
 
     #[test]
