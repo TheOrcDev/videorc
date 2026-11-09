@@ -1181,7 +1181,7 @@ themes; nothing next to Record or Go Live; one home per control.
 | --- | --- | --- |
 | Flake rate | `pnpm smoke:cloud-solo` 10× in a row on a quiet Mac | 10 of 10; hold 1.4 to 1.8 s; largest gap ≤ 67 ms; receivers see EOF 10 of 10 |
 | Feed cuts | `VIDEORC_CLOUD_SOLO_DROP_MS` at 2, 10, 60 and 300 s; 25 flaps in 10 min | every cut holds and resumes; no receiver reconnect |
-| Hold limit | a 5-minute limit with the feed gone | the show ends `hold-expired` within 2 s of the limit |
+| Hold limit | a 5-minute limit with the feed gone | the show ends `hold-limit` within 2 s of the limit |
 | Mac death | SIGKILL the app group (the smoke's death step) | Resume live ≤ 8 s after the click; one show on the web |
 | App update mid-stream | relaunch from a different build directory with the same state dir (the smoke's relaunch with `VIDEORC_APP_VERSION` bumped); then once for real on a packaged build (A2) | Resume works; `client.version` changes on the agent's log |
 | Runner crash | SIGKILL the runner | platforms back ≤ 5 s; "Videorc Cloud restarted your show" once |
