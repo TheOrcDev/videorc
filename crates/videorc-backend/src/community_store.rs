@@ -624,7 +624,8 @@ fn accounts_by_keys_locked(
             "SELECT {ACCOUNT_COLUMNS} FROM community_accounts WHERE account_key IN ({})",
             in_placeholders(chunk.len())
         ))?;
-        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), account_from_row)?;
+        let rows =
+            statement.query_map(rusqlite::params_from_iter(chunk.iter()), account_from_row)?;
         for row in rows {
             let row = row?;
             out.insert(row.account_key.clone(), row);
@@ -646,7 +647,8 @@ fn live_accounts_by_people_locked(
              ORDER BY first_seen_at ASC, account_key ASC",
             in_placeholders(chunk.len())
         ))?;
-        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), account_from_row)?;
+        let rows =
+            statement.query_map(rusqlite::params_from_iter(chunk.iter()), account_from_row)?;
         for row in rows {
             let row = row?;
             out.entry(row.person_id.clone()).or_default().push(row);
@@ -707,7 +709,8 @@ fn people_by_ids_locked(
             "SELECT {PERSON_COLUMNS} FROM community_people WHERE id IN ({})",
             in_placeholders(chunk.len())
         ))?;
-        let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), person_from_row)?;
+        let rows =
+            statement.query_map(rusqlite::params_from_iter(chunk.iter()), person_from_row)?;
         for row in rows {
             let row = row?;
             out.insert(row.id.clone(), row);
@@ -909,7 +912,12 @@ fn set_support_locked(
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(account_key, session_id) DO UPDATE SET
             support_json = excluded.support_json, at = MAX(at, excluded.at)",
-        params![account_key, session_id, serde_json::to_string(support)?, iso(at)],
+        params![
+            account_key,
+            session_id,
+            serde_json::to_string(support)?,
+            iso(at)
+        ],
     )?;
     Ok(())
 }
@@ -1032,8 +1040,7 @@ fn scrub_report_names_locked(
     };
     let mut scrubbed = 0u32;
     for (session_id, json) in rows {
-        let Some(mut report) = crate::protocol::CohostSessionReport::from_stored_json(&json)
-        else {
+        let Some(mut report) = crate::protocol::CohostSessionReport::from_stored_json(&json) else {
             continue;
         };
         let Some(community) = report.community.as_mut() else {
@@ -2140,11 +2147,7 @@ impl Database {
         let name = account.name.clone();
         forget_account_locked(&transaction, &account, now)?;
         // F2: past reports named them as a regular or a milestone.
-        scrub_report_names_locked(
-            &transaction,
-            Some(&[(name.clone(), account.platform)]),
-            now,
-        )?;
+        scrub_report_names_locked(&transaction, Some(&[(name.clone(), account.platform)]), now)?;
         transaction.commit()?;
         Ok((!name.is_empty()).then_some(name))
     }

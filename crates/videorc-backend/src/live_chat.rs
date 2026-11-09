@@ -3634,14 +3634,13 @@ async fn mark_first_time_chatters(
     // without `arrival`. The first-time query is unchanged.
     let looked_up = tokio::task::spawn_blocking(move || {
         let returning = database.live_chat_returning_authors(&lookup_session_id, &lookup);
-        let (arrivals, already_arrived, log) =
-            crate::community_service::lookup_arrivals_blocking(
-                &database,
-                &community,
-                &lookup_session_id,
-                &lookup,
-                chrono::Utc::now(),
-            );
+        let (arrivals, already_arrived, log) = crate::community_service::lookup_arrivals_blocking(
+            &database,
+            &community,
+            &lookup_session_id,
+            &lookup,
+            chrono::Utc::now(),
+        );
         (returning, arrivals, already_arrived, log)
     })
     .await;

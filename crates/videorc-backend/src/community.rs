@@ -761,7 +761,9 @@ pub fn milestones_within(celebrated: &[String], streams: u32, best_in_a_row: u32
             if let Some(value) = key.strip_prefix("streams-") {
                 value.parse::<u32>().is_ok_and(|value| value <= streams)
             } else if let Some(value) = key.strip_prefix("row-") {
-                value.parse::<u32>().is_ok_and(|value| value <= best_in_a_row)
+                value
+                    .parse::<u32>()
+                    .is_ok_and(|value| value <= best_in_a_row)
             } else {
                 false
             }

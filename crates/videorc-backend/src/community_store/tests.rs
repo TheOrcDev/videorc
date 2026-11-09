@@ -824,23 +824,34 @@ fn forgetme_leaves_a_tombstone_that_later_chat_never_revives_until_rememberme() 
         &[(StreamPlatform::Twitch, "t1", "Ada")],
     );
     assert_eq!(
-        database.community_account_status("twitch:t1").map(|(_, s)| s),
+        database
+            .community_account_status("twitch:t1")
+            .map(|(_, s)| s),
         Some(CommunityPersonStatus::Forgotten),
         "still never learned again"
     );
     {
         let conn = database.lock().unwrap();
         let people: i64 = conn
-            .query_row("SELECT COUNT(*) FROM community_people", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM community_people", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(people, 0, "the forgotten account has no person");
     }
-    database.community_forget_account("x:gone", day(2026, 10, 18)).unwrap();
+    database
+        .community_forget_account("x:gone", day(2026, 10, 18))
+        .unwrap();
     database.community_forget_all(day(2026, 10, 19)).unwrap();
     assert!(
-        database.community_export(day(2026, 10, 19)).unwrap().people.iter().all(|person| {
-            person.status == "forgotten" && person.accounts.iter().all(|a| a.name.is_empty())
-        }),
+        database
+            .community_export(day(2026, 10, 19))
+            .unwrap()
+            .people
+            .iter()
+            .all(|person| {
+                person.status == "forgotten" && person.accounts.iter().all(|a| a.name.is_empty())
+            }),
         "only nameless tombstones export after a wipe"
     );
     assert_eq!(
@@ -1703,7 +1714,11 @@ fn youtube_derived_support_milestones_and_best_run_leave_with_the_attendance() {
     assert_eq!(database.community_prune(day(2026, 10, 3)).unwrap(), 0);
     let kim = person_of(&database, StreamPlatform::Youtube, "kim");
     assert_eq!((kim.streams, kim.in_a_row, kim.best_in_a_row), (3, 3, 3));
-    assert!(kim.support.is_empty(), "the day-1 tip left: {:?}", kim.support);
+    assert!(
+        kim.support.is_empty(),
+        "the day-1 tip left: {:?}",
+        kim.support
+    );
     assert!(
         kim.milestones.is_empty(),
         "a 5th-stream milestone three streams cannot justify: {:?}",
@@ -1748,7 +1763,12 @@ fn youtube_derived_support_milestones_and_best_run_leave_with_the_attendance() {
     // Linked: the union; split: each side's own support comes back (D4).
     let kick = person_of(&database, StreamPlatform::Kick, "ada-k");
     database
-        .community_link(&ada.id, &kick.id, CommunityLinkKind::Manual, day(2026, 10, 4))
+        .community_link(
+            &ada.id,
+            &kick.id,
+            CommunityLinkKind::Manual,
+            day(2026, 10, 4),
+        )
         .unwrap();
     let linked = person_of(&database, StreamPlatform::Twitch, "ada");
     assert_eq!((linked.support.bits, linked.support.kicks), (100, 50));
@@ -1764,19 +1784,28 @@ fn youtube_derived_support_milestones_and_best_run_leave_with_the_attendance() {
     let ada_export = file
         .people
         .iter()
-        .find(|person| person.accounts.iter().any(|a| a.account_key == "twitch:ada"))
+        .find(|person| {
+            person
+                .accounts
+                .iter()
+                .any(|a| a.account_key == "twitch:ada")
+        })
         .unwrap();
     assert_eq!(ada_export.accounts[0].support.len(), 1);
     assert_eq!(ada_export.accounts[0].support[0].support.bits, 100);
     let other = Database::open_in_memory_for_tests();
     other.community_import(&file, day(2026, 10, 7)).unwrap();
     assert_eq!(
-        person_of(&other, StreamPlatform::Twitch, "ada").support.bits,
+        person_of(&other, StreamPlatform::Twitch, "ada")
+            .support
+            .bits,
         100
     );
     other.community_import(&file, day(2026, 10, 8)).unwrap();
     assert_eq!(
-        person_of(&other, StreamPlatform::Twitch, "ada").support.bits,
+        person_of(&other, StreamPlatform::Twitch, "ada")
+            .support
+            .bits,
         100,
         "a second import doubles nothing"
     );
@@ -1831,7 +1860,12 @@ fn the_import_records_its_links_refuses_strange_x_attachments_and_clamps_status(
     let ada = person_of(&database, StreamPlatform::Twitch, "ada");
     let ada_kick = person_of(&database, StreamPlatform::Kick, "ada-k");
     database
-        .community_link(&ada.id, &ada_kick.id, CommunityLinkKind::Manual, day(2026, 10, 2))
+        .community_link(
+            &ada.id,
+            &ada_kick.id,
+            CommunityLinkKind::Manual,
+            day(2026, 10, 2),
+        )
         .unwrap();
     // The file: Ada's Kick and X (the other computer never saw her Twitch),
     // Bo's Kick and X, and Cy marked "forgotten" with a live account.
@@ -1859,19 +1893,30 @@ fn the_import_records_its_links_refuses_strange_x_attachments_and_clamps_status(
             vec![account("twitch:cy", StreamPlatform::Twitch, "Cy")],
         ),
     ]);
-    database.community_import(&imported, day(2026, 10, 12)).unwrap();
+    database
+        .community_import(&imported, day(2026, 10, 12))
+        .unwrap();
     // Ada's X account: the file never held her Twitch account, so it
     // lands alone; her YouTube account attaches, on the record.
     let ada = person_of(&database, StreamPlatform::Twitch, "ada");
-    let mut keys: Vec<&str> = ada.accounts.iter().map(|a| a.account_key.as_str()).collect();
+    let mut keys: Vec<&str> = ada
+        .accounts
+        .iter()
+        .map(|a| a.account_key.as_str())
+        .collect();
     keys.sort();
     assert_eq!(keys, vec!["kick:ada-k", "twitch:ada", "youtube:UCada"]);
     let ada_x = person_of(&database, StreamPlatform::X, "ada-x");
-    assert_ne!(ada_x.id, ada.id, "a stranger on this side refuses the X join");
+    assert_ne!(
+        ada_x.id, ada.id,
+        "a stranger on this side refuses the X join"
+    );
     assert_eq!(ada_x.accounts.len(), 1);
     assert!(
-        ada.link_events.iter().any(|event| event.account_key == "youtube:UCada"
-            && event.kind == CommunityLinkKind::Manual),
+        ada.link_events
+            .iter()
+            .any(|event| event.account_key == "youtube:UCada"
+                && event.kind == CommunityLinkKind::Manual),
         "{:?}",
         ada.link_events
     );

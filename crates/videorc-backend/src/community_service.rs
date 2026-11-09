@@ -466,12 +466,7 @@ pub(crate) fn session_ended(state: &AppState) {
         };
         // F11: only this session's rows leave; a session started meanwhile
         // keeps its own.
-        state
-            .cohost
-            .lock()
-            .await
-            .community
-            .end_session(&session_id);
+        state.cohost.lock().await.community.end_session(&session_id);
         state.emit_log(
             "info",
             format!("Community: writing the report block for {session_id}."),
@@ -1079,12 +1074,11 @@ async fn run_chat_command(
                                 account_key: second.account_key.clone(),
                                 at: now.to_rfc3339(),
                             };
-                            state
-                                .cohost
-                                .lock()
-                                .await
-                                .community
-                                .note_link_made(session_id, link, Instant::now());
+                            state.cohost.lock().await.community.note_link_made(
+                                session_id,
+                                link,
+                                Instant::now(),
+                            );
                             publish_cohost_state(state).await;
                         }
                         Ok(Err(error)) => {
@@ -2804,6 +2798,84 @@ mod tests {
         assert_eq!(summary.people, 4);
     }
 
+    /// The review of 2026-11-09, F14: an X account joins only through the
+    /// viewer's own `!link`. The same name on Twitch and X opens no "might
+    /// be the same person" suggestion, and the word joins them through the
+    /// service like any other pair.
+    #[tokio::test]
+    async fn an_x_account_joins_through_its_own_link_word_and_never_by_name() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let generation = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            generation,
+            vec![
+                row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
+                row("s1", StreamPlatform::X, "1001", "Ada", 2, "hello from x"),
+            ],
+        )
+        .await;
+        let twitch = state
+            .database
+            .community_account_person("twitch:ada")
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            state
+                .database
+                .community_account_person("x:1001")
+                .unwrap()
+                .unwrap(),
+            twitch
+        );
+        assert!(
+            suggestions(&state).await.unwrap().suggestions.is_empty(),
+            "a name never suggests an X account"
+        );
+        deliver(
+            &state,
+            generation,
+            vec![row(
+                "s1",
+                StreamPlatform::Twitch,
+                "ada",
+                "Ada",
+                3,
+                "!link orcwave",
+            )],
+        )
+        .await;
+        assert_eq!(pending_link_words(&state), 1);
+        deliver(
+            &state,
+            generation,
+            vec![row(
+                "s1",
+                StreamPlatform::X,
+                "1001",
+                "Ada",
+                4,
+                "!link orcwave",
+            )],
+        )
+        .await;
+        assert_eq!(pending_link_words(&state), 0);
+        assert_eq!(
+            state
+                .database
+                .community_account_person("x:1001")
+                .unwrap()
+                .unwrap(),
+            twitch,
+            "one person now"
+        );
+        assert_eq!(bubble_lines(&state), ["Linked: Ada on Twitch and X."]);
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert_eq!(snapshot.link_made.len(), 1);
+        assert_eq!(snapshot.link_made[0].account_key, "x:1001");
+    }
+
     /// The review of 2026-11-09, F5: the `!link` word is public, so a third
     /// account saying it inside the window may mean the join was hijacked.
     /// Ada links Twitch and YouTube; Mallory types the same word on Kick
@@ -2822,7 +2894,14 @@ mod tests {
                 row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
                 row("s1", StreamPlatform::Youtube, "UCada", "ada_dev", 2, "hi"),
                 row("s1", StreamPlatform::Kick, "mal", "Mallory", 3, "hey"),
-                row("s1", StreamPlatform::Twitch, "ada", "Ada", 4, "!link pixel42"),
+                row(
+                    "s1",
+                    StreamPlatform::Twitch,
+                    "ada",
+                    "Ada",
+                    4,
+                    "!link pixel42",
+                ),
                 row(
                     "s1",
                     StreamPlatform::Youtube,
@@ -2903,18 +2982,15 @@ mod tests {
                 ("twitch:ada".to_string(), "youtube:UCada".to_string()),
             ]
         );
-        assert!(listed.iter().all(|s| s.reason
-            == crate::community::CommunitySuggestionReason::LinkCancelled));
+        assert!(
+            listed
+                .iter()
+                .all(|s| s.reason == crate::community::CommunitySuggestionReason::LinkCancelled)
+        );
         assert_eq!(pending_link_words(&state), 0, "the word stays burnt");
         // The report counts no link for this stream.
         assert_eq!(
-            state
-                .community
-                .lock()
-                .session
-                .as_ref()
-                .unwrap()
-                .links_made,
+            state.community.lock().session.as_ref().unwrap().links_made,
             0
         );
     }
@@ -2947,7 +3023,14 @@ mod tests {
         deliver(
             &state,
             second,
-            vec![row("s2", StreamPlatform::Youtube, "UCada", "ada_dev", 2, "yo")],
+            vec![row(
+                "s2",
+                StreamPlatform::Youtube,
+                "UCada",
+                "ada_dev",
+                2,
+                "yo",
+            )],
         )
         .await;
         let youtube = state
@@ -2967,7 +3050,14 @@ mod tests {
             third,
             vec![
                 row("s3", StreamPlatform::Twitch, "ada", "Ada", 3, "back"),
-                row("s3", StreamPlatform::Youtube, "UCada", "ada_dev", 4, "and here"),
+                row(
+                    "s3",
+                    StreamPlatform::Youtube,
+                    "UCada",
+                    "ada_dev",
+                    4,
+                    "and here",
+                ),
             ],
         )
         .await;
@@ -2977,7 +3067,11 @@ mod tests {
             .iter()
             .filter(|u| u.trigger.kind == CohostUtteranceTriggerKind::Greeting)
             .count();
-        assert_eq!(cards, 1, "one welcome for one person: {:?}", snapshot.utterances);
+        assert_eq!(
+            cards, 1,
+            "one welcome for one person: {:?}",
+            snapshot.utterances
+        );
         assert_eq!(snapshot.welcome_back.len(), 1);
         let rows = state
             .database
@@ -3015,7 +3109,11 @@ mod tests {
             ],
         )
         .await;
-        assert!(bubble_lines(&state).is_empty(), "{:?}", bubble_lines(&state));
+        assert!(
+            bubble_lines(&state).is_empty(),
+            "{:?}",
+            bubble_lines(&state)
+        );
         let person = state
             .database
             .community_account_person("twitch:ada")
@@ -3985,7 +4083,14 @@ mod tests {
             deliver(
                 &state,
                 generation,
-                vec![row(session_id, StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
+                vec![row(
+                    session_id,
+                    StreamPlatform::Twitch,
+                    "ada",
+                    "Ada",
+                    1,
+                    "hello",
+                )],
             )
             .await;
             crate::live_chat::stop_live_chat(&state).await;
@@ -3998,7 +4103,14 @@ mod tests {
             vec![
                 row("s3", StreamPlatform::Twitch, "ada", "Ada", 2, "back"),
                 row("s3", StreamPlatform::Youtube, "UCada", "ada_dev", 3, "hi"),
-                row("s3", StreamPlatform::Twitch, "ada", "Ada", 4, "!link pixel42"),
+                row(
+                    "s3",
+                    StreamPlatform::Twitch,
+                    "ada",
+                    "Ada",
+                    4,
+                    "!link pixel42",
+                ),
                 row(
                     "s3",
                     StreamPlatform::Youtube,
@@ -4016,18 +4128,35 @@ mod tests {
         deliver(
             &state,
             third,
-            vec![row("s3", StreamPlatform::Twitch, "ada", "Ada", 6, "!forgetme")],
+            vec![row(
+                "s3",
+                StreamPlatform::Twitch,
+                "ada",
+                "Ada",
+                6,
+                "!forgetme",
+            )],
         )
         .await;
         let snapshot = state.cohost.lock().await.snapshot();
         assert!(snapshot.welcome_back.is_empty(), "the row left with her");
         assert!(snapshot.link_made.is_empty(), "the card left with her");
         assert!(
-            state.community.lock().session.as_ref().unwrap().report_arrivals.is_empty(),
+            state
+                .community
+                .lock()
+                .session
+                .as_ref()
+                .unwrap()
+                .report_arrivals
+                .is_empty(),
             "her arrival left the report"
         );
         assert_eq!(
-            state.database.community_account_person("twitch:ada").unwrap(),
+            state
+                .database
+                .community_account_person("twitch:ada")
+                .unwrap(),
             None
         );
         crate::live_chat::stop_live_chat(&state).await;
