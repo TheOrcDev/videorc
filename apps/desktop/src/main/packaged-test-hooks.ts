@@ -18,13 +18,23 @@ export const PACKAGED_TEST_HOOK_ENV_NAMES = Object.freeze([
   'VIDEORC_REMOTE_DEBUG_PORT',
   'VIDEORC_NATIVE_PREVIEW_HOST_MODULE',
   'VIDEORC_NATIVE_PREVIEW_IN_PROCESS_MODULE',
-  'VIDEORC_NATIVE_PREVIEW_HOST_HELPER'
+  'VIDEORC_NATIVE_PREVIEW_HOST_HELPER',
+  // Plan 224 S-G1: Chromium's fake camera and microphone from files. A
+  // release build must never swap the host's real devices for a file.
+  'VIDEORC_SMOKE_FAKE_MEDIA_VIDEO',
+  'VIDEORC_SMOKE_FAKE_MEDIA_AUDIO'
 ])
 
-/** Chromium switches that open a DevTools endpoint when passed on the command line. */
+/**
+ * Chromium switches that open a DevTools endpoint when passed on the command
+ * line, and the fake-media switches the env names above would append.
+ */
 export const PACKAGED_TEST_HOOK_SWITCHES = Object.freeze([
   'remote-debugging-port',
-  'remote-debugging-pipe'
+  'remote-debugging-pipe',
+  'use-fake-device-for-media-stream',
+  'use-file-for-fake-video-capture',
+  'use-file-for-fake-audio-capture'
 ])
 
 declare const __VIDEORC_PACKAGED_TEST_HOOKS__: boolean | undefined

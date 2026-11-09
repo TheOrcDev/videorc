@@ -9,8 +9,10 @@ import {
   timingSafeEqual,
   verify as verifyBytes
 } from 'node:crypto'
+import { createReadStream, existsSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 
+import { guestPageHtml } from './fake-cloud-guest-page.mjs'
 import { capabilitiesDocument } from './fake-transcript-service.mjs'
 
 /**
@@ -38,9 +40,22 @@ import { capabilitiesDocument } from './fake-transcript-service.mjs'
  *   the show in the last 15 s (`LOST_SHOW_SILENCE_MS`); that end is final (a
  *   node that comes back gets the show in `endShows`, never reopened).
  *
+ * - talk shows (plan 224, S-G1), when `startFakeCloudWeb` gets a `talk`
+ *   block with a local `livekit-server --dev`: `POST /api/cloud/shows` with
+ *   `kind: "talk"` mints the host's and the runner's LiveKit tokens
+ *   (`mintLiveKitToken`, the web's `roomGrantFor`), an invite slug and the
+ *   room's limits, and hands the agent the `room` and `recording` blocks;
+ *   `POST …/room/token`, `GET`/`PATCH …/room`, `POST …/invite/rotate`,
+ *   `GET …/guests`, the Let in / Decline and the guest actions (remove and
+ *   ban through LiveKit's server API); the public guest routes
+ *   (`GET /api/guest/:slug`, `POST …/join`, `GET …/join/:requestId`,
+ *   `POST …/leave`) with the `vrc_guest` cookie; the node-signed
+ *   `POST /api/cloud/recordings`; and the guest page itself at
+ *   `/guest/<slug>` (`fake-cloud-guest-page.mjs`) for headless browsers.
+ *
  * Every call is recorded for the report as method, path and status only.
- * Bearer tokens, show tokens, ingest keys, SRT passphrases and stream keys
- * never reach a log.
+ * Bearer tokens, show tokens, ingest keys, SRT passphrases, stream keys and
+ * LiveKit tokens never reach a log.
  *
  * What it does NOT mirror of `videorc-web/lib/cloud/*` (the lane 3 fidelity
  * diff of 2026-10-21, re-read 2026-11-08 at web `be159d28`). A smoke that
@@ -80,6 +95,20 @@ export const NODE_SECRET_BYTES = 32
 
 export const SHOW_TOKEN_VERSION = 'vcs1'
 export const SHOW_TOKEN_ROLE_HOST = 'host'
+
+// Plan 224 talk shows: the web's constants (`lib/cloud/livekit.ts`,
+// `lib/cloud/talk.ts`).
+export const LIVEKIT_PERSON_TOKEN_TTL_SECONDS = 10 * 60
+export const LIVEKIT_RUNNER_TOKEN_TTL_SECONDS = 12.5 * 60 * 60
+export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+export const TALK_LIMITS_MAX = Object.freeze({
+  guestsOnStage: 5,
+  roomSize: 10,
+  recordingRetentionDays: 30
+})
+const GUEST_ID_PATTERN = /^g_[0-9A-Za-z]{22}$/
+const GUEST_REQUEST_ID_PATTERN = /^gr_[0-9A-Za-z]{22}$/
+const INVITE_SLUG_PATTERN = /^[0-9A-Za-z]{16}$/
 /** Any single show ends after 12 hours (plan 184 D18). */
 export const MAX_SHOW_SECONDS = 12 * 60 * 60
 export const DEFAULT_HOLD_MAX_SECONDS = 30 * 60
@@ -161,6 +190,219 @@ export function isIngestKey(value) {
 
 export function isNodeId(value) {
   return typeof value === 'string' && NODE_ID_PATTERN.test(value)
+}
+
+export function newInviteSlug() {
+  return base62(16)
+}
+
+export function newGuestId() {
+  return `g_${base62(22)}`
+}
+
+export function newGuestRequestId() {
+  return `gr_${base62(22)}`
+}
+
+export function isGuestId(value) {
+  return typeof value === 'string' && GUEST_ID_PATTERN.test(value)
+}
+
+export function isGuestRequestId(value) {
+  return typeof value === 'string' && GUEST_REQUEST_ID_PATTERN.test(value)
+}
+
+export function isInviteSlug(value) {
+  return typeof value === 'string' && INVITE_SLUG_PATTERN.test(value)
+}
+
+export function hostIdentityOf(showId) {
+  return `host:${showId}`
+}
+
+export function runnerIdentityOf(showId) {
+  return `runner:${showId}`
+}
+
+/** A guest's sources (the web's `guestPublishSources`): the host's mute is this list. */
+export function guestPublishSources(screenShare, microphone = true) {
+  return [
+    'camera',
+    ...(microphone ? ['microphone'] : []),
+    ...(screenShare ? ['screen_share', 'screen_share_audio'] : [])
+  ]
+}
+
+/**
+ * The grant each role gets (the web's `roomGrantFor`, plan 224 Wire shape
+ * "Ids and tokens"). The runner is not hidden (plan 221 U3): a hidden
+ * participant's tracks are invisible, so the host could never subscribe to
+ * the return; the runner itself limits the return's subscribers.
+ */
+export function roomGrantFor({ role, room, screenShare = false, microphone = true }) {
+  const base = {
+    canPublish: true,
+    canSubscribe: true,
+    room,
+    roomAdmin: false,
+    roomCreate: false,
+    roomJoin: true,
+    roomList: false,
+    roomRecord: false
+  }
+  if (role === 'host') {
+    return {
+      ...base,
+      canPublishData: true,
+      canPublishSources: ['camera', 'microphone', 'screen_share', 'screen_share_audio']
+    }
+  }
+  if (role === 'runner') {
+    return {
+      ...base,
+      canPublishData: false,
+      canPublishSources: ['camera', 'microphone'],
+      hidden: false
+    }
+  }
+  return {
+    ...base,
+    canPublishData: false,
+    canPublishSources: guestPublishSources(screenShare, microphone),
+    canUpdateOwnMetadata: false
+  }
+}
+
+function base64Url(buffer) {
+  return Buffer.from(buffer).toString('base64url')
+}
+
+/**
+ * A LiveKit access token as `livekit-server-sdk`'s `AccessToken` mints it:
+ * an HS256 JWT with `iss` the API key, `sub` the identity, the optional
+ * display name and the `video` grant. Pure: the caller passes the clock.
+ */
+export function mintLiveKitToken({
+  apiKey,
+  apiSecret,
+  identity,
+  name,
+  grant,
+  ttlSeconds,
+  nowMs = Date.now()
+}) {
+  if (!apiKey || !apiSecret || !identity || !grant || !ttlSeconds) {
+    throw new Error('A LiveKit token needs the key pair, an identity, a grant and a ttl.')
+  }
+  const nowSeconds = Math.floor(nowMs / 1000)
+  const header = base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
+  const payload = base64Url(
+    JSON.stringify({
+      exp: nowSeconds + Math.floor(ttlSeconds),
+      nbf: nowSeconds - 10,
+      iss: apiKey,
+      sub: identity,
+      ...(name ? { name } : {}),
+      video: grant
+    })
+  )
+  const signature = base64Url(
+    createHmac('sha256', apiSecret).update(`${header}.${payload}`).digest()
+  )
+  return `${header}.${payload}.${signature}`
+}
+
+/** The claims of a LiveKit token, verified against the secret (the tests). */
+export function readLiveKitToken(token, apiSecret) {
+  const parts = String(token).split('.')
+  if (parts.length !== 3) return null
+  const expected = createHmac('sha256', apiSecret).update(`${parts[0]}.${parts[1]}`).digest()
+  const given = Buffer.from(parts[2], 'base64url')
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null
+  try {
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The room block of a talk show's create (the web's `parseTalkRoomOptions`):
+ * the return's size, a title and the platform names. Pure.
+ */
+export function parseTalkRoom(value) {
+  if (!isRecord(value)) return { message: 'room must be an object on a talk show.' }
+  const returnWidth = integerIn(value.returnWidth, 2, 1920)
+  const returnHeight = integerIn(value.returnHeight, 2, 1920)
+  if (returnWidth === null || returnHeight === null || returnWidth % 2 || returnHeight % 2) {
+    return { message: 'room.returnWidth and room.returnHeight must be even, 2 to 1920.' }
+  }
+  const title = typeof value.title === 'string' ? value.title.trim().slice(0, 80) : ''
+  const platforms = Array.isArray(value.platforms)
+    ? value.platforms
+        .filter((entry) => typeof entry === 'string')
+        .map((entry) => entry.slice(0, 32))
+    : []
+  return { returnWidth, returnHeight, title, platforms }
+}
+
+/**
+ * `POST /api/cloud/recordings` from the node (plan 224 R-G6), node-signed:
+ * one finished file under the show's prefix. Pure.
+ */
+export function parseRecordingReport(value) {
+  if (!isRecord(value)) return { message: 'The body must be a JSON object.' }
+  if (!isShowId(value.showId)) return { message: 'showId must be a show id.' }
+  if (value.orientation !== 'h' && value.orientation !== 'v') {
+    return { message: 'orientation must be h or v.' }
+  }
+  if (value.state !== 'complete' && value.state !== 'failed') {
+    return { message: 'state must be complete or failed.' }
+  }
+  if (!Number.isInteger(value.seconds) || value.seconds < 0) {
+    return { message: 'seconds must be a whole number.' }
+  }
+  if (!Number.isInteger(value.bytes) || value.bytes < 0) {
+    return { message: 'bytes must be a whole number.' }
+  }
+  if (typeof value.startedAt !== 'string' || Number.isNaN(Date.parse(value.startedAt))) {
+    return { message: 'startedAt must be an ISO date.' }
+  }
+  if (typeof value.objectKey !== 'string' || !value.objectKey || value.objectKey.includes('..')) {
+    return { message: 'objectKey must be a key.' }
+  }
+  return {
+    showId: value.showId,
+    orientation: value.orientation,
+    state: value.state,
+    seconds: value.seconds,
+    bytes: value.bytes,
+    startedAt: value.startedAt,
+    objectKey: value.objectKey
+  }
+}
+
+/** The host's guests view (the web's `buildHostGuestsView`): waiting requests and the guests in. Pure. */
+export function buildHostGuestsView(requests, nowIso) {
+  const waiting = requests.filter((request) => request.state === 'waiting' && !request.hidden)
+  const guests = requests.filter((request) => request.state === 'let-in' && request.guestId)
+  return {
+    cursor: nowIso,
+    declinedCount: requests.filter((request) => request.hidden).length,
+    guests: guests.map((request) => ({
+      guestId: request.guestId,
+      name: request.name,
+      joinedAt: request.decidedAt ?? request.askedAt,
+      muted: request.muted === true,
+      screenShareAllowed: request.screenShareAllowed === true
+    })),
+    requests: waiting.map((request) => ({
+      requestId: request.id,
+      name: request.name,
+      askedAt: request.askedAt,
+      device: request.device
+    }))
+  }
 }
 
 // --- Node signatures (web <-> node agent, both directions) --------------------
@@ -491,7 +733,13 @@ export function parseCreateShowBody(value) {
     }
     client = { app: value.client.app.slice(0, 40), version: value.client.version.slice(0, 40) }
   }
-  return { kind: value.kind, outputs, holdMaxSeconds, client }
+  let room = null
+  if (value.kind === 'talk') {
+    const parsed = parseTalkRoom(value.room)
+    if ('message' in parsed) return { message: parsed.message }
+    room = parsed
+  }
+  return { kind: value.kind, outputs, holdMaxSeconds, client, ...(room ? { room } : {}) }
 }
 
 /**
@@ -796,10 +1044,22 @@ export async function startFakeCloudWeb({
   userId = 'user_cloud_smoke',
   allowance,
   srtLatencyMs = DEFAULT_SRT_LATENCY_MS,
-  agentTimeoutMs = AGENT_TIMEOUT_MS
+  agentTimeoutMs = AGENT_TIMEOUT_MS,
+  /**
+   * Plan 224: talk shows need a LiveKit server (`livekit-server --dev`):
+   * `{ livekit: { url, httpUrl, apiKey, apiSecret }, recording?, limits?,
+   * guestAssets? }`. `recording` is the target the node gets (`bucket`,
+   * `endpoint`, `region`, `credentials`), prefixed per show here.
+   * `guestAssets` maps `/guest-assets/<name>` to a file. Without `talk`, a
+   * talk create answers 400 as before.
+   */
+  talk = null
 }) {
   if (!sessionToken || !node?.id || !node?.secret || !node?.agentUrl || !signingKey) {
     throw new Error('The fake cloud web needs a session token, a node and a signing key.')
+  }
+  if (talk && !(talk.livekit?.url && talk.livekit?.apiKey && talk.livekit?.apiSecret)) {
+    throw new Error('The talk block needs livekit { url, apiKey, apiSecret }.')
   }
   const state = {
     shows: new Map(),
@@ -827,7 +1087,19 @@ export async function startFakeCloudWeb({
      * Every lost report (plan 222 D7): the show, what the desktop said, what
      * the node's health probe answered and what became of the show.
      */
-    lostReports: []
+    lostReports: [],
+    /** Plan 224: the rooms by show id (title, platforms, door, limits, invite, the old slugs). */
+    rooms: new Map(),
+    /** Plan 224: every guest request by id, in the order they came. */
+    guestRequests: [],
+    /** Plan 224: every LiveKit token minted (host, runner, guest), memory only: the leak scan. */
+    livekitTokens: [],
+    /** Plan 224: what LiveKit's server API was asked (method and identity, never a token). */
+    livekitCalls: [],
+    /** Plan 224 R-G6: the node's finished recordings. */
+    recordings: [],
+    /** Plan 224: the public guest routes' refusals, counted. */
+    guestRefusals: 0
   }
   const enabledCloud = allowance ?? cloudAllowanceBlock({ nowMs: Date.now() })
   // While the switch is off the account's block says so, as the web's does.
@@ -906,6 +1178,132 @@ export async function startFakeCloudWeb({
     }
   }
 
+  // --- Plan 224: talk-show helpers -------------------------------------------
+  const talkLimits = () => ({ ...TALK_LIMITS_MAX, ...(talk?.limits ?? {}) })
+  const mintFor = ({ role, show, name, guestId, screenShare, microphone }) => {
+    const identity =
+      role === 'host'
+        ? hostIdentityOf(show.id)
+        : role === 'runner'
+          ? runnerIdentityOf(show.id)
+          : guestId
+    const token = mintLiveKitToken({
+      apiKey: talk.livekit.apiKey,
+      apiSecret: talk.livekit.apiSecret,
+      identity,
+      name: role === 'runner' ? undefined : name,
+      grant: roomGrantFor({ role, room: show.id, screenShare, microphone }),
+      ttlSeconds:
+        role === 'runner' ? LIVEKIT_RUNNER_TOKEN_TTL_SECONDS : LIVEKIT_PERSON_TOKEN_TTL_SECONDS
+    })
+    state.livekitTokens.push(token)
+    return token
+  }
+  const newInvite = (room, now) => {
+    if (room.invite) room.oldSlugs.add(room.invite.slug)
+    const slug = newInviteSlug()
+    room.invite = {
+      slug,
+      url: `${state.httpOrigin}/guest/${slug}`,
+      expiresAt: new Date(now.getTime() + INVITE_TTL_MS).toISOString()
+    }
+    // The old link's waiting requests expire with it (`docs/cloud.md`).
+    for (const request of state.guestRequests) {
+      if (request.showId === room.showId && request.slug !== slug && request.state === 'waiting') {
+        request.state = 'expired'
+      }
+    }
+    return room.invite
+  }
+  const roomView = (room) => ({
+    room: {
+      title: room.title,
+      platforms: room.platforms,
+      openDoor: room.openDoor,
+      limits: room.limits
+    },
+    ...(room.invite ? { invite: room.invite } : {})
+  })
+  const roomOf = (slug) => {
+    for (const room of state.rooms.values()) {
+      if (room.invite?.slug === slug) return { room, dead: false }
+      if (room.oldSlugs.has(slug)) return { room, dead: true }
+    }
+    return null
+  }
+  const showOfRoom = (room) => state.shows.get(room.showId) ?? null
+  const guestsIn = (room) =>
+    state.guestRequests.filter(
+      (request) => request.showId === room.showId && request.state === 'let-in'
+    ).length
+  /** LiveKit's server API (Twirp over HTTP) with a server token: moderation and the room's end. */
+  const livekitServer = async (method, body) => {
+    if (!talk?.livekit?.httpUrl) return { ok: false, status: null }
+    const token = mintLiveKitToken({
+      apiKey: talk.livekit.apiKey,
+      apiSecret: talk.livekit.apiSecret,
+      identity: 'videorc-web',
+      grant: { roomAdmin: true, roomCreate: true, room: body.room },
+      ttlSeconds: 60
+    })
+    const started = Date.now()
+    try {
+      const response = await fetch(`${talk.livekit.httpUrl}/twirp/livekit.RoomService/${method}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(agentTimeoutMs)
+      })
+      state.livekitCalls.push({
+        method,
+        room: body.room,
+        identity: body.identity ?? null,
+        status: response.status,
+        ms: Date.now() - started
+      })
+      return { ok: response.ok, status: response.status }
+    } catch (error) {
+      state.livekitCalls.push({
+        method,
+        room: body.room,
+        identity: body.identity ?? null,
+        status: null,
+        error: error.message,
+        ms: Date.now() - started
+      })
+      return { ok: false, status: null }
+    }
+  }
+  const closeRoom = async (show) => {
+    const room = state.rooms.get(show.id)
+    if (!room || room.closedAt) return
+    room.closedAt = new Date()
+    for (const request of state.guestRequests) {
+      if (
+        request.showId === show.id &&
+        (request.state === 'waiting' || request.state === 'let-in')
+      ) {
+        request.state = request.state === 'waiting' ? 'expired' : 'ended'
+      }
+    }
+    await livekitServer('DeleteRoom', { room: show.id })
+  }
+  const guestCookie = (req) => {
+    const header = req.headers.cookie ?? ''
+    for (const part of header.split(';')) {
+      const [name, ...rest] = part.trim().split('=')
+      if (name === 'vrc_guest') return decodeURIComponent(rest.join('='))
+    }
+    return null
+  }
+  const guestState = (room, dead) => {
+    const show = showOfRoom(room)
+    if (dead) return 'invalid'
+    if (!show || show.endedAt || room.closedAt) return 'ended'
+    if (guestsIn(room) >= room.limits.roomSize) return 'full'
+    return 'open'
+  }
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const path = url.pathname
@@ -920,7 +1318,9 @@ export async function startFakeCloudWeb({
     // Node agent -> web, node-signed on the raw body.
     if (
       req.method === 'POST' &&
-      (path === '/api/cloud/nodes/heartbeat' || path === '/api/cloud/usage')
+      (path === '/api/cloud/nodes/heartbeat' ||
+        path === '/api/cloud/usage' ||
+        path === '/api/cloud/recordings')
     ) {
       const rawBody = (await readRequestBody(req, 1024 * 1024)).toString('utf8')
       const verification = verifyNodeRequest({
@@ -980,6 +1380,23 @@ export async function startFakeCloudWeb({
         state.endShowsSent.push(...outcome.endShows)
         return answer(200, { ok: true, endShows: outcome.endShows, drain: false })
       }
+      if (path === '/api/cloud/recordings') {
+        // Plan 224 R-G6: one finished file. The key must sit under the
+        // show's own prefix, as R2's credentials would enforce.
+        const parsed = parseRecordingReport(body)
+        if ('message' in parsed) return fail(400, 'invalid-recording', parsed.message)
+        const show = state.shows.get(parsed.showId)
+        if (!show || show.nodeId !== verification.nodeId || show.kind !== 'talk') {
+          return fail(404, 'cloud-show-not-found', 'No such talk show on this node.')
+        }
+        const prefix = `talk/${show.userId}/${show.id}/`
+        if (!parsed.objectKey.startsWith(prefix)) {
+          return fail(403, 'cloud-recording-outside-prefix', 'The key is outside the show.')
+        }
+        const id = `rec_${base62(22)}`
+        state.recordings.push({ id, nodeId: verification.nodeId, at: now.toISOString(), ...parsed })
+        return answer(200, { ok: true, id })
+      }
       const reports = Array.isArray(body.reports) ? body.reports : null
       if (!reports) return fail(400, 'invalid-usage', 'reports must be an array.')
       const accepted = []
@@ -1021,6 +1438,182 @@ export async function startFakeCloudWeb({
         accepted.push({ showId: entry.showId, seq: entry.seq })
       }
       return answer(200, { ok: true, accepted })
+    }
+
+    // --- Plan 224: the guest page and its public routes (no account) ---
+    const guestAsset = /^\/guest-assets\/([A-Za-z0-9._-]+)$/.exec(path)
+    if (req.method === 'GET' && guestAsset) {
+      await drain(req)
+      const file = talk?.guestAssets?.[guestAsset[1]]
+      if (!file || !existsSync(file)) return fail(404, 'not-found', 'No such asset.')
+      state.calls.push({ at: now.toISOString(), method: req.method, path, status: 200 })
+      res.writeHead(200, {
+        'content-type': guestAsset[1].endsWith('.mjs')
+          ? 'text/javascript; charset=utf-8'
+          : 'application/octet-stream',
+        'content-length': statSync(file).size,
+        'cache-control': 'private, no-store'
+      })
+      createReadStream(file).pipe(res)
+      return
+    }
+    const guestPage = /^\/guest\/([^/]+)$/.exec(path)
+    if (req.method === 'GET' && guestPage) {
+      await drain(req)
+      const slug = decodeURIComponent(guestPage[1])
+      const found = isInviteSlug(slug) ? roomOf(slug) : null
+      const html = guestPageHtml({ slug, title: found?.room.title || 'Videorc guest' })
+      state.calls.push({ at: now.toISOString(), method: req.method, path, status: 200 })
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': Buffer.byteLength(html),
+        'cache-control': 'private, no-store',
+        'x-robots-tag': 'noindex'
+      })
+      res.end(html)
+      return
+    }
+    const guestRoute = /^\/api\/guest\/([^/]+)(?:\/(join|leave)(?:\/([^/]+))?)?$/.exec(path)
+    if (guestRoute) {
+      const slug = decodeURIComponent(guestRoute[1])
+      const action = guestRoute[2] ?? null
+      const requestId = guestRoute[3] ? decodeURIComponent(guestRoute[3]) : null
+      const guestJson = (status, payload, cookie = null) => {
+        state.calls.push({ at: now.toISOString(), method: req.method, path, status })
+        const body = JSON.stringify(payload)
+        res.writeHead(status, {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(body),
+          'cache-control': 'private, no-store',
+          ...(cookie
+            ? {
+                'set-cookie': `vrc_guest=${encodeURIComponent(cookie)}; Path=/; HttpOnly; SameSite=Lax`
+              }
+            : {})
+        })
+        res.end(body)
+      }
+      const refuse = (status, code, message) => {
+        state.guestRefusals += 1
+        return guestJson(status, { error: { code, message } })
+      }
+      const found = isInviteSlug(slug) ? roomOf(slug) : null
+      if (req.method === 'GET' && action === null) {
+        await drain(req)
+        if (!found) return guestJson(200, { show: null, state: 'invalid' })
+        const live = guestState(found.room, found.dead)
+        if (live !== 'open') return guestJson(200, { show: null, state: live })
+        return guestJson(200, {
+          show: {
+            title: found.room.title,
+            platforms: found.room.platforms,
+            recording: Boolean(talk?.recording)
+          },
+          state: 'open',
+          roomSize: found.room.limits.roomSize
+        })
+      }
+      if (req.method === 'POST' && action === 'join' && requestId === null) {
+        let body
+        try {
+          body = JSON.parse((await readRequestBody(req, 16 * 1024)).toString('utf8'))
+        } catch {
+          body = undefined
+        }
+        if (!found || found.dead)
+          return refuse(404, 'guest-link-invalid', 'This link is not valid.')
+        const live = guestState(found.room, false)
+        if (live !== 'open') return refuse(409, `guest-show-${live}`, `This show is ${live}.`)
+        const name =
+          isRecord(body) && typeof body.name === 'string' ? body.name.trim().slice(0, 40) : ''
+        const device = isRecord(body) && body.device === 'phone' ? 'phone' : 'computer'
+        if (!name) return refuse(400, 'guest-name-missing', 'Type a name.')
+        // One waiting request per browser per show (the cookie); a banned
+        // browser never reaches the host again.
+        const cookie = guestCookie(req)
+        const mine = cookie
+          ? state.guestRequests.find(
+              (entry) => entry.id === cookie && entry.showId === found.room.showId
+            )
+          : null
+        if (mine?.banned) return refuse(403, 'guest-banned', 'You were removed from this show.')
+        if (mine && (mine.state === 'waiting' || mine.state === 'let-in')) {
+          return guestJson(200, { requestId: mine.id }, mine.id)
+        }
+        const record = {
+          id: newGuestRequestId(),
+          showId: found.room.showId,
+          slug,
+          name,
+          device,
+          state: found.room.openDoor ? 'let-in' : 'waiting',
+          guestId: found.room.openDoor ? newGuestId() : null,
+          askedAt: now.toISOString(),
+          decidedAt: found.room.openDoor ? now.toISOString() : null,
+          muted: false,
+          screenShareAllowed: false,
+          banned: false,
+          hidden: false
+        }
+        state.guestRequests.push(record)
+        return guestJson(201, { requestId: record.id }, record.id)
+      }
+      if (req.method === 'GET' && action === 'join' && requestId) {
+        await drain(req)
+        const cookie = guestCookie(req)
+        const asked = isGuestRequestId(requestId)
+          ? state.guestRequests.find((entry) => entry.id === requestId)
+          : null
+        if (!asked || cookie !== asked.id)
+          return refuse(404, 'guest-request-not-found', 'No such request.')
+        const show = state.shows.get(asked.showId)
+        if (!show || show.endedAt) return guestJson(200, { state: 'expired' })
+        if (asked.state === 'waiting') return guestJson(200, { state: 'waiting' })
+        if (asked.state === 'let-in' && asked.guestId) {
+          // A fresh token each time while the guest is still allowed.
+          const token = mintFor({
+            role: 'guest',
+            show,
+            name: asked.name,
+            guestId: asked.guestId,
+            screenShare: asked.screenShareAllowed,
+            microphone: !asked.muted
+          })
+          return guestJson(200, {
+            state: 'let-in',
+            room: { url: talk.livekit.url, token },
+            guestId: asked.guestId,
+            hostIdentity: hostIdentityOf(show.id)
+          })
+        }
+        return guestJson(200, { state: asked.state === 'declined' ? 'declined' : 'expired' })
+      }
+      if (req.method === 'POST' && action === 'leave') {
+        let body
+        try {
+          body = JSON.parse((await readRequestBody(req, 16 * 1024)).toString('utf8'))
+        } catch {
+          body = undefined
+        }
+        const cookie = guestCookie(req)
+        const guestId = isRecord(body) ? body.guestId : null
+        const asked = state.guestRequests.find(
+          (entry) => entry.id === cookie && entry.guestId === guestId && entry.state === 'let-in'
+        )
+        if (!asked) return refuse(404, 'guest-not-found', 'No such guest.')
+        const show = state.shows.get(asked.showId)
+        const removed = show
+          ? await livekitServer('RemoveParticipant', { room: show.id, identity: guestId })
+          : { ok: true }
+        if (!removed.ok && removed.status !== 404) {
+          return refuse(502, 'cloud-rooms-unavailable', 'The room did not answer.')
+        }
+        asked.state = 'left'
+        asked.leftAt = now.toISOString()
+        return guestJson(200, { ok: true })
+      }
+      await drain(req)
+      return refuse(404, 'not-found', 'Unknown guest route.')
     }
 
     // Desktop -> web: the bearer.
@@ -1069,8 +1662,11 @@ export async function startFakeCloudWeb({
       }
       const parsed = parseCreateShowBody(body)
       if (!('kind' in parsed)) return fail(400, 'invalid-cloud-show', parsed.message)
-      if (parsed.kind === 'talk') {
-        return fail(400, 'invalid-cloud-show', 'Talk shows are not available yet.')
+      if (parsed.kind === 'talk' && !talk) {
+        return fail(503, 'cloud-rooms-unavailable', 'Talk shows are not available right now.')
+      }
+      if (parsed.kind === 'talk' && !plan.talkShows) {
+        return fail(403, 'cloud-not-entitled', 'Talk shows come with Max.')
       }
       // A test (C6b) costs no hours; the rate limit protects the node instead.
       const isTest = parsed.kind === 'test'
@@ -1144,17 +1740,61 @@ export async function startFakeCloudWeb({
         srtPassphrase
       }
       state.shows.set(showId, show)
+      // Plan 224: the room, the runner's token and the recording target go
+      // to the node with the create; the host's token comes back to the
+      // desktop. The room is created on first join (livekit-server --dev).
+      let talkRoom = null
+      let runnerToken = null
+      let recordingTarget = null
+      if (parsed.kind === 'talk') {
+        talkRoom = {
+          showId,
+          title: parsed.room.title,
+          platforms: parsed.room.platforms,
+          openDoor: false,
+          limits: talkLimits(),
+          returnWidth: parsed.room.returnWidth,
+          returnHeight: parsed.room.returnHeight,
+          invite: null,
+          oldSlugs: new Set(),
+          closedAt: null
+        }
+        newInvite(talkRoom, now)
+        state.rooms.set(showId, talkRoom)
+        runnerToken = mintFor({ role: 'runner', show })
+        if (talk.recording) {
+          recordingTarget = {
+            bucket: talk.recording.bucket,
+            endpoint: talk.recording.endpoint,
+            region: talk.recording.region ?? 'auto',
+            prefix: `talk/${userId}/${showId}/`,
+            credentials: { ...talk.recording.credentials }
+          }
+        }
+      }
       const created = await agent('/v1/shows', {
         showId,
         userId,
         // The node knows no test kind: a test is a solo show with a short cap.
-        kind: 'solo',
+        kind: parsed.kind === 'talk' ? 'talk' : 'solo',
         outputs: parsed.outputs,
         holdMaxSeconds: parsed.holdMaxSeconds,
         maxShowSeconds,
         ingestKey,
         srtPassphrase,
-        srtLatencyMs
+        srtLatencyMs,
+        ...(talkRoom
+          ? {
+              room: {
+                url: talk.livekit.url,
+                runnerToken,
+                name: showId,
+                returnWidth: talkRoom.returnWidth,
+                returnHeight: talkRoom.returnHeight
+              }
+            }
+          : {}),
+        ...(recordingTarget ? { recording: recordingTarget } : {})
       })
       const value =
         created.status === 200
@@ -1178,7 +1818,175 @@ export async function startFakeCloudWeb({
         show: serializeShow(show),
         ingest: value.ingest,
         control: control(show, now),
-        allowance: cloudBlock()
+        allowance: cloudBlock(),
+        ...(talkRoom
+          ? {
+              room: {
+                url: talk.livekit.url,
+                hostToken: mintFor({ role: 'host', show, name: 'Host' }),
+                name: showId
+              },
+              invite: talkRoom.invite,
+              limits: talkRoom.limits
+            }
+          : {})
+      })
+    }
+    // --- Plan 224: the talk-show routes (bearer) ---
+    const talkMatch =
+      /^\/api\/cloud\/shows\/([^/]+)\/(room\/token|room|invite\/rotate|guests(?:\/requests\/([^/]+)|\/([^/]+))?)$/.exec(
+        path
+      )
+    if (talkMatch) {
+      const showId = decodeURIComponent(talkMatch[1])
+      const route = talkMatch[2]
+      const show = isShowId(showId) ? state.shows.get(showId) : null
+      const room = show ? state.rooms.get(showId) : null
+      if (!show || show.userId !== userId || !room) {
+        await drain(req)
+        return fail(404, 'cloud-show-not-found', 'No such talk show.')
+      }
+      if (req.method === 'POST' && route === 'room/token') {
+        await drain(req)
+        if (show.endedAt) return fail(409, 'cloud-show-ended', 'The show is over.')
+        return answer(200, {
+          hostToken: mintFor({ role: 'host', show, name: 'Host' }),
+          url: talk.livekit.url
+        })
+      }
+      if (req.method === 'GET' && route === 'room') {
+        await drain(req)
+        return answer(200, roomView(room))
+      }
+      if (req.method === 'PATCH' && route === 'room') {
+        let body
+        try {
+          body = JSON.parse((await readRequestBody(req, 16 * 1024)).toString('utf8'))
+        } catch {
+          body = undefined
+        }
+        if (!isRecord(body)) return fail(400, 'invalid-request', 'The body must be a JSON object.')
+        if (typeof body.openDoor === 'boolean') room.openDoor = body.openDoor
+        if (typeof body.title === 'string') room.title = body.title.trim().slice(0, 80)
+        if (Array.isArray(body.platforms)) {
+          room.platforms = body.platforms.filter((entry) => typeof entry === 'string')
+        }
+        return answer(200, roomView(room))
+      }
+      if (req.method === 'POST' && route === 'invite/rotate') {
+        await drain(req)
+        return answer(200, { invite: newInvite(room, now) })
+      }
+      if (req.method === 'GET' && route === 'guests') {
+        await drain(req)
+        const view = buildHostGuestsView(
+          state.guestRequests.filter((request) => request.showId === showId),
+          now.toISOString()
+        )
+        return answer(200, view)
+      }
+      if (req.method === 'POST' && route.startsWith('guests/requests/')) {
+        let body
+        try {
+          body = JSON.parse((await readRequestBody(req, 16 * 1024)).toString('utf8'))
+        } catch {
+          body = undefined
+        }
+        const requestId = decodeURIComponent(talkMatch[3] ?? '')
+        const decision = isRecord(body) ? body.decision : null
+        if (decision !== 'let-in' && decision !== 'decline') {
+          return fail(400, 'invalid-request', 'decision must be let-in or decline.')
+        }
+        const asked = state.guestRequests.find(
+          (entry) => entry.id === requestId && entry.showId === showId
+        )
+        if (!asked || asked.state !== 'waiting') {
+          return fail(404, 'guest-request-not-found', 'No such waiting request.')
+        }
+        if (decision === 'decline') {
+          asked.state = 'declined'
+          asked.decidedAt = now.toISOString()
+          asked.hidden = true
+          return answer(200, { ok: true })
+        }
+        if (guestsIn(room) >= room.limits.roomSize) {
+          return fail(409, 'cloud-room-full', 'The room is full.')
+        }
+        asked.state = 'let-in'
+        asked.guestId = newGuestId()
+        asked.decidedAt = now.toISOString()
+        return answer(200, { ok: true, guestId: asked.guestId })
+      }
+      if (req.method === 'POST' && route.startsWith('guests/')) {
+        let body
+        try {
+          body = JSON.parse((await readRequestBody(req, 16 * 1024)).toString('utf8'))
+        } catch {
+          body = undefined
+        }
+        const guestId = decodeURIComponent(talkMatch[4] ?? '')
+        const action = isRecord(body) ? body.action : null
+        const actions = [
+          'mute',
+          'unmute',
+          'remove',
+          'ban',
+          'rename',
+          'allow-screen-share',
+          'disallow-screen-share'
+        ]
+        if (!actions.includes(action)) return fail(400, 'invalid-request', 'Unknown action.')
+        const guest = isGuestId(guestId)
+          ? state.guestRequests.find(
+              (entry) => entry.guestId === guestId && entry.showId === showId
+            )
+          : null
+        if (!guest) return fail(404, 'guest-not-found', 'No such guest.')
+        if (action === 'remove' || action === 'ban') {
+          const removed = await livekitServer('RemoveParticipant', {
+            room: showId,
+            identity: guestId
+          })
+          if (!removed.ok && removed.status !== 404) {
+            return fail(502, 'cloud-rooms-unavailable', 'The room did not answer.')
+          }
+          guest.state = 'removed'
+          guest.leftAt = now.toISOString()
+          if (action === 'ban') {
+            guest.banned = true
+            return answer(200, { ok: true, invite: newInvite(room, now) })
+          }
+          return answer(200, { ok: true })
+        }
+        if (action === 'mute' || action === 'unmute') {
+          guest.muted = action === 'mute'
+          return answer(200, { ok: true })
+        }
+        if (action === 'rename') {
+          const name =
+            isRecord(body) && typeof body.name === 'string' ? body.name.trim().slice(0, 40) : ''
+          if (!name) return fail(400, 'invalid-request', 'A rename needs a name.')
+          guest.name = name
+          return answer(200, { ok: true })
+        }
+        guest.screenShareAllowed = action === 'allow-screen-share'
+        return answer(200, { ok: true })
+      }
+      await drain(req)
+      return fail(405, 'method-not-allowed', 'Not on this route.')
+    }
+    if (req.method === 'GET' && path === '/api/cloud/recordings') {
+      await drain(req)
+      return answer(200, {
+        recordings: state.recordings.map((recording) => ({
+          id: recording.id,
+          showId: recording.showId,
+          startedAt: recording.startedAt,
+          seconds: recording.seconds,
+          bytes: recording.bytes,
+          orientation: recording.orientation,
+          state: recording.state
+        }))
       })
     }
     const endMatch = /^\/api\/cloud\/shows\/([^/]+)\/end$/.exec(path)
@@ -1194,6 +2002,9 @@ export async function startFakeCloudWeb({
       show.status = 'ended'
       show.endedAt = now
       show.endReason = 'host-ended'
+      // Plan 224: the room goes with the show (the invite dies, the guests
+      // are let go).
+      await closeRoom(show)
       return answer(200, { ok: true })
     }
     // Plan 222 D7: the desktop lost its show (control socket gone, feed down
@@ -1268,8 +2079,9 @@ export async function startFakeCloudWeb({
     })
   })
   const address = server.address()
+  state.httpOrigin = `http://127.0.0.1:${address.port}`
   return {
-    httpOrigin: `http://127.0.0.1:${address.port}`,
+    httpOrigin: state.httpOrigin,
     state,
     /** `VIDEORC_CLOUD_DISABLED` on or off, mid-run (the rollback scenario). */
     setDisabled(disabled) {
@@ -1323,9 +2135,64 @@ export async function startFakeCloudWeb({
         show.status = 'ended'
         show.endedAt = new Date()
         show.endReason = 'smoke-cleanup'
+        await closeRoom(show)
         ended.push(show.id)
       }
       return ended
+    },
+    // --- Plan 224: what the talk-show smoke reads -------------------------
+    /** The room's settings and invite, as the web keeps them (no token). */
+    roomFor(showId) {
+      const room = state.rooms.get(showId)
+      if (!room) throw new Error(`The fake web knows no room for ${showId}.`)
+      return {
+        showId,
+        title: room.title,
+        platforms: [...room.platforms],
+        openDoor: room.openDoor,
+        limits: { ...room.limits },
+        invite: room.invite ? { ...room.invite } : null,
+        oldSlugs: [...room.oldSlugs],
+        closedAt: room.closedAt?.toISOString() ?? null
+      }
+    },
+    /** Every guest request of a show, in order (names, states, ids; no cookie). */
+    guestRequestsFor(showId) {
+      return state.guestRequests
+        .filter((request) => request.showId === showId)
+        .map(
+          ({
+            id,
+            name,
+            device,
+            state: requestState,
+            guestId,
+            askedAt,
+            decidedAt,
+            leftAt,
+            muted,
+            banned
+          }) => ({
+            id,
+            name,
+            device,
+            state: requestState,
+            guestId,
+            askedAt,
+            decidedAt,
+            leftAt: leftAt ?? null,
+            muted,
+            banned
+          })
+        )
+    },
+    /** The node's finished recordings (R-G6). */
+    recordingsFor(showId) {
+      return state.recordings.filter((recording) => recording.showId === showId)
+    },
+    /** Every LiveKit token minted (host, runner, guest), for the leak scan only. */
+    livekitTokens() {
+      return [...state.livekitTokens]
     },
     close: () =>
       new Promise((resolveClose) => {

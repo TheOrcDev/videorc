@@ -1261,6 +1261,21 @@ const remoteDebugPortOverride = process.env.VIDEORC_REMOTE_DEBUG_PORT?.trim()
 if (remoteDebugPortOverride) {
   app.commandLine.appendSwitch('remote-debugging-port', remoteDebugPortOverride)
 }
+// Plan 224 S-G1: the talk-show smoke gives the renderer Chromium's fake
+// camera and microphone, fed from a y4m and a wav, so the host publishes a
+// known colour and tone with no device and no macOS camera grant. Development
+// and packaged test builds only (refusePackagedTestHooks above drops both).
+const fakeMediaVideo = process.env.VIDEORC_SMOKE_FAKE_MEDIA_VIDEO?.trim()
+const fakeMediaAudio = process.env.VIDEORC_SMOKE_FAKE_MEDIA_AUDIO?.trim()
+if (fakeMediaVideo || fakeMediaAudio) {
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream')
+  if (fakeMediaVideo) {
+    app.commandLine.appendSwitch('use-file-for-fake-video-capture', fakeMediaVideo)
+  }
+  if (fakeMediaAudio) {
+    app.commandLine.appendSwitch('use-file-for-fake-audio-capture', fakeMediaAudio)
+  }
+}
 if (process.env.VIDEORC_SMOKE_DISABLE_ELECTRON_GPU === '1') {
   app.commandLine.appendSwitch('disable-gpu')
 }

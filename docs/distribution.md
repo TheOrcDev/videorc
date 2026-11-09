@@ -77,7 +77,7 @@ pnpm smoke:packaged:release
 
 ### Packaged hardening (fuses and test hooks)
 
-Every packaged build flips four Electron fuses before signing (`electronFuses` in `apps/desktop/electron-builder.yml`): `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `--inspect` and the `SIGUSR1` inspector are off, and app code loads only from `app.asar`. A release build also ignores `VIDEORC_REMOTE_DEBUG_PORT`, `--remote-debugging-port`/`--remote-debugging-pipe` and the native preview module/helper path overrides (`VIDEORC_NATIVE_PREVIEW_HOST_MODULE`, `VIDEORC_NATIVE_PREVIEW_IN_PROCESS_MODULE`, `VIDEORC_NATIVE_PREVIEW_HOST_HELPER`) and logs one `Release build ignored test-only hooks` line. Each of those lets another same-user process run code as Videorc, inheriting its Screen Recording, Camera and Microphone grants on macOS.
+Every packaged build flips four Electron fuses before signing (`electronFuses` in `apps/desktop/electron-builder.yml`): `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `--inspect` and the `SIGUSR1` inspector are off, and app code loads only from `app.asar`. A release build also ignores `VIDEORC_REMOTE_DEBUG_PORT`, `--remote-debugging-port`/`--remote-debugging-pipe`, the native preview module/helper path overrides (`VIDEORC_NATIVE_PREVIEW_HOST_MODULE`, `VIDEORC_NATIVE_PREVIEW_IN_PROCESS_MODULE`, `VIDEORC_NATIVE_PREVIEW_HOST_HELPER`) and the talk-show smoke's fake camera and microphone (`VIDEORC_SMOKE_FAKE_MEDIA_VIDEO`, `VIDEORC_SMOKE_FAKE_MEDIA_AUDIO` and Chromium's `--use-fake-device-for-media-stream` family), and logs one `Release build ignored test-only hooks` line. Each of those lets another same-user process run code as Videorc, inheriting its Screen Recording, Camera and Microphone grants on macOS.
 
 Check an artifact:
 
