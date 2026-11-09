@@ -265,6 +265,9 @@ pub struct ArrivalLookup {
     /// Set for a returning person; `None` for a first-timer, a bot, a
     /// forgotten account or the streamer.
     pub arrival: Option<ViewerArrival>,
+    /// The person already arrived this stream on another account (F6): the
+    /// row is neither a first chat nor a return, and earns no welcome.
+    pub already_arrived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1339,6 +1342,7 @@ impl Database {
                 key: key.clone(),
                 person_id: None,
                 arrival: None,
+                already_arrived: false,
             };
             if !platform_has_identity(*platform) || streamer_keys.contains(&key) {
                 out.push(lookup);
@@ -1357,8 +1361,12 @@ impl Database {
                 out.push(lookup);
                 continue;
             };
-            if person.status != CommunityPersonStatus::Normal || !arrived.insert(person.id.clone())
-            {
+            if person.status != CommunityPersonStatus::Normal {
+                out.push(lookup);
+                continue;
+            }
+            if !arrived.insert(person.id.clone()) {
+                lookup.already_arrived = true;
                 out.push(lookup);
                 continue;
             }

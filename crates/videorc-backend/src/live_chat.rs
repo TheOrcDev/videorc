@@ -3634,17 +3634,18 @@ async fn mark_first_time_chatters(
     // without `arrival`. The first-time query is unchanged.
     let looked_up = tokio::task::spawn_blocking(move || {
         let returning = database.live_chat_returning_authors(&lookup_session_id, &lookup);
-        let (arrivals, log) = crate::community_service::lookup_arrivals_blocking(
-            &database,
-            &community,
-            &lookup_session_id,
-            &lookup,
-            chrono::Utc::now(),
-        );
-        (returning, arrivals, log)
+        let (arrivals, already_arrived, log) =
+            crate::community_service::lookup_arrivals_blocking(
+                &database,
+                &community,
+                &lookup_session_id,
+                &lookup,
+                chrono::Utc::now(),
+            );
+        (returning, arrivals, already_arrived, log)
     })
     .await;
-    if let Ok((returning, mut arrivals, log)) = looked_up {
+    if let Ok((returning, mut arrivals, already_arrived, log)) = looked_up {
         if let Some(line) = log {
             state.emit_log("warn", line);
         }
@@ -3661,6 +3662,14 @@ async fn mark_first_time_chatters(
                     .any(|(platform, seen)| *platform == message.platform && *seen == author_id)
                 || !marked.insert(key.clone())
             {
+                continue;
+            }
+            if already_arrived.contains(&key) {
+                // Plan 225 F6: the person already arrived this stream on
+                // another account. The row is neither their first chat
+                // (D7: a linked person is first-time only when no account
+                // was seen before) nor a return, so it earns no welcome.
+                message.first_message = false;
                 continue;
             }
             if let Some(returning) = &returning {

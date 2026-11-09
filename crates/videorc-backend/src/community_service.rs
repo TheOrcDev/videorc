@@ -513,20 +513,29 @@ async fn wait_for_pending_writes(state: &AppState, limit: Duration) {
     }
 }
 
+/// What the arrival lookup tells the delivery path: `account_key` →
+/// arrival for the returning people of this batch, the keys whose person
+/// already arrived this stream on another account (F6: no welcome, no
+/// first chat), and a log line for a store error.
+pub(crate) type ArrivalLookups = (
+    HashMap<String, ViewerArrival>,
+    HashSet<String>,
+    Option<String>,
+);
+
 /// B1, D14: the arrival lookup, inside the same blocking read as the
-/// first-time marker. One indexed read per fresh account. A store error
-/// leaves every row without `arrival` and logs once per session. Returns
-/// `account_key` → arrival for the returning people of this batch.
+/// first-time marker. One read per table per batch (F4). A store error
+/// leaves every row without `arrival` and logs once per session.
 pub(crate) fn lookup_arrivals_blocking(
     database: &Database,
     slot: &CommunitySlot,
     session_id: &str,
     fresh: &[(StreamPlatform, String)],
     now: DateTime<Utc>,
-) -> (HashMap<String, ViewerArrival>, Option<String>) {
+) -> ArrivalLookups {
     let settings = settings_snapshot(database, slot);
     if !settings.enabled || fresh.is_empty() {
-        return (HashMap::new(), None);
+        return (HashMap::new(), HashSet::new(), None);
     }
     // F4: lookups run one at a time (so two batches never give one person
     // two arrivals), but the runtime lock is taken only to borrow the
@@ -540,10 +549,10 @@ pub(crate) fn lookup_arrivals_blocking(
     let (streamer_keys, mut arrived, mut streams) = {
         let mut runtime = slot.lock();
         let Some(session) = runtime.session.as_mut() else {
-            return (HashMap::new(), None);
+            return (HashMap::new(), HashSet::new(), None);
         };
         if session.session_id != session_id {
-            return (HashMap::new(), None);
+            return (HashMap::new(), HashSet::new(), None);
         }
         (
             session.streamer_keys.clone(),
@@ -572,7 +581,7 @@ pub(crate) fn lookup_arrivals_blocking(
         .filter(|session| session.session_id == session_id)
     else {
         // The session ended during the read: its rows go without arrivals.
-        return (HashMap::new(), None);
+        return (HashMap::new(), HashSet::new(), None);
     };
     session.arrived.extend(arrived);
     session.known_streams = streams;
@@ -582,22 +591,26 @@ pub(crate) fn lookup_arrivals_blocking(
     match looked_up {
         Ok(lookups) => {
             let mut arrivals = HashMap::new();
+            let mut already = HashSet::new();
             for lookup in lookups {
                 if let Some(person_id) = lookup.person_id.clone() {
                     session.people_by_key.insert(lookup.key.clone(), person_id);
+                }
+                if lookup.already_arrived {
+                    already.insert(lookup.key.clone());
                 }
                 if let Some(arrival) = lookup.arrival {
                     arrivals.insert(lookup.key, arrival);
                 }
             }
-            (arrivals, None)
+            (arrivals, already, None)
         }
         Err(error) => {
             let log = (!session.store_error_logged).then(|| {
                 format!("Community: the arrival lookup failed; chat goes on without it: {error:#}")
             });
             session.store_error_logged = true;
-            (HashMap::new(), log)
+            (HashMap::new(), HashSet::new(), log)
         }
     }
 }
@@ -2842,6 +2855,85 @@ mod tests {
                 .unwrap()
                 .links_made,
             0
+        );
+    }
+
+    /// The review of 2026-11-09, F6: a linked person is welcomed once per
+    /// stream. Ada's Twitch row arrives (one welcome card); her YouTube row
+    /// later the same stream is neither a return nor a first chat, so it
+    /// earns no second card and no "First chat" mark (D7: first time only
+    /// when no account was seen before).
+    #[tokio::test]
+    async fn a_linked_person_is_welcomed_once_per_stream() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Suggest).await;
+        let first = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            first,
+            vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
+        )
+        .await;
+        crate::live_chat::stop_live_chat(&state).await;
+        session_settled(&state, "s1").await;
+        // Her YouTube account, never seen, is linked by the streamer.
+        let twitch = state
+            .database
+            .community_account_person("twitch:ada")
+            .unwrap()
+            .unwrap();
+        let second = start_session(&state, "s2").await;
+        deliver(
+            &state,
+            second,
+            vec![row("s2", StreamPlatform::Youtube, "UCada", "ada_dev", 2, "yo")],
+        )
+        .await;
+        let youtube = state
+            .database
+            .community_account_person("youtube:UCada")
+            .unwrap()
+            .unwrap();
+        state
+            .database
+            .community_link(&twitch, &youtube, CommunityLinkKind::Manual, Utc::now())
+            .unwrap();
+        crate::live_chat::stop_live_chat(&state).await;
+        session_settled(&state, "s2").await;
+        let third = start_session(&state, "s3").await;
+        deliver(
+            &state,
+            third,
+            vec![
+                row("s3", StreamPlatform::Twitch, "ada", "Ada", 3, "back"),
+                row("s3", StreamPlatform::Youtube, "UCada", "ada_dev", 4, "and here"),
+            ],
+        )
+        .await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        let cards = snapshot
+            .utterances
+            .iter()
+            .filter(|u| u.trigger.kind == CohostUtteranceTriggerKind::Greeting)
+            .count();
+        assert_eq!(cards, 1, "one welcome for one person: {:?}", snapshot.utterances);
+        assert_eq!(snapshot.welcome_back.len(), 1);
+        let rows = state
+            .database
+            .list_live_chat_messages_recent("s3", 10)
+            .unwrap();
+        let by_seq = |seq: u32| {
+            rows.iter()
+                .find(|m| m.provider_message_id == format!("fake-{seq}"))
+                .unwrap()
+                .clone()
+        };
+        assert!(by_seq(3).arrival.is_some(), "the Twitch row arrived");
+        let second_account = by_seq(4);
+        assert!(second_account.arrival.is_none());
+        assert!(
+            !second_account.first_message,
+            "a linked person's other account is no first chat"
         );
     }
 
