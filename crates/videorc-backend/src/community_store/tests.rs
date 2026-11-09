@@ -1556,8 +1556,9 @@ fn a_raid_of_four_hundred_fresh_authors_costs_one_read_per_table() {
         .collect();
     authors.extend((0..200).map(|index| (StreamPlatform::Twitch, format!("new{index}"))));
     {
-        let conn = database.lock().unwrap();
-        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count));
+        let mut conn = database.lock().unwrap();
+        conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count))
+            .unwrap();
     }
     let mut arrived = HashSet::new();
     let mut streams = None;
@@ -1614,8 +1615,9 @@ fn a_raid_of_four_hundred_fresh_authors_costs_one_read_per_table() {
     assert!(warm <= 6, "warm: {warm}");
     assert!(again.iter().all(|l| l.arrival.is_none()));
     {
-        let conn = database.lock().unwrap();
-        conn.trace_v2(TraceEventCodes::empty(), None);
+        let mut conn = database.lock().unwrap();
+        conn.trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
+            .unwrap();
     }
 }
 
