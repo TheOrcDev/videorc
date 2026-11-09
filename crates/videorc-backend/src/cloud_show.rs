@@ -2518,13 +2518,23 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 Err(HelloFailure::BadToken) => {
                     // The token expired or rotated: the web mints a fresh one
                     // with the current show, or says the show is gone. An
-                    // unreachable web changes nothing: keep trying.
+                    // unreachable web changes nothing: keep trying. The same
+                    // show without a token (the web cannot mint one right
+                    // now) is unknown, not gone (plan 222 review L2): the
+                    // runner still holds the platforms, so keep trying.
                     if let Ok(current) = self.context.web.current_show(&self.bearer).await {
                         match (current.show, current.control) {
-                            (Some(show), Some(control)) if show.id == self.show_id => {
-                                self.control = control;
+                            (Some(show), control)
+                                if show.id == self.show_id && !show.is_ended() =>
+                            {
+                                match control {
+                                    Some(control) => self.control = control,
+                                    None => tracing::info!(
+                                        "Videorc Cloud lists the show without a control token; still reconnecting"
+                                    ),
+                                }
                             }
-                            (Some(_), _) | (None, _) => return Err(LoopExit::Gone),
+                            _ => return Err(LoopExit::Gone),
                         }
                     }
                 }
@@ -8542,6 +8552,81 @@ mod tests {
         server.send(ack(&frame["id"]));
         reconnect.await.unwrap().unwrap();
         assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Live);
+    }
+
+    // Plan 222 review L2: a reconnect refused for a bad token asks the web;
+    // the same show listed without a control token (the web cannot mint one
+    // right now) is unknown, not gone: the runner still holds the
+    // platforms, so the desktop keeps reconnecting and never goes direct.
+    // Listed ended, or as another show, it is gone as before.
+    #[tokio::test(start_paused = true)]
+    async fn a_show_listed_without_a_token_keeps_the_desktop_reconnecting() {
+        let harness = harness(true);
+        let server = live_show(&harness).await;
+        server.drop_socket();
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .push_back(Some(CLOSE_CODE_BAD_TOKEN));
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse {
+                show: Some(ShowRecord {
+                    status: "live".to_string(),
+                    ..created().show
+                }),
+                control: None,
+                ingest: None,
+            }));
+        wait_for_phase(&harness.context.slot, CloudPhase::Connecting).await;
+        wait_until(|| harness.context.web.current_calls.load(Ordering::SeqCst) >= 1).await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Connecting);
+        assert!(status.show.is_some());
+        assert!(!status.direct_fallback_available);
+        // The refused socket (the fake pushes one for a close code too) is
+        // spent; the next attempt is taken, and the show carries on.
+        let _refused = harness.context.connector.accept().await;
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(welcome_with_legs("live"));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 3);
+
+        // Listed ended (a token or not): gone.
+        server.drop_socket();
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .push_back(Some(CLOSE_CODE_BAD_TOKEN));
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse {
+                show: Some(ShowRecord {
+                    status: "ended".to_string(),
+                    ..created().show
+                }),
+                control: Some(created().control),
+                ingest: None,
+            }));
+        wait_for_phase(&harness.context.slot, CloudPhase::Failed).await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.end_reason.as_deref(), Some("show-gone"));
+        assert!(status.direct_fallback_available);
     }
 
     // Plan 222 review L5: a show the runner ends (the hold limit, the
