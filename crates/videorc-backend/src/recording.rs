@@ -2507,6 +2507,7 @@ pub struct ActiveRecording {
     /// it in place (instant-record P4.1). Released after bridge teardown so
     /// the preview returns to its own dimensions and fps.
     #[cfg_attr(target_os = "windows", allow(dead_code))]
+    // Windows releases it through the guard's Drop
     compositor_capture_lease: Option<CompositorCaptureLeaseGuard>,
     /// The compositor run this session started itself (the restart path:
     /// Linux, and macOS sessions that can't arm in place). Stopped by exact
@@ -2550,7 +2551,7 @@ impl CompositorCaptureLeaseGuard {
         }
     }
 
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg(not(target_os = "windows"))]
     async fn release(mut self) {
         self.released = true;
         let _ = release_compositor_capture_lease(&self.state, &self.session_id).await;
