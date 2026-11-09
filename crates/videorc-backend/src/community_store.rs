@@ -1845,8 +1845,10 @@ impl Database {
         Ok(())
     }
 
-    /// "Forget everyone…" (D13): the whole store, tombstones included (a
-    /// viewer who typed `!forgetme` is forgotten either way).
+    /// "Forget everyone…" (D13): the whole store, except the `!forgetme`
+    /// tombstones (F3): a viewer who asked never to be learned again stays
+    /// unlearned after the streamer wipes the store, with nothing but the
+    /// account key, platform, author id and status left on the row.
     pub fn community_forget_all(&self, now: DateTime<Utc>) -> Result<()> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
@@ -1856,7 +1858,9 @@ impl Database {
              DELETE FROM community_memory_jobs;
              DELETE FROM community_link_events;
              DELETE FROM community_suggestions;
-             DELETE FROM community_accounts;
+             DELETE FROM community_accounts WHERE status != 'forgotten';
+             UPDATE community_accounts SET person_id = '', name = '', handle = NULL, avatar_url = NULL
+                WHERE status = 'forgotten';
              DELETE FROM community_people;
              DELETE FROM community_streams;",
         )?;

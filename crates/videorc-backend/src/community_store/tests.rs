@@ -800,9 +800,40 @@ fn forgetme_leaves_a_tombstone_that_later_chat_never_revives_until_rememberme() 
     let gone = person_of(&database, StreamPlatform::Twitch, "t1");
     assert!(gone.id.is_empty());
     assert!(gone.note.is_empty());
-    // Forget everyone: nothing is left, tombstones included.
+    // Forget everyone: nothing is left but the tombstones (F3): Ada's
+    // Twitch `!forgetme` outlives the streamer's wipe, with no person.
     database.community_forget_all(day(2026, 10, 17)).unwrap();
-    assert_eq!(database.community_account_status("twitch:t1"), None);
+    assert_eq!(
+        database.community_account_status("twitch:t1"),
+        Some((String::new(), CommunityPersonStatus::Forgotten))
+    );
+    assert_eq!(database.community_account_status("kick:k1"), None);
+    stream_with(
+        &database,
+        "s4",
+        day(2026, 10, 18),
+        &[(StreamPlatform::Twitch, "t1", "Ada")],
+    );
+    assert_eq!(
+        database.community_account_status("twitch:t1").map(|(_, s)| s),
+        Some(CommunityPersonStatus::Forgotten),
+        "still never learned again"
+    );
+    {
+        let conn = database.lock().unwrap();
+        let people: i64 = conn
+            .query_row("SELECT COUNT(*) FROM community_people", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(people, 0, "the forgotten account has no person");
+    }
+    database.community_forget_account("x:gone", day(2026, 10, 18)).unwrap();
+    database.community_forget_all(day(2026, 10, 19)).unwrap();
+    assert!(
+        database.community_export(day(2026, 10, 19)).unwrap().people.iter().all(|person| {
+            person.status == "forgotten" && person.accounts.iter().all(|a| a.name.is_empty())
+        }),
+        "only nameless tombstones export after a wipe"
+    );
     assert_eq!(
         database
             .community_summary(day(2026, 10, 17), 3, CommunityBackfill::default())
