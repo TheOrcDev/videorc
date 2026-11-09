@@ -625,21 +625,19 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
         // cache's (decoded by the Screens transition, M4), read every tick
         // so a direct A→B switch guards on B's image (M3).
         match facts.takeover.as_ref() {
-            Some(cached) => {
-                match watch.takeover.as_mut() {
-                    Some(active) if active.screen_id == cached.screen_id => {
-                        active.luma = cached.luma;
-                    }
-                    _ => {
-                        watch.takeover = Some(ActiveTakeover {
-                            screen_id: cached.screen_id.clone(),
-                            since: now,
-                            activated_at: clock.wall,
-                            luma: cached.luma,
-                        });
-                    }
+            Some(cached) => match watch.takeover.as_mut() {
+                Some(active) if active.screen_id == cached.screen_id => {
+                    active.luma = cached.luma;
                 }
-            }
+                _ => {
+                    watch.takeover = Some(ActiveTakeover {
+                        screen_id: cached.screen_id.clone(),
+                        since: now,
+                        activated_at: clock.wall,
+                        luma: cached.luma,
+                    });
+                }
+            },
             None => watch.takeover = None,
         }
         let takeover = watch.takeover.as_ref().map(|active| TakeoverSignal {
@@ -701,11 +699,10 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
             .collect();
         for target in stale {
             watch.platform_health.remove(&target);
-            transitions.extend(
-                watch
-                    .state
-                    .withdraw(&alerts::alert_key(WatchdogCheck::PlatformHealth, Some(&target))),
-            );
+            transitions.extend(watch.state.withdraw(&alerts::alert_key(
+                WatchdogCheck::PlatformHealth,
+                Some(&target),
+            )));
         }
         let platform_health: Vec<PlatformHealthSignal> = watch
             .platform_health
@@ -749,11 +746,13 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
             system_idle,
             chat: &chat,
         };
-        transitions.extend(
-            watch
-                .checks
-                .tick(&signals, &thresholds, &settings, &mut watch.state, clock),
-        );
+        transitions.extend(watch.checks.tick(
+            &signals,
+            &thresholds,
+            &settings,
+            &mut watch.state,
+            clock,
+        ));
 
         // B2: the AI read, when the free match saw a candidate.
         let ai_read = if facts.live
@@ -1326,17 +1325,31 @@ mod tests {
             line("twitch:a", "twitch", "still no sound"),
         ];
         for index in 0..30 {
-            lines.push(line(&format!("twitch:v{index}"), "twitch", &format!("line {index}")));
+            lines.push(line(
+                &format!("twitch:v{index}"),
+                "twitch",
+                &format!("line {index}"),
+            ));
         }
         let refs: Vec<&chat_signals::ChatLine> = lines.iter().collect();
         let messages = ai_read_messages(&refs);
-        assert_eq!(messages.len(), chat_signals::AI_READ_MESSAGES, "the last 20 go");
+        assert_eq!(
+            messages.len(),
+            chat_signals::AI_READ_MESSAGES,
+            "the last 20 go"
+        );
         let body = crate::videorc_api::watchdog_chat_request("session-1", messages.clone());
         let mut keys: Vec<&String> = body.as_object().unwrap().keys().collect();
         keys.sort();
         assert_eq!(
             keys,
-            ["clientVersion", "consentToProcessChat", "messages", "seq", "sessionClientId"]
+            [
+                "clientVersion",
+                "consentToProcessChat",
+                "messages",
+                "seq",
+                "sessionClientId"
+            ]
         );
         assert_eq!(body["consentToProcessChat"], json!(true));
         assert_eq!(body["seq"], json!(0));
@@ -1394,12 +1407,19 @@ mod tests {
         observe_platform_health(&state, "live", "youtube", Some(signal()));
         tick(&state, "live", facts());
         assert_eq!(alerts_view(&state).alerts.len(), 1);
-        assert_eq!(alerts_view(&state).alerts[0].check, WatchdogCheck::PlatformHealth);
+        assert_eq!(
+            alerts_view(&state).alerts[0].check,
+            WatchdogCheck::PlatformHealth
+        );
 
         // Two polls late: still fresh.
         age_platform_health(&state, "live", Duration::from_secs(150));
         tick(&state, "live", facts());
-        assert_eq!(alerts_view(&state).alerts.len(), 1, "two missed polls keep the card");
+        assert_eq!(
+            alerts_view(&state).alerts.len(),
+            1,
+            "two missed polls keep the card"
+        );
 
         // A fresh word resets the age.
         observe_platform_health(&state, "live", "youtube", Some(signal()));
@@ -1408,7 +1428,11 @@ mod tests {
         assert_eq!(alerts_view(&state).alerts.len(), 1);
 
         // Past the stale line: withdrawn, not cleared.
-        age_platform_health(&state, "live", PLATFORM_HEALTH_STALE_AFTER + Duration::from_secs(1));
+        age_platform_health(
+            &state,
+            "live",
+            PLATFORM_HEALTH_STALE_AFTER + Duration::from_secs(1),
+        );
         tick(&state, "live", facts());
         assert!(alerts_view(&state).alerts.is_empty(), "the card aged out");
         let codes: Vec<String> = state
@@ -1418,8 +1442,14 @@ mod tests {
             .into_iter()
             .map(|event| event.code)
             .collect();
-        assert!(codes.contains(&"watchdog-platform-health-withdrawn".to_string()), "{codes:?}");
-        assert!(!codes.contains(&"watchdog-platform-health-cleared".to_string()), "{codes:?}");
+        assert!(
+            codes.contains(&"watchdog-platform-health-withdrawn".to_string()),
+            "{codes:?}"
+        );
+        assert!(
+            !codes.contains(&"watchdog-platform-health-cleared".to_string()),
+            "{codes:?}"
+        );
 
         // The platform says it is fine: a clear.
         observe_platform_health(&state, "live", "youtube", Some(signal()));
@@ -1433,7 +1463,10 @@ mod tests {
             .into_iter()
             .map(|event| event.code)
             .collect();
-        assert!(codes.contains(&"watchdog-platform-health-cleared".to_string()), "{codes:?}");
+        assert!(
+            codes.contains(&"watchdog-platform-health-cleared".to_string()),
+            "{codes:?}"
+        );
         session_ended(&state, "live");
     }
 
@@ -1462,8 +1495,7 @@ mod tests {
         session_ended(&state, "live");
         let mut saw_withdrawn = false;
         while let Ok(event) = events.try_recv() {
-            if event.event == "watchdog.alerts"
-                && event.payload["withdrawn"] == json!([id.clone()])
+            if event.event == "watchdog.alerts" && event.payload["withdrawn"] == json!([id.clone()])
             {
                 saw_withdrawn = true;
                 assert_eq!(event.payload["alerts"], json!([]));
@@ -1486,7 +1518,7 @@ mod tests {
             .iter()
             .find(|event| event.code == "watchdog-mic-silent-withdrawn")
             .unwrap();
-        assert_eq!(withdrawn.level, HealthLevel::Info);
+        assert!(matches!(withdrawn.level, HealthLevel::Info));
         assert!(withdrawn.message.ends_with("Withdrawn without a recovery."));
     }
 
@@ -1554,24 +1586,73 @@ mod tests {
             message
         };
         let own = [
-            ("youtube", line(StreamPlatform::Youtube, &["owner"], &[], "no sound today, sorry")),
-            ("twitch", line(StreamPlatform::Twitch, &["owner"], &["broadcaster"], "cant hear u")),
-            ("kick", line(StreamPlatform::Kick, &["owner", "member"], &["broadcaster"], "no audio")),
+            (
+                "youtube",
+                line(
+                    StreamPlatform::Youtube,
+                    &["owner"],
+                    &[],
+                    "no sound today, sorry",
+                ),
+            ),
+            (
+                "twitch",
+                line(
+                    StreamPlatform::Twitch,
+                    &["owner"],
+                    &["broadcaster"],
+                    "cant hear u",
+                ),
+            ),
+            (
+                "kick",
+                line(
+                    StreamPlatform::Kick,
+                    &["owner", "member"],
+                    &["broadcaster"],
+                    "no audio",
+                ),
+            ),
             ("x", line(StreamPlatform::X, &["owner"], &[], "sin audio")),
-            ("legacy", line(StreamPlatform::Twitch, &[" Broadcaster "], &[], "no sound")),
+            (
+                "legacy",
+                line(StreamPlatform::Twitch, &[" Broadcaster "], &[], "no sound"),
+            ),
         ];
         for (shape, message) in &own {
             observe_chat(&state, message);
-            assert_eq!(chat_lines(&state, "live"), 0, "{shape}: the streamer's own line counted");
+            assert_eq!(
+                chat_lines(&state, "live"),
+                0,
+                "{shape}: the streamer's own line counted"
+            );
         }
-        let echo = crate::live_chat::fake_echo_message_for_tests("live", StreamPlatform::Twitch, "no sound??");
+        let echo = crate::live_chat::fake_echo_message_for_tests(
+            "live",
+            StreamPlatform::Twitch,
+            "no sound??",
+        );
         assert_eq!(echo.author_roles, vec!["owner".to_string()]);
         observe_chat(&state, &echo);
-        assert_eq!(chat_lines(&state, "live"), 0, "the fake echo is the streamer's own line");
+        assert_eq!(
+            chat_lines(&state, "live"),
+            0,
+            "the fake echo is the streamer's own line"
+        );
 
-        observe_chat(&state, &line(StreamPlatform::Youtube, &["moderator"], &[], "no sound??"));
-        observe_chat(&state, &line(StreamPlatform::Kick, &[], &["subscriber"], "cant hear u"));
-        assert_eq!(chat_lines(&state, "live"), 2, "a moderator's and a viewer's line count");
+        observe_chat(
+            &state,
+            &line(StreamPlatform::Youtube, &["moderator"], &[], "no sound??"),
+        );
+        observe_chat(
+            &state,
+            &line(StreamPlatform::Kick, &[], &["subscriber"], "cant hear u"),
+        );
+        assert_eq!(
+            chat_lines(&state, "live"),
+            2,
+            "a moderator's and a viewer's line count"
+        );
         session_ended(&state, "live");
     }
 

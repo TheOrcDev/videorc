@@ -64,7 +64,11 @@ fn host_shaped_label(alert: &WatchdogAlert) -> Option<String> {
 /// a port suffix. "Twitch (main)" and "My server" are not hosts.
 fn looks_like_host(label: &str) -> bool {
     let lower = label.trim().to_ascii_lowercase();
-    if lower.contains("://") || lower.contains("rtmp:") || lower.contains("rtmps:") || lower.contains("www.") {
+    if lower.contains("://")
+        || lower.contains("rtmp:")
+        || lower.contains("rtmps:")
+        || lower.contains("www.")
+    {
         return true;
     }
     let bare = lower.split(':').next().unwrap_or("");
@@ -76,9 +80,10 @@ fn looks_like_host(label: &str) -> bool {
     let last = parts[parts.len() - 1];
     let domain = last.len() >= 2
         && last.chars().all(|ch| ch.is_ascii_alphabetic())
-        && parts
-            .iter()
-            .all(|part| part.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'));
+        && parts.iter().all(|part| {
+            part.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        });
     ipv4 || domain
 }
 
@@ -361,11 +366,20 @@ mod tests {
             "x",
             "Muted for 0:42.",
         );
-        assert_eq!(notify_body(&Transition::Repeated(muted.clone()), true), None);
-        assert_eq!(notify_body(&Transition::Acknowledged(muted.clone()), true), None);
+        assert_eq!(
+            notify_body(&Transition::Repeated(muted.clone()), true),
+            None
+        );
+        assert_eq!(
+            notify_body(&Transition::Acknowledged(muted.clone()), true),
+            None
+        );
         // L5: a record-only session never pushes (the 1064 adoption).
         assert_eq!(notify_body(&Transition::Opened(muted.clone()), false), None);
-        assert!(!pushes(&Transition::Withdrawn(muted), true), "a withdrawal is not a recovery");
+        assert!(
+            !pushes(&Transition::Withdrawn(muted), true),
+            "a withdrawal is not a recovery"
+        );
     }
 
     #[test]

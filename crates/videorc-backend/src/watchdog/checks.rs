@@ -1500,11 +1500,11 @@ mod tests {
             1,
             &signals,
         );
-        assert!(cleared(&out).is_empty(), "the mute is not a recovery: {out:?}");
-        assert_eq!(
-            withdrawn(&out),
-            vec![(WatchdogCheck::ProgramSilent, None)]
+        assert!(
+            cleared(&out).is_empty(),
+            "the mute is not a recovery: {out:?}"
         );
+        assert_eq!(withdrawn(&out), vec![(WatchdogCheck::ProgramSilent, None)]);
         let out = run(
             &mut checks,
             &mut state,

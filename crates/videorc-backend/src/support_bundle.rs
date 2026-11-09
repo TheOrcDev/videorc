@@ -797,7 +797,8 @@ mod tests {
         assert_eq!(
             super::redact_chat_quotes(
                 "watchdog-chat-says",
-                "Chat says they can't hear you. 3 people in the last 2 minutes (audio).".to_string()
+                "Chat says they can't hear you. 3 people in the last 2 minutes (audio)."
+                    .to_string()
             ),
             "Chat says they can't hear you. 3 people in the last 2 minutes (audio)."
         );

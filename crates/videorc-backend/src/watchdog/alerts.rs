@@ -973,12 +973,19 @@ mod tests {
             .open(
                 WatchdogCheck::DestinationDown,
                 "destination-down:yt",
-                AlertSpec::new(AlertSeverity::Warning, "YouTube has been down for 0:20", "x"),
+                AlertSpec::new(
+                    AlertSeverity::Warning,
+                    "YouTube has been down for 0:20",
+                    "x",
+                ),
                 start,
             )
             .unwrap();
         let withdrawn = state.withdraw("destination-down:yt").unwrap();
-        assert!(matches!(withdrawn, Transition::Withdrawn(_)), "{withdrawn:?}");
+        assert!(
+            matches!(withdrawn, Transition::Withdrawn(_)),
+            "{withdrawn:?}"
+        );
         assert_eq!(
             health_code(&withdrawn).as_deref(),
             Some("watchdog-destination-down-withdrawn")
