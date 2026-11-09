@@ -3472,7 +3472,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     }
 
     /// End the current show: `show.end` on the socket, `POST …/end` on the
-    /// web, both best effort, then Off.
+    /// web, both best effort, then Off. An end neither the runner's ack nor
+    /// the web confirmed (a Stop while offline) keeps the show remembered
+    /// (plan 222 review M1): the runner may still hold the platforms, so the
+    /// next launch or Go Live asks the web about it before any direct leg.
     pub async fn end_current_show(&self, bearer: Option<String>) -> Result<CloudStatus> {
         let (show_id, tx) = {
             let mut runtime = lock(&self.slot);
@@ -3484,14 +3487,20 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             (show_id, runtime.control_tx.clone())
         };
         self.hooks.emit_from(&self.slot);
+        let mut confirmed = false;
         if let Some(tx) = tx {
             let id = new_intent_id();
-            let _ = send_intent(&tx, intent_frame(&id, "show.end"), id, END_ACK_TIMEOUT).await;
+            confirmed = send_intent(&tx, intent_frame(&id, "show.end"), id, END_ACK_TIMEOUT)
+                .await
+                .is_ok();
         }
-        if let Some(bearer) = bearer
-            && let Err(error) = self.web.end_show(&bearer, &show_id).await
-        {
-            tracing::info!("Videorc Cloud end request failed (the runner's end stands): {error}");
+        if let Some(bearer) = bearer {
+            match self.web.end_show(&bearer, &show_id).await {
+                Ok(()) => confirmed = true,
+                Err(error) => tracing::info!(
+                    "Videorc Cloud end request failed (the runner's end stands): {error}"
+                ),
+            }
         }
         // Plan 224: the room goes with the show, and its camera comes back
         // before the slot forgets the talk state (`clear_show` drops it).
@@ -3499,6 +3508,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let status = {
             let mut runtime = lock(&self.slot);
             runtime.clear_show(Some("ended-by-host".to_string()));
+            if !confirmed {
+                tracing::warn!(
+                    show = %show_id,
+                    "Videorc Cloud show end not confirmed by the runner or the web; the show stays remembered"
+                );
+                runtime.keep_remembering(&show_id);
+            }
             runtime.status()
         };
         self.hooks.emit_from(&self.slot);
@@ -4494,6 +4510,8 @@ mod tests {
         /// The `kind` of every create, in order (C6b sends `test`).
         create_kinds: StdMutex<Vec<String>>,
         end_calls: StdMutex<Vec<String>>,
+        /// The web cannot be reached for `end` (plan 222 review M1).
+        end_fails: std::sync::atomic::AtomicBool,
         current_calls: AtomicUsize,
         /// Answers for the lost reports, in order (plan 222 D7); empty means
         /// the web could not be reached.
@@ -4545,6 +4563,11 @@ mod tests {
             show_id: &str,
         ) -> std::result::Result<(), CloudApiError> {
             self.end_calls.lock().unwrap().push(show_id.to_string());
+            if self.end_fails.load(Ordering::SeqCst) {
+                return Err(CloudApiError::Transport(
+                    "videorc.com could not be reached".to_string(),
+                ));
+            }
             Ok(())
         }
 
@@ -8701,6 +8724,145 @@ mod tests {
         server.send(ack(&frame["id"]));
         reconnect.await.unwrap().unwrap();
         assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Live);
+    }
+
+    // Plan 222 review M1: a Stop while offline (the socket down, the web
+    // unreachable) ends the show on this computer but can confirm nothing:
+    // the runner may still hold the platforms, so the show stays remembered
+    // and the next launch or Go Live asks the web first. Either confirmation
+    // (the runner's ack, the web's end) forgets it.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_nobody_confirmed_keeps_the_show_remembered() {
+        // Neither: remembered, and the launch check is owed again.
+        let harness = harness(true);
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse::default()));
+        harness.context.detect_current_show("bearer").await.unwrap();
+        assert!(!launch_check_due(&lock(&harness.context.slot), true));
+        let server = live_show(&harness).await;
+        assert_eq!(
+            *harness.remembered.lock().unwrap(),
+            vec![Some("sh_abc".to_string())]
+        );
+        server.drop_socket();
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .extend(std::iter::repeat_n(None, 20));
+        harness.context.web.end_fails.store(true, Ordering::SeqCst);
+        wait_for_phase(&harness.context.slot, CloudPhase::Connecting).await;
+        harness
+            .context
+            .on_session_stopped("session-1", Some("bearer".to_string()))
+            .await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Off);
+        assert_eq!(status.show, None);
+        assert_eq!(
+            *harness.context.web.end_calls.lock().unwrap(),
+            vec!["sh_abc".to_string()]
+        );
+        assert_eq!(
+            lock(&harness.context.slot).remembered_show(),
+            Some("sh_abc")
+        );
+        assert_eq!(
+            *harness.remembered.lock().unwrap(),
+            vec![Some("sh_abc".to_string())],
+            "never forgotten"
+        );
+        assert!(launch_check_due(&lock(&harness.context.slot), true));
+        // The next Go Live asks the web before any direct leg (D6).
+        let asked_before = harness.context.web.current_calls.load(Ordering::SeqCst);
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-2",
+                Some("bearer".to_string()),
+                Vec::new(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        assert_eq!(
+            harness.context.web.current_calls.load(Ordering::SeqCst),
+            asked_before + 1
+        );
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(
+            status.fallback.map(|fallback| fallback.reason),
+            Some(CloudFallbackReason::CloudUnchecked)
+        );
+
+        // The web confirms the end: forgotten, whatever the runner said.
+        let harness = harness_remembering(true, None);
+        let server = live_show(&harness).await;
+        server.drop_socket();
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .extend(std::iter::repeat_n(None, 20));
+        wait_for_phase(&harness.context.slot, CloudPhase::Connecting).await;
+        harness
+            .context
+            .on_session_stopped("session-1", Some("bearer".to_string()))
+            .await;
+        assert_eq!(lock(&harness.context.slot).remembered_show(), None);
+        assert_eq!(
+            *harness.remembered.lock().unwrap(),
+            vec![Some("sh_abc".to_string()), None]
+        );
+
+        // The runner acks the end: forgotten, whatever the web said.
+        let harness = harness_remembering(true, None);
+        let mut server = live_show(&harness).await;
+        harness.context.web.end_fails.store(true, Ordering::SeqCst);
+        let context = harness.context.clone();
+        let stop = tokio::spawn(async move {
+            context
+                .on_session_stopped("session-1", Some("bearer".to_string()))
+                .await
+        });
+        ack_show_end(&mut server).await;
+        stop.await.unwrap();
+        assert_eq!(lock(&harness.context.slot).remembered_show(), None);
+        assert_eq!(
+            *harness.remembered.lock().unwrap(),
+            vec![Some("sh_abc".to_string()), None]
+        );
+
+        // Signed out with the socket down: nothing can confirm; remembered.
+        let harness = harness_remembering(true, None);
+        let server = live_show(&harness).await;
+        server.drop_socket();
+        harness
+            .context
+            .connector
+            .refuse_next
+            .lock()
+            .unwrap()
+            .extend(std::iter::repeat_n(None, 20));
+        wait_for_phase(&harness.context.slot, CloudPhase::Connecting).await;
+        harness.context.on_session_stopped("session-1", None).await;
+        assert!(harness.context.web.end_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            lock(&harness.context.slot).remembered_show(),
+            Some("sh_abc")
+        );
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
     }
 
     // Plan 222 review L1: the launch check connects its banner socket after
