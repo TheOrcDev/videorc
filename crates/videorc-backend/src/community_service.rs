@@ -3388,21 +3388,21 @@ mod tests {
             None,
             "Bo is forgotten"
         );
-        // Both arrivals of the last batch reached the report: Ada and Bo
-        // are regulars on their third stream (Bo's row carried his arrival
-        // before his `!forgetme` ran).
+        // Ada's arrival in the last batch reached the report: she is a
+        // regular on her third stream. Bo's arrival went out with his
+        // `!forgetme` (review F2: a forget leaves no name in the report).
         assert_eq!(
-            community.regulars_back, 2,
-            "the arrivals in the last batch reached the report"
+            community.regulars_back, 1,
+            "the arrival in the last batch reached the report"
         );
-        assert_eq!(community.new_regulars, 2);
+        assert_eq!(community.new_regulars, 1);
         assert_eq!(
             community
                 .regulars
                 .iter()
                 .map(|person| person.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Ada", "Bo"]
+            vec!["Ada"]
         );
         assert_eq!(community.first_timers, 0);
         assert!(
