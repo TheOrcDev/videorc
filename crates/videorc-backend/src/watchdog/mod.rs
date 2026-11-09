@@ -1227,6 +1227,37 @@ mod tests {
         )
     }
 
+    /// A `sessions` row, so the health log's foreign key holds and the
+    /// tests can read the lines back.
+    fn persist_session(state: &AppState, session_id: &str) {
+        state
+            .database
+            .create_session(&crate::storage::NewSession {
+                id: session_id.to_string(),
+                title: "Watchdog test".to_string(),
+                started_at: "2026-11-09T10:00:00Z".to_string(),
+                mode: "record+stream".to_string(),
+                output_path: Some("/tmp/watchdog-test.mp4".to_string()),
+                container: Some("mp4".to_string()),
+                stream_preset: None,
+                sources: serde_json::from_str("{}").unwrap(),
+                layout: crate::protocol::default_layout_settings(),
+                output: serde_json::from_value(json!({
+                    "recordEnabled": true,
+                    "streamEnabled": true,
+                    "video": {
+                        "preset": "tutorial-1080p30",
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30,
+                        "bitrateKbps": 6000
+                    },
+                    "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+                }))
+                .unwrap(),
+            })
+            .unwrap();
+    }
     fn ready_screen(id: &str, image_path: &str) -> StreamScreen {
         StreamScreen {
             id: id.to_string(),
@@ -1390,6 +1421,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_platform_health_card_ages_out_with_its_signal() {
         let state = test_state();
+        persist_session(&state, "live");
         let facts = || SessionFacts {
             live: true,
             ..Default::default()
@@ -1476,6 +1508,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_withdrawal_rides_the_event_and_the_log_and_never_reads_as_a_clear() {
         let state = test_state();
+        persist_session(&state, "live");
         let mut events = state.events.subscribe();
         tick(
             &state,

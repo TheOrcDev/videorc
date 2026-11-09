@@ -37,26 +37,39 @@ pub fn pushes(transition: &Transition, live: bool) -> bool {
 /// would read as an address to the web and fail the push with a 400 (L7):
 /// the push names the platform instead, in the title and the body.
 pub fn push_words(alert: &WatchdogAlert, resolved: bool) -> (String, String) {
-    let (title, body) = push_card_words(alert, resolved);
-    match host_shaped_label(alert) {
-        Some(label) => {
-            let name = platform_name(alert.platform.as_deref());
-            (title.replace(&label, name), body.replace(&label, name))
-        }
-        None => (title, body),
+    let (mut title, mut body) = push_card_words(alert, resolved);
+    let name = platform_name(alert.platform.as_deref());
+    for label in host_shaped_labels(alert) {
+        title = title.replace(&label, name);
+        body = body.replace(&label, name);
     }
+    (title, body)
 }
 
-/// The destination's label on the card when it is shaped like a host.
-fn host_shaped_label(alert: &WatchdogAlert) -> Option<String> {
+/// The destination labels on the card that are shaped like a host: the one
+/// in the title, and the one the all-down card carries only in its detail
+/// ("Every destination is down. Videorc can't reconnect my.server.tv:1935
+/// without a gap on the others.").
+fn host_shaped_labels(alert: &WatchdogAlert) -> Vec<String> {
     if !matches!(
         alert.check,
         WatchdogCheck::DestinationDown | WatchdogCheck::PlatformHealth
     ) {
-        return None;
+        return Vec::new();
     }
-    let label = destination_label(&alert.title);
-    (!label.is_empty() && label != alert.title && looks_like_host(&label)).then_some(label)
+    let from_title = Some(destination_label(&alert.title)).filter(|label| label != &alert.title);
+    let from_detail = alert
+        .detail
+        .split_once("can't reconnect ")
+        .and_then(|(_, rest)| rest.split_once(" without a gap"))
+        .map(|(label, _)| label.to_string());
+    let mut labels: Vec<String> = [from_title, from_detail]
+        .into_iter()
+        .flatten()
+        .filter(|label| !label.is_empty() && looks_like_host(label))
+        .collect();
+    labels.dedup();
+    labels
 }
 
 /// The web's bare-host rule (`lib/alerts/push.ts`): dotted labels with a
