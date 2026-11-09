@@ -1624,6 +1624,8 @@ fn sync_directory(directory: &Path) -> Result<()> {
     // On Windows, publication uses filesystem APIs whose namespace updates are
     // durable with the file handle flush; std cannot open directories for
     // FlushFileBuffers portably.
+    #[cfg(not(unix))]
+    let _ = directory;
     Ok(())
 }
 

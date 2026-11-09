@@ -104,6 +104,7 @@ pub async fn run(mut changes: watch::Receiver<u64>, state: crate::state::AppStat
     let camera_state = state.clone();
     state.spawn_process_task(async move { run_camera_events(camera_state).await });
     while next_change(&mut changes).await {
+        #[cfg(target_os = "macos")]
         crate::devices::invalidate_avfoundation_probe_cache();
         let ffmpeg_path = crate::ffmpeg::resolve_ffmpeg_path_ref(None);
         let devices = crate::devices::list_devices(&ffmpeg_path).await;

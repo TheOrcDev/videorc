@@ -45,7 +45,7 @@ impl ChromeTone {
     }
 
     /// Stable per-tone index for GPU content keys.
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg(any(target_os = "macos", test))]
     pub const fn index(self) -> u64 {
         match self {
             ChromeTone::Dark => 0,
