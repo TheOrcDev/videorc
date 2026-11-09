@@ -6,7 +6,6 @@
 /// the macOS-only Metal implementation to compile shared scene code.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only Metal draws it today; kept neutral (see above)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub enum SourceMask {
     None,
     Circle,
