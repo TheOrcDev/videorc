@@ -89,6 +89,22 @@ use crate::windows_d3d11_encoder_contract::{
 };
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(1);
+/// What [`MediaFoundationH264Encoder::drain_within`] got back (#1074).
+#[derive(Debug)]
+pub struct MediaFoundationDrain {
+    pub frames: Vec<MediaFoundationEncodedFrame>,
+    /// The encoder signalled `METransformDrainComplete` before the deadline.
+    pub complete: bool,
+    /// Frames submitted to the encoder that it never returned.
+    pub abandoned_frames: usize,
+}
+
+impl MediaFoundationDrain {
+    pub fn is_complete(&self) -> bool {
+        self.complete && self.abandoned_frames == 0
+    }
+}
+
 const EVENT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const D3D11_INPUT_SURFACE_COUNT: usize = 4;
@@ -1044,8 +1060,42 @@ impl MediaFoundationH264Encoder {
     }
 
     pub fn drain(&mut self, timeout: Duration) -> Result<Vec<MediaFoundationEncodedFrame>> {
+        let drain = self.drain_within(timeout)?;
+        ensure!(
+            drain.is_complete(),
+            "Media Foundation probe stage=drain encoder={:?} input={} profile={}: bounded drain did not complete in {}ms (pending timestamps={})",
+            self.identity,
+            self.input_subtype.label(),
+            self.config.profile_label(),
+            timeout.as_millis(),
+            drain.abandoned_frames
+        );
+        Ok(drain.frames)
+    }
+
+    /// #1074: a drain bounded by `timeout` that reports what it got instead of
+    /// failing. An async hardware MFT (NVIDIA's) can hold its last frame and
+    /// never signal `METransformDrainComplete`; the caller then decides
+    /// whether the frames it never returned are a failure. An incomplete
+    /// drain leaves the encoder undrained, so `Drop` flushes them away.
+    pub fn drain_within(&mut self, timeout: Duration) -> Result<MediaFoundationDrain> {
+        self.drain_within_until(timeout, |_, deadline| deadline)
+    }
+
+    /// [`Self::drain_within`], but `deadline_now(now, deadline)` runs on every
+    /// poll and may pull the deadline in while the drain waits (#1074: a Stop
+    /// that arrives mid-drain).
+    pub fn drain_within_until(
+        &mut self,
+        timeout: Duration,
+        mut deadline_now: impl FnMut(Instant, Instant) -> Instant,
+    ) -> Result<MediaFoundationDrain> {
         if self.drained {
-            return Ok(Vec::new());
+            return Ok(MediaFoundationDrain {
+                frames: Vec::new(),
+                complete: true,
+                abandoned_frames: 0,
+            });
         }
         unsafe {
             self.transform
@@ -1071,10 +1121,15 @@ impl MediaFoundationH264Encoder {
                     )
                 })?;
         }
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
         let mut output = Vec::new();
         let mut drain_complete = false;
-        while Instant::now() < deadline {
+        loop {
+            let now = Instant::now();
+            deadline = deadline_now(now, deadline);
+            if now >= deadline {
+                break;
+            }
             match self.next_event()? {
                 Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
                     output.extend(self.process_one_output()?);
@@ -1087,17 +1142,15 @@ impl MediaFoundationH264Encoder {
                 None => thread::sleep(EVENT_POLL_INTERVAL),
             }
         }
-        ensure!(
-            drain_complete && self.submitted_pts.is_empty(),
-            "Media Foundation probe stage=drain encoder={:?} input={} profile={}: bounded drain did not complete in {}ms (pending timestamps={})",
-            self.identity,
-            self.input_subtype.label(),
-            self.config.profile_label(),
-            timeout.as_millis(),
-            self.submitted_pts.len()
-        );
-        self.drained = true;
-        Ok(output)
+        let drain = MediaFoundationDrain {
+            frames: output,
+            complete: drain_complete,
+            abandoned_frames: self.submitted_pts.len(),
+        };
+        if drain.is_complete() {
+            self.drained = true;
+        }
+        Ok(drain)
     }
 
     /// Bounded wait for an input credit that never fails on timeout: returns

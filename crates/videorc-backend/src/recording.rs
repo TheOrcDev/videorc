@@ -29079,6 +29079,19 @@ mod tests {
     use crate::capture_input::AVFOUNDATION_VIDEO_PIXEL_FORMAT;
 
     #[test]
+    fn a_media_foundation_stop_drain_ends_well_inside_the_stop_fallback() {
+        // #1074: FFmpeg's EOF waits on the writer's final drain. A drain that
+        // outlasts STOP_TERM_DELAY gets FFmpeg TERMed and the take kept as
+        // recovery media; leave FFmpeg at least as long again to finalize.
+        assert!(
+            crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT * 2 <= STOP_TERM_DELAY,
+            "stop drain {:?} must leave FFmpeg time inside {:?}",
+            crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT,
+            STOP_TERM_DELAY
+        );
+    }
+
+    #[test]
     fn audio_output_stalled_message_names_no_platform() {
         // #1175: the warning reached Windows testers as "this Mac was busy".
         let message = audio_output_stalled_message(&crate::session_audio::OutputStallReport {
