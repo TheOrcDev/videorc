@@ -4,8 +4,10 @@ import {
   RECORD_INTENT,
   captureConfigForIntent,
   livestreamIntent,
+  remoteOutputIntent,
   sameSessionStartIntent,
-  savedModeIntent
+  savedModeIntent,
+  type SessionStartIntent
 } from './session-start-intent'
 
 // Plan 174 S3.1 (B-3, A-3): Record and Go Live are explicit intents, and the
@@ -19,6 +21,53 @@ describe('session start intents', () => {
   it('goes live, and records too only when Save local recording is on', () => {
     expect(livestreamIntent(true)).toEqual({ record: true, stream: true })
     expect(livestreamIntent(false)).toEqual({ record: false, stream: true })
+  })
+
+  describe('what remotes see as the session outputs', () => {
+    const config = { recordEnabled: false, streamEnabled: false }
+    const savedMode = { record: false, stream: false }
+    const live = { state: 'recording', streamUrl: 'rtmp://x' }
+    const outputs = (
+      sessionActive: boolean,
+      startIntent: SessionStartIntent | null,
+      status: { state: string; sessionId?: string; outputPath?: string; streamUrl?: string },
+      previous: SessionStartIntent | null = null
+    ) => remoteOutputIntent({ sessionActive, startIntent, status, config, previous })
+
+    it('is the saved mode while idle, whatever came before', () => {
+      expect(outputs(false, RECORD_INTENT, { state: 'idle' }, RECORD_INTENT)).toEqual(savedMode)
+    })
+
+    it('is the start intent while the session runs', () => {
+      expect(outputs(true, RECORD_INTENT, { state: 'recording' })).toEqual(RECORD_INTENT)
+    })
+
+    it('reads a session this renderer did not start from its status', () => {
+      expect(outputs(true, null, { state: 'recording' })).toEqual(RECORD_INTENT)
+      expect(outputs(true, null, live)).toEqual({ record: true, stream: true })
+      expect(outputs(true, null, { state: 'streaming', streamUrl: 'rtmp://x' })).toEqual({
+        record: false,
+        stream: true
+      })
+    })
+
+    it('keeps what the session did through its stop tail', () => {
+      expect(outputs(true, null, { state: 'stopping' }, RECORD_INTENT)).toEqual(RECORD_INTENT)
+      expect(outputs(true, null, { state: 'idle' }, RECORD_INTENT)).toEqual(RECORD_INTENT)
+    })
+
+    it('reads a session not started here from the backend starting status', () => {
+      const starting = { state: 'starting', sessionId: 's-1' }
+      expect(outputs(true, null, { ...starting, outputPath: '/take.mp4' })).toEqual(RECORD_INTENT)
+      expect(outputs(true, null, { ...starting, streamUrl: 'rtmp://x' })).toEqual({
+        record: false,
+        stream: true
+      })
+    })
+
+    it('falls back to the saved mode before the backend names the starting session', () => {
+      expect(outputs(true, null, { state: 'starting' })).toEqual(savedMode)
+    })
   })
 
   it('reads the saved mode as an intent for the smokes and hydrated sessions', () => {

@@ -5,6 +5,21 @@
 // Settings, every key shows an alert glyph on press and the title says so.
 
 import { privacyKeyTitle, privacyKeyIntent } from './privacy-key.js'
+import {
+  bannerKeyLit,
+  buddyKeyIntent,
+  buddyKeyLit,
+  layoutKeyLit,
+  micKeyLit,
+  recordKeyIntent,
+  recordKeyLit,
+  soundKeyLit,
+  streamKeyIntent,
+  streamKeyLit,
+  systemAudioKeyLit,
+  takeoverKeyIntent,
+  takeoverKeyLit
+} from './key-states.js'
 import streamDeck, { action, SingletonAction } from '@elgato/streamdeck'
 import type {
   DidReceiveSettingsEvent,
@@ -139,22 +154,24 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
 @action({ UUID: 'com.videorc.streamdeck.record-toggle' })
 class RecordToggle extends VideorcAction<JsonObject> {
   protected renderTitle: TitleRenderer = (state, connected) =>
-    !connected ? 'Videorc\noffline' : state?.sessionActive ? '● REC' : 'Record'
-  protected intentFor(): Record<string, unknown> {
-    return { kind: 'recordToggle' }
+    !connected ? 'Videorc\noffline' : recordKeyLit(state) ? '● REC' : 'Record'
+  protected override renderPressed(state: RemoteState | null): boolean {
+    return recordKeyLit(state)
+  }
+  protected intentFor(_settings: JsonObject, state: RemoteState | null): Record<string, unknown> {
+    return recordKeyIntent(state)
   }
 }
 
 @action({ UUID: 'com.videorc.streamdeck.stream-toggle' })
 class StreamToggle extends VideorcAction<JsonObject> {
   protected renderTitle: TitleRenderer = (state, connected) =>
-    !connected
-      ? 'Videorc\noffline'
-      : state?.sessionActive && state.streamEnabled
-        ? 'LIVE'
-        : 'Go Live'
+    !connected ? 'Videorc\noffline' : streamKeyLit(state) ? 'LIVE' : 'Go Live'
+  protected override renderPressed(state: RemoteState | null): boolean {
+    return streamKeyLit(state)
+  }
   protected intentFor(_settings: JsonObject, state: RemoteState | null): Record<string, unknown> {
-    return { kind: state?.sessionActive ? 'streamStop' : 'streamStart' }
+    return streamKeyIntent(state)
   }
 }
 
@@ -162,6 +179,9 @@ class StreamToggle extends VideorcAction<JsonObject> {
 class MicToggle extends VideorcAction<JsonObject> {
   protected renderTitle: TitleRenderer = (state, connected) =>
     !connected ? 'Videorc\noffline' : state?.micMuted ? 'Mic\nMUTED' : 'Mic\nlive'
+  protected override renderPressed(state: RemoteState | null): boolean {
+    return micKeyLit(state)
+  }
   protected intentFor(): Record<string, unknown> {
     return { kind: 'micToggle' }
   }
@@ -180,11 +200,26 @@ class SystemAudioToggle extends VideorcAction<JsonObject> {
         : state.systemAudioOn
           ? 'System\naudio ON'
           : 'System\naudio off'
+  protected override renderPressed(state: RemoteState | null): boolean {
+    return systemAudioKeyLit(state)
+  }
   protected intentFor(
     _settings: JsonObject,
     state: RemoteState | null
   ): Record<string, unknown> | null {
     return state?.systemAudioAvailable ? { kind: 'systemAudioToggle' } : null
+  }
+}
+
+@action({ UUID: 'com.videorc.streamdeck.buddy-live-toggle' })
+class BuddyLiveToggle extends VideorcAction<JsonObject> {
+  protected renderTitle: TitleRenderer = (state, connected) =>
+    !connected ? 'Videorc\noffline' : buddyKeyLit(state) ? 'Buddy\nON' : 'Buddy'
+  protected override renderPressed(state: RemoteState | null): boolean {
+    return buddyKeyLit(state)
+  }
+  protected intentFor(): Record<string, unknown> {
+    return buddyKeyIntent()
   }
 }
 
@@ -214,6 +249,9 @@ type SceneSettings = { layoutPreset?: string }
 class SceneApply extends VideorcAction<SceneSettings> {
   protected renderTitle: TitleRenderer = (state, connected) =>
     !connected ? 'Videorc\noffline' : `Scene\n${state?.layoutPreset ?? ''}`
+  protected override renderPressed(state: RemoteState | null, settings: SceneSettings): boolean {
+    return layoutKeyLit(state, settings.layoutPreset)
+  }
   protected intentFor(settings: SceneSettings): Record<string, unknown> | null {
     if (!settings.layoutPreset) {
       return null
@@ -243,19 +281,16 @@ type TakeoverSettings = { assetId?: string }
 
 @action({ UUID: 'com.videorc.streamdeck.takeover-toggle' })
 class TakeoverToggle extends VideorcAction<TakeoverSettings> {
-  protected renderTitle: TitleRenderer = (state, connected) =>
-    !connected ? 'Videorc\noffline' : state?.activeTakeoverId ? 'BRB\nON' : 'BRB'
+  protected renderTitle: TitleRenderer<TakeoverSettings> = (state, connected, settings) =>
+    !connected ? 'Videorc\noffline' : takeoverKeyLit(state, settings.assetId) ? 'BRB\nON' : 'BRB'
+  protected override renderPressed(state: RemoteState | null, settings: TakeoverSettings): boolean {
+    return takeoverKeyLit(state, settings.assetId)
+  }
   protected intentFor(
     settings: TakeoverSettings,
     state: RemoteState | null
   ): Record<string, unknown> | null {
-    if (state?.activeTakeoverId) {
-      return { kind: 'takeoverHide' }
-    }
-    if (!settings.assetId) {
-      return null
-    }
-    return { kind: 'takeoverShow', assetId: settings.assetId }
+    return takeoverKeyIntent(state, settings.assetId)
   }
   protected override inspectorOptions(): InspectorOption[] {
     return (client.describe?.takeovers ?? []).map((takeover) => ({
@@ -275,6 +310,9 @@ type BannerSettings = { bannerId?: string }
 class BannerToggle extends VideorcAction<BannerSettings> {
   protected renderTitle: TitleRenderer<BannerSettings> = (_state, connected, settings) =>
     bannerKeyTitle(client.describe, settings.bannerId, connected)
+  protected override renderPressed(_state: RemoteState | null, settings: BannerSettings): boolean {
+    return bannerKeyLit(client.describe, settings.bannerId)
+  }
   protected intentFor(settings: BannerSettings): Record<string, unknown> | null {
     return bannerKeyIntent(settings.bannerId)
   }
@@ -296,6 +334,9 @@ type SoundSettings = { soundId?: string }
 class SoundPlay extends VideorcAction<SoundSettings> {
   protected renderTitle: TitleRenderer<SoundSettings> = (_state, connected, settings) =>
     soundKeyTitle(client.describe, settings.soundId, connected)
+  protected override renderPressed(_state: RemoteState | null, settings: SoundSettings): boolean {
+    return soundKeyLit(client.describe, settings.soundId)
+  }
   protected intentFor(settings: SoundSettings): Record<string, unknown> | null {
     return soundKeyIntent(settings.soundId)
   }
@@ -331,6 +372,7 @@ streamDeck.actions.registerAction(new RecordToggle())
 streamDeck.actions.registerAction(new StreamToggle())
 streamDeck.actions.registerAction(new MicToggle())
 streamDeck.actions.registerAction(new SystemAudioToggle())
+streamDeck.actions.registerAction(new BuddyLiveToggle())
 streamDeck.actions.registerAction(new SceneApply())
 streamDeck.actions.registerAction(new SavedSceneApply())
 streamDeck.actions.registerAction(new ScreenHideToggle())

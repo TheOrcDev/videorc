@@ -38,6 +38,7 @@ var __runInitializers = (this && this.__runInitializers) || function (thisArg, i
     return useValue ? value : void 0;
 };
 import { privacyKeyTitle, privacyKeyIntent } from './privacy-key.js';
+import { bannerKeyLit, buddyKeyIntent, buddyKeyLit, layoutKeyLit, micKeyLit, recordKeyIntent, recordKeyLit, soundKeyLit, streamKeyIntent, streamKeyLit, systemAudioKeyLit, takeoverKeyIntent, takeoverKeyLit } from './key-states.js';
 import streamDeck, { action, SingletonAction } from '@elgato/streamdeck';
 import { VideorcClient, sceneKeyIntent, sceneKeyTitle, bannerKeyIntent, bannerKeyTitle, soundKeyIntent, soundKeyTitle } from './videorc-client.js';
 const client = new VideorcClient();
@@ -141,9 +142,12 @@ let RecordToggle = (() => {
             if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
             __runInitializers(_classThis, _classExtraInitializers);
         }
-        renderTitle = (state, connected) => !connected ? 'Videorc\noffline' : state?.sessionActive ? '● REC' : 'Record';
-        intentFor() {
-            return { kind: 'recordToggle' };
+        renderTitle = (state, connected) => !connected ? 'Videorc\noffline' : recordKeyLit(state) ? '● REC' : 'Record';
+        renderPressed(state) {
+            return recordKeyLit(state);
+        }
+        intentFor(_settings, state) {
+            return recordKeyIntent(state);
         }
     };
     return RecordToggle = _classThis;
@@ -163,13 +167,12 @@ let StreamToggle = (() => {
             if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
             __runInitializers(_classThis, _classExtraInitializers);
         }
-        renderTitle = (state, connected) => !connected
-            ? 'Videorc\noffline'
-            : state?.sessionActive && state.streamEnabled
-                ? 'LIVE'
-                : 'Go Live';
+        renderTitle = (state, connected) => !connected ? 'Videorc\noffline' : streamKeyLit(state) ? 'LIVE' : 'Go Live';
+        renderPressed(state) {
+            return streamKeyLit(state);
+        }
         intentFor(_settings, state) {
-            return { kind: state?.sessionActive ? 'streamStop' : 'streamStart' };
+            return streamKeyIntent(state);
         }
     };
     return StreamToggle = _classThis;
@@ -190,6 +193,9 @@ let MicToggle = (() => {
             __runInitializers(_classThis, _classExtraInitializers);
         }
         renderTitle = (state, connected) => !connected ? 'Videorc\noffline' : state?.micMuted ? 'Mic\nMUTED' : 'Mic\nlive';
+        renderPressed(state) {
+            return micKeyLit(state);
+        }
         intentFor() {
             return { kind: 'micToggle' };
         }
@@ -221,11 +227,39 @@ let SystemAudioToggle = (() => {
                 : state.systemAudioOn
                     ? 'System\naudio ON'
                     : 'System\naudio off';
+        renderPressed(state) {
+            return systemAudioKeyLit(state);
+        }
         intentFor(_settings, state) {
             return state?.systemAudioAvailable ? { kind: 'systemAudioToggle' } : null;
         }
     };
     return SystemAudioToggle = _classThis;
+})();
+let BuddyLiveToggle = (() => {
+    let _classDecorators = [action({ UUID: 'com.videorc.streamdeck.buddy-live-toggle' })];
+    let _classDescriptor;
+    let _classExtraInitializers = [];
+    let _classThis;
+    let _classSuper = VideorcAction;
+    var BuddyLiveToggle = class extends _classSuper {
+        static { _classThis = this; }
+        static {
+            const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
+            __esDecorate(null, _classDescriptor = { value: _classThis }, _classDecorators, { kind: "class", name: _classThis.name, metadata: _metadata }, null, _classExtraInitializers);
+            BuddyLiveToggle = _classThis = _classDescriptor.value;
+            if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
+            __runInitializers(_classThis, _classExtraInitializers);
+        }
+        renderTitle = (state, connected) => !connected ? 'Videorc\noffline' : buddyKeyLit(state) ? 'Buddy\nON' : 'Buddy';
+        renderPressed(state) {
+            return buddyKeyLit(state);
+        }
+        intentFor() {
+            return buddyKeyIntent();
+        }
+    };
+    return BuddyLiveToggle = _classThis;
 })();
 let SavedSceneApply = (() => {
     let _classDecorators = [action({ UUID: 'com.videorc.streamdeck.saved-scene' })];
@@ -271,6 +305,9 @@ let SceneApply = (() => {
             __runInitializers(_classThis, _classExtraInitializers);
         }
         renderTitle = (state, connected) => !connected ? 'Videorc\noffline' : `Scene\n${state?.layoutPreset ?? ''}`;
+        renderPressed(state, settings) {
+            return layoutKeyLit(state, settings.layoutPreset);
+        }
         intentFor(settings) {
             if (!settings.layoutPreset) {
                 return null;
@@ -326,15 +363,12 @@ let TakeoverToggle = (() => {
             if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
             __runInitializers(_classThis, _classExtraInitializers);
         }
-        renderTitle = (state, connected) => !connected ? 'Videorc\noffline' : state?.activeTakeoverId ? 'BRB\nON' : 'BRB';
+        renderTitle = (state, connected, settings) => !connected ? 'Videorc\noffline' : takeoverKeyLit(state, settings.assetId) ? 'BRB\nON' : 'BRB';
+        renderPressed(state, settings) {
+            return takeoverKeyLit(state, settings.assetId);
+        }
         intentFor(settings, state) {
-            if (state?.activeTakeoverId) {
-                return { kind: 'takeoverHide' };
-            }
-            if (!settings.assetId) {
-                return null;
-            }
-            return { kind: 'takeoverShow', assetId: settings.assetId };
+            return takeoverKeyIntent(state, settings.assetId);
         }
         inspectorOptions() {
             return (client.describe?.takeovers ?? []).map((takeover) => ({
@@ -365,6 +399,9 @@ let BannerToggle = (() => {
             __runInitializers(_classThis, _classExtraInitializers);
         }
         renderTitle = (_state, connected, settings) => bannerKeyTitle(client.describe, settings.bannerId, connected);
+        renderPressed(_state, settings) {
+            return bannerKeyLit(client.describe, settings.bannerId);
+        }
         intentFor(settings) {
             return bannerKeyIntent(settings.bannerId);
         }
@@ -397,6 +434,9 @@ let SoundPlay = (() => {
             __runInitializers(_classThis, _classExtraInitializers);
         }
         renderTitle = (_state, connected, settings) => soundKeyTitle(client.describe, settings.soundId, connected);
+        renderPressed(_state, settings) {
+            return soundKeyLit(client.describe, settings.soundId);
+        }
         intentFor(settings) {
             return soundKeyIntent(settings.soundId);
         }
@@ -444,6 +484,7 @@ streamDeck.actions.registerAction(new RecordToggle());
 streamDeck.actions.registerAction(new StreamToggle());
 streamDeck.actions.registerAction(new MicToggle());
 streamDeck.actions.registerAction(new SystemAudioToggle());
+streamDeck.actions.registerAction(new BuddyLiveToggle());
 streamDeck.actions.registerAction(new SceneApply());
 streamDeck.actions.registerAction(new SavedSceneApply());
 streamDeck.actions.registerAction(new ScreenHideToggle());
