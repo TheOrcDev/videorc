@@ -3305,6 +3305,14 @@ fn forget_account_locked(
     )?;
     // The person's live accounts decide whether it survives (D13).
     refresh_person_locked(conn, &account.person_id)?;
+    // F2: a person left with one account joins nothing any more, so its
+    // link history (which named the join with the forgotten account) goes.
+    if live_accounts_locked(conn, &account.person_id)?.len() < 2 {
+        conn.execute(
+            "DELETE FROM community_link_events WHERE person_id = ?1",
+            params![account.person_id],
+        )?;
+    }
     Ok(())
 }
 
