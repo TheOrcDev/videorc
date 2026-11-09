@@ -4466,10 +4466,38 @@ fn fake_echo_message(
     );
     message.author_id = Some("fake-broadcaster".to_string());
     message.author_name = "You".to_string();
-    message.author_roles = vec!["broadcaster".to_string()];
+    // The connectors normalize the streamer to `owner` (plan 223 M1): the
+    // echo wears the same role, so every reader excludes it the same way.
+    message.author_roles = vec!["owner".to_string()];
     message.author_verified = None;
     message.message_text = text.to_string();
     message
+}
+
+/// The echo's row as a test sees it (plan 223 M1: it wears `owner`).
+#[cfg(test)]
+pub(crate) fn fake_echo_message_for_tests(
+    session_id: &str,
+    platform: StreamPlatform,
+    text: &str,
+) -> LiveChatMessage {
+    let provider = LiveChatProviderState {
+        id: format!("{}:fake", stream_platform_id(platform)),
+        platform,
+        target_id: None,
+        account_id: None,
+        account_label: None,
+        read: CommentsReadState::Ready,
+        write: CommentsWriteState::Ready,
+        moderate: None,
+        state: LiveChatProviderConnectionState::Connected,
+        message: String::new(),
+        last_connected_at: None,
+        last_message_at: None,
+        last_error: None,
+        retry_at: None,
+    };
+    fake_echo_message(session_id, &provider, "fake-echo-1", text)
 }
 
 pub(crate) fn fake_message(

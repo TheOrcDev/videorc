@@ -372,6 +372,11 @@ impl ChatWindow {
         }
     }
 
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
     fn prune(&mut self, now: Instant) {
         self.lines
             .retain(|line| now.saturating_duration_since(line.at) <= CHAT_RECENT);

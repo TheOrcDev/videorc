@@ -464,13 +464,7 @@ pub fn observe_platform_health(
 /// One delivered chat message (B1): the streamer's own and Buddy's never
 /// count; everything else goes into the window with its class.
 pub fn observe_chat(state: &AppState, message: &crate::live_chat::LiveChatMessage) {
-    if message.is_deleted
-        || message
-            .author_roles
-            .iter()
-            .chain(message.author_badges.iter())
-            .any(|role| role.eq_ignore_ascii_case("broadcaster"))
-    {
+    if message.is_deleted || is_streamers_own_row(message) {
         return;
     }
     let text = message.message_text.trim();
@@ -500,6 +494,23 @@ pub fn observe_chat(state: &AppState, message: &crate::live_chat::LiveChatMessag
         return;
     };
     watch.chat.push(line);
+}
+
+/// The streamer's own row: the connectors normalize the broadcaster to the
+/// `owner` role (YouTube's chat owner, Twitch's and Kick's broadcaster
+/// badge, X's host); `broadcaster` is kept for a raw badge or an older
+/// row, as `cohost_greetings` and `community_service` read it.
+fn is_streamers_own_row(message: &crate::live_chat::LiveChatMessage) -> bool {
+    message
+        .author_roles
+        .iter()
+        .chain(message.author_badges.iter())
+        .any(|role| {
+            matches!(
+                role.trim().to_ascii_lowercase().as_str(),
+                "owner" | "broadcaster"
+            )
+        })
 }
 
 /// `watchdog.idle.report` from the renderer (main's `powerMonitor`).
@@ -723,6 +734,16 @@ pub(crate) fn watching(state: &AppState, session_id: &str) -> bool {
         .session
         .as_ref()
         .is_some_and(|watch| watch.session_id == session_id)
+}
+
+/// How many chat lines the session's window holds (B1's exclusions).
+#[cfg(test)]
+pub(crate) fn chat_lines(state: &AppState, session_id: &str) -> usize {
+    lock(&state.watchdog)
+        .session
+        .as_ref()
+        .filter(|watch| watch.session_id == session_id)
+        .map_or(0, |watch| watch.chat.len())
 }
 
 /// The takeover the session's watch guards on, as the last tick saw it.
@@ -1098,6 +1119,52 @@ mod tests {
         assert_eq!(seeded.1, screen.image_path);
         database.clear_active_stream_screen().unwrap();
         assert_eq!(load_takeover(&database), None);
+    }
+
+    /// Plan 223 M1 (the review): the streamer's own line never counts, in
+    /// the role each connector writes: YouTube's chat owner, Twitch's and
+    /// Kick's broadcaster badge (normalized to `owner`, the raw badge kept),
+    /// X's host, and the fake echo's `owner`. A raw `broadcaster` on an
+    /// older row is excluded too; a moderator's and a viewer's line count.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_streamers_own_line_never_counts_on_any_platform() {
+        use crate::streaming::StreamPlatform;
+        let state = test_state();
+        tick(
+            &state,
+            "live",
+            SessionFacts {
+                live: true,
+                ..Default::default()
+            },
+        );
+        let line = |platform, roles: &[&str], badges: &[&str], text: &str| {
+            let mut message = crate::live_chat::fake_message("live", platform, None, 7);
+            message.author_roles = roles.iter().map(|role| role.to_string()).collect();
+            message.author_badges = badges.iter().map(|badge| badge.to_string()).collect();
+            message.message_text = text.to_string();
+            message
+        };
+        let own = [
+            ("youtube", line(StreamPlatform::Youtube, &["owner"], &[], "no sound today, sorry")),
+            ("twitch", line(StreamPlatform::Twitch, &["owner"], &["broadcaster"], "cant hear u")),
+            ("kick", line(StreamPlatform::Kick, &["owner", "member"], &["broadcaster"], "no audio")),
+            ("x", line(StreamPlatform::X, &["owner"], &[], "sin audio")),
+            ("legacy", line(StreamPlatform::Twitch, &[" Broadcaster "], &[], "no sound")),
+        ];
+        for (shape, message) in &own {
+            observe_chat(&state, message);
+            assert_eq!(chat_lines(&state, "live"), 0, "{shape}: the streamer's own line counted");
+        }
+        let echo = crate::live_chat::fake_echo_message_for_tests("live", StreamPlatform::Twitch, "no sound??");
+        assert_eq!(echo.author_roles, vec!["owner".to_string()]);
+        observe_chat(&state, &echo);
+        assert_eq!(chat_lines(&state, "live"), 0, "the fake echo is the streamer's own line");
+
+        observe_chat(&state, &line(StreamPlatform::Youtube, &["moderator"], &[], "no sound??"));
+        observe_chat(&state, &line(StreamPlatform::Kick, &[], &["subscriber"], "cant hear u"));
+        assert_eq!(chat_lines(&state, "live"), 2, "a moderator's and a viewer's line count");
+        session_ended(&state, "live");
     }
 
     /// Issue 1064 on a record-only session: no tick ever starts its watch
