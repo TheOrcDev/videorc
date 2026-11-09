@@ -99,8 +99,83 @@ behaviour changed (not a line number), that is a STOP condition.
   `hostShape`; `overlay.set`'s rect is normalized; the runner has no
   per-leg end today, so End livestream in a talk show sends `legs.end`
   and reports the runner's refusal until R-G adds it.
-- TODO S-G1 `pnpm smoke:cloud-talk-show`: waits for the runner's talk-show
-  input to land on `phase-1-runner`; not built in this pass.
+- Slice results (2026-11-08, commits dd3793dac..28ee28641 on the branch):
+  - **C-G1** built as `crates/videorc-backend/src/cloud_talk.rs` beside
+    `cloud_show.rs` (the runtime's `talk` field), with the RPCs
+    `cloud.room.open|close|resume`, `cloud.room.invite.rotate`,
+    `cloud.room.door.set`, `cloud.room.token.refresh` (renderer role only,
+    the one token-carrying answer), `cloud.room.client.report`,
+    `cloud.guest.decide|act`, `cloud.stage.set`,
+    `cloud.recording.start|stop`, `cloud.return.set`, `cloud.show.goLive`,
+    `cloud.show.legs.end`; the event `cloud.room.requests`; `CloudStatus.room`
+    and `.recording`; `show.kind`; the two fallback reasons. Fixture
+    `cloud.statusTalk` plus the params, token answer and event, round-tripped
+    in both languages. `session.start` is refused while a room is open.
+  - **C-G4**: `lib/talk-show-room.ts` (lazy, `livekit-client` 2.23.0) and
+    `hooks/use-talk-show-room.ts` (`useStudioCloud().talkShow`). The main
+    renderer's web permissions allowed audio only and refused display
+    capture; a room grant (`talk-show:media-grant`) lets camera video through
+    and answers one `getDisplayMedia` with the named `desktopCapturer`
+    source (`talk-show:display-sources`). The backend lends the camera with
+    reason `talk-show`, refuses the lend while a take records it, refuses
+    every start while lent, and returns it when the room closes.
+  - **C-G5**: `PreviewStage` reads "The Show stage replaces the Preview
+    while the room is open." with Close the room; the provider closes and
+    reopens the Preview by plan 203 S5's rule; `probe:preview-lifecycle`
+    gains the scripted room steps (`window.__videorcSmokeSetTalkShowRoomOpen`).
+  - **C-G6**: `lib/talk-show-session.ts` projects the room into the
+    recording-state view; Record → `cloud.recording.start`, Go Live →
+    `cloud.show.goLive` after the dialog and platform setup, with the
+    YouTube and X activations keyed on the show id; End livestream completes
+    the broadcasts and sends `cloud.show.legs.end`. **Gap**: the runner has
+    no per-leg end (wire notes: "Phase 1 has no per-leg remove"), so the
+    desktop reports "Videorc Cloud can't end the stream without closing the
+    room yet." until the runner adds `legs.end`. Record's blocked reason is
+    the runner's `recording.problem`.
+  - **C-G7**: `comment_highlight.rs` forks to `overlay.set` slot `card`
+    (normalized rect, `h`/`v`, 10 s TTL); live chat attaches to the show id
+    at Go Live and stops with the legs or the room; takeovers go to slot
+    `takeover` full frame. No aux-leg wiring (no local stream leg).
+  - **C-G8**: the Resume notice reads "Your guests are still on."; Resume
+    calls `cloud.room.resume` (the camera lent, `GET room`, a fresh token,
+    the guests poll); the renderer rejoins through `cloud.room.token.refresh`.
+  - **For C-G2 and C-G3**: `useStudioCloud()` gives `cloudStatus.room`
+    (phase, inviteUrl, doorOpen, requests, guests, participants, stage,
+    limits, client, live, message), `cloudStatus.recording`, and `talkShow`
+    with `room` (people as `MediaStreamTrack`s, local media, monitor),
+    `hostIdentity`, `previewReplaced`, and the actions `openRoom`,
+    `closeRoom`, `resumeRoom`, `rotateInvite`, `setDoor`, `decideGuest`,
+    `actOnGuest`, `setStage`, `bringOn`, `sendBackstage`, `setLayout`,
+    `setSpotlight`, `listDisplaySources`, `startScreenShare`,
+    `stopScreenShare`, `setMonitor`, `setMicrophoneMuted`, `setCameraOff`,
+    `startCloudRecording`, `stopCloudRecording`, `endTalkShowLivestream`;
+    the event `cloud.room.requests` for the "wants to join" alert; the copy
+    constants `PREVIEW_REPLACED_BY_SHOW_STAGE`, `CLOSE_THE_ROOM_LABEL`,
+    `RECORDING_GOES_TO_CLOUD`, `PROGRAM_MONITOR_EMPTY`.
+- Gates (2026-11-09, head cd17ed75b, before the merge of origin's budget
+  raise): `cargo fmt --check --all`, clippy all targets `-D warnings`, the full
+  `cargo test -p videorc-backend` (4827 passed, 0 failed, 26 ignored),
+  `pnpm typecheck`, `pnpm lint` (0 findings), `pnpm format:check`, the desktop
+  vitest suite (663 files), `pnpm test:scripts` (3161 passed): all green.
+  `pnpm build` green; `check:renderer-assets` RED against the then ceilings
+  2,325,000 raw / 477,000 gzip: eager raw 2,358,466, gzip 484,997 (the branch
+  stood at 480,639 before these slices: +4,358, `livekit-client` stays lazy).
+  App smokes, one chain behind the host lock: `probe:preview-lifecycle`
+  100/100 cycles with the scripted room steps PASS; `smoke:comment-highlight-
+  stream` PASS; `smoke:multistream` green; `smoke:preview-scene-commit` OK;
+  `smoke:preview-pump-diagnostics` OK; `smoke:preview-surface` green;
+  `smoke:preview-overlay-presentation` PASS; `smoke:cloud-solo` PASS (live in
+  5082 ms against the runner at aa40afa). `smoke:layout-source-loop` RED and
+  pre-existing: `dockHiddenReason: scrolled-away` in a 960x568 window, the
+  below-the-fold red draft PR #1261 fixes test-side; the smoke script is
+  unchanged on this branch. `smoke:recording-studio` not run: no local
+  recording step changed (the new `session.start` refusal needs an open room).
+- TODO S-G1 `pnpm smoke:cloud-talk-show`: the runner's talk-show input is
+  on `phase-1-runner` (ca94d09); the smoke (headless-Chrome guests,
+  `fake-cloud-web.mjs` minting LiveKit tokens and answering the guest
+  routes) is not built in this pass.
+- Runner follow-up owed: a `legs.end` intent (End livestream keeps the room,
+  D17); until then the desktop reports the refusal.
 
 ## The owner's ask (2026-11-08)
 
