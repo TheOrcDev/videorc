@@ -1036,6 +1036,60 @@ async fn run_chat_command(
                         changed = true;
                     }
                 }
+                LinkOutcome::Hijacked {
+                    first,
+                    second,
+                    third,
+                } => {
+                    // F5: the word was public and a third account said it
+                    // inside the window, so the join may be a hijack. Undo
+                    // it (the account that joined splits off again), take
+                    // the card down, and list every pair for the streamer.
+                    // Nothing is said: the streamer settles it in Community.
+                    let database = state.database.clone();
+                    let split_key = second.account_key.clone();
+                    let pairs = [
+                        (first.account_key.clone(), second.account_key.clone()),
+                        (first.account_key.clone(), third.account_key.clone()),
+                        (second.account_key.clone(), third.account_key.clone()),
+                    ];
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        database.community_unlink(&split_key, now)?;
+                        for (a, b) in &pairs {
+                            database.community_link_cancelled(a, b, now)?;
+                        }
+                        Ok::<(), CommunityError>(())
+                    })
+                    .await;
+                    match outcome {
+                        Ok(Ok(())) => {
+                            changed = true;
+                            count_for_report(state, session_id, |session| {
+                                session.links_made = session.links_made.saturating_sub(1)
+                            });
+                            let mut engine = state.cohost.lock().await;
+                            if engine.community.note_unlinked(&second.account_key) {
+                                drop(engine);
+                                publish_cohost_state(state).await;
+                            }
+                            state.emit_log(
+                                "info",
+                                format!(
+                                    "Community: a !link word was claimed a third time ({}); the link was undone and waits for you in Community.",
+                                    crate::streaming::stream_platform_label(third.platform)
+                                ),
+                            );
+                        }
+                        Ok(Err(error)) => state.emit_log(
+                            "warn",
+                            format!("Community: could not undo a hijacked !link: {error}"),
+                        ),
+                        Err(error) => state.emit_log(
+                            "warn",
+                            format!("Community: could not undo a hijacked !link: {error}"),
+                        ),
+                    }
+                }
             }
         }
     }
@@ -2674,6 +2728,121 @@ mod tests {
         let summary = summary(&state).await.unwrap();
         assert_eq!(summary.links_pending, 1);
         assert_eq!(summary.people, 4);
+    }
+
+    /// The review of 2026-11-09, F5: the `!link` word is public, so a third
+    /// account saying it inside the window may mean the join was hijacked.
+    /// Ada links Twitch and YouTube; Mallory types the same word on Kick
+    /// moments later: the YouTube account splits off again, the "Linked …
+    /// Undo" card comes down, nothing is said, and all three pairs wait for
+    /// the streamer under "Links that need you".
+    #[tokio::test]
+    async fn a_third_claim_on_a_linked_word_undoes_the_join_and_lists_the_pairs() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let generation = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            generation,
+            vec![
+                row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
+                row("s1", StreamPlatform::Youtube, "UCada", "ada_dev", 2, "hi"),
+                row("s1", StreamPlatform::Kick, "mal", "Mallory", 3, "hey"),
+                row("s1", StreamPlatform::Twitch, "ada", "Ada", 4, "!link pixel42"),
+                row(
+                    "s1",
+                    StreamPlatform::Youtube,
+                    "UCada",
+                    "ada_dev",
+                    5,
+                    "!link pixel42",
+                ),
+            ],
+        )
+        .await;
+        let twitch = state
+            .database
+            .community_account_person("twitch:ada")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state
+                .database
+                .community_account_person("youtube:UCada")
+                .unwrap()
+                .unwrap(),
+            twitch,
+            "linked"
+        );
+        assert_eq!(state.cohost.lock().await.snapshot().link_made.len(), 1);
+        assert_eq!(bubble_lines(&state).len(), 1);
+        deliver(
+            &state,
+            generation,
+            vec![row(
+                "s1",
+                StreamPlatform::Kick,
+                "mal",
+                "Mallory",
+                6,
+                "!link pixel42",
+            )],
+        )
+        .await;
+        let youtube = state
+            .database
+            .community_account_person("youtube:UCada")
+            .unwrap()
+            .unwrap();
+        assert_ne!(youtube, twitch, "the join is undone");
+        assert_eq!(
+            state
+                .database
+                .community_account_person("kick:mal")
+                .unwrap()
+                .unwrap()
+                .len(),
+            36,
+            "Mallory is her own person still"
+        );
+        assert!(
+            state.cohost.lock().await.snapshot().link_made.is_empty(),
+            "the card came down"
+        );
+        assert_eq!(bubble_lines(&state).len(), 1, "a hijack says nothing");
+        let listed = suggestions(&state).await.unwrap().suggestions;
+        let mut pairs: Vec<(String, String)> = listed
+            .iter()
+            .map(|s| {
+                (
+                    s.account_a.account_key.clone(),
+                    s.account_b.account_key.clone(),
+                )
+            })
+            .collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("kick:mal".to_string(), "twitch:ada".to_string()),
+                ("kick:mal".to_string(), "youtube:UCada".to_string()),
+                ("twitch:ada".to_string(), "youtube:UCada".to_string()),
+            ]
+        );
+        assert!(listed.iter().all(|s| s.reason
+            == crate::community::CommunitySuggestionReason::LinkCancelled));
+        assert_eq!(pending_link_words(&state), 0, "the word stays burnt");
+        // The report counts no link for this stream.
+        assert_eq!(
+            state
+                .community
+                .lock()
+                .session
+                .as_ref()
+                .unwrap()
+                .links_made,
+            0
+        );
     }
 
     /// Owner call 2026-11-08 (plan 225 C3): in Suggest mode the "Welcome

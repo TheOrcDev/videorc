@@ -989,11 +989,33 @@ pub enum LinkOutcome {
     Waiting,
     /// Two accounts on two platforms said the word within the window.
     Linked { first: LinkClaim, second: LinkClaim },
-    /// A second account on the same platform claimed the word: the word is
-    /// burnt, and Community lists the pair for the streamer (D4 b).
+    /// A second account on the same platform claimed the word, or a claim
+    /// came on a word already burnt: the word is burnt, and Community lists
+    /// the pair for the streamer (D4 b).
     Cancelled { first: LinkClaim, second: LinkClaim },
+    /// A third account claimed a word that linked within the window (the
+    /// review of 2026-11-09, F5): the word was public, so the join may be
+    /// a hijack. The caller splits `second` off again and lists all three
+    /// under "Links that need you".
+    Hijacked {
+        first: LinkClaim,
+        second: LinkClaim,
+        third: LinkClaim,
+    },
     /// The same account again, or the two accounts are already one person.
     Ignored,
+}
+
+/// A word that linked or was cancelled (F5): burnt for the rest of its
+/// window, so a late third claim cannot start the word afresh.
+#[derive(Debug, Clone)]
+struct BurntWord {
+    at: Instant,
+    first: LinkClaim,
+    second: LinkClaim,
+    /// The word joined two accounts (a later claim undoes that); `false`
+    /// once cancelled or hijacked.
+    linked: bool,
 }
 
 /// Pending `!link` words, in memory only, keyed by word (Wire shape). They
@@ -1001,13 +1023,34 @@ pub enum LinkOutcome {
 #[derive(Debug, Default)]
 pub struct PendingLinks {
     claims: HashMap<String, LinkClaim>,
+    burnt: HashMap<String, BurntWord>,
 }
 
 impl PendingLinks {
     /// `account` says `word` at `now`. A word is single-use: once linked or
-    /// cancelled it is gone, and a later claim starts afresh.
+    /// cancelled it is burnt for the rest of its window (F5); a claim on a
+    /// burnt word undoes the join it made and lists everyone involved.
     pub fn claim(&mut self, word: &str, claim: LinkClaim) -> LinkOutcome {
         self.expire(claim.at);
+        if let Some(burnt) = self.burnt.get_mut(word) {
+            if burnt.first.account_key == claim.account_key
+                || burnt.second.account_key == claim.account_key
+            {
+                return LinkOutcome::Ignored;
+            }
+            if burnt.linked {
+                burnt.linked = false;
+                return LinkOutcome::Hijacked {
+                    first: burnt.first.clone(),
+                    second: burnt.second.clone(),
+                    third: claim,
+                };
+            }
+            return LinkOutcome::Cancelled {
+                first: burnt.first.clone(),
+                second: claim,
+            };
+        }
         let Some(first) = self.claims.get(word).cloned() else {
             self.claims.insert(word.to_string(), claim);
             return LinkOutcome::Waiting;
@@ -1016,27 +1059,40 @@ impl PendingLinks {
             return LinkOutcome::Ignored;
         }
         self.claims.remove(word);
-        if first.platform == claim.platform {
-            LinkOutcome::Cancelled {
+        let linked = first.platform != claim.platform;
+        self.burnt.insert(
+            word.to_string(),
+            BurntWord {
+                at: first.at,
+                first: first.clone(),
+                second: claim.clone(),
+                linked,
+            },
+        );
+        if linked {
+            LinkOutcome::Linked {
                 first,
                 second: claim,
             }
         } else {
-            LinkOutcome::Linked {
+            LinkOutcome::Cancelled {
                 first,
                 second: claim,
             }
         }
     }
 
-    /// Drop claims older than the window.
+    /// Drop claims and burnt words older than the window.
     pub fn expire(&mut self, now: Instant) {
         self.claims
             .retain(|_, claim| now.saturating_duration_since(claim.at) < LINK_WORD_WINDOW);
+        self.burnt
+            .retain(|_, burnt| now.saturating_duration_since(burnt.at) < LINK_WORD_WINDOW);
     }
 
     pub fn clear(&mut self) {
         self.claims.clear();
+        self.burnt.clear();
     }
 
     #[cfg(test)]
@@ -1437,23 +1493,79 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // Single use: the word is gone, a third claim starts afresh.
+        // Single use: the word is burnt for the rest of its window (F5).
+        // The two who linked may repeat it; a third account undoes the
+        // join, and everyone involved waits for the streamer.
         assert_eq!(links.waiting(), 0);
         assert_eq!(
             links.claim(
                 "pixel42",
-                claim("x:3", StreamPlatform::X, "p3", start + secs(30))
+                claim("youtube:2", StreamPlatform::Youtube, "p2", start + secs(25))
             ),
-            LinkOutcome::Waiting
+            LinkOutcome::Ignored
         );
-        // A hijack on the same platform burns the word: nothing links.
+        match links.claim(
+            "pixel42",
+            claim("x:3", StreamPlatform::X, "p3", start + secs(30)),
+        ) {
+            LinkOutcome::Hijacked {
+                first,
+                second,
+                third,
+            } => {
+                assert_eq!(first.account_key, "twitch:1");
+                assert_eq!(second.account_key, "youtube:2");
+                assert_eq!(third.account_key, "x:3");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A fourth claim is listed too, and undoes nothing more.
         match links.claim(
             "pixel42",
             claim("x:4", StreamPlatform::X, "p4", start + secs(40)),
         ) {
             LinkOutcome::Cancelled { first, second } => {
+                assert_eq!(first.account_key, "twitch:1");
+                assert_eq!(second.account_key, "x:4");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(links.waiting(), 0);
+        // Past the window the word is free again.
+        assert_eq!(
+            links.claim(
+                "pixel42",
+                claim("x:5", StreamPlatform::X, "p5", start + secs(601))
+            ),
+            LinkOutcome::Waiting
+        );
+        links.clear();
+        // A hijack on the same platform burns the word: nothing links, and
+        // a third claim within the window is listed against the first.
+        assert_eq!(
+            links.claim(
+                "teacup",
+                claim("x:3", StreamPlatform::X, "p3", start + secs(30))
+            ),
+            LinkOutcome::Waiting
+        );
+        match links.claim(
+            "teacup",
+            claim("x:4", StreamPlatform::X, "p4", start + secs(40)),
+        ) {
+            LinkOutcome::Cancelled { first, second } => {
                 assert_eq!(first.account_key, "x:3");
                 assert_eq!(second.account_key, "x:4");
+            }
+            other => panic!("{other:?}"),
+        }
+        match links.claim(
+            "teacup",
+            claim("twitch:9", StreamPlatform::Twitch, "p9", start + secs(50)),
+        ) {
+            LinkOutcome::Cancelled { first, second } => {
+                assert_eq!(first.account_key, "x:3");
+                assert_eq!(second.account_key, "twitch:9");
             }
             other => panic!("{other:?}"),
         }
