@@ -3,11 +3,9 @@ import type {
   CloudRoomRequest,
   CloudRoomStatus,
   CloudStageLayout,
-  CloudStatus,
-  StreamPlatform
+  CloudStatus
 } from '@/lib/backend'
 import { plural } from '@/lib/format'
-import { platformLabel } from '@/lib/platform-copy'
 import type { StatusTone } from '@/lib/status-word'
 import { effectiveStageLayout, showStageInput } from '@/lib/talk-show-layout'
 
@@ -126,21 +124,41 @@ export function newLinkAsksFirst(room: CloudRoomStatus | undefined): boolean {
   return (room?.guests?.length ?? 0) > 0
 }
 
-const joinWords = (words: readonly string[]): string =>
-  words.length <= 1
-    ? (words[0] ?? '')
-    : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`
+/**
+ * The platform names in D13's line, as the guest page writes them
+ * (videorc-web `lib/cloud/guest-consent.ts`); any other value is left out.
+ */
+const CONSENT_PLATFORM_NAMES: ReadonlyMap<string, string> = new Map([
+  ['youtube', 'YouTube'],
+  ['twitch', 'Twitch'],
+  ['kick', 'Kick'],
+  ['x', 'X'],
+  ['facebook', 'Facebook'],
+  ['tiktok', 'TikTok'],
+  ['instagram', 'Instagram'],
+  ['custom', 'your own server']
+])
+
+/** "A", "A and B", "A, B, and C": the guest page's list, serial comma included. */
+function consentListPhrase(items: readonly string[]): string {
+  if (items.length <= 1) return items.join('')
+  if (items.length === 2) return `${items[0]} and ${items[1]}`
+  return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`
+}
 
 /**
  * D13: the line a guest reads before "Ask to join", from the show's saved
- * destinations; before any is known, the short form.
+ * destinations; before any is known, the short form. Word for word the guest
+ * page's `consentLine` (review L2), pinned by `protocol-fixtures/guest-consent-lines.json`,
+ * which videorc-web keeps a copy of.
  */
 export function guestConsentLine(platforms: readonly string[] | undefined): string {
-  const names = [...new Set((platforms ?? []).filter(Boolean))].map((platform) =>
-    platformLabel(platform as StreamPlatform)
-  )
+  const names = (platforms ?? []).flatMap((platform) => {
+    const name = CONSENT_PLATFORM_NAMES.get(platform)
+    return name ? [name] : []
+  })
   return names.length > 0
-    ? `This show goes out live on ${joinWords(names)} and may be recorded. Your camera and voice are part of it.`
+    ? `This show goes out live on ${consentListPhrase(names)} and may be recorded. Your camera and voice are part of it.`
     : 'This show goes out live and may be recorded. Your camera and voice are part of it.'
 }
 

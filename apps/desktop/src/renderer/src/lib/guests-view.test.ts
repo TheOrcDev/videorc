@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import { describe, expect, it } from 'vitest'
 
 import { HOST, ada, grace, openRoom, talkStatus } from '@/lib/guests-room-fixtures'
@@ -116,14 +118,29 @@ describe('limits (D15)', () => {
 describe('the consent line (D13)', () => {
   it('names the platforms, or says the short form before any is known', () => {
     expect(guestConsentLine(['youtube', 'twitch', 'kick'])).toBe(
-      'This show goes out live on YouTube, Twitch and Kick and may be recorded. Your camera and voice are part of it.'
+      'This show goes out live on YouTube, Twitch, and Kick and may be recorded. Your camera and voice are part of it.'
     )
     expect(guestConsentLine(['youtube'])).toBe(
       'This show goes out live on YouTube and may be recorded. Your camera and voice are part of it.'
     )
-    expect(guestConsentLine([])).toBe(
+    expect(guestConsentLine(undefined)).toBe(
       'This show goes out live and may be recorded. Your camera and voice are part of it.'
     )
+  })
+
+  // Review L2: the host reads exactly what the guest page shows. The fixture
+  // is shared with videorc-web (tests/fixtures/guest-consent-lines.json).
+  it('says every shared fixture line word for word, as the guest page does', () => {
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL('../../../../../../protocol-fixtures/guest-consent-lines.json', import.meta.url),
+        'utf8'
+      )
+    ) as { cases: { platforms: string[]; line: string }[] }
+    expect(fixture.cases.length).toBeGreaterThanOrEqual(8)
+    for (const { platforms, line } of fixture.cases) {
+      expect(guestConsentLine(platforms)).toBe(line)
+    }
   })
 })
 
