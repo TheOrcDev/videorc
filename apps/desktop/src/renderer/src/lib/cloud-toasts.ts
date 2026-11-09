@@ -3,12 +3,12 @@ import type { AiCapabilitiesCloud, CloudFallbackReason, CloudStatus } from './ba
 // The Studio provider's Videorc Cloud toasts (plan 184): a Go Live that
 // streamed directly says why once, a show the cloud lost while this
 // computer fed it warns once, a runner restart says so once, and the
-// 12-hour cap warns an hour before. The provider is in the eager bundle, so
-// this module holds only what it says; the Livestream section's copy
+// 12-hour cap warns an hour before. The provider loads this module with the
+// first cloud status and keeps only the toast id eager; the Livestream copy
 // (`cloud-view.ts`) and the show's (`cloud-show-view.ts`) load with the
 // surfaces that show them. Pure, so every line of copy is a test.
 
-export const CLOUD_TOAST_ID = 'videorc-cloud'
+export { CLOUD_TOAST_ID } from './cloud-toast-id'
 
 /** The Premium sentence (docs/ui-copy.md): Max includes Premium. */
 export const CLOUD_PREMIUM_REASON = 'Videorc Cloud is part of Videorc Premium.'

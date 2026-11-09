@@ -118,6 +118,8 @@ import {
 } from '@/lib/scene-transform-commit'
 import {
   createContext,
+  lazy,
+  Suspense,
   useCallback,
   useContext,
   useEffect,
@@ -160,18 +162,9 @@ import {
   replayStartWaitsForScreen
 } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
-import {
-  CLOUD_TOAST_ID,
-  cloudFallbackToast,
-  cloudLostToast,
-  cloudRestartToast,
-  cloudShowCapToast
-} from '@/lib/cloud-toasts'
-import {
-  NO_TALK_SHOW,
-  useTalkShowRoomController,
-  type TalkShowContextValue
-} from '@/hooks/use-talk-show-room'
+import { CLOUD_TOAST_ID } from '@/lib/cloud-toast-id'
+import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
+import type { TalkShowRoomControllerDeps } from '@/hooks/use-talk-show-room'
 import {
   talkShowLiveStartedAt as talkShowLiveStartedAtFrom,
   talkShowRecordingBlockedReason,
@@ -789,6 +782,11 @@ function loadCaptionOverlay() {
 // first time a chat switch is on while live.
 /** Plan 222 U1, U5: the cloud's rarer notices load when one is due. */
 const loadCloudNotices = () => import('@/lib/cloud-notices')
+// The cloud's toast copy loads with the first cloud status (plan 184); the
+// eager provider keeps only the toast id.
+const loadCloudToasts = () => import('@/lib/cloud-toasts')
+// Plan 224 C-G4: the room controller mounts lazily under the provider.
+const TalkShowRoomHost = lazy(() => import('@/components/studio/talk-show-room-host'))
 
 async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlayDriver> {
   const [{ createChatOverlayDriver }, { renderChatOverlayCards }] = await Promise.all([
@@ -2643,6 +2641,12 @@ type StudioContextProvidersProps = {
   /** Plan 191. Optional so a test that mounts the providers alone has no caption lines. */
   captions?: StudioCaptionsContextValue
   cloud?: StudioCloudContextValue
+  /**
+   * Plan 224 C-G4: the room controller's inputs. When given, the lazy
+   * controller runs under the cloud provider and its value replaces
+   * `cloud.talkShow`.
+   */
+  talkShowDeps?: TalkShowRoomControllerDeps
   children?: ReactNode
 }
 
@@ -2673,6 +2677,7 @@ export function StudioContextProviders({
   replay = REPLAY_BUFFER_OFF_CONTROLS,
   captions = NO_CAPTION_LINES,
   cloud,
+  talkShowDeps,
   children
 }: StudioContextProvidersProps): ReactElement {
   return (
@@ -2685,9 +2690,9 @@ export function StudioContextProviders({
                 <StudioAudioContext.Provider value={audio}>
                   <StudioReplayContext.Provider value={replay}>
                     <StudioCaptionsContext.Provider value={captions}>
-                      <StudioCloudContext.Provider value={cloud ?? null}>
+                      <StudioCloudProvider cloud={cloud} talkShowDeps={talkShowDeps}>
                         {children}
-                      </StudioCloudContext.Provider>
+                      </StudioCloudProvider>
                     </StudioCaptionsContext.Provider>
                   </StudioReplayContext.Provider>
                 </StudioAudioContext.Provider>
@@ -2697,6 +2702,37 @@ export function StudioContextProviders({
         </StudioRecordingContext.Provider>
       </StudioRecordingStateContext.Provider>
     </StudioContext.Provider>
+  )
+}
+
+/**
+ * The cloud context, with the talk show's room controller mounted lazily
+ * beside it (plan 224 C-G4). The controller's value lives here, below the
+ * Studio provider, so a room snapshot re-renders only the cloud's readers.
+ */
+function StudioCloudProvider({
+  cloud,
+  talkShowDeps,
+  children
+}: {
+  cloud?: StudioCloudContextValue
+  talkShowDeps?: TalkShowRoomControllerDeps
+  children?: ReactNode
+}): ReactElement {
+  const [talkShow, setTalkShow] = useState<TalkShowContextValue>(NO_TALK_SHOW)
+  const value = useMemo(
+    () => (cloud && talkShowDeps ? { ...cloud, talkShow } : (cloud ?? null)),
+    [cloud, talkShow, talkShowDeps]
+  )
+  return (
+    <>
+      {talkShowDeps ? (
+        <Suspense fallback={null}>
+          <TalkShowRoomHost deps={talkShowDeps} onValue={setTalkShow} />
+        </Suspense>
+      ) : null}
+      <StudioCloudContext.Provider value={value}>{children}</StudioCloudContext.Provider>
+    </>
   )
 }
 
@@ -5383,14 +5419,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const previous = cloudStatusRef.current
     cloudStatusRef.current = next
     setCloudStatus(next)
-    const fallback = cloudFallbackToast(previous, next)
-    if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
-    const lost = cloudLostToast(previous, next)
-    if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
-    const restarted = cloudRestartToast(previous, next)
-    if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
-    const cap = cloudShowCapToast(previous, next)
-    if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
+    void loadCloudToasts().then((words) => {
+      const fallback = words.cloudFallbackToast(previous, next)
+      if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
+      const lost = words.cloudLostToast(previous, next)
+      if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
+      const restarted = words.cloudRestartToast(previous, next)
+      if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
+      const cap = words.cloudShowCapToast(previous, next)
+      if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
+    })
     // Plan 222 U5: past the month's hours is news, never a cut (D18); the
     // words load only when a show runs past them.
     if (next.allowancePast)
@@ -16847,19 +16885,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const talkShowError = useCallback((error: unknown, action: string) => {
     toastUserError(error, { action, object: 'the room' }, { id: CLOUD_TOAST_ID })
   }, [])
-  const talkShow = useTalkShowRoomController({
-    client,
-    cloudStatus,
-    commitCloudStatus,
-    cameraId: captureConfig.sources.cameraId ?? null,
-    microphoneId: captureConfig.sources.microphoneId ?? null,
-    devices: deviceList.devices,
-    outputs: talkShowOutputs,
-    hostShape: talkShowHostShape,
-    onCameraReturned: talkShowCameraReturned,
-    onError: talkShowError,
-    previewReplacedOverride: smokeTalkShowRoomOpen
-  })
+  const talkShowCameraId = captureConfig.sources.cameraId ?? null
+  const talkShowMicrophoneId = captureConfig.sources.microphoneId ?? null
+  const talkShowDeps = useMemo<TalkShowRoomControllerDeps>(
+    () => ({
+      client,
+      cloudStatus,
+      commitCloudStatus,
+      cameraId: talkShowCameraId,
+      microphoneId: talkShowMicrophoneId,
+      devices: deviceList.devices,
+      outputs: talkShowOutputs,
+      hostShape: talkShowHostShape,
+      onCameraReturned: talkShowCameraReturned,
+      onError: talkShowError,
+      previewReplacedOverride: smokeTalkShowRoomOpen
+    }),
+    [
+      client,
+      cloudStatus,
+      commitCloudStatus,
+      deviceList.devices,
+      smokeTalkShowRoomOpen,
+      talkShowCameraId,
+      talkShowCameraReturned,
+      talkShowError,
+      talkShowHostShape,
+      talkShowMicrophoneId,
+      talkShowOutputs
+    ]
+  )
   const cloudValue = useMemo<StudioCloudContextValue>(
     () => ({
       cloudStatus,
@@ -16868,7 +16923,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       resumeCloudShow,
       runCloudTest,
       setCloudSettings,
-      talkShow
+      talkShow: NO_TALK_SHOW
     }),
     [
       cloudStatus,
@@ -16876,8 +16931,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshCloudAllowance,
       resumeCloudShow,
       runCloudTest,
-      setCloudSettings,
-      talkShow
+      setCloudSettings
     ]
   )
 
@@ -20006,6 +20060,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             chat={chatValue}
             cloud={cloudValue}
             core={value}
+            talkShowDeps={talkShowDeps}
             diagnostics={diagnosticsValue}
             preview={previewValue}
             recording={recordingValue}

@@ -2,16 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { BackendClient } from '@/backendClient'
 import type {
-  CloudGuestAction,
-  CloudGuestDecision,
   CloudRoomOpenParams,
   CloudRoomTokenAnswer,
   CloudStage,
-  CloudStageLayout,
   CloudStatus,
-  Device,
-  TalkShowDisplaySource
+  Device
 } from '@/lib/backend'
+import {
+  IDLE_TALK_SHOW_SNAPSHOT,
+  NO_TALK_SHOW,
+  type TalkShowContextValue
+} from '@/lib/talk-show-context'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 
 // The host's room, from the Studio's side (plan 224 C-G4). The backend owns
@@ -20,95 +21,17 @@ import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-r
 // when it closes, keeps the guest page's stage topic current, and hands the
 // room's tracks to the Show stage (C-G3) as plain `MediaStreamTrack`s.
 //
-// `lib/talk-show-room.ts` (and `livekit-client` with it) loads only when a
-// room opens: the eager bundle never carries it (the budget is an owner STOP).
+// This module is lazy: `components/studio/talk-show-room-host.tsx` runs the
+// hook under the Studio provider, which holds only the idle value
+// (`lib/talk-show-context.ts`). `lib/talk-show-room.ts` (and `livekit-client`
+// with it) loads only when a room opens. The eager budget is an owner STOP.
 
 export { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
+export { NO_TALK_SHOW, type TalkShowContextValue }
 
-/** A frozen idle snapshot, so the UI never waits on the lazy module. */
-const IDLE_SNAPSHOT: TalkShowRoomSnapshot = {
-  state: 'idle',
-  detail: null,
-  identity: null,
-  people: [],
-  local: {
-    camera: null,
-    microphone: null,
-    screen: null,
-    micMuted: false,
-    cameraOff: false,
-    problem: null
-  },
-  monitor: { enabled: false, video: null, audio: null }
-}
+const IDLE_SNAPSHOT = IDLE_TALK_SHOW_SNAPSHOT
 
 const loadRoomClient = () => import('@/lib/talk-show-room')
-
-export interface TalkShowContextValue {
-  /** The renderer's room connection and its tracks; idle outside a room. */
-  room: TalkShowRoomSnapshot
-  /**
-   * Plan 224 D7 (C-G5): the Show stage replaces the Preview. True while the
-   * room is open (and under the lifecycle probe's scripted room).
-   */
-  previewReplaced: boolean
-  /** `host:<showId>` while the room is open, for "You" on the stage. */
-  hostIdentity: string | null
-  openRoom: (
-    params: Omit<CloudRoomOpenParams, 'outputs'> & { outputs?: CloudRoomOpenParams['outputs'] }
-  ) => Promise<void>
-  closeRoom: () => Promise<void>
-  resumeRoom: () => Promise<void>
-  rotateInvite: () => Promise<void>
-  setDoor: (open: boolean) => Promise<void>
-  decideGuest: (requestId: string, decision: CloudGuestDecision) => Promise<void>
-  actOnGuest: (guestId: string, action: CloudGuestAction, name?: string) => Promise<void>
-  /** The whole stage in one frame (D8). */
-  setStage: (stage: CloudStage) => Promise<void>
-  bringOn: (identity: string) => Promise<void>
-  sendBackstage: (identity: string) => Promise<void>
-  setLayout: (layout: CloudStageLayout) => Promise<void>
-  setSpotlight: (identity: string | null) => Promise<void>
-  /** The screens and windows main's `desktopCapturer` lists, with thumbnails. */
-  listDisplaySources: () => Promise<TalkShowDisplaySource[]>
-  startScreenShare: (sourceId: string) => Promise<void>
-  stopScreenShare: () => Promise<void>
-  setMonitor: (enabled: boolean) => Promise<void>
-  setMicrophoneMuted: (muted: boolean) => Promise<void>
-  setCameraOff: (off: boolean) => Promise<void>
-  /** Record in a talk show (D10). */
-  startCloudRecording: () => Promise<void>
-  stopCloudRecording: () => Promise<void>
-  /** End livestream in a talk show (D17): the legs end, the room stays. */
-  endTalkShowLivestream: () => Promise<void>
-}
-
-export const NO_TALK_SHOW: TalkShowContextValue = {
-  room: IDLE_SNAPSHOT,
-  previewReplaced: false,
-  hostIdentity: null,
-  openRoom: async () => {},
-  closeRoom: async () => {},
-  resumeRoom: async () => {},
-  rotateInvite: async () => {},
-  setDoor: async () => {},
-  decideGuest: async () => {},
-  actOnGuest: async () => {},
-  setStage: async () => {},
-  bringOn: async () => {},
-  sendBackstage: async () => {},
-  setLayout: async () => {},
-  setSpotlight: async () => {},
-  listDisplaySources: async () => [],
-  startScreenShare: async () => {},
-  stopScreenShare: async () => {},
-  setMonitor: async () => {},
-  setMicrophoneMuted: async () => {},
-  setCameraOff: async () => {},
-  startCloudRecording: async () => {},
-  stopCloudRecording: async () => {},
-  endTalkShowLivestream: async () => {}
-}
 
 export type TalkShowRoomControllerDeps = {
   client: BackendClient | null
