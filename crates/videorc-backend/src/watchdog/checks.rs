@@ -133,7 +133,8 @@ pub struct TakeoverSignal {
     pub since: Instant,
     /// The wall clock of `since`, for "since 12:04".
     pub activated_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Mean luma of its own image, read once at activation (D10's guard).
+    /// Mean luma of its own image (D10's guard), from the watchdog's cache:
+    /// the Screens transition decodes it, the tick reads it every second.
     pub luma: Option<u8>,
 }
 
@@ -237,7 +238,6 @@ pub struct Checks {
     last_voice: Option<Instant>,
     voice_since: Option<Instant>,
     no_voice_armed_at: Option<Instant>,
-    takeover_dark: Option<bool>,
     av_drift_since: Option<Instant>,
     chat_last_opened: BTreeMap<super::chat_signals::ChatClass, Instant>,
     still_there_quiet_since: Option<Instant>,
@@ -411,17 +411,11 @@ impl Checks {
 
         // --- picture-black (desktop if A7 shipped it, cloud) ---
         let black_key = alert_key(WatchdogCheck::PictureBlack, None);
-        match takeover {
-            Some(takeover) => {
-                if self.takeover_dark.is_none() {
-                    self.takeover_dark = takeover
-                        .luma
-                        .map(|luma| (BLACK_LUMA..DARK_TAKEOVER_LUMA).contains(&luma));
-                }
-            }
-            None => self.takeover_dark = None,
-        }
-        let dark_takeover = takeover.is_some() && self.takeover_dark == Some(true);
+        // The guard is the active takeover's own luma, read every tick: a
+        // direct A→B switch guards on B's image, never on A's verdict (M3).
+        let dark_takeover = takeover
+            .and_then(|takeover| takeover.luma)
+            .is_some_and(|luma| (BLACK_LUMA..DARK_TAKEOVER_LUMA).contains(&luma));
         // The sampler may have read black since the first frame; the clock
         // counts from the end of the grace, like the silence clock.
         let grace_end = (!warming_up)
@@ -1550,6 +1544,67 @@ mod tests {
             state.open_alert("picture-black").unwrap().fixes[0].kind,
             FixKind::EndTakeover
         );
+    }
+
+    /// Plan 223 M3 (the review): the dark-takeover guard follows the
+    /// takeover on screen. A dark card A suppresses the black sampler; a
+    /// direct switch to a bright card B, with the program still black,
+    /// alarms within the threshold with End takeover; a switch back to a
+    /// dark card C suppresses again, and the alert leaves the list.
+    #[test]
+    fn a_direct_takeover_switch_reads_the_new_cards_luma() {
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let start = clock();
+        let mut signals = live();
+        signals.black_since = Some(start.now);
+        let card = |luma: u8| TakeoverSignal {
+            since: start.now,
+            activated_at: None,
+            luma: Some(luma),
+        };
+        signals.takeover = Some(card(30));
+        let out = run(&mut checks, &mut state, start, 30, &signals);
+        assert!(opened(&out).is_empty(), "a dark card is by design: {out:?}");
+
+        signals.takeover = Some(card(200));
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(30)),
+            1,
+            &signals,
+        );
+        assert_eq!(
+            opened(&out),
+            vec![(WatchdogCheck::PictureBlack, AlertSeverity::Critical)],
+            "a bright card over a black program alarms at once (the sampler has read black for 30 s)"
+        );
+        assert_eq!(
+            state.open_alert("picture-black").unwrap().fixes[0].kind,
+            FixKind::EndTakeover
+        );
+
+        signals.takeover = Some(card(40));
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(31)),
+            1,
+            &signals,
+        );
+        assert!(
+            !state.is_open("picture-black"),
+            "a dark card suppresses again: {out:?}"
+        );
+        let out = run(
+            &mut checks,
+            &mut state,
+            start.plus(Duration::from_secs(32)),
+            30,
+            &signals,
+        );
+        assert!(opened(&out).is_empty(), "{out:?}");
     }
 
     #[test]

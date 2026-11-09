@@ -36314,14 +36314,14 @@ mod tests {
             "the store alone never reaches the tick"
         );
 
-        crate::watchdog::observe_takeover(&state, Some(&screen));
+        crate::watchdog::observe_takeover(&state, Some(&screen), None);
         watchdog_tick(&state, "live", facts.clone()).await;
         assert_eq!(
             crate::watchdog::watched_takeover(&state, "live").as_deref(),
             Some(screen.id.as_str())
         );
 
-        crate::watchdog::observe_takeover(&state, None);
+        crate::watchdog::observe_takeover(&state, None, None);
         watchdog_tick(&state, "live", facts).await;
         assert_eq!(crate::watchdog::watched_takeover(&state, "live"), None);
         crate::watchdog::session_ended(&state, "live");

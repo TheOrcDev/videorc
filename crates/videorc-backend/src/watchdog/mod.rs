@@ -13,8 +13,10 @@
 //! A record-only session never ticks (plan 221 Q7: "warn while only
 //! recording: not in v1"); the one check it keeps is the 1064 microphone
 //! silence report, which the recording's own sampler sends in. The tick
-//! itself touches no lock but the watchdog's and reads no database: the
-//! takeover it guards on is a cache the Screens transition refreshes.
+//! itself touches no lock but the watchdog's, reads no database and decodes
+//! no image: the takeover it guards on is a cache the Screens transition
+//! refreshes, with the image's mean luma (the dark-takeover guard) read
+//! there, off the runtime, and kept beside the path.
 
 pub mod alerts;
 pub mod chat_signals;
@@ -92,7 +94,18 @@ pub struct SessionFacts {
     /// The runner's legs carry this session (a cloud show).
     pub cloud_show: bool,
     pub cloud: Option<CloudSignal>,
-    pub takeover: Option<(String, String)>,
+    pub takeover: Option<CachedTakeover>,
+}
+
+/// The active takeover as the Screens transition last applied it: the
+/// screen, its image, and the image's mean luma (D10's dark-takeover
+/// guard), decoded once there and never on the tick. `luma` is None when
+/// the image did not decode; the guard then never suppresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedTakeover {
+    pub screen_id: String,
+    pub image_path: String,
+    pub luma: Option<u8>,
 }
 
 /// The per-session watch.
@@ -166,15 +179,15 @@ pub struct WatchdogRuntime {
     session: Option<SessionWatch>,
     /// The renderer's last `watchdog.idle.report`, and when it arrived.
     system_idle: Option<(Duration, Instant)>,
-    /// The active takeover (screen id, image path) as the Screens
-    /// transition last applied it: seeded from the store at startup and
-    /// refreshed by `observe_takeover`, so the tick never reads SQLite on
-    /// a runtime thread.
-    takeover: Option<(String, String)>,
+    /// The active takeover as the Screens transition last applied it, with
+    /// its image's luma: seeded from the store at startup and refreshed by
+    /// `observe_takeover`, so the tick never reads SQLite or decodes a PNG
+    /// on a runtime thread.
+    takeover: Option<CachedTakeover>,
 }
 
 impl WatchdogRuntime {
-    pub fn new(settings: WatchdogSettings, takeover: Option<(String, String)>) -> Self {
+    pub fn new(settings: WatchdogSettings, takeover: Option<CachedTakeover>) -> Self {
         let thresholds = thresholds_for(&settings);
         Self {
             settings,
@@ -216,20 +229,44 @@ fn thresholds_for(settings: &WatchdogSettings) -> Thresholds {
     })
 }
 
-pub fn new_slot(settings: WatchdogSettings, takeover: Option<(String, String)>) -> WatchdogSlot {
+pub fn new_slot(settings: WatchdogSettings, takeover: Option<CachedTakeover>) -> WatchdogSlot {
     Arc::new(Mutex::new(WatchdogRuntime::new(settings, takeover)))
 }
 
-/// The persisted active takeover, read once at startup to seed the cache;
+/// The persisted active takeover, read once at startup to seed the cache
+/// (its image decoded once there too, before the runtime serves anything);
 /// from then on `observe_takeover` keeps it current.
-pub fn load_takeover(database: &crate::storage::Database) -> Option<(String, String)> {
+pub fn load_takeover(database: &crate::storage::Database) -> Option<CachedTakeover> {
     match database.active_stream_screen() {
-        Ok(screen) => takeover_of(screen.as_ref()),
+        Ok(screen) => takeover_of(screen.as_ref()).map(|(screen_id, image_path)| {
+            let luma = luma::mean_luma_png(std::path::Path::new(&image_path));
+            CachedTakeover {
+                screen_id,
+                image_path,
+                luma,
+            }
+        }),
         Err(error) => {
             tracing::warn!("Could not read the active Screen for the watchdog: {error:#}");
             None
         }
     }
+}
+
+/// The image a takeover draws, when it draws one (a Ready screen with an
+/// image); what `read_takeover_luma` decodes.
+pub fn takeover_image_path(screen: Option<&StreamScreen>) -> Option<String> {
+    takeover_of(screen).map(|(_, image_path)| image_path)
+}
+
+/// The mean luma of a takeover's image, decoded on a blocking thread (a
+/// 4K PNG is tens of milliseconds), for the cache `observe_takeover` fills.
+/// None when the image does not decode: the guard then never suppresses.
+pub async fn read_takeover_luma(image_path: String) -> Option<u8> {
+    tokio::task::spawn_blocking(move || luma::mean_luma_png(std::path::Path::new(&image_path)))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// A takeover the viewers see: a Ready screen with an image. A missing or
@@ -285,14 +322,19 @@ pub fn set_settings(
 
 /// The Screens transition applied this takeover to the output (main.rs
 /// `apply_active_screen_output`: activate, clear, delete, retire, and the
-/// rollback of a failed persist). The tick reads this cache instead of the
-/// store.
-pub fn observe_takeover(state: &AppState, screen: Option<&StreamScreen>) {
-    lock(&state.watchdog).takeover = takeover_of(screen);
+/// rollback of a failed persist), with the image's luma it read through
+/// `read_takeover_luma`. The tick reads this cache instead of the store.
+pub fn observe_takeover(state: &AppState, screen: Option<&StreamScreen>, luma: Option<u8>) {
+    lock(&state.watchdog).takeover =
+        takeover_of(screen).map(|(screen_id, image_path)| CachedTakeover {
+            screen_id,
+            image_path,
+            luma,
+        });
 }
 
-/// The cached active takeover: (screen id, image path).
-pub fn takeover_snapshot(state: &AppState) -> Option<(String, String)> {
+/// The cached active takeover.
+pub fn takeover_snapshot(state: &AppState) -> Option<CachedTakeover> {
     lock(&state.watchdog).takeover.clone()
 }
 
@@ -553,20 +595,23 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
         let watch = runtime.watch_or_start(session_id);
         watch.live = facts.live;
 
-        // The takeover: a new one reads its own image's luma once.
+        // The takeover: a new screen starts its clock; the luma is the
+        // cache's (decoded by the Screens transition, M4), read every tick
+        // so a direct A→B switch guards on B's image (M3).
         match facts.takeover.as_ref() {
-            Some((screen_id, image_path)) => {
-                if watch
-                    .takeover
-                    .as_ref()
-                    .is_none_or(|active| &active.screen_id != screen_id)
-                {
-                    watch.takeover = Some(ActiveTakeover {
-                        screen_id: screen_id.clone(),
-                        since: now,
-                        activated_at: clock.wall,
-                        luma: luma::mean_luma_png(std::path::Path::new(image_path)),
-                    });
+            Some(cached) => {
+                match watch.takeover.as_mut() {
+                    Some(active) if active.screen_id == cached.screen_id => {
+                        active.luma = cached.luma;
+                    }
+                    _ => {
+                        watch.takeover = Some(ActiveTakeover {
+                            screen_id: cached.screen_id.clone(),
+                            since: now,
+                            activated_at: clock.wall,
+                            luma: cached.luma,
+                        });
+                    }
                 }
             }
             None => watch.takeover = None,
@@ -755,6 +800,17 @@ pub(crate) fn watched_takeover(state: &AppState, session_id: &str) -> Option<Str
         .filter(|watch| watch.session_id == session_id)
         .and_then(|watch| watch.takeover.as_ref())
         .map(|active| active.screen_id.clone())
+}
+
+/// The luma the session's watch guards on, as the last tick saw it.
+#[cfg(test)]
+pub(crate) fn watched_takeover_luma(state: &AppState, session_id: &str) -> Option<u8> {
+    lock(&state.watchdog)
+        .session
+        .as_ref()
+        .filter(|watch| watch.session_id == session_id)
+        .and_then(|watch| watch.takeover.as_ref())
+        .and_then(|active| active.luma)
 }
 
 // --- RPCs -----------------------------------------------------------------
@@ -1078,23 +1134,27 @@ mod tests {
             "a fresh store has no takeover"
         );
 
-        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")));
+        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")), Some(30));
         assert_eq!(
             takeover_snapshot(&state),
-            Some(("brb".to_string(), "/tmp/brb.png".to_string()))
+            Some(CachedTakeover {
+                screen_id: "brb".to_string(),
+                image_path: "/tmp/brb.png".to_string(),
+                luma: Some(30),
+            })
         );
 
         let mut missing = ready_screen("gone", "");
         missing.status = StreamScreenStatus::Missing;
-        observe_takeover(&state, Some(&missing));
+        observe_takeover(&state, Some(&missing), None);
         assert_eq!(
             takeover_snapshot(&state),
             None,
             "a missing image draws nothing"
         );
 
-        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")));
-        observe_takeover(&state, None);
+        observe_takeover(&state, Some(&ready_screen("brb", "/tmp/brb.png")), None);
+        observe_takeover(&state, None, None);
         assert_eq!(takeover_snapshot(&state), None, "clear ends the takeover");
     }
 
@@ -1115,10 +1175,50 @@ mod tests {
             .unwrap();
         database.activate_stream_screen(&screen.id).unwrap();
         let seeded = load_takeover(&database).expect("the active screen seeds the cache");
-        assert_eq!(seeded.0, screen.id);
-        assert_eq!(seeded.1, screen.image_path);
+        assert_eq!(seeded.screen_id, screen.id);
+        assert_eq!(seeded.image_path, screen.image_path);
+        assert_eq!(seeded.luma, None, "a file that is not an image reads None");
         database.clear_active_stream_screen().unwrap();
         assert_eq!(load_takeover(&database), None);
+    }
+
+    /// Plan 223 M4 (the review): the takeover's luma is decoded off the
+    /// runtime by the Screens transition and travels in the cache; the tick
+    /// never opens the file. A switch to another screen brings that
+    /// screen's luma (M3).
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_takeover_luma_is_decoded_once_off_the_tick_and_follows_a_switch() {
+        let dir = crate::test_temp_dir::TestTempDir::new("watchdog-takeover-luma");
+        let dark = dir.join("dark.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([30, 30, 30, 255]))
+            .save(&dark)
+            .unwrap();
+        assert_eq!(
+            read_takeover_luma(dark.to_string_lossy().into_owned()).await,
+            Some(30)
+        );
+        assert_eq!(
+            read_takeover_luma(dir.join("missing.png").to_string_lossy().into_owned()).await,
+            None,
+            "a file that does not decode reads None"
+        );
+
+        let state = test_state();
+        let facts = |takeover: Option<CachedTakeover>| SessionFacts {
+            live: true,
+            takeover,
+            ..Default::default()
+        };
+        observe_takeover(&state, Some(&ready_screen("a", "/tmp/a.png")), Some(30));
+        tick(&state, "live", facts(takeover_snapshot(&state)));
+        assert_eq!(watched_takeover(&state, "live").as_deref(), Some("a"));
+        assert_eq!(watched_takeover_luma(&state, "live"), Some(30));
+        // A direct switch: B's luma, not A's verdict.
+        observe_takeover(&state, Some(&ready_screen("b", "/tmp/b.png")), Some(200));
+        tick(&state, "live", facts(takeover_snapshot(&state)));
+        assert_eq!(watched_takeover(&state, "live").as_deref(), Some("b"));
+        assert_eq!(watched_takeover_luma(&state, "live"), Some(200));
+        session_ended(&state, "live");
     }
 
     /// Plan 223 M1 (the review): the streamer's own line never counts, in
