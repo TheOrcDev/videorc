@@ -72,6 +72,7 @@ pub const MODULE_NAME: &str = "v4l2loopback";
 /// through `pkexec`. kmod quotes a value with a space on its own, so
 /// `card_label=Videorc Camera` reaches the kernel as
 /// `card_label="Videorc Camera"`.
+#[cfg_attr(not(test), allow(dead_code))] // Electron main owns pkexec; tests lock this argv
 pub const LOAD_MODULE_ARGS: [&str; 5] = [
     "modprobe",
     MODULE_NAME,
@@ -81,6 +82,7 @@ pub const LOAD_MODULE_ARGS: [&str; 5] = [
 ];
 
 /// The same load as a terminal line, for copy that names it.
+#[cfg_attr(not(test), allow(dead_code))] // Electron main owns pkexec; tests lock this copy
 pub fn load_module_terminal_line() -> String {
     format!(
         "sudo modprobe {MODULE_NAME} exclusive_caps=1 card_label=\"{VIRTUAL_CAMERA_LINUX_CARD_LABEL}\" video_nr={VIRTUAL_CAMERA_LINUX_VIDEO_NR}"
@@ -367,6 +369,7 @@ pub fn platform_report(state: &LinuxSetupState) -> (VirtualCameraPlatformStep, O
 
 /// The `setting-up` row, while main's `pkexec modprobe` runs. No message:
 /// the page knows the step, and a `needs-setup` message is a command line.
+#[cfg_attr(not(test), allow(dead_code))] // Electron main reports setting-up; tests lock the row
 pub fn setting_up_report() -> (VirtualCameraPlatformStep, Option<String>) {
     (VirtualCameraPlatformStep::SettingUp, None)
 }

@@ -72,13 +72,13 @@ jobs:
 
       - name: Clippy
         # clippy -D warnings is the compile gate (compile errors fail it
-        # regardless of the lint allows), matching ci.yml and windows.yml —
+        # too), matching ci.yml and windows.yml —
         # no separate cargo check, no pnpm (the JS steps use Node directly), and
         # no fmt (rustfmt output is platform-independent; ci.yml owns it).
-        # cfg(linux) makes macOS/Windows-only helpers dead or their imports
-        # unused. Keep this allow list identical to windows.yml while the
-        # cross-platform warning wall is burned down; drop both lists together.
-        run: cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
+        # No lint allow list, like the Windows gate: code that only macOS or
+        # Windows uses is fenced with cfg at its definition, so a helper that
+        # is dead under cfg(linux) fails here.
+        run: cargo clippy -p videorc-backend -- -D warnings
 
       - name: Test
         # Platform-neutral tests run normally. Tests that require Apple or
