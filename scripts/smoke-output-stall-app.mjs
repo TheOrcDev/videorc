@@ -16,8 +16,10 @@
 // speakers and nothing moves the pointer.
 //
 // PASS: the stall is reported (audio-output-stalled), the microphone is never
-// reported lost, and the decoded file has the tone before the pause and again
-// within 2.5 s of its end, to the end of the file.
+// reported lost, the decoded file has the tone before the pause and again
+// within 2.5 s of its end, to the end of the file, and no watchdog alert
+// (plan 223: "The picture has stopped" above all) opens, because the session
+// only records and the watchdog runs no check on it (plan 221 Q7).
 //
 //   node scripts/smoke-output-stall-app.mjs [--pause-ms 1500] [--pause-repeat 3] [--seconds 16]
 
@@ -188,7 +190,7 @@ try {
   }
   assert.deepEqual(verdict.failures, [])
   console.log(
-    `Output-stall smoke PASS: ${verdict.stallEvents} stall report(s), the microphone back at ${verdict.resumedAt?.toFixed(1)} s and never reported lost. Evidence: ${reportPath}`
+    `Output-stall smoke PASS: ${verdict.stallEvents} stall report(s), the microphone back at ${verdict.resumedAt?.toFixed(1)} s and never reported lost, no watchdog alert on the record-only session. Evidence: ${reportPath}`
   )
 } catch (error) {
   report.error = error instanceof Error ? error.message : String(error)

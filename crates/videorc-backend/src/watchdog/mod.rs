@@ -761,26 +761,11 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
             && !watch.ai_refused
             && crate::cohost::premium_entitled()
         {
-            watch.chat.ai_read_due(now).map(|lines| {
-                let mut authors: Vec<String> = Vec::new();
-                lines
-                    .iter()
-                    .map(|line| {
-                        let author = match authors.iter().position(|known| known == &line.author) {
-                            Some(index) => index,
-                            None => {
-                                authors.push(line.author.clone());
-                                authors.len() - 1
-                            }
-                        };
-                        json!({
-                            "author": author.min(chat_signals::AI_READ_MESSAGES - 1),
-                            "platform": line.platform,
-                            "text": truncate_chars(&line.text, 500),
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
+            watch
+                .chat
+                .ai_read_due(now)
+                .map(|lines| ai_read_messages(&lines))
+                .filter(|messages| !messages.is_empty())
         } else {
             None
         };
@@ -796,6 +781,44 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
     if let Some(messages) = ai_read {
         spawn_ai_read(state.clone(), session_id.to_string(), messages);
     }
+}
+
+/// The web's chat platforms (`COHOST_PLATFORMS` in `lib/ai/cohost.ts`):
+/// the strict request schema refuses any other.
+const AI_READ_PLATFORMS: [&str; 4] = ["twitch", "youtube", "x", "kick"];
+/// The web's `MAX_WATCHDOG_CHAT_TEXT_CHARS`.
+const AI_READ_TEXT_CHARS: usize = 500;
+
+/// The AI read's `messages` (B2), exactly the web's strict
+/// `watchdogChatMessageSchema`: the text (trimmed, never empty, at most
+/// 500 chars), the platform (one the web knows) and a per-call author
+/// index (0 to 19; the same number is the same person in this call only),
+/// never an id or a name; the last 20 lines at most, oldest first.
+pub(crate) fn ai_read_messages(lines: &[&chat_signals::ChatLine]) -> Vec<serde_json::Value> {
+    let kept: Vec<&&chat_signals::ChatLine> = lines
+        .iter()
+        .filter(|line| AI_READ_PLATFORMS.contains(&line.platform.as_str()))
+        .filter(|line| !line.text.trim().is_empty())
+        .collect();
+    let start = kept.len().saturating_sub(chat_signals::AI_READ_MESSAGES);
+    let mut authors: Vec<&str> = Vec::new();
+    kept[start..]
+        .iter()
+        .map(|line| {
+            let author = match authors.iter().position(|known| *known == line.author) {
+                Some(index) => index,
+                None => {
+                    authors.push(&line.author);
+                    authors.len() - 1
+                }
+            };
+            json!({
+                "author": author.min(chat_signals::AI_READ_MESSAGES - 1),
+                "platform": line.platform,
+                "text": truncate_chars(line.text.trim(), AI_READ_TEXT_CHARS),
+            })
+        })
+        .collect()
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -1275,6 +1298,76 @@ mod tests {
         assert_eq!(seeded.luma, None, "a file that is not an image reads None");
         database.clear_active_stream_screen().unwrap();
         assert_eq!(load_takeover(&database), None);
+    }
+
+    /// Plan 223 L8 (the review): the AI read's body against the web's
+    /// strict schema (`lib/ai/watchdog-chat.ts`): the five top-level keys
+    /// and nothing else, consent `true`, 1 to 20 messages of exactly
+    /// `author` (0 to 19), `platform` (twitch, youtube, x, kick) and `text`
+    /// (trimmed, 1 to 500 chars); a platform the web does not know and an
+    /// empty line never go; the same person keeps one index.
+    #[test]
+    fn the_ai_read_body_fits_the_webs_strict_schema() {
+        let at = Instant::now();
+        let line = |author: &str, platform: &str, text: &str| chat_signals::ChatLine {
+            author: author.to_string(),
+            text: text.to_string(),
+            platform: platform.to_string(),
+            at,
+            class: None,
+        };
+        let long = "x".repeat(600);
+        let mut lines = vec![
+            line("twitch:a", "twitch", "  no sound??  "),
+            line("youtube:b", "youtube", &long),
+            line("custom:c", "custom", "never sent"),
+            line("x:d", "x", "   "),
+            line("kick:e", "kick", "lag"),
+            line("twitch:a", "twitch", "still no sound"),
+        ];
+        for index in 0..30 {
+            lines.push(line(&format!("twitch:v{index}"), "twitch", &format!("line {index}")));
+        }
+        let refs: Vec<&chat_signals::ChatLine> = lines.iter().collect();
+        let messages = ai_read_messages(&refs);
+        assert_eq!(messages.len(), chat_signals::AI_READ_MESSAGES, "the last 20 go");
+        let body = crate::videorc_api::watchdog_chat_request("session-1", messages.clone());
+        let mut keys: Vec<&String> = body.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["clientVersion", "consentToProcessChat", "messages", "seq", "sessionClientId"]
+        );
+        assert_eq!(body["consentToProcessChat"], json!(true));
+        assert_eq!(body["seq"], json!(0));
+        let version = body["clientVersion"].as_str().unwrap();
+        assert!(!version.trim().is_empty() && version.len() <= 64);
+        assert!(body["sessionClientId"].as_str().unwrap().len() <= 128);
+        for message in body["messages"].as_array().unwrap() {
+            let mut keys: Vec<&String> = message.as_object().unwrap().keys().collect();
+            keys.sort();
+            assert_eq!(keys, ["author", "platform", "text"]);
+            let author = message["author"].as_u64().unwrap();
+            assert!(author < chat_signals::AI_READ_MESSAGES as u64);
+            assert!(AI_READ_PLATFORMS.contains(&message["platform"].as_str().unwrap()));
+            let text = message["text"].as_str().unwrap();
+            assert!(!text.is_empty() && text.chars().count() <= 500);
+            assert_eq!(text, text.trim());
+            assert_ne!(text, "never sent");
+        }
+        // The window's first six lines, alone: the same person keeps one
+        // index, the long line is cut, the unknown platform and the blank
+        // line never go.
+        let head: Vec<&chat_signals::ChatLine> = lines[..6].iter().collect();
+        let messages = ai_read_messages(&head);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["text"], "no sound??");
+        assert_eq!(messages[0]["author"], 0);
+        assert_eq!(messages[1]["text"].as_str().unwrap().chars().count(), 500);
+        assert_eq!(messages[1]["author"], 1);
+        assert_eq!(messages[2]["platform"], "kick");
+        assert_eq!(messages[3]["author"], 0, "the same person, the same index");
+        assert!(ai_read_messages(&[]).is_empty());
     }
 
     /// Plan 223 L6 (the review): a platform's word holds its card only

@@ -41,6 +41,24 @@ pub(crate) const ALERTS_NOTIFY_TIMEOUT: std::time::Duration = std::time::Duratio
 pub(crate) const WATCHDOG_CHAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const WATCHDOG_CHAT_PATH: &str = "/api/ai/watchdog/chat";
 
+/// `POST /api/ai/watchdog/chat`'s body (plan 223 B2), exactly the web's
+/// strict `watchdogChatRequestSchema`: `clientVersion`, `consentToProcessChat`
+/// (true), `messages` (1 to 20 of `watchdog::ai_read_messages`), `seq`,
+/// `sessionClientId`; nothing else. `watchdog::tests` holds it against the
+/// schema's bounds.
+pub(crate) fn watchdog_chat_request(
+    session_client_id: &str,
+    messages: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "clientVersion": env!("CARGO_PKG_VERSION"),
+        "consentToProcessChat": true,
+        "messages": messages,
+        "seq": 0,
+        "sessionClientId": session_client_id,
+    })
+}
+
 /// Why a watchdog chat read did not answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchdogChatError {
@@ -2090,13 +2108,7 @@ impl VideorcApiClient {
         messages: Vec<serde_json::Value>,
     ) -> std::result::Result<Vec<(crate::watchdog::chat_signals::ChatClass, f64)>, WatchdogChatError>
     {
-        let request = serde_json::json!({
-            "clientVersion": env!("CARGO_PKG_VERSION"),
-            "consentToProcessChat": true,
-            "messages": messages,
-            "seq": 0,
-            "sessionClientId": session_client_id,
-        });
+        let request = watchdog_chat_request(session_client_id, messages);
         let response = self
             .http
             .post(self.endpoint(WATCHDOG_CHAT_PATH))
