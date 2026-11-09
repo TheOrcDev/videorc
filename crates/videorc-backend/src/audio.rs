@@ -1,10 +1,11 @@
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs::File;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
+#[cfg(any(test, debug_assertions))]
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,10 @@ use crate::protocol::{AudioMeterResult, AudioMeterStatus, Device, DeviceKind, De
 #[cfg(debug_assertions)]
 #[path = "audio_fixture_clock.rs"]
 pub(crate) mod fixture_clock;
+
+#[cfg(debug_assertions)]
+#[path = "audio_fixture_pcm.rs"]
+mod fixture_pcm;
 
 pub const NATIVE_AUDIO_SAMPLE_RATE: u32 = 48_000;
 pub const NATIVE_AUDIO_CHANNELS: u16 = 2;
@@ -134,6 +139,7 @@ impl AudioFrame {
 
 #[derive(Debug, Clone, Copy)]
 pub struct AudioProcessingSettings {
+    pub noise_suppression: crate::protocol::MicrophoneNoiseSuppression,
     pub gain_db: f32,
     pub muted: bool,
 }
@@ -141,6 +147,7 @@ pub struct AudioProcessingSettings {
 impl Default for AudioProcessingSettings {
     fn default() -> Self {
         Self {
+            noise_suppression: Default::default(),
             gain_db: 0.0,
             muted: false,
         }
@@ -182,18 +189,28 @@ fn normalized_audio_processing_settings(
             0.0
         },
         muted: settings.muted,
+        noise_suppression: settings.noise_suppression,
     }
 }
 
 fn pack_audio_processing_settings(settings: AudioProcessingSettings) -> u64 {
     let settings = normalized_audio_processing_settings(settings);
-    u64::from(settings.gain_db.to_bits()) | (u64::from(settings.muted) << 32)
+    u64::from(settings.gain_db.to_bits())
+        | (u64::from(settings.muted) << 32)
+        | (u64::from(
+            settings.noise_suppression == crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+        ) << 33)
 }
 
 fn unpack_audio_processing_settings(packed: u64) -> AudioProcessingSettings {
     AudioProcessingSettings {
         gain_db: f32::from_bits(packed as u32),
         muted: ((packed >> 32) & 1) == 1,
+        noise_suppression: if ((packed >> 33) & 1) == 1 {
+            crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+        } else {
+            crate::protocol::MicrophoneNoiseSuppression::Off
+        },
     }
 }
 
@@ -207,6 +224,7 @@ fn unpack_audio_processing_settings(packed: u64) -> AudioProcessingSettings {
 #[derive(Debug, Clone)]
 pub struct CaptionContractTestAudioInjector {
     raw_peak_bits: Arc<AtomicU64>,
+    fixture_cursor: Arc<AtomicU64>,
     packets_remaining: Arc<AtomicU64>,
     packets_generated: Arc<AtomicU64>,
     injection_active: Arc<AtomicBool>,
@@ -253,6 +271,7 @@ impl CaptionContractTestAudioInjector {
         let before = self.packets_generated.load(Ordering::Acquire);
         self.raw_peak_bits
             .store(u64::from(raw_peak.to_bits()), Ordering::Release);
+        self.fixture_cursor.store(0, Ordering::Release);
         self.packets_remaining
             .store(packet_count, Ordering::Release);
 
@@ -314,11 +333,12 @@ pub struct AudioCaptureStats {
     // the Studio mixer's live meter reads this via the diagnostics sampler —
     // no extra device open (post-0.9.4 fix batch F7).
     live_peak_milli: AtomicU64,
-    // Loudest peak seen over the whole recording window (same milli-units).
-    // A TCC-unauthorized process gets SILENT ZEROS from CoreAudio, not an
-    // error — frames keep counting while the track holds nothing. This is the
-    // truthful "did the mic capture any sound at all" signal (plan 021 F3).
+    // Loudest processed output peak over the recording window.
     session_peak_milli: AtomicU64,
+    // Raw microphone evidence before gain, denoising, ramps and safety mute.
+    // Keep capture health independent of intentional output suppression.
+    capture_session_peak_milli: AtomicU64,
+    received_capture_frames: AtomicU64,
     // Plan 092: the level window the Studio's microphone meter reads while the
     // warm microphone stands by (no session bus runs then). The loudest sample
     // and the loudest per-callback RMS since the last read, in micro-units so
@@ -390,6 +410,22 @@ impl AudioCaptureStats {
 
     pub fn session_peak(&self) -> f32 {
         self.session_peak_milli.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+
+    pub(crate) fn capture_session_peak(&self) -> f32 {
+        self.capture_session_peak_milli.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+
+    pub(crate) fn received_capture_frames(&self) -> u64 {
+        self.received_capture_frames.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_capture_evidence(&self, frames: u64, peak: f32) {
+        self.received_capture_frames
+            .fetch_add(frames, Ordering::Relaxed);
+        let clamped = (peak.clamp(0.0, 1.0) * 1000.0) as u64;
+        self.capture_session_peak_milli
+            .fetch_max(clamped, Ordering::Relaxed);
     }
 
     pub(crate) fn input_state(&self) -> NativeAudioInputState {
@@ -539,6 +575,8 @@ impl AudioCaptureStats {
         self.dropped_frames.store(0, Ordering::Relaxed);
         self.fifo_write_errors.store(0, Ordering::Relaxed);
         self.session_peak_milli.store(0, Ordering::Relaxed);
+        self.capture_session_peak_milli.store(0, Ordering::Relaxed);
+        self.received_capture_frames.store(0, Ordering::Relaxed);
         *window = AudioCaptureWindow {
             started_at: Some(started_at),
             finished_elapsed: None,
@@ -771,7 +809,7 @@ pub(crate) fn trim_audio_frame_before_epoch(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn attach_fifo_writer_with_stall_timeout(
     source: NativeAudioSource,
     fifo_path: PathBuf,
@@ -1088,7 +1126,7 @@ impl FoldPlan {
         VoiceFold::default().plan(input, source_channels)
     }
 
-    fn fold(self, left: f32, right: f32, frame_index: usize, frame_count: usize) -> f32 {
+    pub(crate) fn fold(self, left: f32, right: f32, frame_index: usize, frame_count: usize) -> f32 {
         if self.from == self.to {
             return match self.to {
                 FoldMode::Average => (left + right) * 0.5,
@@ -1195,12 +1233,14 @@ fn start_contract_test_audio_source(
     device_id: u32,
     continuous_tone: bool,
 ) -> Result<NativeAudioSource> {
+    let fixture_pcm = fixture_pcm::load_from_env()?;
     let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
     let stats = Arc::new(AudioCaptureStats::default());
     let processing_settings = AudioProcessingSettingsHandle::new(settings);
     let stop = Arc::new(AtomicBool::new(false));
     let injector = CaptionContractTestAudioInjector {
         raw_peak_bits: Arc::new(AtomicU64::new(0)),
+        fixture_cursor: Arc::new(AtomicU64::new(0)),
         packets_remaining: Arc::new(AtomicU64::new(0)),
         packets_generated: Arc::new(AtomicU64::new(0)),
         injection_active: Arc::new(AtomicBool::new(false)),
@@ -1251,6 +1291,14 @@ fn start_contract_test_audio_source(
             } else {
                 0.0
             };
+            let fixture_offset = if inject_tone {
+                producer_injector
+                    .fixture_cursor
+                    .fetch_add(samples_per_channel as u64, Ordering::AcqRel)
+                    as usize
+            } else {
+                0
+            };
             let mut input = Vec::with_capacity(samples_per_channel * SOURCE_CHANNELS);
             for sample_index in 0..samples_per_channel {
                 let absolute = frame_cursor as usize + sample_index;
@@ -1261,7 +1309,11 @@ fn start_contract_test_audio_source(
                 };
                 let phase = absolute as f32 * frequency * std::f32::consts::TAU
                     / NATIVE_AUDIO_SAMPLE_RATE as f32;
-                let sample = phase.sin() * raw_peak;
+                let sample = if let Some(pcm) = fixture_pcm.as_ref().filter(|_| inject_tone) {
+                    pcm[(fixture_offset + sample_index) % pcm.len()] * raw_peak
+                } else {
+                    phase.sin() * raw_peak
+                };
                 input.extend_from_slice(&[sample, sample]);
             }
             let mut frame = processed_capture_frame_with_handle(
@@ -1919,6 +1971,7 @@ mod tests {
         assert_eq!(session.input_state(), expected);
     }
 
+    #[cfg(unix)]
     fn frame(samples: usize) -> AudioFrame {
         static CLOCK: OnceLock<Instant> = OnceLock::new();
         let now = Instant::now();
@@ -1942,6 +1995,7 @@ mod tests {
         wait_for_input_state(session, NativeAudioInputState::Live);
     }
 
+    #[cfg(unix)]
     fn frame_at(captured_at: Instant, samples: usize) -> AudioFrame {
         AudioFrame {
             timestamp_micros: 0,
@@ -2207,6 +2261,22 @@ mod tests {
     }
 
     #[test]
+    fn raw_capture_health_is_independent_of_processed_peak_and_resets() {
+        let stats = AudioCaptureStats::default();
+        stats.record_capture_evidence(480, 0.004);
+        stats.record_live_peak(0.0);
+        assert_eq!(stats.received_capture_frames(), 480);
+        assert_eq!(stats.capture_session_peak(), 0.004);
+        assert_eq!(stats.session_peak(), 0.0);
+        stats.reset_recording_window();
+        assert_eq!(stats.received_capture_frames(), 0);
+        assert_eq!(stats.capture_session_peak(), 0.0);
+        stats.record_capture_evidence(480, 0.0);
+        stats.record_live_peak(0.9);
+        assert_eq!(stats.capture_session_peak(), 0.0);
+    }
+
+    #[test]
     fn queued_audio_frames_are_discarded_before_fifo_writer_starts() {
         let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
         for frame in fake_pcm_frames(1_920, 480, 440.0) {
@@ -2308,6 +2378,7 @@ mod tests {
             &input,
             2,
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 6.0,
                 muted: false,
             },
@@ -2319,6 +2390,7 @@ mod tests {
             &input,
             2,
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 24.0,
                 muted: true,
             },
@@ -2332,6 +2404,7 @@ mod tests {
             &[0.8, 0.8, -0.5, -0.5],
             2,
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 24.0,
                 muted: true,
             },
@@ -2345,6 +2418,7 @@ mod tests {
             &[0.1, 0.1],
             2,
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 6.0,
                 muted: false,
             },
@@ -2358,6 +2432,7 @@ mod tests {
     #[test]
     fn caption_contract_test_source_delivers_permissionless_warmup_frames() {
         let mut source = start_caption_contract_test_audio_source(AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 6.0,
             muted: true,
         })
@@ -2382,6 +2457,7 @@ mod tests {
         let input = [0.1, 0.1, -0.2, -0.2];
 
         settings.update(AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 6.0,
             muted: false,
         });
@@ -2392,6 +2468,7 @@ mod tests {
         assert!(gained.samples[0] > input[0]);
 
         settings.update(AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 24.0,
             muted: true,
         });
@@ -2405,6 +2482,32 @@ mod tests {
     fn mono_input_is_duplicated_to_stereo() {
         let output = process_interleaved_f32(&[0.1, 0.2], 1, AudioProcessingSettings::default());
         assert_eq!(output, vec![0.1, 0.1, 0.2, 0.2]);
+    }
+
+    #[test]
+    fn rnnoise_atomic_controls_preserve_mode_gain_and_safety_mute() {
+        let handle = AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
+        assert_eq!(
+            handle.load().noise_suppression,
+            crate::protocol::MicrophoneNoiseSuppression::Off
+        );
+        handle.update(AudioProcessingSettings {
+            gain_db: 6.25,
+            muted: true,
+            noise_suppression: crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+        });
+        let settings = handle.load();
+        assert_eq!(
+            settings.noise_suppression,
+            crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+        );
+        assert_eq!(settings.gain_db, 6.25);
+        assert!(settings.muted);
+        handle.update(AudioProcessingSettings::default());
+        assert_eq!(
+            handle.load().noise_suppression,
+            crate::protocol::MicrophoneNoiseSuppression::Off
+        );
     }
 
     #[test]

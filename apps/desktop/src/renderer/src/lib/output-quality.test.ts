@@ -188,3 +188,21 @@ describe('the Output page preset list (plan 174 S3.6, D-28)', () => {
     expect(options.filter((option) => option.value.startsWith('stream-'))).toHaveLength(1)
   })
 })
+
+describe('the Output page preset list on Windows (issue #1062)', () => {
+  it('never offers 4K60, and keeps a saved one only while it is the setting', () => {
+    const values = (current: Parameters<typeof recordingPresetOptions>[0]) =>
+      recordingPresetOptions(current, 'horizontal', 'win32').map((option) => option.value)
+    expect(values('tutorial-1080p30')).toEqual([
+      'record-4k30',
+      'tutorial-1440p30',
+      'tutorial-1080p30',
+      'tutorial-720p30',
+      'tutorial-540p30'
+    ])
+    expect(values('record-4k60-experimental').at(-1)).toBe('record-4k60-experimental')
+    expect(
+      recordingPresetOptions('tutorial-1080p30', 'horizontal', 'darwin').map((o) => o.value)
+    ).toContain('record-4k60-experimental')
+  })
+})

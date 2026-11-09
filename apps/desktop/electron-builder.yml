@@ -51,6 +51,12 @@ afterPack: ../../scripts/electron-builder-after-pack-macos.cjs
 # (it does not override) — a global entry with a mac-only path breaks the
 # Windows build and vice versa.
 extraResources:
+  - from: ../../licenses/rnnoise-rs
+    to: licenses/rnnoise-rs
+    filter:
+      - LICENSE.txt
+      - UPSTREAM-NOTICES.txt
+      - SOURCE.txt
   - from: src/renderer/src/assets/videorc-logo.png
     to: videorc-logo.png
   - from: src/renderer/src/assets/backgrounds
@@ -253,6 +259,19 @@ linux:
   target:
     - dir
     - AppImage
+
+# The AppImage runtime. Electron Builder 26's default ("0.0.0", the AppImageKit
+# runtime) dlopens libfuse.so.2, which stock Ubuntu 24.04 does not install (it
+# ships FUSE 3), so the AppImage stopped at "AppImages require FUSE to run"
+# there. 1.0.2 is the static AppImage type2-runtime (20251108): FUSE is linked
+# in and it mounts through fusermount3. `--appimage-extract`, which the release
+# validator and the live-lab installer use, works the same. Its AppRun adds
+# --no-sandbox where unprivileged user namespaces are refused (the AppRun hunk
+# in patches/app-builder-lib@26.8.1.patch); with this toolset the bundled
+# videorc.desktop runs `AppRun %U` and leaves the flag to that probe (the
+# AppImageTarget hunk).
+toolsets:
+  appimage: '1.0.2'
 
 # Install window, designed in Dmgly. The background already carries the
 # "Drag to Applications" text, the arrow and both label pills; Finder supplies

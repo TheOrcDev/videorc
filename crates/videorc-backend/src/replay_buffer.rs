@@ -261,7 +261,7 @@ pub fn concat_list(selection: &Selection, segment_dir: &Path) -> String {
     let mut script = String::from("ffconcat version 1.0\n");
     for (index, segment) in selection.segments.iter().enumerate() {
         let path = segment_dir.join(&segment.file_name);
-        let quoted = path.display().to_string().replace('\'', "'\\''");
+        let quoted = crate::ffmpeg::ffmpeg_file_path(&path).replace('\'', "'\\''");
         script.push_str(&format!("file '{quoted}'\n"));
         if let Some(next) = selection.segments.get(index + 1) {
             let duration = (next.start_seconds - segment.start_seconds).max(0.0);
@@ -271,32 +271,43 @@ pub fn concat_list(selection: &Selection, segment_dir: &Path) -> String {
     script
 }
 
+/// The segment muxer's options and its output pattern: the ring as its own
+/// output ([`segment_muxer_args`]) or as a tee slave beside the file (the
+/// Linux raw path shares the file's encode with the ring).
+pub fn segment_muxer_options(
+    segment_dir: &Path,
+    seconds: u32,
+) -> (Vec<(&'static str, String)>, String) {
+    let options = vec![
+        ("segment_format", "mpegts".to_string()),
+        ("segment_time", SEGMENT_SECONDS.to_string()),
+        ("reset_timestamps", "0".to_string()),
+        (
+            "segment_list",
+            crate::ffmpeg::ffmpeg_file_path(&segment_dir.join(SEGMENT_LIST_FILE)),
+        ),
+        ("segment_list_type", "csv".to_string()),
+        ("segment_list_size", keep_count(seconds).to_string()),
+        ("segment_list_flags", "+live".to_string()),
+    ];
+    let pattern = crate::ffmpeg::ffmpeg_file_path(
+        &segment_dir.join(format!("{SEGMENT_FILE_PREFIX}%06d{SEGMENT_FILE_SUFFIX}")),
+    );
+    (options, pattern)
+}
+
 /// The segment muxer tail of the ring output. The caller has already mapped
 /// the streams and chosen the codecs (`-c:v copy` behind an encoded bridge,
 /// the platform encoder on the raw and legacy paths, AAC audio either way).
 pub fn segment_muxer_args(segment_dir: &Path, seconds: u32) -> Vec<String> {
-    vec![
-        "-f".to_string(),
-        "segment".to_string(),
-        "-segment_format".to_string(),
-        "mpegts".to_string(),
-        "-segment_time".to_string(),
-        SEGMENT_SECONDS.to_string(),
-        "-reset_timestamps".to_string(),
-        "0".to_string(),
-        "-segment_list".to_string(),
-        segment_dir.join(SEGMENT_LIST_FILE).display().to_string(),
-        "-segment_list_type".to_string(),
-        "csv".to_string(),
-        "-segment_list_size".to_string(),
-        keep_count(seconds).to_string(),
-        "-segment_list_flags".to_string(),
-        "+live".to_string(),
-        segment_dir
-            .join(format!("{SEGMENT_FILE_PREFIX}%06d{SEGMENT_FILE_SUFFIX}"))
-            .display()
-            .to_string(),
-    ]
+    let (options, pattern) = segment_muxer_options(segment_dir, seconds);
+    let mut args = vec!["-f".to_string(), "segment".to_string()];
+    for (key, value) in options {
+        args.push(format!("-{key}"));
+        args.push(value);
+    }
+    args.push(pattern);
+    args
 }
 
 /// The audio encoding of the ring output: the session's own audio filter
@@ -333,7 +344,7 @@ pub fn save_args(concat_list_path: &Path, partial_output: &Path) -> Vec<String> 
         "-safe".to_string(),
         "0".to_string(),
         "-i".to_string(),
-        concat_list_path.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(concat_list_path),
         "-map".to_string(),
         "0:v:0".to_string(),
         "-map".to_string(),
@@ -344,7 +355,7 @@ pub fn save_args(concat_list_path: &Path, partial_output: &Path) -> Vec<String> 
         "+faststart".to_string(),
         "-f".to_string(),
         "mp4".to_string(),
-        partial_output.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(partial_output),
     ]
 }
 
@@ -523,6 +534,9 @@ pub struct ReplayRuntime {
     pub save_in_progress: bool,
     /// One more save is waiting behind the running one (plan 181 S3).
     pub queued_save: Option<QueuedSave>,
+    /// The handover ends this ring without its flush (see
+    /// [`claim_unflushed_retire`]); a press now waits for the next ring.
+    pub retiring_unflushed: bool,
 }
 
 /// The save waiting behind the running one: its accepted id, what asked for
@@ -762,6 +776,7 @@ pub fn prepare(state: &AppState, request: RingRequest<'_>) -> Result<RingGuard> 
         prune_task: None,
         save_in_progress: false,
         queued_save: None,
+        retiring_unflushed: false,
     };
     {
         let mut registry = lock(state);
@@ -927,6 +942,28 @@ pub enum RetireOutcome {
     Stopped,
     /// The session ended on its own; the buffer is off and says why.
     Failed(String),
+}
+
+/// Plan 181 S7: a Record hands over from the buffer-only session, and
+/// `retire` deletes the ring the moment that session's FFmpeg exits, so its
+/// flush of the last segment is work nobody reads (250 to 300 ms of a VAAPI
+/// Record press on Linux). Claims the ring for an unflushed end when nothing
+/// reads it again: no save runs or waits. A press after the claim is refused
+/// as starting, since the next ring starts with the session that follows.
+pub fn claim_unflushed_retire(state: &AppState, session_id: &str) -> bool {
+    let mut registry = lock(state);
+    let Some(runtime) = registry
+        .active
+        .as_mut()
+        .filter(|runtime| runtime.session_id == session_id && runtime.replay_only)
+    else {
+        return false;
+    };
+    if runtime.save_in_progress || runtime.queued_save.is_some() {
+        return false;
+    }
+    runtime.retiring_unflushed = true;
+    true
 }
 
 /// The session's monitor retired its slot: stop pruning, delete the ring
@@ -1209,6 +1246,9 @@ pub fn request_save(
             return Err(SaveRefusal::off());
         };
         match runtime.state {
+            ReplayBufferState::On if runtime.retiring_unflushed => {
+                return Err(SaveRefusal::starting());
+            }
             ReplayBufferState::On => {}
             ReplayBufferState::Starting => return Err(SaveRefusal::starting()),
             ReplayBufferState::Off | ReplayBufferState::Error => return Err(SaveRefusal::off()),
@@ -1473,7 +1513,7 @@ async fn probe_replay(ffprobe_path: &str, path: &Path) -> Result<ReplayProbe, St
             "-of",
             "json",
         ])
-        .arg(path)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(path))
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1718,6 +1758,14 @@ pub(crate) fn replay_only_test_params() -> StartSessionParams {
         "replay": { "seconds": 30 }
     }))
     .unwrap()
+}
+
+/// Marks the current ring as read by a clip save, for tests in other modules.
+#[cfg(test)]
+pub(crate) fn mark_save_in_progress_for_test(state: &AppState) {
+    if let Some(runtime) = lock(state).active.as_mut() {
+        runtime.save_in_progress = true;
+    }
 }
 
 #[cfg(test)]
@@ -2043,6 +2091,59 @@ mod runtime_tests {
         let third = unused_target(&dir, "Replay 2026-10-12 18-30-05.mp4");
         assert_eq!(third, dir.join("Replay 2026-10-12 18-30-05 (3).mp4"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Plan 181 S7: the handover ends a buffer-only ring unflushed only when
+    /// no save runs or waits, never a ring riding on a recording, and a press
+    /// after the claim waits for the next ring instead of starting a save.
+    #[test]
+    fn an_unflushed_retire_is_claimed_only_while_no_save_needs_the_ring() {
+        let state = test_state();
+        let recordings = std::env::temp_dir().join("videorc-replay-recordings-test");
+        let params = replay_only_params();
+        let ring = |session_id: &'static str, replay_only: bool| {
+            let guard = prepare(
+                &state,
+                RingRequest {
+                    session_id,
+                    params: &params,
+                    replay_only,
+                    recordings_dir: &recordings,
+                    ffmpeg_path: "ffmpeg",
+                },
+            )
+            .unwrap();
+            lock(&state).active.as_mut().unwrap().state = ReplayBufferState::On;
+            guard
+        };
+
+        assert!(!claim_unflushed_retire(&state, "no-ring"));
+
+        let guard = ring("session-recording", false);
+        assert!(!claim_unflushed_retire(&state, "session-recording"));
+        drop(guard);
+
+        let guard = ring("session-saving", true);
+        lock(&state).active.as_mut().unwrap().save_in_progress = true;
+        assert!(!claim_unflushed_retire(&state, "session-saving"));
+        lock(&state).active.as_mut().unwrap().save_in_progress = false;
+        lock(&state).active.as_mut().unwrap().queued_save = Some(QueuedSave {
+            save_id: "queued".to_string(),
+            source: None,
+            seconds: 30,
+        });
+        assert!(!claim_unflushed_retire(&state, "session-saving"));
+        drop(guard);
+
+        let guard = ring("session-idle", true);
+        assert!(!claim_unflushed_retire(&state, "another-session"));
+        assert!(claim_unflushed_retire(&state, "session-idle"));
+        assert_eq!(
+            request_save(&state, None, None).unwrap_err().code,
+            "replay-starting"
+        );
+        assert!(!lock(&state).active.as_ref().unwrap().save_in_progress);
+        drop(guard);
     }
 
     #[test]

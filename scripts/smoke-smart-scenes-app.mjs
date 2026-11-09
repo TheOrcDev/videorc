@@ -55,6 +55,8 @@ import {
   flashFixtureApp,
   frontApp,
   launchFixtureApp,
+  minimizeFixtureApp,
+  restoreFixtureApp,
   stopFixtureApp,
   stopFixtureApps,
   waitForFrontApp
@@ -77,6 +79,8 @@ import {
   hideSpanVerdict,
   newScenesGate,
   passwordManagerGate,
+  outOfSightGate,
+  outOfSightRefusalCopyOk,
   relaunchGate,
   smartScenesVerdict,
   switchGate
@@ -939,6 +943,172 @@ try {
       ...passwordManagerGate(result),
       ...result,
       detail: `listed app in front → hidden ${onFront.hidden} (${onFront.reason}) in ${fmt(onFront.latencyMs)} ms (budget ${SMART_SCENES_BUDGET.passwordManagerHideMs}); left → hidden ${shownOnLeave.hidden}; manual hide: in front ${afterFront.hidden} (${afterFront.reason}), left ${afterLeave.hidden}, Show → ${afterShow.hidden}`
+    }
+  })
+
+  // ------------------------------------------------------------------ step 7
+  summary.steps.outOfSight = await step('out-of-sight', async () => {
+    // Plan 219 S1: Alpha on the canvas, then minimized by the fixture itself
+    // for ~15 s. The stall must be held (one notice, no recovery restart,
+    // no source-missing), and frames must resume on the same generation.
+    // Step 6 removed both app scenes, so the window goes on through the
+    // Studio's own picker path (the working picture, no saved scene on).
+    const pickWindow = async (fixture) => {
+      await requestSmokeCommand(
+        smoke,
+        'select-screen-device',
+        { sourceId: fixture.windowId, settleMs: 0 },
+        { timeoutMs }
+      )
+      return waitForScreenLive(fixture.windowId)
+    }
+    const privacy = await request(ws, timeoutMs, 'screen.privacy.get')
+    if (privacy.hidden) {
+      await renderer.togglePrivacy()
+      await waitForBackendState(
+        'screen.privacy.get',
+        (current) => current.hidden === false,
+        'Show screen before the out-of-sight step',
+        5000
+      )
+    }
+    await pickWindow(alpha)
+    // The streamer's case is a session: capture health samples the screen
+    // for a consumer, and the Clips ring is the lightest one (the probe that
+    // held correctly ran with it on; step 6 turned it off).
+    await renderer.setClips(true)
+    await waitForBackendState(
+      'replay.status',
+      (ring) => ring?.state === 'on',
+      'the Clips ring on for the out-of-sight hold',
+      30_000
+    )
+    // Capture health needs a flowing producer before it can call a stall:
+    // a window minimized in the first second of a fresh generation has no
+    // producer evidence yet and is never held. Three seconds of frames first.
+    const liveBefore = await waitForBackendState(
+      'preview.screen.status',
+      (status) =>
+        status?.state === 'live' &&
+        status.sourceId === alpha.windowId &&
+        (status.framesCaptured ?? 0) > 90 &&
+        (status.frameAgeMs ?? Infinity) < 500,
+      'Alpha flowing for three seconds before the minimize',
+      15_000
+    )
+    const framesBefore = liveBefore.framesCaptured ?? 0
+    const eventsFrom = events.length
+    const minimizedAtMs = await minimizeFixtureApp(alpha)
+    log(`  Alpha minimized at ${minimizedAtMs}`)
+    const noticed = await waitForEvent(
+      (entry) =>
+        entry.event === 'health.event' &&
+        entry.payload?.code === 'screen-window-out-of-sight' &&
+        entry.atMs >= minimizedAtMs,
+      'the out-of-sight notice',
+      25_000
+    ).catch(() => null)
+    if (noticed)
+      log(`  notice after ${noticed.atMs - minimizedAtMs} ms: ${noticed.payload.message}`)
+    await sleep(Math.max(0, minimizedAtMs + 15_000 - Date.now()))
+    const whileHidden = await request(ws, timeoutMs, 'preview.screen.status')
+    const restoredAtMs = await restoreFixtureApp(alpha)
+    log(`  Alpha restored at ${restoredAtMs}`)
+    const back = await waitForEvent(
+      (entry) =>
+        entry.event === 'health.event' &&
+        entry.payload?.code === 'screen-window-back' &&
+        entry.atMs >= restoredAtMs,
+      'the window-back notice',
+      25_000
+    ).catch(() => null)
+    const resumed = await waitForBackendState(
+      'preview.screen.status',
+      (status) =>
+        status?.state === 'live' &&
+        status.sourceId === alpha.windowId &&
+        (status.framesCaptured ?? 0) > (whileHidden.framesCaptured ?? 0) + 30,
+      'frames flowing again after the restore',
+      15_000
+    )
+    const since = events.slice(eventsFrom)
+    const recoveryPhases = since
+      .filter(
+        (entry) => entry.event === 'capture.recovery.status' && entry.payload?.phase !== 'idle'
+      )
+      .map((entry) => entry.payload.phase)
+    const screenStatuses = since
+      .filter((entry) => entry.event === 'preview.screen.status')
+      .map((entry) => entry.payload)
+
+    // Plan 219 S2: a start on a window that is out of sight (Beta, not live)
+    // is refused with copy the streamer can act on, and the same start goes
+    // live once the window is back. Direct backend start, as the ISO
+    // preflight does it (the dev app has no camera for a real ISO take).
+    const betaSources = { windowId: beta.windowId, windowName: beta.name, cameraOff: true }
+    const startParams = {
+      sources: betaSources,
+      video,
+      protectedOverlayWindowIds: [],
+      ffmpegPath
+    }
+    await minimizeFixtureApp(beta)
+    await sleep(500)
+    const refusedStatus = await request(ws, timeoutMs, 'preview.screen.start', startParams)
+    log(`  start on minimized Beta: ${refusedStatus.state}: ${refusedStatus.message ?? ''}`)
+    await restoreFixtureApp(beta)
+    await sleep(500)
+    const acceptedStatus = await request(ws, timeoutMs, 'preview.screen.start', startParams)
+    let liveAfterRestore = acceptedStatus.state === 'live'
+    if (!liveAfterRestore) {
+      liveAfterRestore = await waitForBackendState(
+        'preview.screen.status',
+        (status) => status?.state === 'live' && status.sourceId === beta.windowId,
+        'Beta live after its restore',
+        15_000
+      )
+        .then(() => true)
+        .catch(() => false)
+    }
+    log(`  start on restored Beta: ${acceptedStatus.state}; live ${liveAfterRestore}`)
+    // The direct start moved the capture to Beta behind the renderer's
+    // back (its pick is still Alpha): pick the display, then Alpha again,
+    // so the renderer and the capture agree on Alpha. This is tidy-up for
+    // whatever follows, never the step's evidence.
+    try {
+      await renderer.setClips(false)
+      await renderer.selectDisplay(display)
+      await waitForScreenLive(display.id)
+      await pickWindow(alpha)
+    } catch (error) {
+      log(`  tidy-up after the step did not settle: ${error?.message?.split('\n')[0]}`)
+    }
+
+    const result = {
+      noticed: Boolean(noticed),
+      noticeMs: noticed ? noticed.atMs - minimizedAtMs : null,
+      noticeMessage: noticed?.payload?.message ?? null,
+      back: Boolean(back),
+      backMs: back ? back.atMs - restoredAtMs : null,
+      framesBefore,
+      framesWhileHidden: whileHidden.framesCaptured ?? 0,
+      framesAfter: resumed.framesCaptured ?? 0,
+      stateWhileHidden: whileHidden.state,
+      sourceWhileHidden: whileHidden.sourceId ?? null,
+      recoveryPhases,
+      screenStates: [...new Set(screenStatuses.map((status) => status.state))],
+      sourceMissingSeen: screenStatuses.some((status) => status.state === 'source-missing'),
+      refusal: {
+        state: refusedStatus.state,
+        message: refusedStatus.message ?? null,
+        copyOk: outOfSightRefusalCopyOk(refusedStatus.message),
+        liveAfterRestore
+      }
+    }
+    return {
+      ...outOfSightGate(result),
+      ...result,
+      detail: `minimized ${fmt(restoredAtMs - minimizedAtMs)} ms: notice after ${fmt(result.noticeMs)} ms, frames ${framesBefore} → ${result.framesWhileHidden} → ${result.framesAfter}, recovery ${recoveryPhases.length ? recoveryPhases.join(',') : 'none'}, back after ${fmt(result.backMs)} ms; start on a minimized window → ${result.refusal.state} (${result.refusal.copyOk ? 'copy ok' : 'copy wrong'}), live after restore ${liveAfterRestore}`
     }
   })
 

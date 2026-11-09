@@ -13,6 +13,10 @@ import { cn } from '@/lib/utils'
  * Each size ships its 2× file and lets the browser scale it down on 1×
  * displays. One file serves both themes: the warm stone reads on porcelain
  * and on black, so it is never tinted.
+ *
+ * `picture` shows the streamer's own Buddy instead (its idle pose, from
+ * `buddyPictureUrl`), fitted into the same square so a wide or tall upload
+ * never shifts the header. Null or absent keeps the golem.
  */
 const SIZES = {
   md: { src: emblem64Url, className: 'h-8' },
@@ -23,10 +27,12 @@ export type BuddyEmblemSize = keyof typeof SIZES
 
 export function BuddyEmblem({
   size = 'md',
+  picture,
   alt = '',
   className
 }: {
   size?: BuddyEmblemSize
+  picture?: string | null
   /** Empty (decorative) by default: the text beside it names Buddy. */
   alt?: string
   className?: string
@@ -36,11 +42,17 @@ export function BuddyEmblem({
     <img
       alt={alt}
       aria-hidden={alt === '' ? true : undefined}
-      className={cn('w-auto shrink-0 select-none', sizeClassName, className)}
+      className={cn(
+        'w-auto shrink-0 select-none',
+        sizeClassName,
+        picture && 'aspect-square object-contain',
+        className
+      )}
+      data-picture={picture ? 'own' : 'default'}
       data-slot="buddy-emblem"
       decoding="async"
       draggable={false}
-      src={src}
+      src={picture ?? src}
     />
   )
 }

@@ -176,12 +176,20 @@ export function SceneList({
       action={
         <>
           {platform === 'darwin' ? <FollowFrontAppSwitch /> : null}
-          {/* Plan 215 D4: the editor's door on its own page, until it's on. */}
-          {sceneEditMode ? null : (
-            <Button data-testid="scene-edit" variant="outline" onClick={onEditScene}>
-              {EDIT_SCENE_LABEL}
-            </Button>
-          )}
+          {/* Plan 215 D4: the editor's door on its own page, until it's on.
+              Hidden, never unmounted: the first grab on the stage is what
+              turns the editor on, and a header that loses a button at that
+              pointerdown rewraps its description, the pane scroll-anchors,
+              and the stage ends the gesture on that scroll. */}
+          <Button
+            className={cn(sceneEditMode && 'invisible')}
+            data-testid="scene-edit"
+            disabled={sceneEditMode}
+            variant="outline"
+            onClick={onEditScene}
+          >
+            {EDIT_SCENE_LABEL}
+          </Button>
           {saveButton()}
           <DisabledReason reason={readOnly ? READ_ONLY_REASON : null}>
             <Button

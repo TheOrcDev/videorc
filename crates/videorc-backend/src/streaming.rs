@@ -446,6 +446,17 @@ pub struct StreamTargetRuntime {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redacted_url: Option<String>,
+    /// Plan 218: how many times this session the leg's FFmpeg fifo
+    /// overflowed because the connection could not carry the stream to this
+    /// destination (each one skipped seconds of video for its viewers).
+    /// Additive to `state`: a leg stays `live` while it overflows; the
+    /// existing `warning` keeps meaning "the platform is not receiving".
+    /// Absent until the first overflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink_overflows: Option<u64>,
+    /// RFC 3339 time of the latest overflow; absent until the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink_overflow_at: Option<String>,
 }
 
 /// The full per-target runtime snapshot for a session, replacing the renderer's map

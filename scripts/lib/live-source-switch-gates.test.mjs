@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   evaluatePacketDts,
   evaluateSourceIdentity,
+  liveSourceSwitchSkipReason,
   measureSourceWindow,
   resolveSourceOutputAudioTiming,
   sourceSampleWindowStart
@@ -143,4 +144,15 @@ test('packet DTS is monotonic per stream while legal B-frame PTS reorder is acce
   assert.ok(evaluatePacketDts([...packets, { stream_index: 0, dts_time: '-0.1' }]).length > 0)
   assert.ok(evaluatePacketDts([{ stream_index: 0 }]).length > 0)
   assert.ok(evaluatePacketDts([]).length > 0)
+})
+
+test('off macOS the smoke SKIPs with a reason naming its CoreAudio fixtures', () => {
+  assert.equal(liveSourceSwitchSkipReason('darwin'), null)
+  const linux = liveSourceSwitchSkipReason('linux')
+  assert.match(linux, /CoreAudio fixture microphones/)
+  assert.match(linux, /microphone:coreaudio:4294967295/)
+  assert.match(linux, /Linux plan 0024/)
+  const windows = liveSourceSwitchSkipReason('win32')
+  assert.match(windows, /microphone:coreaudio:4294967295.*macOS only/)
+  assert.doesNotMatch(windows, /Linux/)
 })

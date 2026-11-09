@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { EffectiveSceneBackground } from '../shared/backend'
+import type { CompositorSceneSourceStatus, EffectiveSceneBackground } from '../shared/backend'
 import {
   PREVIEW_SURFACE_LIVE_BACKGROUND_CONSOLE_PREFIX,
   PREVIEW_SURFACE_LIVE_BACKGROUND_RUNTIME_SCRIPT,
@@ -15,7 +15,8 @@ import {
   previewSurfaceLiveBackgroundLibraryScript,
   previewSurfaceLiveBackgroundLogLine,
   previewSurfaceLiveBackgroundStatusFrom,
-  previewSurfaceLiveBackgroundStatusFromConsoleLine
+  previewSurfaceLiveBackgroundStatusFromConsoleLine,
+  previewSurfaceStatusBackground
 } from './preview-surface-live-background'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -131,6 +132,66 @@ describe('proof surface background layer (plan 190 S6)', () => {
         picture({ live: { id: 'nebula' as 'silk', look: 'x', motion: 'calm' } })
       )
     ).toBeUndefined()
+  })
+})
+
+describe('proof surface background from the compositor status', () => {
+  function statusSource(
+    id: string,
+    kind: CompositorSceneSourceStatus['kind']
+  ): CompositorSceneSourceStatus {
+    return {
+      id,
+      name: id,
+      kind,
+      state: 'live',
+      visible: true,
+      transform: {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        cropLeft: 0,
+        cropTop: 0,
+        cropRight: 0,
+        cropBottom: 0
+      },
+      fit: 'cover',
+      mirror: false
+    }
+  }
+  const testPattern = statusSource('source:test-pattern', 'test-pattern')
+  const camera = statusSource('source:camera', 'camera')
+
+  it('draws the committed background the status names, picture or live', () => {
+    const silk = live('silk', 'satin', 'calm')
+    expect(
+      previewSurfaceStatusBackground(
+        [statusSource('background-image:builtin-bg-01', 'background-image'), testPattern],
+        picture()
+      )
+    ).toStrictEqual(picture())
+    expect(
+      previewSurfaceStatusBackground(
+        [testPattern, camera, statusSource('background-image:live-silk-satin', 'background-image')],
+        silk
+      )
+    ).toBe(silk)
+  })
+
+  it('draws none when the program has no background, whatever main heard before', () => {
+    expect(previewSurfaceStatusBackground([testPattern, camera], picture())).toBeNull()
+    expect(previewSurfaceStatusBackground([testPattern], undefined)).toBeNull()
+    expect(previewSurfaceStatusBackground([], null)).toBeNull()
+  })
+
+  it('keeps the current layer while main has not heard of the background the status names', () => {
+    const named = [statusSource('background-image:live-silk-satin', 'background-image')]
+    expect(previewSurfaceStatusBackground(named, undefined)).toBeUndefined()
+    expect(previewSurfaceStatusBackground(named, null)).toBeUndefined()
+    expect(previewSurfaceStatusBackground(named, picture())).toBeUndefined()
+    // A look change is a new asset: the old look is not drawn as the new one.
+    expect(previewSurfaceStatusBackground(named, live('silk', 'midnight', 'calm'))).toBeUndefined()
   })
 })
 

@@ -15,6 +15,7 @@ import {
   normalizeSceneVisual,
   resolveSavedBackground,
   sameSceneAudio,
+  sameSceneBackground,
   sameSceneVisual,
   sceneAudio,
   sceneMicrophone,
@@ -308,6 +309,25 @@ describe('scene presets', () => {
         background: { ...snapshot, assetId: 'imported', fileName: '../secret.png' }
       })
     ).toThrow()
+  })
+  it('matches a committed picture to its slot whatever order the backend wrote its keys in', () => {
+    const registry = applySlot(createDefaultRegistry(), 'bg-01')
+    const applied = effectiveSceneBackground(registry)!
+    // `scene.get` after applying Code Demo (ogre 2026-11-06): keys alphabetical.
+    const committed = JSON.parse(
+      '{"assetId":"builtin-bg-01","blurPx":0,"dimPercent":0,"fit":"fill",' +
+        '"managedAssetPath":"videorc-asset://background/code-demo.webp","offsetX":0,' +
+        '"offsetY":0,"saturationPercent":100,"scale":100,"vignettePercent":0,' +
+        '"visibilityPercent":20}'
+    )
+    expect(JSON.stringify(snapshotBackground(committed))).not.toBe(
+      JSON.stringify(snapshotBackground(applied))
+    )
+    expect(sameSceneBackground(applied, committed)).toBe(true)
+    expect(sameSceneBackground(applied, { ...committed, dimPercent: 10 })).toBe(false)
+    expect(sameSceneBackground(applied, { ...committed, assetId: 'builtin-bg-02' })).toBe(false)
+    expect(sameSceneBackground(applied, null)).toBe(false)
+    expect(sameSceneBackground(null, undefined)).toBe(true)
   })
   it('checks exact available source IDs with layout-aware and Freeform requirements', () => {
     const devices = [

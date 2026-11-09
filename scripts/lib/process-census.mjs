@@ -534,6 +534,9 @@ export function classifyProcessInTable(row, rowsByPid) {
 }
 
 export function classifyProcess(row) {
+  if (isExitedProcessRow(row)) {
+    return 'exited'
+  }
   const text = `${row.command} ${row.args}`
   const lowerText = text.toLowerCase()
   const commandName = (row.command.split(/[\\/]/).pop() ?? row.command).toLowerCase()
@@ -551,10 +554,13 @@ export function classifyProcess(row) {
   if (executableNames.has('videorc-backend') || executableNames.has('videorc-backend.exe')) {
     return 'backend'
   }
-  if (lowerText.includes('ffmpeg')) {
+  // By executable name, not substring: a checkout under a directory named
+  // `…ffmpeg…` put every Electron process's argv over the line and the census
+  // read the whole app as FFmpeg (Linux, 2026-11-06).
+  if (executableNames.has('ffmpeg') || executableNames.has('ffmpeg.exe')) {
     return 'ffmpeg'
   }
-  if (lowerText.includes('ffprobe')) {
+  if (executableNames.has('ffprobe') || executableNames.has('ffprobe.exe')) {
     return 'ffprobe'
   }
   for (const role of ['notes', 'comments', 'captions']) {
@@ -591,6 +597,24 @@ export function classifyProcess(row) {
     return 'tooling'
   }
   return 'other'
+}
+
+/**
+ * procps prints a process without a command line as its bracketed name. Outside
+ * kernel threads (group 0) that is a process that has exited: a zombie its
+ * parent has not reaped yet (`[electron] <defunct>`, after the comm column's
+ * own `electron <defun`, cut at 15 characters) or one already tearing down its
+ * memory (`[electron]`, no RSS). Linux Chromium's zygote forks the renderers
+ * and reaps them, so in the moment between a renderer's exit and the reap the
+ * census read a nameless `electron` without `--type=` as a second Electron
+ * main and failed the lifecycle gate (Linux, 2026-11-06).
+ */
+function isExitedProcessRow(row) {
+  const args = String(row.args ?? '').trim()
+  if (/(?:^|\s)\[[^\]]*\] <defunct>$/.test(args)) {
+    return true
+  }
+  return row.pgid !== 0 && Number(row.rssKb) === 0 && args === `[${row.command}]`
 }
 
 function processArgumentExecutableName(args) {

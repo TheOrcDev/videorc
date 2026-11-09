@@ -4724,7 +4724,7 @@ mod tests {
         // 8×8 blue background; a 2×2 solid-green source drawn into the right half
         // (dest x=0.5,y=0, w=0.5,h=1.0 → covers columns 4..8).
         let out = 8usize;
-        let green = vec![0u8, 255, 0, 255].repeat(2 * 2); // BGRA green, 2×2
+        let green = [0u8, 255, 0, 255].repeat(2 * 2); // BGRA green, 2×2
         let sources = [GpuSource {
             kind: GpuSourceKind::TestPattern,
             bgra: &green,

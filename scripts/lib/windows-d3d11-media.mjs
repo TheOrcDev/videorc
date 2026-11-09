@@ -62,18 +62,33 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
   contract: Object.freeze([
     'compositor::tests::windows_d3d11_export_handle_is_role_bound_and_releases_on_final_clone',
     'compositor::tests::windows_d3d11_pixel_formats_keep_preview_and_encoder_surfaces_distinct',
+    'diagnostics::tests::windows_d3d11_media_session_end_resets_only_the_ended_session',
     'native_preview_host::tests::windows_d3d11_main_owned_host_bounds_preserve_opaque_handle_and_generation',
-    'preview_surface::tests::windows_d3d11_main_owned_preview_bounds_are_generation_bound_and_redacted',
     'protocol::tests::windows_d3d11_main_owned_preview_bounds_preserve_opaque_hwnd_and_generation',
     'protocol::tests::windows_d3d11_opaque_hwnd_rejects_unsafe_wire_values',
+    'protocol::tests::windows_d3d11_presenter_media_generation_is_stable_on_the_wire',
     'protocol::tests::windows_d3d11_renderer_preview_bounds_never_serialize_an_hwnd',
+    'protocol::tests::windows_d3d11_synchronization_timeout_counter_is_stable_on_the_wire',
+    'recording::tests::windows_d3d11_fallback_diagnostics_name_the_legacy_path',
+    'recording::tests::windows_d3d11_fallback_prepares_the_screen_the_preflight_skipped',
+    'recording::tests::windows_d3d11_final_snapshot_waits_for_writer_and_monitor_join',
     'recording::tests::windows_d3d11_layout_capability_covers_shipping_display_camera_presets',
+    'recording::tests::windows_d3d11_monitor_updates_only_its_session_and_generation',
+    'recording::tests::windows_d3d11_preflight_bypasses_only_the_dxgi_screen_store',
+    'recording::tests::windows_d3d11_preview_monitor_closes_and_reopens_cleanly',
+    'recording::tests::windows_d3d11_recovery_allows_one_immediate_successor_then_fails_closed',
+    'recording::tests::windows_d3d11_recovery_rejects_stale_and_skipped_generations',
     'tests::windows_d3d11_main_owned_preview_bounds_are_admin_only',
+    'windows_d3d11_device::tests::cancelled_capture_and_pointer_failure_wait_for_gpu_completion_before_reuse',
     'windows_d3d11_device::tests::canonical_dxgi_screen_id_round_trips_adapter_and_output',
     'windows_d3d11_device::tests::cloned_export_ticket_releases_role_exactly_once_on_last_drop',
+    'windows_d3d11_device::tests::device_loss_retires_each_generation_once_without_touching_replacement',
+    'windows_d3d11_device::tests::failed_capture_retirement_signal_quarantines_the_published_slot',
     'windows_d3d11_device::tests::full_drop_queue_fails_closed_without_blocking_or_recycling',
     'windows_d3d11_device::tests::pool_rejects_duplicate_roles_stale_generations_and_fence_regressions',
     'windows_d3d11_device::tests::preview_release_cannot_stop_active_stream_role',
+    'windows_d3d11_device::tests::preview_status_error_invalidates_an_older_presenter_snapshot',
+    'windows_d3d11_device::tests::retired_encoder_counters_preserve_final_drain_and_flush_timeouts',
     'windows_d3d11_device::tests::windows_d3d11_adapter_selection_rejects_invalid_screen_ids',
     'windows_d3d11_device::tests::windows_d3d11_coordinator_rejects_cross_adapter_reuse',
     'windows_d3d11_device::tests::windows_d3d11_latency_samples_are_bounded_and_report_p95_and_max',
@@ -89,6 +104,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
   ]),
   capture: Object.freeze([
     'windows_d3d11_capture::tests::windows_d3d11_capture_copies_before_releasing_duplication_frame',
+    'windows_d3d11_capture::tests::windows_d3d11_capture_keeps_recording_when_windows_masks_protected_content',
     'windows_d3d11_capture::tests::windows_d3d11_capture_latest_wins_is_bounded',
     'windows_d3d11_capture::tests::windows_d3d11_capture_pointer_only_publication_is_truthful',
     'windows_d3d11_capture::tests::windows_d3d11_capture_pointer_ownership_is_exactly_once',
@@ -100,20 +116,25 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_capture::tests::windows_d3d11_capture_wgc_cursor_exclusion_fails_closed'
   ]),
   compositor: Object.freeze([
+    'windows_d3d11_compositor::runtime::sprite_shader_tests::windows_d3d11_shaders_compile_with_the_buddy_sprite_turn',
+    'windows_d3d11_compositor::tests::windows_d3d11_compositor_bt709_video_range_matches_reference_fixtures',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_filters_scene_layers_per_output_leg',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_layout_plan_preserves_horizontal_and_vertical_geometry',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_overlay_alpha_uses_straight_alpha_contract',
+    'windows_d3d11_compositor::tests::windows_d3d11_compositor_plans_the_uncut_box_beyond_the_canvas',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_primary_and_auxiliary_outputs_validate_dimensions',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_rejects_adapter_and_generation_mismatch',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_rejects_layers_with_no_output_leg',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_runtime_blend_state_matches_overlay_reference',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_test_readback_is_separately_attributed',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_transforms_crop_mirror_and_masks_match_cpu_contract',
-    'windows_d3d11_compositor::tests::windows_d3d11_compositor_bt709_video_range_matches_reference_fixtures',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_unsupported_scene_feature_falls_back_whole_frame',
     'windows_d3d11_device::tests::windows_d3d11_compositor_source_requires_live_role_bound_ticket'
   ]),
   encoder: Object.freeze([
+    'encoder_bridge::tests::windows_d3d11_primary_sequence_newer_only_for_unseen_publications',
+    'windows_d3d11_encoder_contract::startup_failure_tests::mf_both_topology_failures_survive_long_multibyte_identity',
+    'windows_d3d11_encoder_contract::startup_failure_tests::mf_unstructured_probe_failure_retains_its_reason',
     'windows_d3d11_encoder_contract::tests::windows_d3d11_encoder_callbacks_recycle_more_than_pool_capacity',
     'windows_d3d11_encoder_contract::tests::windows_d3d11_encoder_drain_waits_for_tracked_callbacks',
     'windows_d3d11_encoder_contract::tests::windows_d3d11_encoder_need_input_and_output_never_release_leases',
@@ -126,24 +147,58 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_media_foundation_encoder::tests::windows_d3d11_encoder_tracked_callback_keys_and_roles_are_unambiguous'
   ]),
   preview: Object.freeze([
+    'windows_d3d11_preview::runtime::tests::windows_d3d11_preview_extended_style_contains_click_through_noactivate_triple',
+    'windows_d3d11_preview::runtime::tests::windows_d3d11_preview_swapchain_is_flip_model_bgra_and_double_buffered',
+    'windows_d3d11_preview::runtime::tests::windows_d3d11_preview_wndproc_is_transparent_and_never_activates',
     'windows_d3d11_preview::tests::windows_d3d11_preview_claim_requires_first_present_and_source_liveness',
     'windows_d3d11_preview::tests::windows_d3d11_preview_clipped_actual_bounds_are_scalar_and_sanitized',
-    'windows_d3d11_preview::tests::windows_d3d11_preview_extended_style_contains_click_through_noactivate_triple',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_diagnostics_identify_the_media_authority_generation',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_foreign_window_inside_the_slot_fails_stacking',
     'windows_d3d11_preview::tests::windows_d3d11_preview_hidden_and_busy_frames_drop_without_revoking_claim',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_hidden_owned_windows_may_cover_the_presenter',
     'windows_d3d11_preview::tests::windows_d3d11_preview_latest_wins_drop_is_bounded_diagnostic',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_owned_group_at_the_top_of_the_z_order_uses_hwnd_top',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_presenter_claims_the_top_of_previews_owned_group',
     'windows_d3d11_preview::tests::windows_d3d11_preview_rejects_foreign_owner_and_stale_generation',
     'windows_d3d11_preview::tests::windows_d3d11_preview_rejects_missing_target_and_wrong_z_order',
-    'windows_d3d11_preview::tests::windows_d3d11_preview_swapchain_is_flip_model_bgra_and_double_buffered',
-    'windows_d3d11_preview::tests::windows_d3d11_preview_wndproc_is_transparent_and_never_activates',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_timing_measures_the_presenters_own_cadence_and_latency',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_timing_skips_hidden_gaps_and_resets_on_rearm',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_timing_window_is_bounded',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_visible_owned_window_over_presenter_is_restacked',
+    'windows_d3d11_session::runtime::windows_buddy_legs_of_one_tick_share_the_animator_step',
+    'windows_d3d11_session::runtime::windows_live_plan_draws_the_live_background_on_the_stream_target',
+    'windows_d3d11_session::runtime::windows_live_scene_mapping_keeps_slots_auxiliary_geometry_and_takeover',
+    'windows_d3d11_session::runtime::windows_live_snapshot_fences_precommit_same_id_generations_and_recovery_bootstrap',
+    'windows_d3d11_session::runtime::windows_live_startup_scene_holds_the_committed_scene_before_the_coordinator',
+    'windows_d3d11_session::runtime::windows_overlay_frames_stack_the_buddy_between_captions_and_the_card',
+    'windows_d3d11_session::runtime::windows_preview_composition_draws_the_program_while_each_leg_keeps_its_plan',
+    'windows_d3d11_session::tests::render_ticks_stay_on_the_wall_clock_grid_despite_sleep_overshoot',
+    'windows_d3d11_session::tests::the_buddy_clock_is_the_output_sequence_over_the_fps',
+    'windows_d3d11_session::tests::the_preview_bit_follows_program_shows_over_every_d3d11_session_shape',
+    'windows_d3d11_session::tests::the_preview_draws_the_program_and_each_encoded_leg_keeps_its_plan',
+    'windows_d3d11_session::tests::windows_banner_layers_sit_between_scene_and_captions',
     'windows_d3d11_session::tests::windows_d3d11_accepts_scaled_split_outputs_and_screen_camera_upload',
+    'windows_d3d11_session::tests::windows_d3d11_auto_falls_back_for_unqualified_2k_output',
     'windows_d3d11_session::tests::windows_d3d11_auto_names_layout_and_window_fallbacks',
+    'windows_d3d11_session::tests::windows_d3d11_buddy_bubble_sits_above_the_head_like_cpu_and_metal',
+    'windows_d3d11_session::tests::windows_d3d11_buddy_sprite_clips_at_the_canvas_edge_instead_of_squashing',
+    'windows_d3d11_session::tests::windows_d3d11_buddy_sprite_vertices_match_the_cpu_and_metal_quad',
+    'windows_d3d11_session::tests::windows_d3d11_cfr_blank_preserves_clock_after_start_but_never_supplies_startup',
     'windows_d3d11_session::tests::windows_d3d11_cfr_rejects_nonadvancing_capture_sequence',
     'windows_d3d11_session::tests::windows_d3d11_cfr_repeats_retained_static_source_at_render_cadence',
+    'windows_d3d11_session::tests::windows_d3d11_cfr_replacement_resets_only_the_source_fence',
     'windows_d3d11_session::tests::windows_d3d11_claim_gate_requires_every_ticket_and_encoder',
     'windows_d3d11_session::tests::windows_d3d11_media_env_selects_auto_required_and_disabled',
+    'windows_d3d11_session::tests::windows_d3d11_overlay_layer_geometry_follows_the_shared_rect_oracle',
+    'windows_d3d11_session::tests::windows_d3d11_pump_snapshot_defaults_render_telemetry_to_zero',
+    'windows_d3d11_session::tests::windows_d3d11_render_tick_overrun_accounting_is_interval_relative',
     'windows_d3d11_session::tests::windows_d3d11_required_fails_closed_for_unsupported_session',
+    'windows_d3d11_session::tests::windows_d3d11_scene_with_a_background_stays_on_d3d11',
+    'windows_d3d11_session::tests::windows_d3d11_sessions_size_deep_render_pools',
     'windows_d3d11_session::tests::windows_d3d11_split_session_assigns_record_and_stream_roles',
-    'windows_d3d11_session::tests::windows_d3d11_supported_auto_session_gets_generation_roles'
+    'windows_d3d11_session::tests::windows_d3d11_supported_auto_session_gets_generation_roles',
+    'windows_d3d11_session::tests::windows_d3d11_ticket_source_treats_every_stopped_pump_as_terminal',
+    'windows_d3d11_session::tests::windows_source_presenter_liveness_distinguishes_unavailable_inputs_none_and_takeover'
   ])
 })
 
@@ -425,9 +480,11 @@ export function assertWindowsD3d11RustDiscovery(
   if (expected.length === 0) {
     throw new Error(`Windows D3D11 Rust manifest for ${resolvedStage} contained zero tests.`)
   }
-  const expectedSet = new Set(expected)
+  // Discovery lists every stage's tests, so a lower stage requires its own
+  // prefix but only rejects tests no stage names.
+  const manifestSet = new Set(requiredWindowsD3d11TestsThrough('preview'))
   const missing = expected.filter((name) => !discovered.includes(name))
-  const extra = discovered.filter((name) => !expectedSet.has(name))
+  const extra = discovered.filter((name) => !manifestSet.has(name))
   if (missing.length > 0) {
     throw new Error(`Windows D3D11 Rust discovery was missing: ${missing.join(', ')}`)
   }

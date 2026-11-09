@@ -473,7 +473,6 @@ class StudioBackend {
   xPrepareCount = 0
   xPrepareFailuresRemaining = 0
   xPublishCount = 0
-  xPublishTweetError: string | undefined
   xEndFailuresRemaining = 0
   platformAccountValidations: PlatformAccountValidation[] = []
   audioProcessingResponseDelayMs = 0
@@ -1413,7 +1412,6 @@ class StudioBackend {
           mediaKey: `x-media-key-${publishSequence}`,
           shareUrl: `https://x.com/i/broadcasts/${publishSequence}`,
           state: 'running',
-          ...(this.xPublishTweetError ? { tweetError: this.xPublishTweetError } : {}),
           message: 'X broadcast published.'
         }
       }
@@ -1558,14 +1556,24 @@ class StudioBackend {
       case 'events.setIncluded':
       case 'events.setExcluded':
         return null
-      case 'audio.processing.update':
+      case 'audio.processing.update': {
+        const reasonCode =
+          this.audioProcessingReasonCode === 'microphone-noise-suppression-unavailable' &&
+          params.microphoneNoiseSuppression !== 'rnnoise'
+            ? null
+            : this.audioProcessingReasonCode
         return {
           sessionId: params.sessionId,
-          applied: this.audioProcessingReasonCode === null,
+          applied: reasonCode === null,
+          microphoneNoiseSuppression: params.microphoneNoiseSuppression ?? 'off',
           microphoneGainDb: params.microphoneGainDb,
           microphoneMuted: params.microphoneMuted,
-          ...(this.audioProcessingReasonCode ? { reasonCode: this.audioProcessingReasonCode } : {})
+          ...(reasonCode ? { reasonCode } : {}),
+          ...(reasonCode === 'microphone-noise-suppression-unavailable'
+            ? { confirmedMicrophoneNoiseSuppression: 'off' }
+            : {})
         }
+      }
       case 'session.start': {
         if (this.sessionStartError) {
           throw new Error(this.sessionStartError)
@@ -8038,6 +8046,226 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
   }, 15_000)
 
+  // The ring holds the session while the camera is turned off, so the idle
+  // scene reload skips it. The ring used to re-arm before that reload ran:
+  // the scene kept the camera and the look never confirmed (Save stayed off).
+  it('loads a camera Off picked during a buffer-only session before the ring re-arms', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    // A scene without the camera, so turning it off leaves nothing to block.
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' &&
+        latest()?.core.canSaveScene === true
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.replayOnly === true && latest()?.core.canSaveScene === true
+    )
+
+    const cameras = latest()!.core.deviceList.devices.filter((device) => device.kind === 'camera')
+    const commandsBefore = backend.sentCommands.length
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest()!.core.captureConfig.sources, cameras, undefined)
+      )
+    })
+    await waitForObservation(() =>
+      backend.sentCommands
+        .slice(commandsBefore)
+        .some((command) => command.method === 'session.start')
+    )
+    const after = backend.sentCommands.slice(commandsBefore)
+    const load = after.findIndex(
+      (command) =>
+        command.method === 'scene.load_from_capture_config' &&
+        (command.params as { sources?: SourceSelection }).sources?.cameraOff === true
+    )
+    const stop = after.findIndex((command) => command.method === 'session.stop')
+    const rearm = after.findIndex((command) => command.method === 'session.start')
+    expect(stop).toBeGreaterThanOrEqual(0)
+    expect(load).toBeGreaterThan(stop)
+    expect(load).toBeLessThan(rearm)
+    expect((after[rearm]!.params as { sources?: SourceSelection }).sources?.cameraOff).toBe(true)
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.replayOnly === true && latest()?.core.canSaveScene === true
+    )
+  }, 15_000)
+
+  // The ring's own start answers after the pick (ogre, 2026-11-06): that start
+  // carried the old camera, and the idle reload skipped the ring it started.
+  it('restarts a buffer-only ring on a camera Off picked while its start is in flight', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' &&
+        latest()?.core.canSaveScene === true
+    )
+    const releaseStart = backend.deferResponse('session.start', BACKEND_RESPONSE)
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'session.start')
+    )
+
+    const cameras = latest()!.core.deviceList.devices.filter((device) => device.kind === 'camera')
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest()!.core.captureConfig.sources, cameras, undefined)
+      )
+    })
+    await waitForObservation(() => latest()?.core.captureConfig.sources.cameraOff === true)
+    const commandsBefore = backend.sentCommands.length
+    await act(async () => {
+      releaseStart()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands
+        .slice(commandsBefore)
+        .some((command) => command.method === 'session.start')
+    )
+    const after = backend.sentCommands.slice(commandsBefore)
+    const stop = after.findIndex((command) => command.method === 'session.stop')
+    const load = after.findIndex(
+      (command) =>
+        command.method === 'scene.load_from_capture_config' &&
+        (command.params as { sources?: SourceSelection }).sources?.cameraOff === true
+    )
+    const rearm = after.findIndex((command) => command.method === 'session.start')
+    expect(stop).toBeGreaterThanOrEqual(0)
+    expect(load).toBeGreaterThan(stop)
+    expect(load).toBeLessThan(rearm)
+    expect((after[rearm]!.params as { sources?: SourceSelection }).sources?.cameraOff).toBe(true)
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.replayOnly === true &&
+        backend.confirmedSources.cameraOff === true &&
+        latest()?.core.canSaveScene === true
+    )
+  }, 15_000)
+
+  // Clips waits for the Screen Recording grant, and turning the screen off
+  // ends the wait with the ring idle between sessions: its start (150 ms) used
+  // to overtake the idle scene reload (250 ms), carry the old scene and,
+  // holding the session, cancel that reload, so Save stayed off (ogre,
+  // 2026-11-06: a camera Off while the ring waited to re-arm).
+  it('loads a screen Off picked while the ring is idle before the ring starts', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'granted',
+        screen: 'not-determined'
+      })
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.mediaAccess?.screen === 'not-determined'
+    )
+    // A scene without the screen, so turning it off leaves nothing to block.
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'camera-only' }))
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'camera-only' &&
+        latest()?.core.canSaveScene === true
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(
+      () => latest()?.replay.armed === true && latest()?.replay.waitReason != null
+    )
+    expect(backend.sentCommands.some((command) => command.method === 'session.start')).toBe(false)
+
+    const screens = latest()!.core.deviceList.devices.filter((device) => device.kind === 'screen')
+    const commandsBefore = backend.sentCommands.length
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive(
+        'capture',
+        buildCaptureSources(latest()!.core.captureConfig.sources, screens, undefined)
+      )
+    })
+    await waitForObservation(() =>
+      backend.sentCommands
+        .slice(commandsBefore)
+        .some((command) => command.method === 'session.start')
+    )
+    const after = backend.sentCommands.slice(commandsBefore)
+    const load = after.findIndex(
+      (command) =>
+        command.method === 'scene.load_from_capture_config' &&
+        (command.params as { sources?: SourceSelection }).sources?.captureOff === true
+    )
+    const start = after.findIndex((command) => command.method === 'session.start')
+    expect(load).toBeGreaterThanOrEqual(0)
+    expect(load).toBeLessThan(start)
+    expect((after[start]!.params as { sources?: SourceSelection }).sources?.captureOff).toBe(true)
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.replayOnly === true && latest()?.core.canSaveScene === true
+    )
+  }, 15_000)
+
   it('records a live camera Off as intent that survives confirmation', async () => {
     const backend = new StudioBackend()
     backend.recordingState = 'recording'
@@ -12038,7 +12266,12 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       latest()?.core.setCaptureConfig((current) => ({
         ...current,
-        audio: { ...current.audio, microphoneGainDb: 6, microphoneMuted: true }
+        audio: {
+          ...current.audio,
+          microphoneGainDb: 6,
+          microphoneMuted: true,
+          microphoneNoiseSuppression: 'rnnoise'
+        }
       }))
     })
     await act(async () => {
@@ -12056,6 +12289,7 @@ describe('real StudioProvider lifecycle', () => {
       expect.objectContaining({
         params: {
           sessionId: 'session-1',
+          microphoneNoiseSuppression: 'rnnoise',
           microphoneGainDb: 6,
           microphoneMuted: true
         }
@@ -12141,6 +12375,7 @@ describe('real StudioProvider lifecycle', () => {
       expect.objectContaining({
         params: {
           sessionId: 'session-1',
+          microphoneNoiseSuppression: 'off',
           microphoneGainDb: 0,
           microphoneMuted: false,
           systemAudioEnabled: true,
@@ -12186,6 +12421,7 @@ describe('real StudioProvider lifecycle', () => {
           payload: {
             id: 'health-system-audio-lost',
             sessionId: 'session-1',
+            microphoneNoiseSuppression: 'off',
             level: 'warn',
             code: 'system-audio-lost',
             message: 'System audio stopped. The session continues with the microphone.',
@@ -12338,7 +12574,10 @@ describe('real StudioProvider lifecycle', () => {
       }
     }
 
-    async function startSystemAudioSession(backend: StudioBackend): Promise<{
+    async function startSystemAudioSession(
+      backend: StudioBackend,
+      beforeStart?: (latest: () => StudioCoreContextValue) => Promise<void>
+    ): Promise<{
       latest: () => StudioCoreContextValue
       emit: (name: string, value: unknown) => void
       updates: () => Array<Record<string, unknown>>
@@ -12371,6 +12610,7 @@ describe('real StudioProvider lifecycle', () => {
           latest().wsStatus === 'connected' &&
           latest().captureConfig.sources.microphoneId === 'mic:1'
       )
+      if (beforeStart) await beforeStart(latest)
       await act(async () => {
         await latest().startSession()
       })
@@ -12487,6 +12727,113 @@ describe('real StudioProvider lifecycle', () => {
       await waitForObservation(() => updates().length === 5)
       expect(updates()[4]).toMatchObject({ systemAudioEnabled: false })
       expect(latest().systemAudioIssue).toBeNull()
+    })
+
+    it('restores Off after unavailable RNNoise while keeping gain and mute live', async () => {
+      const backend = new StudioBackend()
+      backend.audioProcessingReasonCode = 'microphone-noise-suppression-unavailable'
+      const { latest, updates } = await startSystemAudioSession(backend)
+      await act(async () => {
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneNoiseSuppression: 'rnnoise' }
+        }))
+      })
+      await waitForObservation(
+        () =>
+          updates().length >= 1 && latest().captureConfig.audio.microphoneNoiseSuppression === 'off'
+      )
+      expect(latest().lastError).toContain('Noise reduction is unavailable')
+      backend.audioProcessingReasonCode = null
+      await act(async () => {
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneGainDb: 6, microphoneMuted: true }
+        }))
+      })
+      await waitForObservation(() => updates().at(-1)?.microphoneGainDb === 6)
+      expect(updates().at(-1)).toMatchObject({
+        microphoneNoiseSuppression: 'off',
+        microphoneGainDb: 6,
+        microphoneMuted: true
+      })
+    })
+
+    const startWithNoiseReduction = async (latest: () => StudioCoreContextValue): Promise<void> => {
+      await act(async () => {
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneNoiseSuppression: 'rnnoise' }
+        }))
+      })
+    }
+
+    it('confirms noise reduction once after a start that asked for it', async () => {
+      const backend = new StudioBackend()
+      const { latest, updates } = await startSystemAudioSession(backend, startWithNoiseReduction)
+      const started = backend.sentCommands.find((command) => command.method === 'session.start')
+      expect(
+        (started?.params as { audio: { microphoneNoiseSuppression?: string } }).audio
+      ).toMatchObject({ microphoneNoiseSuppression: 'rnnoise' })
+      await waitForObservation(() => updates().length === 1)
+      expect(updates()[0]).toMatchObject({
+        sessionId: 'session-1',
+        microphoneNoiseSuppression: 'rnnoise'
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+      expect(updates()).toHaveLength(1)
+      expect(latest().captureConfig.audio.microphoneNoiseSuppression).toBe('rnnoise')
+      expect(latest().lastError).toBeNull()
+      expect(toastSpies.error).not.toHaveBeenCalled()
+      expect(toastSpies.warning).not.toHaveBeenCalled()
+    })
+
+    it('shows Off and one message when the started session cannot run noise reduction', async () => {
+      // A microphone that bypasses the session audio bus starts without
+      // noise reduction: the confirmation after start is rejected, the
+      // rollback shows Off, and the backend's own record of the downgrade
+      // (its health event) adds no second notice.
+      const backend = new StudioBackend()
+      backend.audioProcessingReasonCode = 'microphone-noise-suppression-unavailable'
+      const { latest, updates, emitIssue } = await startSystemAudioSession(
+        backend,
+        startWithNoiseReduction
+      )
+      await waitForObservation(
+        () =>
+          updates().length >= 1 && latest().captureConfig.audio.microphoneNoiseSuppression === 'off'
+      )
+      expect(updates()[0]).toMatchObject({ microphoneNoiseSuppression: 'rnnoise' })
+      expect(latest().lastError).toContain(
+        'Noise reduction is unavailable for this capture. It is Off.'
+      )
+      const notices = (): number =>
+        toastSpies.error.mock.calls.length + toastSpies.warning.mock.calls.length
+      await waitForObservation(() => notices() === 1)
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+      // A rejection re-sends the system audio fields (PR #477 review); that
+      // and anything after it asks for Off, never for noise reduction again.
+      const settled = updates().length
+      expect(
+        updates()
+          .slice(1)
+          .map((update) => update.microphoneNoiseSuppression)
+      ).toEqual(
+        updates()
+          .slice(1)
+          .map(() => 'off')
+      )
+      await emitIssue('microphone-noise-suppression-unavailable')
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+      expect(updates()).toHaveLength(settled)
+      expect(latest().captureConfig.audio.microphoneNoiseSuppression).toBe('off')
+      expect(notices()).toBe(1)
     })
 
     it('sends a rejected system audio update again instead of treating it as sent', async () => {
@@ -13923,7 +14270,6 @@ describe('real StudioProvider lifecycle', () => {
   it('ends the actual X broadcast when the session dies during publish', async () => {
     const backend = new StudioBackend()
     enableXOauthForTest(backend)
-    backend.xPublishTweetError = 'The announcement post was rejected.'
     backend.terminalRecordingStatusOnMethod = 'streamTargets.x.publish'
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -13985,10 +14331,9 @@ describe('real StudioProvider lifecycle', () => {
     ).toBe('stopped')
   })
 
-  it('keeps a published X broadcast live when only the announcement post fails', async () => {
+  it('shows a published X broadcast live with its share link and no error', async () => {
     const backend = new StudioBackend()
     enableXOauthForTest(backend)
-    backend.xPublishTweetError = 'The announcement post was rejected.'
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
     const api = createVideorcApi({
@@ -14020,9 +14365,20 @@ describe('real StudioProvider lifecycle', () => {
       latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
     ).toMatchObject({
       state: 'live',
-      lastError: 'The announcement post was rejected.',
+      message: 'X broadcast is live: https://x.com/i/broadcasts/1',
       redactedUrl: 'https://x.com/i/broadcasts/1'
     })
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
+        ?.lastError
+    ).toBeUndefined()
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.publish')
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.not.objectContaining({ region: expect.anything() })
+      })
+    ])
     expect(
       backend.sentCommands.filter((command) => command.method === 'liveChat.x.start')
     ).toHaveLength(1)

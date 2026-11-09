@@ -56,7 +56,8 @@ import { formatDb } from '@/lib/audio/decibels'
 import {
   SOUNDBOARD_VOLUME_DB_MAX,
   SOUNDBOARD_VOLUME_DB_MIN,
-  type AudioSettings
+  type AudioSettings,
+  type MicrophoneNoiseSuppression
 } from '@/lib/backend'
 import {
   MICROPHONE_SYNC_OFFSET_MAX_MS,
@@ -72,6 +73,7 @@ import {
 } from '@/lib/capture'
 import {
   meterHasNoReading,
+  MIC_SESSION_LEVEL_UNAVAILABLE_COPY,
   micLevelUnavailableCopy,
   soundsMeterInput,
   systemAudioMeterInput,
@@ -151,6 +153,31 @@ function MixerRow({ children }: { children: ReactNode }): ReactElement {
  */
 export function keepMicrophoneReadyHint(platform: string | undefined): string {
   return `Opens the microphone while Studio is on screen, so Record starts at once. ${microphoneIndicatorCopy(platform)} while it's open; hiding the window releases it.`
+}
+
+/**
+ * The Microphone row's Noise reduction switch (PR 1036): checked is RNNoise.
+ * It can't turn On with no microphone, and its line says so instead of the
+ * level fact. Off always stays possible: removing a microphone keeps the
+ * choice (docs/rnnoise.md), so a switch left On never gets stuck there.
+ * Outside a recording or livestream the level is the input before noise
+ * reduction, so the line says when it shows the cleaned sound.
+ */
+export function noiseReductionSwitchView(
+  value: MicrophoneNoiseSuppression,
+  microphoneSelected: boolean
+): { checked: boolean; disabled: boolean; description: string } {
+  const checked = value === 'rnnoise'
+  const disabled = !checked && !microphoneSelected
+  return {
+    checked,
+    disabled,
+    description: `Cuts background noise while you record or go live. ${
+      disabled
+        ? 'Choose a microphone to turn it on.'
+        : 'The level shows the cleaned sound only then.'
+    }`
+  }
 }
 
 /** The Sources "Audio" column: the Microphone, System audio, then the soundboard's Sounds. */
@@ -237,6 +264,10 @@ export function SourcesAudioMixer(): ReactElement {
                   muteShortcut={settings.globalShortcuts?.micToggle}
                   platform={platform}
                   muted={audio.microphoneMuted}
+                  noiseSuppression={audio.microphoneNoiseSuppression ?? 'off'}
+                  onNoiseSuppressionChange={(microphoneNoiseSuppression) =>
+                    setAudio((current) => ({ ...current, microphoneNoiseSuppression }))
+                  }
                   picker={
                     <DevicePicker
                       description={<SourceSwitchStatus kind="microphone" />}
@@ -260,12 +291,14 @@ export function SourcesAudioMixer(): ReactElement {
                     />
                   }
                   sessionActive={isSessionActive}
+                  sessionLevelUnavailable={microphone.sessionLevelUnavailable}
                   status={microphoneStatus({
                     selected: Boolean(microphoneId),
                     switching: sourceDeviceSwitchPending === 'microphone',
                     device: selectedDeviceStatus(deviceList.devices, microphoneId),
                     muted: audio.microphoneMuted,
-                    sessionActive: isSessionActive
+                    sessionActive: isSessionActive,
+                    silent: microphone.monitorState === 'silent'
                   })}
                   syncOffsetMs={audio.microphoneSyncOffsetMs}
                   syncUserSet={audio.microphoneSyncOffsetUserSet === true}
@@ -327,9 +360,9 @@ export function SourcesAudioMixer(): ReactElement {
 }
 
 /**
- * The Microphone row: Mute in the header; the picker, its level and Gain in
- * the body; Sync, Keep microphone ready (and, in development builds,
- * Calibrate) folded into More.
+ * The Microphone row: Mute in the header; the picker, its level, Gain and
+ * Noise reduction in the body; Sync, Keep microphone ready (and, in
+ * development builds, Calibrate) folded into More.
  * Markup from props, so the tests render it.
  */
 export function MicrophoneChannel({
@@ -341,11 +374,14 @@ export function MicrophoneChannel({
   unavailableReason,
   gainDb,
   muted,
+  noiseSuppression = 'off',
+  onNoiseSuppressionChange,
   muteShortcut,
   platform,
   syncOffsetMs,
   syncUserSet,
   sessionActive,
+  sessionLevelUnavailable = false,
   calibration,
   keepReady,
   defaultMoreOpen,
@@ -362,12 +398,16 @@ export function MicrophoneChannel({
   unavailableReason: MicStreamFailureReason | undefined
   gainDb: number
   muted: boolean
+  noiseSuppression?: MicrophoneNoiseSuppression
+  onNoiseSuppressionChange?: (value: MicrophoneNoiseSuppression) => void
   /** The bound global mute shortcut (an accelerator); absent when none is bound. */
   muteShortcut?: string
   platform?: string
   syncOffsetMs: number
   syncUserSet: boolean
   sessionActive: boolean
+  /** Issue 1064: the running bus sends no level, so the meter shows none. */
+  sessionLevelUnavailable?: boolean
   /** Calibrate, in development builds only (plan 173, D3); null otherwise. */
   calibration: ReactNode
   /** Keep the microphone open while Studio is on screen (plan 174 S3.6, D5). */
@@ -378,6 +418,7 @@ export function MicrophoneChannel({
   onSyncChange: (offsetMs: number, reason: ParameterChangeReason) => void
 }): ReactElement {
   const tag = syncOffsetTag(syncOffsetMs, syncUserSet)
+  const noiseReduction = noiseReductionSwitchView(noiseSuppression, microphoneSelected)
   return (
     <AudioConfigProvider value={{ dimmed: muted || !microphoneSelected }}>
       <SourceItem
@@ -465,7 +506,27 @@ export function MicrophoneChannel({
           >
             {micLevelUnavailableCopy(unavailableReason)}
           </p>
+        ) : sessionLevelUnavailable ? (
+          <p className="text-xs text-muted-foreground" data-videorc-mic-level-reason="session">
+            {MIC_SESSION_LEVEL_UNAVAILABLE_COPY}
+          </p>
         ) : null}
+        <SettingsRow
+          data-videorc-mic-noise-reduction=""
+          description={noiseReduction.description}
+          label="Noise reduction"
+        >
+          <Switch
+            checked={noiseReduction.checked}
+            disabled={noiseReduction.disabled}
+            size="sm"
+            onCheckedChange={(checked) => {
+              // Never On without a microphone; Off always goes through.
+              if (checked && !microphoneSelected) return
+              onNoiseSuppressionChange?.(checked ? 'rnnoise' : 'off')
+            }}
+          />
+        </SettingsRow>
       </SourceItem>
     </AudioConfigProvider>
   )

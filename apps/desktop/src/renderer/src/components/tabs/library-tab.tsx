@@ -905,7 +905,8 @@ function LibraryRow({
   // still runs; the row says so instead of claiming an MKV.
   const finalizing = isFinalizingSession(session)
   const exportFailed = finalizationFailed(session)
-  // A take Videorc stopped in the middle of, recovered on the next start.
+  // A take that ended early (a crash, or a recording that failed mid-take),
+  // recovered as MP4.
   const recovered = interruptedTakeBadge(session)
   // Plan 198: a Screen or Camera file that stopped during the take.
   const fileStopped = separateFileStopped(session)

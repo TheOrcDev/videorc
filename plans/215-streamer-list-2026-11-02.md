@@ -819,3 +819,18 @@ Windows CI for D3D11.
     gate's mirrored corner.
   - Owed: Rust tests and clippy (CI), the smokes (G2, G4), and checking it
     by eye in both themes and both orientations.
+  - **Dual-orientation fix (2026-11-03).** `pnpm smoke:comment-highlight-stream`
+    found two things wrong with a vertical leg on. (1) The horizontal stream
+    rides the primary leg at the session's own size (1280x720 in the smoke),
+    not the stream profile's 1920, but the renderer painted the landscape box
+    for the stream settings; the box is exactly its rect's width and the
+    blit keeps pixel size, so the backend centre-cropped it and the icon and
+    first letters were gone. Now `chat.overlay.canvases` also names the
+    landscape canvas the box lands on (the smallest landscape leg,
+    `recording::chat_overlay_horizontal_canvas`), the driver paints for it,
+    and the stream settings are only the fallback. (2) The vertical box was
+    right (one message is a one-line strip at the top of its rect), but the
+    gate compared the rect's glass against its mirror, and the 80%-wide
+    portrait rect overlaps its own mirror. The gate now reads the box's left
+    edge instead: the emote, the leading YouTube icon and the glass padding
+    before it inside the rect, so the cropped horizontal box fails too.

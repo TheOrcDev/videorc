@@ -148,4 +148,31 @@ describe('Sources Video column (plan 173)', () => {
     expect(toggle).toContain('role="switch"')
     expect(toggle).toContain('aria-checked="false"')
   })
+
+  it('shows the low-light switch only for a camera that has the control (issue #1066)', () => {
+    expect(render()).not.toContain('Low-light compensation')
+    const camera = {
+      devices: cameras,
+      value: 'cam:built-in',
+      selectedName: 'MacBook Pro Camera',
+      disabled: false,
+      status: { label: 'Receiving', tone: 'good' as const },
+      facts: null,
+      shortfall: null,
+      onChange: noop
+    }
+    const off = render({
+      camera: { ...camera, lowLight: { checked: false, disabled: false, onChange: noop } }
+    })
+    expect(off).toContain('>Low-light compensation<')
+    expect(off).toContain('may drop to half its frame rate')
+    const offToggle = off.match(/<span[^>]*data-videorc-camera-low-light-toggle[^>]*>/)?.[0]
+    expect(offToggle).toContain('role="switch"')
+    expect(offToggle).toContain('aria-checked="false"')
+    const on = render({
+      camera: { ...camera, lowLight: { checked: true, disabled: false, onChange: noop } }
+    })
+    const onToggle = on.match(/<span[^>]*data-videorc-camera-low-light-toggle[^>]*>/)?.[0]
+    expect(onToggle).toContain('aria-checked="true"')
+  })
 })

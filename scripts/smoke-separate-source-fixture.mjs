@@ -53,7 +53,8 @@ const root = resolve(import.meta.dirname, '..')
 const directory = mkdtempSync(join(tmpdir(), 'videorc-separate-source-fixture-'))
 const ffmpeg = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 // The H.264 encoder this FFmpeg actually has: libx264 at CRF 12 where it
-// exists, else OpenH264 (the vendored LGPL Linux build has no libx264).
+// exists, else OpenH264 (the vendored LGPL Linux build has no libx264) or
+// Media Foundation (the vendored LGPL Windows build).
 const FIXTURE_VIDEO_CODEC_ARGS = (() => {
   const args = fixtureH264EncoderArgs(ffmpeg)
   return args.includes('libx264') ? [...args, '-crf', '12'] : args

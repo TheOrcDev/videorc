@@ -1897,11 +1897,16 @@ async fn start_missing_sources(
                         | PreviewCameraState::DeviceMissing
                         | PreviewCameraState::PermissionNeeded
                 ) {
-                    bail!(
-                        "Camera failed to start for the live {action_label} ({:?}): {}",
-                        status.state,
-                        status.message.unwrap_or_else(|| "no detail".to_string())
-                    );
+                    return Err(source_start_failure(
+                        state,
+                        intent_id,
+                        format!(
+                            "Camera failed to start for the live {action_label} ({:?}): {}",
+                            status.state,
+                            status.message.unwrap_or_else(|| "no detail".to_string())
+                        ),
+                    )
+                    .await);
                 }
             }
             "screen" => {
@@ -1957,17 +1962,37 @@ async fn start_missing_sources(
                         | PreviewScreenState::SourceMissing
                         | PreviewScreenState::PermissionNeeded
                 ) {
-                    bail!(
-                        "Screen capture failed to start for the live {action_label} ({:?}): {}",
-                        status.state,
-                        status.message.unwrap_or_else(|| "no detail".to_string())
-                    );
+                    return Err(source_start_failure(
+                        state,
+                        intent_id,
+                        format!(
+                            "Screen capture failed to start for the live {action_label} ({:?}): {}",
+                            status.state,
+                            status.message.unwrap_or_else(|| "no detail".to_string())
+                        ),
+                    )
+                    .await);
                 }
             }
             other => bail!("Unknown source kind {other} for live layout switch."),
         }
     }
     Ok(readiness_deadlines)
+}
+
+/// The error for a source start that ended Failed, missing or without
+/// permission. Supersession wins: a newer intent stops the sources it does not
+/// compose (a stopped screen reads `SourceMissing`), and a superseded waiter's
+/// joined start can return that stopped status before its supersession watcher
+/// is polled. Both are ready together under load and `select!` picks one at
+/// random, so without this check the older intent reported the newer one's
+/// retirement as its own capture failure. The newer intent always registers
+/// before it retires anything, so this check cannot miss it.
+async fn source_start_failure(state: &AppState, intent_id: u64, failure: String) -> anyhow::Error {
+    match ensure_layout_intent_current(state, intent_id).await {
+        Err(superseded) => superseded,
+        Ok(()) => anyhow::anyhow!(failure),
+    }
 }
 
 async fn active_recording_ffmpeg_path(state: &AppState) -> Option<String> {
@@ -3102,6 +3127,73 @@ mod tests {
             crate::preview_camera::stop_preview_camera(&state).await;
             crate::preview_screen::stop_preview_screen(&state).await;
         }
+    }
+
+    /// 2026-11-03, smoke:smart-scenes `hide`: the renderer stops the preview
+    /// camera because its app scene shows none, while the record+stream take
+    /// armed with Separate source recordings composes that camera into its
+    /// Camera file every tick. The client's stop is refused while the take's
+    /// Camera member is live, and goes through once that member retired.
+    #[tokio::test]
+    async fn a_client_camera_stop_is_refused_while_a_source_take_records_the_camera() {
+        let state = test_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub("iso"));
+        // The program scene is screen-only (an app scene); the take's selection
+        // still names the camera, which only the Camera file composes.
+        let mut params = config(LayoutPreset::ScreenOnly, true, true);
+        params.video.as_mut().unwrap().width = 64;
+        params.video.as_mut().unwrap().height = 36;
+        let video = params.video.as_ref().unwrap();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            params.sources.camera_id.as_deref().unwrap(),
+            &params.layout,
+            video,
+        )
+        .await;
+        let stores = crate::compositor::test_install_source_iso_frame_stores(&state).await;
+        let scene = scene_from_capture_config(params.clone());
+        assert!(
+            !required_scene_sources(&scene).camera,
+            "the program scene must not show the camera"
+        );
+        crate::compositor::update_compositor_scene_with_selected_sources(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(scene),
+                layout: params.layout.clone(),
+                active_screen: None,
+                transition_ms: None,
+            },
+            &params.sources,
+        )
+        .await;
+        assert!(crate::preview_camera::source_take_records_camera(&state).await);
+
+        let status = crate::preview_camera::stop_preview_camera_from_client(&state).await;
+        assert_eq!(
+            status.message.as_deref(),
+            Some(crate::preview_camera::CAMERA_STOP_REFUSED_BY_SOURCE_TAKE_MESSAGE)
+        );
+        assert!(
+            crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .is_some(),
+            "the camera the Camera file records must keep capturing"
+        );
+
+        // The Camera file ended (shed, or its source removed): the stop lands.
+        stores
+            .batches
+            .retire(crate::compositor::source_iso_batch::CAMERA, None);
+        assert!(!crate::preview_camera::source_take_records_camera(&state).await);
+        crate::preview_camera::stop_preview_camera_from_client(&state).await;
+        assert!(
+            crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -4843,6 +4935,38 @@ mod tests {
         assert!(source_liveness(&state, &winner_target).await.screen);
     }
 
+    /// A superseded waiter whose joined start returns first sees the newer
+    /// intent's retirement (a stopped screen reads `SourceMissing`). It must
+    /// report the supersession, never a capture failure of its own; the
+    /// current intent keeps its real failure.
+    #[tokio::test]
+    async fn a_source_start_failure_after_supersession_reports_the_supersession() {
+        let state = test_state();
+        let screen_only = SceneSourceNeeds {
+            camera: false,
+            screen: true,
+        };
+        let older = begin_layout_intent(&state, Some(10), screen_only)
+            .await
+            .expect("older intent should register");
+        let newer = begin_layout_intent(&state, Some(11), SceneSourceNeeds::default())
+            .await
+            .expect("newer intent should register");
+        let failure = "Screen capture failed to start for the live preview layout switch \
+             (SourceMissing): Stopping native screen preview; teardown remains exclusively owned.";
+
+        let superseded = source_start_failure(&state, older, failure.to_string()).await;
+        assert!(
+            superseded
+                .to_string()
+                .contains("superseded by newer intent 11"),
+            "{superseded}"
+        );
+
+        let current = source_start_failure(&state, newer, failure.to_string()).await;
+        assert_eq!(current.to_string(), failure);
+    }
+
     #[tokio::test]
     async fn superseded_layout_stops_waiting_for_an_in_flight_native_source_start() {
         let state = test_state();
@@ -5953,7 +6077,7 @@ mod tests {
                 .compositor_status
                 .scene_layout
                 .as_ref()
-                .map(|layout| layout.arrangement_mode.clone()),
+                .map(|layout| layout.arrangement_mode),
             Some(crate::protocol::ArrangementMode::Freeform)
         );
         let camera = preview_camera_status(&state).await;

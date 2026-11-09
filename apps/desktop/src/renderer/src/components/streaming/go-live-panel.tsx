@@ -18,6 +18,7 @@ import {
 import type {
   DiagnosticStats,
   PlatformAccount,
+  StreamDeliveryState,
   StreamHealth,
   StreamPlatform,
   StreamTargetRuntime,
@@ -50,6 +51,7 @@ import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
 import {
   classifyStreamHealthAttribution,
   liveProblemLabel,
+  type RecentStreamDrops,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
 import { cn } from '@/lib/utils'
@@ -85,7 +87,7 @@ export function GoLivePanel({
     streamSharedEncodeFallbackVideo,
     streamTargets
   } = useStudioCore()
-  const { diagnosticStats, streamHealth } = useStudioDiagnostics()
+  const { diagnosticStats, recentStreamDrops, streamHealth } = useStudioDiagnostics()
   const streaming = captureConfig.streaming
   // No separate stream encoder on this computer: the session records at the
   // stream's profile, so show that instead of the Output setting.
@@ -167,6 +169,7 @@ export function GoLivePanel({
         preflight={streamOutputTopologyPreflight}
         profileCompatible={!compatibility.blockingReason}
         providerPlan={providerPlan}
+        recentStreamDrops={recentStreamDrops}
         recordEnabled={captureConfig.recordEnabled}
         recordingMatchesStream={streamSharedEncodeFallbackVideo !== null}
         recordingVideo={video}
@@ -181,6 +184,7 @@ export function GoLivePanel({
         liveOutputActive={liveOutputActive}
         preflight={streamOutputTopologyPreflight}
         providerPlan={providerPlan}
+        recentStreamDrops={recentStreamDrops}
         streamHealth={currentStreamHealth}
         streamTargets={streamTargets}
       />
@@ -223,6 +227,7 @@ export function ReadyToGoLive({
   preflight,
   liveOutputActive,
   diagnosticStats,
+  recentStreamDrops,
   streamHealth,
   streamTargets,
   onOpenDestination,
@@ -244,6 +249,7 @@ export function ReadyToGoLive({
   preflight: StreamOutputTopologyPreflight
   liveOutputActive: boolean
   diagnosticStats: DiagnosticStats
+  recentStreamDrops: RecentStreamDrops
   streamHealth: StreamHealth | null
   streamTargets: StreamTargetRuntime[]
   onOpenDestination: (targetId: string) => void
@@ -306,6 +312,7 @@ export function ReadyToGoLive({
       {liveOutputActive ? (
         <LiveStreamRow
           diagnosticStats={diagnosticStats}
+          recentStreamDrops={recentStreamDrops}
           streamHealth={streamHealth}
           streamTargets={streamTargets}
         />
@@ -417,14 +424,21 @@ function StreamCheckRow({
 /** While live: quiet when healthy, the problem in a few words when not. */
 function LiveStreamRow({
   diagnosticStats,
+  recentStreamDrops,
   streamHealth,
   streamTargets
 }: {
   diagnosticStats: DiagnosticStats
+  recentStreamDrops: RecentStreamDrops
   streamHealth: StreamHealth | null
   streamTargets: StreamTargetRuntime[]
 }): ReactElement {
-  const attribution = classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets)
+  const attribution = classifyStreamHealthAttribution(
+    diagnosticStats,
+    streamHealth,
+    streamTargets,
+    recentStreamDrops
+  )
   const healthy = attribution === 'healthy'
   return (
     <ChecklistRow
@@ -442,6 +456,7 @@ export function TechnicalDetails({
   liveOutputActive,
   preflight,
   providerPlan,
+  recentStreamDrops,
   streamHealth,
   streamTargets
 }: {
@@ -449,12 +464,18 @@ export function TechnicalDetails({
   liveOutputActive: boolean
   preflight: StreamOutputTopologyPreflight
   providerPlan: ProviderStreamOutputPlan
+  recentStreamDrops: RecentStreamDrops
   streamHealth: StreamHealth | null
   streamTargets: StreamTargetRuntime[]
 }): ReactElement {
   const [open, setOpen] = useState(readTechnicalDetailsOpen)
   const attribution = liveOutputActive
-    ? classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets)
+    ? classifyStreamHealthAttribution(
+        diagnosticStats,
+        streamHealth,
+        streamTargets,
+        recentStreamDrops
+      )
     : preflightAttribution(preflight)
   const badge = streamHealthBadge(attribution, liveOutputActive)
   const probeResult = !liveOutputActive && preflight.state === 'ready' ? preflight.result : null
@@ -477,6 +498,7 @@ export function TechnicalDetails({
     ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
     : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
   const bitrate = streamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps
+  const loweredBitrate = formatLoweredBitrate(diagnosticStats.streamDelivery)
   const summary = liveOutputActive
     ? attribution === 'healthy'
       ? [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)].filter(Boolean).join(' · ')
@@ -522,8 +544,16 @@ export function TechnicalDetails({
 
         {liveOutputActive ? (
           <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
-            <OutputMetric label="Frame rate" value={formatLiveFps(streamHealth?.fps) || NO_VALUE} />
+            <OutputMetric
+              label="Frame rate"
+              value={
+                formatDeliveredFps(diagnosticStats.streamDelivery) ||
+                formatLiveFps(streamHealth?.fps) ||
+                NO_VALUE
+              }
+            />
             <OutputMetric label="Bitrate" value={formatLiveBitrate(bitrate)} />
+            {loweredBitrate ? <OutputMetric label="Bitrate target" value={loweredBitrate} /> : null}
             <OutputMetric
               label="Encoder speed"
               value={formatEncoderSpeed(streamHealth?.speed ?? diagnosticStats.encoderSpeed)}
@@ -688,6 +718,13 @@ function streamHealthBadge(
   if (attribution === 'unknown') {
     return { label: 'Unknown', tone: 'outline' }
   }
+  // Plan 218: the stream's own verdicts, in words a streamer can act on.
+  if (attribution === 'choppy') {
+    return { label: 'Choppy', tone: 'warning' }
+  }
+  if (attribution === 'uplink') {
+    return { label: 'Slow connection', tone: 'warning' }
+  }
   if (attribution === 'fallback' || attribution === 'network' || attribution === 'preview') {
     return {
       label: attribution.charAt(0).toUpperCase() + attribution.slice(1),
@@ -725,6 +762,10 @@ function streamHealthDescription(
       return 'A disconnected capture device is interrupting the stream.'
     case 'audio':
       return 'Audio capture is dropping data before the stream encode.'
+    case 'choppy':
+      return 'The stream is skipping frames that could not be sent in time, so viewers see a stutter. The recording is unaffected.'
+    case 'uplink':
+      return 'Your connection can’t carry this stream to every destination. Videorc lowers the stream’s bitrate to keep it moving; fewer destinations give it more room.'
     case 'capture':
       return 'Capture is running below the target frame rate.'
     case 'render':
@@ -776,6 +817,41 @@ function DetailRow({
 
 function formatLiveFps(value?: number): string {
   return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} fps` : ''
+}
+
+/**
+ * Plan 218: what the stream encoder delivered over its 30 s window, against
+ * the target, e.g. "21 of 30 fps". FFmpeg's own fps describes the recording
+ * file when one is written, so the stream's figure wins when it exists.
+ */
+export function formatDeliveredFps(delivery?: StreamDeliveryState): string {
+  if (!delivery || !Number.isFinite(delivery.deliveredFps) || delivery.windowSeconds <= 0) {
+    return ''
+  }
+  return `${Math.round(delivery.deliveredFps)} of ${delivery.targetFps} fps`
+}
+
+/**
+ * Plan 218 S3a: "4.8 of 6 Mbps" while Videorc holds the stream under its
+ * chosen bitrate to fit the connection; empty once it is back.
+ */
+export function formatLoweredBitrate(delivery?: StreamDeliveryState): string {
+  const current = delivery?.bitrateKbps
+  const chosen = delivery?.chosenBitrateKbps
+  if (
+    typeof current !== 'number' ||
+    typeof chosen !== 'number' ||
+    !Number.isFinite(current) ||
+    !Number.isFinite(chosen) ||
+    current >= chosen
+  ) {
+    return ''
+  }
+  const mbps = (kbps: number): string => {
+    const value = kbps / 1000
+    return Number.isInteger(value) ? `${value}` : value.toFixed(1)
+  }
+  return `${mbps(current)} of ${mbps(chosen)} Mbps`
 }
 
 function formatLiveBitrate(value?: number): string {

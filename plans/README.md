@@ -1,5 +1,34 @@
 # Implementation Plans
 
+- 2026-11-05: [Plan 218](218-the-stream-holds-its-frame-rate.md), a
+  streamer's support bundle (0.18.0): "laggy on YouTube, streaming 1080,
+  saving 1440". PLANNED, not started:
+  - Cause, proven part: in all three of their sessions (two of them
+    stream-only), about 30 % of stream frames were dropped before encode,
+    so YouTube got about 21 of 30 fps, and an RTMP leg overflowed its fifo
+    (`FIFO queue full`). The 1440p recording was clean. Neither problem
+    ever shows on the owner's Mac.
+  - Open: why FFmpeg reads the stream video late on their Mac. Either a
+    slow uplink pushing back, or FFmpeg's 100 ms interleave hold on the
+    150 ms audio playout delay. S0 asks the streamer for evidence; S1
+    reproduces it here.
+  - Fix: adaptive stream bitrate (uplink) or a stream queue budget that
+    allows for the interleave wait, plus a leg-named live warning and a
+    support bundle that can tell the two apart.
+  - Open: D1 (one slow leg lowers all), D2 (bitrate floor), D3 (pre-live
+    upload check).
+- 2026-11-04: [Plan 217](217-the-stream-never-waits-for-the-recording.md),
+  the owner's live stream lagged while recording 4K. PLANNED, not started:
+  - Cause: one FFmpeg carries the audio, the 4K recording and the 1080p
+    stream, and FFmpeg holds every input to the slowest output. When a local
+    release build pushed the load to 24 on 10 cores, the 4K leg fell behind
+    and the stream stalled for 2–3 s at a time, with up to 12 s of silent
+    audio.
+  - Fix: split-output sessions run the stream in its own FFmpeg process; the
+    recording reads a mixed audio tap that can never slow the bus.
+  - Already shipped beside it: agent builds and smokes wait while Videorc is
+    live on this Mac (`waitWhileVideorcLive`).
+  - Open: D1 (replay buffer side), D2 (stream process dies), D3 (Windows).
 - 2026-11-03: [Plan 216](216-freeform-screen-box-and-drag.md), a streamer's
   bug report with a video and a support bundle (0.18.0, all three bugs still
   on main). BUILT 2026-11-03 (#1100, #1102, #1098, #1097); the owner took

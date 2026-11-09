@@ -117,6 +117,9 @@ describe('backend RPC contract', () => {
     // The standby microphone between sessions carries no session.
     const standby = { microphone: { peakDb: -30, rmsDb: -36 }, masterClippedSamples: 0 }
     expect(validateBackendEventPayload('audio.levels', standby)).toEqual(standby)
+    // Issue 1064: the silence watchdog's report rides the levels while true.
+    const silent = { ...levels, microphone: { peakDb: -120, rmsDb: -120 }, microphoneSilent: true }
+    expect(validateBackendEventPayload('audio.levels', silent)).toEqual(silent)
     for (const malformed of [
       { ...levels, sessionId: null },
       { ...levels, microphone: { peakDb: -12, rmsDb: -20, extra: 1 } },
@@ -124,6 +127,7 @@ describe('backend RPC contract', () => {
       { ...levels, microphone: { peakDb: 60, rmsDb: -20 } },
       { ...levels, microphone: null },
       { ...levels, masterClippedSamples: -1 },
+      { ...levels, microphoneSilent: 'yes' },
       { ...levels, unknown: true }
     ]) {
       expect(() => validateBackendEventPayload('audio.levels', malformed)).toThrow()
@@ -3729,6 +3733,49 @@ it('keeps a live camera that sends no video (plan 216 D2)', () => {
   expect(() =>
     validateBackendEventPayload('preview.camera.status', { ...status, noVideo: 'yes' })
   ).toThrow()
+})
+
+describe('Camera low-light compensation wire contract (issue #1066)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/camera-low-light.json', import.meta.url),
+      'utf8'
+    )
+  ) as {
+    getParams: unknown
+    setParams: unknown
+    keepsFrameRate: unknown
+    compensating: unknown
+    unsupported: unknown
+    rejectedParams: unknown[]
+    rejectedSetParams: unknown[]
+    rejectedStates: unknown[]
+  }
+
+  it('accepts the fixture params and states, field for field', () => {
+    expect(validateBackendRpcParams('camera.lowLight.get', fixture.getParams)).toEqual(
+      fixture.getParams
+    )
+    expect(validateBackendRpcParams('camera.lowLight.set', fixture.setParams)).toEqual(
+      fixture.setParams
+    )
+    for (const state of [fixture.keepsFrameRate, fixture.compensating, fixture.unsupported]) {
+      expect(validateBackendRpcResult('camera.lowLight.get', state)).toEqual(state)
+      expect(validateBackendRpcResult('camera.lowLight.set', state)).toEqual(state)
+    }
+  })
+
+  it('rejects an empty id, a missing or null flag and a forged field', () => {
+    for (const bad of fixture.rejectedParams) {
+      expect(() => validateBackendRpcParams('camera.lowLight.get', bad)).toThrow()
+    }
+    for (const bad of fixture.rejectedSetParams) {
+      expect(() => validateBackendRpcParams('camera.lowLight.set', bad)).toThrow()
+    }
+    for (const bad of fixture.rejectedStates) {
+      expect(() => validateBackendRpcResult('camera.lowLight.get', bad)).toThrow()
+    }
+  })
 })
 
 describe('Videorc Camera wire contract (plan 214 A4)', () => {

@@ -15,6 +15,7 @@
 // u[5] = tint (linear)
 // u[6] = base colour
 precision highp float;
+precision highp int;
 
 uniform vec4 u[16];
 uniform sampler2D t0;
@@ -22,9 +23,28 @@ out vec4 outColor;
 
 const float PI = 3.141592653589793;
 
+// PCG (Jarzynski and Olano 2020) over whole numbers, then the top 24 bits as
+// a value in [0, 1): the same bits on every GPU and API. Plan 194 hashed with
+// fract(sin(x) * 47453.5453) and fract(sin(x) * 43758.5453123), whose sin of
+// hundreds to thousands of radians lands differently per driver, so Beams'
+// lanes sat elsewhere on Linux and Windows (#987, #1077).
+uint pcg(uint v) {
+  uint state = v * 747796405u + 2891336453u;
+  uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+
+float unit(uint h) {
+  return float(h >> 8u) * (1.0 / 16777216.0);
+}
+
 #ifdef VIDEORC_PASS_FIELD
+// React Bits' mod(((x * 34) + 1) * x, 289) in whole numbers (x is below
+// 578): a divide that rounds the `mod` the wrong way at a multiple of 289
+// would pick another gradient.
 vec4 permute(vec4 x) {
-  return mod(((x * 34.0) + 1.0) * x, 289.0);
+  uvec4 i = uvec4(x);
+  return vec4((i * 34u + 1u) * i % 289u);
 }
 
 vec4 taylorInvSqrt(vec4 r) {
@@ -33,6 +53,23 @@ vec4 taylorInvSqrt(vec4 r) {
 
 vec3 fade(vec3 t) {
   return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+// The gradient React Bits takes from a permutation p (a whole number below
+// 289): fract(p / 7), fract(floor(p / 7) / 7) - 0.5 and the fold back into
+// the octahedron. The sevenths are split as whole numbers and the fold is
+// decided on them: one p in seven is a multiple of 7, where a divide that
+// rounds down moves floor(p / 7) and fract(p / 7) to the other end.
+void gradient(vec4 p, out vec4 gx, out vec4 gy, out vec4 gz) {
+  vec4 q = floor((p + 0.5) / 7.0);
+  vec4 rx = p - 7.0 * q;
+  vec4 ry = q - 7.0 * floor((q + 0.5) / 7.0);
+  gx = rx / 7.0;
+  gy = ry / 7.0 - 0.5;
+  gz = vec4(0.5) - abs(gx) - abs(gy);
+  vec4 fold = step(7.0 - 2.0 * rx - abs(2.0 * ry - 7.0), vec4(0.0));
+  gx -= fold * (step(0.0, gx) - 0.5);
+  gy -= fold * (step(0.0, gy) - 0.5);
 }
 
 float cnoise(vec3 P) {
@@ -49,20 +86,10 @@ float cnoise(vec3 P) {
   vec4 ixy = permute(permute(ix) + iy);
   vec4 ixy0 = permute(ixy + iz0);
   vec4 ixy1 = permute(ixy + iz1);
-  vec4 gx0 = ixy0 / 7.0;
-  vec4 gy0 = fract(floor(gx0) / 7.0) - 0.5;
-  gx0 = fract(gx0);
-  vec4 gz0 = vec4(0.5) - abs(gx0) - abs(gy0);
-  vec4 sz0 = step(gz0, vec4(0.0));
-  gx0 -= sz0 * (step(0.0, gx0) - 0.5);
-  gy0 -= sz0 * (step(0.0, gy0) - 0.5);
-  vec4 gx1 = ixy1 / 7.0;
-  vec4 gy1 = fract(floor(gx1) / 7.0) - 0.5;
-  gx1 = fract(gx1);
-  vec4 gz1 = vec4(0.5) - abs(gx1) - abs(gy1);
-  vec4 sz1 = step(gz1, vec4(0.0));
-  gx1 -= sz1 * (step(0.0, gx1) - 0.5);
-  gy1 -= sz1 * (step(0.0, gy1) - 0.5);
+  vec4 gx0, gy0, gz0;
+  gradient(ixy0, gx0, gy0, gz0);
+  vec4 gx1, gy1, gz1;
+  gradient(ixy1, gx1, gy1, gz1);
   vec3 g000 = vec3(gx0.x, gy0.x, gz0.x);
   vec3 g100 = vec3(gx0.y, gy0.y, gz0.y);
   vec3 g010 = vec3(gx0.z, gy0.z, gz0.z);
@@ -96,8 +123,10 @@ float cnoise(vec3 P) {
   return 2.2 * n_xyz;
 }
 
-float laneHash(float lane) {
-  return fract(sin(lane * 91.3458 + u[4].x * 17.17) * 47453.5453);
+// A lane's share of the noise (salt 0) and its spin (salt 1), from the lane
+// number and the look's seed bits.
+float laneHash(float lane, uint salt) {
+  return unit(pcg(pcg(pcg(uint(int(lane) + 65536)) + floatBitsToUint(u[4].x)) + salt));
 }
 
 float lobe(float nh, float nl, float nv, float vh, float roughness) {
@@ -113,11 +142,11 @@ float lobe(float nh, float nl, float nv, float vh, float roughness) {
 }
 
 vec2 glint(float lane, vec2 local, float uTime, float camera) {
-  float along = local.y / u[2].y - laneHash(lane) * 60.0;
+  float along = local.y / u[2].y - laneHash(lane, 0u) * 60.0;
   float step = 0.01;
   float slope = (cnoise(vec3(0.0, along + step, uTime)) - cnoise(vec3(0.0, along - step, uTime))) / (2.0 * step);
   slope *= 0.2 * u[2].z;
-  float spin = laneHash(lane + 0.37);
+  float spin = laneHash(lane, 1u);
   float tilt = ((spin - 0.5) * 0.5 + sin(uTime * 2.1 + spin * 6.2831) * 0.06) * u[3].z;
   vec3 normal = normalize(vec3(tilt, -slope, 1.0));
   vec3 view = normalize(vec3(-local, camera));
@@ -164,17 +193,19 @@ void main() {
   outColor = vec4(value.x, value.y, min(hot, 6.0), 1.0);
 }
 #else
-float random(vec2 st) {
-  return fract(sin(dot(st, vec2(12.9898, 78.233))) * 43758.5453123);
+// One value per whole-number pair: the grain lattice (salt 0) and the
+// dither per pixel (salt 1).
+float random(vec2 st, uint salt) {
+  return unit(pcg(pcg(pcg(uint(st.x)) + uint(st.y)) + salt));
 }
 
 float grainNoise(vec2 st) {
   vec2 i = floor(st);
   vec2 f = fract(st);
-  float a = random(i);
-  float b = random(i + vec2(1.0, 0.0));
-  float c = random(i + vec2(0.0, 1.0));
-  float d = random(i + vec2(1.0, 1.0));
+  float a = random(i, 0u);
+  float b = random(i + vec2(1.0, 0.0), 0u);
+  float c = random(i + vec2(0.0, 1.0), 0u);
+  float d = random(i + vec2(1.0, 1.0), 0u);
   vec2 w = f * f * (3.0 - 2.0 * f);
   return mix(a, b, w.x) + (c - a) * w.y * (1.0 - w.x) + (d - b) * w.x * w.y;
 }
@@ -221,7 +252,7 @@ void main() {
   color = max(color, 0.0);
 
   // No edge fade and full opacity: React Bits' mask is 1.
-  float dither = (random(gl_FragCoord.yx + 31.7) - 0.5) / 255.0;
+  float dither = (random(gl_FragCoord.xy, 1u) - 0.5) / 255.0;
   color = clamp(color + dither, 0.0, 1.0);
   float alpha = max(color.r, max(color.g, color.b));
   outColor = vec4((color + u[6].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);

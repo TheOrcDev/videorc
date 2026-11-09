@@ -359,7 +359,9 @@ export interface ChatOverlayInput {
   sessionId?: string
   messages: readonly LiveChatMessage[]
   layout: Pick<OverlayItemLayout, 'horizontal' | 'vertical'>
-  /** The stream output's canvas (the horizontal leg). */
+  /** The stream output's canvas from the stream settings: the fallback for
+   * the landscape box when the session names no canvas
+   * (`chat.overlay.canvases`). */
   canvas: { width: number; height: number }
 }
 
@@ -395,7 +397,7 @@ export function createChatOverlayDriver(deps: ChatOverlayDeps): ChatOverlayDrive
   let input: ChatOverlayInput | null = null
   let installed = false
   let painted: string | null = null
-  let canvases: { sessionId: string; vertical: ChatOverlayCanvases['vertical'] } | null = null
+  let canvases: { sessionId: string; read: ChatOverlayCanvases | null } | null = null
 
   const run = async (): Promise<void> => {
     const current = input
@@ -413,13 +415,19 @@ export function createChatOverlayDriver(deps: ChatOverlayDeps): ChatOverlayDrive
       return
     }
     if (canvases?.sessionId !== current.sessionId) {
-      const read = await deps.canvases().catch(() => null)
-      canvases = { sessionId: current.sessionId, vertical: read?.vertical }
+      canvases = { sessionId: current.sessionId, read: await deps.canvases().catch(() => null) }
     }
-    const orientation = current.canvas.height > current.canvas.width ? 'vertical' : 'horizontal'
-    const stream: ChatOverlayCanvas = { ...current.canvas, rect: current.layout[orientation] }
-    const vertical: ChatOverlayCanvas | undefined = canvases.vertical
-      ? { ...canvases.vertical, rect: current.layout.vertical }
+    // The landscape box is painted for the leg it lands on, as the session
+    // says: with a vertical leg the horizontal stream is the primary leg at
+    // the session's own size, not the stream profile's, and the backend
+    // crops a box painted wider than its rect (the box is exactly the rect's
+    // width). The stream settings are the fallback, when the backend names
+    // no canvas (no compositor leg, or the read failed).
+    const landscape = canvases.read?.horizontal ?? current.canvas
+    const orientation = landscape.height > landscape.width ? 'vertical' : 'horizontal'
+    const stream: ChatOverlayCanvas = { ...landscape, rect: current.layout[orientation] }
+    const vertical: ChatOverlayCanvas | undefined = canvases.read?.vertical
+      ? { ...canvases.read.vertical, rect: current.layout.vertical }
       : undefined
     const signature = chatOverlaySignature(messages, stream, vertical)
     if (signature === painted) return

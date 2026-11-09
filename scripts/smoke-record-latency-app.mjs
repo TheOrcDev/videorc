@@ -23,7 +23,7 @@
 // by smokeAppEnv from VIDEORC_SMOKE_STATE_DIR. No resource capability is needed.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { cpus, hostname, release, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -36,7 +36,8 @@ import {
   disposeRecordLatencyRun,
   startRecordLatencyCycle,
   stopRecordLatencyCycle,
-  waitForPublishedMp4
+  waitForPublishedMp4,
+  warningEvents
 } from './lib/record-latency-events.mjs'
 import {
   RECORD_LATENCY_BUDGETS,
@@ -63,6 +64,7 @@ import {
 } from './lib/startup-resolution-analyzer.mjs'
 import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const { values: args } = parseArgs({
   options: {
@@ -528,6 +530,7 @@ try {
       (record) => record.event === 'health.event' && record.payload?.code === 'system-audio-lost'
     ).length
   }
+  const warnings = warningEvents(recorder.events)
   const report = {
     generatedAt: new Date().toISOString(),
     commit: gitHead(),
@@ -544,6 +547,7 @@ try {
       replayBuffer
     },
     systemAudioEvidence: systemAudio ? systemAudioEvidence : undefined,
+    warnings,
     budgets,
     enforce,
     verdict,
@@ -566,6 +570,11 @@ try {
       `system audio: ${systemAudioEvidence.mixedStatuses} mixed status event(s), ${systemAudioEvidence.unavailable} unavailable, ${systemAudioEvidence.lost} lost`
     )
   }
+  log(
+    warnings.length === 0
+      ? 'warnings: none'
+      : `warnings: ${warnings.length} (${warnings.map((entry) => `${entry.level} ${entry.code}`).join(', ')})`
+  )
   log(`report written to ${reportPath}`)
   if (!verdict.pass) {
     for (const failure of verdict.failures) log(`budget: ${failure}`)
@@ -587,7 +596,7 @@ try {
     renderer,
     remote,
     stopApp,
-    removeProfile: () => rmSync(userDataDir, { recursive: true, force: true })
+    removeProfile: () => removeProfileDir(userDataDir, { label: 'record-latency' })
   })
   for (const failure of cleanup.failures) {
     console.error(`record-latency: cleanup failed for ${failure.owner}.`)

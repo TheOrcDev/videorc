@@ -28,6 +28,14 @@ describe('backendCrashView', () => {
     expect(backendCrashExitLabel({ code: null, signal: null })).toBe('unknown exit')
   })
 
+  it('names a Windows crash code from either sign Node reports', () => {
+    for (const code of [3221225477, -1073741819]) {
+      expect(
+        backendCrashExitLabel({ code, signal: null, windowsStatus: 'STATUS_ACCESS_VIOLATION' })
+      ).toBe('code 0xC0000005 STATUS_ACCESS_VIOLATION')
+    }
+  })
+
   it('formats uptime at a glance', () => {
     expect(formatBackendUptime(250)).toBe('250ms')
     expect(formatBackendUptime(4_200)).toBe('4.2s')

@@ -25,7 +25,7 @@
 // `pnpm smoke:soundboard-fixture`.
 
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -56,6 +56,7 @@ import {
 } from './lib/system-audio-gates.mjs'
 import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const ALL_CASES = ['idle', 'on-air', 'system-audio']
 const { values: args } = parseArgs({
@@ -471,6 +472,6 @@ try {
   try {
     await stopApp()
   } finally {
-    rmSync(userDataDir, { recursive: true, force: true })
+    await removeProfileDir(userDataDir, { label: 'soundboard smoke' })
   }
 }

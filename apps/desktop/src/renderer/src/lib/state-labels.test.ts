@@ -190,6 +190,11 @@ describe('micSignalLabel (plan 174 S2.3a, C-38)', () => {
     expect(micSignalLabel('muted')).toBe('Muted')
     expect(micSignalLabel('idle')).toBe('No signal')
   })
+
+  it('says Silent for a session microphone the bus reads as digital silence (issue 1064)', () => {
+    expect(micSignalLabel('silent')).toBe('Silent')
+    expect(micSignalLabel('silent')).not.toBe(micSignalLabel('live'))
+  })
 })
 
 describe('systemAudioIssueLabel (plan 174 S2.3a, J2-4)', () => {
@@ -229,7 +234,7 @@ describe('state labels', () => {
       ...PREVIEW_STATES.map(previewStateLabel),
       ...SOURCE_STATES.map(previewSourceStateLabel),
       ...CAPTIONS_STATES.map((state) => captionsStatusLabel({ state, desiredEnabled: true })),
-      ...(['live', 'monitoring', 'muted', 'idle'] as const).map(micSignalLabel)
+      ...(['live', 'monitoring', 'muted', 'silent', 'idle'] as const).map(micSignalLabel)
     ]
     for (const label of labels) {
       expect(isRawStatusValue(label)).toBe(false)

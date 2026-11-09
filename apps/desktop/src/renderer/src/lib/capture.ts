@@ -1,3 +1,4 @@
+import { windowsBridgeEnvelopeRefusal } from './bridge-envelope'
 import { normalizeCameraLook } from './camera-look'
 import type { GlobalShortcutsConfig } from '../../../shared/backend'
 import { formatBitrate, formatResolution, formatVideoQuality, resolutionName } from './format-video'
@@ -1054,8 +1055,21 @@ export const streamPlatformOutputCapabilities: Record<
 export function videoProfileCompatibility(
   config: Pick<CaptureConfig, 'recordEnabled' | 'streamEnabled' | 'video'> & {
     streaming?: StreamingSettings
-  }
+  },
+  platform?: string
 ): VideoProfileCompatibility {
+  // Issue #1062: on Windows an output outside the encoder bridge's envelope
+  // is refused by the backend (software OpenH264 cannot hold it), so the
+  // Output page and Go Live say so first, in the same words.
+  const envelopeRefusal = windowsBridgeEnvelopeRefusal({
+    platform,
+    recordEnabled: config.recordEnabled,
+    streamEnabled: config.streamEnabled,
+    video: config.video
+  })
+  if (envelopeRefusal) {
+    return { blockingReason: envelopeRefusal, warning: null }
+  }
   // Video-profile / streaming guardrails removed per owner (2026-06-24): 4K
   // livestreaming (YouTube 4K30), higher-bitrate and non-YouTube stream outputs
   // ship now, so the app no longer pre-blocks these profiles. Platforms and the
@@ -1477,6 +1491,7 @@ export const defaultCaptureConfig: CaptureConfig = {
     sourceVisibility: { camera: true, capture: true }
   },
   audio: {
+    microphoneNoiseSuppression: 'off',
     microphoneGainDb: 0,
     microphoneMuted: false,
     // Pure manual trim: structural A/V alignment happens in the backend (the audio
@@ -1670,6 +1685,8 @@ export function normalizeAudioSettings(audio: unknown): AudioSettings {
   // (Comments stay out of these object literals: the bundler keeps those in
   // the eager Studio chunk.)
   return {
+    microphoneNoiseSuppression:
+      candidate.microphoneNoiseSuppression === 'rnnoise' ? 'rnnoise' : 'off',
     microphoneGainDb: clampNumber(
       candidate.microphoneGainDb,
       defaultCaptureConfig.audio.microphoneGainDb,

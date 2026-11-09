@@ -2,8 +2,15 @@ import { describe, expect, it } from 'vitest'
 
 import type { DiagnosticStats, StreamHealth, StreamTargetRuntime } from '@/lib/backend'
 import {
+  advanceStreamDropActivity,
   classifyStreamHealthAttribution,
+  emptyStreamDropActivity,
   liveProblemLabel,
+  NO_RECENT_DROPS,
+  RECENT_DROP_WINDOW_MS,
+  RECENT_UPLINK_OVERFLOW_WINDOW_MS,
+  recentStreamDrops,
+  type RecentStreamDrops,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
 
@@ -14,6 +21,8 @@ describe('liveProblemLabel', () => {
     const labels: Record<StreamHealthAttribution, string> = {
       device: 'Capture device lost',
       audio: 'Audio dropping',
+      choppy: 'Stream skipping frames',
+      uplink: 'Connection too slow',
       capture: 'Capture running slow',
       render: 'Rendering slow',
       encoder: 'Encoder dropping frames',
@@ -33,6 +42,7 @@ type ClassifierInput = {
   diagnosticStats: DiagnosticStats
   streamHealth: StreamHealth | null
   streamTargets: StreamTargetRuntime[]
+  recentDrops?: Partial<RecentStreamDrops>
 }
 
 type ProblemAttribution = Exclude<StreamHealthAttribution, 'healthy' | 'unknown'>
@@ -58,6 +68,7 @@ function diagnosticStats(overrides: Partial<DiagnosticStats> = {}): DiagnosticSt
     encoderBridgeDroppedFrames: 0,
     encoderBridgeOutputQueueDroppedFrames: 0,
     encoderBridgeStreamQueueDroppedFrames: 0,
+    encoderBridgeEncodedOutputErrors: 0,
     ...overrides
   } as DiagnosticStats
 }
@@ -73,6 +84,32 @@ function streamHealth(overrides: Partial<StreamHealth> = {}): StreamHealth {
     duplicatedFrames: 0,
     createdAt: '2026-07-29T10:00:00.000Z',
     ...overrides
+  }
+}
+
+function streamDelivery(
+  overrides: Partial<NonNullable<DiagnosticStats['streamDelivery']>> = {}
+): NonNullable<DiagnosticStats['streamDelivery']> {
+  return {
+    targetFps: 60,
+    deliveredFps: 60,
+    dropPercent: 0,
+    windowSeconds: 30,
+    degraded: false,
+    atFloor: false,
+    uplinkOverflows: 0,
+    ...overrides
+  }
+}
+
+function overflowingTarget(atMs: number): StreamTargetRuntime {
+  return {
+    targetId: 'target-overflowing',
+    platform: 'youtube',
+    label: 'YouTube',
+    state: 'live',
+    uplinkOverflows: 2,
+    uplinkOverflowAt: new Date(atMs).toISOString()
   }
 }
 
@@ -98,9 +135,17 @@ const problemSignals: Array<{
   expected: ProblemAttribution
   diagnosticStats?: Partial<DiagnosticStats>
   streamTargets?: StreamTargetRuntime[]
+  recentDrops?: Partial<RecentStreamDrops>
 }> = [
   { expected: 'device', diagnosticStats: { deviceDisconnected: true } },
-  { expected: 'audio', diagnosticStats: { micDroppedFrames: 1 } },
+  { expected: 'audio', recentDrops: { audio: true } },
+  {
+    expected: 'choppy',
+    diagnosticStats: {
+      streamDelivery: streamDelivery({ degraded: true, deliveredFps: 42, dropPercent: 30 })
+    }
+  },
+  { expected: 'uplink', streamTargets: [overflowingTarget(Date.now())] },
   { expected: 'capture', diagnosticStats: { captureFps: 30 } },
   { expected: 'render', diagnosticStats: { renderFps: 30 } },
   { expected: 'encoder', diagnosticStats: { encoderSpeed: 0.8 } },
@@ -113,7 +158,7 @@ const problemSignals: Array<{
     }
   },
   { expected: 'network', streamTargets: [streamTarget('failed', 'RTMP disconnected.')] },
-  { expected: 'preview', diagnosticStats: { previewDroppedFrames: 1 } }
+  { expected: 'preview', recentDrops: { preview: true } }
 ]
 
 function withProblemSignals(...signals: (typeof problemSignals)[number][]): ClassifierInput {
@@ -122,6 +167,7 @@ function withProblemSignals(...signals: (typeof problemSignals)[number][]): Clas
     Object.assign({}, ...signals.map((signal) => signal.diagnosticStats))
   )
   input.streamTargets = signals.flatMap((signal) => signal.streamTargets ?? [])
+  input.recentDrops = Object.assign({}, ...signals.map((signal) => signal.recentDrops))
   return input
 }
 
@@ -129,7 +175,8 @@ function classify(input: ClassifierInput): StreamHealthAttribution {
   return classifyStreamHealthAttribution(
     input.diagnosticStats,
     input.streamHealth,
-    input.streamTargets
+    input.streamTargets,
+    { ...NO_RECENT_DROPS, ...input.recentDrops }
   )
 }
 
@@ -173,22 +220,30 @@ describe('classifyStreamHealthAttribution', () => {
     expect(classify(withOverrides({ diagnosticStats: { encoderSpeed: 0.979 } }))).toBe('encoder')
   })
 
-  it('attributes output drops, duplicate frames, and bridge errors to the encoder', () => {
-    const encoderSignals: Partial<DiagnosticStats>[] = [
+  it('attributes recent drops and bridge errors to the encoder, never a session total', () => {
+    expect(classify(withOverrides({ recentDrops: { encoder: true } }))).toBe('encoder')
+    expect(
+      classify(withOverrides({ diagnosticStats: { encoderBridgeError: 'writer stopped' } }))
+    ).toBe('encoder')
+
+    // #981: these are session totals. One frame dropped while a destination
+    // reconnected must not read as "Encoder dropping frames" for the rest of
+    // the stream; only the window (below) says whether drops are current.
+    const sessionTotals: Partial<DiagnosticStats>[] = [
       { droppedFrames: 1 },
       { encoderBridgeDroppedFrames: 1 },
       { encoderBridgeOutputQueueDroppedFrames: 1 },
       { encoderBridgeStreamQueueDroppedFrames: 1 },
       { encoderBridgeEncodedOutputErrors: 1 },
-      { encoderBridgeError: 'writer stopped' },
-      { streamDuplicatedFrames: 1 }
+      { streamDuplicatedFrames: 1 },
+      { micDroppedFrames: 1 },
+      { previewDroppedFrames: 1 }
     ]
-
-    for (const signal of encoderSignals) {
-      expect(classify(withOverrides({ diagnosticStats: signal }))).toBe('encoder')
+    for (const total of sessionTotals) {
+      expect(classify(withOverrides({ diagnosticStats: total }))).toBe('healthy')
     }
-    expect(classify(withOverrides({ streamHealth: { droppedFrames: 1 } }))).toBe('encoder')
-    expect(classify(withOverrides({ streamHealth: { duplicatedFrames: 1 } }))).toBe('encoder')
+    expect(classify(withOverrides({ streamHealth: { droppedFrames: 1 } }))).toBe('healthy')
+    expect(classify(withOverrides({ streamHealth: { duplicatedFrames: 1 } }))).toBe('healthy')
   })
 
   it('requires a requested/effective mismatch and a reason before naming fallback', () => {
@@ -233,13 +288,99 @@ describe('classifyStreamHealthAttribution', () => {
     ).toBe('healthy')
   })
 
-  it('uses rolling bitrate below 90 percent only after media health is known', () => {
-    expect(classify(withOverrides({ streamHealth: { bitrateKbps: 5_400 } }))).toBe('healthy')
-    expect(classify(withOverrides({ streamHealth: { bitrateKbps: 5_399 } }))).toBe('network')
+  // Plan 218: the streamer's sessions reported bottleneck "capture" (a static
+  // screen idles) while a third of the stream's frames were skipped.
+  it('names a choppy stream over the inferred capture bottleneck', () => {
+    expect(
+      classify(
+        withOverrides({
+          diagnosticStats: {
+            bottleneck: 'capture',
+            streamDelivery: streamDelivery({ degraded: true, deliveredFps: 21, dropPercent: 30 })
+          }
+        })
+      )
+    ).toBe('choppy')
+    expect(
+      classify(
+        withOverrides({
+          diagnosticStats: { streamDelivery: streamDelivery({ deliveredFps: 59, dropPercent: 2 }) }
+        })
+      )
+    ).toBe('healthy')
+  })
 
+  it('names a slow connection while the bitrate is lowered, at its floor, or a leg overflowed', () => {
+    const lowered = streamDelivery({ bitrateKbps: 4_800, chosenBitrateKbps: 6_000 })
+    expect(classify(withOverrides({ diagnosticStats: { streamDelivery: lowered } }))).toBe('uplink')
+    expect(
+      classify(
+        withOverrides({
+          diagnosticStats: {
+            streamDelivery: streamDelivery({
+              bitrateKbps: 3_000,
+              chosenBitrateKbps: 6_000,
+              atFloor: true
+            })
+          }
+        })
+      )
+    ).toBe('uplink')
+    const restored = streamDelivery({ bitrateKbps: 6_000, chosenBitrateKbps: 6_000 })
+    expect(classify(withOverrides({ diagnosticStats: { streamDelivery: restored } }))).toBe(
+      'healthy'
+    )
+    const nowMs = Date.parse('2026-11-05T12:00:00.000Z')
+    const input = healthyInput()
+    input.streamTargets = [overflowingTarget(nowMs - 30_000)]
+    expect(
+      classifyStreamHealthAttribution(
+        input.diagnosticStats,
+        input.streamHealth,
+        input.streamTargets,
+        NO_RECENT_DROPS,
+        nowMs
+      )
+    ).toBe('uplink')
+    input.streamTargets = [overflowingTarget(nowMs - RECENT_UPLINK_OVERFLOW_WINDOW_MS - 1)]
+    expect(
+      classifyStreamHealthAttribution(
+        input.diagnosticStats,
+        input.streamHealth,
+        input.streamTargets,
+        NO_RECENT_DROPS,
+        nowMs
+      )
+    ).toBe('healthy')
+  })
+
+  it('never reads a bitrate below the configured one as delivery trouble', () => {
+    // #981: a static screen encodes far below the configured rate on
+    // purpose (777 of 6000 kbps in the report); delivery trouble is what
+    // the destinations report.
+    expect(classify(withOverrides({ streamHealth: { bitrateKbps: 777 } }))).toBe('healthy')
+    expect(
+      classify(
+        withOverrides({
+          streamHealth: { bitrateKbps: undefined },
+          diagnosticStats: { streamMeasuredBitrateKbps: 777 }
+        })
+      )
+    ).toBe('healthy')
+    expect(
+      classify(
+        withOverrides({
+          streamHealth: { bitrateKbps: 777 },
+          streamTargets: [streamTarget('reconnecting', 'Reconnecting…')]
+        })
+      )
+    ).toBe('network')
+  })
+
+  it('does not name a network problem before media health is known', () => {
     const input = unknownInput()
     input.streamHealth = streamHealth({ fps: undefined, speed: undefined, bitrateKbps: 1_000 })
-    input.diagnosticStats.streamOutputBitrateKbps = 6_000
+    input.streamTargets = [streamTarget('failed')]
     input.diagnosticStats.bottleneck = 'unknown'
     expect(classify(input)).toBe('unknown')
   })
@@ -270,18 +411,149 @@ describe('classifyStreamHealthAttribution', () => {
 function withOverrides({
   diagnosticStats: diagnosticOverrides = {},
   streamHealth: healthOverrides = {},
-  streamTargets
+  streamTargets,
+  recentDrops
 }: {
   diagnosticStats?: Partial<DiagnosticStats>
   streamHealth?: Partial<StreamHealth>
   streamTargets?: StreamTargetRuntime[]
+  recentDrops?: Partial<RecentStreamDrops>
 }): ClassifierInput {
   return {
     diagnosticStats: diagnosticStats(diagnosticOverrides),
     streamHealth: streamHealth(healthOverrides),
-    streamTargets: streamTargets ?? [streamTarget('live')]
+    streamTargets: streamTargets ?? [streamTarget('live')],
+    recentDrops
   }
 }
+
+// #981: the window reads the growth of the diagnostics' drop counters, so a
+// stage is dropping while its counters grow and for the window after, never
+// for the rest of the session because a total is above zero.
+describe('stream drop window', () => {
+  const t0 = 1_700_000_000_000
+
+  function sample(
+    activity = emptyStreamDropActivity(),
+    stats: Partial<DiagnosticStats> = {},
+    health: Partial<StreamHealth> | null = {},
+    at = t0
+  ) {
+    return advanceStreamDropActivity(
+      activity,
+      diagnosticStats(stats),
+      health === null ? null : streamHealth(health),
+      at
+    )
+  }
+
+  it('names a stage while its counters grow, then clears after the window', () => {
+    const baseline = sample()
+    expect(recentStreamDrops(baseline, t0)).toEqual(NO_RECENT_DROPS)
+
+    const dropped = sample(baseline, { encoderBridgeStreamQueueDroppedFrames: 1 }, {}, t0 + 1_000)
+    expect(recentStreamDrops(dropped, t0 + 1_000)).toEqual({ ...NO_RECENT_DROPS, encoder: true })
+
+    // The total stays at 1 for the rest of the stream (the report's case).
+    let settled = dropped
+    for (let second = 2; second <= 20; second += 1) {
+      settled = sample(
+        settled,
+        { encoderBridgeStreamQueueDroppedFrames: 1 },
+        {},
+        t0 + second * 1_000
+      )
+    }
+    expect(recentStreamDrops(settled, t0 + 1_000 + RECENT_DROP_WINDOW_MS)).toEqual({
+      ...NO_RECENT_DROPS,
+      encoder: true
+    })
+    expect(recentStreamDrops(settled, t0 + 1_001 + RECENT_DROP_WINDOW_MS)).toEqual(NO_RECENT_DROPS)
+
+    const droppedAgain = sample(
+      settled,
+      { encoderBridgeStreamQueueDroppedFrames: 2 },
+      {},
+      t0 + 30_000
+    )
+    expect(recentStreamDrops(droppedAgain, t0 + 30_000).encoder).toBe(true)
+  })
+
+  it('watches every counter of every stage', () => {
+    const cases: Array<{
+      stage: keyof RecentStreamDrops
+      stats?: Partial<DiagnosticStats>
+      health?: Partial<StreamHealth>
+    }> = [
+      { stage: 'audio', stats: { micDroppedFrames: 1 } },
+      { stage: 'capture', stats: { previewCameraDroppedFrames: 1 } },
+      { stage: 'capture', stats: { previewScreenDroppedFrames: 1 } },
+      { stage: 'encoder', stats: { droppedFrames: 1 } },
+      { stage: 'encoder', stats: { encoderBridgeDroppedFrames: 1 } },
+      { stage: 'encoder', stats: { encoderBridgeOutputQueueDroppedFrames: 1 } },
+      { stage: 'encoder', stats: { encoderBridgeStreamQueueDroppedFrames: 1 } },
+      { stage: 'encoder', stats: { encoderBridgeEncodedOutputErrors: 1 } },
+      { stage: 'encoder', stats: { streamDuplicatedFrames: 1 } },
+      { stage: 'encoder', health: { droppedFrames: 1 } },
+      { stage: 'encoder', health: { duplicatedFrames: 1 } },
+      { stage: 'preview', stats: { previewDroppedFrames: 1 } }
+    ]
+    for (const { stage, stats, health } of cases) {
+      const baseline = sample(
+        emptyStreamDropActivity(),
+        { previewCameraDroppedFrames: 0, previewScreenDroppedFrames: 0 },
+        { droppedFrames: 0, duplicatedFrames: 0 }
+      )
+      const dropped = sample(
+        baseline,
+        { previewCameraDroppedFrames: 0, previewScreenDroppedFrames: 0, ...stats },
+        { droppedFrames: 0, duplicatedFrames: 0, ...health },
+        t0 + 1_000
+      )
+      expect(recentStreamDrops(dropped, t0 + 1_000), JSON.stringify({ stats, health })).toEqual({
+        ...NO_RECENT_DROPS,
+        [stage]: true
+      })
+    }
+  })
+
+  it('takes a first sight, a reset and a new session as the baseline, not as drops', () => {
+    // Opening the Studio mid-stream, with totals already above zero.
+    const midStream = sample(emptyStreamDropActivity(), { droppedFrames: 7 }, { droppedFrames: 7 })
+    expect(recentStreamDrops(midStream, t0)).toEqual(NO_RECENT_DROPS)
+
+    // A new run resets the bridge's counters to zero.
+    const reset = sample(midStream, { droppedFrames: 0 }, { droppedFrames: 0 }, t0 + 1_000)
+    expect(recentStreamDrops(reset, t0 + 1_000)).toEqual(NO_RECENT_DROPS)
+
+    // Stream health appearing with a total is a baseline too.
+    const healthArrives = sample(sample(baseline(), {}, null), {}, { droppedFrames: 3 }, t0 + 1_000)
+    expect(recentStreamDrops(healthArrives, t0 + 1_000)).toEqual(NO_RECENT_DROPS)
+
+    // A new session starts over: the old session's drop is forgotten and its
+    // totals never count against the new one.
+    const dropped = sample(reset, { droppedFrames: 1 }, { droppedFrames: 1 }, t0 + 2_000)
+    expect(recentStreamDrops(dropped, t0 + 2_000).encoder).toBe(true)
+    const nextSession = sample(
+      dropped,
+      { sessionId: 'session-b', droppedFrames: 0 },
+      { sessionId: 'session-b', droppedFrames: 0 },
+      t0 + 3_000
+    )
+    expect(recentStreamDrops(nextSession, t0 + 3_000)).toEqual(NO_RECENT_DROPS)
+    expect(nextSession.sessionId).toBe('session-b')
+
+    function baseline() {
+      return emptyStreamDropActivity()
+    }
+  })
+
+  it('ignores stream health from another session', () => {
+    const base = sample(emptyStreamDropActivity(), {}, { droppedFrames: 0 })
+    const stale = sample(base, {}, { sessionId: 'session-b', droppedFrames: 5 }, t0 + 1_000)
+    expect(recentStreamDrops(stale, t0 + 1_000)).toEqual(NO_RECENT_DROPS)
+  })
+})
 
 function unknownInput(): ClassifierInput {
   return {

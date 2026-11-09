@@ -6,6 +6,9 @@ import type {
   ScreenPrivacy,
   VirtualCameraPlatformReportParams,
   VirtualCameraSetParams,
+  CameraLowLightParams,
+  CameraLowLightSetParams,
+  CameraLowLightState,
   VirtualCameraStatus,
   SourceSwitchParams,
   BackendHealth,
@@ -543,6 +546,10 @@ export interface BackendRpcMethodMap {
     VirtualCameraStatus
   >
   // --- end Videorc Camera (plan 214 A4) ---
+  // --- Camera low-light compensation (issue #1066) ---
+  'camera.lowLight.get': BackendRpcDefinition<CameraLowLightParams, CameraLowLightState>
+  /** Saved per camera and written to the device now; open or not. */
+  'camera.lowLight.set': BackendRpcDefinition<CameraLowLightSetParams, CameraLowLightState>
   'sounds.list': BackendRpcDefinition<undefined, SoundboardState>
   'sounds.import': BackendRpcDefinition<SoundImportParams, Sound>
   'sounds.update': BackendRpcDefinition<SoundUpdateParams, Sound>
@@ -1548,7 +1555,11 @@ const streamTargetRuntimeSchema = objectSchema(
       'stopped'
     ]),
     message: optionalText,
-    redactedUrl: optionalText
+    redactedUrl: optionalText,
+    // Plan 218: fifo overflows on this leg (the connection could not carry
+    // the stream to it); additive to `state`, absent until the first one.
+    uplinkOverflows: optionalSchema(nonNegativeInteger),
+    uplinkOverflowAt: optionalSchema(timestamp)
   },
   { allowUnknown: false }
 )
@@ -2337,6 +2348,24 @@ const captureRecoveryStatusSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CaptureRecoveryStatus>
 
+// Plan 218 S2: `degraded` holds while more than 10 % of the stream's frames
+// were skipped before encode over the last 30 s (clears under 5 %).
+const streamDeliveryStateSchema = objectSchema(
+  {
+    targetFps: nonNegativeInteger,
+    deliveredFps: numberSchema({ min: 0 }),
+    dropPercent: numberSchema({ min: 0, max: 100 }),
+    windowSeconds: numberSchema({ min: 0 }),
+    degraded: booleanSchema,
+    degradedSince: optionalSchema(timestamp),
+    bitrateKbps: optionalSchema(nonNegativeInteger),
+    chosenBitrateKbps: optionalSchema(nonNegativeInteger),
+    atFloor: booleanSchema,
+    uplinkOverflows: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
 const diagnosticStatsSchema = boundedSemanticValue(
   'bounded diagnostic statistics',
   objectSchema(
@@ -2365,6 +2394,35 @@ const diagnosticStatsSchema = boundedSemanticValue(
       encoderBridgeVideoToolboxPendingEncodeFrames: optionalSchema(nonNegativeInteger),
       encoderBridgeVideoToolboxPendingFifoFrames: optionalSchema(nonNegativeInteger),
       encoderBridgeEncodedAccessUnitDroppedFrames: optionalSchema(nonNegativeInteger),
+      // Plan 218 S2: the live stream's delivery over a rolling 30 s window
+      // (absent without a stream) and per-leg fifo overflow counts.
+      streamDelivery: optionalSchema(streamDeliveryStateSchema),
+      streamLegOverflows: optionalSchema(
+        arraySchema(
+          objectSchema(
+            {
+              targetId: boundedString,
+              platform: streamPlatformSchema,
+              label: boundedString,
+              overflows: nonNegativeInteger
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: 16 }
+        )
+      ),
+      streamDestinationCount: optionalSchema(nonNegativeInteger),
+      streamDestinationPlatforms: optionalSchema(
+        arraySchema(streamPlatformSchema, { maxLength: 16 })
+      ),
+      microphoneSyncOffsetMs: optionalSchema(numberSchema({ integer: true })),
+      recordingMeasuredBitrateKbps: optionalSchema(numberSchema({ min: 0 })),
+      recordingOutputTotalBytes: optionalSchema(nonNegativeInteger),
+      encoderBridgeStreamVideoToolboxFifoWriteP95Ms: optionalSchema(numberSchema({ min: 0 })),
+      encoderBridgeStreamQueueAgeP95Ms: optionalSchema(numberSchema({ min: 0 })),
+      encoderBridgeStreamQueueDepthTrips: optionalSchema(nonNegativeInteger),
+      encoderBridgeStreamQueueAgeTrips: optionalSchema(nonNegativeInteger),
+      encoderBridgeStreamQueueLastTrip: optionalSchema(enumSchema(['depth', 'age'])),
       windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
       previewImagePollCounts: optionalSchema(previewImagePollCountsSchema),
       compositorSourceCaptureTextureReuses: nonNegativeInteger,
@@ -2545,7 +2603,7 @@ const sessionSummarySchema = boundedSemanticValue(
       // Plan 157: separate-source take membership.
       takeId: optionalSchema(boundedString),
       recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera'])),
-      // A take Videorc stopped mid-recording, recovered on the next start.
+      // A take that ended early, recovered as MP4 (or not).
       interruptionRecovery: optionalSchema(interruptionRecoverySchema)
     },
     { allowUnknown: false }
@@ -3521,19 +3579,19 @@ const chatOverlayInfoSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<ChatOverlayInfo>
-// `vertical` is omitted, never null, when the session has no portrait leg
-// (`skip_serializing_if` on the Rust side).
+// A canvas is omitted, never null, when the session has no such leg (no
+// session, or no portrait leg; `skip_serializing_if` on the Rust side).
+const chatOverlayCanvasSchema = objectSchema(
+  {
+    width: numberSchema({ integer: true, min: 1 }),
+    height: numberSchema({ integer: true, min: 1 })
+  },
+  { allowUnknown: false }
+)
 const chatOverlayCanvasesSchema = objectSchema(
   {
-    vertical: optionalSchema(
-      objectSchema(
-        {
-          width: numberSchema({ integer: true, min: 1 }),
-          height: numberSchema({ integer: true, min: 1 })
-        },
-        { allowUnknown: false }
-      )
-    )
+    horizontal: optionalSchema(chatOverlayCanvasSchema),
+    vertical: optionalSchema(chatOverlayCanvasSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<ChatOverlayCanvases>
@@ -3718,6 +3776,19 @@ const virtualCameraSetParamsSchema = objectSchema(
   { on: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<VirtualCameraSetParams>
+const cameraLowLightCameraIdSchema = stringSchema({ minLength: 1, maxLength: 1024 })
+const cameraLowLightParamsSchema = objectSchema(
+  { cameraId: cameraLowLightCameraIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CameraLowLightParams>
+const cameraLowLightSetParamsSchema = objectSchema(
+  { cameraId: cameraLowLightCameraIdSchema, compensation: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CameraLowLightSetParams>
+const cameraLowLightStateSchema = objectSchema(
+  { cameraId: cameraLowLightCameraIdSchema, supported: booleanSchema, compensation: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CameraLowLightState>
 const virtualCameraPlatformReportParamsSchema = objectSchema(
   {
     platformStep: virtualCameraPlatformStepSchema,
@@ -4036,7 +4107,9 @@ const audioLevelsEventSchema = objectSchema(
     // Plan 189: the soundboard's sounds as mixed.
     sounds: optionalSchema(audioLevelReadingSchema),
     master: optionalSchema(audioLevelReadingSchema),
-    masterClippedSamples: nonNegativeInteger
+    masterClippedSamples: nonNegativeInteger,
+    // Issue 1064: the silence watchdog's report, sent only while true.
+    microphoneSilent: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<AudioLevelsEvent>
@@ -5489,6 +5562,11 @@ const runtimeContracts = {
     result: virtualCameraStatusSchema
   },
   // --- end Videorc Camera (plan 214 A4) ---
+  'camera.lowLight.get': { params: cameraLowLightParamsSchema, result: cameraLowLightStateSchema },
+  'camera.lowLight.set': {
+    params: cameraLowLightSetParamsSchema,
+    result: cameraLowLightStateSchema
+  },
   'sounds.list': { params: undefinedSchema, result: soundboardStateSchema },
   'sounds.import': { params: soundImportParamsSchema, result: soundSchema },
   'sounds.update': { params: soundUpdateParamsSchema, result: soundSchema },

@@ -1812,12 +1812,7 @@ mod tests {
         for (transform, (width, height), (x, y, w, h)) in cases {
             let rect = scene_source_rect_pixels(transform, width, height).expect("a box");
             assert_eq!(
-                (
-                    i64::from(rect.x),
-                    i64::from(rect.y),
-                    rect.width,
-                    rect.height
-                ),
+                (rect.x, rect.y, rect.width, rect.height),
                 (x, y, w, h),
                 "{transform:?} on {width}x{height}"
             );

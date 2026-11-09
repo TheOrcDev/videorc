@@ -87,6 +87,28 @@ describe('videoSourceStatus', () => {
     ).toEqual({ label: 'Receiving', tone: 'good' })
   })
 
+  it('says a camera stuck at a low frame rate instead of Receiving (issue #1066)', () => {
+    const lowFrameRate = { fps: 14.68, expectedFps: 30 }
+    const preview = { state: 'live' as const, frameAgeMs: 60 }
+    expect(videoSourceStatus({ ...base, preview, name: 'C920', lowFrameRate })).toEqual({
+      label: 'Low frame rate',
+      tone: 'warn',
+      hint: 'C920 is sending 15 of 30 fps. More light usually helps.'
+    })
+    // Sending nothing and stale frames are worse news, and keep their chips.
+    expect(
+      videoSourceStatus({ ...base, preview: { ...preview, noVideo: true }, lowFrameRate })?.label
+    ).toBe('No video')
+    expect(
+      videoSourceStatus({ ...base, preview: { state: 'live', frameAgeMs: 4200 }, lowFrameRate })
+        ?.label
+    ).toBe('Stale 4s')
+    expect(videoSourceStatus({ ...base, preview, lowFrameRate: null })?.label).toBe('Receiving')
+    expect(videoSourceStatus({ ...base, kind: 'screen', preview, lowFrameRate })?.label).toBe(
+      'Receiving'
+    )
+  })
+
   it('trusts a live preview over a lagging device list', () => {
     expect(videoSourceStatus({ ...base, device: 'missing', preview: { state: 'live' } })).toEqual({
       label: 'Receiving',
@@ -198,6 +220,22 @@ describe('microphoneStatus', () => {
 
   it('shows no chip with no microphone selected', () => {
     expect(microphoneStatus({ ...base, selected: false, muted: true })).toBeNull()
+  })
+
+  // Issue 1064: the bus reads digital silence from the session microphone.
+  it('says Silent, never Receiving, while the backend reports the session microphone silent', () => {
+    expect(microphoneStatus({ ...base, sessionActive: true, silent: true })).toEqual({
+      label: 'Silent',
+      tone: 'warn'
+    })
+    // The mute is the user's: it wins over the watchdog's word.
+    expect(microphoneStatus({ ...base, sessionActive: true, silent: true, muted: true })).toEqual({
+      label: 'Muted',
+      tone: 'neutral'
+    })
+    expect(microphoneStatus({ ...base, sessionActive: true, silent: false })?.label).toBe(
+      'Receiving'
+    )
   })
 })
 

@@ -84,7 +84,12 @@ describe('session finalization helpers', () => {
     expect(interruptedTakeBadge(row({ interruptionRecovery: 'failed' }))).toBeNull()
     const badge = interruptedTakeBadge(row({ interruptionRecovery: 'recovered' }))
     expect(badge?.label).toBe('Recovered')
-    expect(badge?.detail).toContain('Videorc stopped during this recording')
+    expect(badge?.detail).toBe(
+      'This recording ended early. Everything up to that moment was saved as MP4; the original MKV is kept.'
+    )
+    // A take that failed while Videorc kept running is recovered too: the
+    // badge must not read like a crash.
+    expect(badge?.detail).not.toContain('Videorc stopped')
   })
 
   describe('a Record start the backend refused', () => {

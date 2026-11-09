@@ -1797,9 +1797,9 @@ mod tests {
         assert!(admits(0, IN_FLIGHT_CAP));
         assert!(admits(IN_FLIGHT_CAP - 1, IN_FLIGHT_CAP));
         assert!(!admits(IN_FLIGHT_CAP, IN_FLIGHT_CAP));
-        assert!(IN_FLIGHT_CAP > 10, "well above the sink queue P0a measured");
+        const { assert!(IN_FLIGHT_CAP > 10, "well above the sink queue P0a measured") };
         assert!(POOL_ALLOCATION_THRESHOLD as usize > IN_FLIGHT_CAP);
-        assert!(DISPLAY_MARGIN >= 1);
+        const { assert!(DISPLAY_MARGIN >= 1) };
     }
 
     #[test]

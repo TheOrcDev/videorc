@@ -720,6 +720,30 @@ impl VideoToolboxH264Session {
         Ok(())
     }
 
+    /// Retunes the target bitrate of a running session (plan 218 S3a). The
+    /// encoder applies `AverageBitRate` to the frames that follow without a
+    /// new parameter set or a forced keyframe, so a stream's reference chain
+    /// is untouched; on this hardware the output rate follows within a
+    /// second (`video_toolbox_average_bit_rate_change_takes_effect_within_2s`,
+    /// an on-box check run with `--ignored`). The target is advice the
+    /// encoder can only follow above the content's floor: per-frame noise
+    /// with 4 px grains costs 18 Mbps at 720p30 at the highest quantizer, and
+    /// no target (nor `DataRateLimits`, measured the same day) brings it
+    /// lower. Real desktops sit far above their floor.
+    pub fn set_average_bit_rate(&self, average_bit_rate_bps: i64) -> Result<()> {
+        ensure!(
+            average_bit_rate_bps > 0,
+            "VideoToolbox average bit rate must be positive"
+        );
+        let value = CFNumber::new_i64(average_bit_rate_bps);
+        self.set_property(
+            "AverageBitRate",
+            unsafe { kVTCompressionPropertyKey_AverageBitRate },
+            value.as_ref(),
+        )?;
+        Ok(())
+    }
+
     pub fn complete_pending_frames(&self) -> Result<()> {
         let complete_status = unsafe { self.session.complete_frames(kCMTimeInvalid) };
         if complete_status != NO_ERR {
@@ -1379,6 +1403,160 @@ mod tests {
         assert!(
             copied_sequence_bytes > 0,
             "VideoToolbox sequence copied no encoded bytes"
+        );
+    }
+
+    /// Plan 218 S1 on-box check for S3a: a running real-time stream session
+    /// follows a lowered `AverageBitRate` within 2 s, with no dropped or
+    /// failed frame across the change. Per-frame noise keeps the encoder
+    /// working; its grain size decides whether a target is reachable at all
+    /// (4 px grains cost 18 Mbps at 720p30 at the highest quantizer, measured
+    /// 2026-11-05, so no rate control can bound them; 16 px grains followed
+    /// 6 then 2 Mbps as 5.7 then 2.8 Mbps there). The sweep prints what each
+    /// grain size encodes at on the smoke's 1080p30 canvas with the target
+    /// out of the way, then at 6 Mbps, then at 3 Mbps (the adaptive floor);
+    /// the assertions hold the grain the thin-uplink smoke paints
+    /// (`VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN=32`: 16 and 24 px grains floor
+    /// above 6 Mbps at 1080p, so no target could lower them). Hardware-bound;
+    /// run with
+    /// `cargo test -p videorc-backend video_toolbox_average_bit_rate -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "on-box VideoToolbox rate-control check (plan 218)"]
+    fn video_toolbox_average_bit_rate_change_takes_effect_within_2s() {
+        const WIDTH: usize = 1920;
+        const HEIGHT: usize = 1080;
+        const FPS: i64 = 30;
+        // Inside High@4.0, the level the session picks for 1080p30 (a 50 Mbps
+        // target fails PrepareToEncodeFrames with kVTParameterErr).
+        const OPEN_BPS: i64 = 20_000_000;
+        const HIGH_BPS: i64 = 6_000_000;
+        const LOW_BPS: i64 = 3_000_000;
+        const PHASE: i64 = 90;
+        const GRAINS: [usize; 3] = [16, 24, 32];
+        const ASSERTED_GRAIN: usize = 32;
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut noise = vec![0u8; WIDTH * HEIGHT * 4];
+        let mut verdict = None;
+        for grain in GRAINS {
+            let session = VideoToolboxH264Session::new_tuned(
+                WIDTH,
+                HEIGHT,
+                FPS as i32,
+                (FPS * 2) as i32,
+                Some(OPEN_BPS),
+                true,
+            )
+            .expect("VideoToolbox H.264 session");
+            session.prepare().expect("VideoToolbox session prepares");
+            let mut per_frame_bytes = Vec::<usize>::new();
+            for frame_index in 0..PHASE * 3 {
+                let cells = WIDTH.div_ceil(grain);
+                let mut cell_colors = vec![[0u8; 3]; cells * HEIGHT.div_ceil(grain)];
+                for color in cell_colors.iter_mut() {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let bytes = seed.to_le_bytes();
+                    *color = [bytes[0], bytes[1], bytes[2]];
+                }
+                for (y, row) in noise.chunks_exact_mut(WIDTH * 4).enumerate() {
+                    for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                        let color = cell_colors[(y / grain) * cells + x / grain];
+                        pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
+                    }
+                }
+                let sources = [GpuSource {
+                    kind: GpuSourceKind::Image,
+                    bgra: &noise,
+                    content_key: None,
+                    iosurface: None,
+                    pixel_buffer: None,
+                    texture: None,
+                    width: WIDTH,
+                    height: HEIGHT,
+                    dest: [0.0, 0.0, 1.0, 1.0],
+                    crop: [0.0; 4],
+                    mirror: false,
+                    mask: crate::metal_compositor::SourceMask::None,
+                    blend: false,
+                    chroma_key: None,
+                    camera_look: None,
+                    corners: None,
+                    sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                    opacity: 1.0,
+                }];
+                compositor
+                    .compose_bgra(WIDTH, HEIGHT, [0.0, 0.0, 0.0, 1.0], &sources)
+                    .expect("compose retained Metal target");
+                let target = compositor
+                    .latest_target_pixel_buffer()
+                    .expect("IOSurface-backed Metal target");
+                if frame_index == PHASE {
+                    session
+                        .set_average_bit_rate(HIGH_BPS)
+                        .expect("AverageBitRate change accepted mid-session");
+                }
+                if frame_index == PHASE * 2 {
+                    session
+                        .set_average_bit_rate(LOW_BPS)
+                        .expect("AverageBitRate change accepted mid-session");
+                }
+                let timing =
+                    VideoToolboxFrameTiming::frame_index(frame_index, FPS as i32).expect("timing");
+                let result = session
+                    .encode_retained_target_with_timing(&target, timing)
+                    .expect("encode noise frame");
+                assert_eq!(result.encode_status, Some(NO_ERR));
+                assert_eq!(result.callback_status, Some(NO_ERR));
+                assert!(
+                    !result.frame_dropped,
+                    "frame {frame_index} dropped: {result:?}"
+                );
+                assert!(result.copied_sample_bytes > 0, "frame {frame_index} empty");
+                per_frame_bytes.push(result.copied_sample_bytes);
+            }
+            let kbps = |range: std::ops::Range<usize>| -> f64 {
+                let bytes: usize = per_frame_bytes[range.clone()].iter().sum();
+                bytes as f64 * 8.0 / 1000.0 / (range.len() as f64 / FPS as f64)
+            };
+            let phase = PHASE as usize;
+            let open = kbps(phase / 3..phase);
+            let high = kbps(phase + phase / 3..phase * 2);
+            let low = kbps(phase * 2 + phase / 3..phase * 3);
+            let first_low_second = (phase * 2..phase * 3 - 30)
+                .step_by(5)
+                .find(|start| kbps(*start..start + 30) < high * 0.75)
+                .map(|start| (start - phase * 2) as i64 * 1000 / FPS);
+            eprintln!(
+                "1080p30 noise, {grain}px grains: target out of the way -> {open:.0} kbps; \
+                 AverageBitRate {HIGH_BPS} bps -> {high:.0} kbps; AverageBitRate {LOW_BPS} bps \
+                 -> {low:.0} kbps, first 1 s window under 75 % of the 6 Mbps rate {} ms after the change",
+                first_low_second.map_or("never".to_string(), |ms| ms.to_string())
+            );
+            if grain == ASSERTED_GRAIN {
+                verdict = Some((open, high, low, first_low_second));
+            }
+        }
+        let (open, high, low, first_low_second) = verdict.expect("asserted grain");
+        // Measured 2026-11-05: 16 and 24 px grains floor at 6.3 and 6.9 Mbps
+        // (13 Mbps with the target out of the way); 32 px grains encode at
+        // 5.3 Mbps open, 4.3 Mbps under 6 Mbps and 2.8 Mbps under 3 Mbps, the
+        // step landing 166 ms after the change.
+        assert!(
+            open >= HIGH_BPS as f64 / 1000.0 * 0.7 && high >= LOW_BPS as f64 / 1000.0,
+            "{ASSERTED_GRAIN}px grains do not make the encoder work: {open:.0} kbps open, {high:.0} kbps at 6 Mbps"
+        );
+        assert!(
+            low <= LOW_BPS as f64 / 1000.0 * 1.3 && low < high * 0.75,
+            "the lower stream bitrate did not take: {high:.0} kbps before, {low:.0} kbps after"
+        );
+        assert!(
+            first_low_second.is_some_and(|ms| ms <= 2_000),
+            "the rate did not drop within 2 s of the change"
         );
     }
 

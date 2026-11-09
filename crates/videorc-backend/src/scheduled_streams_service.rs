@@ -202,6 +202,8 @@ pub async fn dispatch(state: &AppState, method: &str, params: Value) -> Result<V
                 .scheduled_event(params["eventId"].as_str().context("Event ID required")?)?;
             let api = match api(state, &event).await? {
                 ProviderApi::X(api) => {
+                    let mut event = event;
+                    resolve_legacy_x_source_id(&api, &mut event, false).await?;
                     return Ok(json!(
                         x_candidates(state, &event, api.list().await?)?
                             .into_iter()
@@ -1212,6 +1214,119 @@ fn confirmed_x(event: &mut ScheduledStreamEvent, remote: Value) -> Result<()> {
     Ok(())
 }
 
+/// Every stored copy of an X event's source id: the ingest binding, the
+/// live/retained preparation's `stream_id`, and the prepared ingest inside
+/// them.
+fn x_source_id_slots(event: &mut ScheduledStreamEvent) -> Vec<&mut String> {
+    let mut slots = Vec::new();
+    if let Some(ingest) = event.ingest.as_mut() {
+        slots.push(&mut ingest.source_id);
+    }
+    for preparation in [event.preparation.as_mut(), event.retained_ingest.as_mut()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(stream_id) = preparation.stream_id.as_mut() {
+            slots.push(stream_id);
+        }
+        if let Some(PreparedIngest::X(prepared)) = preparation.prepared.as_mut() {
+            slots.push(&mut prepared.source_id);
+        }
+    }
+    slots
+}
+
+/// Events saved before the `/2/sources` migration hold the old stream key
+/// as `source_id` (the deprecated routes used the key as the id). X now
+/// answers every scheduled-broadcast read with the real 19-digit source id,
+/// so such an event could never match its own schedule again ("Provider
+/// ingest mismatch"). Resolves the real id once, by the dedicated source's
+/// deterministic name, else from the remote schedule, and rewrites every
+/// stored copy. Returns `true` when the event changed and needs a
+/// checkpoint. On `recover`, an id nothing on X can resolve any more is
+/// dropped so recovery can bind a fresh source; every other action gets a
+/// clear error pointing at Recover.
+async fn resolve_legacy_x_source_id(
+    api: &XScheduledBroadcasts,
+    event: &mut ScheduledStreamEvent,
+    recovering: bool,
+) -> Result<bool> {
+    let legacy: Vec<String> = {
+        let mut legacy: Vec<String> = x_source_id_slots(event)
+            .into_iter()
+            .map(|slot| slot.clone())
+            .filter(|id| !crate::x_live::is_x_source_id(id))
+            .collect();
+        legacy.sort();
+        legacy.dedup();
+        legacy
+    };
+    if legacy.is_empty() {
+        return Ok(false);
+    }
+    let name = scheduled_x::scheduled_source_name(&event.id);
+    let by_name = api
+        .sources()
+        .await?
+        .into_iter()
+        .find(|source| source.name.as_deref() == Some(name.as_str()))
+        .map(|source| source.id);
+    let resolved = match by_name {
+        Some(id) => Some(id),
+        None => match event.provider_event_id.as_deref() {
+            Some(id) => api
+                .get(id)
+                .await?
+                .and_then(|remote| remote["source_id"].as_str().map(str::to_string))
+                .filter(|id| crate::x_live::is_x_source_id(id)),
+            None => None,
+        },
+    };
+    match resolved {
+        Some(resolved) => {
+            for slot in x_source_id_slots(event) {
+                if legacy.contains(slot) {
+                    *slot = resolved.clone();
+                }
+            }
+            tracing::info!(
+                event = %event.id,
+                source_id = %resolved,
+                "Migrated a scheduled X broadcast from its stream key to its source id."
+            );
+            Ok(true)
+        }
+        None if recovering => {
+            // Nothing on X knows this source any more: let recovery create
+            // and bind a fresh one instead of looping on the same error.
+            tracing::warn!(
+                event = %event.id,
+                "The saved X source of this broadcast no longer exists on X; recovery binds a fresh one."
+            );
+            event.ingest = None;
+            for preparation in [event.preparation.as_mut(), event.retained_ingest.as_mut()]
+                .into_iter()
+                .flatten()
+            {
+                if preparation
+                    .stream_id
+                    .as_deref()
+                    .is_some_and(|id| legacy.iter().any(|old| old == id))
+                {
+                    preparation.stream_id = None;
+                }
+                if matches!(preparation.prepared, Some(PreparedIngest::X(_))) {
+                    preparation.prepared = None;
+                }
+            }
+            Ok(true)
+        }
+        None => bail!(
+            "This broadcast was saved with X's old source format and its source could not be found on X. Recover the broadcast to bind it again."
+        ),
+    }
+}
+
 /// Creates (or, after a lost response, re-adopts by its deterministic name)
 /// the dedicated ingest source of an X schedule.
 async fn ensure_x_source(
@@ -1232,16 +1347,21 @@ async fn ensure_x_source(
         .unwrap_or_default()
         .into_iter()
         .find(|source| source.name.as_deref() == Some(name.as_str()));
+    // The stream key rides along only with `POST /2/sources`; a re-adopted
+    // source needs the dedicated stream_key route.
     let source = match existing {
-        Some(source) => source,
+        Some(mut source) => {
+            source.stream_key = Some(api.stream_key(&source.id).await?);
+            source
+        }
         None => api.create_source(&name).await?,
     };
     let key = source
-        .rtmp_stream_key
+        .stream_key
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())
-        .context("X stream source response did not include an RTMP stream key.")?;
+        .context("X stream source response did not include a stream key.")?;
     let server_url = source
         .rtmps_url
         .as_deref()
@@ -1257,7 +1377,7 @@ async fn ensure_x_source(
     put_secret(&secret_ref, key)?;
     event.ingest = Some(ScheduledIngest {
         source_id: source.id.clone(),
-        region: source.rtmp_region.clone().unwrap_or_default(),
+        region: source.region.clone().unwrap_or_default(),
         server_url: server_url.into(),
         stream_key_secret_ref: secret_ref,
     });
@@ -1338,6 +1458,9 @@ async fn execute_x(
     api: &XScheduledBroadcasts,
     put_secret: impl Fn(&str, &str) -> Result<()>,
 ) -> Result<()> {
+    if resolve_legacy_x_source_id(api, event, action == "recover").await? {
+        checkpoint(state, event, op, "source-id-migrated")?;
+    }
     if action == "schedule" {
         if event.provider_event_id.is_none() {
             if event.create_uncertain {
@@ -1397,6 +1520,11 @@ async fn execute_x(
     };
     let life = scheduled_x::lifecycle(&current);
     if action == "refresh" || action == "recover" {
+        if action == "recover" && event.ingest.is_none() {
+            // The legacy source id could not be resolved: bind a fresh
+            // dedicated source so the schedule can be prepared again.
+            ensure_x_source(state, api, event, op, &put_secret).await?;
+        }
         hydrate_x(event, &current)?;
         confirmed_x(event, current)?;
         if action == "recover"
@@ -1493,13 +1621,10 @@ async fn execute_x(
         if source.is_stream_active {
             bail!("Another encoder is already sending to this broadcast's source.");
         }
-        let key = source
-            .rtmp_stream_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .context("X stream source response did not include an RTMP stream key.")?;
-        put_secret(&ingest.stream_key_secret_ref, key)?;
+        // `GET /2/sources/:id` never carries the key; read it from the
+        // stream_key route right before the encoder needs it.
+        let key = api.stream_key(&ingest.source_id).await?;
+        put_secret(&ingest.stream_key_secret_ref, &key)?;
         let server_url = source
             .rtmps_url
             .as_deref()
@@ -1514,7 +1639,7 @@ async fn execute_x(
             account_label: event.account_label.clone(),
             source_id: ingest.source_id.clone(),
             region: source
-                .rtmp_region
+                .region
                 .clone()
                 .filter(|region| !region.is_empty())
                 .unwrap_or(ingest.region.clone()),
@@ -1523,8 +1648,6 @@ async fn execute_x(
             stream_key_present: true,
             redacted_url: "rtmps://<x-ingest>/<stream-key>".into(),
             is_stream_active: false,
-            recommended_configuration: source.recommended_configuration.clone(),
-            compatibility_info: source.compatibility_info.clone(),
             selection: crate::x_live::XSourceSelection::Created,
             deleted_retired_source_ids: Vec::new(),
         };
@@ -1624,17 +1747,20 @@ async fn execute_x(
             .map(str::to_string)
             .unwrap_or_else(|| scheduled_x::share_url(&id));
         event.watch_url = Some(share.clone());
+        let media_key = broadcast["media_key"].as_str().unwrap_or("");
+        // The new routes return no `media_id`; it is the digits after the
+        // last `_` of `media_key`. No playback URL exists any more either.
         op.result = Some(json!({
             "platform":"x",
             "accountId":event.account_id,
             "sourceId":source_id,
             "broadcastId":id,
-            "mediaKey":broadcast["media_key"].as_str().unwrap_or(""),
-            "mediaId":broadcast["media_id"],
+            "mediaKey":media_key,
+            "mediaId":crate::x_live::x_media_id_from_media_key(media_key),
             "shareUrl":share,
             "state":broadcast["state"].as_str().unwrap_or("RUNNING"),
             "tweetId":broadcast["tweet_id"],
-            "hlsUrl":broadcast.pointer("/video_access/https_hls_url").or(broadcast.pointer("/video_access/hls_url")),
+            "alreadyLive":false,
             "message":"Scheduled X broadcast is live."
         }));
         return Ok(());
@@ -2823,29 +2949,73 @@ mod x_tests {
             .push((method.clone(), path.clone(), body.clone()));
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         let ok = |value: Value| axum::Json(value).into_response();
+        let problem = |status: StatusCode, detail: &str| {
+            (
+                status,
+                axum::Json(json!({
+                    "type": match status.as_u16() {
+                        400 => "https://api.x.com/2/problems/invalid-request",
+                        404 => "https://api.x.com/2/problems/resource-not-found",
+                        _ => "about:blank",
+                    },
+                    "title": status.canonical_reason().unwrap_or("Problem"),
+                    "detail": detail,
+                    "status": status.as_u16(),
+                })),
+            )
+                .into_response()
+        };
         match (method.as_str(), parts.as_slice()) {
-            ("GET", ["2", "region"]) => ok(json!({"region":"eu"})),
-            ("POST", ["2", "users", _, "sources"]) => {
-                fixture.counter += 1;
-                let source = json!({"id":format!("src{}",fixture.counter),"name":body["name"],"rtmp_region":"eu","rtmps_url":"rtmps://ingest.fixture/live","rtmp_stream_key":format!("key{}",fixture.counter),"is_stream_active":false});
-                fixture.sources.push(source.clone());
-                ok(json!({"source":source}))
-            }
-            ("GET", ["2", "users", _, "sources"]) => ok(json!({"sources":fixture.sources})),
-            ("GET", ["2", "users", _, "sources", id]) => {
-                let active = fixture.source_active;
-                match fixture.sources.iter().find(|s| s["id"] == *id) {
-                    Some(source) => {
-                        let mut source = source.clone();
-                        source["is_stream_active"] = json!(active);
-                        ok(json!({"source":source}))
-                    }
-                    None => (StatusCode::NOT_FOUND, axum::Json(json!({}))).into_response(),
+            ("GET", ["2", "region"]) => ok(json!({"region":"us-east-1"})),
+            // POST /2/sources: 201, `data` envelope, the only answer with
+            // `stream_key`; the body is exactly {name, region}.
+            ("POST", ["2", "sources"]) => {
+                if body.as_object().is_none_or(|object| {
+                    object.len() != 2
+                        || !object.contains_key("name")
+                        || !object.contains_key("region")
+                }) {
+                    return problem(
+                        StatusCode::BAD_REQUEST,
+                        "POST /2/sources accepts only name and region.",
+                    );
                 }
+                fixture.counter += 1;
+                let source = json!({"id":source_id(fixture.counter),"name":body["name"],"region":"us-east-1","rtmps_url":"rtmps://ingest.fixture/live","is_stream_active":false,"created_at_ms":"1772029802844"});
+                fixture.sources.push(source.clone());
+                let mut created = source;
+                created["stream_key"] = json!(format!("key{}", fixture.counter));
+                (StatusCode::CREATED, axum::Json(json!({"data":created}))).into_response()
             }
-            ("DELETE", ["2", "users", _, "sources", id]) => {
-                fixture.sources.retain(|s| s["id"] != *id);
-                ok(json!({}))
+            ("GET", ["2", "sources"]) => {
+                ok(json!({"data":fixture.sources,"meta":{"result_count":fixture.sources.len()}}))
+            }
+            ("GET" | "DELETE", ["2", "sources", id])
+            | ("GET", ["2", "sources", id, "stream_key"]) => {
+                if !crate::x_live::is_x_source_id(id) {
+                    return problem(
+                        StatusCode::BAD_REQUEST,
+                        "The `id` value is not a source id.",
+                    );
+                }
+                let active = fixture.source_active;
+                let Some(index) = fixture.sources.iter().position(|s| s["id"] == *id) else {
+                    return problem(StatusCode::NOT_FOUND, "Source not found.");
+                };
+                if method == "DELETE" {
+                    fixture.sources.remove(index);
+                    return ok(json!({"data":{"deleted":true}}));
+                }
+                if parts.len() == 4 {
+                    let number = fixture.sources[index]["id"]
+                        .as_str()
+                        .and_then(|id| id[16..].parse::<usize>().ok())
+                        .unwrap_or_default();
+                    return ok(json!({"data":{"id":id,"stream_key":format!("key{number}")}}));
+                }
+                let mut source = fixture.sources[index].clone();
+                source["is_stream_active"] = json!(active);
+                ok(json!({"data":source}))
             }
             ("POST", ["2", "broadcasts", "scheduled"]) => {
                 fixture.counter += 1;
@@ -2914,9 +3084,12 @@ mod x_tests {
                 ok(json!({"data":schedule.clone()}))
             }
             ("GET", ["2", "broadcasts", id]) => ok(
-                json!({"broadcast":{"id":id,"media_key":format!("28_{id}"),"state":"RUNNING"},"share_url":format!("https://x.com/i/broadcasts/{id}")}),
+                json!({"data":{"id":id,"broadcast_id":id,"media_key":format!("28_2116610227978326{:03}", id.len()),"state":"RUNNING","share_url":format!("https://x.com/i/broadcasts/{id}")}}),
             ),
-            ("PUT", ["2", "users", _, "broadcasts", id, "state"]) => {
+            ("PUT", ["2", "broadcasts", id, "state"]) => {
+                if body != json!({"state":"END"}) {
+                    return problem(StatusCode::BAD_REQUEST, "Send exactly {\"state\":\"END\"}.");
+                }
                 if let Some(schedule) = fixture
                     .schedules
                     .iter_mut()
@@ -2924,10 +3097,15 @@ mod x_tests {
                 {
                     schedule["state"] = json!("Ended");
                 }
-                ok(json!({"broadcast":{"id":id,"state":"ENDED"}}))
+                ok(json!({"data":{"id":id,"state":"ENDED"}}))
             }
             _ => (StatusCode::NOT_FOUND, axum::Json(json!({}))).into_response(),
         }
+    }
+
+    /// The fixture's 19-digit source ids, in creation order.
+    fn source_id(counter: usize) -> String {
+        format!("9123456789012345{counter:03}")
     }
 
     async fn x_fixture() -> (
@@ -3029,7 +3207,7 @@ mod x_tests {
         assert_eq!(data.schedules.len(), 1);
         let schedule = &data.schedules[0];
         assert_eq!(schedule["manual_publish"], true);
-        assert_eq!(schedule["source_id"], "src1");
+        assert_eq!(schedule["source_id"], source_id(1));
         assert_eq!(schedule["scheduled_start_ms"], "2051262000000");
         assert_eq!(schedule["scheduled_end_ms"], "2051265600000");
         assert_eq!(schedule["available_for_replay"], false);
@@ -3040,11 +3218,21 @@ mod x_tests {
             event.watch_url.as_deref(),
             Some("https://x.com/i/broadcasts/sched2")
         );
-        assert_eq!(event.ingest.as_ref().unwrap().source_id, "src1");
+        assert_eq!(event.ingest.as_ref().unwrap().source_id, source_id(1));
         let stored = secrets.lock().unwrap();
         assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].0, "platform:x:123:src1:stream-key");
+        assert_eq!(
+            stored[0].0,
+            format!("platform:x:123:{}:stream-key", source_id(1))
+        );
         assert_eq!(stored[0].1, "key1");
+        // The key came from the create response; nothing asked the
+        // stream_key route and no request carried a key in its path.
+        assert!(
+            data.calls
+                .iter()
+                .all(|(_, path, _)| !path.ends_with("/stream_key") && !path.contains("key1"))
+        );
         assert!(!event.create_uncertain);
         // No instant broadcast was created and nothing was published.
         assert!(
@@ -3180,7 +3368,7 @@ mod x_tests {
             assert_eq!(put.2["manual_publish"], true);
             assert_eq!(put.2["scheduled_broadcast_id"], "902");
             assert_eq!(put.2["scheduled_end_ms"], "2051265600000");
-            assert_eq!(put.2["source_id"], "src1");
+            assert_eq!(put.2["source_id"], source_id(1));
             assert_eq!(data.schedules[0]["title"], "Edited");
         }
         state
@@ -3246,14 +3434,28 @@ mod x_tests {
         .unwrap();
         let prepared = op.result.clone().unwrap();
         assert_eq!(prepared["platform"], "x");
-        assert_eq!(prepared["sourceId"], "src1");
+        assert_eq!(prepared["sourceId"], source_id(1));
         assert_eq!(prepared["serverUrl"], "rtmps://ingest.fixture/live");
         assert_eq!(
             prepared["streamKeySecretRef"],
-            "platform:x:123:src1:stream-key"
+            format!("platform:x:123:{}:stream-key", source_id(1))
         );
         assert!(prepared.get("streamKey").is_none());
+        assert!(prepared.get("compatibilityInfo").is_none());
+        // Prepare reads the key through the stream_key route, since the
+        // source read never carries it.
         assert_eq!(secrets.lock().unwrap().len(), 1);
+        assert_eq!(secrets.lock().unwrap()[0].1, "key1");
+        assert!(
+            fixture
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|(method, path, _)| {
+                    method == "GET" && *path == format!("/2/sources/{}/stream_key", source_id(1))
+                })
+        );
         assert_eq!(event.lifecycle, "preparing");
         assert!(matches!(
             event.preparation.as_ref().unwrap().prepared,
@@ -3355,6 +3557,148 @@ mod x_tests {
         assert!(event.provider_event_id.is_some());
         assert_eq!(fixture.lock().unwrap().schedules.len(), 1);
         assert_eq!(sanitized_error(&error).code, "thumbnail");
+        handle.abort();
+    }
+
+    /// An event saved before the `/2/sources` migration: every stored copy
+    /// of the source id is the old stream key.
+    fn legacy_prepared(source_id: &str) -> Preparation {
+        Preparation {
+            attempt_id: "attempt".into(),
+            target_id: "x".into(),
+            stream_id: Some(source_id.into()),
+            profile: json!({}),
+            phase: "released".into(),
+            session_id: None,
+            prepared: Some(PreparedIngest::X(crate::x_live::PreparedXStreamSource {
+                platform: StreamPlatform::X,
+                account_id: "123".into(),
+                account_label: "@videorc".into(),
+                source_id: source_id.into(),
+                region: "us-east-1".into(),
+                server_url: "rtmps://ingest.fixture/live".into(),
+                stream_key_secret_ref: format!("platform:x:123:{source_id}:stream-key"),
+                stream_key_present: true,
+                redacted_url: "rtmps://<x-ingest>/<stream-key>".into(),
+                is_stream_active: false,
+                selection: crate::x_live::XSourceSelection::Created,
+                deleted_retired_source_ids: Vec::new(),
+            })),
+        }
+    }
+
+    const LEGACY_STREAM_KEY: &str = "1hJz9kQ2LmNpRsTuVwXyZaBcDe";
+
+    async fn scheduled_legacy_event() -> (
+        XScheduledBroadcasts,
+        Arc<Mutex<XFixture>>,
+        tokio::task::JoinHandle<()>,
+        AppState,
+        ScheduledStreamEvent,
+        Mutation,
+        ScheduleOperation,
+    ) {
+        let (api, fixture, handle) = x_fixture().await;
+        let state = super::tests::state();
+        let (mut event, m, mut op) = reserve(&state, x_event());
+        execute_x(&state, "schedule", &m, &mut event, &mut op, &api, |_, _| {
+            Ok(())
+        })
+        .await
+        .unwrap();
+        event.ingest.as_mut().unwrap().source_id = LEGACY_STREAM_KEY.into();
+        event.retained_ingest = Some(legacy_prepared(LEGACY_STREAM_KEY));
+        (api, fixture, handle, state, event, m, op)
+    }
+
+    #[tokio::test]
+    async fn legacy_x_source_ids_migrate_by_the_dedicated_source_name() {
+        let (api, fixture, handle, state, mut event, m, mut op) = scheduled_legacy_event().await;
+        // Before the migration this read bailed "Provider ingest mismatch":
+        // X returns the real source id on every scheduled read now.
+        execute_x(&state, "refresh", &m, &mut event, &mut op, &api, |_, _| {
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(event.ingest.as_ref().unwrap().source_id, source_id(1));
+        let retained = event.retained_ingest.as_ref().unwrap();
+        assert_eq!(retained.stream_id.as_deref(), Some(source_id(1).as_str()));
+        match &retained.prepared {
+            Some(PreparedIngest::X(prepared)) => assert_eq!(prepared.source_id, source_id(1)),
+            other => panic!("prepared ingest not migrated: {other:?}"),
+        }
+        assert_eq!(op.stage, "source-id-migrated");
+        assert_eq!(event.lifecycle, "scheduled");
+        // The stream key never travelled in a path.
+        assert!(
+            fixture
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|(_, path, _)| !path.contains(LEGACY_STREAM_KEY))
+        );
+        // Persisted: the next load sees the migrated id.
+        state
+            .database
+            .checkpoint_scheduled_operation(&event, &op, true)
+            .unwrap();
+        let saved = state.database.scheduled_event(&event.id).unwrap();
+        assert_eq!(saved.ingest.unwrap().source_id, source_id(1));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_x_source_ids_fall_back_to_the_remote_schedule() {
+        let (api, fixture, handle, state, mut event, m, mut op) = scheduled_legacy_event().await;
+        // The dedicated source was renamed on X: the name no longer matches,
+        // but the schedule still names its source id.
+        fixture.lock().unwrap().sources[0]["name"] = json!("Renamed in Media Studio");
+        execute_x(&state, "refresh", &m, &mut event, &mut op, &api, |_, _| {
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(event.ingest.as_ref().unwrap().source_id, source_id(1));
+        assert_eq!(
+            event.retained_ingest.as_ref().unwrap().stream_id.as_deref(),
+            Some(source_id(1).as_str())
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_legacy_x_source_id_asks_for_recovery_then_rebinds() {
+        let (api, fixture, handle, state, mut event, m, mut op) = scheduled_legacy_event().await;
+        {
+            let mut data = fixture.lock().unwrap();
+            data.sources.clear();
+            data.schedules[0]["source_id"] = Value::Null;
+        }
+        let error = execute_x(&state, "refresh", &m, &mut event, &mut op, &api, |_, _| {
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("Recover the broadcast"),
+            "{error}"
+        );
+        assert_eq!(event.ingest.as_ref().unwrap().source_id, LEGACY_STREAM_KEY);
+        // Recover drops the dead binding and creates a fresh dedicated source.
+        execute_x(&state, "recover", &m, &mut event, &mut op, &api, |_, _| {
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let ingest = event.ingest.as_ref().unwrap();
+        assert!(crate::x_live::is_x_source_id(&ingest.source_id));
+        assert_ne!(ingest.source_id, LEGACY_STREAM_KEY);
+        assert!(event.retained_ingest.as_ref().unwrap().stream_id.is_none());
+        assert!(event.retained_ingest.as_ref().unwrap().prepared.is_none());
+        assert_eq!(event.provider_event_id.as_deref(), Some("sched2"));
+        assert_eq!(fixture.lock().unwrap().sources.len(), 1);
         handle.abort();
     }
 }

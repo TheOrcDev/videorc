@@ -16,7 +16,7 @@ use crate::streaming::{
 
 type HmacSha1 = Hmac<Sha1>;
 
-const X_LIVESTREAM_DOCS_URL: &str = "https://github.com/xdevplatform/x-livestream-sample";
+const X_LIVESTREAM_DOCS_URL: &str = "https://docs.x.com/livestream-api/migration-guide";
 const X_API_OVERVIEW_URL: &str = "https://docs.x.com/x-api/overview";
 pub const DEFAULT_API_BASE_URL: &str = "https://api.x.com";
 const DEFAULT_SOURCE_NAME: &str = "Videorc Primary Encoder";
@@ -63,10 +63,8 @@ pub struct XPrepareParams {
 pub struct XPublishParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// The 19-digit source id from prepare (never the stream key).
     pub source_id: String,
-    pub region: String,
-    #[serde(default = "default_true")]
-    pub is_low_latency: bool,
     /// Active capture session — X lifecycle events land in its session log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -80,10 +78,6 @@ pub struct XEndParams {
     pub broadcast_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,12 +127,9 @@ pub struct PreparedXStreamSource {
     pub stream_key_present: bool,
     pub redacted_url: String,
     pub is_stream_active: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_configuration: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compatibility_info: Option<serde_json::Value>,
     pub selection: XSourceSelection,
-    /// Retired sources deleted during this prepare (best-effort cleanup).
+    /// Idle Videorc-named leftovers deleted during this prepare (best-effort
+    /// quota hygiene).
     #[serde(default)]
     pub deleted_retired_source_ids: Vec<String>,
 }
@@ -155,18 +146,15 @@ pub struct XPublishResult {
     pub media_id: Option<String>,
     pub share_url: String,
     pub state: String,
+    /// The announcing Post, when X had already created it at Go Live time.
+    /// Missing is not an error: X posts asynchronously and never reports a
+    /// failed Post (the state watch reads it later).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tweet_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tweet_error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hls_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub playable_before_publish: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pre_publish_wait_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compatibility_info: Option<serde_json::Value>,
+    /// `true` when `POST /2/broadcasts` answered 200: the source already had a
+    /// live broadcast, which X returned unchanged.
+    #[serde(default)]
+    pub already_live: bool,
     pub message: String,
 }
 
@@ -196,9 +184,6 @@ pub struct XPrepareSourceRequest {
     pub account: Option<PlatformAccount>,
     pub source_name: String,
     pub api_base_url: Option<String>,
-    /// Sources retired by the playback health model — never selected, and
-    /// deleted best-effort when idle.
-    pub retired_source_ids: Vec<String>,
 }
 
 /// How prepare arrived at the source it returns (session-log evidence).
@@ -217,21 +202,20 @@ pub enum XSourceSelection {
 pub struct XPublishRequest {
     pub credentials: XLivestreamCredentials,
     pub source_id: String,
-    pub region: String,
     pub metadata: StreamMetadataDraft,
-    pub is_low_latency: bool,
     pub locale: String,
     pub chat_option: u8,
     pub api_base_url: Option<String>,
+    /// `GET /2/sources/:id` polls for `is_stream_active` before Go Live: the
+    /// announcing Post goes out the instant the call returns, so video must
+    /// already be flowing.
     pub poll_attempts: usize,
     pub poll_interval_ms: u64,
-    // Pre-publish playback gate: after CREATE, wait for the HLS playlist to
-    // carry real segments before the PUBLISH that posts the announcement —
-    // so the tweet points at working video whenever X provisions in time.
-    // 0 attempts disables the gate. Publish proceeds either way (X may only
-    // provision on publish; never deadlock on the gate).
-    pub pre_publish_probe_attempts: usize,
-    pub pre_publish_probe_interval_ms: u64,
+    /// `POST /2/broadcasts` answers 409 while the source cannot take video
+    /// yet (and may answer 5xx or lose its response); retry that many times
+    /// with this backoff before giving up.
+    pub conflict_attempts: usize,
+    pub conflict_backoff_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -247,101 +231,57 @@ struct XRegionResponse {
     region: String,
 }
 
+/// The X API v2 `data` wrapper every `/2/sources` and `/2/broadcasts`
+/// response uses (lists add `meta.result_count`, which nothing reads).
 #[derive(Debug, Clone, Deserialize)]
-struct XSourceEnvelope {
-    source: XStreamSource,
+struct XData<T> {
+    data: T,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct XSourcesEnvelope {
-    #[serde(default)]
-    sources: Vec<XStreamSource>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct XBroadcastEnvelope {
-    broadcast: XBroadcast,
-    #[serde(default)]
-    share_url: Option<String>,
-    // Playback URLs exist from CREATE (before publish) — the watchability
-    // probe uses them to verify X is actually transcoding.
-    #[serde(default)]
-    video_access: Option<XVideoAccess>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct XVideoAccess {
-    #[serde(default)]
-    hls_url: Option<String>,
-    #[serde(default)]
-    https_hls_url: Option<String>,
-}
-
-impl XVideoAccess {
-    fn best_hls_url(&self) -> Option<String> {
-        self.https_hls_url
-            .clone()
-            .or_else(|| self.hls_url.clone())
-            .map(|url| url.trim().to_string())
-            .filter(|url| !url.is_empty())
-    }
-}
-
+/// A stream source as `/2/sources` returns it. `id` is the 19-digit source
+/// id (not a secret); `stream_key` is present only in the `POST /2/sources`
+/// response and the `GET /2/sources/:id/stream_key` answer.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct XStreamSource {
     pub(crate) id: String,
     #[serde(default)]
     pub(crate) name: Option<String>,
-    #[serde(default)]
-    pub(crate) rtmp_region: Option<String>,
+    #[serde(default, alias = "rtmp_region")]
+    pub(crate) region: Option<String>,
     #[serde(default)]
     pub(crate) rtmps_url: Option<String>,
     #[serde(default)]
     pub(crate) rtmp_url: Option<String>,
     #[serde(default)]
-    pub(crate) rtmp_stream_key: Option<String>,
+    pub(crate) stream_key: Option<String>,
     #[serde(default)]
     pub(crate) is_stream_active: bool,
-    #[serde(default)]
-    pub(crate) recommended_configuration: Option<serde_json::Value>,
-    #[serde(default)]
-    pub(crate) compatibility_info: Option<serde_json::Value>,
 }
 
-/// Persisted per-source playback record (app_settings key `xSourceHealth`,
-/// a `{source_id: XSourceHealth}` map). Retirement is conservative — the
-/// 2026-07-08 incident proved a source can transcode one hour and not the
-/// next, so one bad probe only counts, it does not retire.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct XSourceHealth {
+/// `GET /2/sources/:id/stream_key` → `{"data":{"id","stream_key"}}`.
+#[derive(Debug, Clone, Deserialize)]
+struct XStreamKey {
     #[serde(default)]
-    pub last_verified_at: Option<String>,
-    #[serde(default)]
-    pub consecutive_failures: u32,
-    #[serde(default)]
-    pub retired: bool,
+    stream_key: Option<String>,
 }
 
-pub const X_SOURCE_HEALTH_SETTING: &str = "xSourceHealth";
-pub const X_SOURCE_RETIRE_FAILURES: u32 = 2;
+/// Legacy app_settings key of the retired per-source playback health map.
+/// Its keys were old stream keys (the deprecated routes used the key as the
+/// source id), so the map is cleared, never migrated.
+pub const LEGACY_X_SOURCE_HEALTH_SETTING: &str = "xSourceHealth";
 
-pub fn apply_x_playback_outcome(
-    mut health: XSourceHealth,
-    verified: bool,
-    now_rfc3339: &str,
-) -> XSourceHealth {
-    if verified {
-        health.last_verified_at = Some(now_rfc3339.to_string());
-        health.consecutive_failures = 0;
-        health.retired = false;
-    } else {
-        health.consecutive_failures = health.consecutive_failures.saturating_add(1);
-        if health.consecutive_failures >= X_SOURCE_RETIRE_FAILURES {
-            health.retired = true;
-        }
-    }
-    health
+/// `true` for an X source id: the 19-digit (all ASCII digits, non-empty)
+/// identifier the `/2/sources` routes take. A stream key is never one.
+pub fn is_x_source_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// The broadcast's media id is not returned by the new routes: it is the
+/// digits after the last `_` in `media_key` (`28_2116610227978326016` →
+/// `2116610227978326016`).
+pub fn x_media_id_from_media_key(media_key: &str) -> Option<String> {
+    let (_, digits) = media_key.trim().rsplit_once('_')?;
+    is_x_source_id(digits).then(|| digits.to_string())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -353,15 +293,121 @@ struct XBroadcast {
     #[serde(default)]
     media_key: Option<String>,
     #[serde(default)]
-    media_id: Option<String>,
-    #[serde(default)]
     share_url: Option<String>,
     #[serde(default)]
     state: Option<String>,
     #[serde(default)]
     tweet_id: Option<String>,
-    #[serde(default)]
-    tweet_error: Option<String>,
+}
+
+/// One failed X Livestream API call: the HTTP status plus the problem
+/// `detail` (or the legacy `message`), never the request body or URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XApiError {
+    pub status: u16,
+    pub detail: String,
+}
+
+impl std::fmt::Display for XApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = reqwest::StatusCode::from_u16(self.status)
+            .ok()
+            .and_then(|status| status.canonical_reason())
+            .map(|reason| format!(" {reason}"))
+            .unwrap_or_default();
+        write!(
+            formatter,
+            "X Livestream API request failed with HTTP {}{reason}: {}",
+            self.status, self.detail
+        )
+    }
+}
+
+impl std::error::Error for XApiError {}
+
+impl XApiError {
+    pub fn is_conflict(&self) -> bool {
+        self.status == 409
+    }
+}
+
+/// Whether a failed Go Live may be sent again. X documents `POST
+/// /2/broadcasts` as safe to retry: a source that already went live answers
+/// 200 with the same broadcast. So a 409 (encoder not connected yet), a 5xx
+/// (temporary failure) and a lost or unreadable response are retried; any
+/// other 4xx is final.
+fn go_live_error_is_retryable(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<XApiError>() {
+        Some(api_error) => api_error.is_conflict() || api_error.status >= 500,
+        None => true,
+    }
+}
+
+/// What the broadcast state watch does with one `GET /2/broadcasts/:id`
+/// sample (plan: X migration). Pure so the decision is testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XBroadcastWatchVerdict {
+    /// Still RUNNING (or no state field yet): keep watching.
+    KeepWatching,
+    /// The owning session is gone: nothing left to protect, stop quietly.
+    SessionOver,
+    /// X moved the broadcast out of RUNNING while the session still streams
+    /// (TIMED_OUT when no video reached X within 5 minutes, ENDED, or any
+    /// other state): the streamer must hear about it.
+    EndedByX { state: String },
+}
+
+pub fn x_broadcast_watch_verdict(
+    state: Option<&str>,
+    session_active: bool,
+) -> XBroadcastWatchVerdict {
+    if !session_active {
+        return XBroadcastWatchVerdict::SessionOver;
+    }
+    match state.map(str::trim).filter(|state| !state.is_empty()) {
+        None => XBroadcastWatchVerdict::KeepWatching,
+        Some(state) if state.eq_ignore_ascii_case("RUNNING") => {
+            XBroadcastWatchVerdict::KeepWatching
+        }
+        Some(state) => XBroadcastWatchVerdict::EndedByX {
+            state: state.to_ascii_uppercase(),
+        },
+    }
+}
+
+/// One `GET /2/broadcasts/:id?broadcast.fields=state,tweet_id` sample.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct XBroadcastStateSample {
+    pub state: Option<String>,
+    pub tweet_id: Option<String>,
+}
+
+/// Reads the broadcast's `state` and `tweet_id`, signed like every other
+/// Livestream call (the query is part of the OAuth 1.0a base string).
+pub async fn fetch_broadcast_state(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+    broadcast_id: &str,
+) -> Result<XBroadcastStateSample> {
+    let mut url = endpoint(base_url, &format!("/2/broadcasts/{broadcast_id}"))?;
+    url.query_pairs_mut()
+        .append_pair("broadcast.fields", "state,tweet_id");
+    let body: serde_json::Value =
+        send_x_request(client, credentials, Method::GET, url, None).await?;
+    let broadcast = crate::scheduled_x::payload(&body);
+    let text = |key: &str| {
+        broadcast
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    Ok(XBroadcastStateSample {
+        state: text("state"),
+        tweet_id: text("tweet_id"),
+    })
 }
 
 /// The application-level OAuth 1.0a consumer pair. Runtime env wins, then the
@@ -566,7 +612,7 @@ pub fn x_native_live_capability_with(
             credential_source: Some(credentials.credential_source),
             message: "Connected X account does not match the account that authorized X Live.".to_string(),
             evidence: vec![
-                "X rejects Livestream requests when the OAuth 1.0a token user id differs from the :user_id path.".to_string(),
+                "X takes the broadcast owner from the OAuth 1.0a token, so Videorc would go live on the account that authorized X Live, not the connected one.".to_string(),
                 "Re-run Authorize X Live signed in as the connected X account, or reconnect the matching account.".to_string(),
             ],
             docs_url: X_LIVESTREAM_DOCS_URL.to_string(),
@@ -588,8 +634,8 @@ pub fn x_native_live_capability_with(
         message: "X Livestream API credentials are configured. Videorc can prepare a native X source and publish broadcasts through the allow-listed API.".to_string(),
         evidence: vec![
             "OAuth 1.0a consumer key, consumer secret, access token, and token secret are present.".to_string(),
-            "The numeric X user id is available for /2/users/:user_id source and broadcast paths.".to_string(),
-            "RTMPS source keys will be stored in the backend secret store and redacted from UI/logs.".to_string(),
+            "The /2/sources and /2/broadcasts routes take the owner from that token; the numeric X user id only identifies the connected account.".to_string(),
+            "Stream keys come only from the create-source response or GET /2/sources/:id/stream_key; they are stored in the backend secret store and redacted from UI/logs.".to_string(),
         ],
         docs_url: X_LIVESTREAM_DOCS_URL.to_string(),
         api_overview_url: X_API_OVERVIEW_URL.to_string(),
@@ -636,13 +682,20 @@ where
         None => get_region(client, &credentials, &base_url).await?,
     };
     let mut deleted_retired_source_ids = Vec::new();
+    // The stream key arrives with the source only from `POST /2/sources`;
+    // every reused source needs the dedicated stream_key route.
     let (source, selection) = if let Some(source_id) =
         optional_env_any(&["VIDEORC_X_LIVESTREAM_SOURCE_ID", "X_LIVESTREAM_SOURCE_ID"])
     {
-        (
-            get_source(client, &credentials, &base_url, &source_id).await?,
-            XSourceSelection::EnvOverride,
-        )
+        if !is_x_source_id(&source_id) {
+            anyhow::bail!(
+                "VIDEORC_X_LIVESTREAM_SOURCE_ID must be the 19-digit source id from GET /2/sources, not a stream key."
+            );
+        }
+        let mut source = get_source(client, &credentials, &base_url, &source_id).await?;
+        source.stream_key =
+            Some(get_source_stream_key(client, &credentials, &base_url, &source_id).await?);
+        (source, XSourceSelection::EnvOverride)
     } else {
         let sources = list_sources(client, &credentials, &base_url)
             .await
@@ -663,16 +716,10 @@ where
         .await
         {
             Ok(created) => {
-                // Quota hygiene: yesterday's Videorc sources and retired ones
-                // are dead weight. Delete everything idle that we own by name
-                // plus explicit retirees — never the source just created, and
-                // never one actively receiving a stream.
-                for source_id in x_source_cleanup_ids(
-                    &sources,
-                    &request.source_name,
-                    &request.retired_source_ids,
-                    &created.id,
-                ) {
+                // Quota hygiene: yesterday's Videorc sources are dead weight.
+                // Delete everything idle that we own by name — never the
+                // source just created, and never one actively receiving.
+                for source_id in x_source_cleanup_ids(&sources, &request.source_name, &created.id) {
                     if delete_source(client, &credentials, &base_url, &source_id)
                         .await
                         .is_ok()
@@ -683,22 +730,21 @@ where
                 (created, XSourceSelection::Created)
             }
             Err(create_error) => {
-                let retired = |source: &&XStreamSource| {
-                    request
-                        .retired_source_ids
-                        .iter()
-                        .any(|retired_id| retired_id == &source.id)
-                };
                 let fallback = sources
                     .iter()
-                    .filter(|source| !retired(source))
                     .find(|source| {
                         source.name.as_deref() == Some(request.source_name.as_str())
-                            && source.rtmp_region.as_deref() == Some(region.as_str())
+                            && source.region.as_deref() == Some(region.as_str())
                     })
                     .cloned();
                 match fallback {
-                    Some(fallback) => (fallback, XSourceSelection::ReusedNameMatch),
+                    Some(mut fallback) => {
+                        fallback.stream_key = Some(
+                            get_source_stream_key(client, &credentials, &base_url, &fallback.id)
+                                .await?,
+                        );
+                        (fallback, XSourceSelection::ReusedNameMatch)
+                    }
                     None => {
                         return Err(create_error.context(
                             "Could not create a fresh X stream source and no reusable one exists.",
@@ -710,7 +756,7 @@ where
     };
 
     let source_id = source.id.trim().to_string();
-    if source_id.is_empty() {
+    if !is_x_source_id(&source_id) {
         anyhow::bail!("X stream source response did not include a source id.");
     }
     let server_url = source
@@ -722,14 +768,14 @@ where
         .context("X stream source response did not include an RTMPS ingest URL.")?
         .to_string();
     let stream_key = source
-        .rtmp_stream_key
+        .stream_key
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())
-        .context("X stream source response did not include an RTMP stream key.")?
+        .context("X stream source response did not include a stream key.")?
         .to_string();
     let region = source
-        .rtmp_region
+        .region
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(region);
@@ -755,8 +801,6 @@ where
         stream_key_present: true,
         redacted_url: "rtmps://<x-ingest>/<stream-key>".to_string(),
         is_stream_active: source.is_stream_active,
-        recommended_configuration: source.recommended_configuration,
-        compatibility_info: source.compatibility_info,
         selection,
         deleted_retired_source_ids,
     })
@@ -767,191 +811,88 @@ pub async fn publish_x_broadcast(
     client: &reqwest::Client,
 ) -> Result<XPublishResult> {
     let base_url = api_base_url(request.api_base_url.as_deref());
+    if !is_x_source_id(&request.source_id) {
+        anyhow::bail!(
+            "X Go Live needs the 19-digit source id from prepare, not a stream key. Prepare the X source again."
+        );
+    }
+    // The announcing Post goes out the instant Go Live returns, so video must
+    // already be flowing (X ends a broadcast without video as TIMED_OUT).
     let attempts = request.poll_attempts.max(1);
-    let mut last_source = None;
+    let mut active = false;
     for attempt in 0..attempts {
         let source =
             get_source(client, &request.credentials, &base_url, &request.source_id).await?;
-        let active = source.is_stream_active;
-        last_source = Some(source);
-        if active {
+        if source.is_stream_active {
+            active = true;
             break;
         }
         if attempt + 1 < attempts {
             sleep(Duration::from_millis(request.poll_interval_ms)).await;
         }
     }
-    if !last_source
-        .as_ref()
-        .is_some_and(|source| source.is_stream_active)
-    {
-        anyhow::bail!("X RTMPS source did not become active before publish.");
+    if !active {
+        anyhow::bail!("X RTMPS source did not become active before Go Live.");
     }
-    let compatibility_info = last_source
-        .as_ref()
-        .and_then(|source| source.compatibility_info.clone());
 
-    let created = create_broadcast(
-        client,
-        &request.credentials,
-        &base_url,
-        &request.source_id,
-        &request.region,
-        request.is_low_latency,
-    )
-    .await?;
-    let broadcast_id = created
-        .broadcast
-        .broadcast_id
-        .clone()
-        .or(created.broadcast.id.clone())
-        .context("X broadcast create response did not include a broadcast id.")?;
-    let media_key = created
-        .broadcast
-        .media_key
-        .clone()
-        .context("X broadcast create response did not include a media_key.")?;
-    let share_url = created
-        .share_url
-        .clone()
-        .or(created.broadcast.share_url.clone())
-        .unwrap_or_else(|| format!("https://x.com/i/broadcasts/{broadcast_id}"));
-    let hls_url = created
-        .video_access
-        .as_ref()
-        .and_then(XVideoAccess::best_hls_url);
-
-    // Pre-publish playback gate: give X a bounded window to bring up the
-    // transcode BEFORE the announcement post goes out. Never fails publish.
-    let mut playable_before_publish = None;
-    let mut pre_publish_wait_ms = None;
-    if let Some(hls_url) = hls_url.as_deref()
-        && request.pre_publish_probe_attempts > 0
-    {
-        let started = std::time::Instant::now();
-        let mut playable = false;
-        for attempt in 0..request.pre_publish_probe_attempts {
-            if x_playlist_playable(client, hls_url).await.unwrap_or(false) {
-                playable = true;
+    let body = GoLiveRequest {
+        source_id: &request.source_id,
+        title: &x_title(&request.metadata),
+        locale: &request.locale,
+        chat_option: request.chat_option,
+        should_not_tweet: x_should_not_tweet(&request.metadata),
+    };
+    let conflict_attempts = request.conflict_attempts.max(1);
+    let mut outcome = None;
+    for attempt in 0..conflict_attempts {
+        match go_live(client, &request.credentials, &base_url, &body).await {
+            Ok(result) => {
+                outcome = Some(result);
                 break;
             }
-            if attempt + 1 < request.pre_publish_probe_attempts {
-                sleep(Duration::from_millis(request.pre_publish_probe_interval_ms)).await;
+            // 409: the source cannot take video yet (retry once video flows)
+            // or another broadcast is live on it (`detail` names it). 5xx and
+            // a lost response are retried too: a retry of a call that did go
+            // live answers 200 with that broadcast. The final error keeps X's
+            // detail.
+            Err(error) if attempt + 1 < conflict_attempts && go_live_error_is_retryable(&error) => {
+                sleep(Duration::from_millis(request.conflict_backoff_ms)).await;
             }
+            Err(error) => return Err(error),
         }
-        playable_before_publish = Some(playable);
-        pre_publish_wait_ms = Some(started.elapsed().as_millis() as u64);
     }
-
-    let title = x_title(&request.metadata);
-    let published = publish_broadcast(
-        client,
-        &request.credentials,
-        &base_url,
-        PublishBroadcastStateRequest {
-            broadcast_id: &broadcast_id,
-            title: &title,
-            should_not_tweet: x_should_not_tweet(&request.metadata),
-            locale: &request.locale,
-            chat_option: request.chat_option,
-        },
-    )
-    .await?;
+    let (already_live, broadcast) = outcome.context("X Go Live produced no broadcast.")?;
+    let broadcast_id = broadcast
+        .broadcast_id
+        .clone()
+        .or(broadcast.id.clone())
+        .context("X Go Live response did not include a broadcast id.")?;
+    // `media_key` is optional in the Go Live response, and by now the
+    // broadcast is already RUNNING on X with its Post out: a missing key must
+    // never turn a live broadcast into a reported failure.
+    let media_key = broadcast.media_key.clone().unwrap_or_default();
+    let share_url = broadcast
+        .share_url
+        .clone()
+        .unwrap_or_else(|| format!("https://x.com/i/broadcasts/{broadcast_id}"));
 
     Ok(XPublishResult {
         platform: StreamPlatform::X,
         account_id: request.credentials.user_id,
         source_id: request.source_id,
         broadcast_id,
+        media_id: x_media_id_from_media_key(&media_key),
         media_key,
-        media_id: created.broadcast.media_id,
         share_url,
-        state: published
-            .broadcast
-            .state
-            .unwrap_or_else(|| "RUNNING".to_string()),
-        tweet_id: published.broadcast.tweet_id,
-        tweet_error: published.broadcast.tweet_error,
-        hls_url,
-        playable_before_publish,
-        pre_publish_wait_ms,
-        compatibility_info,
-        message: "X broadcast is live.".to_string(),
+        state: broadcast.state.unwrap_or_else(|| "RUNNING".to_string()),
+        tweet_id: broadcast.tweet_id,
+        already_live,
+        message: if already_live {
+            "X broadcast was already live on this source; X returned it unchanged.".to_string()
+        } else {
+            "X broadcast is live.".to_string()
+        },
     })
-}
-
-/// One playback probe: does the HLS playlist behind `url` currently carry
-/// real media segments? Text-only fetches — never downloads video. A master
-/// playlist is followed one level to its first variant. `Ok(false)` covers
-/// every not-ready shape (HTTP errors, empty playlists) so callers can poll.
-pub async fn x_playlist_playable(client: &reqwest::Client, url: &str) -> Result<bool> {
-    let body = match fetch_playlist_text(client, url).await? {
-        Some(body) => body,
-        None => return Ok(false),
-    };
-    match playlist_verdict(&body) {
-        PlaylistVerdict::Playable => Ok(true),
-        PlaylistVerdict::NotReady => Ok(false),
-        PlaylistVerdict::Variant(variant) => {
-            let variant_url = resolve_playlist_url(url, &variant)?;
-            let Some(body) = fetch_playlist_text(client, &variant_url).await? else {
-                return Ok(false);
-            };
-            Ok(matches!(playlist_verdict(&body), PlaylistVerdict::Playable))
-        }
-    }
-}
-
-async fn fetch_playlist_text(client: &reqwest::Client, url: &str) -> Result<Option<String>> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .context("Could not reach the X playback playlist.")?;
-    if !response.status().is_success() {
-        return Ok(None);
-    }
-    Ok(Some(response.text().await.unwrap_or_default()))
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum PlaylistVerdict {
-    Playable,
-    /// Master playlist: the first variant URI to follow.
-    Variant(String),
-    NotReady,
-}
-
-fn playlist_verdict(body: &str) -> PlaylistVerdict {
-    let mut variant = None;
-    let mut saw_stream_inf = false;
-    for line in body.lines() {
-        let line = line.trim();
-        if line.starts_with("#EXTINF") {
-            return PlaylistVerdict::Playable;
-        }
-        if saw_stream_inf && !line.is_empty() && !line.starts_with('#') && variant.is_none() {
-            variant = Some(line.to_string());
-        }
-        if line.starts_with("#EXT-X-STREAM-INF") {
-            saw_stream_inf = true;
-        }
-    }
-    match variant {
-        Some(variant) => PlaylistVerdict::Variant(variant),
-        None => PlaylistVerdict::NotReady,
-    }
-}
-
-fn resolve_playlist_url(playlist_url: &str, reference: &str) -> Result<String> {
-    if reference.starts_with("http://") || reference.starts_with("https://") {
-        return Ok(reference.to_string());
-    }
-    let base = Url::parse(playlist_url).context("X playback playlist URL is invalid.")?;
-    Ok(base
-        .join(reference)
-        .context("Could not resolve the X playback variant URL.")?
-        .to_string())
 }
 
 pub async fn end_x_broadcast(request: XEndRequest, client: &reqwest::Client) -> Result<XEndResult> {
@@ -984,9 +925,10 @@ pub fn default_publish_locale() -> String {
         .unwrap_or_else(|| DEFAULT_LOCALE.to_string())
 }
 
-/// PUBLISH `chat_option` enum (X Livestream API doc): 0 none, 1 disabled,
-/// 2 everyone, 3 verified accounts (platform default), 4 follows,
-/// 5 subscribers.
+/// Go Live `chat_option` (X Livestream API doc): 0 default, 1 chat off,
+/// 2 everyone, 3 verified accounts, 4 accounts the host follows, 5 the
+/// host's subscribers, 6 accounts followed by an account the host follows.
+/// Sent as a JSON integer; `POST /2/broadcasts` rejects numeric strings.
 pub fn default_chat_option() -> u8 {
     optional_env_any(&[
         "VIDEORC_X_LIVESTREAM_CHAT_OPTION",
@@ -1012,15 +954,14 @@ async fn list_sources(
     credentials: &XLivestreamCredentials,
     base_url: &str,
 ) -> Result<Vec<XStreamSource>> {
-    let url = endpoint(
-        base_url,
-        &format!("/2/users/{}/sources", credentials.user_id),
-    )?;
-    let response: XSourcesEnvelope =
+    let url = endpoint(base_url, "/2/sources")?;
+    let response: XData<Vec<XStreamSource>> =
         send_x_request(client, credentials, Method::GET, url, None).await?;
-    Ok(response.sources)
+    Ok(response.data)
 }
 
+/// `POST /2/sources` (201): the only response that carries `stream_key`.
+/// The body is exactly `{name, region}`; X rejects any other field.
 async fn create_source(
     client: &reqwest::Client,
     credentials: &XLivestreamCredentials,
@@ -1028,23 +969,19 @@ async fn create_source(
     name: &str,
     region: &str,
 ) -> Result<XStreamSource> {
-    let url = endpoint(
-        base_url,
-        &format!("/2/users/{}/sources", credentials.user_id),
-    )?;
+    let url = endpoint(base_url, "/2/sources")?;
     let body = json!({ "name": name, "region": region });
-    let response: XSourceEnvelope =
+    let response: XData<XStreamSource> =
         send_x_request(client, credentials, Method::POST, url, Some(body)).await?;
-    Ok(response.source)
+    Ok(response.data)
 }
 
 /// Which existing sources to delete after a fresh one is created: idle
-/// Videorc-named sources (previous sessions' leftovers) plus explicitly
-/// retired ids. Never the fresh source, never one actively receiving.
+/// Videorc-named sources (previous sessions' leftovers). Never the fresh
+/// source, never one actively receiving.
 fn x_source_cleanup_ids(
     sources: &[XStreamSource],
     source_name: &str,
-    retired_source_ids: &[String],
     keep_source_id: &str,
 ) -> Vec<String> {
     sources
@@ -1057,9 +994,7 @@ fn x_source_cleanup_ids(
                 name.starts_with(crate::scheduled_x::SCHEDULED_SOURCE_NAME_PREFIX)
             })
         })
-        .filter(|source| {
-            source.name.as_deref() == Some(source_name) || retired_source_ids.contains(&source.id)
-        })
+        .filter(|source| source.name.as_deref() == Some(source_name))
         .map(|source| source.id.clone())
         .collect()
 }
@@ -1070,10 +1005,7 @@ async fn delete_source(
     base_url: &str,
     source_id: &str,
 ) -> Result<()> {
-    let url = endpoint(
-        base_url,
-        &format!("/2/users/{}/sources/{}", credentials.user_id, source_id),
-    )?;
+    let url = endpoint(base_url, &format!("/2/sources/{source_id}"))?;
     let _: serde_json::Value =
         send_x_request(client, credentials, Method::DELETE, url, None).await?;
     Ok(())
@@ -1085,64 +1017,57 @@ async fn get_source(
     base_url: &str,
     source_id: &str,
 ) -> Result<XStreamSource> {
-    let url = endpoint(
-        base_url,
-        &format!("/2/users/{}/sources/{}", credentials.user_id, source_id),
-    )?;
-    let response: XSourceEnvelope =
+    let url = endpoint(base_url, &format!("/2/sources/{source_id}"))?;
+    let response: XData<XStreamSource> =
         send_x_request(client, credentials, Method::GET, url, None).await?;
-    Ok(response.source)
+    Ok(response.data)
 }
 
-async fn create_broadcast(
+/// `GET /2/sources/:id/stream_key`: the credential for a source Videorc did
+/// not just create. Fetched only to configure the encoder; never logged.
+async fn get_source_stream_key(
     client: &reqwest::Client,
     credentials: &XLivestreamCredentials,
     base_url: &str,
     source_id: &str,
-    region: &str,
-    is_low_latency: bool,
-) -> Result<XBroadcastEnvelope> {
-    let url = endpoint(
-        base_url,
-        &format!("/2/users/{}/broadcasts", credentials.user_id),
-    )?;
-    let body = json!({
-        "source_id": source_id,
-        "region": region,
-        "is_low_latency": is_low_latency,
-    });
-    send_x_request(client, credentials, Method::POST, url, Some(body)).await
+) -> Result<String> {
+    let url = endpoint(base_url, &format!("/2/sources/{source_id}/stream_key"))?;
+    let response: XData<XStreamKey> =
+        send_x_request(client, credentials, Method::GET, url, None).await?;
+    response
+        .data
+        .stream_key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .context("X stream_key response did not include a stream key.")
 }
 
-struct PublishBroadcastStateRequest<'a> {
-    broadcast_id: &'a str,
+/// The strict `POST /2/broadcasts` body: exactly these five fields, with
+/// `chat_option` a JSON integer and `should_not_tweet` a JSON boolean.
+/// Unknown fields (the old `region`, `is_low_latency`) are a 400.
+#[derive(Debug, Clone, Serialize)]
+struct GoLiveRequest<'a> {
+    source_id: &'a str,
     title: &'a str,
-    should_not_tweet: bool,
     locale: &'a str,
     chat_option: u8,
+    should_not_tweet: bool,
 }
 
-async fn publish_broadcast(
+/// `POST /2/broadcasts`: creates and publishes in one call. 201 is a new
+/// RUNNING broadcast; 200 is the broadcast already live on the source,
+/// returned unchanged (`already_live`).
+async fn go_live(
     client: &reqwest::Client,
     credentials: &XLivestreamCredentials,
     base_url: &str,
-    request: PublishBroadcastStateRequest<'_>,
-) -> Result<XBroadcastEnvelope> {
-    let url = endpoint(
-        base_url,
-        &format!(
-            "/2/users/{}/broadcasts/{}/state",
-            credentials.user_id, request.broadcast_id
-        ),
-    )?;
-    let body = json!({
-        "state": "PUBLISH",
-        "title": request.title,
-        "should_not_tweet": request.should_not_tweet,
-        "locale": request.locale,
-        "chat_option": request.chat_option,
-    });
-    send_x_request(client, credentials, Method::PUT, url, Some(body)).await
+    body: &GoLiveRequest<'_>,
+) -> Result<(bool, XBroadcast)> {
+    let url = endpoint(base_url, "/2/broadcasts")?;
+    let body = serde_json::to_value(body).context("Could not encode the X Go Live body.")?;
+    let (status, response): (reqwest::StatusCode, XData<XBroadcast>) =
+        send_x_request_with_status(client, credentials, Method::POST, url, Some(body)).await?;
+    Ok((status == reqwest::StatusCode::OK, response.data))
 }
 
 /// One X viewer poll (plan 054): the concurrent count, or why there is none.
@@ -1863,13 +1788,8 @@ pub(crate) async fn end_broadcast(
     base_url: &str,
     broadcast_id: &str,
 ) -> Result<()> {
-    let url = endpoint(
-        base_url,
-        &format!(
-            "/2/users/{}/broadcasts/{}/state",
-            credentials.user_id, broadcast_id
-        ),
-    )?;
+    let url = endpoint(base_url, &format!("/2/broadcasts/{broadcast_id}/state"))?;
+    // Exactly `{"state":"END"}`: any publish field here is a 400.
     let body = json!({ "state": "END" });
     let _: serde_json::Value =
         send_x_request(client, credentials, Method::PUT, url, Some(body)).await?;
@@ -1883,6 +1803,21 @@ async fn send_x_request<T: serde::de::DeserializeOwned>(
     url: Url,
     body: Option<serde_json::Value>,
 ) -> Result<T> {
+    send_x_request_with_status(client, credentials, method, url, body)
+        .await
+        .map(|(_, value)| value)
+}
+
+/// One signed call. Every 2xx is success (the new routes answer 201 on
+/// create and 200 on an already-live Go Live); anything else is an
+/// `XApiError` carrying the status and the problem `detail`.
+async fn send_x_request_with_status<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    method: Method,
+    url: Url,
+    body: Option<serde_json::Value>,
+) -> Result<(reqwest::StatusCode, T)> {
     let authorization = oauth1_authorization_header(
         method.as_str(),
         url.as_str(),
@@ -1900,16 +1835,21 @@ async fn send_x_request<T: serde::de::DeserializeOwned>(
         .send()
         .await
         .context("Could not call X Livestream API")?;
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         let detail = x_error_detail(&body).unwrap_or_else(|| "no error detail".to_string());
-        anyhow::bail!("X Livestream API request failed with HTTP {status}: {detail}");
+        return Err(XApiError {
+            status: status.as_u16(),
+            detail,
+        }
+        .into());
     }
-    response
+    let value = response
         .json::<T>()
         .await
-        .context("Could not parse X Livestream API response")
+        .context("Could not parse X Livestream API response")?;
+    Ok((status, value))
 }
 
 pub fn oauth1_authorization_header(
@@ -2086,39 +2026,48 @@ pub(crate) fn sanitize_secret_ref_segment(value: &str) -> String {
         .collect()
 }
 
+/// The human-readable reason in an X error body. The `/2/sources` and
+/// `/2/broadcasts` routes answer problem JSON (`{type, title, detail,
+/// status, errors?}`): `detail` leads, and the per-field `errors` messages
+/// follow it in parentheses. The legacy `message` / `error` shapes still
+/// parse for the routes that kept them.
 pub(crate) fn x_error_detail(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    if let Some(message) = value
-        .get("message")
-        .and_then(|message| message.as_str())
-        .map(str::trim)
-        .filter(|message| !message.is_empty())
-    {
-        return Some(message.to_string());
-    }
-    if let Some(errors) = value.get("errors").and_then(|errors| errors.as_array()) {
-        let joined = errors
-            .iter()
-            .filter_map(|error| {
-                error
-                    .get("message")
-                    .and_then(|message| message.as_str())
-                    .or_else(|| error.as_str())
-            })
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|message| !message.is_empty())
             .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        if !joined.is_empty() {
-            return Some(joined.join("; "));
-        }
+    };
+    let errors = value
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|error| {
+                    error
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| error.as_str())
+                })
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|errors| !errors.is_empty())
+        .map(|errors| errors.join("; "));
+    match (text("detail"), errors) {
+        (Some(detail), Some(errors)) if detail != errors => Some(format!("{detail} ({errors})")),
+        (Some(detail), _) => Some(detail),
+        (None, Some(errors)) => Some(errors),
+        (None, None) => text("message")
+            .or_else(|| text("title"))
+            .or_else(|| text("error")),
     }
-    value
-        .get("error")
-        .and_then(|error| error.as_str())
-        .map(str::trim)
-        .filter(|message| !message.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn x_title(metadata: &StreamMetadataDraft) -> String {
@@ -2133,10 +2082,10 @@ fn x_title(metadata: &StreamMetadataDraft) -> String {
 }
 
 /// X has no visibility control; the only reach lever the Livestream API
-/// exposes is `should_not_tweet` on PUBLISH (suppresses the announcement
-/// post). The draft stores it as `x_announce` (None/true = announce, the
+/// exposes is `should_not_tweet` on Go Live (suppresses the announcing
+/// Post). The draft stores it as `x_announce` (None/true = announce, the
 /// platform default).
-fn x_should_not_tweet(metadata: &StreamMetadataDraft) -> bool {
+pub(crate) fn x_should_not_tweet(metadata: &StreamMetadataDraft) -> bool {
     metadata
         .target_overrides
         .iter()
@@ -2319,7 +2268,7 @@ mod tests {
     fn oauth_header_includes_query_params_but_never_json_body() {
         let header = oauth1_authorization_header(
             "POST",
-            "https://api.x.com/2/users/12345/sources?pagination_token=a b",
+            "https://api.x.com/2/broadcasts?pagination_token=a b",
             &credentials(),
             "nonce",
             1772031973,
@@ -2439,7 +2388,7 @@ mod tests {
         let credentials = credentials();
         let direct = oauth1_authorization_header(
             "POST",
-            "https://api.x.com/2/users/12345/sources?pagination_token=a b",
+            "https://api.x.com/2/broadcasts?pagination_token=a b",
             &credentials,
             "nonce",
             1772031973,
@@ -2447,7 +2396,7 @@ mod tests {
         .unwrap();
         let general = oauth1_signed_header(&Oauth1SigningInputs {
             method: "POST",
-            url: "https://api.x.com/2/users/12345/sources?pagination_token=a b",
+            url: "https://api.x.com/2/broadcasts?pagination_token=a b",
             consumer_key: &credentials.consumer_key,
             consumer_secret: &credentials.consumer_secret,
             token: Some((&credentials.access_token, &credentials.access_token_secret)),
@@ -2460,125 +2409,15 @@ mod tests {
         assert_eq!(direct, general);
     }
 
-    #[test]
-    fn playlist_verdict_detects_segments_variants_and_not_ready() {
-        assert_eq!(
-            playlist_verdict("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg0.ts\n"),
-            PlaylistVerdict::Playable
-        );
-        assert_eq!(
-            playlist_verdict(
-                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nvariant/playlist.m3u8\n"
-            ),
-            PlaylistVerdict::Variant("variant/playlist.m3u8".to_string())
-        );
-        assert_eq!(
-            playlist_verdict("#EXTM3U\n#EXT-X-TARGETDURATION:2\n"),
-            PlaylistVerdict::NotReady
-        );
-        assert_eq!(playlist_verdict(""), PlaylistVerdict::NotReady);
-    }
-
-    #[test]
-    fn playlist_variant_urls_resolve_relative_and_absolute() {
-        assert_eq!(
-            resolve_playlist_url(
-                "https://video.pscp.tv/x/master.m3u8?type=live",
-                "variant/playlist.m3u8"
-            )
-            .unwrap(),
-            "https://video.pscp.tv/x/variant/playlist.m3u8"
-        );
-        assert_eq!(
-            resolve_playlist_url(
-                "https://video.pscp.tv/x/master.m3u8",
-                "https://other.pscp.tv/v.m3u8"
-            )
-            .unwrap(),
-            "https://other.pscp.tv/v.m3u8"
-        );
-    }
-
-    #[tokio::test]
-    async fn playlist_probe_follows_master_to_variant() {
-        use axum::Router;
-        use axum::routing::get;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new()
-                    .route(
-                        "/master.m3u8",
-                        get(|| async {
-                            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nmedia.m3u8\n"
-                        }),
-                    )
-                    .route(
-                        "/media.m3u8",
-                        get(|| async { "#EXTM3U\n#EXTINF:2.0,\nseg0.ts\n" }),
-                    )
-                    .route("/empty.m3u8", get(|| async { "#EXTM3U\n" })),
-            )
-            .await
-            .unwrap();
-        });
-        let client = reqwest::Client::new();
-        assert!(
-            x_playlist_playable(&client, &format!("http://{address}/master.m3u8"))
-                .await
-                .unwrap()
-        );
-        assert!(
-            !x_playlist_playable(&client, &format!("http://{address}/empty.m3u8"))
-                .await
-                .unwrap()
-        );
-        assert!(
-            !x_playlist_playable(&client, &format!("http://{address}/missing.m3u8"))
-                .await
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn playback_outcomes_retire_only_after_consecutive_failures() {
-        let health = XSourceHealth::default();
-        let after_one = apply_x_playback_outcome(health, false, "2026-07-08T12:00:00Z");
-        assert_eq!(after_one.consecutive_failures, 1);
-        assert!(!after_one.retired);
-
-        let after_two = apply_x_playback_outcome(after_one.clone(), false, "2026-07-08T13:00:00Z");
-        assert_eq!(after_two.consecutive_failures, 2);
-        assert!(after_two.retired);
-
-        // A verified playback fully rehabilitates the source.
-        let recovered = apply_x_playback_outcome(after_two, true, "2026-07-08T14:00:00Z");
-        assert_eq!(recovered.consecutive_failures, 0);
-        assert!(!recovered.retired);
-        assert_eq!(
-            recovered.last_verified_at.as_deref(),
-            Some("2026-07-08T14:00:00Z")
-        );
-
-        // One failure after a success does NOT retire (the 2026-07-08
-        // incident source worked at 7 min and failed at 2 min same day).
-        let one_bad = apply_x_playback_outcome(recovered, false, "2026-07-08T15:00:00Z");
-        assert!(!one_bad.retired);
-    }
-
     fn test_source(id: &str, name: Option<&str>, active: bool) -> XStreamSource {
         XStreamSource {
             id: id.to_string(),
             name: name.map(str::to_string),
-            rtmp_region: Some("eu-west-3".to_string()),
+            region: Some("us-east-1".to_string()),
             rtmps_url: None,
             rtmp_url: None,
-            rtmp_stream_key: None,
+            stream_key: None,
             is_stream_active: active,
-            recommended_configuration: None,
-            compatibility_info: None,
         }
     }
 
@@ -2588,27 +2427,860 @@ mod tests {
     // fresh source, never an actively-receiving one, and never a source we
     // don't own by name (e.g. Media Studio or StreamYard sources).
     #[test]
-    fn source_cleanup_reaps_idle_videorc_and_retired_sources_only() {
+    fn source_cleanup_reaps_idle_videorc_sources_only() {
         let sources = vec![
-            test_source("fresh1", Some("Videorc Primary Encoder"), false),
-            test_source("old1", Some("Videorc Primary Encoder"), false),
-            test_source("active1", Some("Videorc Primary Encoder"), true),
-            test_source("studio1", Some("Videorc"), false),
-            test_source("streamyard", Some("StreamYardApp"), false),
-            test_source("retired1", Some("Other Name"), false),
-            test_source("sched1", Some("Videorc Scheduled 11111111"), false),
-            test_source("sched2", Some("Videorc Scheduled 22222222"), false),
+            test_source(
+                "9123456789012345001",
+                Some("Videorc Primary Encoder"),
+                false,
+            ),
+            test_source(
+                "9123456789012345002",
+                Some("Videorc Primary Encoder"),
+                false,
+            ),
+            test_source("9123456789012345003", Some("Videorc Primary Encoder"), true),
+            test_source("9123456789012345004", Some("Videorc"), false),
+            test_source("9123456789012345005", Some("StreamYardApp"), false),
+            test_source(
+                "9123456789012345006",
+                Some("Videorc Scheduled 11111111"),
+                false,
+            ),
         ];
 
-        let cleanup = x_source_cleanup_ids(
-            &sources,
-            "Videorc Primary Encoder",
-            &["retired1".to_string(), "sched2".to_string()],
-            "fresh1",
-        );
+        let cleanup =
+            x_source_cleanup_ids(&sources, "Videorc Primary Encoder", "9123456789012345001");
 
-        // Scheduled sources survive both the name sweep and the retired list.
-        assert_eq!(cleanup, vec!["old1".to_string(), "retired1".to_string()]);
+        // Scheduled sources survive the name sweep.
+        assert_eq!(cleanup, vec!["9123456789012345002".to_string()]);
+    }
+
+    #[test]
+    fn source_ids_are_digits_and_media_ids_come_from_the_media_key() {
+        assert!(is_x_source_id("9123456789012345678"));
+        assert!(is_x_source_id("1"));
+        assert!(!is_x_source_id(""));
+        assert!(!is_x_source_id("1hJz9kQ2LmNpRsTuVwXyZaBcDe"));
+        assert!(!is_x_source_id("91234567890 12345678"));
+        assert_eq!(
+            x_media_id_from_media_key("28_2116610227978326016").as_deref(),
+            Some("2116610227978326016")
+        );
+        assert_eq!(
+            x_media_id_from_media_key("28_1_77").as_deref(),
+            Some("77"),
+            "the digits after the LAST underscore"
+        );
+        assert_eq!(x_media_id_from_media_key("2116610227978326016"), None);
+        assert_eq!(x_media_id_from_media_key("28_"), None);
+        assert_eq!(x_media_id_from_media_key("28_abc"), None);
+    }
+
+    #[test]
+    fn x_error_detail_reads_problem_json_before_legacy_shapes() {
+        assert_eq!(
+            x_error_detail(
+                r#"{"type":"https://api.x.com/2/problems/invalid-request","title":"Invalid Request","detail":"The `id` value is not a source id.","status":400}"#
+            )
+            .as_deref(),
+            Some("The `id` value is not a source id.")
+        );
+        assert_eq!(
+            x_error_detail(
+                r#"{"type":"https://api.x.com/2/problems/invalid-request","title":"Invalid Request","detail":"One or more parameters to your request was invalid.","status":400,"errors":[{"message":"chat_option must be between 0 and 6"},{"message":"unknown field: region"}]}"#
+            )
+            .as_deref(),
+            Some(
+                "One or more parameters to your request was invalid. (chat_option must be between 0 and 6; unknown field: region)"
+            )
+        );
+        assert_eq!(
+            x_error_detail(r#"{"type":"about:blank","title":"Forbidden","status":403}"#).as_deref(),
+            Some("Forbidden")
+        );
+        assert_eq!(
+            x_error_detail(r#"{"error_type":"notFound","message":"legacy message"}"#).as_deref(),
+            Some("legacy message")
+        );
+        assert_eq!(x_error_detail("not json"), None);
+    }
+
+    #[test]
+    fn broadcast_watch_keeps_running_and_reports_every_other_state() {
+        use XBroadcastWatchVerdict::*;
+        assert_eq!(
+            x_broadcast_watch_verdict(Some("RUNNING"), true),
+            KeepWatching
+        );
+        assert_eq!(
+            x_broadcast_watch_verdict(Some("running"), true),
+            KeepWatching
+        );
+        assert_eq!(x_broadcast_watch_verdict(None, true), KeepWatching);
+        assert_eq!(x_broadcast_watch_verdict(Some("  "), true), KeepWatching);
+        assert_eq!(
+            x_broadcast_watch_verdict(Some("TIMED_OUT"), true),
+            EndedByX {
+                state: "TIMED_OUT".to_string()
+            }
+        );
+        assert_eq!(
+            x_broadcast_watch_verdict(Some("ended"), true),
+            EndedByX {
+                state: "ENDED".to_string()
+            }
+        );
+        // Once the owning session is gone there is nothing to protect.
+        assert_eq!(x_broadcast_watch_verdict(Some("ENDED"), false), SessionOver);
+        assert_eq!(
+            x_broadcast_watch_verdict(Some("RUNNING"), false),
+            SessionOver
+        );
+    }
+
+    #[test]
+    fn x_api_errors_keep_the_status_and_detail() {
+        let error = XApiError {
+            status: 409,
+            detail: "Broadcast 1AbC is live on this source.".to_string(),
+        };
+        assert!(error.is_conflict());
+        assert_eq!(
+            error.to_string(),
+            "X Livestream API request failed with HTTP 409 Conflict: Broadcast 1AbC is live on this source."
+        );
+        let wrapped: anyhow::Error = error.clone().into();
+        assert_eq!(wrapped.downcast_ref::<XApiError>(), Some(&error));
+    }
+
+    // --- The /2/sources + /2/broadcasts routes against a mock X ------------
+
+    /// What the mock X records about one request: method, path (with query),
+    /// and the JSON body. The stream key must never appear in a path.
+    type SeenRequest = (String, String, serde_json::Value);
+
+    #[derive(Default)]
+    struct MockX {
+        seen: Vec<SeenRequest>,
+        /// Sources by id; `stream_key` is held here and handed out only by
+        /// the create response and the stream_key route.
+        sources: Vec<(String, String, bool, String)>,
+        refuse_create: bool,
+        source_active: bool,
+        conflicts_before_live: usize,
+        /// Go Live answers this status (problem JSON) once per entry, in
+        /// order, before it succeeds.
+        go_live_failures: Vec<u16>,
+        omit_media_key: bool,
+        already_live: bool,
+        broadcast_state: String,
+        tweet_id: Option<String>,
+        counter: usize,
+    }
+
+    const MOCK_STREAM_KEY_PREFIX: &str = "1hJz9kQ2LmNpRsTuVwXyZ";
+
+    fn mock_source_json(id: &str, name: &str, active: bool) -> serde_json::Value {
+        json!({
+            "id": id,
+            "name": name,
+            "region": "us-east-1",
+            "rtmp_url": "rtmps://a.live.x.com/x",
+            "rtmps_url": "rtmps://a.live.x.com:443/x",
+            "is_stream_active": active,
+            "created_at_ms": "1772029802844"
+        })
+    }
+
+    fn problem(status: u16, detail: &str) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let kind = match status {
+            400 => "https://api.x.com/2/problems/invalid-request",
+            404 => "https://api.x.com/2/problems/resource-not-found",
+            409 => "https://api.x.com/2/problems/conflict",
+            _ => "about:blank",
+        };
+        (
+            axum::http::StatusCode::from_u16(status).unwrap(),
+            axum::Json(
+                json!({"type": kind, "title": "Problem", "detail": detail, "status": status}),
+            ),
+        )
+            .into_response()
+    }
+
+    async fn mock_x_respond(
+        axum::extract::State(mock): axum::extract::State<std::sync::Arc<std::sync::Mutex<MockX>>>,
+        request: axum::extract::Request,
+    ) -> axum::response::Response {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        let method = request.method().to_string();
+        let path = request.uri().path().to_string();
+        let query = request.uri().query().unwrap_or("").to_string();
+        let signed = request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("OAuth ") && value.contains("oauth_signature="));
+        let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default();
+        let mut mock = mock.lock().unwrap();
+        mock.seen.push((
+            method.clone(),
+            if query.is_empty() {
+                path.clone()
+            } else {
+                format!("{path}?{query}")
+            },
+            body.clone(),
+        ));
+        if !signed {
+            return problem(401, "Unauthorized");
+        }
+        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        let ok = |value: serde_json::Value| (StatusCode::OK, axum::Json(value)).into_response();
+        match (method.as_str(), parts.as_slice()) {
+            ("GET", ["2", "region"]) => ok(json!({"region": "us-east-1"})),
+            ("GET", ["2", "sources"]) => {
+                let data: Vec<_> = mock
+                    .sources
+                    .iter()
+                    .map(|(id, name, active, _)| mock_source_json(id, name, *active))
+                    .collect();
+                ok(json!({"data": data, "meta": {"result_count": data.len()}}))
+            }
+            ("POST", ["2", "sources"]) => {
+                if mock.refuse_create {
+                    return problem(400, "Too many sources.");
+                }
+                let keys: Vec<String> = body
+                    .as_object()
+                    .map(|object| object.keys().cloned().collect())
+                    .unwrap_or_default();
+                if keys.len() != 2
+                    || !keys.contains(&"name".to_string())
+                    || !keys.contains(&"region".to_string())
+                {
+                    return problem(400, "POST /2/sources accepts only name and region.");
+                }
+                mock.counter += 1;
+                let id = format!("9123456789012345{:03}", mock.counter);
+                let key = format!("{MOCK_STREAM_KEY_PREFIX}{}", mock.counter);
+                let name = body["name"].as_str().unwrap_or("").to_string();
+                mock.sources
+                    .push((id.clone(), name.clone(), false, key.clone()));
+                let mut source = mock_source_json(&id, &name, false);
+                source["stream_key"] = json!(key);
+                (StatusCode::CREATED, axum::Json(json!({"data": source}))).into_response()
+            }
+            ("GET" | "DELETE", ["2", "sources", id])
+            | ("GET", ["2", "sources", id, "stream_key"]) => {
+                if !is_x_source_id(id) {
+                    return problem(400, "The `id` value is not a source id.");
+                }
+                let active = mock.source_active;
+                let Some(index) = mock.sources.iter().position(|(saved, ..)| saved == id) else {
+                    return problem(404, "Source not found.");
+                };
+                if method == "DELETE" {
+                    mock.sources.remove(index);
+                    return ok(json!({"data": {"deleted": true}}));
+                }
+                let (id, name, _, key) = mock.sources[index].clone();
+                if parts.len() == 4 {
+                    return ok(json!({"data": {"id": id, "stream_key": key}}));
+                }
+                ok(json!({"data": mock_source_json(&id, &name, active)}))
+            }
+            ("POST", ["2", "broadcasts"]) => {
+                if mock.conflicts_before_live > 0 {
+                    mock.conflicts_before_live -= 1;
+                    return problem(409, "The source cannot take video yet.");
+                }
+                if !mock.go_live_failures.is_empty() {
+                    let status = mock.go_live_failures.remove(0);
+                    return problem(status, "Scripted Go Live failure.");
+                }
+                let allowed = [
+                    "source_id",
+                    "title",
+                    "locale",
+                    "chat_option",
+                    "should_not_tweet",
+                ];
+                let unknown: Vec<String> = body
+                    .as_object()
+                    .map(|object| {
+                        object
+                            .keys()
+                            .filter(|key| !allowed.contains(&key.as_str()))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !unknown.is_empty() {
+                    return problem(400, &format!("unknown field: {}", unknown.join(", ")));
+                }
+                if !body["chat_option"].is_u64() || !body["should_not_tweet"].is_boolean() {
+                    return problem(
+                        400,
+                        "chat_option must be an integer and should_not_tweet a boolean.",
+                    );
+                }
+                let Some(source_id) = body["source_id"].as_str() else {
+                    return problem(400, "source_id is required.");
+                };
+                if !is_x_source_id(source_id) {
+                    return problem(400, "The `source_id` value is not a source id.");
+                }
+                let tweet_id = mock.tweet_id.clone();
+                let mut data = json!({
+                    "id": "1AbCdEfGhIjKl",
+                    "broadcast_id": "1AbCdEfGhIjKl",
+                    "state": "RUNNING",
+                    "share_url": "https://x.com/i/broadcasts/1AbCdEfGhIjKl",
+                    "media_key": "28_2116610227978326016",
+                    "title": body["title"],
+                    "language": body["locale"],
+                    "chat_option": body["chat_option"],
+                    "start_ms": "1772029802844"
+                });
+                if let Some(tweet_id) = tweet_id {
+                    data["tweet_id"] = json!(tweet_id);
+                }
+                if mock.omit_media_key {
+                    data.as_object_mut().unwrap().remove("media_key");
+                }
+                let status = if mock.already_live {
+                    StatusCode::OK
+                } else {
+                    StatusCode::CREATED
+                };
+                (status, axum::Json(json!({"data": data}))).into_response()
+            }
+            ("GET", ["2", "broadcasts", id]) => {
+                let mut data = json!({"id": id, "state": mock.broadcast_state});
+                if let Some(tweet_id) = mock.tweet_id.clone() {
+                    data["tweet_id"] = json!(tweet_id);
+                }
+                ok(json!({"data": data}))
+            }
+            ("PUT", ["2", "broadcasts", id, "state"]) => {
+                if body != json!({"state": "END"}) {
+                    return problem(400, "Send exactly {\"state\":\"END\"}.");
+                }
+                ok(json!({"data": {"id": id, "state": "ENDED"}}))
+            }
+            _ => problem(404, "Route not found."),
+        }
+    }
+
+    async fn mock_x() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<MockX>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mock = std::sync::Arc::new(std::sync::Mutex::new(MockX {
+            broadcast_state: "RUNNING".to_string(),
+            ..MockX::default()
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = axum::Router::new()
+            .fallback(mock_x_respond)
+            .with_state(mock.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{address}"), mock, server)
+    }
+
+    fn publish_request(base: &str, source_id: &str) -> XPublishRequest {
+        let mut metadata =
+            crate::streaming::default_stream_metadata_draft("2026-11-06T00:00:00Z".to_string());
+        metadata.title = "Migration test".to_string();
+        XPublishRequest {
+            credentials: credentials(),
+            source_id: source_id.to_string(),
+            metadata,
+            locale: "en".to_string(),
+            chat_option: 2,
+            api_base_url: Some(base.to_string()),
+            poll_attempts: 2,
+            poll_interval_ms: 1,
+            conflict_attempts: 3,
+            conflict_backoff_ms: 1,
+        }
+    }
+
+    fn seen_paths(mock: &std::sync::Mutex<MockX>) -> Vec<String> {
+        mock.lock()
+            .unwrap()
+            .seen
+            .iter()
+            .map(|(method, path, _)| format!("{method} {path}"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn prepare_creates_a_source_and_reads_the_key_from_the_create_response() {
+        let (base, mock, server) = mock_x().await;
+        // A previous session's idle leftover is reaped; a scheduled source
+        // and a foreign source survive.
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.sources.push((
+                "9123456789012345900".to_string(),
+                "Videorc Primary Encoder".to_string(),
+                false,
+                "oldkey".to_string(),
+            ));
+            mock.sources.push((
+                "9123456789012345901".to_string(),
+                "Videorc Scheduled 11111111".to_string(),
+                false,
+                "schedkey".to_string(),
+            ));
+        }
+        let stored = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = stored.clone();
+        let prepared = prepare_x_stream_source(
+            XPrepareSourceRequest {
+                credentials: credentials(),
+                account: None,
+                source_name: "Videorc Primary Encoder".to_string(),
+                api_base_url: Some(base.clone()),
+            },
+            &reqwest::Client::new(),
+            move |secret_ref, value| {
+                sink.lock()
+                    .unwrap()
+                    .push((secret_ref.to_string(), value.to_string()));
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.source_id, "9123456789012345001");
+        assert_eq!(prepared.selection, XSourceSelection::Created);
+        assert_eq!(prepared.region, "us-east-1");
+        assert_eq!(prepared.server_url, "rtmps://a.live.x.com:443/x");
+        assert_eq!(
+            prepared.stream_key_secret_ref,
+            "platform:x:12345:9123456789012345001:stream-key"
+        );
+        assert_eq!(
+            prepared.deleted_retired_source_ids,
+            vec!["9123456789012345900".to_string()]
+        );
+        let stored = stored.lock().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].1, format!("{MOCK_STREAM_KEY_PREFIX}1"));
+        let paths = seen_paths(&mock);
+        assert_eq!(
+            paths,
+            vec![
+                "GET /2/region",
+                "GET /2/sources",
+                "POST /2/sources",
+                "DELETE /2/sources/9123456789012345900",
+            ]
+        );
+        // The create body is exactly {name, region} and no request carried
+        // a stream key in its path.
+        let create = &mock.lock().unwrap().seen[2].2;
+        assert_eq!(
+            create,
+            &json!({"name": "Videorc Primary Encoder", "region": "us-east-1"})
+        );
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path.contains(MOCK_STREAM_KEY_PREFIX))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prepare_reuses_a_named_source_and_fetches_its_key_from_the_stream_key_route() {
+        let (base, mock, server) = mock_x().await;
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.refuse_create = true;
+            mock.sources.push((
+                "9123456789012345777".to_string(),
+                "Videorc Primary Encoder".to_string(),
+                false,
+                "reusedkey".to_string(),
+            ));
+        }
+        let stored = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = stored.clone();
+        let prepared = prepare_x_stream_source(
+            XPrepareSourceRequest {
+                credentials: credentials(),
+                account: None,
+                source_name: "Videorc Primary Encoder".to_string(),
+                api_base_url: Some(base.clone()),
+            },
+            &reqwest::Client::new(),
+            move |secret_ref, value| {
+                sink.lock()
+                    .unwrap()
+                    .push((secret_ref.to_string(), value.to_string()));
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.source_id, "9123456789012345777");
+        assert_eq!(prepared.selection, XSourceSelection::ReusedNameMatch);
+        assert_eq!(stored.lock().unwrap()[0].1, "reusedkey");
+        assert_eq!(
+            seen_paths(&mock),
+            vec![
+                "GET /2/region",
+                "GET /2/sources",
+                "POST /2/sources",
+                "GET /2/sources/9123456789012345777/stream_key",
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_stream_key_in_place_of_a_source_id_is_a_400_with_x_detail() {
+        let (base, _mock, server) = mock_x().await;
+        let error = get_source(
+            &reqwest::Client::new(),
+            &credentials(),
+            &base,
+            "1hJz9kQ2LmNpRsTuVwXyZ",
+        )
+        .await
+        .unwrap_err();
+        let api_error = error.downcast_ref::<XApiError>().unwrap();
+        assert_eq!(api_error.status, 400);
+        assert_eq!(api_error.detail, "The `id` value is not a source id.");
+        // Go Live refuses locally before any request leaves the machine.
+        let error = publish_x_broadcast(
+            publish_request(&base, "1hJz9kQ2LmNpRsTuVwXyZ"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("19-digit source id"), "{error}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn go_live_sends_exactly_the_five_fields_with_json_types() {
+        let (base, mock, server) = mock_x().await;
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.source_active = true;
+            mock.tweet_id = Some("1990000000000000001".to_string());
+            mock.sources.push((
+                "9123456789012345001".to_string(),
+                "Videorc Primary Encoder".to_string(),
+                true,
+                "key".to_string(),
+            ));
+        }
+        let result = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.broadcast_id, "1AbCdEfGhIjKl");
+        assert_eq!(result.media_key, "28_2116610227978326016");
+        assert_eq!(result.media_id.as_deref(), Some("2116610227978326016"));
+        assert_eq!(result.share_url, "https://x.com/i/broadcasts/1AbCdEfGhIjKl");
+        assert_eq!(result.state, "RUNNING");
+        assert_eq!(result.tweet_id.as_deref(), Some("1990000000000000001"));
+        assert!(!result.already_live);
+        let seen = mock.lock().unwrap().seen.clone();
+        assert_eq!(seen[0].1, "/2/sources/9123456789012345001");
+        let (method, path, body) = &seen[1];
+        assert_eq!((method.as_str(), path.as_str()), ("POST", "/2/broadcasts"));
+        let mut keys: Vec<&String> = body.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "chat_option",
+                "locale",
+                "should_not_tweet",
+                "source_id",
+                "title"
+            ]
+        );
+        assert_eq!(body["source_id"], "9123456789012345001");
+        assert_eq!(body["title"], "Migration test");
+        assert_eq!(body["locale"], "en");
+        assert_eq!(body["chat_option"], json!(2));
+        assert!(body["chat_option"].is_u64());
+        assert_eq!(body["should_not_tweet"], json!(false));
+        assert!(body["should_not_tweet"].is_boolean());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn go_live_retries_a_409_then_accepts_201() {
+        let (base, mock, server) = mock_x().await;
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.source_active = true;
+            mock.conflicts_before_live = 1;
+            mock.sources.push((
+                "9123456789012345001".to_string(),
+                "n".to_string(),
+                true,
+                "key".to_string(),
+            ));
+        }
+        let result = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.already_live);
+        assert_eq!(result.message, "X broadcast is live.");
+        let posts = seen_paths(&mock)
+            .into_iter()
+            .filter(|path| path == "POST /2/broadcasts")
+            .count();
+        assert_eq!(posts, 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn go_live_accepts_200_for_a_source_that_is_already_live() {
+        let (base, mock, server) = mock_x().await;
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.source_active = true;
+            mock.already_live = true;
+            mock.sources.push((
+                "9123456789012345001".to_string(),
+                "n".to_string(),
+                true,
+                "key".to_string(),
+            ));
+        }
+        let result = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+        assert!(result.already_live);
+        assert_eq!(result.broadcast_id, "1AbCdEfGhIjKl");
+        assert!(result.message.contains("already live"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn go_live_gives_up_after_the_conflict_budget_with_x_detail() {
+        let (base, mock, server) = mock_x().await;
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.source_active = true;
+            mock.conflicts_before_live = 10;
+            mock.sources.push((
+                "9123456789012345001".to_string(),
+                "n".to_string(),
+                true,
+                "key".to_string(),
+            ));
+        }
+        let error = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<XApiError>(),
+            Some(&XApiError {
+                status: 409,
+                detail: "The source cannot take video yet.".to_string()
+            })
+        );
+        assert!(error.to_string().contains("HTTP 409 Conflict"), "{error}");
+        let posts = seen_paths(&mock)
+            .into_iter()
+            .filter(|path| path == "POST /2/broadcasts")
+            .count();
+        assert_eq!(posts, 3, "conflict_attempts bounds the retries");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn go_live_retries_a_503_and_never_retries_another_4xx() {
+        let (base, mock, server) = mock_x().await;
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.source_active = true;
+            mock.go_live_failures = vec![503];
+            mock.sources.push((
+                "9123456789012345001".to_string(),
+                "n".to_string(),
+                true,
+                "key".to_string(),
+            ));
+        }
+        let result = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.broadcast_id, "1AbCdEfGhIjKl");
+
+        // A 403 (account cannot go live) is final: one POST, X's status kept.
+        mock.lock().unwrap().go_live_failures = vec![403, 403, 403];
+        let before = seen_paths(&mock)
+            .into_iter()
+            .filter(|path| path == "POST /2/broadcasts")
+            .count();
+        let error = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<XApiError>().map(|error| error.status),
+            Some(403)
+        );
+        let after = seen_paths(&mock)
+            .into_iter()
+            .filter(|path| path == "POST /2/broadcasts")
+            .count();
+        assert_eq!(after - before, 1, "a 403 is never retried");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn go_live_without_a_media_key_is_still_live() {
+        let (base, mock, server) = mock_x().await;
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.source_active = true;
+            mock.omit_media_key = true;
+            mock.sources.push((
+                "9123456789012345001".to_string(),
+                "n".to_string(),
+                true,
+                "key".to_string(),
+            ));
+        }
+        let result = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.state, "RUNNING");
+        assert_eq!(result.media_key, "");
+        assert_eq!(result.media_id, None);
+        server.abort();
+    }
+
+    #[test]
+    fn go_live_retry_policy_follows_the_docs() {
+        let api = |status| {
+            anyhow::Error::from(XApiError {
+                status,
+                detail: String::new(),
+            })
+        };
+        assert!(go_live_error_is_retryable(&api(409)));
+        assert!(go_live_error_is_retryable(&api(503)));
+        assert!(go_live_error_is_retryable(&anyhow::anyhow!(
+            "connection reset"
+        )));
+        for status in [400, 401, 403, 404] {
+            assert!(!go_live_error_is_retryable(&api(status)), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn go_live_waits_for_an_active_source_and_refuses_an_idle_one() {
+        let (base, mock, server) = mock_x().await;
+        mock.lock().unwrap().sources.push((
+            "9123456789012345001".to_string(),
+            "n".to_string(),
+            false,
+            "key".to_string(),
+        ));
+        let error = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("did not become active"),
+            "{error}"
+        );
+        assert!(
+            !seen_paths(&mock)
+                .iter()
+                .any(|path| path == "POST /2/broadcasts"),
+            "no Go Live without video"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_state_watch_reads_state_and_tweet_id_and_end_sends_only_end() {
+        let (base, mock, server) = mock_x().await;
+        let client = reqwest::Client::new();
+        let sample = fetch_broadcast_state(&client, &credentials(), &base, "1AbCdEfGhIjKl")
+            .await
+            .unwrap();
+        assert_eq!(
+            sample,
+            XBroadcastStateSample {
+                state: Some("RUNNING".to_string()),
+                tweet_id: None
+            }
+        );
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.broadcast_state = "TIMED_OUT".to_string();
+            mock.tweet_id = Some("1990000000000000001".to_string());
+        }
+        let sample = fetch_broadcast_state(&client, &credentials(), &base, "1AbCdEfGhIjKl")
+            .await
+            .unwrap();
+        assert_eq!(sample.state.as_deref(), Some("TIMED_OUT"));
+        assert_eq!(sample.tweet_id.as_deref(), Some("1990000000000000001"));
+        end_x_broadcast(
+            XEndRequest {
+                credentials: credentials(),
+                broadcast_id: "1AbCdEfGhIjKl".to_string(),
+                api_base_url: Some(base.clone()),
+            },
+            &client,
+        )
+        .await
+        .unwrap();
+        let seen = mock.lock().unwrap().seen.clone();
+        assert_eq!(
+            seen[0].1,
+            "/2/broadcasts/1AbCdEfGhIjKl?broadcast.fields=state%2Ctweet_id"
+        );
+        assert_eq!(seen[2].0, "PUT");
+        assert_eq!(seen[2].1, "/2/broadcasts/1AbCdEfGhIjKl/state");
+        assert_eq!(seen[2].2, json!({"state": "END"}));
+        server.abort();
     }
 
     #[test]

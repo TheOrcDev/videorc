@@ -889,8 +889,11 @@ mod tests {
             updated_at: "2026-09-25T00:00:00Z".to_string(),
             status: PlatformAccountStatus::Connected,
         };
-        let (read, write, message) =
-            destination_chat_preflight(&kick_target, &[kick.clone()], &SessionState::SignedOut);
+        let (read, write, message) = destination_chat_preflight(
+            &kick_target,
+            std::slice::from_ref(&kick),
+            &SessionState::SignedOut,
+        );
         assert_eq!(read, CommentsReadState::NeedsVideorcSignIn);
         assert_eq!(write, CommentsWriteState::Ready);
         assert_eq!(message, "Kick chat needs your Videorc sign-in.");

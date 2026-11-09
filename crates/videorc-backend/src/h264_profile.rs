@@ -68,8 +68,8 @@ mod tests {
     fn vaapi_level_arg_strips_only_the_dot_zero_labels() {
         for (label, _, _) in H264_HIGH_LEVELS {
             let arg = h264_vaapi_level_arg(label);
-            if label.ends_with(".0") {
-                assert_eq!(arg, &label[..label.len() - 2], "{label}");
+            if let Some(stripped) = label.strip_suffix(".0") {
+                assert_eq!(arg, stripped, "{label}");
             } else {
                 assert_eq!(arg, label, "{label}");
             }

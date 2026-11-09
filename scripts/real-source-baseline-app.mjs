@@ -617,13 +617,13 @@ async function main() {
     if (config.notesOverlay) {
       notesOverlayState = await setupNotesOverlay(sources.screen)
       console.log(
-        `Notes overlay window ${notesOverlayBounds?.width ?? 'n/a'}x${notesOverlayBounds?.height ?? 'n/a'} @ ${notesOverlayBounds?.x ?? 'n/a'},${notesOverlayBounds?.y ?? 'n/a'} protected=${notesOverlayState.protected} windowId=${notesOverlayState.windowId ?? 'n/a'}.`
+        `Notes overlay window ${notesOverlayBounds?.width ?? 'n/a'}x${notesOverlayBounds?.height ?? 'n/a'} @ ${notesOverlayBounds?.x ?? 'n/a'},${notesOverlayBounds?.y ?? 'n/a'} protected=${notesOverlayState.protected} windowId=${notesOverlayState.windowId ?? 'n/a'} level=${notesOverlayState.level ?? 'n/a'}.`
       )
     }
     if (config.streamManagerOverlay) {
       streamManagerOverlayState = await setupStreamManagerOverlay(sources.screen)
       console.log(
-        `Stream Manager overlay window ${streamManagerOverlayBounds?.width ?? 'n/a'}x${streamManagerOverlayBounds?.height ?? 'n/a'} @ ${streamManagerOverlayBounds?.x ?? 'n/a'},${streamManagerOverlayBounds?.y ?? 'n/a'} hiddenFromStream=${streamManagerOverlayState.hiddenFromStream} method=${streamManagerOverlayState.hideFromStreamMethod} windowId=${streamManagerOverlayState.windowId ?? 'n/a'}.`
+        `Stream Manager overlay window ${streamManagerOverlayBounds?.width ?? 'n/a'}x${streamManagerOverlayBounds?.height ?? 'n/a'} @ ${streamManagerOverlayBounds?.x ?? 'n/a'},${streamManagerOverlayBounds?.y ?? 'n/a'} hiddenFromStream=${streamManagerOverlayState.hiddenFromStream} method=${streamManagerOverlayState.hideFromStreamMethod} windowId=${streamManagerOverlayState.windowId ?? 'n/a'} level=${streamManagerOverlayState.level ?? 'n/a'}.`
       )
     }
     const protectedOverlayWindowIds = protectedOverlayWindowIdsFromOverlays()
@@ -975,9 +975,7 @@ async function main() {
     }
     const streamManagerOverlayVerdict = streamManagerOverlay ?? {
       pass: false,
-      failures: [
-        'stream-manager: overlay gate was requested but no overlay evidence was produced'
-      ],
+      failures: ['stream-manager: overlay gate was requested but no overlay evidence was produced'],
       warnings: []
     }
     if (config.streamManagerOverlayGate) return streamManagerOverlayVerdict
@@ -1102,7 +1100,35 @@ async function setupNotesOverlay(screenSource) {
   if (typeof state.windowId !== 'number') {
     throw new Error('Notes overlay smoke could not resolve a ScreenCaptureKit window ID.')
   }
-  return state
+  const raised = await raiseOverlayAboveMotionStimulus(smoke, 'notes', state.windowId)
+  return { ...state, level: raised.level }
+}
+
+/**
+ * Lifts an overlay window above the motion stimulus. The native stimulus is
+ * an NSPanel at `.screenSaver` (level 1000) so it covers every other app;
+ * Keep on top is only `floating` (3), so a window placed over it with
+ * set-bounds + moveTop still sits *behind* it and never reaches the
+ * recording. Behind the stimulus, "absent" proves nothing about the capture
+ * filter or content protection, and a "present" phase can never pass. One
+ * level above the stimulus, the recording sees the window whenever the
+ * capture lets it through, so both verdicts mean what they say.
+ */
+async function raiseOverlayAboveMotionStimulus(smoke, role, expectedWindowId) {
+  const raised = await smokeCommand(smoke, 'raise-window', {
+    role,
+    level: 'screen-saver',
+    focus: false
+  })
+  if (raised.level !== 'screen-saver') {
+    throw new Error(`${role} overlay smoke could not lift the window above the motion stimulus.`)
+  }
+  if (typeof expectedWindowId === 'number' && raised.windowId !== expectedWindowId) {
+    throw new Error(
+      `${role} overlay smoke lifted window ${raised.windowId}, not the overlay window ${expectedWindowId}.`
+    )
+  }
+  return raised
 }
 
 async function requireMotionStimulusVisibleBeforeRecording() {
@@ -1190,7 +1216,8 @@ function notesOverlayBoundsForSource(screenSource) {
 /**
  * Plan 215 C5: the Stream Manager over the captured display, red edge to
  * edge, with Hide from stream on. The same bounds recipe as Notes, so the
- * marker sits where the motion stimulus paints.
+ * marker sits where the motion stimulus paints, and lifted above the
+ * stimulus so the recording can see it whenever the switch is off.
  */
 async function setupStreamManagerOverlay(screenSource) {
   const smoke = launched?.connections?.['preview-motion-ready']
@@ -1199,11 +1226,7 @@ async function setupStreamManagerOverlay(screenSource) {
   }
   await smokeCommand(smoke, 'comments-window-open')
   streamManagerOverlayBounds = notesOverlayBoundsForSource(screenSource)
-  const placed = await smokeCommand(
-    smoke,
-    'comments-window-set-bounds',
-    streamManagerOverlayBounds
-  )
+  const placed = await smokeCommand(smoke, 'comments-window-set-bounds', streamManagerOverlayBounds)
   streamManagerOverlayBounds = placed.bounds ?? streamManagerOverlayBounds
   if (!placed.enabled) {
     throw new Error('Stream Manager overlay smoke could not enable the Stream Manager.')
@@ -1233,8 +1256,9 @@ async function setupStreamManagerOverlay(screenSource) {
   if (typeof state.windowId !== 'number') {
     throw new Error('Stream Manager overlay smoke could not resolve a ScreenCaptureKit window ID.')
   }
+  const raised = await raiseOverlayAboveMotionStimulus(smoke, 'chat', state.windowId)
   streamManagerOverlayHidden = true
-  return state
+  return { ...state, level: raised.level }
 }
 
 /** The exclusion list the Studio renderer would send: Notes, and the Stream
@@ -1305,7 +1329,12 @@ async function analyzeStreamManagerOverlayArtifact(outputPath, { toggles, endMs 
   const failures = []
   const settle = config.streamManagerOverlaySettleMs
   const margin = 500
-  if (!toggles || toggles.error || !Number.isFinite(toggles.offAtMs) || !Number.isFinite(toggles.onAtMs)) {
+  if (
+    !toggles ||
+    toggles.error ||
+    !Number.isFinite(toggles.offAtMs) ||
+    !Number.isFinite(toggles.onAtMs)
+  ) {
     failures.push(
       `stream-manager: the mid-recording toggle did not run (${toggles?.error ?? 'no toggle timeline'})`
     )
@@ -2311,12 +2340,12 @@ function writeBaselineReport(
   }
   if (config.notesOverlay) {
     lines.push(
-      `- notesOverlay: true (windowId ${notesOverlayState?.windowId ?? 'n/a'}; bounds ${formatBounds(notesOverlayBounds)})`
+      `- notesOverlay: true (windowId ${notesOverlayState?.windowId ?? 'n/a'}; level ${notesOverlayState?.level ?? 'n/a'}; bounds ${formatBounds(notesOverlayBounds)})`
     )
   }
   if (config.streamManagerOverlay) {
     lines.push(
-      `- streamManagerOverlay: true (windowId ${streamManagerOverlayState?.windowId ?? 'n/a'}; bounds ${formatBounds(streamManagerOverlayBounds)})`
+      `- streamManagerOverlay: true (windowId ${streamManagerOverlayState?.windowId ?? 'n/a'}; level ${streamManagerOverlayState?.level ?? 'n/a'}; bounds ${formatBounds(streamManagerOverlayBounds)})`
     )
   }
   lines.push('')

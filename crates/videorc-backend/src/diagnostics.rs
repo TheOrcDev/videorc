@@ -616,7 +616,19 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         stream_measured_bitrate_min_kbps: None,
         stream_measured_bitrate_max_kbps: None,
         stream_output_total_bytes: 0,
+        recording_measured_bitrate_kbps: None,
+        recording_output_total_bytes: 0,
         stream_duplicated_frames: 0,
+        stream_delivery: None,
+        stream_leg_overflows: None,
+        stream_destination_count: None,
+        stream_destination_platforms: None,
+        microphone_sync_offset_ms: None,
+        encoder_bridge_stream_video_toolbox_fifo_write_p95_ms: None,
+        encoder_bridge_stream_queue_age_p95_ms: None,
+        encoder_bridge_stream_queue_depth_trips: 0,
+        encoder_bridge_stream_queue_age_trips: 0,
+        encoder_bridge_stream_queue_last_trip: None,
         encoder_bridge_active_video_toolbox_output_encoders: 0,
         encoder_bridge_recording_video_toolbox_output_frames: 0,
         encoder_bridge_recording_video_toolbox_output_bytes: 0,
@@ -1275,10 +1287,51 @@ pub fn apply_active_scene_revision(
     stats
 }
 
+/// Which output FFmpeg's progress `bitrate=` / `total_size=` describe: its
+/// first output (plan 218 S2). With a recording that is the recording file;
+/// without one the first output is an RTMP leg and FFmpeg prints `N/A`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfmpegProgressOutput {
+    Stream,
+    Recording,
+}
+
+#[cfg(test)]
 pub fn apply_stream_health(
+    stats: DiagnosticStats,
+    health: &StreamHealth,
+    target_fps: u32,
+) -> DiagnosticStats {
+    apply_stream_health_from(stats, health, target_fps, FfmpegProgressOutput::Stream)
+}
+
+/// Folds the stream's measured video bitrate into the diagnostics, keeping
+/// the session's non-zero minimum and maximum.
+pub fn apply_measured_stream_bitrate(
+    mut stats: DiagnosticStats,
+    bitrate_kbps: f64,
+) -> DiagnosticStats {
+    stats.stream_measured_bitrate_kbps = Some(bitrate_kbps);
+    if bitrate_kbps > 0.0 {
+        stats.stream_measured_bitrate_min_kbps = Some(
+            stats
+                .stream_measured_bitrate_min_kbps
+                .map_or(bitrate_kbps, |minimum| minimum.min(bitrate_kbps)),
+        );
+        stats.stream_measured_bitrate_max_kbps = Some(
+            stats
+                .stream_measured_bitrate_max_kbps
+                .map_or(bitrate_kbps, |maximum| maximum.max(bitrate_kbps)),
+        );
+    }
+    stats
+}
+
+pub fn apply_stream_health_from(
     mut stats: DiagnosticStats,
     health: &StreamHealth,
     target_fps: u32,
+    progress_output: FfmpegProgressOutput,
 ) -> DiagnosticStats {
     let new_session = stats.session_id.as_deref() != Some(health.session_id.as_str());
     if new_session {
@@ -1286,6 +1339,8 @@ pub fn apply_stream_health(
         stats.stream_measured_bitrate_min_kbps = None;
         stats.stream_measured_bitrate_max_kbps = None;
         stats.stream_output_total_bytes = 0;
+        stats.recording_measured_bitrate_kbps = None;
+        stats.recording_output_total_bytes = 0;
         stats.stream_duplicated_frames = 0;
     }
     stats.session_id = Some(health.session_id.clone());
@@ -1294,30 +1349,38 @@ pub fn apply_stream_health(
     // either the capture or render stage. Those fields remain owned by their
     // stage-specific samplers; aliasing output cadence into both makes
     // attribution report healthy media stages when capture/render are unknown.
+    // The bottleneck reads drops since the last sample (#981): the health
+    // counter is a session total, and a drop during one reconnect must not
+    // name the encoder for the rest of the stream.
+    let dropped_frames_since_last_sample = health.dropped_frames.map_or(0, |dropped_frames| {
+        let previous = if new_session { 0 } else { stats.dropped_frames };
+        dropped_frames.saturating_sub(previous)
+    });
     if let Some(dropped_frames) = health.dropped_frames {
         stats.dropped_frames = dropped_frames;
         stats.skipped_frames = dropped_frames;
     }
-    if let Some(bitrate_kbps) = health
+    let bitrate_kbps = health
         .bitrate_kbps
-        .filter(|bitrate_kbps| bitrate_kbps.is_finite() && *bitrate_kbps >= 0.0)
-    {
-        stats.stream_measured_bitrate_kbps = Some(bitrate_kbps);
-        if bitrate_kbps > 0.0 {
-            stats.stream_measured_bitrate_min_kbps = Some(
-                stats
-                    .stream_measured_bitrate_min_kbps
-                    .map_or(bitrate_kbps, |minimum| minimum.min(bitrate_kbps)),
-            );
-            stats.stream_measured_bitrate_max_kbps = Some(
-                stats
-                    .stream_measured_bitrate_max_kbps
-                    .map_or(bitrate_kbps, |maximum| maximum.max(bitrate_kbps)),
-            );
+        .filter(|bitrate_kbps| bitrate_kbps.is_finite() && *bitrate_kbps >= 0.0);
+    match progress_output {
+        FfmpegProgressOutput::Stream => {
+            if let Some(bitrate_kbps) = bitrate_kbps {
+                stats = apply_measured_stream_bitrate(stats, bitrate_kbps);
+            }
+            if let Some(total_bytes) = health.total_bytes {
+                stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+            }
         }
-    }
-    if let Some(total_bytes) = health.total_bytes {
-        stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+        FfmpegProgressOutput::Recording => {
+            if bitrate_kbps.is_some() {
+                stats.recording_measured_bitrate_kbps = bitrate_kbps;
+            }
+            if let Some(total_bytes) = health.total_bytes {
+                stats.recording_output_total_bytes =
+                    stats.recording_output_total_bytes.max(total_bytes);
+            }
+        }
     }
     if let Some(duplicated_frames) = health.duplicated_frames {
         stats.stream_duplicated_frames = stats.stream_duplicated_frames.max(duplicated_frames);
@@ -1329,7 +1392,7 @@ pub fn apply_stream_health(
         stats.capture_fps,
         stats.render_fps,
         stats.encoder_speed,
-        stats.dropped_frames,
+        dropped_frames_since_last_sample,
         stats.mic_dropped_frames,
         target_fps,
         stats.device_disconnected,
@@ -1430,6 +1493,17 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub stream_video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
     pub recording_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
     pub stream_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    /// Plan 218 S2: the stream encoder's own figures. `None`/`0` where this
+    /// emission does not come from the writer that feeds the stream, so the
+    /// previous stream values are kept.
+    pub stream_measured_bitrate_kbps: Option<f64>,
+    pub stream_output_total_bytes: Option<u64>,
+    pub stream_video_toolbox_fifo_write_p95_ms: Option<f64>,
+    pub stream_queue_age_p95_ms: Option<f64>,
+    pub stream_queue_depth_trips: Option<u64>,
+    pub stream_queue_age_trips: Option<u64>,
+    pub stream_queue_last_trip: Option<String>,
+    pub stream_delivery: Option<crate::protocol::StreamDeliveryState>,
     pub error: Option<String>,
 }
 
@@ -1471,6 +1545,11 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_recording_role_diagnostics = bridge.recording_role_diagnostics;
     stats.encoder_bridge_stream_role_diagnostics = bridge.stream_role_diagnostics;
     stats.encoder_bridge_input_fps = input_fps;
+    // Drops since the last bridge sample (#981): the snapshot carries the
+    // session total, which must not read as a current encoder problem.
+    let dropped_frames_since_last_sample = bridge
+        .dropped_frames
+        .saturating_sub(stats.encoder_bridge_dropped_frames);
     stats.encoder_bridge_dropped_frames = bridge.dropped_frames;
     stats.encoder_bridge_recording_dropped_frames = bridge.recording_dropped_frames;
     stats.encoder_bridge_stream_dropped_frames = bridge.stream_dropped_frames;
@@ -1546,6 +1625,36 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_schedule_skipped_ms = bridge.schedule_skipped_ms;
     stats.encoder_bridge_recording_input_fps = recording_input_fps;
     stats.encoder_bridge_stream_input_fps = stream_input_fps;
+    // Plan 218 S2: the stream's bitrate is what its encoder produced. A
+    // recording-role emission in a split session carries none and keeps the
+    // stream writer's last figures.
+    if let Some(bitrate_kbps) =
+        finite_non_negative_encoder_stat(bridge.stream_measured_bitrate_kbps)
+    {
+        stats = apply_measured_stream_bitrate(stats, bitrate_kbps);
+    }
+    if let Some(total_bytes) = bridge.stream_output_total_bytes {
+        stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+    }
+    if bridge.stream_video_toolbox_fifo_write_p95_ms.is_some() {
+        stats.encoder_bridge_stream_video_toolbox_fifo_write_p95_ms =
+            bridge.stream_video_toolbox_fifo_write_p95_ms;
+    }
+    if bridge.stream_queue_age_p95_ms.is_some() {
+        stats.encoder_bridge_stream_queue_age_p95_ms = bridge.stream_queue_age_p95_ms;
+    }
+    if let Some(trips) = bridge.stream_queue_depth_trips {
+        stats.encoder_bridge_stream_queue_depth_trips = trips;
+    }
+    if let Some(trips) = bridge.stream_queue_age_trips {
+        stats.encoder_bridge_stream_queue_age_trips = trips;
+    }
+    if bridge.stream_queue_last_trip.is_some() {
+        stats.encoder_bridge_stream_queue_last_trip = bridge.stream_queue_last_trip;
+    }
+    if bridge.stream_delivery.is_some() {
+        stats.stream_delivery = bridge.stream_delivery;
+    }
     stats.encoder_bridge_recording_queue_depth = bridge.recording_queue_depth;
     stats.encoder_bridge_recording_queue_oldest_frame_age_ms =
         bridge.recording_queue_oldest_frame_age_ms;
@@ -1581,7 +1690,7 @@ pub fn apply_encoder_bridge_stats(
         stats.capture_fps,
         stats.render_fps,
         stats.encoder_speed,
-        stats.dropped_frames,
+        dropped_frames_since_last_sample,
         stats.mic_dropped_frames,
         target_fps,
         stats.device_disconnected,
@@ -1639,6 +1748,11 @@ pub fn apply_preview_camera_source_stats(
 ) -> DiagnosticStats {
     stats.preview_camera_frame_age_ms = status.frame_age_ms;
     stats.preview_camera_source_fps = status.source_fps;
+    // Drops name the capture stage only while they grow (#981): the status
+    // carries a run total, and one old drop is not a current slowdown.
+    let dropped_frames_since_last_sample = status
+        .dropped_frames
+        .saturating_sub(stats.preview_camera_dropped_frames);
     stats.preview_camera_dropped_frames = status.dropped_frames;
     stats.preview_camera_state = Some(status.state.clone());
     stats.preview_camera_device_unique_id = status.device_unique_id.clone();
@@ -1651,7 +1765,7 @@ pub fn apply_preview_camera_source_stats(
     stats.preview_camera_selected_format_height = status.selected_format_height;
     stats.preview_camera_selected_format_min_fps = status.selected_format_min_fps;
     stats.preview_camera_selected_format_max_fps = status.selected_format_max_fps;
-    if status.dropped_frames > 0 {
+    if dropped_frames_since_last_sample > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
     stats.updated_at = Utc::now().to_rfc3339();
@@ -1735,6 +1849,11 @@ pub fn apply_preview_screen_source_stats(
 ) -> DiagnosticStats {
     stats.preview_screen_frame_age_ms = status.frame_age_ms;
     stats.preview_screen_source_fps = status.source_fps;
+    // Same rule as the camera (#981): only new drops name the capture stage.
+    // A static screen's idle callbacks are not drops (preview_screen.rs).
+    let dropped_frames_since_last_sample = status
+        .dropped_frames
+        .saturating_sub(stats.preview_screen_dropped_frames);
     stats.preview_screen_dropped_frames = status.dropped_frames;
     stats.preview_screen_message = status.message.clone();
     stats.preview_screen_native_width = status.native_width;
@@ -1745,7 +1864,7 @@ pub fn apply_preview_screen_source_stats(
     stats.preview_screen_actual_height = status.actual_height;
     stats.preview_screen_iosurface_available = status.iosurface_available;
     stats.preview_screen_d3d11_texture_available = status.d3d11_texture_available;
-    if status.dropped_frames > 0 {
+    if dropped_frames_since_last_sample > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
     stats.updated_at = Utc::now().to_rfc3339();
@@ -2175,11 +2294,16 @@ pub fn apply_system_audio_stats(
     stats
 }
 
+/// The slowest stage right now. `dropped_frames_since_last_sample` is the
+/// growth of the encoder's drop counter since the previous sample, never the
+/// session total (#981): a stuck total would name the encoder for the rest of
+/// the run after one drop. The cumulative view lives in
+/// `classify_recording_risk`, where a defect the file has taken on must stay.
 pub fn classify_bottleneck(
     capture_fps: Option<f64>,
     render_fps: Option<f64>,
     encoder_speed: Option<f64>,
-    dropped_frames: u64,
+    dropped_frames_since_last_sample: u64,
     mic_dropped_frames: u64,
     target_fps: u32,
     device_disconnected: bool,
@@ -2199,7 +2323,7 @@ pub fn classify_bottleneck(
     if render_fps.is_some_and(|fps| fps < f64::from(target_fps) * 0.9) {
         return DiagnosticBottleneck::Render;
     }
-    if dropped_frames > 0 {
+    if dropped_frames_since_last_sample > 0 {
         return DiagnosticBottleneck::Encoder;
     }
     if capture_fps.is_some() || render_fps.is_some() || encoder_speed.is_some() {
@@ -2742,6 +2866,84 @@ mod tests {
             );
             assert_eq!(stats.encoder_speed, None);
         }
+    }
+
+    // Plan 218 S2: FFmpeg's progress describes its first output. With a
+    // recording that is the recording file, and it must never pose as the
+    // stream; the stream's own encoder fills the stream fields.
+    #[test]
+    fn ffmpeg_progress_for_the_recording_file_fills_the_recording_fields() {
+        let health = StreamHealth {
+            session_id: "session-a".to_string(),
+            fps: Some(30.0),
+            dropped_frames: Some(0),
+            speed: Some(1.0),
+            bitrate_kbps: Some(8_166.0),
+            total_bytes: Some(50_000),
+            duplicated_frames: Some(0),
+            created_at: "first".to_string(),
+        };
+        let stats = apply_stream_health_from(
+            idle_diagnostics(),
+            &health,
+            30,
+            FfmpegProgressOutput::Recording,
+        );
+        assert_eq!(stats.recording_measured_bitrate_kbps, Some(8_166.0));
+        assert_eq!(stats.recording_output_total_bytes, 50_000);
+        assert_eq!(stats.stream_measured_bitrate_kbps, None);
+        assert_eq!(stats.stream_output_total_bytes, 0);
+
+        let bridge = EncoderBridgeDiagnosticSnapshot {
+            stream_measured_bitrate_kbps: Some(5_900.0),
+            stream_output_total_bytes: Some(40_000),
+            stream_video_toolbox_fifo_write_p95_ms: Some(79.8),
+            stream_queue_age_p95_ms: Some(133.0),
+            stream_queue_depth_trips: Some(2),
+            stream_queue_age_trips: Some(300),
+            stream_queue_last_trip: Some("age".to_string()),
+            stream_delivery: Some(crate::protocol::StreamDeliveryState {
+                target_fps: 30,
+                delivered_fps: 21.0,
+                drop_percent: 30.0,
+                window_seconds: 30.0,
+                degraded: true,
+                degraded_since: Some("t".to_string()),
+                bitrate_kbps: Some(4_800),
+                chosen_bitrate_kbps: Some(6_000),
+                at_floor: false,
+                uplink_overflows: 1,
+            }),
+            ..Default::default()
+        };
+        let stats = apply_encoder_bridge_stats(stats, bridge, 30);
+        assert_eq!(stats.stream_measured_bitrate_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_measured_bitrate_min_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_output_total_bytes, 40_000);
+        assert_eq!(
+            stats.encoder_bridge_stream_video_toolbox_fifo_write_p95_ms,
+            Some(79.8)
+        );
+        assert_eq!(stats.encoder_bridge_stream_queue_age_p95_ms, Some(133.0));
+        assert_eq!(stats.encoder_bridge_stream_queue_depth_trips, 2);
+        assert_eq!(stats.encoder_bridge_stream_queue_age_trips, 300);
+        assert_eq!(
+            stats.encoder_bridge_stream_queue_last_trip.as_deref(),
+            Some("age")
+        );
+        assert!(stats.stream_delivery.as_ref().is_some_and(|d| d.degraded));
+
+        // A recording-role emission carries none of it and erases nothing.
+        let quiet = EncoderBridgeDiagnosticSnapshot {
+            stream_measured_bitrate_kbps: Some(4_100.0),
+            ..Default::default()
+        };
+        let stats = apply_encoder_bridge_stats(stats, quiet, 30);
+        assert_eq!(stats.stream_measured_bitrate_min_kbps, Some(4_100.0));
+        assert_eq!(stats.stream_measured_bitrate_max_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_output_total_bytes, 40_000);
+        assert_eq!(stats.encoder_bridge_stream_queue_age_trips, 300);
+        assert!(stats.stream_delivery.is_some());
     }
 
     #[test]
@@ -3848,6 +4050,168 @@ mod tests {
         assert_eq!(stats.preview_camera_selected_format_max_fps, Some(60.0));
     }
 
+    fn screen_status_with_drops(dropped_frames: u64, frames_captured: u64) -> PreviewScreenStatus {
+        PreviewScreenStatus {
+            state: PreviewScreenState::Live,
+            source_id: Some("screen:screencapturekit:1".to_string()),
+            source_kind: Some(PreviewScreenSourceKind::Screen),
+            target_fps: 30,
+            width: Some(1920),
+            height: Some(1080),
+            native_width: Some(1920),
+            native_height: Some(1080),
+            requested_width: Some(1920),
+            requested_height: Some(1080),
+            actual_width: Some(1920),
+            actual_height: Some(1080),
+            iosurface_available: Some(true),
+            d3d11_texture_available: Some(false),
+            source_fps: Some(30.0),
+            frame_age_ms: Some(12),
+            frames_captured,
+            dropped_frames,
+            sequence: Some(frames_captured),
+            include_cursor: true,
+            exclude_current_process_windows: true,
+            updated_at: "2026-11-04T00:00:00Z".to_string(),
+            message: None,
+        }
+    }
+
+    fn camera_status_with_drops(dropped_frames: u64, frames_captured: u64) -> PreviewCameraStatus {
+        PreviewCameraStatus {
+            state: PreviewCameraState::Live,
+            camera_id: Some("camera:avfoundation-native:abc".to_string()),
+            device_unique_id: Some("device-abc".to_string()),
+            target_fps: 30,
+            width: Some(1920),
+            height: Some(1080),
+            requested_width: Some(1920),
+            requested_height: Some(1080),
+            actual_width: Some(1920),
+            actual_height: Some(1080),
+            selected_format_width: Some(1920),
+            selected_format_height: Some(1080),
+            selected_format_min_fps: Some(1.0),
+            selected_format_max_fps: Some(30.0),
+            source_fps: Some(30.0),
+            frame_age_ms: Some(8),
+            frames_captured,
+            dropped_frames,
+            sequence: Some(frames_captured),
+            updated_at: "2026-11-04T00:00:00Z".to_string(),
+            message: Some("Live".to_string()),
+            no_video: None,
+        }
+    }
+
+    /// #981: the screen status carries a run total. Drops name the capture
+    /// stage when they grow, and an old total never keeps naming it.
+    #[test]
+    fn preview_screen_drops_flag_capture_only_while_they_grow() {
+        let dropping =
+            apply_preview_screen_source_stats(idle_diagnostics(), &screen_status_with_drops(3, 90));
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Capture);
+        assert_eq!(dropping.preview_screen_dropped_frames, 3);
+
+        let mut settled = dropping.clone();
+        settled.bottleneck = DiagnosticBottleneck::None;
+        let same_total =
+            apply_preview_screen_source_stats(settled.clone(), &screen_status_with_drops(3, 120));
+        assert_eq!(same_total.bottleneck, DiagnosticBottleneck::None);
+        assert_eq!(same_total.preview_screen_dropped_frames, 3);
+
+        let growing =
+            apply_preview_screen_source_stats(same_total, &screen_status_with_drops(4, 150));
+        assert_eq!(growing.bottleneck, DiagnosticBottleneck::Capture);
+
+        // A new run starts its counter at zero: not a drop, not a slowdown.
+        let new_run = apply_preview_screen_source_stats(settled, &screen_status_with_drops(0, 1));
+        assert_eq!(new_run.bottleneck, DiagnosticBottleneck::None);
+        assert_eq!(new_run.preview_screen_dropped_frames, 0);
+    }
+
+    #[test]
+    fn preview_camera_drops_flag_capture_only_while_they_grow() {
+        let dropping =
+            apply_preview_camera_source_stats(idle_diagnostics(), &camera_status_with_drops(2, 60));
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Capture);
+        assert_eq!(dropping.preview_camera_dropped_frames, 2);
+
+        let mut settled = dropping;
+        settled.bottleneck = DiagnosticBottleneck::None;
+        let same_total =
+            apply_preview_camera_source_stats(settled, &camera_status_with_drops(2, 90));
+        assert_eq!(same_total.bottleneck, DiagnosticBottleneck::None);
+
+        let growing =
+            apply_preview_camera_source_stats(same_total, &camera_status_with_drops(5, 120));
+        assert_eq!(growing.bottleneck, DiagnosticBottleneck::Capture);
+        assert_eq!(growing.preview_camera_dropped_frames, 5);
+    }
+
+    /// #981: one frame dropped while a stream leg reconnected must not read as
+    /// "Encoder" for the rest of the session. Only new drops do.
+    #[test]
+    fn encoder_bridge_drops_flag_encoder_only_while_they_grow() {
+        let healthy_bridge = |dropped_frames: u64| EncoderBridgeDiagnosticSnapshot {
+            input_fps: Some(30.0),
+            encoder_speed: Some(1.0),
+            dropped_frames,
+            ..Default::default()
+        };
+        let stats = apply_encoder_bridge_stats(idle_diagnostics(), healthy_bridge(0), 30);
+        assert_eq!(stats.bottleneck, DiagnosticBottleneck::None);
+
+        let dropping = apply_encoder_bridge_stats(stats, healthy_bridge(1), 30);
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Encoder);
+        assert_eq!(dropping.dropped_frames, 1);
+        assert_eq!(dropping.encoder_bridge_dropped_frames, 1);
+
+        let settled = apply_encoder_bridge_stats(dropping, healthy_bridge(1), 30);
+        assert_eq!(settled.bottleneck, DiagnosticBottleneck::None);
+        // The session total stays visible; only the verdict moved on.
+        assert_eq!(settled.dropped_frames, 1);
+        assert_eq!(settled.encoder_bridge_dropped_frames, 1);
+
+        let dropping_again = apply_encoder_bridge_stats(settled, healthy_bridge(3), 30);
+        assert_eq!(dropping_again.bottleneck, DiagnosticBottleneck::Encoder);
+    }
+
+    #[test]
+    fn stream_health_drops_flag_encoder_only_while_they_grow() {
+        let health = |session_id: &str, dropped_frames: u64| StreamHealth {
+            session_id: session_id.to_string(),
+            fps: Some(30.0),
+            dropped_frames: Some(dropped_frames),
+            speed: Some(1.0),
+            bitrate_kbps: Some(6_000.0),
+            total_bytes: Some(1_024),
+            duplicated_frames: Some(0),
+            created_at: "now".to_string(),
+        };
+        let mut stats = idle_diagnostics();
+        stats.capture_fps = Some(30.0);
+        stats.render_fps = Some(30.0);
+
+        let dropping = apply_stream_health(stats, &health("session", 1), 30);
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Encoder);
+        assert_eq!(dropping.dropped_frames, 1);
+
+        let settled = apply_stream_health(dropping, &health("session", 1), 30);
+        assert_eq!(settled.bottleneck, DiagnosticBottleneck::None);
+        assert_eq!(settled.dropped_frames, 1);
+
+        let dropping_again = apply_stream_health(settled, &health("session", 2), 30);
+        assert_eq!(dropping_again.bottleneck, DiagnosticBottleneck::Encoder);
+
+        // A new session's first drops are new, whatever the old total was.
+        let next_session = apply_stream_health(dropping_again, &health("session-2", 1), 30);
+        assert_eq!(next_session.bottleneck, DiagnosticBottleneck::Encoder);
+        let next_settled = apply_stream_health(next_session, &health("session-2", 1), 30);
+        assert_eq!(next_settled.bottleneck, DiagnosticBottleneck::None);
+    }
+
     #[test]
     fn preview_camera_capability_stats_record_format_matrix() {
         let stats = apply_preview_camera_capability_stats(
@@ -4085,6 +4449,14 @@ mod tests {
                 stream_video_toolbox_fifo_enqueue_p95_ms: None,
                 recording_video_toolbox_fifo_enqueue_max_ms: None,
                 stream_video_toolbox_fifo_enqueue_max_ms: None,
+                stream_measured_bitrate_kbps: None,
+                stream_output_total_bytes: None,
+                stream_video_toolbox_fifo_write_p95_ms: None,
+                stream_queue_age_p95_ms: None,
+                stream_queue_depth_trips: None,
+                stream_queue_age_trips: None,
+                stream_queue_last_trip: None,
+                stream_delivery: None,
                 error: None,
             },
             30,
@@ -4189,6 +4561,14 @@ mod tests {
                 stream_video_toolbox_fifo_enqueue_p95_ms: Some(9.0),
                 recording_video_toolbox_fifo_enqueue_max_ms: Some(14.0),
                 stream_video_toolbox_fifo_enqueue_max_ms: Some(18.0),
+                stream_measured_bitrate_kbps: None,
+                stream_output_total_bytes: None,
+                stream_video_toolbox_fifo_write_p95_ms: None,
+                stream_queue_age_p95_ms: None,
+                stream_queue_depth_trips: None,
+                stream_queue_age_trips: None,
+                stream_queue_last_trip: None,
+                stream_delivery: None,
                 error: None,
             },
             30,

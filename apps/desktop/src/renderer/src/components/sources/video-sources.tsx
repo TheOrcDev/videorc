@@ -8,6 +8,7 @@ import { SourceFacts, SourceItem } from '@/components/sources/source-item'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Switch } from '@/components/ui/switch'
+import { useCameraLowLight } from '@/hooks/use-camera-low-light'
 import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
 import type { Device, DeviceList, SourceSelection } from '@/lib/backend'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
@@ -56,6 +57,11 @@ export interface VideoSourcesViewProps {
     shortfall: string | null
     switchStatus?: ReactNode
     onChange: (cameraId: string | undefined) => void
+    /**
+     * Issue #1066: the camera's low-light compensation, where Videorc can set
+     * it (a Windows camera with the control); null hides the switch.
+     */
+    lowLight?: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void } | null
   }
   /** Development builds only: the deterministic synthetic screen. */
   synthetic: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void } | null
@@ -156,6 +162,24 @@ export function VideoSourcesView({
           ) : camera.facts ? (
             <SourceFacts>{camera.facts}</SourceFacts>
           ) : null}
+          {camera.lowLight ? (
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex min-w-0 flex-col">
+                <span className="text-xs font-medium text-foreground">Low-light compensation</span>
+                <span className="text-xs text-muted-foreground">
+                  Brightens a dark picture, but the camera may drop to half its frame rate.
+                </span>
+              </span>
+              <Switch
+                aria-label="Low-light compensation"
+                checked={camera.lowLight.checked}
+                data-videorc-camera-low-light-toggle
+                disabled={camera.lowLight.disabled}
+                size="sm"
+                onCheckedChange={camera.lowLight.onChange}
+              />
+            </div>
+          ) : null}
         </SourceItem>
       </GroupedList>
     </PanelSection>
@@ -225,9 +249,10 @@ export function VideoSources(): ReactElement {
     runtimeInfo,
     mediaAccess,
     systemAccessContext,
-    wsStatus
+    wsStatus,
+    requestCameraLowLight
   } = useStudioCore()
-  const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
+  const { previewCameraStatus, previewCameraLowFrameRate, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats } = useStudioDiagnostics()
   const sources = captureConfig.sources
   const captureDevices = capturePickerDevices(deviceList.devices)
@@ -248,6 +273,20 @@ export function VideoSources(): ReactElement {
   })
 
   const shortfall = sources.cameraId ? cameraFormatShortfall(diagnosticStats) : null
+  const {
+    state: cameraLowLight,
+    pending: cameraLowLightPending,
+    setCompensation: setCameraLowLight
+  } = useCameraLowLight({
+    cameraId: sources.cameraId,
+    connected: wsStatus === 'connected',
+    request: requestCameraLowLight
+  })
+  // Issue #1066: only the answer for the camera in use counts.
+  const lowLight =
+    sources.cameraId && cameraLowLight?.cameraId === sources.cameraId && cameraLowLight.supported
+      ? cameraLowLight
+      : null
 
   const switchCapture = (captureId: string | undefined): void => {
     const next: SourceSelection = buildCaptureSources(sources, captureDevices, captureId)
@@ -274,14 +313,23 @@ export function VideoSources(): ReactElement {
           preview: previewCameraStatus,
           // The camera in use: a stand-in is the one that may send nothing.
           name: sources.cameraName,
-          standIn: cameraStandIn
+          standIn: cameraStandIn,
+          lowFrameRate: previewCameraLowFrameRate,
+          lowLightCompensation: lowLight?.compensation
         }),
         // Facts describe the selected source only (the synthetic screen and a
         // camera turned Off leave the picker saying None or Off).
         facts: sources.cameraId ? cameraFacts(previewCameraStatus) : null,
         shortfall: shortfall ? cameraFormatShortfallMessage(shortfall) : null,
         switchStatus: <SourceSwitchStatus kind="camera" />,
-        onChange: switchCamera
+        onChange: switchCamera,
+        lowLight: lowLight
+          ? {
+              checked: lowLight.compensation,
+              disabled: wsStatus !== 'connected' || cameraLowLightPending,
+              onChange: (on) => void setCameraLowLight(on)
+            }
+          : null
       }}
       discoveryPending={wsStatus !== 'connected'}
       screen={{

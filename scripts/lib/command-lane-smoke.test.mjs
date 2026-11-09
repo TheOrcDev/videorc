@@ -31,7 +31,8 @@ test('command-lane smoke uses one explicitly enabled debug backend socket', () =
     'scene.layout.apply_preview',
     'captions.stop',
     'liveChat.send',
-    'session.stop'
+    'session.stop',
+    'remote.surface.publish'
   ]) {
     assert.match(smoke, new RegExp(`['"]${method.replace('.', '\\.')}['"]`))
   }

@@ -442,12 +442,32 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     expect(block.querySelector('[data-slot="buddy-emblem"]')?.getAttribute('src')).toContain(
       'buddy-emblem-112'
     )
+    expect(block.querySelector('[data-slot="buddy-emblem"]')?.getAttribute('data-picture')).toBe(
+      'default'
+    )
     expect(block.querySelector('#buddy-live-switch')).toBeTruthy()
     expect(block.querySelector('[data-testid="buddy-live-pointer"]')).toBeNull()
     expect(document.getElementById('cohost-listen')).toBeTruthy()
     // The three-column pitch is gone; Live lists what Buddy does as rows.
     expect(document.querySelector('ul[aria-label="What Buddy does"]')).toBeNull()
     expect(document.querySelectorAll('[data-power-tab]')).toHaveLength(BUDDY_LIVE_POWERS.length)
+  })
+
+  it("puts the streamer's own Buddy in the header, not the golem", async () => {
+    const owl = settings()
+    owl.persona = {
+      ...owl.persona,
+      id: 'p1',
+      name: 'Archie',
+      source: 'generated',
+      images: { idle: 'p1/idle-0a1b2c3d.png' }
+    }
+    await render({ cohost: owl })
+    const block = document.querySelector('[data-slot="buddy-live-status-block"]') as HTMLElement
+    const emblem = block.querySelector('[data-slot="buddy-emblem"]')
+    expect(emblem?.getAttribute('data-picture')).toBe('own')
+    expect(emblem?.getAttribute('src')).toBe('videorc-asset://buddy/p1/idle-0a1b2c3d.png')
+    expect(block.querySelector('[data-slot="buddy-profile-name"]')?.textContent).toBe('Archie')
   })
 
   it('opens the tab that holds a power when its row is pressed', async () => {

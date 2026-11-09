@@ -30,6 +30,26 @@ export type PersistentDirectoryHandle = {
   displayName: string
 }
 
+/**
+ * The remembered folder is no longer at its path: deleted, moved away, or on a
+ * drive that was unplugged or unmounted. Distinct from a changed identity,
+ * where something else now answers at the path. Callers own the user copy.
+ */
+export class DirectoryUnavailableError extends Error {
+  readonly displayName: string
+
+  constructor(displayName: string, cause: unknown) {
+    super(`The folder ${displayName} is not available.`, { cause })
+    this.name = 'DirectoryUnavailableError'
+    this.displayName = displayName
+  }
+}
+
+/** Record, Clips, Import and Show in folder say this when the chosen recordings folder is gone. */
+export function outputDirectoryUnavailableMessage(displayName: string): string {
+  return `Videorc can’t find your recordings folder “${displayName}”. If it’s on a drive, reconnect the drive. Otherwise choose a folder in Output → Where recordings go.`
+}
+
 export class PersistentDirectoryAuthority {
   constructor(
     private readonly filePath: string,
@@ -75,7 +95,15 @@ export class PersistentDirectoryAuthority {
     if (!entry) {
       throw new Error('Directory handle is unknown. Choose the folder again.')
     }
-    const resolved = canonicalDirectory(entry.canonicalPath)
+    let resolved: CanonicalDirectory
+    try {
+      resolved = canonicalDirectory(entry.canonicalPath)
+    } catch (error) {
+      if (missingPathError(error)) {
+        throw new DirectoryUnavailableError(entry.displayName, error)
+      }
+      throw error
+    }
     if (
       resolved.canonicalPath !== entry.canonicalPath ||
       !sameDirectoryObjectIdentity(resolved.objectIdentity, entry.objectIdentity)
@@ -173,10 +201,19 @@ function sameDirectoryObjectIdentity(
   return left.device === right.device && left.inode === right.inode
 }
 
-function canonicalDirectory(rawPath: string): {
+type CanonicalDirectory = {
   canonicalPath: string
   objectIdentity: DirectoryObjectIdentity
-} {
+}
+
+// ENOENT: the folder or a parent is gone. ENOTDIR: a file now sits where a
+// parent folder was.
+function missingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+function canonicalDirectory(rawPath: string): CanonicalDirectory {
   if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.trim() !== rawPath) {
     throw new Error('Directory path is invalid.')
   }

@@ -17,7 +17,7 @@ import {
   summarizeNativePreviewRecordingDiagnostics
 } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
-import { configureWindowsD3d11RendererSources } from './lib/windows-d3d11-preview-sources.mjs'
+import { configureWindowsD3d11RendererSourcesWhenListed } from './lib/windows-d3d11-preview-sources.mjs'
 import {
   nativePreviewSurfaceStatusReady,
   previewWindowSurfaceReady,
@@ -340,9 +340,11 @@ async function startPackagedWindowsScreenPreview(ws) {
 }
 
 async function configurePackagedWindowsD3d11RendererSources(smoke, screenId) {
-  await configureWindowsD3d11RendererSources(
+  // The renderer lists the screen only after its first device refresh.
+  await configureWindowsD3d11RendererSourcesWhenListed(
     (command, params) => smokeCommand(smoke, command, params),
-    screenId
+    screenId,
+    Date.now() + timeoutMs
   )
   console.log(`Native-preview recording smoke set renderer sources to ${screenId} + ScreenOnly.`)
 }

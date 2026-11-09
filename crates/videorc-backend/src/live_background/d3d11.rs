@@ -859,11 +859,6 @@ impl LiveBackgroundD3d11Renderer {
         (self.pixels.len() as u32, bytes)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn guard_level(&self) -> GuardLevel {
-        self.guard.level()
-    }
-
     /// Drop the passes' shaders and scratch, keeping what a still draws
     /// with (the present pass and its triangle, the live frame and the
     /// poster).
@@ -1754,26 +1749,14 @@ mod tests {
     /// slightly: on 2026-10-24 the worst cell was 11 (Liquid Chrome) at a
     /// mean of 0.05. A real port bug shows a mean of 20 or more.
     ///
-    /// Ghost Fibers' `hash11` calls `sin` of arguments from thousands up to
-    /// about 1e7 rad (`n * 91.3458` at tens of thousands of instances). Plan
-    /// 194 S4 predicted a WARP miss with a small mean: the fibers still sit
-    /// in the same place on average, but a few cells differ because WARP's
-    /// range reduction is not ANGLE's. CI on 2026-10-25 measured means
-    /// 0.70–1.61 (under 2.0) and a worst cell of 60. That residual keeps a
-    /// dedicated cell bound of 64 so the miss stays reported in the log
-    /// without failing the gate; a mean over 2.0 is still a port bug.
-    ///
-    /// Beams on WARP is a different miss. The HLSL field and composite match
-    /// the Metal port (which is inside mean 2 / cell 10 of the GLSL
-    /// goldens). Folding the lane hash with `sinPeriod` and replacing
-    /// `GenerateMips` with an explicit 2×2 box did not move the WARP numbers:
-    /// CI on 2026-10-25 measured means 9.2–22.1 and a worst cell of 222
-    /// across three looks × two phases. Color Bends, Dither and Ferrofluid
-    /// on the same harness sit at mean ≤ 0.07, so the D3D11 pipeline, the
-    /// UV flip and the uniforms are not the cause. Beams' classic Perlin
-    /// and `sin` hash are the remaining WARP/ANGLE gap; the dedicated bounds
-    /// (mean 24, cell 225) keep those numbers in the log. A mean over 24
-    /// would be a new port bug.
+    /// Beams and Ghost Fibers once had wider bounds here (24 / 225 and
+    /// 2 / 64): both hashed with `sin` of large arguments (Ghost Fibers'
+    /// reach about 1e7 rad), whose range reduction on WARP and on a GTX 1650
+    /// SUPER is not ANGLE's (#1077 measured `beams/chrome@29` at mean 17.9,
+    /// cell 229), and Beams' Perlin gradient was decided by divide rounding.
+    /// Both now hash in integers and Beams splits its gradient in whole
+    /// numbers (#987, #1077), so every device draws the goldens' lanes and
+    /// strands; a miss is a port bug.
     #[test]
     fn golden_grids_match_the_glsl_reference() {
         let Some((mut renderer, _board)) = renderer() else {
@@ -1825,11 +1808,7 @@ mod tests {
             let mean = total as f64 / expected.len() as f64;
             let name = format!("{css}/{}@{phase}", look.id);
             eprintln!("golden {name}: mean {mean:.3}, max cell {max}");
-            let (mean_limit, max_cell) = match css {
-                "ghost-fibers" => (2.0, 64),
-                "beams" => (24.0, 225),
-                _ => (2.0, 16),
-            };
+            let (mean_limit, max_cell) = (2.0, 16);
             if mean > mean_limit || max > max_cell {
                 failures.push(format!("{name}: mean {mean:.3}, max {max}"));
             }

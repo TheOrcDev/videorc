@@ -46,6 +46,7 @@ vi.mock('@/hooks/use-studio', () => ({
     diagnosticStats: mocked.stats as unknown as DiagnosticStats,
     healthEvents: mocked.healthEvents,
     logs: [],
+    recentStreamDrops: { audio: false, capture: false, encoder: false, preview: false },
     previewSurfaceStatus: {
       source: 'capture',
       targetFps: 30,

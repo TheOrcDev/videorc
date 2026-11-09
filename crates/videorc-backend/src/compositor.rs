@@ -5352,7 +5352,7 @@ impl StartupBarrierAccumulator {
     fn observe(
         &mut self,
         evidence: CompositorFrameEvidence,
-        started_at: Instant,
+        started_at: tokio::time::Instant,
     ) -> StartupBarrierObservation {
         if evidence.has_real_source && self.first_source_frame_ms.is_none() {
             self.first_source_frame_ms = Some(started_at.elapsed().as_millis() as u64);
@@ -5420,7 +5420,7 @@ impl StartupBarrierAccumulator {
         StartupBarrierObservation::Pending
     }
 
-    fn ready_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+    fn ready_result(&self, started_at: tokio::time::Instant) -> CompositorStartupBarrierResult {
         CompositorStartupBarrierResult {
             ready: true,
             wait_ms: started_at.elapsed().as_millis() as u64,
@@ -5434,7 +5434,7 @@ impl StartupBarrierAccumulator {
         }
     }
 
-    fn timeout_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+    fn timeout_result(&self, started_at: tokio::time::Instant) -> CompositorStartupBarrierResult {
         let wait_ms = started_at.elapsed().as_millis() as u64;
         // Cadence-only: the compositor IS producing usable frames, just
         // not three in a row inside the budget. Anything structural, or
@@ -5470,7 +5470,10 @@ pub async fn wait_for_compositor_startup_frames(
     state: &AppState,
     params: CompositorStartupBarrierParams,
 ) -> CompositorStartupBarrierResult {
-    let started_at = Instant::now();
+    // The barrier's clock is tokio's, like its polling sleeps: under a test's
+    // paused time its deadline and the wait it reports advance with the
+    // frames the test publishes, not with the host's load (#1076).
+    let started_at = tokio::time::Instant::now();
     let mut accumulator = StartupBarrierAccumulator::new(params);
 
     // Seed from frames the compositor already produced (instant-record P3): a
@@ -5543,7 +5546,9 @@ pub fn frame_history_proves_live_sources(
         // judged at its own canvas size.
         accumulator.params.width = evidence.width;
         accumulator.params.height = evidence.height;
-        if accumulator.observe(*evidence, now) == StartupBarrierObservation::Ready {
+        if accumulator.observe(*evidence, tokio::time::Instant::from_std(now))
+            == StartupBarrierObservation::Ready
+        {
             return Some(accumulator.frames_observed);
         }
     }
@@ -7255,6 +7260,7 @@ async fn run_synthetic_compositor_loop(
                             .as_ref()
                             .map(|source| f64::from(source.target_fps()))
                             .filter(|fps| fps.is_finite() && *fps > 0.0);
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let (mut camera_producer, exact_frameless_zombie) = if camera_is_consumed {
                             match preview_camera_restart_snapshot(&state).await {
                                 Some(snapshot) => {
@@ -7298,6 +7304,7 @@ async fn run_synthetic_compositor_loop(
                         } else {
                             (None, false)
                         };
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let mut camera_fresh_serves = fetch.camera_fresh_serves;
                         #[cfg(debug_assertions)]
                         if let Some(producer) = camera_producer.as_mut()
@@ -7323,6 +7330,7 @@ async fn run_synthetic_compositor_loop(
                             producer.frame_store_publications = stall.frame_store_publications;
                         }
                         let screen_is_consumed = capture_needs.screen;
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let (screen_target_fps, mut screen_producer) = if screen_is_consumed {
                             match preview_screen_restart_snapshot(&state).await {
                                 Some(snapshot) => {
@@ -7356,6 +7364,7 @@ async fn run_synthetic_compositor_loop(
                         } else {
                             (None, None)
                         };
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let mut screen_fresh_serves = fetch.screen_fresh_serves;
                         #[cfg(debug_assertions)]
                         if let Some(producer) = screen_producer.as_mut()
@@ -7971,12 +7980,11 @@ fn cpu_live_background_source(
 }
 
 /// Plan 190 S5: stop the Linux live background thread when composition stops
-/// (the idle preview composes no pixels) or the live background leaves.
+/// (the idle preview composes no pixels) or the live background leaves, and
+/// take down its status: a poster status holds no thread (fix plan 0007).
 fn release_cpu_live_background(slot: &mut Option<Box<LiveBackgroundGpuRenderer>>) {
     #[cfg(target_os = "linux")]
-    if let Some(renderer) = slot.as_mut()
-        && renderer.holds_resources()
-    {
+    if let Some(renderer) = slot.as_mut() {
         renderer.release();
     }
     #[cfg(not(target_os = "linux"))]
@@ -8622,7 +8630,7 @@ fn test_trace_source_iso_composition(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn test_take_source_iso_composition_trace() -> Vec<SourceIsoCompositionTiming> {
     std::mem::take(
         &mut *SOURCE_ISO_COMPOSITION_TRACE
@@ -9578,6 +9586,26 @@ fn synthetic_hard_content_enabled() -> bool {
     })
 }
 
+/// Plan 218: the thin-uplink smoke paints its noise as constant blocks this
+/// many pixels wide at full canvas resolution
+/// (`VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN`, off by default). The default
+/// quarter-canvas noise is scaled up by the compositor's linear sampler, which
+/// turns every pixel into a gradient the H.264 encoder cannot bring under
+/// about 6.5 Mbps at 1080p30 even at its highest quantizer, so no bitrate
+/// target binds it; hard-edged 32 px blocks encode at about 4.3 Mbps under a
+/// 6 Mbps target and follow a 3 Mbps target to 2.8 Mbps (the on-box
+/// VideoToolbox sweep, 2026-11-05), while every block still changes every
+/// frame.
+fn synthetic_hard_content_grain() -> Option<usize> {
+    static GRAIN: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *GRAIN.get_or_init(|| {
+        std::env::var("VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|grain| (2..=256).contains(grain))
+    })
+}
+
 fn xorshift64(state: &mut u64) -> u64 {
     let mut value = *state;
     value ^= value << 13;
@@ -9592,18 +9620,41 @@ fn synthetic_hard_content_bgra(
     canvas_width: u32,
     canvas_height: u32,
 ) -> SyntheticTestPatternBgra {
-    let width = (canvas_width as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 960);
-    let height = (canvas_height as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 960);
-    let mut bytes = vec![0; width * height * 4];
     // Deterministic per (frame, run): reproducible artifacts, zero skip blocks.
     let mut rng = sequence.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
-    for pixel in bytes.as_chunks_mut::<4>().0 {
-        let noise = xorshift64(&mut rng);
-        pixel[0] = noise as u8;
-        pixel[1] = (noise >> 8) as u8;
-        pixel[2] = (noise >> 16) as u8;
-        pixel[3] = 255;
-    }
+    let (width, height, mut bytes) = match synthetic_hard_content_grain() {
+        Some(grain) => {
+            let width = (canvas_width as usize).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 3840);
+            let height = (canvas_height as usize).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 2160);
+            let cells = width.div_ceil(grain);
+            let mut cell_colors = vec![[0u8; 3]; cells * height.div_ceil(grain)];
+            for color in cell_colors.iter_mut() {
+                let noise = xorshift64(&mut rng);
+                *color = [noise as u8, (noise >> 8) as u8, (noise >> 16) as u8];
+            }
+            let mut bytes = vec![0; width * height * 4];
+            for (y, row) in bytes.chunks_exact_mut(width * 4).enumerate() {
+                for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                    let color = cell_colors[(y / grain) * cells + x / grain];
+                    pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
+                }
+            }
+            (width, height, bytes)
+        }
+        None => {
+            let width = (canvas_width as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 960);
+            let height = (canvas_height as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 960);
+            let mut bytes = vec![0; width * height * 4];
+            for pixel in bytes.as_chunks_mut::<4>().0 {
+                let noise = xorshift64(&mut rng);
+                pixel[0] = noise as u8;
+                pixel[1] = (noise >> 8) as u8;
+                pixel[2] = (noise >> 16) as u8;
+                pixel[3] = 255;
+            }
+            (width, height, bytes)
+        }
+    };
     crate::synthetic_diagnostic::overlay_frame_markers(
         &mut bytes,
         width,
@@ -15912,6 +15963,7 @@ mod tests {
         ));
         // Canvas (1, 1) is box (5, 3) -> source centre (2.25, 1.25): mostly
         // source (2, 1), a shade toward (3, 2).
+        #[allow(clippy::identity_op, reason = "row * stride + column names the pixel")]
         let centre = bytes[1 * 4 + 1];
         assert!(
             (i16::from(centre) - i16::from(expected_y(2, 1))).abs() <= 24,
@@ -16100,7 +16152,7 @@ mod tests {
         ));
         assert_eq!(circle[3], 0, "top-left corner must be transparent");
         assert_eq!(
-            circle[((1 * 4 + 1) * 4) + 3],
+            circle[((4 + 1) * 4) + 3],
             255,
             "circle center must remain opaque"
         );
@@ -17481,6 +17533,52 @@ mod tests {
         )
     }
 
+    /// Stops the state's synthetic compositor run when a test unwinds
+    /// (#1069). A failed assertion otherwise drops the test runtime, whose
+    /// blocking pool waits forever for the thread running
+    /// `run_synthetic_compositor_loop`, which nothing told to stop: the
+    /// failure is never reported and the test just runs on. Declared right
+    /// after the state so it drops last, the guard signals the current run's
+    /// stop channel and waits for its worker, so the panic reports instead.
+    /// A test that returns normally has stopped its run itself; the guard
+    /// then finds nothing to do.
+    struct StopSyntheticRunOnDrop {
+        state: AppState,
+    }
+
+    impl StopSyntheticRunOnDrop {
+        fn new(state: AppState) -> Self {
+            Self { state }
+        }
+    }
+
+    impl Drop for StopSyntheticRunOnDrop {
+        fn drop(&mut self) {
+            // Drop cannot await: the runtime lock is tried until the loop
+            // lets go of it (it holds the lock for one frame's bookkeeping
+            // at most), and the worker is joined by polling its handle.
+            let deadline = Instant::now() + COMPOSITOR_WORKER_STOP_TIMEOUT;
+            let task = loop {
+                if let Ok(mut compositor) = self.state.compositor.try_lock() {
+                    if let Some(stop_tx) = compositor.stop_tx.take() {
+                        let _ = stop_tx.send(true);
+                    }
+                    break compositor.render_task.take();
+                }
+                if Instant::now() >= deadline {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let Some(task) = task else {
+                return;
+            };
+            while !task.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
     fn tiny_video() -> VideoSettings {
         VideoSettings {
             preset: VideoPreset::Custom,
@@ -18501,6 +18599,7 @@ mod tests {
         .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn set_latest_frame_evidence_for_scene(
         state: &AppState,
         sequence: u64,
@@ -18526,7 +18625,10 @@ mod tests {
                 camera_sequence,
                 screen_sequence,
                 has_image_source,
-                published_at: Instant::now(),
+                // Stamped from tokio's clock: under paused time the gaps the
+                // barrier measures are exactly the writer's sleeps, however
+                // late the host runs them. On a running clock this is now.
+                published_at: tokio::time::Instant::now().into_std(),
             });
     }
 
@@ -18541,6 +18643,7 @@ mod tests {
     #[tokio::test]
     async fn synthetic_compositor_reports_render_cadence() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -18601,6 +18704,7 @@ mod tests {
     #[tokio::test]
     async fn compositor_publishes_auxiliary_stream_output_store() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -18700,6 +18804,7 @@ mod tests {
     #[tokio::test]
     async fn simulcast_bound_aux_composes_its_own_vertical_scene() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -18989,7 +19094,7 @@ mod tests {
         assert!(stream.metadata.has_metal_iosurface_target());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_waits_for_consecutive_target_real_frames() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19021,7 +19126,7 @@ mod tests {
         assert_eq!(result.timeout_reason, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_requires_stable_frame_cadence_when_configured() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19246,7 +19351,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_blocks_unstable_frame_cadence_when_configured() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19298,7 +19403,7 @@ mod tests {
     /// Cadence matrix: the owner's 166/100/90ms hiccup pattern is unsteady
     /// under a tight budget (cadence-only, with the last three gaps on record)
     /// and clean under the 200ms production budget, at 30 and at 60fps.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_reports_gap_history_and_cadence_only_for_hiccups() {
         for (label, budget_ms, expect_ready) in [
             ("30fps/tight", 71_u64, false),
@@ -19386,7 +19491,7 @@ mod tests {
     /// A stall is never cadence-only: no frame at all, or frames that stop
     /// advancing the required camera, report zero/one fresh frame and no
     /// cadence violation so the caller refuses instead of recording.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_stalls_are_not_cadence_only() {
         let silent = wait_for_compositor_startup_frames(
             &test_state(),
@@ -19459,7 +19564,7 @@ mod tests {
 
     /// A resolution block AFTER usable frames wins over earlier cadence
     /// misses: the latest observation decides, so this is never cadence-only.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_structural_block_after_hiccups_is_not_cadence_only() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19509,7 +19614,7 @@ mod tests {
         assert_eq!(startup_gap_history_label(&[]), "none");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_requires_advancing_camera_frames() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19548,7 +19653,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_accepts_advancing_camera_frames() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19731,6 +19836,7 @@ mod tests {
     #[tokio::test]
     async fn compositor_start_replaces_stale_frame_store() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let old_store = compositor_frame_store(&state).await;
         {
             let mut store = old_store
@@ -19780,6 +19886,7 @@ mod tests {
     #[tokio::test]
     async fn rapid_compositor_replacement_awaits_the_previous_blocking_worker() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let params = |width| CompositorStartParams {
             benchmark: false,
             target_fps: 60,
@@ -19890,6 +19997,7 @@ mod tests {
     #[tokio::test]
     async fn arm_compositor_for_capture_keeps_the_run_and_swaps_the_loop_config() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
         let preview_run_id = preview.run_id.clone().expect("preview run id");
         let before = wait_for_frame_dimensions(&state, 64, 36, 0).await;
@@ -19989,6 +20097,7 @@ mod tests {
         assert!(!idle.buddy_on_aux);
 
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -20101,6 +20210,7 @@ mod tests {
         );
 
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -20181,6 +20291,7 @@ mod tests {
     #[tokio::test]
     async fn a_layout_saved_at_idle_swaps_the_idle_runs_flags() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let idle = idle_overlay_flags(&state);
         assert!(!idle.buddy_on_primary);
         start_synthetic_compositor(
@@ -20265,14 +20376,8 @@ mod tests {
     #[tokio::test]
     async fn a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "TEMP-DIAG benchmark arm: preview run started"
-            );
-        }
         // The user's scene: one plain test pattern (the only source a test
         // can draw), committed the way the idle Preview commits it.
         let (user_scene, user_sources) = test_pattern_scene(64, 36);
@@ -20289,13 +20394,6 @@ mod tests {
         )
         .await;
         let before = wait_for_frame_at_revision(&state, Some(10)).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "TEMP-DIAG benchmark arm: user frame at 10"
-            );
-        }
         let user_status = compositor_status(&state).await;
         assert_eq!(user_status.scene_revision, Some(10));
         assert_eq!(
@@ -20340,10 +20438,6 @@ mod tests {
         )
         .await
         .expect("arms in place");
-        {
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: armed");
-        }
         assert!(
             commit_benchmark_scene(
                 &state,
@@ -20354,19 +20448,10 @@ mod tests {
             )
             .await
         );
-        let benchmark_frame = wait_for_frame_dimensions(&state, 128, 72, before.sequence).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "TEMP-DIAG benchmark arm: benchmark frame"
-            );
-        }
-        assert_eq!(
-            benchmark_frame.scene_revision,
-            Some(11),
-            "the barrier reads the benchmark scene's revision"
-        );
+        // The arm resizes the loop at once and the commit lands a tick or
+        // two later, so a frame of the user's scene at the benchmark's size
+        // is possible in between: the wait names the revision too.
+        wait_for_frame_dimensions_at_revision(&state, 128, 72, Some(11), before.sequence).await;
         {
             let compositor = state.compositor.lock().await;
             assert_eq!(compositor.status.scene_revision, Some(10));
@@ -20411,10 +20496,6 @@ mod tests {
         // the user's scene at its own revision (no surface: the run stops).
         release_compositor_capture_lease(&state, "benchmark").await;
         {
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: released");
-        }
-        {
             let compositor = state.compositor.lock().await;
             assert!(compositor.benchmark_scene.is_none());
             assert_eq!(
@@ -20424,13 +20505,6 @@ mod tests {
             );
         }
 
-        {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "TEMP-DIAG benchmark arm: before fresh run"
-            );
-        }
         // Fresh run: the benchmark starts its own run.
         start_synthetic_compositor(
             state.clone(),
@@ -20451,12 +20525,7 @@ mod tests {
             )
             .await
         );
-        let fresh_frame = wait_for_frame_dimensions(&state, 128, 72, 0).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: fresh frame");
-        }
-        assert_eq!(fresh_frame.scene_revision, Some(12));
+        wait_for_frame_dimensions_at_revision(&state, 128, 72, Some(12), 0).await;
         {
             let compositor = state.compositor.lock().await;
             assert_ne!(
@@ -20477,11 +20546,49 @@ mod tests {
             );
         }
         stop_compositor(&state).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: stopped");
-        }
         assert!(state.compositor.lock().await.benchmark_scene.is_none());
+    }
+
+    /// #1069: a failed assertion while a synthetic run is live reports as a
+    /// failure instead of hanging the whole test binary in the runtime's
+    /// blocking-pool shutdown (the guard stops the run as the test unwinds).
+    #[tokio::test]
+    #[should_panic(expected = "a failure during a live synthetic run reports")]
+    async fn a_panic_during_a_live_synthetic_run_reports_instead_of_hanging() {
+        let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
+        start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+        wait_for_frame_dimensions(&state, 64, 36, 0).await;
+        panic!("a failure during a live synthetic run reports");
+    }
+
+    /// The first frame at `width`x`height` that also carries `revision`: a
+    /// run resized in place (or started) before a scene commit renders the
+    /// previous scene at the new size until the commit reaches it.
+    async fn wait_for_frame_dimensions_at_revision(
+        state: &AppState,
+        width: u32,
+        height: u32,
+        revision: Option<u64>,
+        after_sequence: u64,
+    ) -> CompositorFrameEvidence {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let latest = compositor_latest_frame_evidence(state).await;
+            if let Some(evidence) = latest
+                && evidence.width == width
+                && evidence.height == height
+                && evidence.scene_revision == revision
+                && evidence.sequence > after_sequence
+            {
+                return evidence;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "compositor never published a {width}x{height} frame at revision {revision:?} after {after_sequence} (latest {latest:?})"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn wait_for_frame_at_revision(
@@ -20515,6 +20622,7 @@ mod tests {
     #[tokio::test]
     async fn arm_compositor_for_capture_refuses_non_preview_runs() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         assert_eq!(
             arm_compositor_for_capture(&state, "s", arm_params(128, 72)).await,
             Err(CompositorArmRefusal::NoLiveRun)
@@ -20562,6 +20670,7 @@ mod tests {
     #[tokio::test]
     async fn stopping_a_leased_run_clears_the_lease() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
         let run_id = preview.run_id.expect("preview run id");
         arm_compositor_for_capture(&state, "session-arm", arm_params(128, 72))
@@ -20579,6 +20688,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_shutdown_joins_the_compositor_blocking_worker() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -20623,6 +20733,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_compositor_starts_serialize_the_full_worker_handoff() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let params = |width| CompositorStartParams {
             benchmark: false,
             target_fps: 60,
@@ -20663,6 +20774,7 @@ mod tests {
     #[tokio::test]
     async fn compositor_restart_publishes_requested_recording_dimensions_after_preview_size() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -23751,8 +23863,11 @@ mod tests {
                     presented_at,
                     Duration::from_secs_f64(1.0 / f64::from(video.fps)),
                 );
-                // Both inputs deliver current audio from the moment Record starts.
-                let started = Instant::now();
+                // Both inputs deliver current audio from the moment Record
+                // starts: the presentation the epoch came from, not a wall
+                // clock read after it, which a loaded host stretches past the
+                // half-tick allowance below (#1076).
+                let started = presented_at;
                 for (microphone, system) in [(true, false), (false, true), (true, true)] {
                     for packet_frames in [128, 480, 512, 960] {
                         let case = format!(
@@ -23976,6 +24091,7 @@ mod buddy_sprite_tests {
     /// The S-B5 draw: cell 4 of the 3 x 2 fixture (neighbours on three
     /// sides), 150 px on canvas from 120 px cells, turned 30 degrees and
     /// scaled 1.1 x 0.9 about page-pet's pivot, nudged by (12, -7).
+    #[cfg(target_os = "macos")]
     fn parity_leg() -> BuddyLegFrame {
         let atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
         let buddy_box = [565.0, 285.0, 150.0, 150.0];
@@ -23998,6 +24114,7 @@ mod buddy_sprite_tests {
 
     /// Distance from a canvas point to the quad's outline, and whether the
     /// point is inside.
+    #[cfg(target_os = "macos")]
     fn edge_distance(corners: [[f32; 2]; 4], point: [f32; 2]) -> (f32, bool) {
         // Outline order: top-left, top-right, bottom-right, bottom-left.
         let outline = [corners[0], corners[1], corners[3], corners[2]];
@@ -25731,14 +25848,13 @@ mod program_leg_tests {
             );
             // Captions exist only in a session; their program is any leg,
             // so an aux-only bar needs the twin and a primary bar never does.
-            assert_eq!(
+            assert!(
                 preview_needs_program_leg(
                     session,
                     replay_only,
                     overlays(OverlayLegFlags::default_for_test(), (false, true)),
                     &none
                 ),
-                true,
                 "{name}: captions on the aux leg only"
             );
             assert!(!preview_needs_program_leg(
@@ -25804,6 +25920,7 @@ mod program_leg_tests {
 
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 360;
+    #[cfg(target_os = "macos")]
     const PET: [u8; 3] = [230, 40, 40];
 
     fn state_with_scene() -> AppState {
@@ -25849,6 +25966,7 @@ mod program_leg_tests {
     }
 
     /// The pet's box on `canvas`, as an oracle rect around its centre.
+    #[cfg(target_os = "macos")]
     fn pet_rect() -> crate::preview_debug_sample::Rect {
         let [x, y, w, h] = crate::buddy_sprite::buddy_box(
             OverlayLayout::default().buddy.horizontal,
@@ -25863,6 +25981,7 @@ mod program_leg_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn sample(store: &CompositorFrameStore) -> [f64; 3] {
         let value = crate::preview_debug_sample::sample_frame_store(store, &[pet_rect()])
             .expect("the leg published a readable frame");
@@ -25874,6 +25993,7 @@ mod program_leg_tests {
         ]
     }
 
+    #[cfg(target_os = "macos")]
     fn is_pet(rgb: [f64; 3]) -> bool {
         rgb.iter()
             .zip(PET)
@@ -26247,6 +26367,7 @@ mod program_leg_tests {
 
     /// The idle run's configuration a Clips lease parks (a stream-only
     /// Buddy is in the idle program).
+    #[cfg(target_os = "macos")]
     fn idle_config() -> CompositorLoopConfig {
         CompositorLoopConfig {
             target_fps: 30,
@@ -27585,6 +27706,75 @@ mod live_background_cpu_tests {
         assert!(slot.is_none());
         release_cpu_live_background(&mut slot);
         assert!(slot.is_none());
+    }
+
+    /// A Linux renderer with a poster status up, as the forced preflight
+    /// leaves it (no thread, no GPU).
+    #[cfg(target_os = "linux")]
+    fn renderer_showing_the_poster(
+        board: &Arc<LiveBackgroundBoard>,
+    ) -> Option<Box<LiveBackgroundGpuRenderer>> {
+        let now = Instant::now();
+        let mut runtime = None;
+        sync_live_background(&mut runtime, Some(&spec()), now);
+        let input =
+            runtime
+                .unwrap()
+                .frame_input(&background(), board, LiveBackgroundTick::unmeasured(now));
+        let mut renderer = Box::new(LiveBackgroundGpuRenderer::new(Arc::clone(board)));
+        let forced = Some(crate::protocol::LiveBackgroundStillReason::Forced);
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        assert!(!renderer.holds_resources());
+        Some(renderer)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn board_rendering(board: &LiveBackgroundBoard) -> Option<LiveBackgroundRendering> {
+        board.snapshot().0.map(|status| status.rendering)
+    }
+
+    /// Fix plan 0007: when composition stops (the idle Linux preview composes
+    /// nothing) or the run ends, the renderer takes down the status it put
+    /// up; nothing else would, so the idle preview kept the take's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stopped_cpu_live_background_takes_down_its_status() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        // A poster status holds no thread: release still takes it down.
+        let mut slot = renderer_showing_the_poster(&board);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        release_cpu_live_background(&mut slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+        release_cpu_live_background(&mut slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+        // A session's run ends and drops its renderer.
+        let slot = renderer_showing_the_poster(&board);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        drop(slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+    }
+
+    /// The run that replaces an ending one may report first; the ending
+    /// run's renderer leaves that status up.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ending_runs_renderer_leaves_the_next_runs_status_up() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let ending = renderer_showing_the_poster(&board);
+        let next = renderer_showing_the_poster(&board);
+        drop(ending);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        drop(next);
+        assert_eq!(board.snapshot(), (None, 0, 0));
     }
 
     #[cfg(not(target_os = "linux"))]

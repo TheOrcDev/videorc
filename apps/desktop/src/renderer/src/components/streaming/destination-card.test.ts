@@ -6,6 +6,7 @@ import type {
   OAuthProviderCredentialStatus,
   PlatformAccount,
   PlatformAccountValidation,
+  StreamTargetRuntime,
   StreamTargetSettings,
   XNativeLiveCapability
 } from '@/lib/backend'
@@ -13,6 +14,7 @@ import type {
 import {
   accountStatus,
   DestinationCard,
+  destinationUplinkLine,
   idleDestinationBadge,
   manualKeyGuidance,
   missingPermissionsRow
@@ -103,6 +105,7 @@ function render(props: {
   sharedAccountWith?: string
   xNativeCapability?: XNativeLiveCapability | null
   expanded?: boolean
+  runtime?: StreamTargetRuntime
 }): string {
   return renderToStaticMarkup(
     createElement(DestinationCard, {
@@ -175,6 +178,34 @@ describe('DestinationCard header', () => {
     ).toEqual({ tone: 'success', label: 'Prepared' })
     // The old header said "Idle" for every idle card.
     expect(render({ target: ready, account: signedIn, expanded: false })).not.toContain('>Idle<')
+  })
+})
+
+// Plan 218: a leg whose connection fell behind stays on air, so its state
+// badge says so; the row adds the news beside it in plain words.
+describe('DestinationCard falling behind', () => {
+  const live: StreamTargetRuntime = {
+    targetId: 'youtube',
+    platform: 'youtube',
+    label: 'YouTube',
+    state: 'live'
+  }
+
+  it('says nothing while the leg keeps up', () => {
+    expect(destinationUplinkLine(live)).toBeNull()
+    expect(destinationUplinkLine(undefined)).toBeNull()
+    expect(render({ target: target('youtube'), runtime: live, expanded: false })).not.toContain(
+      'destination-uplink'
+    )
+  })
+
+  it('counts the times the connection fell behind, next to the on-air badge', () => {
+    const behind = { ...live, uplinkOverflows: 3, uplinkOverflowAt: '2026-11-05T12:00:00Z' }
+    const markup = render({ target: target('youtube'), runtime: behind, expanded: false })
+    expect(markup).toContain('data-testid="destination-uplink"')
+    expect(markup).toContain('>Falling behind<')
+    expect(markup).toContain('fell behind on this destination 3 times')
+    expect(destinationUplinkLine({ ...live, uplinkOverflows: 1 })).toContain('once')
   })
 })
 

@@ -654,6 +654,19 @@ impl ScreenCaptureFrameStatus {
     fn is_valid_current_image(self) -> bool {
         self == Self::Complete
     }
+
+    /// A dropped screen frame is a callback that should have carried a picture
+    /// and did not (#981). ScreenCaptureKit's idle, blank, suspended, started
+    /// and stopped statuses say the screen has nothing new to show (unchanged
+    /// content, an off-screen window, a sleeping display, a stream edge); the
+    /// last complete frame stays current and nothing was lost, so they count
+    /// only in the per-status tallies. An unknown status is a callback whose
+    /// content cannot be trusted, so it is the one non-complete status that
+    /// counts as a drop.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    fn counts_as_dropped_frame(self) -> bool {
+        self == Self::Unknown
+    }
 }
 
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -731,12 +744,10 @@ fn record_screen_capture_callback_status(
     guard.capture_timings.record_callback_at(callback_at);
     guard.capture_callback_count = guard.capture_callback_count.saturating_add(1);
     guard.frame_statuses.record(status);
-    if status.is_valid_current_image() {
-        true
-    } else {
+    if status.counts_as_dropped_frame() {
         guard.dropped_frames = guard.dropped_frames.saturating_add(1);
-        false
     }
+    status.is_valid_current_image()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2497,6 +2508,12 @@ async fn execute_registered_preview_screen(
             }
         }
         NativeScreenStartup::SourceMissing(message) => {
+            tracing::warn!(
+                source_id = %source.source_id,
+                generation = start_lease.generation,
+                %message,
+                "screen preview start refused: source missing"
+            );
             stop_supervised_screen(supervisor, Some(start_lease.generation), "source-missing")
                 .await;
             let status = status_for_missing_source(
@@ -7454,10 +7471,16 @@ mod macos {
                     ))
                 })?;
                 let window = find_window(content, window_id).ok_or_else(|| {
-                    NativeScreenStartup::SourceMissing(format!(
-                        "ScreenCaptureKit window is missing: {}",
-                        config.source_id
-                    ))
+                    // Plan 219 S2: the on-screen list drops a window that is
+                    // minimized, hidden or on another desktop; say which it
+                    // is, so the streamer can act. The id stays in the log.
+                    let presence = crate::screen_capture::window_presence(window_id);
+                    tracing::warn!(
+                        source_id = %config.source_id,
+                        presence = ?presence,
+                        "ScreenCaptureKit window is missing from the on-screen content"
+                    );
+                    NativeScreenStartup::SourceMissing(missing_window_message(&presence))
                 })?;
                 // F-013: a foreign-session window (the macOS login window)
                 // ABORTS the process inside SkyLight when wrapped in an
@@ -7503,6 +7526,20 @@ mod macos {
                     screen_rect: Some(screen_rect_of(&frame)),
                 })
             }
+        }
+    }
+
+    /// Plan 219 S2: the start refusal for a picked window that is not in
+    /// the on-screen list, classified by where the window server says it is.
+    fn missing_window_message(presence: &crate::screen_capture::WindowPresence) -> String {
+        use crate::screen_capture::WindowPresence;
+        match presence {
+            WindowPresence::OffScreen { name } | WindowPresence::OnScreen { name } => {
+                // OnScreen here is a race (listed by the window server, not
+                // yet by ScreenCaptureKit): the same fix applies.
+                WindowPresence::out_of_sight_start_message(name)
+            }
+            WindowPresence::Gone => WindowPresence::closed_message(),
         }
     }
 
@@ -8538,22 +8575,24 @@ mod tests {
 
     #[test]
     fn capture_drop_reason_screen_frame_status_classifies_complete_and_noncomplete_fixtures() {
+        // (raw status, classification, publishes a picture, counts as a drop)
         let fixtures = [
-            (Some(0), ScreenCaptureFrameStatus::Complete, true),
-            (Some(1), ScreenCaptureFrameStatus::Idle, false),
-            (Some(2), ScreenCaptureFrameStatus::Blank, false),
-            (Some(3), ScreenCaptureFrameStatus::Suspended, false),
-            (Some(4), ScreenCaptureFrameStatus::Started, false),
-            (Some(5), ScreenCaptureFrameStatus::Stopped, false),
-            (Some(99), ScreenCaptureFrameStatus::Unknown, false),
-            (None, ScreenCaptureFrameStatus::Unknown, false),
+            (Some(0), ScreenCaptureFrameStatus::Complete, true, false),
+            (Some(1), ScreenCaptureFrameStatus::Idle, false, false),
+            (Some(2), ScreenCaptureFrameStatus::Blank, false, false),
+            (Some(3), ScreenCaptureFrameStatus::Suspended, false, false),
+            (Some(4), ScreenCaptureFrameStatus::Started, false, false),
+            (Some(5), ScreenCaptureFrameStatus::Stopped, false, false),
+            (Some(99), ScreenCaptureFrameStatus::Unknown, false, true),
+            (None, ScreenCaptureFrameStatus::Unknown, false, true),
         ];
         let mut counts = ScreenCaptureFrameStatusCounts::default();
 
-        for (raw, expected, valid_current_image) in fixtures {
+        for (raw, expected, valid_current_image, dropped) in fixtures {
             let status = classify_screen_capture_frame_status(raw);
             assert_eq!(status, expected);
             assert_eq!(status.is_valid_current_image(), valid_current_image);
+            assert_eq!(status.counts_as_dropped_frame(), dropped, "{status:?}");
             counts.record(status);
         }
 
@@ -8605,7 +8644,8 @@ mod tests {
         assert_eq!(latest.sequence, expected_sequence);
         assert_eq!(guard.frames_captured, 1);
         assert_eq!(guard.capture_callback_count, 6);
-        assert_eq!(guard.dropped_frames, 6);
+        // Only the unknown status is a drop (#981); the rest say "nothing new".
+        assert_eq!(guard.dropped_frames, 1);
         assert_eq!(guard.frame_statuses.idle, 1);
         assert_eq!(guard.frame_statuses.blank, 1);
         assert_eq!(guard.frame_statuses.suspended, 1);
@@ -8613,6 +8653,33 @@ mod tests {
         assert_eq!(guard.frame_statuses.stopped, 1);
         assert_eq!(guard.frame_statuses.unknown, 1);
         assert_eq!(guard.frame_statuses.complete, 0);
+    }
+
+    /// #981: a static screen is a stream of idle callbacks after one complete
+    /// frame. They are not dropped frames; they stay visible in the per-status
+    /// counts so Health can still say the screen is idle.
+    #[test]
+    fn capture_drop_reason_idle_screen_callbacks_are_not_dropped_frames() {
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+        assert!(record_screen_capture_callback_status(
+            &shared,
+            Instant::now(),
+            ScreenCaptureFrameStatus::Complete
+        ));
+        for _ in 0..300 {
+            assert!(!record_screen_capture_callback_status(
+                &shared,
+                Instant::now(),
+                ScreenCaptureFrameStatus::Idle
+            ));
+        }
+
+        let guard = shared.lock().unwrap();
+        assert_eq!(guard.capture_callback_count, 301);
+        assert_eq!(guard.dropped_frames, 0);
+        assert_eq!(guard.frame_statuses.complete, 1);
+        assert_eq!(guard.frame_statuses.idle, 300);
+        assert_eq!(guard.frame_statuses.diagnostic_stats().idle, 300);
     }
 
     #[test]
@@ -8752,7 +8819,11 @@ mod tests {
         let mut bytes = vec![0_u8; (PRIVACY_W * PRIVACY_H * 4) as usize];
         for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
             let x = index % PRIVACY_W as usize;
-            let value = if (x / 2 + phase) % 2 == 0 { 255 } else { 0 };
+            let value = if (x / 2 + phase).is_multiple_of(2) {
+                255
+            } else {
+                0
+            };
             px[..3].fill(value);
             px[3] = 255;
         }
@@ -9133,8 +9204,10 @@ mod tests {
     fn swap_attribution_stamps_frames_by_their_screen_rectangle() {
         let alpha = (40.0, 40.0, 1280.0, 720.0);
         let beta = (200.0, 230.0, 1280.0, 720.0);
-        let mut shared = PreviewScreenShared::default();
-        shared.capture_generation = 1;
+        let mut shared = PreviewScreenShared {
+            capture_generation: 1,
+            ..Default::default()
+        };
         arm_capture_generation(
             &mut shared,
             SwapAttribution {
@@ -9171,8 +9244,10 @@ mod tests {
 
         // The other order: the completion first, then a straggler of the
         // previous target, discarded; the next target's frames carry 3.
-        let mut shared = PreviewScreenShared::default();
-        shared.capture_generation = 2;
+        let mut shared = PreviewScreenShared {
+            capture_generation: 2,
+            ..Default::default()
+        };
         arm_capture_generation(&mut shared, attribution(3, alpha, beta));
         begin_capture_generation(&mut shared, 3);
         assert_eq!(shared.capture_generation, 3);
@@ -9187,8 +9262,10 @@ mod tests {
         assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(3));
 
         // Two targets at the same place: the completion alone decides.
-        let mut shared = PreviewScreenShared::default();
-        shared.capture_generation = 3;
+        let mut shared = PreviewScreenShared {
+            capture_generation: 3,
+            ..Default::default()
+        };
         arm_capture_generation(&mut shared, attribution(4, alpha, alpha));
         assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(3));
         begin_capture_generation(&mut shared, 4);

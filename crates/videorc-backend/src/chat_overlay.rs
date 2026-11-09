@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::captions::{OverlayFallbackPlacement, OverlayPlacement};
-use crate::comment_highlight::{CommentHighlightCanvas, CommentHighlightCanvases};
+use crate::comment_highlight::CommentHighlightCanvas;
 use crate::overlay_layout::{CHAT_DEFAULT_SNAP, OverlayItem, OverlayRect};
 use crate::state::AppState;
 
@@ -166,17 +166,46 @@ pub fn clear_chat_overlay(state: &AppState) -> ChatOverlayInfo {
     }
 }
 
-/// `chat.overlay.canvases`: the extra canvas the renderer rasterizes a second
-/// box for, the vertical simulcast leg's, while the running session has one.
-/// Unlike the highlight's, it does not wait for the chat switch: the box is
-/// cheap, and a switch flipped mid-session then lands on the next repaint.
-pub async fn chat_overlay_canvases(state: &AppState) -> CommentHighlightCanvases {
+/// What `chat.overlay.canvases` answers: the canvases of the running session
+/// the renderer rasterizes the box for. Both absent without a session (or off
+/// the compositor bridge); the renderer then paints for its own stream
+/// settings.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatOverlayCanvases {
+    /// The landscape canvas the box lands on
+    /// (`recording::chat_overlay_horizontal_canvas`): with a vertical leg the
+    /// horizontal stream is the primary leg at the session's own size, not
+    /// the stream profile's, and a box painted for the wrong width is cropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horizontal: Option<CommentHighlightCanvas>,
+    /// The vertical simulcast leg's portrait canvas, for its own box.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<CommentHighlightCanvas>,
+}
+
+/// `chat.overlay.canvases`: the canvases the renderer rasterizes the box
+/// for, the landscape leg's and, while the running session has one, the
+/// vertical simulcast leg's. Unlike the highlight's, it does not wait for
+/// the chat switch: the box is cheap, and a switch flipped mid-session then
+/// lands on the next repaint. Leg sizes never change mid-session, so the
+/// renderer reads this once per livestream.
+pub async fn chat_overlay_canvases(state: &AppState) -> ChatOverlayCanvases {
     let recording = state.recording.lock().await;
-    CommentHighlightCanvases {
-        vertical: recording
-            .as_ref()
-            .and_then(|active| active.simulcast_vertical_canvas)
-            .map(|(width, height)| CommentHighlightCanvas { width, height }),
+    let canvas = |size: Option<(u32, u32)>| {
+        size.map(|(width, height)| CommentHighlightCanvas { width, height })
+    };
+    ChatOverlayCanvases {
+        horizontal: canvas(
+            recording
+                .as_ref()
+                .and_then(|active| active.chat_overlay_horizontal_canvas),
+        ),
+        vertical: canvas(
+            recording
+                .as_ref()
+                .and_then(|active| active.simulcast_vertical_canvas),
+        ),
     }
 }
 
@@ -350,23 +379,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canvases_name_the_vertical_simulcast_leg_only_while_a_session_has_one() {
+    async fn canvases_name_the_session_legs_only_while_a_session_has_them() {
         let state = test_state();
         assert_eq!(
             chat_overlay_canvases(&state).await,
-            CommentHighlightCanvases::default()
+            ChatOverlayCanvases::default()
         );
-        let mut active = crate::recording::test_active_recording_stub("session-1");
-        active.simulcast_vertical_canvas = Some((1080, 1920));
+        assert_eq!(
+            serde_json::to_value(chat_overlay_canvases(&state).await).unwrap(),
+            serde_json::json!({}),
+            "absent canvases are omitted, never null"
+        );
+        // A session off the compositor bridge: no leg draws the box.
+        let active = crate::recording::test_active_recording_stub("session-0");
         *state.recording.lock().await = Some(active);
         assert_eq!(
             chat_overlay_canvases(&state).await,
-            CommentHighlightCanvases {
+            ChatOverlayCanvases::default()
+        );
+        // A dual-orientation session: the horizontal stream rides the primary
+        // leg (1280x720 here, whatever the stream profile says), and the
+        // vertical leg has its own canvas.
+        let mut active = crate::recording::test_active_recording_stub("session-1");
+        active.chat_overlay_horizontal_canvas = Some((1280, 720));
+        active.simulcast_vertical_canvas = Some((720, 1280));
+        *state.recording.lock().await = Some(active);
+        let canvases = chat_overlay_canvases(&state).await;
+        assert_eq!(
+            canvases,
+            ChatOverlayCanvases {
+                horizontal: Some(CommentHighlightCanvas {
+                    width: 1280,
+                    height: 720
+                }),
                 vertical: Some(CommentHighlightCanvas {
-                    width: 1080,
-                    height: 1920
+                    width: 720,
+                    height: 1280
                 }),
             }
+        );
+        assert_eq!(
+            serde_json::to_value(canvases).unwrap(),
+            serde_json::json!({
+                "horizontal": { "width": 1280, "height": 720 },
+                "vertical": { "width": 720, "height": 1280 }
+            })
         );
     }
 }

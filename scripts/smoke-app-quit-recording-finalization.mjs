@@ -25,7 +25,7 @@ import {
 } from './lib/process-census.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
-import { connectBackend, request } from './smoke-recording-session.mjs'
+import { connectBackend, request, sessionSelectsMicrophone } from './smoke-recording-session.mjs'
 
 const SHIM_MODE = '--ffmpeg-finalization-barrier-shim'
 const BARRIER_HOST_ENV = 'VIDEORC_FINALIZATION_BARRIER_HOST'
@@ -64,7 +64,7 @@ export function isMp4FinalizationExport(args) {
   )
 }
 
-export function appQuitRecordingSessionParams({ outputDirectoryCapability }) {
+export function appQuitRecordingSessionParams({ outputDirectoryCapability, ffmpegPath }) {
   return {
     sources: { testPattern: true },
     layout: {
@@ -87,6 +87,7 @@ export function appQuitRecordingSessionParams({ outputDirectoryCapability }) {
       recordEnabled: true,
       streamEnabled: false,
       outputDirectoryCapability,
+      ...(ffmpegPath ? { ffmpegPath } : {}),
       video: {
         preset: 'custom',
         width: 640,
@@ -133,9 +134,9 @@ export async function runFfmpegFinalizationBarrierShim(
 }
 
 async function runSmoke() {
-  if (process.platform !== 'darwin') {
+  if (process.platform !== 'darwin' && process.platform !== 'linux') {
     throw new Error(
-      'The live app quit-during-recording smoke currently requires macOS; its executable FFmpeg shim is POSIX-only.'
+      'The live app quit-during-recording smoke currently requires macOS or Linux; its quit teardown census reads POSIX process groups.'
     )
   }
 
@@ -178,6 +179,7 @@ async function runSmoke() {
   mkdirSync(outputDirectory, { recursive: true })
   const barrier = await createFinalizationBarrierServer()
   const shimPath = createExecutableFfmpegShim(stateRoot)
+  const sessionFfmpegPath = finalizationBarrierSessionFfmpegPath(shimPath)
   let launched
   let backendSocket
   let normalExitComplete = false
@@ -219,23 +221,31 @@ async function runSmoke() {
       { kind: 'output-directory', path: outputDirectory },
       { timeoutMs }
     )
-    backendSocket = await connectBackend(backendConnection, timeoutMs)
-    const started = await request(
-      backendSocket,
-      timeoutMs,
-      'session.start',
-      appQuitRecordingSessionParams({
-        outputDirectoryCapability: requiredString(
-          outputAuthorization.capabilityId,
-          'output directory capability'
-        )
-      })
-    )
+    const sessionParams = appQuitRecordingSessionParams({
+      outputDirectoryCapability: requiredString(
+        outputAuthorization.capabilityId,
+        'output directory capability'
+      ),
+      ffmpegPath: sessionFfmpegPath
+    })
+    const sessionStart = finalizationBarrierSessionStart(sessionParams)
+    let started
+    if (sessionStart.route === 'backend-debug-rpc') {
+      started = await requestSmokeCommand(
+        smoke,
+        'backend-debug-rpc',
+        { method: sessionStart.method, params: sessionParams, timeoutMs },
+        { timeoutMs }
+      )
+    } else {
+      backendSocket = await connectBackend(backendConnection, timeoutMs)
+      started = await request(backendSocket, timeoutMs, sessionStart.method, sessionParams)
+      await closeWebSocket(backendSocket, 2_000)
+      backendSocket = null
+    }
     assert.equal(started?.state, 'recording', `Expected recording, got ${started?.state}.`)
     const sessionId = requiredString(started.sessionId, 'recording session ID')
     const mkvPath = requiredString(started.outputPath, 'recording MKV path')
-    await closeWebSocket(backendSocket, 2_000)
-    backendSocket = null
 
     await sleep(recordingMs)
     const quitAccepted = await requestSmokeCommand(smoke, 'app-quit', {}, { timeoutMs: 2_000 })
@@ -247,7 +257,8 @@ async function runSmoke() {
 
     const barrierEntry = await waitForBarrierEntryWithLiveProcesses(barrier, {
       pids: [appPid, backendPid],
-      timeoutMs
+      timeoutMs,
+      shimPath
     })
     assert.equal(isMp4FinalizationExport(barrierEntry.args), true)
 
@@ -327,6 +338,7 @@ async function runSmoke() {
       ffprobePath: realFfprobe,
       intendedFps: 30,
       expectAudio: true,
+      microphoneAvailable: sessionSelectsMicrophone(sessionParams.sources),
       gates: TEST_PATTERN_GATES
     })
     const reports = writeReports(quality)
@@ -470,23 +482,88 @@ async function waitForFinalizationBarrierRelease(env, args) {
   })
 }
 
-export function createExecutableFfmpegShim(stateRoot) {
-  const shimDirectory = join(stateRoot, 'finalization-barrier-bin')
-  const shimPath = join(shimDirectory, 'ffmpeg')
-  mkdirSync(shimDirectory, { recursive: true })
-  writeFileSync(
-    shimPath,
-    `#!/usr/bin/env node\nimport { runFfmpegFinalizationBarrierShim } from ${JSON.stringify(import.meta.url)}\nconst result = await runFfmpegFinalizationBarrierShim(process.argv.slice(2))\nprocess.exitCode = result.code\n`,
-    { encoding: 'utf8', mode: 0o700 }
-  )
-  chmodSync(shimPath, 0o700)
-  return shimPath
+/**
+ * The barrier shim's files and the one the backend runs as FFmpeg. POSIX: an
+ * executable `ffmpeg` node script found first on PATH. Windows can't run an
+ * extensionless script and Rust's PATH lookup only finds `ffmpeg.exe` (dev
+ * main pins the vendored one anyway), so there it is `ffmpeg.cmd` calling a
+ * sibling module, named as the session's FFmpeg (#1081).
+ */
+export function finalizationBarrierShimFiles({
+  platform = process.platform,
+  moduleUrl = import.meta.url,
+  nodePath = process.execPath
+} = {}) {
+  const body = `import { runFfmpegFinalizationBarrierShim } from ${JSON.stringify(moduleUrl)}\nconst result = await runFfmpegFinalizationBarrierShim(process.argv.slice(2))\nprocess.exitCode = result.code\n`
+  if (platform === 'win32') {
+    return {
+      entry: 'ffmpeg.cmd',
+      files: [
+        { name: 'shim.mjs', content: body },
+        { name: 'ffmpeg.cmd', content: `@"${nodePath}" "%~dp0shim.mjs" %*\r\n` }
+      ]
+    }
+  }
+  return {
+    entry: 'ffmpeg',
+    files: [{ name: 'ffmpeg', content: `#!/usr/bin/env node\n${body}` }]
+  }
 }
 
-async function waitForBarrierEntryWithLiveProcesses(barrier, { pids, timeoutMs }) {
+/**
+ * The `output.ffmpegPath` a barrier smoke's session start sends: the shim on
+ * Windows and Linux, through the debug admin socket's smoke-only FFmpeg
+ * override (the backend reads no other caller-chosen FFmpeg). Dev main pins
+ * the vendored FFmpeg on both and puts it ahead of the shim on PATH, so a
+ * session that names none records through the real binary and never reaches
+ * the barrier. macOS dev keeps the ordinary PATH lookup, so it sends none.
+ */
+export function finalizationBarrierSessionFfmpegPath(shimPath, platform = process.platform) {
+  return platform === 'win32' || platform === 'linux' ? shimPath : undefined
+}
+
+/**
+ * How a barrier smoke starts its session. The renderer socket strips every
+ * `ffmpegPath` (`scrub_untrusted_ffmpeg_paths`), so a session that names the
+ * shim starts as `recording.start_test` through main's `backend-debug-rpc`
+ * bridge: the admin role in a debug smoke build is the one caller the backend
+ * lets choose its FFmpeg. A session that names none starts as the renderer's
+ * ordinary `session.start`.
+ */
+export function finalizationBarrierSessionStart(params) {
+  return params?.output?.ffmpegPath
+    ? { route: 'backend-debug-rpc', method: 'recording.start_test' }
+    : { route: 'renderer', method: 'session.start' }
+}
+
+export function createExecutableFfmpegShim(stateRoot) {
+  const shimDirectory = join(stateRoot, 'finalization-barrier-bin')
+  const { entry, files } = finalizationBarrierShimFiles()
+  mkdirSync(shimDirectory, { recursive: true })
+  for (const file of files) {
+    const path = join(shimDirectory, file.name)
+    writeFileSync(path, file.content, { encoding: 'utf8', mode: 0o700 })
+    chmodSync(path, 0o700)
+  }
+  return join(shimDirectory, entry)
+}
+
+/** The failure to report when a process died before the export reached the barrier. */
+export function barrierNeverEngagedError(error, shimPath) {
+  return new Error(
+    `The MP4 finalization export never entered the barrier, so the shim at ${shimPath} was not the session's FFmpeg; ` +
+      `liveness after that proves nothing. ${error?.message ?? String(error)}`
+  )
+}
+
+async function waitForBarrierEntryWithLiveProcesses(barrier, { pids, timeoutMs, shimPath }) {
   const deadline = Date.now() + timeoutMs
   while (!barrier.entry && Date.now() < deadline) {
-    assertLivePids(pids, 'before finalization entered the barrier')
+    try {
+      assertLivePids(pids, 'before finalization entered the barrier')
+    } catch (error) {
+      throw barrierNeverEngagedError(error, shimPath)
+    }
     await Promise.race([barrier.entryPromise, sleep(100)])
   }
   if (!barrier.entry) {

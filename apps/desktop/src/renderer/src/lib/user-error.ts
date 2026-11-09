@@ -87,7 +87,7 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   'command-expired-before-dispatch': BUSY_REASON,
   'command-lane-full': BUSY_REASON,
   'screen-import-busy':
-    'An image is already being imported. Wait for it to finish, then try again.',
+    'Another file is already being imported. Wait for it to finish, then try again.',
   'command-not-applied': BUSY_REASON,
   'clean-cut-mutation-blocked':
     'Clean cut is still working on this recording. Try again when it finishes.',

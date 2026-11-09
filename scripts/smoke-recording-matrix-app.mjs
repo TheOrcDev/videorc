@@ -25,6 +25,10 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import {
+  incidentToneMissingFailure,
+  releaseBackendIncidentToneRefusal
+} from './lib/incident-ffmpeg-tone.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, DEFAULT_GATES, writeReports } from './lib/recording-analyzer.mjs'
@@ -43,6 +47,14 @@ import {
   missingRecordingMatrixResultFailures
 } from './lib/transient-fifo-pressure-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+
+// Every pass arms the debug-only FFmpeg tone (below). A release backend
+// ignores it and each combo would fail as a digital-zero dropout (#1089).
+const incidentToneRefusal = releaseBackendIncidentToneRefusal({ VIDEORC_INCIDENT_FFMPEG_TONE: '1' })
+if (incidentToneRefusal) {
+  console.error(`Recording matrix BLOCKED: ${incidentToneRefusal}`)
+  process.exit(2)
+}
 
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-recording-matrix-${Date.now()}`)
@@ -159,7 +171,7 @@ const TRANSIENT_FIFO_GATES = Object.freeze({
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY
 })
 
-// Hard content on OpenH264 skips frames on overshoot by design
+// Hard content on OpenH264 skips frames on overshoot by design outside Linux
 // (recording-matrix-software-skip.mjs). Only the frame-skipping laws relax;
 // the 2 s keyframe cadence and the A/V stop tail stay gated.
 const SOFTWARE_SKIP_GATES = softwareSkipGates(MATRIX_GATES)
@@ -204,6 +216,15 @@ async function recordCombo({
   if (started.state !== 'recording') {
     throw new Error(`session.start state ${started.state}: ${started.message ?? ''}`)
   }
+  // The tone is decided at session start; any other way of losing it is
+  // named here once instead of as every combo's digital-zero failure.
+  const toneMissing = incidentToneMissingFailure(
+    await request(ws, timeoutMs, 'sessions.healthEvents.list', {
+      sessionId: started.sessionId,
+      limit: 120
+    })
+  )
+  if (toneMissing) throw new IncidentToneMissingError(`${combo.label}: ${toneMissing}`)
   let livenessFailure = null
   if (assertPreviewLiveness) {
     // The 0.9.44 regression starved the compositor mid-recording (encoder
@@ -321,7 +342,8 @@ async function recordCombo({
   const contract = hardContentContract({
     stress,
     hardContent,
-    encodeBackend: bridgeDiagnostics.encodeBackend
+    encodeBackend: bridgeDiagnostics.encodeBackend,
+    platform: process.platform
   })
   const quality = await analyzeRecording(outputPath, {
     ffmpegPath,
@@ -507,6 +529,10 @@ async function runPass({
           console.log(`  WARN ${result.softwareSkipWarning}`)
         }
       } catch (error) {
+        if (error instanceof IncidentToneMissingError) {
+          await request(ws, timeoutMs, 'session.stop').catch(() => {})
+          throw error
+        }
         passResults.push({ combo: label, failures: [String(error?.message ?? error)] })
         console.error(`Recording matrix [${label}] FAIL: ${String(error?.message ?? error)}`)
         // A start-time refusal leaves no live session; a mid-recording error may.
@@ -668,6 +694,9 @@ function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 }
 
+/** Ends the whole run: without the tone no audio gate below means anything. */
+class IncidentToneMissingError extends Error {}
+
 const results = []
 let launchedOk = false
 try {
@@ -679,8 +708,8 @@ try {
   // 0.9.44 shipped its mid-recording-crash regression through green gates
   // exactly that way. Preview must stay live THROUGH the recording.
   // 1080p60 must hold FULL cadence under noise on the hardware encoders
-  // (proven headroom); OpenH264 skips frames there by design and is held to
-  // SOFTWARE_SKIP_GATES. 4K noise is beyond any real content, so 4K30 runs as
+  // (proven headroom); OpenH264 skips frames there by design outside Linux and
+  // is held to SOFTWARE_SKIP_GATES. 4K noise is beyond any real content, so 4K30 runs as
   // a survival stress combo.
   if (HARD_COMBOS.length > 0) {
     results.push(
@@ -739,6 +768,10 @@ try {
     )
   }
 } catch (error) {
+  if (error instanceof IncidentToneMissingError) {
+    console.error(`Recording matrix stopped before its audio gates: ${error.message}`)
+    process.exit(1)
+  }
   console.error(`Recording matrix pass failed to launch: ${String(error?.message ?? error)}`)
 }
 

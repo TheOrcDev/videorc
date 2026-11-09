@@ -32,15 +32,7 @@
 // copied packets is the recording's (same clock, same packets); the
 // real-game acceptance checks it by ear.
 
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync
-} from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -55,6 +47,7 @@ import {
   waitForPublishedMp4
 } from './lib/record-latency-events.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import { isClipUnderRecordingsClips, isReplayClipFileName } from './lib/replay-clip-path.mjs'
 import {
   connectRemote,
   enableRemoteControl,
@@ -66,6 +59,7 @@ import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const { values: args } = parseArgs({
   options: {
@@ -204,10 +198,10 @@ async function verifyReplay(event, label, clipSeconds) {
   if (!path || !existsSync(path)) fail(`${label}: replay missing on disk: ${path}`)
   // The smoke's recordings folder is the harness's isolated one
   // (smokeAppEnv: <state>/app-data/recordings); clips go under its Clips.
-  if (!path.startsWith(outputDirectory) || !path.includes(join('recordings', 'Clips') + '/')) {
+  if (!isClipUnderRecordingsClips(path, outputDirectory)) {
     fail(`${label}: clip is outside <recordings>/Clips: ${path}`)
   }
-  if (!/\/Clip \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}( \(\d+\))?\.mp4$/.test(path)) {
+  if (!isReplayClipFileName(path)) {
     fail(`${label}: clip is not named Clip YYYY-MM-DD HH-MM-SS.mp4: ${path}`)
   }
   if (saved.seconds !== clipSeconds) {
@@ -640,7 +634,7 @@ try {
     renderer,
     remote,
     stopApp,
-    removeProfile: () => rmSync(userDataDir, { recursive: true, force: true })
+    removeProfile: () => removeProfileDir(userDataDir, { label: 'replay-buffer' })
   })
   for (const failure of cleanup.failures) {
     console.error(`replay-buffer: cleanup failed for ${failure.owner}.`)
