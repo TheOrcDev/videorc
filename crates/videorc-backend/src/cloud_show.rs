@@ -1213,8 +1213,19 @@ impl std::fmt::Debug for HandoverDestination {
     }
 }
 
-pub(crate) fn destinations_set_frame(id: &str, destinations: &[HandoverDestination]) -> Value {
-    json!({
+/// The `destinations.set` intent. `replace` (plan 222 review M3, additive on
+/// the wire: sent only when true) makes the runner end the legs the list
+/// does not name; the Go Live hand-over sets it, because the list is every
+/// platform the host has now, and a show held since before a platform was
+/// switched off must not keep that leg beside the chosen ones. A single-id
+/// Reconnect and the re-send after a runner restart leave it off: the
+/// runner's upsert (plan 223 C2) keeps every running leg.
+pub(crate) fn destinations_set_frame(
+    id: &str,
+    destinations: &[HandoverDestination],
+    replace: bool,
+) -> Value {
+    let mut frame = json!({
         "t": "intent",
         "id": id,
         "kind": "destinations.set",
@@ -1228,7 +1239,11 @@ pub(crate) fn destinations_set_frame(id: &str, destinations: &[HandoverDestinati
                 "url": destination.url,
             }))
             .collect::<Vec<_>>(),
-    })
+    });
+    if replace {
+        frame["replace"] = Value::Bool(true);
+    }
+    frame
 }
 
 fn hello_frame(token: &str) -> Value {
@@ -2368,8 +2383,10 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         let id = new_intent_id();
         let (ack_tx, ack_rx) = oneshot::channel();
         pending.insert(id.clone(), ack_tx);
+        // The upsert, not `replace`: the restarted runner may have got its
+        // legs back from the agent, and this list is the same one.
         transport
-            .send(destinations_set_frame(&id, destinations))
+            .send(destinations_set_frame(&id, destinations, false))
             .await
             .map_err(|_| ())?;
         let slot = self.context.slot.clone();
@@ -3071,7 +3088,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         hold_image_png_base64: Option<String>,
     ) -> Result<()> {
         let id = new_intent_id();
-        let frame = destinations_set_frame(&id, destinations);
+        // The hand-over replaces the runner's legs (M3): a held show that
+        // still runs a platform the host switched off since ends that leg.
+        let frame = destinations_set_frame(&id, destinations, true);
         if let Err(problem) = send_intent(tx, frame, id, ACK_TIMEOUT).await {
             let end_id = new_intent_id();
             let _ = send_intent(
@@ -3328,7 +3347,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             (tx, destination)
         };
         let id = new_intent_id();
-        let frame = destinations_set_frame(&id, std::slice::from_ref(&destination));
+        // Never `replace`: the other legs keep running (M3).
+        let frame = destinations_set_frame(&id, std::slice::from_ref(&destination), false);
         if let Err(problem) = send_intent(&tx, frame, id, ACK_TIMEOUT).await {
             bail!("Videorc Cloud did not take the reconnect: {problem}");
         }
@@ -5133,6 +5153,7 @@ mod tests {
         server.send(welcome("starting"));
         let set = server.next_frame().await;
         assert_eq!(set["kind"], "destinations.set");
+        assert_eq!(set["replace"], true, "the hand-over replaces (M3)");
         server.send(ack(&set["id"]));
         if png.is_some() {
             let image = server.next_frame().await;
@@ -5649,6 +5670,8 @@ mod tests {
             format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}")
         );
         assert_eq!(set["destinations"][1]["id"], "twitch-main");
+        // Plan 222 review M3: the hand-over replaces the runner's legs.
+        assert_eq!(set["replace"], true);
         server.send(ack(&set["id"]));
         let hold_image = server.next_frame().await;
         assert_eq!(hold_image["kind"], "hold.image.set");
@@ -5804,6 +5827,8 @@ mod tests {
         }}));
         let set = server.next_frame().await;
         assert_eq!(set["kind"], "destinations.set");
+        // The re-send is the upsert, never `replace` (M3).
+        assert!(set.get("replace").is_none(), "{set}");
         assert_eq!(set["destinations"][0]["id"], "youtube-main");
         assert_eq!(
             set["destinations"][0]["url"],
@@ -7007,6 +7032,8 @@ mod tests {
         }));
         let set = server.next_frame().await;
         assert_eq!(set["kind"], "destinations.set");
+        // M3: a platform the host switched off since the show started ends.
+        assert_eq!(set["replace"], true);
         server.send(ack(&set["id"]));
     }
 
@@ -8426,5 +8453,43 @@ mod tests {
             vec!["sh_abc".to_string()]
         );
         assert!(!lock(&harness.context.slot).signal_test_cancel());
+    }
+
+    // Plan 222 review M3: the Go Live hand-over's `destinations.set` carries
+    // `replace: true` (the runner ends the legs it does not name), and a
+    // single-id Reconnect carries no flag, so the other legs keep running.
+    #[tokio::test(start_paused = true)]
+    async fn the_hand_over_replaces_the_runners_legs_and_a_reconnect_does_not() {
+        let harness = harness(true);
+        let mut server = live_show(&harness).await;
+        let set = harness
+            .context
+            .connector
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|frame| frame["kind"] == "destinations.set")
+            .cloned()
+            .expect("the hand-over");
+        assert_eq!(set["replace"], true);
+        assert_eq!(set["destinations"].as_array().unwrap().len(), 2);
+
+        let context = harness.context.clone();
+        let reconnect =
+            tokio::spawn(async move { context.reconnect_destination("youtube-main").await });
+        let frame = loop {
+            let frame = server.next_frame().await;
+            if frame["t"] != "ping" {
+                break frame;
+            }
+        };
+        assert_eq!(frame["kind"], "destinations.set");
+        assert_eq!(frame["destinations"].as_array().unwrap().len(), 1);
+        assert_eq!(frame["destinations"][0]["id"], "youtube-main");
+        assert!(frame.get("replace").is_none(), "{frame}");
+        server.send(ack(&frame["id"]));
+        reconnect.await.unwrap().unwrap();
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Live);
     }
 }

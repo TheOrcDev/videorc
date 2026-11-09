@@ -661,6 +661,11 @@ every Rust `Option` with `skip_serializing_if = "Option::is_none"`:
   with the show's status after the probe (`live` or ended with
   `endReason`). The web probes `GET {agentUrl}/v1/health` once, 8 s. The
   web ends the show only when the node doesn't answer (D7).
+- **`destinations.set`** (desktop → runner) gains `"replace": true`
+  (review 2026-11-09, M3; `videorc-cloud/docs/wire-notes.md`): the runner
+  ends the legs the list does not name. Sent only by the Go Live
+  hand-over; absent (the single-id Reconnect, the re-send after a runner
+  restart) the upsert of plan 223 C2 stands. An older runner ignores it.
 - **`cloud.selftest.run`** result gains `"nodeId"`, `"region"` and
   `"handshakeMs"` (the time to the first RTMPS byte accepted) for the Test
   row's description: "Videorc Cloud works from here. Upload 6.1 of 6 Mbps ·

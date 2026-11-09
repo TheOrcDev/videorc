@@ -1393,7 +1393,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         }
         let id = new_intent_id();
-        let frame = crate::cloud_show::destinations_set_frame(&id, &destinations);
+        // A Go Live hand-over replaces the runner's legs (plan 222 review
+        // M3): the list is every platform the host chose for this show.
+        let frame = crate::cloud_show::destinations_set_frame(&id, &destinations, true);
         send_intent(&tx, frame, id, ACK_TIMEOUT)
             .await
             .map_err(|problem| {
