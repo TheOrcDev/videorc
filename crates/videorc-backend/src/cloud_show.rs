@@ -1950,9 +1950,60 @@ pub(crate) fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
     transport: C::Transport,
     welcome: RunnerState,
 ) -> mpsc::UnboundedSender<ControlRequest> {
+    match install_control_loop_inner(context, bearer, control, show_id, transport, welcome, None) {
+        Ok(tx) => tx,
+        Err(_) => unreachable!("an unguarded install is never refused"),
+    }
+}
+
+/// The launch check's install (plan 222 review L1): a Resume or Go Live
+/// that bound the show while the check's connect was in flight installed
+/// its own socket, and this one must not displace it. Under the one lock,
+/// the install happens only while the slot's generation is still
+/// `generation` and no session feeds the show; otherwise the transport
+/// comes back for the caller to close.
+fn install_control_loop_unless_claimed<W: CloudWebApi, C: ControlConnector>(
+    context: &CloudShowContext<W, C>,
+    bearer: String,
+    control: ShowControl,
+    show_id: String,
+    transport: C::Transport,
+    welcome: RunnerState,
+    generation: u64,
+) -> std::result::Result<mpsc::UnboundedSender<ControlRequest>, C::Transport> {
+    install_control_loop_inner(
+        context,
+        bearer,
+        control,
+        show_id,
+        transport,
+        welcome,
+        Some(generation),
+    )
+}
+
+fn install_control_loop_inner<W: CloudWebApi, C: ControlConnector>(
+    context: &CloudShowContext<W, C>,
+    bearer: String,
+    control: ShowControl,
+    show_id: String,
+    transport: C::Transport,
+    welcome: RunnerState,
+    only_while_generation: Option<u64>,
+) -> std::result::Result<mpsc::UnboundedSender<ControlRequest>, C::Transport> {
     let (tx, rx) = mpsc::unbounded_channel();
     let generation = {
         let mut runtime = lock(&context.slot);
+        if let Some(expected) = only_while_generation {
+            let claimed = runtime.generation != expected
+                || runtime
+                    .show
+                    .as_ref()
+                    .is_none_or(|show| show.record.id != show_id || show.session_id.is_some());
+            if claimed {
+                return Err(transport);
+            }
+        }
         let generation = runtime.bump_generation();
         runtime.control_tx = Some(tx.clone());
         runtime.connected = true;
@@ -1973,7 +2024,7 @@ pub(crate) fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
         resend_stage: false,
     };
     tokio::spawn(task.run(transport, rx));
-    tx
+    Ok(tx)
 }
 
 struct ControlLoop<W: CloudWebApi, C: ControlConnector> {
@@ -3451,7 +3502,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let Some(control) = current.control else {
             bail!("Videorc Cloud reported a live show without a control token.");
         };
-        {
+        let generation = {
             let mut runtime = lock(&self.slot);
             if runtime
                 .show
@@ -3472,22 +3523,30 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 hold_image_png_base64: None,
                 resuming: false,
             });
-            runtime.bump_generation();
-        }
+            runtime.bump_generation()
+        };
         self.hooks.emit_from(&self.slot);
         match connect_and_hello(self.connector.as_ref(), &control).await {
             Ok((transport, welcome)) => {
-                install_control_loop(
+                // L1: a Resume or Go Live that bound the show meanwhile owns
+                // the socket; this one closes instead of displacing it.
+                if let Err(mut transport) = install_control_loop_unless_claimed(
                     self,
                     bearer.to_string(),
                     control,
                     show.id,
                     transport,
                     welcome,
-                );
+                    generation,
+                ) {
+                    transport.close().await;
+                }
             }
             Err(HelloFailure::NoSuchShow) => {
-                lock(&self.slot).clear_show(Some("show-gone".to_string()));
+                let mut runtime = lock(&self.slot);
+                if runtime.generation == generation {
+                    runtime.clear_show(Some("show-gone".to_string()));
+                }
             }
             Err(_) => {
                 // Stay resumable and unconnected; Resume will connect again.
@@ -8552,6 +8611,91 @@ mod tests {
         server.send(ack(&frame["id"]));
         reconnect.await.unwrap().unwrap();
         assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Live);
+    }
+
+    // Plan 222 review L1: the launch check connects its banner socket after
+    // the web answers; a Resume (or Go Live) that binds the show while that
+    // connect is in flight installs its own socket, and the late banner
+    // socket closes instead of displacing it.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_launch_check_socket_never_displaces_a_resume_that_bound_the_show() {
+        let harness = harness(true);
+        let created = created();
+        for _ in 0..2 {
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(Ok(CurrentShowResponse {
+                    show: Some(created.show.clone()),
+                    control: Some(created.control.clone()),
+                    ingest: None,
+                }));
+        }
+        let context = harness.context.clone();
+        let detect = tokio::spawn(async move { context.detect_current_show("bearer").await });
+        // The banner socket: hello sent, welcome not yet answered.
+        let mut banner = harness.context.connector.accept().await;
+        assert_eq!(banner.next_frame().await["t"], "hello");
+        assert_eq!(
+            lock(&harness.context.slot).resumable_show_id().as_deref(),
+            Some("sh_abc")
+        );
+
+        // Resume meanwhile: its own socket, the ingest handed back.
+        let context = harness.context.clone();
+        let resume = tokio::spawn(async move {
+            context
+                .resume_session("session-r", Some("bearer".to_string()), None)
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        assert_eq!(server.next_frame().await["t"], "hello");
+        server.send(welcome("hold"));
+        let ask = server.next_frame().await;
+        assert_eq!(ask["kind"], "ingest.get");
+        server.send(json!({
+            "t": "ack",
+            "id": ask["id"],
+            "ok": true,
+            "result": { "ingest": [{
+                "orientation": "horizontal",
+                "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live",
+                "streamKey": INGEST_KEY,
+            }] },
+        }));
+        let handover = resume.await.unwrap().unwrap();
+        assert_eq!(handover.show_id, "sh_abc");
+        let generation = lock(&harness.context.slot).generation;
+        assert_eq!(
+            lock(&harness.context.slot).status().session_id.as_deref(),
+            Some("session-r")
+        );
+
+        // The banner's welcome lands late: nothing changes hands.
+        banner.send(welcome("hold"));
+        detect.await.unwrap().unwrap();
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(
+            lock(&harness.context.slot).generation,
+            generation,
+            "the resume's socket stays"
+        );
+        assert_eq!(status.session_id.as_deref(), Some("session-r"));
+        assert!(status.connected);
+        // The show's control still goes through the resume's socket: Stop
+        // ends the show there.
+        let context = harness.context.clone();
+        let stop = tokio::spawn(async move {
+            context
+                .on_session_stopped("session-r", Some("bearer".to_string()))
+                .await
+        });
+        ack_show_end(&mut server).await;
+        stop.await.unwrap();
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
     }
 
     // Plan 222 review L2: a reconnect refused for a bad token asks the web;
