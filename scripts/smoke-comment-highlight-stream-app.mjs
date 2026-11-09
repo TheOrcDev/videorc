@@ -16,6 +16,7 @@ import {
   commentHighlightImagePngBase64,
   formatCommentHighlightArtifactSummary
 } from './lib/comment-highlight-artifact.mjs'
+import { mainWindowSizeVerdict, parseWindowSize, viewportChange } from './lib/main-window-size.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -38,6 +39,8 @@ const surface =
 const STUDIO_CHAT = '[data-testid="studio-chat"]'
 /** The preview card's rect while the section is away, to compare once it shows. */
 let studioPreviewBefore = null
+/** The viewport that rect was measured in: the comparison needs the same one. */
+let studioViewportBefore = null
 // Chat on stream (plan 215 G, D5): the default run also switches the chat box
 // on for the stream and proves the fake message (its emote and the box's
 // glass) lands in the box's rect on every stream leg. The legacy FFmpeg graph
@@ -726,11 +729,10 @@ async function studioEval(smoke, code, params = {}) {
 /** Settings → General → Chat in Studio, then back to the Studio. */
 async function turnOnStudioChat(smoke) {
   // The main window's default size (D8): the section must fit there.
-  // VIDEORC_STUDIO_CHAT_WINDOW=800x560 checks a small window too (plan 0009).
-  const [width, height] = (process.env.VIDEORC_STUDIO_CHAT_WINDOW ?? '1180x780')
-    .split('x')
-    .map(Number)
-  await smokeCommand(smoke, 'resize-window', { width, height })
+  // VIDEORC_STUDIO_CHAT_WINDOW=960x660 checks the minimum too (plan 0009).
+  const requested = parseWindowSize(process.env.VIDEORC_STUDIO_CHAT_WINDOW)
+  await smokeCommand(smoke, 'resize-window', requested)
+  await assertMainWindowSize(smoke, requested)
   const result = await studioEval(
     smoke,
     `await openTab('settings', '#studio-chat')
@@ -745,10 +747,12 @@ async function turnOnStudioChat(smoke) {
      return {
        checked,
        section: Boolean(document.querySelector(${JSON.stringify(STUDIO_CHAT)})),
-       preview: ${PREVIEW_CARD_RECT}
+       preview: ${PREVIEW_CARD_RECT},
+       viewport: { width: window.innerWidth, height: window.innerHeight }
      }`
   )
   studioPreviewBefore = result?.preview ?? null
+  studioViewportBefore = result?.viewport ?? null
   if (result?.checked !== 'true') {
     throw new Error(`Chat in Studio did not turn on: ${JSON.stringify(result)}`)
   }
@@ -756,6 +760,35 @@ async function turnOnStudioChat(smoke) {
   if (result.section) {
     throw new Error('The Studio Chat section showed before the livestream went on air')
   }
+}
+
+/**
+ * The layout checks below hold at the size asked for. A tiling window manager
+ * (Hyprland) can keep its own tile, even below the app's minimum: stop there
+ * with both sizes instead of a layout verdict about the wrong window.
+ */
+async function assertMainWindowSize(smoke, requested) {
+  // X11 reports a requested size at once and corrects it when the window
+  // manager answers, so a size counts once two reads agree.
+  const deadline = Date.now() + 5000
+  let previous = null
+  let bounds = null
+  while (Date.now() < deadline) {
+    await sleep(250)
+    bounds = (await smokeCommand(smoke, 'main-window-state'))?.bounds ?? null
+    const settled =
+      previous && bounds && previous.width === bounds.width && previous.height === bounds.height
+    if (settled && mainWindowSizeVerdict({ requested, bounds }).ok) return
+    previous = bounds
+  }
+  const viewport = await studioEval(
+    smoke,
+    'return { width: window.innerWidth, height: window.innerHeight }'
+  )
+  const verdict = mainWindowSizeVerdict({ requested, bounds, viewport })
+  throw new Error(
+    verdict.message ?? `The main window did not settle at ${requested.width}x${requested.height}`
+  )
 }
 
 /** The Studio row for one message: its words, its accessible name and its phase. */
@@ -907,7 +940,14 @@ async function recordStudioChatEvidence(smoke, scenarioDirectory) {
   }
   await shoot('dark', 'dark')
   await shoot('light', 'light')
-  const evidence = { metrics, previewBefore: before, previewStill, inView, shots }
+  const evidence = {
+    metrics,
+    previewBefore: before,
+    viewportBefore: studioViewportBefore,
+    previewStill,
+    inView,
+    shots
+  }
   writeFileSync(
     join(scenarioDirectory, 'studio-chat-layout.json'),
     JSON.stringify(evidence, null, 2)
@@ -915,6 +955,11 @@ async function recordStudioChatEvidence(smoke, scenarioDirectory) {
   console.log(
     `[studio] layout at ${metrics?.window?.width}x${metrics?.window?.height}: preview unmoved=${previewStill}, section in view=${inView} (bottom ${Math.round(metrics?.section?.bottom ?? -1)} of ${Math.round(metrics?.pane?.bottom ?? -1)}); shots ${shots.dark}, ${shots.light}`
   )
+  // A window re-tiled between the two rects makes them incomparable.
+  const resized = viewportChange(studioViewportBefore, metrics?.window)
+  if (resized) {
+    throw new Error(`${resized} ${JSON.stringify(evidence)}`)
+  }
   if (!previewStill) {
     throw new Error(
       `The preview card moved when the Chat section appeared: ${JSON.stringify(evidence)}`

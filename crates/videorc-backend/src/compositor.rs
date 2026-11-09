@@ -8001,12 +8001,11 @@ fn cpu_live_background_source(
 }
 
 /// Plan 190 S5: stop the Linux live background thread when composition stops
-/// (the idle preview composes no pixels) or the live background leaves.
+/// (the idle preview composes no pixels) or the live background leaves, and
+/// take down its status: a poster status holds no thread (fix plan 0007).
 fn release_cpu_live_background(slot: &mut Option<Box<LiveBackgroundGpuRenderer>>) {
     #[cfg(target_os = "linux")]
-    if let Some(renderer) = slot.as_mut()
-        && renderer.holds_resources()
-    {
+    if let Some(renderer) = slot.as_mut() {
         renderer.release();
     }
     #[cfg(not(target_os = "linux"))]
@@ -27728,6 +27727,75 @@ mod live_background_cpu_tests {
         assert!(slot.is_none());
         release_cpu_live_background(&mut slot);
         assert!(slot.is_none());
+    }
+
+    /// A Linux renderer with a poster status up, as the forced preflight
+    /// leaves it (no thread, no GPU).
+    #[cfg(target_os = "linux")]
+    fn renderer_showing_the_poster(
+        board: &Arc<LiveBackgroundBoard>,
+    ) -> Option<Box<LiveBackgroundGpuRenderer>> {
+        let now = Instant::now();
+        let mut runtime = None;
+        sync_live_background(&mut runtime, Some(&spec()), now);
+        let input =
+            runtime
+                .unwrap()
+                .frame_input(&background(), board, LiveBackgroundTick::unmeasured(now));
+        let mut renderer = Box::new(LiveBackgroundGpuRenderer::new(Arc::clone(board)));
+        let forced = Some(crate::protocol::LiveBackgroundStillReason::Forced);
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        assert!(!renderer.holds_resources());
+        Some(renderer)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn board_rendering(board: &LiveBackgroundBoard) -> Option<LiveBackgroundRendering> {
+        board.snapshot().0.map(|status| status.rendering)
+    }
+
+    /// Fix plan 0007: when composition stops (the idle Linux preview composes
+    /// nothing) or the run ends, the renderer takes down the status it put
+    /// up; nothing else would, so the idle preview kept the take's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stopped_cpu_live_background_takes_down_its_status() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        // A poster status holds no thread: release still takes it down.
+        let mut slot = renderer_showing_the_poster(&board);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        release_cpu_live_background(&mut slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+        release_cpu_live_background(&mut slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+        // A session's run ends and drops its renderer.
+        let slot = renderer_showing_the_poster(&board);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        drop(slot);
+        assert_eq!(board.snapshot(), (None, 0, 0));
+    }
+
+    /// The run that replaces an ending one may report first; the ending
+    /// run's renderer leaves that status up.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ending_runs_renderer_leaves_the_next_runs_status_up() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let ending = renderer_showing_the_poster(&board);
+        let next = renderer_showing_the_poster(&board);
+        drop(ending);
+        assert_eq!(
+            board_rendering(&board),
+            Some(LiveBackgroundRendering::Still)
+        );
+        drop(next);
+        assert_eq!(board.snapshot(), (None, 0, 0));
     }
 
     #[cfg(not(target_os = "linux"))]

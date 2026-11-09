@@ -66,6 +66,21 @@ export function cameraPreviewStartAllowed(
   )
 }
 
+/**
+ * A `preview.camera.start` reply and the `preview.camera.status` events travel
+ * separately, so the reply can land after a newer event. On Windows the start
+ * replies with `starting` as soon as it is admitted (issue #1068), and the
+ * `live` event can overtake it. Keep whichever status the backend wrote last;
+ * a reply that loses that race would pin the camera at `starting`, because
+ * `cameraPreviewStartAllowed` never restarts the same key while it starts.
+ */
+export function freshestPreviewCameraStatus(
+  current: PreviewCameraStatus,
+  reply: PreviewCameraStatus
+): PreviewCameraStatus {
+  return Date.parse(current.updatedAt) > Date.parse(reply.updatedAt) ? current : reply
+}
+
 export function sourceReturnAction(
   status: Pick<RecordingStatus, 'state' | 'replayOnly'>,
   blocked = false

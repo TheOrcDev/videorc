@@ -347,7 +347,13 @@ Windows CI compiles every entry point and runs the golden grids on WARP.
   the poster until the first frame lands.
 - **Lifecycle.** The thread starts with the first composed frame (the idle
   Linux preview composes none; the proof surface draws it in WebGL2) and
-  stops when composition stops or the live background leaves.
+  stops when composition stops or the live background leaves. Its status
+  goes with it: the idle Linux compositor reports no live background (the
+  proof surface reports its own), so a stopped take never leaves its
+  `shader` behind. `pnpm smoke:live-background` checks the idle preview on
+  the proof surface on Linux and accepts its poster only for a Chromium
+  launched without a GPU (`software-gpu`/`no-gpu` under
+  `VIDEORC_DISABLE_GPU=1`); the takes still check the compositor's shader.
 - **Plasma Wave** needs `EXT_color_buffer_float` or
   `EXT_color_buffer_half_float`. Without them only Plasma Wave shows its
   poster.

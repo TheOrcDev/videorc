@@ -182,6 +182,9 @@ pub struct CpuLiveFrame {
 #[derive(Debug, Default, Clone)]
 struct BoardState {
     status: Option<LiveBackgroundStatus>,
+    /// Counts the status reports (never reset), so a renderer withdraws
+    /// only the status it put up last.
+    reports: u64,
     programs: u32,
     scratch_bytes: u64,
 }
@@ -193,8 +196,12 @@ pub struct LiveBackgroundBoard {
 }
 
 impl LiveBackgroundBoard {
-    pub fn report(&self, status: LiveBackgroundStatus) {
-        self.lock().status = Some(status);
+    /// Put up a status; the returned ticket withdraws it (`withdraw`).
+    pub fn report(&self, status: LiveBackgroundStatus) -> u64 {
+        let mut state = self.lock();
+        state.status = Some(status);
+        state.reports += 1;
+        state.reports
     }
 
     /// Report only when the status differs from the one on the board (the
@@ -203,6 +210,20 @@ impl LiveBackgroundBoard {
         let mut state = self.lock();
         if state.status.as_ref() != Some(&status) {
             state.status = Some(status);
+            state.reports += 1;
+        }
+    }
+
+    /// Take down the status `ticket` put up, unless a later report replaced
+    /// it (a new run's renderer may already report while the old one stops).
+    #[cfg_attr(
+        not(any(test, target_os = "linux", feature = "live-background-gl-check")),
+        allow(dead_code)
+    )]
+    pub fn withdraw(&self, ticket: u64) {
+        let mut state = self.lock();
+        if state.reports == ticket {
+            state.status = None;
         }
     }
 
@@ -215,7 +236,11 @@ impl LiveBackgroundBoard {
     }
 
     pub fn clear(&self) {
-        *self.lock() = BoardState::default();
+        let mut state = self.lock();
+        *state = BoardState {
+            reports: state.reports,
+            ..BoardState::default()
+        };
     }
 
     pub fn snapshot(&self) -> (Option<LiveBackgroundStatus>, u32, u64) {
@@ -352,5 +377,34 @@ mod tests {
         assert_eq!(board.snapshot().1, 2);
         board.clear();
         assert_eq!(board.snapshot(), (None, 0, 0));
+    }
+
+    #[test]
+    fn a_withdraw_takes_down_only_the_status_its_ticket_put_up() {
+        let board = LiveBackgroundBoard::default();
+        let status = |rendering| LiveBackgroundStatus {
+            id: LiveBackgroundId::Silk,
+            look: "satin".to_string(),
+            rendering,
+            reason: None,
+            p95_ms: None,
+            requested_look: None,
+        };
+        let rendering = |board: &LiveBackgroundBoard| board.snapshot().0.map(|s| s.rendering);
+        // A clear never lets an old ticket take down a later report.
+        let before_clear = board.report(status(LiveBackgroundRendering::Shader));
+        board.clear();
+        board.report(status(LiveBackgroundRendering::Half));
+        board.withdraw(before_clear);
+        assert_eq!(rendering(&board), Some(LiveBackgroundRendering::Half));
+        // A stopping run's renderer leaves a newer run's report up...
+        let old = board.report(status(LiveBackgroundRendering::Shader));
+        let new = board.report(status(LiveBackgroundRendering::Shader));
+        board.withdraw(old);
+        assert_eq!(rendering(&board), Some(LiveBackgroundRendering::Shader));
+        // ...and takes down its own.
+        board.set_resources(1, 64);
+        board.withdraw(new);
+        assert_eq!(board.snapshot(), (None, 1, 64));
     }
 }

@@ -4300,6 +4300,10 @@ async fn start_session_with_timeline(
     ) {
         return Err(crate::replay_buffer::AutoStartSourcesNotReady.into());
     }
+    // #1068: a microphone the hand-over below carries is this start's until
+    // the microphone phase ends (or the start fails); then it closes.
+    let mut microphone_handover_window =
+        (!replay_only).then(|| MicrophoneHandoverWindow(state.microphone_handover.clone()));
     // Plan 181 S7: Record or Go Live while a buffer-only session runs hands
     // over here, so no caller meets "A capture session is already running"
     // because of the buffer. The new session carries its own ring.
@@ -4310,7 +4314,7 @@ async fn start_session_with_timeline(
         if replay_hand_over_pending(&state).await {
             refuse_invalid_request(&state, &params)?;
         }
-        hand_over_replay_only_session(&state).await?;
+        hand_over_replay_only_session(&state, params.sources.microphone_id.as_deref()).await?;
     }
     // Once armed at the Starting edge this guard owns the admission itself, so
     // every uncommitted return publishes the exact-session terminal replacement
@@ -4337,9 +4341,8 @@ async fn start_session_with_timeline(
     // admission instead of refusing outright.
     let cleanup_deadline = Instant::now() + MICROPHONE_CLEANUP_GRACE;
     loop {
-        let pending =
-            crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count())
-                && state.recording.lock().await.is_none();
+        let pending = crate::session_audio::cleanup_pending(standby_microphone_owners(&state))
+            && state.recording.lock().await.is_none();
         if !pending {
             break;
         }
@@ -4742,6 +4745,18 @@ async fn start_session_with_timeline(
         let path = native_audio_fifo_path(&session_id);
         let prepared = async {
             create_native_audio_fifo(&path)?;
+            // #1068: the Clips session's microphone, still running, when it
+            // is this device; otherwise open it.
+            if let Some(carried) = state.microphone_handover.take(&id) {
+                state.emit_log(
+                    "info",
+                    format!(
+                        "Microphone {} carried over from Clips; not reopened.",
+                        carried.device_name()
+                    ),
+                );
+                return Ok(carried);
+            }
             crate::session_audio::prepare_initial_adapter(id, ffmpeg_path.clone()).await
         }
         .await;
@@ -4829,6 +4844,8 @@ async fn start_session_with_timeline(
         }
     }
     timeline.mark(RecordingStartPhase::MicWarm);
+    // A carried microphone this session did not take closes now.
+    drop(microphone_handover_window.take());
     if let Some(prepared) = native_audio_source.as_ref() {
         startup_resources.track_fifo(&prepared.fifo_path);
     }
@@ -22002,7 +22019,39 @@ fn refuse_invalid_request(state: &AppState, params: &StartSessionParams) -> Resu
     Ok(())
 }
 
-async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
+/// #1068: whether a Clips hand-over carries its live microphone to the session
+/// that replaces it. Windows only for now: its capture-worker open is the
+/// ~1 s this saves. macOS keeps its warm standby microphone, and Linux's
+/// worker path needs a run on the named Linux box before it changes.
+const fn carries_microphone_across_handover() -> bool {
+    cfg!(target_os = "windows")
+}
+
+/// Microphones held open for a session that has not started yet: the warm
+/// standby and a microphone carried across a Clips hand-over (#1068). Neither
+/// is a cleanup still in flight.
+fn standby_microphone_owners(state: &AppState) -> u64 {
+    state.warm_microphone.owned_producer_count() + state.microphone_handover.owned_producer_count()
+}
+
+/// Closes the #1068 hand-over window when the session start that opened it
+/// ends, on every path: a microphone nobody took closes with it.
+struct MicrophoneHandoverWindow(Arc<crate::session_audio::MicrophoneHandover>);
+impl Drop for MicrophoneHandoverWindow {
+    fn drop(&mut self) {
+        if self.0.close() {
+            tracing::info!("A carried microphone was not used by the new session; closed it.");
+        }
+    }
+}
+
+/// `carry_microphone`: the microphone id the next session opens. When the
+/// buffer-only session's bus has that device live, it hands it over instead
+/// of closing it (#1068); the caller holds a [`MicrophoneHandoverWindow`].
+async fn hand_over_replay_only_session(
+    state: &AppState,
+    carry_microphone: Option<&str>,
+) -> Result<()> {
     // The ring re-arms right after every Stop (redesign R2), so the next
     // press can land while that buffer-only start is still between admission
     // and its running session. Wait for it (bounded) and hand over from the
@@ -22041,6 +22090,21 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
     tracing::info!("Replay buffer session {session_id} hands over to a new session.");
+    if let Some(device_id) = carry_microphone.filter(|_| carries_microphone_across_handover()) {
+        let recording = state.recording.lock().await;
+        let offered = recording
+            .as_ref()
+            .filter(|active| active.session_id == session_id && !active.stop_requested)
+            .and_then(|active| active.native_audio.as_ref())
+            .is_some_and(|audio| {
+                audio.offer_microphone_handover(&state.microphone_handover, device_id)
+            });
+        if offered {
+            tracing::info!(
+                "Replay buffer session {session_id} keeps its microphone open for the new session."
+            );
+        }
+    }
     claim_unflushed_handover(state, &session_id).await;
     let status = stop_recording_with_intent(state.clone(), SessionStopParams::default())
         .await
@@ -22051,8 +22115,9 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
     let deadline = Instant::now() + REPLAY_HANDOVER_CLEANUP_TIMEOUT;
     loop {
         let slot_free = state.recording.lock().await.is_none();
+        // A carried microphone is parked, not closing: it counts as standby.
         let audio_settled =
-            !crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count());
+            !crate::session_audio::cleanup_pending(standby_microphone_owners(state));
         if slot_free && audio_settled {
             return Ok(());
         }
@@ -22094,7 +22159,7 @@ pub(crate) async fn admit_interruption_over_replay_buffer(
 ) -> std::result::Result<crate::capture_interruption::InterruptionLeaseGrant, String> {
     let mut attempt = 1;
     loop {
-        hand_over_replay_only_session(state)
+        hand_over_replay_only_session(state, None)
             .await
             .map_err(|error| format!("{error:#}"))?;
         match state
@@ -30836,6 +30901,19 @@ mod tests {
     use crate::capture_input::AVFOUNDATION_VIDEO_PIXEL_FORMAT;
 
     #[test]
+    fn a_media_foundation_stop_drain_ends_well_inside_the_stop_fallback() {
+        // #1074: FFmpeg's EOF waits on the writer's final drain. A drain that
+        // outlasts STOP_TERM_DELAY gets FFmpeg TERMed and the take kept as
+        // recovery media; leave FFmpeg at least as long again to finalize.
+        assert!(
+            crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT * 2 <= STOP_TERM_DELAY,
+            "stop drain {:?} must leave FFmpeg time inside {:?}",
+            crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT,
+            STOP_TERM_DELAY
+        );
+    }
+
+    #[test]
     fn audio_output_stalled_message_names_no_platform() {
         // #1175: the warning reached Windows testers as "this Mac was busy".
         let message = audio_output_stalled_message(&crate::session_audio::OutputStallReport {
@@ -37602,7 +37680,7 @@ mod tests {
             finisher.capture_interruption.capture_finished();
         });
         let waited_from = Instant::now();
-        hand_over_replay_only_session(&state)
+        hand_over_replay_only_session(&state, None)
             .await
             .expect("the hand-over waits for the terminal edge");
         assert!(waited_from.elapsed() >= Duration::from_millis(150));
@@ -37611,7 +37689,7 @@ mod tests {
 
         // Nothing finishing and nothing starting: no wait at all.
         let waited_from = Instant::now();
-        hand_over_replay_only_session(&state)
+        hand_over_replay_only_session(&state, None)
             .await
             .expect("idle hand-over");
         assert!(waited_from.elapsed() < Duration::from_millis(100));

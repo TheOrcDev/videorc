@@ -1153,6 +1153,9 @@ pub struct AppState {
     /// Microphone kept open while Studio is visible (instant-record P5);
     /// `session.start` takes it instead of opening the device.
     pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
+    /// #1068: the Clips session's live microphone, carried to the Record or
+    /// Go Live session that replaces it.
+    pub microphone_handover: Arc<crate::session_audio::MicrophoneHandover>,
     pub live_chat: LiveChatSlot,
     /// Chat moderation (plan 140 S4): pending removals, their timers and the
     /// rate limiter. The durable rows live in SQLite.
@@ -1459,6 +1462,7 @@ impl AppState {
             usage_stats: Arc::default(),
             discord_announce: Arc::default(),
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
+            microphone_handover: Arc::default(),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             community: crate::community_service::new_slot(),
             watchdog: crate::watchdog::new_slot(watchdog_settings, watchdog_takeover),
