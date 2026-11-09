@@ -646,24 +646,27 @@ function StripRow({
       }
       title={person.name}
     >
-      <DisabledReason reason={blocked}>
-        <Button
-          data-testid={person.onStage ? 'show-stage-send-backstage' : 'show-stage-bring-on'}
-          disabled={disabled || blocked !== null}
-          size="xs"
-          type="button"
-          variant={person.onStage ? 'outline' : 'secondary'}
-          onClick={() =>
-            void (
-              person.onStage
-                ? talkShow.sendBackstage(person.identity)
-                : talkShow.bringOn(person.identity)
-            ).catch(() => {})
-          }
-        >
-          {person.onStage ? 'Send backstage' : 'Bring on'}
-        </Button>
-      </DisabledReason>
+      {/* The host is always on stage (H2): their row has no stage move (L3). */}
+      {person.host ? null : (
+        <DisabledReason reason={blocked}>
+          <Button
+            data-testid={person.onStage ? 'show-stage-send-backstage' : 'show-stage-bring-on'}
+            disabled={disabled || blocked !== null}
+            size="xs"
+            type="button"
+            variant={person.onStage ? 'outline' : 'secondary'}
+            onClick={() =>
+              void (
+                person.onStage
+                  ? talkShow.sendBackstage(person.identity)
+                  : talkShow.bringOn(person.identity)
+              ).catch(() => {})
+            }
+          >
+            {person.onStage ? 'Send backstage' : 'Bring on'}
+          </Button>
+        </DisabledReason>
+      )}
       <Button
         aria-label={
           person.host

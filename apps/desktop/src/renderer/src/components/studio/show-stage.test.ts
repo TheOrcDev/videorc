@@ -181,6 +181,23 @@ describe('the backstage strip (C-G3)', () => {
     expect(show.sendBackstage).toHaveBeenCalledWith('g_grace')
   })
 
+  it('never offers to send the host backstage (review L3)', async () => {
+    await mount(
+      talkStatus({
+        room: openRoom({
+          guests: [ada],
+          stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada'] }
+        })
+      }),
+      talkShow()
+    )
+    const host = row('You')
+    expect(host.querySelector('[data-testid="show-stage-send-backstage"]')).toBeNull()
+    expect(host.querySelector('[data-testid="show-stage-bring-on"]')).toBeNull()
+    expect(button(host, 'Mute')).toBeDefined()
+    expect(row('Ada').querySelector('[data-testid="show-stage-send-backstage"]')).not.toBeNull()
+  })
+
   it("holds a guest's mic by guest id, and mutes the host's own mic locally", async () => {
     const show = talkShow()
     await mount(talkStatus({ room: openRoom({ guests: [ada, grace] }) }), show)
