@@ -35,11 +35,12 @@ import {
 
 import type { CloudRoomClientState, CloudRoomQuality, CloudRoomTokenAnswer } from '@/lib/backend'
 import { matchMicrophoneDeviceId } from '@/lib/mic-meter'
+import { RemoteAudioAttachments, isRunnerIdentity } from '@/lib/talk-show-room-audio'
+
+export { isRunnerIdentity } from '@/lib/talk-show-room-audio'
 
 /** The data topic the guest page listens on (`guest-wire.ts`, `STAGE_TOPIC`). */
 export const STAGE_TOPIC = 'videorc.stage'
-/** The runner's identity prefix: its tracks are the return (R-G5). */
-const RUNNER_IDENTITY_PREFIX = 'runner:'
 /** Host tokens live 10 minutes (the web); refresh with a margin. */
 const TOKEN_REFRESH_MS = 8 * 60 * 1000
 const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]
@@ -115,10 +116,6 @@ export function stageMessage(onStage: readonly string[]): Uint8Array<ArrayBuffer
   return new TextEncoder().encode(JSON.stringify({ v: 1, onStage: [...onStage] }))
 }
 
-export function isRunnerIdentity(identity: string): boolean {
-  return identity.startsWith(RUNNER_IDENTITY_PREFIX)
-}
-
 function qualityOf(quality: ConnectionQuality): CloudRoomQuality {
   switch (quality) {
     case ConnectionQuality.Excellent:
@@ -168,12 +165,14 @@ export class TalkShowRoomClient {
   #microphone: LocalAudioTrack | null = null
   #screen: LocalVideoTrack | null = null
   #speaking = new Set<string>()
-  #attached = new Map<string, HTMLMediaElement[]>()
+  /** Remote voices playing through the audio host; never the runner's return (H1). */
+  readonly #audio: RemoteAudioAttachments<HTMLMediaElement>
   #snapshot: TalkShowRoomSnapshot = IDLE_TALK_SHOW_ROOM
   #problem: string | null = null
 
   constructor(deps: TalkShowRoomDeps) {
     this.#deps = deps
+    this.#audio = new RemoteAudioAttachments<HTMLMediaElement>(() => deps.audioHost())
   }
 
   get snapshot(): TalkShowRoomSnapshot {
@@ -223,12 +222,7 @@ export class TalkShowRoomClient {
     if (room) {
       await room.disconnect().catch(() => {})
     }
-    for (const elements of this.#attached.values()) {
-      for (const element of elements) {
-        element.remove()
-      }
-    }
-    this.#attached.clear()
+    this.#audio.clear()
     this.#snapshot = IDLE_TALK_SHOW_ROOM
     this.#deps.onSnapshot(this.#snapshot)
   }
@@ -335,7 +329,7 @@ export class TalkShowRoomClient {
           _publication: RemoteTrackPublication,
           participant: RemoteParticipant
         ) => {
-          if (track.kind === Track.Kind.Audio) this.#attachAudio(participant.identity, track)
+          if (track.kind === Track.Kind.Audio) this.#audio.subscribed(participant.identity, track)
           this.#publish()
         }
       )
@@ -346,7 +340,7 @@ export class TalkShowRoomClient {
           _publication: RemoteTrackPublication,
           participant: RemoteParticipant
         ) => {
-          if (track.kind === Track.Kind.Audio) this.#detachAudio(participant.identity, track)
+          if (track.kind === Track.Kind.Audio) this.#audio.unsubscribed(participant.identity, track)
           this.#publish()
         }
       )
@@ -438,27 +432,6 @@ export class TalkShowRoomClient {
         track.stop()
       }
     }
-  }
-
-  #attachAudio(identity: string, track: RemoteTrack): void {
-    const host = this.#deps.audioHost()
-    if (!host) return
-    const element = track.attach()
-    element.setAttribute('data-talk-show-audio', identity)
-    host.appendChild(element)
-    const list = this.#attached.get(identity) ?? []
-    list.push(element)
-    this.#attached.set(identity, list)
-  }
-
-  #detachAudio(identity: string, track: RemoteTrack): void {
-    const detached = track.detach()
-    for (const element of detached) element.remove()
-    const list = (this.#attached.get(identity) ?? []).filter(
-      (element) => !detached.includes(element)
-    )
-    if (list.length) this.#attached.set(identity, list)
-    else this.#attached.delete(identity)
   }
 
   #armTokenRefresh(): void {
