@@ -107,6 +107,31 @@ export function windowsNativeScreenRequiresFinalDiagnostics({
   return requireEncodedBridge || d3d11 || Boolean(expectFallback)
 }
 
+const formatHoldMs = (value) => (Number.isFinite(value) ? value.toFixed(1) : '-')
+
+/**
+ * One line naming why the D3D11 texture pool ran short (#1042): which bucket ran
+ * out, who held its slots then, and each consumer role's mean/max hold.
+ * Returns null when the backend did not report the breakdown.
+ */
+export function describeTexturePoolPressure(pressure) {
+  if (!pressure || typeof pressure !== 'object') return null
+  const parts = [
+    `bgra=${pressure.bgraExhaustions ?? 0}`,
+    `nv12=${pressure.nv12Exhaustions ?? 0}`,
+    `renderSkips=${pressure.renderPressureSkips ?? 0}`
+  ]
+  const holders = Object.entries(pressure.holders ?? {})
+    .filter(([, count]) => count > 0)
+    .map(([role, count]) => `${role}=${count}`)
+  if (holders.length > 0) parts.push(`holders ${holders.join(',')}`)
+  const holds = Object.entries(pressure.holds ?? {})
+    .filter(([, hold]) => (hold?.releases ?? 0) > 0)
+    .map(([role, hold]) => `${role} ${formatHoldMs(hold.meanMs)}/${formatHoldMs(hold.maxMs)}ms`)
+  if (holds.length > 0) parts.push(`hold mean/max ${holds.join(', ')}`)
+  return parts.join('; ')
+}
+
 export function evaluateWindowsNativeScreenD3d11Diagnostics(
   diagnostics,
   { requireOutput = false, expectFallback = null, requireZeroPoolPressure = false } = {}
@@ -152,7 +177,10 @@ export function evaluateWindowsNativeScreenD3d11Diagnostics(
     failures.push(`adapterMismatches=${media.adapterMismatches}`)
   }
   if (requireZeroPoolPressure && (media.texturePoolPressureEvents ?? 0) !== 0) {
-    failures.push(`texturePoolPressureEvents=${media.texturePoolPressureEvents}`)
+    const detail = describeTexturePoolPressure(media.texturePoolPressure)
+    failures.push(
+      `texturePoolPressureEvents=${media.texturePoolPressureEvents}${detail ? ` (${detail})` : ''}`
+    )
   }
   if (typeof media.fallbackReason === 'string' && media.fallbackReason.trim()) {
     failures.push(`fallbackReason=${media.fallbackReason}`)

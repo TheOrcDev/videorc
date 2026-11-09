@@ -183,6 +183,41 @@ test('required D3D11 lanes fail closed on texture pool pressure', () => {
   )
 })
 
+test('a pool pressure failure names the bucket, its holders and each role hold (#1042)', () => {
+  const pressured = {
+    windowsD3d11Media: {
+      state: 'live',
+      captureBackend: 'desktop-duplication',
+      texturePoolPressureEvents: 2,
+      texturePoolPressure: {
+        bgraExhaustions: 0,
+        nv12Exhaustions: 1,
+        renderPressureSkips: 1,
+        holders: {
+          writing: 0,
+          compositor: 0,
+          preview: 0,
+          record: 4,
+          stream: 0,
+          awaitingFence: 1
+        },
+        holds: {
+          compositor: { releases: 120, meanMs: 16.4, maxMs: 40 },
+          preview: { releases: 0 },
+          record: { releases: 118, meanMs: 52.25, maxMs: 91.5 },
+          stream: { releases: 0 }
+        }
+      }
+    }
+  }
+  assert.deepEqual(
+    evaluateWindowsNativeScreenD3d11Diagnostics(pressured, { requireZeroPoolPressure: true }),
+    [
+      'texturePoolPressureEvents=2 (bgra=0; nv12=1; renderSkips=1; holders record=4,awaitingFence=1; hold mean/max compositor 16.4/40.0ms, record 52.3/91.5ms)'
+    ]
+  )
+})
+
 test('native Windows screen requests final diagnostics only for diagnostics-gated lanes', () => {
   assert.equal(windowsNativeScreenRequiresFinalDiagnostics(), false)
   assert.equal(

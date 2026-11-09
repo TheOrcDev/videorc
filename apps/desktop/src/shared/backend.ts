@@ -2417,7 +2417,32 @@ export interface WindowsD3d11MediaDiagnostics {
   renderTickOverruns: number
   renderTickLagMaxMs?: number
   renderComposeStageMaxMs?: number
+  /** Per-stage evidence behind `texturePoolPressureEvents` (#1042). */
+  texturePoolPressure?: WindowsD3d11TexturePoolPressureDiagnostics
   fallbackReason?: string
+}
+
+/** Why the D3D11 texture pool ran short (#1042). `texturePoolPressureEvents` is the
+ * pool's exhaustions plus the render loop's pressure skips, so one exhausted compose
+ * counts in both; these fields split it and name what held the textures. */
+export interface WindowsD3d11TexturePoolPressureDiagnostics {
+  bgraExhaustions: number
+  nv12Exhaustions: number
+  renderPressureSkips: number
+  /** Summed over every exhaustion: the exhausted bucket's slots by holder. */
+  holders: {
+    writing: number
+    compositor: number
+    preview: number
+    record: number
+    stream: number
+    awaitingFence: number
+  }
+  /** Publication-to-release time per consumer role. */
+  holds: Record<
+    'compositor' | 'preview' | 'record' | 'stream',
+    { releases: number; meanMs?: number; maxMs?: number }
+  >
 }
 
 /** Cumulative request counts for the HTTP image-polling preview transports. A native

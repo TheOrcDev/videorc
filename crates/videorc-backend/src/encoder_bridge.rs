@@ -7819,6 +7819,85 @@ fn write_all_until_with_timing<W: StdWrite>(
     Ok(())
 }
 
+/// Where the D3D11 writer's schedule slots went in one diagnostics window
+/// (#1042): a frame the compositor published but the latest-wins store
+/// replaced before this writer read it is `overwritten`; a slot that found
+/// no newer frame than the last one submitted, even after waiting, is
+/// `empty_slots`.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Default)]
+struct WindowsD3d11WriterSlotLoss {
+    overwritten: u64,
+    empty_slots: u64,
+    /// Slots that found no new frame at their deadline and got one while
+    /// waiting inside the slot.
+    empty_slots_filled: u64,
+    late_ticks: u64,
+    lag_max_ms: Option<f64>,
+    poll_max_ms: f64,
+    submit_max_ms: f64,
+    submit_total_ms: f64,
+    submits: u64,
+    /// Slots whose frame the encoder refused at first and accepted on a
+    /// retry within the same slot.
+    backpressure_recovered: u64,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsD3d11WriterSlotLoss {
+    fn observe_lag(&mut self, lag_ms: f64) {
+        self.lag_max_ms = Some(
+            self.lag_max_ms
+                .map_or(lag_ms, |current| current.max(lag_ms)),
+        );
+    }
+
+    fn observe_poll(&mut self, elapsed: Duration) {
+        self.poll_max_ms = self.poll_max_ms.max(elapsed.as_secs_f64() * 1000.0);
+    }
+
+    fn observe_submit(&mut self, elapsed: Duration) {
+        let ms = elapsed.as_secs_f64() * 1000.0;
+        self.submit_max_ms = self.submit_max_ms.max(ms);
+        self.submit_total_ms += ms;
+        self.submits = self.submits.saturating_add(1);
+    }
+
+    fn submit_mean_ms(&self) -> f64 {
+        if self.submits == 0 {
+            0.0
+        } else {
+            self.submit_total_ms / self.submits as f64
+        }
+    }
+
+    fn lost_or_rescued_a_slot(&self, pressure_skips: u64) -> bool {
+        pressure_skips > 0
+            || self.backpressure_recovered > 0
+            || self.overwritten > 0
+            || self.empty_slots_filled > 0
+            || self.late_ticks > 0
+    }
+}
+
+/// #1042: how long a D3D11 writer slot that found no new frame at its
+/// deadline waits for one. The compositor and the writer run separate
+/// clocks at the same rate, so on a loaded GPU (Intel UHD 620 at 1080p60)
+/// a frame lands a few milliseconds after the deadline it was meant for.
+/// Giving the slot up left a one-frame hole and pushed that frame into the
+/// next slot, where the following frame then overwrote it. Waiting up to
+/// half an interval gives the late frame its own slot; anything later is
+/// the next slot's, so the wait never costs the schedule a tick.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_empty_slot_wait_until(
+    next_slot_due: Instant,
+    frame_interval: Duration,
+) -> Instant {
+    next_slot_due
+        .checked_sub(frame_interval / 2)
+        .unwrap_or(next_slot_due)
+}
+
 #[cfg(target_os = "windows")]
 struct WindowsD3d11RecordingWriterParams {
     session_id: String,
@@ -7867,6 +7946,10 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
     let mut terminal_error = None;
     let mut current_input = input.current();
     let mut recovery_wait_started_at = None;
+    // #1042: where the frames between the compositor and the encoder go.
+    let mut slot_loss = WindowsD3d11WriterSlotLoss::default();
+    let mut deadline_lag_times_ms = Vec::with_capacity(128);
+    let mut writer_active_times_ms = Vec::with_capacity(128);
     // The frame store is single-slot latest-wins: a publish that lands while
     // this loop sleeps destroys the previous frame before it is read. Track
     // the newest sequence we have seen published so the pacing wait below can
@@ -7939,6 +8022,16 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                 last_seen_published = published;
             }
         }
+        let active_started_at = Instant::now();
+        let tick_lag = active_started_at.saturating_duration_since(next_frame_at);
+        if tick_lag >= ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD {
+            let lag_ms = tick_lag.as_secs_f64() * 1000.0;
+            deadline_lag_times_ms.push(lag_ms);
+            slot_loss.observe_lag(lag_ms);
+            if tick_lag >= frame_interval {
+                slot_loss.late_ticks = slot_loss.late_ticks.saturating_add(1);
+            }
+        }
         next_frame_at += frame_interval;
         schedule_index = schedule_index.saturating_add(1);
 
@@ -7994,9 +8087,34 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
             }
         };
 
-        if let Some((sequence, captured_at, ticket)) = current_input.latest_ticket()
-            && last_submitted_sequence != Some(sequence)
-        {
+        slot_loss.observe_poll(active_started_at.elapsed());
+        let mut slot_frame = current_input
+            .latest_ticket()
+            .filter(|(sequence, _, _)| last_submitted_sequence != Some(*sequence));
+        if slot_frame.is_none() {
+            // #1042: the frame meant for this slot may land a few
+            // milliseconds after its deadline; wait for it inside the slot.
+            let wait_until = windows_d3d11_empty_slot_wait_until(next_frame_at, frame_interval);
+            while slot_frame.is_none()
+                && Instant::now() < wait_until
+                && !stop.load(Ordering::Relaxed)
+            {
+                thread::sleep(WINDOWS_D3D11_ENCODER_DRAIN_POLL_INTERVAL);
+                let published = current_input.latest_published_sequence();
+                if windows_d3d11_primary_sequence_is_newer(published, last_seen_published) {
+                    last_seen_published = published;
+                    slot_frame = current_input
+                        .latest_ticket()
+                        .filter(|(sequence, _, _)| last_submitted_sequence != Some(*sequence));
+                }
+            }
+            if slot_frame.is_some() {
+                slot_loss.empty_slots_filled = slot_loss.empty_slots_filled.saturating_add(1);
+            } else {
+                slot_loss.empty_slots = slot_loss.empty_slots.saturating_add(1);
+            }
+        }
+        if let Some((sequence, captured_at, ticket)) = slot_frame {
             let source_age_ms = captured_at.elapsed().as_millis() as u64;
             max_source_age_ms = Some(
                 max_source_age_ms.map_or(source_age_ms, |current: u64| current.max(source_age_ms)),
@@ -8014,13 +8132,25 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
             let mut refused_since: Option<Instant> = None;
             loop {
                 let (sequence, ticket) = submission;
-                match current_input.client.submit_encoder_texture(
+                let submit_started_at = Instant::now();
+                let submitted = current_input.client.submit_encoder_texture(
                     ticket,
                     pts_100ns,
                     duration_100ns,
                     encoder_started_at.elapsed().as_micros() as u64,
-                ) {
+                );
+                slot_loss.observe_submit(submit_started_at.elapsed());
+                match submitted {
                     Ok(progress) => {
+                        if let Some(previous) = last_submitted_sequence {
+                            slot_loss.overwritten = slot_loss.overwritten.saturating_add(
+                                sequence.saturating_sub(previous).saturating_sub(1),
+                            );
+                        }
+                        if refused_since.is_some() {
+                            slot_loss.backpressure_recovered =
+                                slot_loss.backpressure_recovered.saturating_add(1);
+                        }
                         last_submitted_sequence = Some(sequence);
                         input_frames = input_frames.saturating_add(1);
                         queue_depth = progress.status.pending_frame_count as u64;
@@ -8132,6 +8262,7 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                 }
             }
         }
+        writer_active_times_ms.push(active_started_at.elapsed().as_secs_f64() * 1000.0);
         // A complete poll/submission iteration proves that the current media
         // generation is responsive again; only consecutive failures share a
         // bounded recovery deadline.
@@ -8167,11 +8298,44 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                     video_toolbox_output_frames: output_frames,
                     video_toolbox_output_bytes: output_bytes,
                     video_toolbox_fifo_write_p95_ms: p95_ms(&fifo_write_times_ms),
+                    writer_active_p95_ms: p95_ms(&writer_active_times_ms),
+                    deadline_lag_p95_ms: p95_ms(&deadline_lag_times_ms),
+                    deadline_lag_max_ms: slot_loss.lag_max_ms,
+                    late_deadline_ticks: slot_loss.late_ticks,
                     ..Default::default()
                 },
                 diagnostics_context,
                 None,
             );
+            // A window that lost or rescued a slot is worth a line in the
+            // log; a clean one stays at debug so long recordings stay quiet.
+            macro_rules! log_writer_window {
+                ($level:ident) => {
+                    tracing::$level!(
+                        role = ?current_input.role,
+                        submitted = input_frames,
+                        overwritten = slot_loss.overwritten,
+                        empty_slots = slot_loss.empty_slots,
+                        empty_slots_filled = slot_loss.empty_slots_filled,
+                        backpressure = pressure_skips,
+                        backpressure_recovered = slot_loss.backpressure_recovered,
+                        late_ticks = slot_loss.late_ticks,
+                        lag_max_ms = slot_loss.lag_max_ms.unwrap_or(0.0),
+                        poll_max_ms = slot_loss.poll_max_ms,
+                        submit_max_ms = slot_loss.submit_max_ms,
+                        submit_mean_ms = slot_loss.submit_mean_ms(),
+                        "D3D11 encoder writer window (#1042)"
+                    )
+                };
+            }
+            if slot_loss.lost_or_rescued_a_slot(pressure_skips) {
+                log_writer_window!(info);
+            } else {
+                log_writer_window!(debug);
+            }
+            slot_loss = WindowsD3d11WriterSlotLoss::default();
+            deadline_lag_times_ms.clear();
+            writer_active_times_ms.clear();
             input_frames = 0;
             output_frames = 0;
             output_bytes = 0;
@@ -10913,6 +11077,24 @@ mod tests {
         assert!(windows_d3d11_primary_sequence_is_newer(Some(8), Some(7)));
         assert!(!windows_d3d11_primary_sequence_is_newer(Some(7), Some(7)));
         assert!(!windows_d3d11_primary_sequence_is_newer(Some(6), Some(7)));
+    }
+
+    #[test]
+    fn an_empty_d3d11_slot_waits_half_an_interval_for_its_late_frame() {
+        // #1042: a frame that lands just after its deadline keeps its own
+        // slot; the wait ends half an interval before the next slot is due.
+        for fps in [30_u32, 60] {
+            let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+            let slot_due = Instant::now() + Duration::from_secs(1);
+            let next_slot_due = slot_due + interval;
+            let wait_until = windows_d3d11_empty_slot_wait_until(next_slot_due, interval);
+            assert_eq!(wait_until, next_slot_due - interval / 2);
+            // Half an interval either way, to the nanosecond.
+            let waited = wait_until - slot_due;
+            assert!(waited.abs_diff(interval / 2) <= Duration::from_nanos(1));
+            assert!(wait_until > slot_due);
+            assert!(wait_until < next_slot_due);
+        }
     }
 
     #[test]

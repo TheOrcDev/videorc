@@ -20339,6 +20339,40 @@ fn windows_d3d11_fallback_diagnostics(
     }
 }
 
+/// #1042: the pool's per-stage pressure evidence, in the protocol's units.
+#[cfg(target_os = "windows")]
+fn windows_d3d11_texture_pool_pressure(
+    pool: crate::windows_d3d11_device::WindowsD3d11TexturePoolDiagnostics,
+    render_pressure_skips: u64,
+) -> crate::protocol::WindowsD3d11TexturePoolPressureDiagnostics {
+    let hold = |stats: crate::windows_d3d11_device::WindowsD3d11RoleHoldStats| {
+        crate::protocol::WindowsD3d11TextureRoleHold {
+            releases: stats.releases,
+            mean_ms: stats.mean_micros().map(|micros| micros as f64 / 1_000.0),
+            max_ms: (stats.releases > 0).then(|| stats.max_micros as f64 / 1_000.0),
+        }
+    };
+    crate::protocol::WindowsD3d11TexturePoolPressureDiagnostics {
+        bgra_exhaustions: pool.bgra_exhaustions,
+        nv12_exhaustions: pool.nv12_exhaustions,
+        render_pressure_skips,
+        holders: crate::protocol::WindowsD3d11TexturePoolHolders {
+            writing: pool.holders.writing,
+            compositor: pool.holders.compositor,
+            preview: pool.holders.preview,
+            record: pool.holders.record,
+            stream: pool.holders.stream,
+            awaiting_fence: pool.holders.awaiting_fence,
+        },
+        holds: crate::protocol::WindowsD3d11TexturePoolRoleHolds {
+            compositor: hold(pool.compositor_hold),
+            preview: hold(pool.preview_hold),
+            record: hold(pool.record_hold),
+            stream: hold(pool.stream_hold),
+        },
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn u64_ms_option(micros: u64) -> Option<f64> {
     if micros == 0 {
@@ -20470,6 +20504,10 @@ fn windows_d3d11_live_diagnostics(
         render_tick_overruns: snapshot.pump.render_tick_overruns,
         render_tick_lag_max_ms: u64_ms_option(snapshot.pump.render_tick_lag_max_us),
         render_compose_stage_max_ms: u64_ms_option(snapshot.pump.render_compose_stage_max_us),
+        texture_pool_pressure: Some(windows_d3d11_texture_pool_pressure(
+            snapshot.device.runtime.texture_pool,
+            snapshot.pump.pressure_skips,
+        )),
         fallback_reason: terminal_error.or_else(|| snapshot.pump.capture_source_error.clone())
             .or_else(|| snapshot.pump.capture_cleanup_pending.then(|| "Previous capture is still closing; output continues on the committed source".into()))
             .or_else(|| (snapshot.pump.capture_upload_frames > 0).then(|| "Live capture replacement uses the existing preview BGRA upload route".into()))

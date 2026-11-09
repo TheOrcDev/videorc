@@ -2213,6 +2213,44 @@ const previewScreenStatusSchema = boundedSemanticValue(
   )
 ) as RuntimeSchema<PreviewScreenStatus>
 
+const windowsD3d11TextureRoleHoldSchema = objectSchema(
+  {
+    releases: nonNegativeInteger,
+    meanMs: optionalSchema(numberSchema({ min: 0 })),
+    maxMs: optionalSchema(numberSchema({ min: 0 }))
+  },
+  { allowUnknown: false }
+)
+
+const windowsD3d11TexturePoolPressureSchema = objectSchema(
+  {
+    bgraExhaustions: nonNegativeInteger,
+    nv12Exhaustions: nonNegativeInteger,
+    renderPressureSkips: nonNegativeInteger,
+    holders: objectSchema(
+      {
+        writing: nonNegativeInteger,
+        compositor: nonNegativeInteger,
+        preview: nonNegativeInteger,
+        record: nonNegativeInteger,
+        stream: nonNegativeInteger,
+        awaitingFence: nonNegativeInteger
+      },
+      { allowUnknown: false }
+    ),
+    holds: objectSchema(
+      {
+        compositor: windowsD3d11TextureRoleHoldSchema,
+        preview: windowsD3d11TextureRoleHoldSchema,
+        record: windowsD3d11TextureRoleHoldSchema,
+        stream: windowsD3d11TextureRoleHoldSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  { allowUnknown: false }
+)
+
 const windowsD3d11MediaDiagnosticsSchema = objectSchema(
   {
     state: enumSchema(['unavailable', 'probing', 'live', 'draining', 'fallback', 'failed']),
@@ -2268,6 +2306,7 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
     renderTickOverruns: nonNegativeInteger,
     renderTickLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
     renderComposeStageMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    texturePoolPressure: optionalSchema(windowsD3d11TexturePoolPressureSchema),
     fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
   },
   { allowUnknown: false }

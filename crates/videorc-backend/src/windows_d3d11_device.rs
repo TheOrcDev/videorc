@@ -3,6 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::time::Instant;
 
 const WINDOWS_DXGI_SCREEN_PREFIX: &str = "screen:dxgi:";
 const D3D11_MAX_TEXTURE_DIMENSION: u32 = 16_384;
@@ -792,6 +793,9 @@ enum WindowsD3d11TextureSlotPhase {
         lease_id: WindowsD3d11TextureLeaseId,
         fence_value: u64,
         pending_roles: BTreeSet<WindowsD3d11MediaRole>,
+        /// When the producer published it; each role's release measures its
+        /// hold from here (#1042).
+        published_at: Instant,
     },
 }
 
@@ -803,6 +807,66 @@ struct WindowsD3d11TextureSlotState {
     phase: WindowsD3d11TextureSlotPhase,
 }
 
+/// Who held the slots of a bucket that an acquire found exhausted (#1042).
+/// Each field sums, over every exhaustion, the slots in that state; a slot
+/// published to two roles counts once per role still holding it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WindowsD3d11TexturePoolHolders {
+    /// Acquired by a producer that had not yet published it.
+    pub(crate) writing: u64,
+    pub(crate) compositor: u64,
+    pub(crate) preview: u64,
+    pub(crate) record: u64,
+    pub(crate) stream: u64,
+    /// Released by every role, but its GPU fence had not completed.
+    pub(crate) awaiting_fence: u64,
+}
+
+/// How long one consumer role held its published textures (#1042).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WindowsD3d11RoleHoldStats {
+    pub(crate) releases: u64,
+    pub(crate) total_micros: u64,
+    pub(crate) max_micros: u64,
+}
+
+impl WindowsD3d11RoleHoldStats {
+    fn observe(&mut self, micros: u64) {
+        self.releases = self.releases.saturating_add(1);
+        self.total_micros = self.total_micros.saturating_add(micros);
+        self.max_micros = self.max_micros.max(micros);
+    }
+
+    pub(crate) fn mean_micros(self) -> Option<u64> {
+        (self.releases > 0).then(|| self.total_micros / self.releases)
+    }
+}
+
+/// Per-stage evidence for texture-pool pressure (#1042): which format ran
+/// out, who held that bucket when it did, and how long each consumer role
+/// keeps a texture between publication and release.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WindowsD3d11TexturePoolDiagnostics {
+    pub(crate) bgra_exhaustions: u64,
+    pub(crate) nv12_exhaustions: u64,
+    pub(crate) holders: WindowsD3d11TexturePoolHolders,
+    pub(crate) compositor_hold: WindowsD3d11RoleHoldStats,
+    pub(crate) preview_hold: WindowsD3d11RoleHoldStats,
+    pub(crate) record_hold: WindowsD3d11RoleHoldStats,
+    pub(crate) stream_hold: WindowsD3d11RoleHoldStats,
+}
+
+impl WindowsD3d11TexturePoolDiagnostics {
+    fn role_hold_mut(&mut self, role: WindowsD3d11MediaRole) -> &mut WindowsD3d11RoleHoldStats {
+        match role {
+            WindowsD3d11MediaRole::Compositor => &mut self.compositor_hold,
+            WindowsD3d11MediaRole::Preview => &mut self.preview_hold,
+            WindowsD3d11MediaRole::Record => &mut self.record_hold,
+            WindowsD3d11MediaRole::Stream => &mut self.stream_hold,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WindowsD3d11BoundedTexturePool {
     generation: u64,
@@ -810,6 +874,7 @@ pub(crate) struct WindowsD3d11BoundedTexturePool {
     next_lease_id: u64,
     timeline: WindowsD3d11FenceTimeline,
     pressure_events: u64,
+    diagnostics: WindowsD3d11TexturePoolDiagnostics,
 }
 
 impl WindowsD3d11BoundedTexturePool {
@@ -850,6 +915,7 @@ impl WindowsD3d11BoundedTexturePool {
             next_lease_id: 1,
             timeline: WindowsD3d11FenceTimeline::new(),
             pressure_events: 0,
+            diagnostics: WindowsD3d11TexturePoolDiagnostics::default(),
         })
     }
 
@@ -888,6 +954,7 @@ impl WindowsD3d11BoundedTexturePool {
         });
         let Some(slot_index) = slot_index else {
             self.pressure_events = self.pressure_events.saturating_add(1);
+            self.record_exhaustion(format, dimensions);
             return Err(WindowsD3d11Error::new(
                 WindowsD3d11ErrorCode::TexturePoolExhausted,
                 format!(
@@ -929,6 +996,57 @@ impl WindowsD3d11BoundedTexturePool {
 
     pub(crate) const fn pressure_events(&self) -> u64 {
         self.pressure_events
+    }
+
+    pub(crate) const fn diagnostics(&self) -> WindowsD3d11TexturePoolDiagnostics {
+        self.diagnostics
+    }
+
+    fn record_exhaustion(
+        &mut self,
+        format: WindowsD3d11TextureFormat,
+        dimensions: WindowsD3d11TextureDimensions,
+    ) {
+        let completed = self.timeline.completed;
+        let diagnostics = &mut self.diagnostics;
+        match format {
+            WindowsD3d11TextureFormat::Bgra8Unorm => {
+                diagnostics.bgra_exhaustions = diagnostics.bgra_exhaustions.saturating_add(1);
+            }
+            WindowsD3d11TextureFormat::Nv12 => {
+                diagnostics.nv12_exhaustions = diagnostics.nv12_exhaustions.saturating_add(1);
+            }
+        }
+        let holders = &mut diagnostics.holders;
+        for slot in self
+            .slots
+            .iter()
+            .filter(|slot| slot.format == format && slot.dimensions == dimensions)
+        {
+            match &slot.phase {
+                WindowsD3d11TextureSlotPhase::Free {
+                    reusable_after_fence,
+                } => {
+                    if *reusable_after_fence > completed {
+                        holders.awaiting_fence = holders.awaiting_fence.saturating_add(1);
+                    }
+                }
+                WindowsD3d11TextureSlotPhase::Writing { .. } => {
+                    holders.writing = holders.writing.saturating_add(1);
+                }
+                WindowsD3d11TextureSlotPhase::Published { pending_roles, .. } => {
+                    for role in pending_roles {
+                        let count = match role {
+                            WindowsD3d11MediaRole::Compositor => &mut holders.compositor,
+                            WindowsD3d11MediaRole::Preview => &mut holders.preview,
+                            WindowsD3d11MediaRole::Record => &mut holders.record,
+                            WindowsD3d11MediaRole::Stream => &mut holders.stream,
+                        };
+                        *count = count.saturating_add(1);
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn cancel_write(
@@ -1038,6 +1156,7 @@ impl WindowsD3d11BoundedTexturePool {
             lease_id: lease.lease_id,
             fence_value,
             pending_roles: pending_roles.clone(),
+            published_at: Instant::now(),
         };
         Ok(WindowsD3d11PublishedTextureLease {
             generation: self.generation,
@@ -1150,11 +1269,13 @@ impl WindowsD3d11BoundedTexturePool {
         let WindowsD3d11TextureSlotPhase::Published {
             fence_value,
             pending_roles,
+            published_at,
             ..
         } = &mut slot.phase
         else {
             unreachable!("published slot was selected above");
         };
+        let held_micros = u64::try_from(published_at.elapsed().as_micros()).unwrap_or(u64::MAX);
         if !pending_roles.remove(&release.role) {
             return Err(WindowsD3d11Error::new(
                 WindowsD3d11ErrorCode::RoleNotHeld,
@@ -1167,6 +1288,9 @@ impl WindowsD3d11BoundedTexturePool {
         }
         let reusable_after_fence = *fence_value;
         let fully_released = pending_roles.is_empty();
+        self.diagnostics
+            .role_hold_mut(release.role)
+            .observe(held_micros);
         if fully_released {
             slot.phase = WindowsD3d11TextureSlotPhase::Free {
                 reusable_after_fence,
@@ -1544,6 +1668,7 @@ pub(crate) struct WindowsD3d11MediaRuntimeCounters {
     pub(crate) texture_pool_capacity: u64,
     pub(crate) texture_pool_in_use: u64,
     pub(crate) texture_pool_pressure_events: u64,
+    pub(crate) texture_pool: WindowsD3d11TexturePoolDiagnostics,
 }
 
 impl WindowsD3d11MediaRuntimeCounters {
@@ -3849,6 +3974,7 @@ mod runtime {
         counters.texture_pool_capacity = texture_pool.state.capacity() as u64;
         counters.texture_pool_in_use = texture_pool.state.in_use() as u64;
         counters.texture_pool_pressure_events = texture_pool.state.pressure_events();
+        counters.texture_pool = texture_pool.state.diagnostics();
         for encoder in media_runtime.encoders.values() {
             let diagnostics = encoder.encoder.diagnostics();
             counters.include_encoder_totals(
@@ -5834,5 +5960,81 @@ mod tests {
             release_receiver.recv().unwrap().lease_id,
             WindowsD3d11TextureLeaseId::from_u64(1)
         );
+    }
+
+    #[test]
+    fn exhaustion_names_the_bucket_holders_and_role_holds() {
+        let mut pool = WindowsD3d11BoundedTexturePool::new(9, pool_config(1, 2)).unwrap();
+        // NV12: one slot still held by Record, one released but behind its fence.
+        let held = pool
+            .acquire_for_write(WindowsD3d11TextureFormat::Nv12)
+            .unwrap();
+        let held = pool.publish(held, [WindowsD3d11MediaRole::Record]).unwrap();
+        let fenced = pool
+            .acquire_for_write(WindowsD3d11TextureFormat::Nv12)
+            .unwrap();
+        let fenced = pool
+            .publish(
+                fenced,
+                [
+                    WindowsD3d11MediaRole::Preview,
+                    WindowsD3d11MediaRole::Record,
+                ],
+            )
+            .unwrap();
+        for role in [
+            WindowsD3d11MediaRole::Preview,
+            WindowsD3d11MediaRole::Record,
+        ] {
+            pool.release_role(WindowsD3d11LeaseRelease {
+                generation: 9,
+                lease_id: fenced.lease_id,
+                role,
+            })
+            .unwrap();
+        }
+        // BGRA: its only slot is mid-write.
+        let _writing = pool
+            .acquire_for_write(WindowsD3d11TextureFormat::Bgra8Unorm)
+            .unwrap();
+
+        let nv12 = pool
+            .acquire_for_write(WindowsD3d11TextureFormat::Nv12)
+            .unwrap_err();
+        assert_eq!(nv12.code, WindowsD3d11ErrorCode::TexturePoolExhausted);
+        let bgra = pool
+            .acquire_for_write(WindowsD3d11TextureFormat::Bgra8Unorm)
+            .unwrap_err();
+        assert_eq!(bgra.code, WindowsD3d11ErrorCode::TexturePoolExhausted);
+
+        let diagnostics = pool.diagnostics();
+        assert_eq!(pool.pressure_events(), 2);
+        assert_eq!(diagnostics.nv12_exhaustions, 1);
+        assert_eq!(diagnostics.bgra_exhaustions, 1);
+        assert_eq!(
+            diagnostics.holders,
+            WindowsD3d11TexturePoolHolders {
+                writing: 1,
+                record: 1,
+                awaiting_fence: 1,
+                ..WindowsD3d11TexturePoolHolders::default()
+            }
+        );
+        assert_eq!(diagnostics.record_hold.releases, 1);
+        assert_eq!(diagnostics.preview_hold.releases, 1);
+        assert_eq!(diagnostics.compositor_hold.releases, 0);
+        assert_eq!(diagnostics.compositor_hold.mean_micros(), None);
+        assert!(
+            diagnostics.record_hold.max_micros >= diagnostics.record_hold.mean_micros().unwrap()
+        );
+
+        // Releasing the held slot is timed too.
+        pool.release_role(WindowsD3d11LeaseRelease {
+            generation: 9,
+            lease_id: held.lease_id,
+            role: WindowsD3d11MediaRole::Record,
+        })
+        .unwrap();
+        assert_eq!(pool.diagnostics().record_hold.releases, 2);
     }
 }
