@@ -270,6 +270,22 @@ pub struct ArrivalLookup {
     pub already_arrived: bool,
 }
 
+/// What `community_unlink` did (F10): the account split off into a new
+/// person, or it was alone already and nothing changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommunityUnlinkOutcome {
+    Split { person_id: String },
+    Alone { person_id: String },
+}
+
+impl CommunityUnlinkOutcome {
+    pub fn person_id(&self) -> &str {
+        match self {
+            Self::Split { person_id } | Self::Alone { person_id } => person_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CommunityWriteOutcome {
     /// Accounts the store met for the first time, by key and name.
@@ -2004,13 +2020,14 @@ impl Database {
     }
 
     /// "Not the same person" or `!unlink` (D4): the account moves into a new
-    /// person; its memories follow; both sides' counts come back from the
-    /// per-account attendance. Returns the new person's id.
+    /// person; its memories and support follow; both sides' counts come
+    /// back from the per-account rows. An account alone in its person has
+    /// nothing to split (F10): the caller stays quiet.
     pub fn community_unlink(
         &self,
         account_key: &str,
         now: DateTime<Utc>,
-    ) -> Result<String, CommunityError> {
+    ) -> Result<CommunityUnlinkOutcome, CommunityError> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
         let account = account_locked(&transaction, account_key)?.ok_or(CommunityError::NotFound)?;
@@ -2019,8 +2036,9 @@ impl Database {
         }
         let siblings = live_accounts_locked(&transaction, &account.person_id)?;
         if siblings.len() < 2 {
-            // Alone already: nothing to split.
-            return Ok(account.person_id);
+            return Ok(CommunityUnlinkOutcome::Alone {
+                person_id: account.person_id,
+            });
         }
         let old_person =
             person_locked(&transaction, &account.person_id)?.ok_or(CommunityError::NotFound)?;
@@ -2056,7 +2074,9 @@ impl Database {
         refresh_person_locked(&transaction, &old_person.id)?;
         refresh_person_locked(&transaction, &new_person)?;
         transaction.commit()?;
-        Ok(new_person)
+        Ok(CommunityUnlinkOutcome::Split {
+            person_id: new_person,
+        })
     }
 
     /// "Not the same" (D4 c): the pair never shows again.

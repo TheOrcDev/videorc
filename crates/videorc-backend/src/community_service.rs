@@ -36,7 +36,8 @@ use crate::community::{
     report_community,
 };
 use crate::community_store::{
-    CommunityError, CommunityExportFile, CommunityRowFacts, PRUNED_AT_SETTING_KEY,
+    CommunityError, CommunityExportFile, CommunityRowFacts, CommunityUnlinkOutcome,
+    PRUNED_AT_SETTING_KEY,
 };
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 use crate::state::AppState;
@@ -949,7 +950,7 @@ async fn run_chat_command(
             match tokio::task::spawn_blocking(move || database.community_unlink(&unlink_key, now))
                 .await
             {
-                Ok(Ok(_)) => {
+                Ok(Ok(CommunityUnlinkOutcome::Split { .. })) => {
                     changed = true;
                     line = command_bubble_line(talk, &command, &name, None);
                     let mut engine = state.cohost.lock().await;
@@ -958,6 +959,8 @@ async fn run_chat_command(
                         publish_cohost_state(state).await;
                     }
                 }
+                // F10: alone already; nothing happened, so nothing is said.
+                Ok(Ok(CommunityUnlinkOutcome::Alone { .. })) => {}
                 Ok(Err(CommunityError::NotFound)) => {}
                 Ok(Err(error)) => {
                     state.emit_log("warn", format!("Community: !unlink failed: {error}"))
@@ -1331,7 +1334,7 @@ pub async fn unlink(
         ));
     }
     let undo_key = key.clone();
-    let person_id = blocking(state, move |database| {
+    let outcome = blocking(state, move |database| {
         database.community_unlink(&undo_key, Utc::now())
     })
     .await?;
@@ -1341,8 +1344,12 @@ pub async fn unlink(
     if card_left {
         publish_cohost_state(state).await;
     }
-    emit_changed(state).await;
-    Ok(CommunityUnlinkResult { person_id })
+    if matches!(outcome, CommunityUnlinkOutcome::Split { .. }) {
+        emit_changed(state).await;
+    }
+    Ok(CommunityUnlinkResult {
+        person_id: outcome.person_id().to_string(),
+    })
 }
 
 pub async fn suggestion_dismiss(
@@ -2935,6 +2942,51 @@ mod tests {
             !second_account.first_message,
             "a linked person's other account is no first chat"
         );
+    }
+
+    /// The review of 2026-11-09, F10: `!unlink` from an account that is
+    /// alone in its person has nothing to split: the bubble says nothing and
+    /// the community is unchanged (no `changed` event, no "Unlinked, Ada.").
+    #[tokio::test]
+    async fn an_unlink_from_a_single_account_person_stays_silent() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Bubble).await;
+        let generation = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            generation,
+            vec![
+                row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
+                row("s1", StreamPlatform::Twitch, "ada", "Ada", 2, "!unlink"),
+            ],
+        )
+        .await;
+        assert!(bubble_lines(&state).is_empty(), "{:?}", bubble_lines(&state));
+        let person = state
+            .database
+            .community_account_person("twitch:ada")
+            .unwrap()
+            .unwrap();
+        let outcome = state
+            .database
+            .community_unlink("twitch:ada", Utc::now())
+            .unwrap();
+        assert_eq!(
+            outcome,
+            CommunityUnlinkOutcome::Alone {
+                person_id: person.clone()
+            }
+        );
+        // The RPC still answers with the person, unchanged.
+        let answer = unlink(
+            &state,
+            CommunityUnlinkParams {
+                account_key: "twitch:ada".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.person_id, person);
     }
 
     /// Owner call 2026-11-08 (plan 225 C3): in Suggest mode the "Welcome

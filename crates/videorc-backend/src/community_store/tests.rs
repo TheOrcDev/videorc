@@ -180,7 +180,9 @@ fn a_two_account_person_counts_the_union_and_a_split_restores_both_sides() {
     // "Not the same person": every count comes back exactly.
     let split = database
         .community_unlink("youtube:y1", day(2026, 11, 2))
-        .unwrap();
+        .unwrap()
+        .person_id()
+        .to_string();
     assert_ne!(split, twitch.id);
     let twitch_again = person_of(&database, StreamPlatform::Twitch, "t1");
     let youtube_again = person_of(&database, StreamPlatform::Youtube, "y1");
@@ -334,7 +336,9 @@ fn memories_follow_their_account_through_a_split() {
     );
     let split = database
         .community_unlink("kick:k1", day(2026, 10, 4))
-        .unwrap();
+        .unwrap()
+        .person_id()
+        .to_string();
     let twitch = person_of(&database, StreamPlatform::Twitch, "t1");
     let kick = person_of(&database, StreamPlatform::Kick, "k1");
     assert_eq!(kick.id, split);
