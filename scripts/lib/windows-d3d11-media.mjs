@@ -83,6 +83,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_device::tests::canonical_dxgi_screen_id_round_trips_adapter_and_output',
     'windows_d3d11_device::tests::cloned_export_ticket_releases_role_exactly_once_on_last_drop',
     'windows_d3d11_device::tests::device_loss_retires_each_generation_once_without_touching_replacement',
+    'windows_d3d11_device::tests::exhaustion_names_the_bucket_holders_and_role_holds',
     'windows_d3d11_device::tests::failed_capture_retirement_signal_quarantines_the_published_slot',
     'windows_d3d11_device::tests::full_drop_queue_fails_closed_without_blocking_or_recycling',
     'windows_d3d11_device::tests::pool_rejects_duplicate_roles_stale_generations_and_fence_regressions',
