@@ -5809,6 +5809,52 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => latest().recording.recording.state === 'idle')
   })
 
+  it.each([false, true])(
+    'allows stopping cloud outputs without a local session (live=%s)',
+    async (live) => {
+      const backend = new StudioBackend()
+      backend.cloudStatus = {
+        ...resumableCloudStatus(),
+        phase: 'live',
+        plan: 'premium',
+        show: { id: 'sh_test', nodeId: 'local-1', resumable: false, kind: 'talk' },
+        room: {
+          phase: 'open',
+          doorOpen: false,
+          declinedCount: 0,
+          stage: { layout: 'solo', onStage: ['host:sh_test'] },
+          hostAway: false,
+          connected: true,
+          client: 'connected',
+          returnEnabled: false,
+          stageSet: true,
+          live
+        },
+        recording: { active: true, seconds: 0, bytes: 0 }
+      }
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const testDom = installProviderTestEnvironment(
+        createVideorcApi({
+          acknowledge: async () => true,
+          pending: async () => [],
+          acknowledgeProvider: async () => true,
+          pendingProvider: async () => []
+        })
+      )
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = (): StudioObservation => observations.at(-1)!
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
+      })
+      await waitForObservation(() => latest()?.cloud.cloudStatus?.room?.phase === 'open')
+      expect(backend.recordingState).toBe('idle')
+      expect(latest().recording.recording.state).toBe(live ? 'streaming' : 'recording')
+      expect(latest().core.canStop).toBe(true)
+    }
+  )
+
   // Plan 184 C5b: the Resume notice feeds the live cloud show again and sets
   // nothing up on a platform. The runner holds the legs (the live YouTube
   // broadcast among them), so Resume never opens the Go Live dialog, never

@@ -18,6 +18,7 @@ import { CommandPalette } from './command-palette'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
+  cloud: { cloudStatus: null } as Record<string, unknown>,
   banners: {} as Record<string, unknown>,
   soundboard: {} as Record<string, unknown>,
   recording: { state: 'idle' } as Record<string, unknown>,
@@ -38,6 +39,7 @@ const mocked = vi.hoisted(() => ({
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
+  useStudioCloud: () => mocked.cloud,
   useStudioBanners: () => mocked.banners,
   useStudioRecordingState: () => ({ recording: mocked.recording }),
   useStudioReplay: () => mocked.replay
@@ -71,6 +73,7 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   mocked.recording = { state: 'idle' }
+  mocked.cloud = { cloudStatus: null }
   mocked.banners = {
     banners: [],
     showBanner: vi.fn(async () => true),
@@ -188,6 +191,20 @@ async function search(text: string): Promise<void> {
 }
 
 describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
+  it('hides Guests until both cloud launch switches allow talk shows', async () => {
+    await render()
+    expect(values()).not.toContain('Open Guests')
+    mocked.cloud = { cloudStatus: { allowance: { enabled: false, talkShows: true } } }
+    await render()
+    expect(values()).not.toContain('Open Guests')
+    mocked.cloud = { cloudStatus: { allowance: { enabled: true, talkShows: false } } }
+    await render()
+    expect(values()).not.toContain('Open Guests')
+    mocked.cloud = { cloudStatus: { allowance: { enabled: true, talkShows: true } } }
+    await render()
+    expect(values()).toContain('Open Guests')
+  })
+
   it('ends a livestream through requestStopSession, never stopSession', async () => {
     mocked.recording = { state: 'recording', sessionId: 'live', streamUrl: 'rtmp://x/***' }
     await render()
@@ -309,8 +326,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Open Library',
       'Open Settings',
       'Open Health',
-      'Open Upcoming events',
-      'Open Guests'
+      'Open Upcoming events'
     ])
     await act(async () => item('Open Scene').click())
     expect(nav.openStudioPanel).toHaveBeenCalledExactlyOnceWith('layouts')

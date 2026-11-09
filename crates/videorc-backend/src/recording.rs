@@ -27257,19 +27257,28 @@ async fn prepare_cloud_stream_targets(
     let Some(context) = crate::cloud_context(state) else {
         return Ok(CloudSeam::direct(resolution));
     };
-    // Before anything reaches the web: a feed that cannot check the node is
-    // refused here, never created and then dropped.
-    let tls = cloud_feed_tls_verification(state)?;
+    let mut tls = None;
     let targets = resolution.ready;
     let outputs = cloud_output_specs(&params.output.video, &targets);
     let destinations = cloud_handover_destinations(&targets);
     let outcome = context
-        .prepare_session(
+        .prepare_session_with_feed_setup(
             session_id,
             crate::account::stored_session_token(),
             outputs,
             destinations,
-            cloud_hold_image(state),
+            async {
+                let state = state.clone();
+                let (verification, image) = tokio::task::spawn_blocking(move || {
+                    Ok::<_, anyhow::Error>((
+                        cloud_feed_tls_verification(&state)?,
+                        cloud_hold_image(&state),
+                    ))
+                })
+                .await??;
+                tls = Some(verification);
+                Ok(image)
+            },
         )
         .await?;
     match outcome {
@@ -27279,7 +27288,11 @@ async fn prepare_cloud_stream_targets(
             platform_rows: Vec::new(),
         }),
         crate::cloud_show::PrepareOutcome::Cloud(handover) => {
-            match cloud_feed_targets(&handover.ingest, &targets, &tls) {
+            match cloud_feed_targets(
+                &handover.ingest,
+                &targets,
+                tls.as_ref().expect("cloud feed was prepared"),
+            ) {
                 Ok(feeds) => {
                     tracing::info!(
                         "Session {session_id} streams through Videorc Cloud show {} ({} platform targets handed over)",

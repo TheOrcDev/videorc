@@ -482,3 +482,57 @@ describe('SessionTransport reason line (plan 174 S3.2)', () => {
     expect(container.querySelector('[data-slot="session-blocked-reason"]')).toBeNull()
   })
 })
+
+it.each([false, true])(
+  'keeps both talk-show output controls available (recording=%s)',
+  (recording) => {
+    const onRecord = vi.fn()
+    const onLiveStream = vi.fn()
+    const onStopRecording = vi.fn()
+    const onStop = vi.fn()
+    act(() =>
+      root.render(
+        createElement(
+          StudioContextProviders,
+          {
+            core: unused,
+            recordingState: { recording: { state: 'streaming' } },
+            recording: { recording: { state: 'streaming' } },
+            preview: unused,
+            diagnostics: unused,
+            chat: unused,
+            audio: unused
+          },
+          createElement(SessionTransport, {
+            active: true,
+            canStop: true,
+            stopLabel: 'End livestream',
+            startRequestPending: false,
+            recordBlockedReason: null,
+            liveStreamBlockedReason: null,
+            status: null,
+            onRecord,
+            onLiveStream,
+            onStop,
+            talkShowOutputs: { recording, live: !recording, onStopRecording }
+          })
+        )
+      )
+    )
+    const buttons = [...container.querySelectorAll('button')]
+    const recordButton = buttons.find((button) =>
+      button.textContent?.includes(recording ? 'Stop recording' : 'Record')
+    )!
+    const liveButton = buttons.find((button) =>
+      button.textContent?.includes(recording ? 'Go Live' : 'End livestream')
+    )!
+    expect(recordButton.disabled).toBe(false)
+    expect(liveButton.disabled).toBe(false)
+    act(() => {
+      recordButton.click()
+      liveButton.click()
+    })
+    expect(recording ? onStopRecording : onRecord).toHaveBeenCalledOnce()
+    expect(recording ? onLiveStream : onStop).toHaveBeenCalledOnce()
+  }
+)

@@ -237,6 +237,9 @@ pub struct RunnerRoomState {
     pub return_enabled: bool,
     #[serde(default)]
     pub stage_set: bool,
+    /// Complete stage accepted by the runner; absent on older runners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<CloudStage>,
     /// Review M2: the stage as the program draws it (the runner's re-flow
     /// and stale-screen fallbacks applied); absent from an older runner and
     /// until the current stage is composed.
@@ -1044,6 +1047,10 @@ impl CloudShowRuntime {
             return;
         };
         if talk.stage_sent {
+            return;
+        }
+        if let Some(stage) = room.stage.as_ref().filter(|stage| stage.validate().is_ok()) {
+            talk.stage = stage.clone();
             return;
         }
         if let Some(layout) = CloudStageLayout::parse(&room.layout) {

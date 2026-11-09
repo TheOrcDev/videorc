@@ -2,7 +2,7 @@ import { AlertIcon, SaveIcon, TextIcon } from '@/components/icons'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { PageTabs } from '@/components/page-tabs'
 import { TabsContent } from '@/components/ui/tabs'
-import { LIVESTREAM_VIEWS, type LivestreamViewId } from '@/lib/livestream-tabs'
+import { guestsVisible, livestreamViews, type LivestreamViewId } from '@/lib/livestream-tabs'
 import { LIVESTREAM_SETUP_GRID, PAGE_LEAD_COLUMN } from '@/lib/page-layout'
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
@@ -53,7 +53,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import type {
   PlatformAccount,
   PlatformAccountValidation,
@@ -97,11 +97,14 @@ export function StreamingTab({
   destinationToOpen?: string | null
   onDestinationOpened?: () => void
 }): ReactElement {
+  const { cloudStatus } = useStudioCloud()
+  const showGuests = guestsVisible(cloudStatus)
+  const visibleView = view === 'guests' && !showGuests ? 'setup' : view
   return (
     <PageTabs
       label="Livestream view"
-      tabs={LIVESTREAM_VIEWS}
-      value={view}
+      tabs={livestreamViews(cloudStatus)}
+      value={visibleView}
       onValueChange={onViewChange}
     >
       <TabsContent value="setup">
@@ -115,11 +118,13 @@ export function StreamingTab({
           <ScheduledStreams />
         </Suspense>
       </TabsContent>
-      <TabsContent value="guests">
-        <Suspense fallback={<p role="status">Loading guests…</p>}>
-          <GuestsTab />
-        </Suspense>
-      </TabsContent>
+      {showGuests ? (
+        <TabsContent value="guests">
+          <Suspense fallback={<p role="status">Loading guests…</p>}>
+            <GuestsTab />
+          </Suspense>
+        </TabsContent>
+      ) : null}
     </PageTabs>
   )
 }

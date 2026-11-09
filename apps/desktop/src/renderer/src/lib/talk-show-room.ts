@@ -162,6 +162,7 @@ export class TalkShowRoomClient {
   #camera: LocalVideoTrack | null = null
   #microphone: LocalAudioTrack | null = null
   #screen: LocalVideoTrack | null = null
+  #screenGeneration = 0
   #speaking = new Set<string>()
   /** Remote voices playing through the audio host; never the runner's return (H1). */
   readonly #audio: RemoteAudioAttachments<HTMLMediaElement>
@@ -197,13 +198,14 @@ export class TalkShowRoomClient {
     this.#room = room
     this.#bind(room)
     await room.connect(token.url, token.hostToken, { autoSubscribe: false })
-    if (this.#closed) {
+    if (!this.#owns(room)) {
       await room.disconnect()
       return
     }
     this.#reconnectAttempt = 0
     this.#setState('connected', null, token.identity)
     await this.#publishLocal()
+    if (!this.#owns(room)) return
     this.#applySubscriptions()
     await this.sendStage(this.#lastStage)
     this.#publish()
@@ -212,6 +214,7 @@ export class TalkShowRoomClient {
   /** Leave: the local tracks stop first (D13 for guests; the same here). */
   async disconnect(): Promise<void> {
     this.#closed = true
+    this.#screenGeneration += 1
     this.#clearTimers()
     await this.#stopLocal()
     const room = this.#room
@@ -263,17 +266,25 @@ export class TalkShowRoomClient {
    * with `detail` so shared text stays crisp (S0b). */
   async startScreenShare(): Promise<void> {
     const room = this.#room
-    if (!room) throw new Error('The room is not open.')
+    if (!room || !this.#owns(room)) throw new Error('The room is not open.')
     await this.stopScreenShare()
+    const generation = this.#screenGeneration
+    if (!this.#owns(room)) return
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
       audio: false
     })
+    if (!this.#owns(room) || generation !== this.#screenGeneration) {
+      stream.getTracks().forEach((track) => track.stop())
+      return
+    }
     const [mediaTrack] = stream.getVideoTracks()
     if (!mediaTrack) throw new Error('No screen was shared.')
     mediaTrack.contentHint = 'detail'
     const track = new LocalVideoTrack(mediaTrack, undefined, true)
-    mediaTrack.addEventListener('ended', () => void this.stopScreenShare())
+    mediaTrack.addEventListener('ended', () => {
+      if (this.#screen === track) void this.stopScreenShare()
+    })
     this.#screen = track
     await room.localParticipant.publishTrack(track, {
       source: Track.Source.ScreenShare,
@@ -285,9 +296,11 @@ export class TalkShowRoomClient {
   }
 
   async stopScreenShare(): Promise<void> {
+    this.#screenGeneration += 1
     const track = this.#screen
     this.#screen = null
     if (!track) return
+    track.stop()
     try {
       await this.#room?.localParticipant.unpublishTrack(track, true)
     } catch {
@@ -326,6 +339,7 @@ export class TalkShowRoomClient {
           _publication: RemoteTrackPublication,
           participant: RemoteParticipant
         ) => {
+          if (!this.#owns(room)) return
           if (track.kind === Track.Kind.Audio) this.#audio.subscribed(participant.identity, track)
           this.#publish()
         }
@@ -355,7 +369,7 @@ export class TalkShowRoomClient {
         void this.sendStage(this.#lastStage)
       })
       .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
-        if (this.#closed || reason === DisconnectReason.CLIENT_INITIATED) return
+        if (!this.#owns(room) || reason === DisconnectReason.CLIENT_INITIATED) return
         this.#scheduleReconnect(reason)
       })
   }
@@ -373,16 +387,26 @@ export class TalkShowRoomClient {
     }
   }
 
+  #owns(room: Room): boolean {
+    return !this.#closed && this.#room === room
+  }
+
   async #publishLocal(): Promise<void> {
     const room = this.#room
     if (!room) return
+    if (!this.#owns(room)) return
     const problems: string[] = []
     try {
       const deviceId = await cameraDeviceIdFor(this.#deps.cameraName)
+      if (!this.#owns(room)) return
       const camera = await createLocalVideoTrack({
         deviceId,
         resolution: VideoPresets.h720.resolution
       })
+      if (!this.#owns(room)) {
+        camera.stop()
+        return
+      }
       this.#camera = camera
       await room.localParticipant.publishTrack(camera, {
         source: Track.Source.Camera,
@@ -390,25 +414,40 @@ export class TalkShowRoomClient {
         simulcast: true,
         videoEncoding: VideoPresets.h720.encoding
       })
+      if (!this.#owns(room)) {
+        camera.stop()
+        return
+      }
       if (this.#cameraOff) await camera.mute()
     } catch (error) {
       problems.push(`The camera didn't open: ${messageOf(error)}`)
     }
+    if (!this.#owns(room)) return
     try {
       const deviceId = await microphoneDeviceIdFor(this.#deps.microphoneName)
+      if (!this.#owns(room)) return
       const microphone = await createLocalAudioTrack({
         deviceId,
         echoCancellation: true,
         noiseSuppression: true
       })
+      if (!this.#owns(room)) {
+        microphone.stop()
+        return
+      }
       this.#microphone = microphone
       await room.localParticipant.publishTrack(microphone, {
         source: Track.Source.Microphone
       })
+      if (!this.#owns(room)) {
+        microphone.stop()
+        return
+      }
       if (this.#micMuted) await microphone.mute()
     } catch (error) {
       problems.push(`The microphone didn't open: ${messageOf(error)}`)
     }
+    if (!this.#owns(room)) return
     this.#problem = problems.length ? problems.join(' ') : null
     if (this.#problem) this.#deps.report('connected', this.#problem)
   }
@@ -421,6 +460,8 @@ export class TalkShowRoomClient {
     this.#camera = null
     this.#microphone = null
     this.#screen = null
+    // Stop capture synchronously, before waiting for any network unpublish.
+    for (const track of tracks) track.stop()
     for (const track of tracks) {
       try {
         if (room) await room.localParticipant.unpublishTrack(track, true)
@@ -432,6 +473,7 @@ export class TalkShowRoomClient {
   }
 
   #scheduleReconnect(reason?: DisconnectReason): void {
+    if (this.#closed) return
     const attempt = this.#reconnectAttempt
     const terminal =
       reason === DisconnectReason.ROOM_DELETED ||
@@ -454,9 +496,11 @@ export class TalkShowRoomClient {
     this.#room = null
     if (stale) await stale.disconnect().catch(() => {})
     await this.#stopLocal()
+    if (this.#closed) return
     try {
       // A fresh token: the old one may be past its 10 minutes.
       const token = await this.#deps.requestToken()
+      if (this.#closed) return
       const room = new Room({
         adaptiveStream: true,
         dynacast: true,
@@ -469,9 +513,14 @@ export class TalkShowRoomClient {
       this.#room = room
       this.#bind(room)
       await room.connect(token.url, token.hostToken, { autoSubscribe: false })
+      if (!this.#owns(room)) {
+        await room.disconnect()
+        return
+      }
       this.#reconnectAttempt = 0
       this.#setState('connected', null, token.identity)
       await this.#publishLocal()
+      if (!this.#owns(room)) return
       this.#applySubscriptions()
       await this.sendStage(this.#lastStage)
       this.#publish()
@@ -489,6 +538,7 @@ export class TalkShowRoomClient {
   }
 
   #setState(state: CloudRoomClientState, detail: string | null, identity?: string): void {
+    if (this.#closed) return
     this.#snapshot = {
       ...this.#snapshot,
       state,
@@ -500,6 +550,7 @@ export class TalkShowRoomClient {
   }
 
   #publish(): void {
+    if (this.#closed) return
     const room = this.#room
     const people: TalkShowPerson[] = []
     let monitorVideo: MediaStreamTrack | null = null

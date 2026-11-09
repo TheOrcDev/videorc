@@ -1936,3 +1936,95 @@ fn the_import_records_its_links_refuses_strange_x_attachments_and_clamps_status(
     assert_eq!(cy.status, CommunityPersonStatus::Normal);
     assert!(!cy.id.is_empty());
 }
+
+#[test]
+fn expired_youtube_history_does_not_survive_on_a_linked_twitch_person() {
+    let database = Database::open_in_memory_for_tests();
+    for index in 1..=5 {
+        let at = day(2026, 9, index);
+        let session = format!("yt-{index}");
+        database
+            .community_record_stream(&session, at, &[StreamPlatform::Youtube])
+            .unwrap();
+        let mut row = facts(&chat(
+            &session,
+            StreamPlatform::Youtube,
+            "ada",
+            "Ada",
+            index,
+            at,
+        ));
+        if index == 5 {
+            row.celebrate = Some(ViewerMilestone {
+                kind: ViewerMilestoneKind::Row,
+                value: 5,
+            });
+        }
+        database.community_record_batch(&[row], at).unwrap();
+    }
+    stream_with(
+        &database,
+        "twitch",
+        day(2026, 10, 9),
+        &[(StreamPlatform::Twitch, "ada", "Ada")],
+    );
+    let youtube = person_of(&database, StreamPlatform::Youtube, "ada");
+    let twitch = person_of(&database, StreamPlatform::Twitch, "ada");
+    database
+        .community_link(
+            &youtube.id,
+            &twitch.id,
+            CommunityLinkKind::Manual,
+            day(2026, 10, 9),
+        )
+        .unwrap();
+    database.community_prune(day(2026, 10, 10)).unwrap();
+    let kept = person_of(&database, StreamPlatform::Twitch, "ada");
+    assert_eq!((kept.streams, kept.best_in_a_row), (1, 1));
+    assert!(kept.milestones.is_empty());
+}
+
+#[test]
+fn self_link_undo_restores_a_whole_prelinked_person_without_replaying_forgotten_accounts() {
+    for forget in [false, true] {
+        let database = Database::open_in_memory_for_tests();
+        stream_with(
+            &database,
+            "s",
+            day(2026, 11, 1),
+            &[
+                (StreamPlatform::Twitch, "alice", "Alice"),
+                (StreamPlatform::Kick, "bob", "Bob"),
+                (StreamPlatform::X, "bob", "Bob"),
+            ],
+        );
+        let alice = person_of(&database, StreamPlatform::Twitch, "alice");
+        let bob = person_of(&database, StreamPlatform::Kick, "bob");
+        let x = person_of(&database, StreamPlatform::X, "bob");
+        let bob = database
+            .community_link(&bob.id, &x.id, CommunityLinkKind::SelfLink, Utc::now())
+            .unwrap();
+        let (_, undo) = database
+            .community_self_link(&alice.id, &bob, Utc::now())
+            .unwrap();
+        if forget {
+            database
+                .community_forget_account("x:bob", Utc::now())
+                .unwrap();
+        }
+        database.community_undo_self_link(undo, Utc::now()).unwrap();
+        let alice = person_of(&database, StreamPlatform::Twitch, "alice");
+        let bob = person_of(&database, StreamPlatform::Kick, "bob");
+        assert_ne!(alice.id, bob.id);
+        if forget {
+            assert!(
+                database
+                    .community_account_person("x:bob")
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            assert_eq!(person_of(&database, StreamPlatform::X, "bob").id, bob.id);
+        }
+    }
+}

@@ -768,6 +768,7 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // Plan 225: the community store's retention prune (now and daily) and
     // its one-time, resumable backfill.
     community_service::spawn_startup_jobs(&state);
+    watchdog::spawn_talk_show_watch(&state);
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()

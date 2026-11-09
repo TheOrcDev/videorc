@@ -89,3 +89,26 @@ export function talkShowRecordingBlockedReason(status: CloudStatus | null): stri
   }
   return `The cloud recording isn't available (${problem}).`
 }
+
+/** Record and live are independent cloud outputs. Recording must be
+ * acknowledged before the requested destinations can go on air. */
+export async function startTalkShowLivestream(
+  record: boolean,
+  recordingActive: boolean,
+  startRecording: () => Promise<void>,
+  goLive: () => Promise<CloudStatus>
+): Promise<CloudStatus> {
+  if (record && !recordingActive) await startRecording()
+  return goLive()
+}
+
+export function talkShowStartBlockedReason(
+  status: CloudStatus | null,
+  intent: { record: boolean; stream: boolean }
+): string | null {
+  if (intent.stream && status?.room?.live) return 'This show is already live.'
+  if (intent.record && !intent.stream && status?.recording?.active) {
+    return 'The cloud recording is already running.'
+  }
+  return intent.record && !status?.recording?.active ? talkShowRecordingBlockedReason(status) : null
+}

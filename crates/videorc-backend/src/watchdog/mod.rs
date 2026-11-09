@@ -197,6 +197,8 @@ pub struct WatchdogRuntime {
     /// `observe_takeover`, so the tick never reads SQLite or decodes a PNG
     /// on a runtime thread.
     takeover: Option<CachedTakeover>,
+    announcements: std::collections::VecDeque<(String, Vec<Transition>)>,
+    announcing: bool,
 }
 
 impl WatchdogRuntime {
@@ -208,6 +210,8 @@ impl WatchdogRuntime {
             session: None,
             system_idle: None,
             takeover,
+            announcements: Default::default(),
+            announcing: false,
         }
     }
 
@@ -607,8 +611,73 @@ fn ai_refused(state: &AppState, session_id: &str) {
 
 // --- The tick -------------------------------------------------------------
 
+/// Talk shows have no local recording/audio task. One app-owned timer
+/// follows their on-air state, including a show recovered after relaunch.
+pub fn spawn_talk_show_watch(state: &AppState) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut previous = None;
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let status = state
+                .cloud_show
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .status();
+            tick_talk_show(&state, &mut previous, &status);
+        }
+    });
+}
+
+fn tick_talk_show(
+    state: &AppState,
+    previous: &mut Option<String>,
+    status: &crate::cloud_show::CloudStatus,
+) {
+    let current = status
+        .room
+        .as_ref()
+        .filter(|room| room.phase == crate::cloud_talk::CloudRoomPhase::Open && room.live)
+        .and(status.show.as_ref())
+        .map(|show| show.id.clone());
+    if *previous != current {
+        if let Some(ended) = previous.take() {
+            session_ended(state, &ended);
+        }
+        *previous = current.clone();
+    }
+    let Some(session_id) = current else {
+        return;
+    };
+    let program = status.program.unwrap_or_default();
+    tick(
+        state,
+        &session_id,
+        SessionFacts {
+            live: true,
+            targets: status.legs.clone(),
+            cloud_show: true,
+            cloud: Some(CloudSignal {
+                hold_active: status.hold.as_ref().is_some_and(|hold| hold.active),
+                audio_silent_seconds: program.audio_silent_seconds,
+                black_seconds: program.black_seconds,
+                frozen_seconds: program.frozen_seconds,
+                av_skew_ms: program.av_skew_ms,
+                feed_low_since: None,
+            }),
+            takeover: takeover_snapshot(state),
+            ..Default::default()
+        },
+    );
+}
+
 /// Once a second, with the session's facts gathered by the caller.
 pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
+    if !facts.live {
+        return;
+    }
     let clock = alerts::Clock::now();
     let now = clock.now;
     let (transitions, ai_read, view_changed) = {
@@ -839,17 +908,7 @@ pub fn session_ended(state: &AppState, session_id: &str) {
         }
     };
     if let Some(withdrawn) = withdrawn {
-        for transition in &withdrawn {
-            if let Some(code) = alerts::health_code(transition) {
-                let _ = crate::recording::emit_health_event(
-                    state,
-                    Some(session_id),
-                    HealthLevel::Info,
-                    &code,
-                    &withdrawn_message(transition.alert()),
-                );
-            }
-        }
+        queue_announcements(state, session_id, withdrawn.clone());
         state.emit_event(
             "watchdog.alerts",
             WatchdogAlertsView {
@@ -971,6 +1030,74 @@ fn announce_transitions_with_view(
         .session
         .as_ref()
         .is_some_and(|watch| watch.session_id == session_id && watch.live);
+    queue_announcements(state, session_id, transitions.clone());
+    for transition in &transitions {
+        if let Some(body) = push::notify_body(transition, live) {
+            spawn_push(state.clone(), session_id.to_string(), body);
+        }
+    }
+    if emit_view || !transitions.is_empty() {
+        let mut view = alerts_view(state);
+        view.withdrawn = transitions
+            .iter()
+            .filter_map(|transition| match transition {
+                Transition::Withdrawn(alert) => Some(alert.id.clone()),
+                _ => None,
+            })
+            .collect();
+        state.emit_event("watchdog.alerts", view);
+    }
+}
+
+/// One ordered blocking drain per app, never one task per alert. Keeping
+/// the session id in each batch also scopes late writes to the old session.
+fn queue_announcements(state: &AppState, session_id: &str, transitions: Vec<Transition>) {
+    if transitions.is_empty() {
+        return;
+    }
+    {
+        let mut runtime = lock(&state.watchdog);
+        runtime
+            .announcements
+            .push_back((session_id.to_string(), transitions));
+        if runtime.announcing {
+            return;
+        }
+        runtime.announcing = true;
+    }
+    let state = state.clone();
+    let drain = move || loop {
+        let batch = {
+            let mut runtime = lock(&state.watchdog);
+            match runtime.announcements.pop_front() {
+                Some(batch) => batch,
+                None => {
+                    runtime.announcing = false;
+                    return;
+                }
+            }
+        };
+        persist_announcements(&state, &batch.0, batch.1);
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn_blocking(drain);
+    } else {
+        drain();
+    }
+}
+
+fn persist_announcements(state: &AppState, session_id: &str, transitions: Vec<Transition>) {
+    // A talk show's id belongs to the runner, not the local sessions table.
+    // Like buffer-only health events, keep its history without a recording
+    // foreign key. This lookup stays on the blocking announcement drain.
+    let stored_session_id = match state.database.session_exists(session_id) {
+        Ok(true) => Some(session_id),
+        Ok(false) => None,
+        Err(error) => {
+            tracing::warn!("Could not resolve the watchdog health session: {error:#}");
+            None
+        }
+    };
     for transition in &transitions {
         if let Some(code) = alerts::health_code(transition) {
             let alert = transition.alert();
@@ -990,17 +1117,23 @@ fn announce_transitions_with_view(
                 _ if alert.check == WatchdogCheck::ChatSays => push::chat_says_record(alert),
                 _ => format!("{}. {}", alert.title.trim_end_matches('.'), alert.detail),
             };
-            let _ = crate::recording::emit_health_event(
+            if let Err(error) = crate::recording::emit_health_event(
                 state,
-                Some(session_id),
+                stored_session_id,
                 level,
                 &code,
                 &message,
-            );
+            ) {
+                tracing::warn!("Could not persist the watchdog health event: {error:#}");
+            }
         }
         if let Transition::Opened(alert) = transition
             && alert.check == WatchdogCheck::ChatSays
             && crate::buddy_overlay::overlay_enabled(state)
+            && lock(&state.watchdog)
+                .session
+                .as_ref()
+                .is_some_and(|watch| watch.session_id == session_id && watch.live)
         {
             // D6: Buddy may say the card's title in its bubble, never a post.
             let say_state = state.clone();
@@ -1009,24 +1142,18 @@ fn announce_transitions_with_view(
                 text: alert.title.clone(),
                 state: None,
             };
+            let session_id = session_id.to_string();
             tokio::spawn(async move {
+                if !lock(&say_state.watchdog)
+                    .session
+                    .as_ref()
+                    .is_some_and(|watch| watch.session_id == session_id && watch.live)
+                {
+                    return;
+                }
                 let _ = crate::cohost::say_utterance(&say_state, params).await;
             });
         }
-        if let Some(body) = push::notify_body(transition, live) {
-            spawn_push(state.clone(), session_id.to_string(), body);
-        }
-    }
-    if emit_view || !transitions.is_empty() {
-        let mut view = alerts_view(state);
-        view.withdrawn = transitions
-            .iter()
-            .filter_map(|transition| match transition {
-                Transition::Withdrawn(alert) => Some(alert.id.clone()),
-                _ => None,
-            })
-            .collect();
-        state.emit_event("watchdog.alerts", view);
     }
 }
 
@@ -1051,8 +1178,10 @@ fn spawn_push(state: AppState, session_id: String, body: serde_json::Value) {
     }
     tokio::spawn(async move {
         let outcome = async {
-            let bearer =
-                crate::account::stored_session_token().ok_or_else(|| "signed out".to_string())?;
+            let bearer = tokio::task::spawn_blocking(crate::account::stored_session_token)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "signed out".to_string())?;
             let client = crate::videorc_api::VideorcApiClient::new()
                 .map_err(|error| format!("{error:#}"))?;
             client.post_alert_notify(&bearer, &body).await
@@ -1074,13 +1203,16 @@ fn spawn_push(state: AppState, session_id: String, body: serde_json::Value) {
                     drop(runtime);
                     // Once per stream, in the session log only: the phone is
                     // the fallback, never the primary.
-                    let _ = state.database.add_session_log(
-                        &session_id,
-                        HealthLevel::Warn,
-                        "watchdog-push-failed",
-                        &format!("The phone alert could not be sent: {problem}"),
-                        None,
-                    );
+                    let database = state.database.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _ = database.add_session_log(
+                            &session_id,
+                            HealthLevel::Warn,
+                            "watchdog-push-failed",
+                            &format!("The phone alert could not be sent: {problem}"),
+                            None,
+                        );
+                    });
                 } else if !already_logged {
                     tracing::debug!("watchdog push not sent: {problem}");
                 }
@@ -1093,7 +1225,9 @@ fn spawn_ai_read(state: AppState, session_id: String, messages: Vec<serde_json::
     tokio::spawn(async move {
         use crate::videorc_api::WatchdogChatError;
         let outcome = async {
-            let bearer = crate::account::stored_session_token()
+            let bearer = tokio::task::spawn_blocking(crate::account::stored_session_token)
+                .await
+                .map_err(|error| WatchdogChatError::Other(error.to_string()))?
                 .ok_or_else(|| WatchdogChatError::Other("signed out".to_string()))?;
             let client = crate::videorc_api::VideorcApiClient::new()
                 .map_err(|error| WatchdogChatError::Other(format!("{error:#}")))?;
@@ -1118,6 +1252,148 @@ fn spawn_ai_read(state: AppState, session_id: String, messages: Vec<serde_json::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn flush_announcements(state: &AppState) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lock(&state.watchdog).announcing {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("announcement drain finished");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_busy_database_does_not_block_the_watchdog_runtime() {
+        let state = test_state();
+        persist_session(&state, "live");
+        let database = state.database.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = tokio::task::spawn_blocking(move || {
+            let _guard = database.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("runtime stayed responsive");
+        });
+        ready_rx.await.unwrap();
+        tick(
+            &state,
+            "live",
+            SessionFacts {
+                live: true,
+                ..Default::default()
+            },
+        );
+        observe_platform_health(
+            &state,
+            "live",
+            "youtube",
+            Some(PlatformHealthSignal {
+                target_id: "youtube".into(),
+                label: "YouTube".into(),
+                platform: "youtube".into(),
+                kind: PlatformHealthKind::NoAudio,
+                critical: true,
+                description: None,
+                dashboard_url: None,
+            }),
+        );
+        tick(
+            &state,
+            "live",
+            SessionFacts {
+                live: true,
+                ..Default::default()
+            },
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(alerts_view(&state).alerts.len(), 1);
+        session_ended(&state, "live");
+        release_tx.send(()).unwrap();
+        holder.await.unwrap();
+        flush_announcements(&state).await;
+        let events = state.database.list_health_events("live").unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.code == "watchdog-platform-health")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.code == "watchdog-platform-health-withdrawn")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_talk_show_is_watched_only_while_live_including_a_resumed_show() {
+        let state = test_state();
+        assert!(!state.database.session_exists("sh_talk").unwrap());
+        let mut status = crate::cloud_show::CloudShowRuntime::default().status();
+        status.show = Some(
+            serde_json::from_value(json!({
+                "id": "sh_talk", "nodeId": "node", "kind": "talk", "resumable": true,
+            }))
+            .unwrap(),
+        );
+        status.room = Some(
+            serde_json::from_value(json!({
+                "phase": "open", "doorOpen": false, "declinedCount": 0,
+                "stage": {"layout": "solo", "onStage": ["host:sh_talk"]},
+                "hostAway": false, "connected": true, "client": "connected",
+                "returnEnabled": false, "stageSet": true, "live": false,
+            }))
+            .unwrap(),
+        );
+        status.program = Some(crate::cloud_show::CloudProgram {
+            audio_silent_seconds: Some(120),
+            ..Default::default()
+        });
+        let mut previous = None;
+        tick_talk_show(&state, &mut previous, &status);
+        assert!(
+            !watching(&state, "sh_talk"),
+            "backstage and recording alone are not live"
+        );
+        status.room.as_mut().unwrap().live = true;
+        tick_talk_show(&state, &mut previous, &status);
+        assert!(watching(&state, "sh_talk"));
+        assert!(
+            alerts_view(&state)
+                .alerts
+                .iter()
+                .any(|alert| alert.check == WatchdogCheck::ProgramSilent)
+        );
+        status.room.as_mut().unwrap().live = false;
+        tick_talk_show(&state, &mut previous, &status);
+        assert!(
+            !watching(&state, "sh_talk"),
+            "legs.end ends the watch even if recording continues"
+        );
+        assert!(alerts_view(&state).alerts.is_empty());
+        flush_announcements(&state).await;
+        let connection = state.database.lock().unwrap();
+        let codes: Vec<String> = connection
+            .prepare("SELECT code FROM health_events WHERE session_id IS NULL ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            codes,
+            [
+                "watchdog-program-silent",
+                "watchdog-program-silent-withdrawn"
+            ]
+        );
+    }
 
     #[test]
     fn the_wire_view_skips_the_session_when_nothing_runs() {
@@ -1467,6 +1743,7 @@ mod tests {
         );
         tick(&state, "live", facts());
         assert!(alerts_view(&state).alerts.is_empty(), "the card aged out");
+        flush_announcements(&state).await;
         let codes: Vec<String> = state
             .database
             .list_health_events("live")
@@ -1488,6 +1765,7 @@ mod tests {
         tick(&state, "live", facts());
         observe_platform_health(&state, "live", "youtube", None);
         tick(&state, "live", facts());
+        flush_announcements(&state).await;
         let codes: Vec<String> = state
             .database
             .list_health_events("live")
@@ -1540,6 +1818,7 @@ mod tests {
             );
         }
         assert!(saw_withdrawn, "the empty view names the withdrawn id");
+        flush_announcements(&state).await;
         let events = state.database.list_health_events("live").unwrap();
         let codes: Vec<&str> = events.iter().map(|event| event.code.as_str()).collect();
         assert!(

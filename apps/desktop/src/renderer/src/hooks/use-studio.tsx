@@ -168,7 +168,8 @@ import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context
 import type { TalkShowRoomControllerDeps } from '@/hooks/use-talk-show-room'
 import {
   talkShowLiveStartedAt as talkShowLiveStartedAtFrom,
-  talkShowRecordingBlockedReason,
+  talkShowStartBlockedReason,
+  startTalkShowLivestream,
   talkShowSessionView
 } from '@/lib/talk-show-session'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -13232,7 +13233,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     startRequestPending ||
     stopRequestPending ||
     talkShowSession !== null
-  const transportSessionActive = isSessionActive
+  const transportSessionActive =
+    sessionOwnsTransport(recording) || startRequestPending || stopRequestPending
 
   // Plan 222 U1: "Videorc Cloud is on", once per account, never during a
   // session; the backend forgets it for this account once it showed.
@@ -14834,10 +14836,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // the local scene's sources never block a start; the runner's own
       // recording problem does (the wire notes' `recording.problem`).
       if (talkShowRoomOpen) {
-        if (intent.record && !intent.stream) {
-          return talkShowRecordingBlockedReason(cloudStatus)
-        }
-        return null
+        return talkShowStartBlockedReason(cloudStatus, intent)
       }
       const config = captureConfigForIntent(captureConfig, intent)
       const turnedOff = sceneSourcesTurnedOff(
@@ -15930,9 +15929,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // activations run against the show id, the way they run against a
           // session id; Stop completes them the same way.
           if (talkShowRoomOpenRef.current && streamingForStart) {
-            const cloudAfterGoLive = await client.requestTyped('cloud.show.goLive', {
-              streaming: streamingForStart
-            })
+            const talkStreaming = streamingForStart
+            const cloudAfterGoLive = await startTalkShowLivestream(
+              intent.record,
+              cloudStatusRef.current?.recording?.active === true,
+              async () => {
+                commitCloudStatus(await client.requestTyped('cloud.recording.start'))
+              },
+              () => client.requestTyped('cloud.show.goLive', { streaming: talkStreaming })
+            )
             commitCloudStatus(cloudAfterGoLive)
             const showId = cloudAfterGoLive.show?.id
             await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId, showId)
@@ -18591,7 +18596,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const canStart = !startBlockedReason
   const canStop =
     wsStatus === 'connected' &&
-    ['recording', 'streaming', 'starting', 'stopping'].includes(recording.state) &&
+    ['recording', 'streaming', 'starting', 'stopping'].includes(
+      talkShowSession?.state ?? recording.state
+    ) &&
     !stopRequestPending
   // Plan 174 S3.1 (B-9): the reason behind a disabled transport button, the
   // record one first. It shows whether or not an error is on screen: the

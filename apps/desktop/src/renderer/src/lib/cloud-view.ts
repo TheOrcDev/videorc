@@ -99,6 +99,7 @@ export type CloudSectionState =
 /** What the Livestream page's Videorc Cloud section shows (C6). */
 export function cloudSectionState(status: CloudStatus | null): CloudSectionState | null {
   if (!status) return null
+  if (!status.allowance?.enabled && !status.show && !status.room) return null
   if (status.entitled) {
     return {
       hours: cloudHoursLine(status.allowance, status.allowancePast?.seconds),

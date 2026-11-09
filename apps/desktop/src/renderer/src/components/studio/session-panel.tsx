@@ -90,6 +90,7 @@ import { WINDOW_NAMES } from '../../../../shared/window-names'
  */
 export function SessionTransport({
   active,
+  talkShowOutputs,
   canStop,
   stopLabel,
   stopNote,
@@ -108,6 +109,7 @@ export function SessionTransport({
   onStop
 }: {
   active: boolean
+  talkShowOutputs?: { recording: boolean; live: boolean; onStopRecording: () => void }
   canStop: boolean
   stopLabel: string
   /** What Stop does beyond its label, said visibly ("Your recording stops too."). */
@@ -136,12 +138,16 @@ export function SessionTransport({
   onLiveStream: () => void
   onStop: () => void
 }): ReactElement {
+  const recordActive = talkShowOutputs?.recording ?? active
+  const recordStop = talkShowOutputs ? talkShowOutputs.onStopRecording : onStop
+  const recordStopLabel = talkShowOutputs ? 'Stop recording' : stopLabel
+  const liveActive = talkShowOutputs?.live === true
   const startsBusy = startRequestPending || goLivePending
   // Record answers its own click, lit from the click; a Go Live… start,
   // checks included, is Go Live's to answer, so Record is off for it.
   const recordStarting = startRequestPending && !goLivePending && !startingLivestream
   let recordState: RecordButtonState = 'idle'
-  if (active) {
+  if (recordActive) {
     recordState = stopRequestPending ? 'stopping' : 'running'
   } else if (recordStarting) {
     recordState = 'starting'
@@ -167,35 +173,39 @@ export function SessionTransport({
             while the session runs; Go Live… is the chrome primary. Why a
             start is blocked shows on hover and on keyboard focus (plan 174
             S1.1, B-9): a disabled button never shows a title. */}
-        <DisabledReason className="flex-1" reason={active ? null : recordBlockedReason}>
+        <DisabledReason className="flex-1" reason={recordActive ? null : recordBlockedReason}>
           <RecordButton
             className="flex-1"
             disabled={
-              active
+              recordActive
                 ? !canStop && !stopRequestPending
                 : Boolean(recordBlockedReason) || (startsBusy && !recordStarting)
             }
-            labels={{ idle: recordWords, starting: recordWords, running: stopLabel }}
+            labels={{ idle: recordWords, starting: recordWords, running: recordStopLabel }}
             size="lg"
             state={recordState}
-            onClick={active ? onStop : onRecord}
+            onClick={recordActive ? recordStop : onRecord}
           />
         </DisabledReason>
-        {active ? null : (
+        {active && !talkShowOutputs ? null : (
           <DisabledReason
             className="flex-1"
-            reason={goLivePending ? null : liveStreamBlockedReason}
+            reason={goLivePending || liveActive ? null : liveStreamBlockedReason}
           >
             <Button
               className="flex-1"
               data-testid="go-live-button"
-              disabled={Boolean(liveStreamBlockedReason) || startsBusy}
+              disabled={liveActive ? !canStop : Boolean(liveStreamBlockedReason) || startsBusy}
               size="lg"
               variant="default"
-              onClick={onLiveStream}
+              onClick={liveActive ? onStop : onLiveStream}
             >
               <LivestreamIcon data-icon="inline-start" weight="fill" />
-              {goLivePending ? GO_LIVE_CHECKING_LABEL : GO_LIVE_LABEL}
+              {liveActive
+                ? 'End livestream'
+                : goLivePending
+                  ? GO_LIVE_CHECKING_LABEL
+                  : GO_LIVE_LABEL}
             </Button>
           </DisabledReason>
         )}

@@ -251,6 +251,52 @@ pub struct CommunityMemoryPersonFacts {
     pub note: String,
 }
 
+/// A response must still describe the same people when it commits. A forget,
+/// split or deleted memory invalidates the entire answer, including its summary.
+pub(crate) struct CommunityMemoryGuard {
+    pub person_id: String,
+    pub accounts: Vec<(String, StreamPlatform)>,
+    pub memory_ids: HashSet<String>,
+    pub note: String,
+}
+
+pub(crate) struct CommunityMemoryChanges {
+    pub person_id: String,
+    pub adds: Vec<(String, String)>,
+    pub updates: Vec<(String, String)>,
+    pub removes: Vec<String>,
+}
+
+/// Bounded in-memory undo for a self-link word. Only still-live accounts
+/// owned by this merge can move back; deleted data is never replayed.
+pub(crate) struct CommunityLinkUndo {
+    kept_id: String,
+    kept_keys: Vec<String>,
+    moved_keys: Vec<String>,
+    kept_note: String,
+    moved_note: String,
+    merged_note: String,
+    notes_forgotten: bool,
+}
+
+impl CommunityLinkUndo {
+    pub(crate) fn forget_notes(&mut self, account_key: Option<&str>, person_id: Option<&str>) {
+        if person_id == Some(self.kept_id.as_str())
+            || account_key.is_some_and(|key| {
+                self.kept_keys
+                    .iter()
+                    .chain(&self.moved_keys)
+                    .any(|known| known == key)
+            })
+        {
+            self.kept_note.clear();
+            self.moved_note.clear();
+            self.merged_note.clear();
+            self.notes_forgotten = true;
+        }
+    }
+}
+
 /// Memories a pass may add per person, and keep in all (plan 183 D14).
 pub const MEMORY_ADDS_MAX: usize = 2;
 pub const MEMORY_PER_PERSON_MAX: usize = 8;
@@ -940,13 +986,17 @@ fn person_support_locked(conn: &Connection, person_id: &str) -> Result<Community
 }
 
 /// Recompute a person's stored counts, support and newest name from its
-/// accounts, attendance and support rows (D1, D2). A YouTube-only person's
+/// accounts, attendance and support rows (D1, D2). A person's YouTube-derived
 /// best run and celebrated milestones are recomputed too (F8), so nothing
 /// derived from YouTube outlives its 30 days (D3). A person with no live
 /// account left is deleted
 /// with its memories, note and link events (F2: a forgotten person leaves
 /// no trace; the kept side of a split keeps its own events).
 fn refresh_person_locked(conn: &Connection, person_id: &str) -> Result<()> {
+    refresh_person_history_locked(conn, person_id, false)
+}
+
+fn refresh_person_history_locked(conn: &Connection, person_id: &str, expired: bool) -> Result<()> {
     let Some(person) = person_locked(conn, person_id)? else {
         return Ok(());
     };
@@ -963,21 +1013,38 @@ fn refresh_person_locked(conn: &Connection, person_id: &str) -> Result<()> {
         .max_by(|a, b| a.last_seen_at.cmp(&b.last_seen_at))
         .unwrap_or(&accounts[0]);
     let support = person_support_locked(conn, person_id)?;
-    // F8: a YouTube-only person's best run and milestones come from the
-    // retained history alone; everyone else keeps their best.
-    let (best, milestones): (Option<i64>, Option<String>) = if history.youtube_only() {
-        let best = best_in_a_row(&history, &streams).max(run);
-        (
-            Some(i64::from(best)),
-            Some(serde_json::to_string(&milestones_within(
-                &person.milestones,
-                history.streams(),
-                best,
-            ))?),
-        )
-    } else {
-        (None, None)
-    };
+    // Linked people must also forget aggregates earned from expired YouTube
+    // rows, including when the last YouTube account itself just expired.
+    let (best, milestones): (Option<i64>, Option<String>) =
+        if expired || history.platforms.contains(&StreamPlatform::Youtube) {
+            let best = best_in_a_row(&history, &streams).max(run);
+            let mut milestones = milestones_within(&person.milestones, history.streams(), best);
+            // A mixed person's anniversary must be justified by a retained,
+            // non-YouTube account; a YouTube first-seen date is never its source.
+            let off_youtube = histories_locked(conn, &[&person], true)?
+                .remove(person_id)
+                .unwrap_or_default();
+            if let Some(first) = off_youtube.first_seen_at {
+                use chrono::Datelike;
+                milestones.extend(
+                    person
+                        .milestones
+                        .iter()
+                        .filter(|key| {
+                            key.strip_prefix("year-")
+                                .and_then(|year| year.parse::<i32>().ok())
+                                .is_some_and(|year| year > first.year())
+                        })
+                        .cloned(),
+                );
+            }
+            (
+                Some(i64::from(best)),
+                Some(serde_json::to_string(&milestones)?),
+            )
+        } else {
+            (None, None)
+        };
     conn.execute(
         "UPDATE community_people SET name = ?2, avatar_url = ?3, streams = ?4, messages = ?5,
             in_a_row = ?6, best_in_a_row = COALESCE(?11, MAX(best_in_a_row, ?6)),
@@ -2004,6 +2071,112 @@ impl Database {
         Ok(into)
     }
 
+    pub(crate) fn community_self_link(
+        &self,
+        a: &str,
+        b: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(String, CommunityLinkUndo), CommunityError> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        if a == b {
+            return Err(CommunityError::Invalid("Already linked.".into()));
+        }
+        let (into, from) = older_first_locked(&transaction, a, b)?;
+        let kept = person_locked(&transaction, &into)?.ok_or(CommunityError::NotFound)?;
+        let moved = person_locked(&transaction, &from)?.ok_or(CommunityError::NotFound)?;
+        let keys = |id: &str| -> Result<Vec<String>> {
+            Ok(live_accounts_locked(&transaction, id)?
+                .into_iter()
+                .map(|a| a.account_key)
+                .collect())
+        };
+        let mut undo = CommunityLinkUndo {
+            kept_id: into.clone(),
+            kept_keys: keys(&into)?,
+            moved_keys: keys(&from)?,
+            kept_note: kept.note,
+            moved_note: moved.note,
+            merged_note: String::new(),
+            notes_forgotten: false,
+        };
+        merge_people_locked(&transaction, &into, &from, CommunityLinkKind::SelfLink, now)?;
+        undo.merged_note = person_locked(&transaction, &into)?
+            .ok_or(CommunityError::NotFound)?
+            .note;
+        transaction.commit()?;
+        Ok((into, undo))
+    }
+
+    pub(crate) fn community_undo_self_link(
+        &self,
+        undo: CommunityLinkUndo,
+        now: DateTime<Utc>,
+    ) -> Result<(), CommunityError> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let Some(kept) = person_locked(&transaction, &undo.kept_id)? else {
+            return Ok(());
+        };
+        let accounts = live_accounts_locked(&transaction, &undo.kept_id)?;
+        let moved: Vec<_> = accounts
+            .iter()
+            .filter(|a| undo.moved_keys.contains(&a.account_key))
+            .collect();
+        if moved.is_empty() {
+            return Ok(());
+        }
+        let restored = insert_person_locked(
+            &transaction,
+            &moved[0].name,
+            moved[0].avatar_url.as_deref(),
+            kept.status,
+            now,
+        )?;
+        for account in &moved {
+            for table in [
+                "community_accounts",
+                "community_memories",
+                "community_link_events",
+            ] {
+                transaction.execute(&format!("UPDATE {table} SET person_id = ?2 WHERE account_key = ?1 AND person_id = ?3"),
+                    params![account.account_key, restored, undo.kept_id])?;
+            }
+            insert_link_event_locked(
+                &transaction,
+                &restored,
+                &account.account_key,
+                CommunityLinkKind::Split,
+                now,
+            )?;
+        }
+        // Do not replay notes after a forget, an intervening edit, or a
+        // further merge. Counts and milestones come from retained rows.
+        if undo.notes_forgotten || kept.note == undo.merged_note {
+            let intact = !undo.notes_forgotten
+                && accounts.len() == undo.kept_keys.len() + undo.moved_keys.len()
+                && undo
+                    .kept_keys
+                    .iter()
+                    .all(|key| accounts.iter().any(|a| &a.account_key == key))
+                && moved.len() == undo.moved_keys.len();
+            transaction.execute(
+                "UPDATE community_people SET note = ?2 WHERE id = ?1",
+                params![undo.kept_id, if intact { &undo.kept_note } else { "" }],
+            )?;
+            if intact {
+                transaction.execute(
+                    "UPDATE community_people SET note = ?2 WHERE id = ?1",
+                    params![restored, undo.moved_note],
+                )?;
+            }
+        }
+        refresh_person_history_locked(&transaction, &undo.kept_id, true)?;
+        refresh_person_history_locked(&transaction, &restored, true)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Accept "Might be the same person" (D4 c): link the two accounts'
     /// people; same refusal rules as a manual link.
     pub fn community_suggestion_accept(
@@ -2380,6 +2553,7 @@ impl Database {
     /// two new and eight in all. Only this person's own memory ids count;
     /// a new memory records the account whose words taught it. Returns how
     /// many were added.
+    #[cfg(test)]
     pub fn community_memories_apply(
         &self,
         person_id: &str,
@@ -2391,21 +2565,43 @@ impl Database {
     ) -> Result<u32> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
+        let learned = Self::community_memories_apply_locked(
+            &transaction,
+            person_id,
+            session_id,
+            adds,
+            updates,
+            removes,
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(learned)
+    }
+
+    fn community_memories_apply_locked(
+        conn: &Connection,
+        person_id: &str,
+        session_id: &str,
+        adds: &[(String, String)],
+        updates: &[(String, String)],
+        removes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<u32> {
         let at = iso(now);
         for id in removes {
-            transaction.execute(
+            conn.execute(
                 "DELETE FROM community_memories WHERE id = ?1 AND person_id = ?2",
                 params![id, person_id],
             )?;
         }
         for (id, text) in updates {
-            transaction.execute(
+            conn.execute(
                 "UPDATE community_memories SET text = ?1, updated_at = ?2
                  WHERE id = ?3 AND person_id = ?4",
                 params![text, at, id, person_id],
             )?;
         }
-        let kept: usize = transaction.query_row(
+        let kept: usize = conn.query_row(
             "SELECT COUNT(*) FROM community_memories WHERE person_id = ?1",
             params![person_id],
             |row| row.get::<_, i64>(0),
@@ -2415,7 +2611,7 @@ impl Database {
             .min(MEMORY_ADDS_MAX);
         let mut learned = 0u32;
         for (text, account_key) in adds.iter().take(room) {
-            transaction.execute(
+            conn.execute(
                 "INSERT INTO community_memories
                  (id, person_id, account_key, text, session_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
@@ -2424,11 +2620,77 @@ impl Database {
             learned += 1;
         }
         if learned > 0 || !updates.is_empty() || !removes.is_empty() {
-            transaction.execute(
+            conn.execute(
                 "UPDATE community_people SET updated_at = ?2 WHERE id = ?1",
                 params![person_id, at],
             )?;
         }
+        Ok(learned)
+    }
+
+    pub(crate) fn community_memory_commit(
+        &self,
+        session_id: &str,
+        guards: &[CommunityMemoryGuard],
+        changes: &[CommunityMemoryChanges],
+        summary: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<u32> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        for guard in guards {
+            let Some(person) = person_locked(&transaction, &guard.person_id)? else {
+                return Ok(0);
+            };
+            let accounts: HashSet<_> = live_accounts_locked(&transaction, &guard.person_id)?
+                .into_iter()
+                .filter(|account| account.platform != StreamPlatform::Youtube)
+                .map(|account| (account.account_key, account.platform))
+                .collect();
+            let memories: HashSet<_> = memories_locked(&transaction, &guard.person_id)?
+                .into_iter()
+                .map(|memory| memory.id)
+                .collect();
+            if person.status != CommunityPersonStatus::Normal
+                || person.note != guard.note
+                || accounts != guard.accounts.iter().cloned().collect()
+                || memories != guard.memory_ids
+            {
+                return Ok(0);
+            }
+        }
+        let mut learned = 0u32;
+        for change in changes {
+            learned = learned.saturating_add(Self::community_memories_apply_locked(
+                &transaction,
+                &change.person_id,
+                session_id,
+                &change.adds,
+                &change.updates,
+                &change.removes,
+                now,
+            )?);
+        }
+        let stored: Option<String> = transaction
+            .query_row(
+                "SELECT report_json FROM cohost_reports WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut block = stored
+            .as_deref()
+            .and_then(crate::protocol::CohostSessionReport::from_stored_json)
+            .and_then(|report| report.community)
+            .unwrap_or_default();
+        block.memories_learned = learned;
+        if summary.is_some() {
+            block.summary = summary;
+        }
+        Self::upsert_cohost_report_locked(
+            &transaction,
+            &crate::protocol::CohostSessionReport::community_only(session_id, block, &iso(now)),
+        )?;
         transaction.commit()?;
         Ok(learned)
     }
@@ -2517,7 +2779,7 @@ impl Database {
             }
         }
         for person_id in touched {
-            refresh_person_locked(&transaction, &person_id)?;
+            refresh_person_history_locked(&transaction, &person_id, true)?;
         }
         transaction.execute(
             "DELETE FROM community_people WHERE id NOT IN (

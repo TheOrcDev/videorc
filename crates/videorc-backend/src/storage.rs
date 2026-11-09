@@ -6417,7 +6417,16 @@ impl Database {
     pub fn upsert_cohost_report(&self, report: &CohostSessionReport) -> Result<bool> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
-        let session_exists = transaction
+        let saved = Self::upsert_cohost_report_locked(&transaction, report)?;
+        transaction.commit()?;
+        Ok(saved)
+    }
+
+    pub(crate) fn upsert_cohost_report_locked(
+        conn: &Connection,
+        report: &CohostSessionReport,
+    ) -> Result<bool> {
+        let session_exists = conn
             .query_row(
                 "SELECT 1 FROM sessions WHERE id = ?1",
                 params![report.session_id],
@@ -6428,7 +6437,7 @@ impl Database {
         if !session_exists {
             return Ok(false);
         }
-        let stored: Option<String> = transaction
+        let stored: Option<String> = conn
             .query_row(
                 "SELECT report_json FROM cohost_reports WHERE session_id = ?1",
                 params![report.session_id],
@@ -6442,7 +6451,7 @@ impl Database {
             Some(existing) => existing.merged_with(report.clone()),
             None => report.clone(),
         };
-        transaction.execute(
+        conn.execute(
             "INSERT INTO cohost_reports (session_id, version, report_json, updated_at)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id) DO UPDATE SET
@@ -6456,7 +6465,6 @@ impl Database {
                 Utc::now().to_rfc3339(),
             ],
         )?;
-        transaction.commit()?;
         Ok(true)
     }
 

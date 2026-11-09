@@ -81,6 +81,7 @@ export function StudioTab(): ReactElement {
   const StatusPill = retro ? RetroSessionStatus : SessionStatusPill
   const InspectorSession = retro ? RetroSessionPanel : SessionPanel
   const { recording } = useStudioRecordingState()
+  const { cloudStatus: talkStatus, talkShow } = useStudioCloud()
   const {
     canStop,
     startRequestPending,
@@ -226,6 +227,17 @@ export function StudioTab(): ReactElement {
               still records. */}
           <Transport
             active={active}
+            talkShowOutputs={
+              talkStatus?.room?.phase === 'open'
+                ? {
+                    recording: talkStatus.recording?.active === true,
+                    live: talkStatus.room.live,
+                    onStopRecording: () => {
+                      void talkShow.stopCloudRecording()
+                    }
+                  }
+                : undefined
+            }
             blockedJump={
               banner?.jumpTo && banner.jumpLabel
                 ? { label: banner.jumpLabel, to: banner.jumpTo, settingsTab: banner.settingsTab }

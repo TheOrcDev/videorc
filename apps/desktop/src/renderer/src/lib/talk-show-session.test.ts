@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { CloudStatus } from '@/lib/backend'
 import {
   TALK_SHOW_STREAM_URL,
+  startTalkShowLivestream,
+  talkShowStartBlockedReason,
   talkShowLiveStartedAt,
   talkShowSessionView
 } from '@/lib/talk-show-session'
@@ -105,4 +107,50 @@ describe('talkShowSessionView', () => {
       )
     ).toBe('2026-11-08T12:00:00.000Z')
   })
+})
+
+it('starts requested cloud recording before live and preserves an existing recording', async () => {
+  const calls: string[] = []
+  const record = async () => {
+    calls.push('record')
+  }
+  const live = async () => {
+    calls.push('live')
+    return status({ live: true })
+  }
+  await startTalkShowLivestream(true, false, record, live)
+  expect(calls).toEqual(['record', 'live'])
+  calls.length = 0
+  await startTalkShowLivestream(true, true, record, live)
+  expect(calls).toEqual(['live'])
+  calls.length = 0
+  await startTalkShowLivestream(false, false, record, live)
+  expect(calls).toEqual(['live'])
+  const goLive = vi.fn(live)
+  await expect(
+    startTalkShowLivestream(
+      true,
+      false,
+      async () => {
+        throw new Error('recording refused')
+      },
+      goLive
+    )
+  ).rejects.toThrow('recording refused')
+  expect(goLive).not.toHaveBeenCalled()
+})
+
+it('allows each cloud output to start while only the other is running', () => {
+  expect(
+    talkShowStartBlockedReason(status({ live: true }), { record: true, stream: false })
+  ).toBeNull()
+  expect(
+    talkShowStartBlockedReason(status({}, { active: true, seconds: 1, bytes: 1 }), {
+      record: true,
+      stream: true
+    })
+  ).toBeNull()
+  expect(
+    talkShowStartBlockedReason(status({ live: true }), { record: false, stream: true })
+  ).not.toBeNull()
 })

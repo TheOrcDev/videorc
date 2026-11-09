@@ -16,7 +16,7 @@ const lk = vi.hoisted(() => {
     mediaStreamTrack: { kind: 'video' } as unknown as MediaStreamTrack,
     mute: async () => {},
     unmute: async () => {},
-    stop: () => {}
+    stop: vi.fn()
   })
   class FakeRoom {
     static rooms: FakeRoom[] = []
@@ -25,7 +25,7 @@ const lk = vi.hoisted(() => {
     connectedWith: { url: string; token: string } | null = null
     readonly remoteParticipants = new Map()
     readonly localParticipant = {
-      publishTrack: async () => {},
+      publishTrack: vi.fn(async () => {}),
       unpublishTrack: async () => {},
       publishData: async () => {}
     }
@@ -47,7 +47,7 @@ const lk = vi.hoisted(() => {
       this.handlers.get(event)?.(...args)
     }
   }
-  return { FakeRoom, fakeLocalTrack }
+  return { FakeRoom, fakeLocalTrack, video: vi.fn(), audio: vi.fn() }
 })
 
 vi.mock('livekit-client', () => ({
@@ -72,8 +72,8 @@ vi.mock('livekit-client', () => ({
   },
   LocalAudioTrack: class {},
   LocalVideoTrack: class {},
-  createLocalVideoTrack: async () => lk.fakeLocalTrack(),
-  createLocalAudioTrack: async () => lk.fakeLocalTrack()
+  createLocalVideoTrack: lk.video,
+  createLocalAudioTrack: lk.audio
 }))
 
 function client() {
@@ -104,9 +104,12 @@ const latestRoom = () => lk.FakeRoom.rooms[lk.FakeRoom.rooms.length - 1]
 beforeEach(() => {
   vi.useFakeTimers()
   lk.FakeRoom.rooms.length = 0
+  lk.video.mockReset().mockImplementation(async () => lk.fakeLocalTrack())
+  lk.audio.mockReset().mockImplementation(async () => lk.fakeLocalTrack())
 })
 
 afterEach(() => {
+  vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
@@ -152,4 +155,80 @@ describe('the host in the room (C-G4)', () => {
     await room.connect()
     expect(requestToken).toHaveBeenCalledTimes(1)
   })
+})
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+it.each(['video', 'audio'] as const)('stops a %s track acquired after Close', async (kind) => {
+  const acquired = deferred<ReturnType<typeof lk.fakeLocalTrack>>()
+  const started = deferred<void>()
+  lk[kind].mockImplementationOnce(() => {
+    started.resolve()
+    return acquired.promise
+  })
+  const { room } = client()
+  const connecting = room.connect()
+  await started.promise
+  await room.disconnect()
+  const track = lk.fakeLocalTrack()
+  acquired.resolve(track)
+  await connecting
+  expect(track.stop).toHaveBeenCalled()
+  expect(latestRoom().localParticipant.publishTrack).not.toHaveBeenCalledWith(
+    track,
+    expect.anything()
+  )
+  expect(room.snapshot.state).toBe('idle')
+  expect(room.snapshot.local.camera).toBeNull()
+  expect(room.snapshot.local.microphone).toBeNull()
+  if (kind === 'video') expect(lk.audio).not.toHaveBeenCalled()
+})
+
+it('does not reconnect when Close happens while a fresh token is pending', async () => {
+  const { room, requestToken } = client()
+  await room.connect()
+  const token = deferred<CloudRoomTokenAnswer>()
+  requestToken.mockImplementationOnce(() => token.promise)
+  latestRoom().emit('Disconnected')
+  await vi.advanceTimersByTimeAsync(1000)
+  await room.disconnect()
+  token.resolve({
+    hostToken: 'fresh',
+    url: 'ws://localhost',
+    identity: 'host:sh_talk',
+    showId: 'sh_talk'
+  })
+  await token.promise
+  await Promise.resolve()
+  expect(lk.FakeRoom.rooms).toHaveLength(1)
+  expect(room.snapshot.state).toBe('idle')
+})
+
+it('stops a screen acquired after Close without publishing it', async () => {
+  const stream = deferred<MediaStream>()
+  const started = deferred<void>()
+  vi.stubGlobal('navigator', {
+    mediaDevices: {
+      getDisplayMedia: () => {
+        started.resolve()
+        return stream.promise
+      }
+    }
+  })
+  const { room } = client()
+  await room.connect()
+  const sharing = room.startScreenShare()
+  await started.promise
+  await room.disconnect()
+  const track = { stop: vi.fn() }
+  stream.resolve({ getTracks: () => [track] } as unknown as MediaStream)
+  await sharing
+  expect(track.stop).toHaveBeenCalledOnce()
+  expect(room.snapshot.local.screen).toBeNull()
 })

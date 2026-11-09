@@ -1,3 +1,4 @@
+import type { CloudStatus } from '@/lib/backend'
 import { STORAGE_KEYS } from '@/lib/capture'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -17,6 +18,18 @@ export const LIVESTREAM_VIEWS = [
   // Plan 224 D16: the talk show's room, its invite link and who is in it.
   { id: 'guests', label: 'Guests' }
 ] as const
+
+/** Launch flags fail closed, but an existing room remains controllable. */
+export function guestsVisible(status: CloudStatus | null): boolean {
+  return Boolean(
+    (status?.allowance?.enabled && status.allowance.talkShows) ||
+    (status?.room && status.room.phase !== 'closed')
+  )
+}
+
+export function livestreamViews(status: CloudStatus | null): (typeof LIVESTREAM_VIEWS)[number][] {
+  return LIVESTREAM_VIEWS.filter((view) => view.id !== 'guests' || guestsVisible(status))
+}
 
 export type LivestreamViewId = (typeof LIVESTREAM_VIEWS)[number]['id']
 

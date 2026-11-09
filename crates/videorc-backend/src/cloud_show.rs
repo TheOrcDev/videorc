@@ -2880,6 +2880,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// Go Live (C4). `bearer` is the signed-in account's session token, or
     /// `None` when signed out. `destinations` are the resolved targets, keys
     /// plain, for the hand-over; they go to the runner and nowhere else.
+    #[cfg(test)]
     pub async fn prepare_session(
         &self,
         session_id: &str,
@@ -2887,6 +2888,26 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         outputs: Vec<ShowOutputSpec>,
         destinations: Vec<HandoverDestination>,
         hold_image_png_base64: Option<String>,
+    ) -> Result<PrepareOutcome> {
+        self.prepare_session_with_feed_setup(
+            session_id,
+            bearer,
+            outputs,
+            destinations,
+            std::future::ready(Ok(hold_image_png_base64)),
+        )
+        .await
+    }
+
+    /// Local feed preparation runs only after direct streaming is ruled
+    /// out, and before handing any destination to the runner.
+    pub async fn prepare_session_with_feed_setup(
+        &self,
+        session_id: &str,
+        bearer: Option<String>,
+        outputs: Vec<ShowOutputSpec>,
+        destinations: Vec<HandoverDestination>,
+        feed_setup: impl std::future::Future<Output = Result<Option<String>>>,
     ) -> Result<PrepareOutcome> {
         let (decision, hold_max_seconds, mut resumable, unconfirmed) = {
             let mut runtime = lock(&self.slot);
@@ -2935,6 +2956,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 }
             }
         }
+        let needs_feed = resumable.is_some() || decision == GoLiveDecision::Cloud;
+        let hold_image_png_base64 = if needs_feed { feed_setup.await? } else { None };
         if decision != GoLiveDecision::Cloud
             && let Some(show_id) = resumable.as_deref()
         {
@@ -5234,7 +5257,9 @@ mod tests {
                 participant("g_bo", false),
                 participant("runner:sh_abc", true),
                 participant("host:sh_abc", true)
-            ], "layout": "spotlight", "hostAway": false, "returnEnabled": true, "stageSet": true }
+            ], "layout": "spotlight", "hostAway": false, "returnEnabled": true, "stageSet": true,
+               "stage": { "layout": "spotlight", "onStage": ["host:sh_abc", "g_ada"],
+                          "spotlight": "g_ada", "screen": "g_ada", "hostShape": "circle" } }
         } }));
         tokio::time::sleep(Duration::from_millis(50)).await;
         let stage = lock(&harness.context.slot).status().room.unwrap().stage;
@@ -5243,6 +5268,12 @@ mod tests {
             stage.on_stage,
             vec!["host:sh_abc".to_string(), "g_ada".to_string()]
         );
+        assert_eq!(stage.spotlight.as_deref(), Some("g_ada"));
+        assert_eq!(stage.screen.as_deref(), Some("g_ada"));
+        assert_eq!(
+            stage.host_shape,
+            Some(crate::cloud_talk::CloudHostShape::Circle)
+        );
         // Bring Bo on from there: Ada and the host stay.
         let mut next = stage;
         next.on_stage.push("g_bo".to_string());
@@ -5250,6 +5281,8 @@ mod tests {
         let set = tokio::spawn(async move { context.set_stage(next).await });
         let frame = server.next_frame().await;
         assert_eq!(frame["onStage"], json!(["host:sh_abc", "g_ada", "g_bo"]));
+        assert_eq!(frame["spotlight"], "g_ada");
+        assert_eq!(frame["screen"], "g_ada");
         server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
         set.await.unwrap().unwrap();
         // From then on the desktop's own stage is the one shown.
@@ -6113,6 +6146,45 @@ mod tests {
             GoLiveDecision::DirectByChoice
         );
         assert!(!runtime.cloud_mode_on());
+    }
+
+    #[tokio::test]
+    async fn direct_streaming_never_prepares_cloud_certificates() {
+        for (entitled, signed_in, enabled) in [
+            (false, false, true),
+            (false, true, true),
+            (true, true, false),
+        ] {
+            let harness = harness(entitled);
+            lock(&harness.context.slot).settings.enabled = Some(enabled);
+            let outcome = harness
+                .context
+                .prepare_session_with_feed_setup(
+                    "direct",
+                    signed_in.then(|| "bearer".into()),
+                    test_outputs(),
+                    destinations(),
+                    async { anyhow::bail!("a cloud CA path containing [brackets] is invalid") },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(outcome, PrepareOutcome::Direct));
+            assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        }
+        let harness = harness(true);
+        let error = harness
+            .context
+            .prepare_session_with_feed_setup(
+                "cloud",
+                Some("bearer".into()),
+                test_outputs(),
+                destinations(),
+                async { anyhow::bail!("invalid cloud CA path") },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid cloud CA path"));
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
     }
 
     #[test]

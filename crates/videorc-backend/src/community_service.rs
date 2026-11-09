@@ -75,6 +75,7 @@ struct SessionCommunity {
     /// "Welcome back" row knows its person without a second read.
     people_by_key: HashMap<String, String>,
     links: PendingLinks,
+    link_undos: HashMap<String, (Instant, crate::community_store::CommunityLinkUndo)>,
     streamer_keys: Option<HashSet<String>>,
     /// F4: the known streams, read once per session for the arrival
     /// lookup's "in a row" (the table is never pruned and grows for ever).
@@ -144,6 +145,7 @@ impl CommunityRuntime {
 pub struct CommunityShared {
     runtime: StdMutex<CommunityRuntime>,
     writes_done: Notify,
+    commands: tokio::sync::Mutex<()>,
     /// F4: arrival lookups run one at a time (so two batches never give one
     /// person two arrivals) without holding `runtime` across the store
     /// read, which the delivery fence's `arrival_reaction_due` also takes.
@@ -156,6 +158,7 @@ pub fn new_slot() -> CommunitySlot {
     Arc::new(CommunityShared {
         runtime: StdMutex::new(CommunityRuntime::default()),
         writes_done: Notify::new(),
+        commands: tokio::sync::Mutex::new(()),
         lookup: StdMutex::new(()),
     })
 }
@@ -891,6 +894,9 @@ async fn drop_forgotten(
                         && Some(arrival.account_key.as_str()) != account_key
                 });
                 session.people_by_key.retain(|key, _| !keys.contains(key));
+                for (_, undo) in session.link_undos.values_mut() {
+                    undo.forget_notes(account_key, person_id.as_deref());
+                }
                 person_id
             }
             None => person_id.map(str::to_string),
@@ -941,6 +947,9 @@ async fn run_chat_command(
     key: &str,
     command: ChatCommand,
 ) -> bool {
+    // Claim order and the corresponding DB effects are one operation.
+    // A third claim must not overtake the second claim's merge.
+    let _command = state.community.commands.lock().await;
     let database = state.database.clone();
     let name = message.author_name.trim().to_string();
     let now = Utc::now();
@@ -1042,7 +1051,12 @@ async fn run_chat_command(
                     .as_mut()
                     .filter(|session| session.session_id == session_id)
                 {
-                    Some(session) => session.links.claim(word, claim),
+                    Some(session) => {
+                        session
+                            .link_undos
+                            .retain(|_, (at, _)| at.elapsed() < crate::community::LINK_WORD_WINDOW);
+                        session.links.claim(word, claim)
+                    }
                     None => LinkOutcome::Ignored,
                 }
             };
@@ -1052,11 +1066,14 @@ async fn run_chat_command(
                     let database = state.database.clone();
                     let (a, b) = (first.person_id.clone(), second.person_id.clone());
                     match tokio::task::spawn_blocking(move || {
-                        database.community_link(&a, &b, CommunityLinkKind::SelfLink, now)
+                        database.community_self_link(&a, &b, now)
                     })
                     .await
                     {
-                        Ok(Ok(kept)) => {
+                        Ok(Ok((kept, undo))) => {
+                            if let Some(session) = state.community.lock().session_mut(session_id) {
+                                session.link_undos.insert(word.clone(), (first.at, undo));
+                            }
                             changed = true;
                             count_for_report(state, session_id, |session| {
                                 session.links_made = session.links_made.saturating_add(1)
@@ -1107,18 +1124,24 @@ async fn run_chat_command(
                 } => {
                     // F5: the word was public and a third account said it
                     // inside the window, so the join may be a hijack. Undo
-                    // it (the account that joined splits off again), take
+                    // it (the whole person that joined splits off again), take
                     // the card down, and list every pair for the streamer.
                     // Nothing is said: the streamer settles it in Community.
                     let database = state.database.clone();
-                    let split_key = second.account_key.clone();
+                    let undo = state
+                        .community
+                        .lock()
+                        .session_mut(session_id)
+                        .and_then(|session| session.link_undos.remove(word));
                     let pairs = [
                         (first.account_key.clone(), second.account_key.clone()),
                         (first.account_key.clone(), third.account_key.clone()),
                         (second.account_key.clone(), third.account_key.clone()),
                     ];
                     let outcome = tokio::task::spawn_blocking(move || {
-                        database.community_unlink(&split_key, now)?;
+                        if let Some((_, undo)) = undo {
+                            database.community_undo_self_link(undo, now)?;
+                        }
                         for (a, b) in &pairs {
                             database.community_link_cancelled(a, b, now)?;
                         }
@@ -1478,6 +1501,7 @@ pub async fn forget_all(state: &AppState) -> Result<CommunityAccepted, Community
             session.arrived.clear();
             session.people_by_key.clear();
             session.links.clear();
+            session.link_undos.clear();
             // F2: the report in progress names nobody either.
             session.report_arrivals.clear();
             // F4: the streams are gone with the store.
@@ -1900,9 +1924,7 @@ where
             Ok(response) => {
                 let id = session_id.clone();
                 let applied = tokio::task::spawn_blocking(move || {
-                    let (learned, summary) =
-                        apply_memory_response(&database, &id, &plan, &response, now)?;
-                    write_memory_report(&database, &id, learned, summary, now)?;
+                    let learned = apply_memory_response(&database, &id, &plan, &response, now)?;
                     database.community_memory_job_delete(&id)?;
                     Ok::<u32, anyhow::Error>(learned)
                 })
@@ -1983,6 +2005,7 @@ struct MemoryPlanPerson {
     person_id: String,
     accounts: Vec<(String, StreamPlatform)>,
     memory_ids: HashSet<String>,
+    note: String,
 }
 
 /// The pass's request for a stream (D10): the people who chatted at least
@@ -2147,6 +2170,7 @@ pub(crate) fn build_memory_request(
             reference,
             person_id: person_id.clone(),
             accounts: facts.accounts.clone(),
+            note: facts.note.clone(),
             memory_ids: facts
                 .memories
                 .iter()
@@ -2183,16 +2207,16 @@ pub(crate) fn build_memory_request(
 /// The answer, applied (D10): per person in the plan, at most two new
 /// memories (on the account of the platform that taught them), the
 /// updates and removals of their own ids; anything for a ref or an id the
-/// request did not send is ignored. Returns how many were learned and the
-/// audience summary.
+/// request did not send is ignored. Memories and the audience summary commit
+/// together only if the request still describes the same live people.
 pub(crate) fn apply_memory_response(
     database: &Database,
     session_id: &str,
     plan: &MemoryPlan,
     response: &CohostMemoryResponse,
     now: DateTime<Utc>,
-) -> anyhow::Result<(u32, Option<String>)> {
-    let mut learned = 0u32;
+) -> anyhow::Result<u32> {
+    let mut changes = Vec::new();
     let mut answered: HashSet<&str> = HashSet::new();
     for result in &response.people {
         let Some(person) = plan
@@ -2240,14 +2264,12 @@ pub(crate) fn apply_memory_response(
         if adds.is_empty() && updates.is_empty() && removes.is_empty() {
             continue;
         }
-        learned = learned.saturating_add(database.community_memories_apply(
-            &person.person_id,
-            session_id,
-            &adds,
-            &updates,
-            &removes,
-            now,
-        )?);
+        changes.push(crate::community_store::CommunityMemoryChanges {
+            person_id: person.person_id.clone(),
+            adds,
+            updates,
+            removes,
+        });
     }
     let summary = response
         .summary
@@ -2263,32 +2285,17 @@ pub(crate) fn apply_memory_response(
             )
         })
         .filter(|summary| !summary.is_empty());
-    Ok((learned, summary))
-}
-
-/// The pass's two lines in the report (D15): what was learned and the
-/// audience summary, folded into the session's Community block.
-fn write_memory_report(
-    database: &Database,
-    session_id: &str,
-    learned: u32,
-    summary: Option<String>,
-    now: DateTime<Utc>,
-) -> anyhow::Result<()> {
-    let mut block = database
-        .get_cohost_report(session_id)?
-        .and_then(|report| report.community)
-        .unwrap_or_default();
-    block.memories_learned = learned;
-    if summary.is_some() {
-        block.summary = summary;
-    }
-    database.upsert_cohost_report(&crate::protocol::CohostSessionReport::community_only(
-        session_id,
-        block,
-        &now.to_rfc3339(),
-    ))?;
-    Ok(())
+    let guards: Vec<_> = plan
+        .people
+        .iter()
+        .map(|person| crate::community_store::CommunityMemoryGuard {
+            person_id: person.person_id.clone(),
+            accounts: person.accounts.clone(),
+            memory_ids: person.memory_ids.clone(),
+            note: person.note.clone(),
+        })
+        .collect();
+    database.community_memory_commit(session_id, &guards, &changes, summary, now)
 }
 
 // --- Jobs: backfill (A3) and retention (A4) ------------------------------------------
@@ -3688,6 +3695,72 @@ mod tests {
             ),
             model: "fake".to_string(),
             usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn forgetting_during_the_memory_request_cannot_restore_memories_or_summary() {
+        for forget_all in [false, true] {
+            let state = test_state();
+            remember_on(&state);
+            let generation = start_session(&state, "late-memory").await;
+            note_cohost_consent(&state, "late-memory", true);
+            deliver(
+                &state,
+                generation,
+                vec![
+                    row("late-memory", StreamPlatform::Twitch, "ada", "Ada", 1, "hi"),
+                    row(
+                        "late-memory",
+                        StreamPlatform::Kick,
+                        "9",
+                        "Ada",
+                        2,
+                        "learning Rust",
+                    ),
+                    row(
+                        "late-memory",
+                        StreamPlatform::Kick,
+                        "9",
+                        "Ada",
+                        3,
+                        "borrow checker",
+                    ),
+                ],
+            )
+            .await;
+            let twitch = person_at(&state, StreamPlatform::Twitch, "ada");
+            let kick = person_at(&state, StreamPlatform::Kick, "9");
+            state
+                .database
+                .community_link(&twitch.id, &kick.id, CommunityLinkKind::Manual, Utc::now())
+                .unwrap();
+            end_and_queue(&state, "late-memory").await;
+            run_memory_jobs_with(&state, true, |request| {
+                assert_eq!(request.people.len(), 1);
+                if forget_all {
+                    state.database.community_forget_all(Utc::now()).unwrap();
+                } else {
+                    state
+                        .database
+                        .community_forget_account("kick:9", Utc::now())
+                        .unwrap();
+                }
+                async { Ok(memory_answer("p1", "Learning Rust", StreamPlatform::Kick)) }
+            })
+            .await;
+            let conn = state.database.lock().unwrap();
+            let memories: i64 = conn
+                .query_row("SELECT COUNT(*) FROM community_memories", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(memories, 0, "late response restored forgotten data");
+            drop(conn);
+            let report = state
+                .database
+                .get_cohost_report("late-memory")
+                .unwrap()
+                .unwrap();
+            assert!(report.community.unwrap().summary.is_none());
         }
     }
 

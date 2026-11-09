@@ -1,3 +1,4 @@
+import { guestsVisible, livestreamViews } from './livestream-tabs'
 import { describe, expect, it } from 'vitest'
 
 import type { CloudStatus, CloudTestResult } from './backend'
@@ -442,4 +443,24 @@ describe('Test cloud copy (plan 184 C6b)', () => {
       )
     ).toBe('A show is live through Videorc Cloud. End it first.')
   })
+})
+
+it('hides cloud and Guests entry points until their launch capabilities arrive', () => {
+  for (const allowance of [undefined, { ...status().allowance!, enabled: false }]) {
+    for (const entitled of [false, true]) {
+      const off = status({ allowance, entitled })
+      expect(cloudSectionState(off)).toBeNull()
+      expect(guestsVisible(off)).toBe(false)
+      expect(livestreamViews(off).map((tab) => tab.id)).toEqual(['setup', 'upcoming'])
+    }
+  }
+  expect(guestsVisible(status())).toBe(false)
+  expect(guestsVisible(status({ allowance: { ...status().allowance!, talkShows: true } }))).toBe(
+    true
+  )
+  expect(
+    cloudSectionState(
+      status({ allowance: undefined, show: { id: 'held', nodeId: 'n', resumable: true } })
+    )
+  ).not.toBeNull()
 })
