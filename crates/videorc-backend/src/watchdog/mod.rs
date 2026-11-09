@@ -54,6 +54,11 @@ pub type WatchdogSlot = Arc<Mutex<WatchdogRuntime>>;
 pub const KICK_LIVENESS_ALERTS: bool = false;
 /// Misses in a row (60 s polls) before Kick reads as offline, once on.
 pub const KICK_LIVENESS_MISSES: u32 = 3;
+/// A platform's word (A4) ages out after three missed 60 s polls plus a
+/// poll's own timeout (L6): a watch that stopped answering (live chat
+/// stopped mid-stream, a token that died) no longer holds its card open
+/// for the rest of the stream.
+pub const PLATFORM_HEALTH_STALE_AFTER: Duration = Duration::from_secs(3 * 60 + 30);
 
 /// The `watchdog.alerts` event and the `watchdog.alerts.list` answer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,7 +135,8 @@ struct SessionWatch {
     black_since: Option<Instant>,
     last_luma_at: Option<Instant>,
     destination_since: BTreeMap<String, (DestinationPhase, Instant)>,
-    platform_health: BTreeMap<String, PlatformHealthSignal>,
+    /// The platforms' words, with when each last arrived (L6).
+    platform_health: BTreeMap<String, (PlatformHealthSignal, Instant)>,
     chat: chat_signals::ChatWindow,
     takeover: Option<ActiveTakeover>,
     push: push::PushLedger,
@@ -502,10 +508,23 @@ pub fn observe_platform_health(
     };
     match signal {
         Some(signal) => {
-            watch.platform_health.insert(target_id.to_string(), signal);
+            watch
+                .platform_health
+                .insert(target_id.to_string(), (signal, Instant::now()));
         }
         None => {
             watch.platform_health.remove(target_id);
+        }
+    }
+}
+
+/// Backdates every platform signal by `by` (the ageing test).
+#[cfg(test)]
+pub(crate) fn age_platform_health(state: &AppState, session_id: &str, by: Duration) {
+    let mut runtime = lock(&state.watchdog);
+    if let Some(watch) = runtime.watch_mut(session_id) {
+        for (_, at) in watch.platform_health.values_mut() {
+            *at = at.checked_sub(by).unwrap_or(*at);
         }
     }
 }
@@ -671,8 +690,28 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
         }
         watch.destination_since.retain(|id, _| seen.contains(id));
 
-        let platform_health: Vec<PlatformHealthSignal> =
-            watch.platform_health.values().cloned().collect();
+        // L6: a platform's word that stopped arriving no longer holds its
+        // card; the card leaves quietly (nothing said it was fine).
+        let mut transitions = Vec::new();
+        let stale: Vec<String> = watch
+            .platform_health
+            .iter()
+            .filter(|(_, (_, at))| now.saturating_duration_since(*at) > PLATFORM_HEALTH_STALE_AFTER)
+            .map(|(target, _)| target.clone())
+            .collect();
+        for target in stale {
+            watch.platform_health.remove(&target);
+            transitions.extend(
+                watch
+                    .state
+                    .withdraw(&alerts::alert_key(WatchdogCheck::PlatformHealth, Some(&target))),
+            );
+        }
+        let platform_health: Vec<PlatformHealthSignal> = watch
+            .platform_health
+            .values()
+            .map(|(signal, _)| signal.clone())
+            .collect();
         let chat: Vec<ChatDecision> = watch
             .chat
             .decide(now)
@@ -710,10 +749,11 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
             system_idle,
             chat: &chat,
         };
-        let transitions =
+        transitions.extend(
             watch
                 .checks
-                .tick(&signals, &thresholds, &settings, &mut watch.state, clock);
+                .tick(&signals, &thresholds, &settings, &mut watch.state, clock),
+        );
 
         // B2: the AI read, when the free match saw a candidate.
         let ai_read = if facts.live
@@ -1235,6 +1275,73 @@ mod tests {
         assert_eq!(seeded.luma, None, "a file that is not an image reads None");
         database.clear_active_stream_screen().unwrap();
         assert_eq!(load_takeover(&database), None);
+    }
+
+    /// Plan 223 L6 (the review): a platform's word holds its card only
+    /// while it keeps arriving; three missed polls later the card leaves,
+    /// withdrawn (the platform never said it was fine). A fresh word keeps
+    /// it; a withdrawn word (`None`) clears it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_platform_health_card_ages_out_with_its_signal() {
+        let state = test_state();
+        let facts = || SessionFacts {
+            live: true,
+            ..Default::default()
+        };
+        tick(&state, "live", facts());
+        let signal = || PlatformHealthSignal {
+            target_id: "youtube".to_string(),
+            label: "YouTube".to_string(),
+            platform: "youtube".to_string(),
+            kind: PlatformHealthKind::NoAudio,
+            critical: true,
+            description: Some("The stream has no audio.".to_string()),
+            dashboard_url: None,
+        };
+        observe_platform_health(&state, "live", "youtube", Some(signal()));
+        tick(&state, "live", facts());
+        assert_eq!(alerts_view(&state).alerts.len(), 1);
+        assert_eq!(alerts_view(&state).alerts[0].check, WatchdogCheck::PlatformHealth);
+
+        // Two polls late: still fresh.
+        age_platform_health(&state, "live", Duration::from_secs(150));
+        tick(&state, "live", facts());
+        assert_eq!(alerts_view(&state).alerts.len(), 1, "two missed polls keep the card");
+
+        // A fresh word resets the age.
+        observe_platform_health(&state, "live", "youtube", Some(signal()));
+        age_platform_health(&state, "live", Duration::from_secs(150));
+        tick(&state, "live", facts());
+        assert_eq!(alerts_view(&state).alerts.len(), 1);
+
+        // Past the stale line: withdrawn, not cleared.
+        age_platform_health(&state, "live", PLATFORM_HEALTH_STALE_AFTER + Duration::from_secs(1));
+        tick(&state, "live", facts());
+        assert!(alerts_view(&state).alerts.is_empty(), "the card aged out");
+        let codes: Vec<String> = state
+            .database
+            .list_health_events("live")
+            .unwrap()
+            .into_iter()
+            .map(|event| event.code)
+            .collect();
+        assert!(codes.contains(&"watchdog-platform-health-withdrawn".to_string()), "{codes:?}");
+        assert!(!codes.contains(&"watchdog-platform-health-cleared".to_string()), "{codes:?}");
+
+        // The platform says it is fine: a clear.
+        observe_platform_health(&state, "live", "youtube", Some(signal()));
+        tick(&state, "live", facts());
+        observe_platform_health(&state, "live", "youtube", None);
+        tick(&state, "live", facts());
+        let codes: Vec<String> = state
+            .database
+            .list_health_events("live")
+            .unwrap()
+            .into_iter()
+            .map(|event| event.code)
+            .collect();
+        assert!(codes.contains(&"watchdog-platform-health-cleared".to_string()), "{codes:?}");
+        session_ended(&state, "live");
     }
 
     /// Plan 223 M2 (the review): a quiet departure rides the event as
