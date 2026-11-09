@@ -174,16 +174,51 @@ export interface WatchdogHistoryRow {
   clearedAt: string | null
 }
 
+/**
+ * The target a `watchdog-<check>*` event names, read from its message
+ * (L3): a destination's label for `destination-down` and `platform-health`
+ * ("YouTube has been down for 0:20", "Streaming to Twitch (main) stopped",
+ * "YouTube is back"; `all` for the fold and "Destinations are back"), the
+ * class for a `chat-says` open ("Chat says the stream is frozen" → video).
+ * Null when the message names none (a clear of `chat-says`, every other
+ * check), which pairs with the oldest open row of that check.
+ */
+export function watchdogEventTarget(check: string, message: string): string | null {
+  const title = message.split('. ')[0] ?? message
+  if (check === 'destination-down' || check === 'platform-health') {
+    if (/^Nobody is receiving your stream/.test(title) || /^Destinations are back/.test(title)) {
+      return 'all'
+    }
+    return (
+      /^Streaming to (.+) stopped$/.exec(title)?.[1] ??
+      /^(.+?) (has been down|isn't receiving|ended the broadcast|reports |is back$)/.exec(
+        title
+      )?.[1] ??
+      null
+    )
+  }
+  if (check === 'chat-says') {
+    if (/can't hear/.test(title)) return 'audio'
+    if (/frozen/.test(title)) return 'video'
+    if (/lagging/.test(title)) return 'lag'
+  }
+  return null
+}
+
 export function watchdogHistory(
   events: readonly { code: string; message: string; createdAt: string }[]
 ): WatchdogHistoryRow[] {
   const sorted = [...events].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-  const open = new Map<string, WatchdogHistoryRow>()
+  // Open rows by check, oldest first; each keyed on its target too (L3),
+  // so a fold's per-leg rows and the one card they folded into pair with
+  // their own close, never with each other's.
+  const open = new Map<string, { target: string | null; row: WatchdogHistoryRow }[]>()
   const rows: WatchdogHistoryRow[] = []
   for (const event of sorted) {
-    const match = /^watchdog-(.+?)(?:-(cleared|acknowledged|snoozed))?$/.exec(event.code)
+    const match = /^watchdog-(.+?)(?:-(cleared|acknowledged|snoozed|withdrawn))?$/.exec(event.code)
     if (!match) continue
     const [, check, suffix] = match
+    const target = watchdogEventTarget(check, event.message)
     if (!suffix) {
       const row: WatchdogHistoryRow = {
         check,
@@ -191,14 +226,15 @@ export function watchdogHistory(
         openedAt: event.createdAt,
         clearedAt: null
       }
-      open.set(check, row)
+      const list = open.get(check) ?? []
+      list.push({ target, row })
+      open.set(check, list)
       rows.push(row)
-    } else if (suffix === 'cleared' || suffix === 'snoozed') {
-      const row = open.get(check)
-      if (row) {
-        row.clearedAt = event.createdAt
-        open.delete(check)
-      }
+    } else if (suffix === 'cleared' || suffix === 'snoozed' || suffix === 'withdrawn') {
+      const list = open.get(check) ?? []
+      const index = target === null ? 0 : list.findIndex((candidate) => candidate.target === target)
+      const [closed] = index >= 0 ? list.splice(index, 1) : []
+      if (closed) closed.row.clearedAt = event.createdAt
     }
   }
   return rows

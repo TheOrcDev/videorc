@@ -10,6 +10,7 @@ import {
   watchdogChipLabel,
   watchdogClearedAlerts,
   watchdogClearedToast,
+  watchdogEventTarget,
   watchdogHistory,
   watchdogHistorySpan,
   watchdogNotificationWords,
@@ -294,5 +295,84 @@ describe('watchdog view (plan 223 A5, A6)', () => {
     ])
     expect(watchdogHistorySpan(rows[0])).toMatch(/ to .* \(0:52\)$/)
     expect(watchdogHistorySpan(rows[1])).toMatch(/, still open$/)
+  })
+
+  it('pairs history rows on the check and its target (L3)', () => {
+    expect(watchdogEventTarget('destination-down', 'YouTube has been down for 0:20. x')).toBe(
+      'YouTube'
+    )
+    expect(watchdogEventTarget('destination-down', 'Streaming to Twitch (main) stopped. x')).toBe(
+      'Twitch (main)'
+    )
+    expect(watchdogEventTarget('destination-down', 'Twitch (main) is back')).toBe('Twitch (main)')
+    expect(watchdogEventTarget('destination-down', 'Nobody is receiving your stream. x')).toBe(
+      'all'
+    )
+    expect(watchdogEventTarget('destination-down', 'Destinations are back')).toBe('all')
+    expect(watchdogEventTarget('platform-health', 'YouTube reports no audio. x')).toBe('YouTube')
+    expect(watchdogEventTarget('chat-says', 'Chat says the stream is frozen. 2 people')).toBe(
+      'video'
+    )
+    expect(watchdogEventTarget('chat-says', 'Chat has gone quiet about it')).toBeNull()
+    expect(watchdogEventTarget('mic-muted', 'Your microphone is muted on the livestream. x')).toBe(
+      null
+    )
+    // YouTube down, then Twitch down, then YouTube back: YouTube's row
+    // closes, Twitch's stays open. Then the fold withdraws Twitch's row and
+    // opens the one card, which clears on its own.
+    const rows = watchdogHistory([
+      {
+        code: 'watchdog-destination-down',
+        message: 'YouTube has been down for 0:20. Videorc is retrying every 2 seconds.',
+        createdAt: '2026-11-08T12:04:00.000Z'
+      },
+      {
+        code: 'watchdog-destination-down',
+        message: 'Twitch has been down for 0:20. Videorc is retrying every 2 seconds.',
+        createdAt: '2026-11-08T12:04:10.000Z'
+      },
+      {
+        code: 'watchdog-destination-down-cleared',
+        message: 'YouTube is back',
+        createdAt: '2026-11-08T12:04:30.000Z'
+      },
+      {
+        code: 'watchdog-destination-down-withdrawn',
+        message: 'Twitch has been down for 0:40. Withdrawn without a recovery.',
+        createdAt: '2026-11-08T12:04:50.000Z'
+      },
+      {
+        code: 'watchdog-destination-down',
+        message: 'Nobody is receiving your stream. Every destination is down.',
+        createdAt: '2026-11-08T12:04:50.000Z'
+      },
+      {
+        code: 'watchdog-destination-down-cleared',
+        message: 'Destinations are back',
+        createdAt: '2026-11-08T12:05:30.000Z'
+      },
+      {
+        code: 'watchdog-chat-says',
+        message: "Chat says they can't hear you. 2 people in the last 2 minutes.",
+        createdAt: '2026-11-08T12:06:00.000Z'
+      },
+      {
+        code: 'watchdog-chat-says',
+        message: 'Chat says the stream is lagging. 2 people in the last 2 minutes.',
+        createdAt: '2026-11-08T12:06:10.000Z'
+      },
+      {
+        code: 'watchdog-chat-says-cleared',
+        message: 'Chat has gone quiet about it',
+        createdAt: '2026-11-08T12:07:00.000Z'
+      }
+    ])
+    expect(rows.map((row) => [row.title, row.clearedAt])).toEqual([
+      ['YouTube has been down for 0:20', '2026-11-08T12:04:30.000Z'],
+      ['Twitch has been down for 0:20', '2026-11-08T12:04:50.000Z'],
+      ['Nobody is receiving your stream', '2026-11-08T12:05:30.000Z'],
+      ["Chat says they can't hear you", '2026-11-08T12:07:00.000Z'],
+      ['Chat says the stream is lagging', null]
+    ])
   })
 })
