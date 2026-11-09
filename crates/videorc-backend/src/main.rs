@@ -11565,10 +11565,15 @@ async fn handle_text_message_with_role(
             }
         }
         "cloud.show.end" => match cloud_context(state) {
-            // Plan 224: a held room goes with the show (its camera comes back).
+            // Plan 224: a held room goes with the show (its camera comes back)
+            // and so does the show's live chat, as with `cloud.room.close`
+            // (review L8).
             Some(context) if cloud_talk_show_open(state) => {
                 match context.close_room(account::stored_session_token()).await {
-                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Ok(status) => {
+                        live_chat::stop_live_chat(state).await;
+                        ServerResponse::ok(command.id, status)
+                    }
                     Err(error) => {
                         ServerResponse::error(command.id, "cloud-end-failed", error.to_string())
                     }
