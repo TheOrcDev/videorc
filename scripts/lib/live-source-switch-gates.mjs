@@ -1,5 +1,19 @@
 import { spawn } from 'node:child_process'
 
+// The smoke switches the debug backend's CoreAudio fixture microphones mid-
+// session, which only macOS runs. Linux sessions also refuse every live
+// microphone and screen change by design (Linux plan 0024:
+// `linux_microphone_switch_reason` and `kind_unavailable` in recording.rs), so
+// there `session.sources.switch` can only fail. Null on macOS, where it runs.
+export function liveSourceSwitchSkipReason(platform) {
+  if (platform === 'darwin') return null
+  const fixtures =
+    'the CoreAudio fixture microphones it switches (microphone:coreaudio:4294967295/4/3) are macOS only'
+  return platform === 'linux'
+    ? `${fixtures}, and Linux sessions refuse live microphone and screen changes by design (Linux plan 0024).`
+    : `${fixtures}.`
+}
+
 // This is reduced evidence from the launched process's actual FFmpeg command,
 // not a topology inferred from mode flags or the artifact's received label.
 // The backend refuses unsupported graphs and input timestamp offsets. Never

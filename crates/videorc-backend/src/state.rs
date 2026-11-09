@@ -251,11 +251,6 @@ impl WindowsD3d11MediaRoleHandle {
         self.client.clone()
     }
 
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
-    pub(crate) fn generation(&self) -> u64 {
-        self.lease.as_ref().map_or(0, |lease| lease.generation)
-    }
-
     pub(crate) fn role(&self) -> WindowsD3d11MediaRole {
         self.lease
             .as_ref()
@@ -1149,6 +1144,9 @@ pub struct AppState {
     /// Microphone kept open while Studio is visible (instant-record P5);
     /// `session.start` takes it instead of opening the device.
     pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
+    /// #1068: the Clips session's live microphone, carried to the Record or
+    /// Go Live session that replaces it.
+    pub microphone_handover: Arc<crate::session_audio::MicrophoneHandover>,
     pub live_chat: LiveChatSlot,
     /// Chat moderation (plan 140 S4): pending removals, their timers and the
     /// rate limiter. The durable rows live in SQLite.
@@ -1440,6 +1438,7 @@ impl AppState {
             usage_stats: Arc::default(),
             discord_announce: Arc::default(),
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
+            microphone_handover: Arc::default(),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             live_chat_moderation: crate::live_chat_moderation::new_moderation_slot(),
             account_session: Arc::new(tokio::sync::Mutex::new(

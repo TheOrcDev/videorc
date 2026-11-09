@@ -1549,9 +1549,8 @@ export interface XPrepareParams {
 
 export interface XPublishParams {
   accountId?: string
+  /** The 19-digit source id from prepare (never the stream key). */
   sourceId: string
-  region: string
-  isLowLatency: boolean
   /** Active capture session — X lifecycle events land in its session log. */
   sessionId?: string
 }
@@ -1596,10 +1595,9 @@ export interface PreparedXStreamSource {
   streamKeyPresent: boolean
   redactedUrl: string
   isStreamActive: boolean
-  recommendedConfiguration?: unknown
-  compatibilityInfo?: unknown
-  /** How prepare picked the source (env-override | reused-name-match | adopted-measured | created). */
+  /** How prepare picked the source (env-override | reused-name-match | created). */
   selection: string
+  /** Idle Videorc-named leftovers deleted during this prepare. */
   deletedRetiredSourceIds: string[]
 }
 
@@ -1612,16 +1610,23 @@ export interface XPublishResult {
   mediaId?: string
   shareUrl: string
   state: string
+  /**
+   * The announcing Post, when X had already created it at Go Live time. X
+   * posts asynchronously and never reports a failed Post; the backend's
+   * state watch logs whether it appeared.
+   */
   tweetId?: string
-  tweetError?: string
-  hlsUrl?: string
-  playableBeforePublish?: boolean
-  prePublishWaitMs?: number
-  compatibilityInfo?: unknown
+  /** X answered 200: the source already had a live broadcast, returned unchanged. */
+  alreadyLive?: boolean
   message: string
 }
 
-/** `streamTargets.x.playback` event — the post-publish watchability probe. */
+/**
+ * `streamTargets.x.playback` event — the post-Go-Live broadcast state watch.
+ * X's `/2/broadcasts` routes expose no playback URL, so `unavailable` now
+ * means X ended the broadcast (TIMED_OUT, ENDED) while the session was still
+ * streaming; `verified` / `pending` are kept for wire compatibility.
+ */
 export interface XPlaybackEvent {
   sessionId?: string | null
   broadcastId: string
@@ -4341,9 +4346,9 @@ export interface SessionListItem {
   takeId?: string
   /** Which file of the take this row is (plan 157); absent on ordinary rows. */
   recordingRole?: RecordingRole
-  /** A take Videorc stopped in the middle of (crash, killed backend, power
-   * loss): `recovered` once its MKV became an MP4 on the next start, `failed`
-   * when that did not work. Absent on every other row. */
+  /** A take that ended early (a crash, a killed backend, a power loss, or a
+   * recording that failed mid-take): `recovered` once its MKV became an MP4,
+   * `failed` when that did not work. Absent on every other row. */
   interruptionRecovery?: InterruptionRecovery
 }
 
@@ -4538,6 +4543,29 @@ export interface VirtualCameraStatus {
   platformStep?: VirtualCameraPlatformStep
   /** Plain copy for the status line, present when there is something to say. */
   message?: string
+}
+
+/** `camera.lowLight.get` (issue #1066). */
+export interface CameraLowLightParams {
+  cameraId: string
+}
+
+/** `camera.lowLight.set` (issue #1066): saved per camera, written to the device now. */
+export interface CameraLowLightSetParams {
+  cameraId: string
+  compensation: boolean
+}
+
+/**
+ * A camera's low-light compensation (issue #1066). On, the camera may drop to
+ * half its frame rate to brighten a dim picture; off (the default), it keeps
+ * its frame rate. `supported` is false off Windows and on cameras without the
+ * control.
+ */
+export interface CameraLowLightState {
+  cameraId: string
+  supported: boolean
+  compensation: boolean
 }
 
 export interface VirtualCameraSetParams {

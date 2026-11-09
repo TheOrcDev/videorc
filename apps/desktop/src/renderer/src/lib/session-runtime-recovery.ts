@@ -377,9 +377,11 @@ export function showXPlaybackEvent(event: XPlaybackEvent): void {
         'Viewers may see a loading spinner for a few minutes. Keep streaming. Videorc keeps checking.'
     })
   } else {
-    notifyOnce('x-playback', 'error', 'X never showed your stream', {
+    // X's API exposes no playback URL any more: `unavailable` means X ended
+    // the broadcast (usually TIMED_OUT: no video reached X in 5 minutes).
+    notifyOnce('x-playback', 'error', 'X ended your broadcast', {
       description:
-        'Viewers saw a loading spinner. Your local recording is unaffected; the next Go Live uses a replacement source if this repeats.'
+        'X stopped it while Videorc was still streaming, usually because no video reached X. Your local recording is unaffected.'
     })
   }
 }
@@ -545,6 +547,14 @@ function showLiveOutputNews(event: HealthEvent): void {
       description: event.message,
       duration: Infinity
     })
+  } else if (event.code === 'recording-output-failed') {
+    // The recording leg's encoder stopped taking frames mid-take; the backend
+    // ends the take (or keeps a healthy stream on air) and says which.
+    toast.error('Your recording stopped', {
+      id: 'recording-output',
+      description: event.message,
+      duration: Infinity
+    })
   } else if (event.code === 'stream-output-stalled') {
     toast.warning('Your stream is frozen', {
       id: STREAM_OUTPUT_TOAST_ID,
@@ -667,6 +677,13 @@ function showSessionAudioNews(event: HealthEvent): void {
     notifyOnce('audio-output-stalled', 'warning', 'Audio dropped for a moment', {
       description: event.message,
       duration: 12_000
+    })
+  } else if (event.code === 'audio-output-failed') {
+    // Unlike a stall this does not come back: the rest of the take is silent.
+    toast.error('Your recording has no sound from here', {
+      id: 'audio-output',
+      description: event.message,
+      duration: Infinity
     })
   } else if (
     event.code === 'microphone-timeline-recovered' ||

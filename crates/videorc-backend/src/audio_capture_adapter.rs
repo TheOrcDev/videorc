@@ -1235,21 +1235,30 @@ pub(crate) fn resolve_dshow_video_name(inventory: &str, selected: &str) -> Resul
 }
 
 fn resolve_dshow_kind(inventory: &str, selected: &str, kind: &str) -> Result<String> {
-    let mut audio: Vec<(String, Option<String>)> = Vec::new();
-    let mut current_audio = false;
+    // Every alternative name a device lists, in FFmpeg's order. One device can
+    // list several: a USB camera behind the Windows Camera Frame Server has its
+    // own `@device_pnp_` moniker and a `@device_sw_` proxy after it.
+    let mut devices: Vec<(String, Vec<String>)> = Vec::new();
+    let mut current = false;
     for line in inventory.lines() {
         if line.contains("Alternative name") {
-            if current_audio && let Some((_, alternate)) = audio.last_mut() {
-                *alternate = quoted_name(line);
+            if current
+                && let Some((_, alternates)) = devices.last_mut()
+                && let Some(alternate) = quoted_name(line)
+            {
+                alternates.push(alternate);
             }
         } else if line.contains("(audio)") || line.contains("(video)") {
-            current_audio = line.contains(kind);
-            if current_audio && let Some(name) = quoted_name(line) {
-                audio.push((name, None));
+            current = line.contains(kind);
+            if current && let Some(name) = quoted_name(line) {
+                devices.push((name, Vec::new()));
             }
         }
     }
-    let matching: Vec<_> = audio.iter().filter(|(name, _)| name == selected).collect();
+    let matching: Vec<_> = devices
+        .iter()
+        .filter(|(name, _)| name == selected)
+        .collect();
     if matching.len() != 1 {
         return Err(WorkerStartError::new(
             WorkerStartFailureKind::DeviceNotInInventory,
@@ -1257,18 +1266,30 @@ fn resolve_dshow_kind(inventory: &str, selected: &str, kind: &str) -> Result<Str
         )
         .into());
     }
-    let target = matching[0].1.as_deref().unwrap_or(selected);
+    let target = preferred_dshow_moniker(&matching[0].1).unwrap_or(selected);
     if target.is_empty()
         || target.contains(['\0', '\r', '\n', ':', '='])
-        || audio
+        || devices
             .iter()
-            .filter(|(_, alternate)| alternate.as_deref() == Some(target))
+            .filter(|(_, alternates)| alternates.iter().any(|alternate| alternate == target))
             .count()
             > 1
     {
         bail!("The selected DirectShow alternative name is ambiguous");
     }
     Ok(target.into())
+}
+
+/// The moniker to open a device by: its own `@device_pnp_` interface when it
+/// lists one, else the first it lists. A `@device_sw_` Frame Server proxy
+/// listed after the PnP moniker can fail to open with an I/O error while the
+/// device itself works; the last-listed name used to win.
+fn preferred_dshow_moniker(alternates: &[String]) -> Option<&str> {
+    alternates
+        .iter()
+        .find(|alternate| alternate.starts_with("@device_pnp_"))
+        .or_else(|| alternates.first())
+        .map(String::as_str)
 }
 fn quoted_name(line: &str) -> Option<String> {
     let first = line.find('"')?;
@@ -2536,6 +2557,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::identity_op)] // spells out the 200 ppm term, which rounds to zero
     fn pulse_capture_clock_stays_continuous_through_stalls_and_follows_drift() {
         // Under encode load the stamps jumped by more than 10 ms and the
         // worker stopped as "discontinuous". Adjacent capture instants must
@@ -2918,6 +2940,42 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A Logitech C920 behind the Windows Camera Frame Server, as FFmpeg lists
+    /// it: its PnP moniker, then a `@device_sw_` proxy that failed to open
+    /// with an I/O error. The PnP moniker is the one opened.
+    #[test]
+    fn dshow_device_with_several_monikers_opens_its_pnp_interface() {
+        let pnp = r"@device_pnp_\\?\usb#vid_046d&pid_0892&mi_00#6&2800b706&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+        let proxy = r"@device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}\{A3FCE0F5-3493-419F-958A-ABA1250EC20B}";
+        let inventory = format!(
+            r#"[in#0 @ 0000020120b34800] "Pixel 8 (Windows Virtual Camera)" (video)
+[in#0 @ 0000020120b34800]   Alternative name "@device_pnp_\\?\swd#vcamdevapi#2033cab0#{{65e8773d-8f56-11d0-a3b9-00a0c9223196}}\{{fcebba03-9d13-4c13-9940-cc84fcd132d1}}"
+[in#0 @ 0000020120b34800] "HD Pro Webcam C920" (video)
+[in#0 @ 0000020120b34800]   Alternative name "{pnp}"
+[in#0 @ 0000020120b34800]   Alternative name "{proxy}"
+[in#0 @ 0000020120b34800] "Microphone (HD Pro Webcam C920)" (audio)
+[in#0 @ 0000020120b34800]   Alternative name "@device_cm_{{33D9A762-90C8-11D0-BD43-00A0C911CE86}}\wave_{{3591E315-4041-4D55-B0EA-11C8E316F691}}""#
+        );
+        assert_eq!(
+            resolve_dshow_video_name(&inventory, "HD Pro Webcam C920").unwrap(),
+            pnp
+        );
+        assert_eq!(
+            resolve_dshow_name(&inventory, "Microphone (HD Pro Webcam C920)").unwrap(),
+            r"@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{3591E315-4041-4D55-B0EA-11C8E316F691}"
+        );
+        // Without a PnP moniker the first one listed is opened, not the last.
+        let no_pnp = "[dshow] \"Cam\" (video)\n[dshow] Alternative name \"@device_sw_first\"\n[dshow] Alternative name \"@device_sw_second\"\n";
+        assert_eq!(
+            resolve_dshow_video_name(no_pnp, "Cam").unwrap(),
+            "@device_sw_first"
+        );
+        // A moniker another device also lists is still refused.
+        let shared =
+            format!("{inventory}\n[dshow] \"Other\" (video)\n[dshow] Alternative name \"{pnp}\"\n");
+        assert!(resolve_dshow_video_name(&shared, "HD Pro Webcam C920").is_err());
     }
 
     #[test]

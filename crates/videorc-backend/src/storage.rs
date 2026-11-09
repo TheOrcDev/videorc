@@ -1624,6 +1624,8 @@ fn sync_directory(directory: &Path) -> Result<()> {
     // On Windows, publication uses filesystem APIs whose namespace updates are
     // durable with the file handle flush; std cannot open directories for
     // FlushFileBuffers portably.
+    #[cfg(not(unix))]
+    let _ = directory;
     Ok(())
 }
 
@@ -6671,6 +6673,13 @@ impl Database {
              ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
             params![key, serde_json::to_string(value)?, Utc::now().to_rfc3339()],
         )?;
+        Ok(())
+    }
+
+    /// Removes one app setting; a missing key is not an error.
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
         Ok(())
     }
 
@@ -12821,10 +12830,15 @@ mod tests {
                 .unwrap();
         }
 
-        database.conn.lock().unwrap().trace_v2(
-            TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(count_session_list_statement),
-        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_session_list_statement),
+            )
+            .unwrap();
         for limit in [1, 20, 200] {
             SESSION_LIST_TRACED_STATEMENTS.store(0, Ordering::Relaxed);
             let started = std::time::Instant::now();
@@ -12878,7 +12892,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                None::<fn(TraceEvent<'_>)>,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -13039,10 +13057,15 @@ mod tests {
         }
 
         SESSION_SIZE_WRITEBACK_STATEMENTS.store(0, Ordering::Relaxed);
-        database.conn.lock().unwrap().trace_v2(
-            TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(count_session_size_writeback_statement),
-        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_session_size_writeback_statement),
+            )
+            .unwrap();
         let page = database
             .list_session_items_page(None, fixtures.len())
             .unwrap();
@@ -13050,7 +13073,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            .trace_v2(
+                TraceEventCodes::SQLITE_TRACE_STMT,
+                None::<fn(TraceEvent<'_>)>,
+            )
+            .unwrap();
 
         let expected_total = fixtures
             .iter()

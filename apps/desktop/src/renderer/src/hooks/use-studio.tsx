@@ -2,6 +2,7 @@ import {
   cameraIsAvailable,
   cameraSelectionDiagnostics,
   cameraPreviewStartAllowed,
+  freshestPreviewCameraStatus,
   returningSourceChoices,
   sourceReturnAction
 } from '@/lib/source-return'
@@ -11,6 +12,7 @@ import {
   sameCameraLowFrameRate,
   type CameraLowFrameRate
 } from '@/lib/camera-frame-rate'
+import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
@@ -76,6 +78,7 @@ import {
   snapshotBackground,
   resolveSavedBackground,
   sameSceneAudio,
+  sameSceneBackground,
   sameSceneVisual,
   sceneAudio,
   sceneMicrophone,
@@ -196,7 +199,10 @@ import {
   COMMENTS_HIGHLIGHT_TIMING_CONTRACT,
   COMMENTS_SEND_TIMING_CONTRACT
 } from '../../../shared/comments-command-timing'
-import { nativePreviewStatusProvesSceneRevision } from '../../../shared/native-preview-scene-authority'
+import {
+  nativePreviewSceneProofWaitSettled,
+  nativePreviewStatusProvesSceneRevision
+} from '../../../shared/native-preview-scene-authority'
 import { compositorStatusFromFrameReady } from '../../../shared/compositor-frame-ready'
 import { rendererCompositorUpdateWasAccepted } from '../../../shared/native-preview-present-ownership'
 import type {
@@ -1144,7 +1150,7 @@ async function waitForNativePreviewSurfaceSceneRevision(
     } catch {
       return lastStatus
     }
-    if (nativePreviewStatusProvesSceneRevision(lastStatus, sceneRevision, platform)) {
+    if (nativePreviewSceneProofWaitSettled(lastStatus, sceneRevision, platform)) {
       return lastStatus
     }
     await sleep(NATIVE_PREVIEW_SCENE_FRAME_WAIT_INTERVAL_MS)
@@ -1590,6 +1596,8 @@ export type StudioContextValue = {
   /** Windows raw-path encoder choice; null until the backend answers. */
   encoderPreference: EncoderPreferenceState | null
   setEncoderPreference: (preference: WindowsH264EncoderPreference) => Promise<void>
+  /** Issue #1066: reads or saves a camera's low-light compensation. */
+  requestCameraLowLight: CameraLowLightRequest
   performanceCheckProgress: PerformanceCheckProgress | null
   runPerformanceCheck: () => Promise<void>
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
@@ -2704,6 +2712,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [replayBlockedReason, setReplayBlockedReasonState] = useState<string | null>(null)
   const replayBlockedReasonRef = useRef<string | null>(null)
   const replayStartInFlightRef = useRef(false)
+  // A source picked while the ring's own start was in flight: that start
+  // carried the old sources, so the ring restarts once it answers.
+  const replaySourcesMovedDuringStartRef = useRef<'visual' | 'audio' | null>(null)
+  const restartReplayForSourcesRef = useRef<(visualChanged: boolean) => void>(() => {})
+  // Scene loads for a screen or camera picked while the ring was armed: the
+  // ring waits for them, or its start would carry the old scene.
+  const replaySceneReloadsRef = useRef(0)
   const replayFailedStartsRef = useRef(0)
   // The backend refused the default ring because the scene's camera has no
   // frame yet; it starts again once the camera preview goes live.
@@ -4552,14 +4567,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }))
       return camera.id
     }
-    // An explicit source ID pins a display, e.g. one held static by a fixture.
+    // An explicit source ID pins a display, e.g. one held static by a fixture,
+    // on any platform (a Windows DXGI display too); without one, the first
+    // ScreenCaptureKit source.
     smokeWindow.__videorcSmokeSelectFirstScreen = (sourceId) => {
       const source = deviceList.devices.find(
         (device) =>
           (device.kind === 'screen' || device.kind === 'window') &&
           device.status === 'available' &&
-          device.id.includes('screencapturekit') &&
-          (!sourceId || device.id === sourceId)
+          (sourceId ? device.id === sourceId : device.id.includes('screencapturekit'))
       )
       if (!source || (source.kind !== 'screen' && source.kind !== 'window')) {
         return null
@@ -8704,7 +8720,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : {
                   state: 'warning' as const,
                   message:
-                    'X never produced playback for this broadcast. Viewers saw a loading spinner. Your local recording is unaffected.',
+                    'X ended your broadcast while Videorc was still streaming (usually no video reached X). Your local recording is unaffected.',
                   redactedUrl: event.shareUrl
                 }
         setCaptureConfig((current) => {
@@ -10064,11 +10080,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               (slot) =>
                 slot.assetId === background.assetId &&
                 slot.status === 'ready' &&
-                JSON.stringify(
-                  snapshotBackground(
-                    effectiveSceneBackground({ ...registry, activeSlotId: slot.id })
-                  )
-                ) === JSON.stringify(snapshotBackground(background))
+                // The backend's scene writes its keys in another order.
+                sameSceneBackground(
+                  effectiveSceneBackground({ ...registry, activeSlotId: slot.id }),
+                  background
+                )
             )?.id ?? null)
           : null
       // Plan 190: a committed live background is the registry's truth; a
@@ -11580,13 +11596,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     )
       return current
 
-    const status = await client.request<PreviewCameraStatus>('preview.camera.start', {
+    const reply = await client.request<PreviewCameraStatus>('preview.camera.start', {
       sources: captureConfig.sources,
       layout: captureConfig.layout,
       video: captureConfig.video
     })
     nativePreviewCameraKeyRef.current = key
-    applyPreviewCameraStatus(status)
+    const status = freshestPreviewCameraStatus(previewCameraStatusRef.current, reply)
+    if (status === reply) applyPreviewCameraStatus(status)
     if (status.state === 'permission-needed') {
       const permissionReport = window.videorc?.reportPreviewPermissionRequired?.(
         'camera-required',
@@ -14715,8 +14732,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : client.request<XPublishResult>('streamTargets.x.publish', {
                 accountId: target.accountId,
                 sourceId,
-                region,
-                isLowLatency: true,
                 sessionId
               })
           const publishedStreamingPromise = publishRequest.then((result) =>
@@ -14726,11 +14741,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               platformStreamId: result.mediaKey,
               status: {
                 state: 'live',
-                message: result.tweetError
-                  ? `X broadcast is live, but the announcement post failed: ${result.tweetError}`
-                  : `X broadcast is live: ${result.shareUrl}`,
-                redactedUrl: result.shareUrl,
-                ...(result.tweetError ? { lastError: result.tweetError } : {})
+                message: `X broadcast is live: ${result.shareUrl}`,
+                redactedUrl: result.shareUrl
               }
             })
           )
@@ -14761,11 +14773,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           xEndedBroadcastResultsRef.current.delete(publishedBroadcastEndKey)
           const publishedStatus: StreamTargetStatus = {
             state: 'live',
-            message: result.tweetError
-              ? `X broadcast is live, but the announcement post failed: ${result.tweetError}`
-              : `X broadcast is live: ${result.shareUrl}`,
-            redactedUrl: result.shareUrl,
-            ...(result.tweetError ? { lastError: result.tweetError } : {})
+            message: `X broadcast is live: ${result.shareUrl}`,
+            redactedUrl: result.shareUrl
           }
           if (sessionId && platformLifecycleOwnerRef.current?.sessionId === sessionId) {
             platformLifecycleOwnerRef.current = {
@@ -17183,6 +17192,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     replayStartInFlightRef.current = true
+    replaySourcesMovedDuringStartRef.current = null
+    let started = false
     try {
       const replay = await import('@/lib/replay-buffer')
       const status = await replay.startBufferOnlySession({
@@ -17196,6 +17207,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       replayBlockedReasonRef.current = null
       setReplayBlockedReasonState(null)
       applyRecordingStatus(status)
+      started = true
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if ((error as { code?: unknown } | null)?.code === REPLAY_SOFTWARE_ENCODER_REFUSAL) {
@@ -17246,6 +17258,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     } finally {
       replayStartInFlightRef.current = false
+      const moved = replaySourcesMovedDuringStartRef.current
+      replaySourcesMovedDuringStartRef.current = null
+      if (started && moved !== null) restartReplayForSourcesRef.current(moved === 'visual')
     }
   }, [
     applyRecordingStatus,
@@ -17287,6 +17302,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         replayStartInFlight:
           replayStartInFlightRef.current ||
           replayReconcileHoldRef.current ||
+          replaySceneReloadsRef.current > 0 ||
           performanceCheckHoldRef.current,
         failedStarts: replayFailedStartsRef.current,
         waitingForCamera: replayWaitingForCameraRef.current
@@ -17310,19 +17326,53 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // A source change while only the buffer-only session runs is an idle
   // change: stop the ring (it restarts empty) and re-arm with the new
   // sources, including the microphone Linux cannot swap mid-session.
-  const replaySources = [
+  const replayVisualSources = [
     captureConfig.sources.screenId,
     captureConfig.sources.windowId,
     captureConfig.sources.cameraId,
-    captureConfig.sources.microphoneId,
     captureConfig.sources.cameraOff === true ? 'camera-off' : '',
-    captureConfig.sources.captureOff === true ? 'capture-off' : '',
+    captureConfig.sources.captureOff === true ? 'capture-off' : ''
+  ].join('|')
+  const replaySources = [
+    replayVisualSources,
+    captureConfig.sources.microphoneId,
     captureConfig.sources.microphoneOff === true ? 'microphone-off' : ''
   ].join('|')
   const replaySourcesRef = useRef(replaySources)
+  const replayVisualSourcesRef = useRef(replayVisualSources)
+  const reloadSceneFromCaptureConfigRef = useRef(reloadSceneFromCaptureConfig)
+  reloadSceneFromCaptureConfigRef.current = reloadSceneFromCaptureConfig
+  // The ring held the session, so the idle scene reload skipped a screen or
+  // camera change, and the re-armed ring (150 ms) would overtake that reload
+  // (250 ms) and start on the old scene: the look never confirms and Save
+  // stays off. Stop the ring and load the scene first; the ring waits for
+  // the load. Between two sessions (stopRing false) there is no ring to stop,
+  // but its pending re-arm would overtake the reload the same way, and its
+  // session would cancel it.
+  const restartReplayForSources = useCallback(
+    (visualChanged: boolean, stopRing = true): void => {
+      if (visualChanged) replaySceneReloadsRef.current += 1
+      void (stopRing ? stopReplayBuffer() : Promise.resolve())
+        .then(async () => {
+          if (!visualChanged || isActiveRecordingState(recordingRef.current.state)) return
+          await reloadSceneFromCaptureConfigRef.current()
+        })
+        .catch((error) => {
+          if (!isActiveRecordingState(recordingRef.current.state)) reportError(error)
+        })
+        .finally(() => {
+          if (visualChanged) replaySceneReloadsRef.current -= 1
+          scheduleReplayReconcile()
+        })
+    },
+    [reportError, scheduleReplayReconcile, stopReplayBuffer]
+  )
+  restartReplayForSourcesRef.current = restartReplayForSources
   useEffect(() => {
     if (replaySourcesRef.current === replaySources) return
     replaySourcesRef.current = replaySources
+    const visualChanged = replayVisualSourcesRef.current !== replayVisualSources
+    replayVisualSourcesRef.current = replayVisualSources
     replayFailedStartsRef.current = 0
     replayWaitingForCameraRef.current = false
     rearmReplayAfterErrorRef.current()
@@ -17333,12 +17383,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           recordingState: recordingRef.current.state
         })
       ) {
-        void stopReplayBuffer().then(() => scheduleReplayReconcile())
+        restartReplayForSources(visualChanged)
+        return
+      }
+      if (replayStartInFlightRef.current) {
+        // The ring's own start is in flight with the old sources (and its
+        // idle reload skips the ring it starts): restart when it answers.
+        replaySourcesMovedDuringStartRef.current =
+          visualChanged || replaySourcesMovedDuringStartRef.current === 'visual'
+            ? 'visual'
+            : 'audio'
+      } else if (
+        visualChanged &&
+        replayArmedRef.current &&
+        !isActiveRecordingState(recordingRef.current.state)
+      ) {
+        restartReplayForSources(true, false)
         return
       }
       scheduleReplayReconcile()
     })
-  }, [replaySources, scheduleReplayReconcile, stopReplayBuffer])
+  }, [replaySources, replayVisualSources, restartReplayForSources, scheduleReplayReconcile])
   // Settings that shape the session restart a buffer-only ring: the Output
   // quality, the canvas orientation and a smoke's shorter ring (plan 199:
   // otherwise the ring is always the minute). A recording or livestream
@@ -17653,6 +17718,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (performanceCheckHoldRef.current) releasePerformanceCheckHold()
     }
   }, [client, commitPerformanceCheck, releasePerformanceCheckHold, wsStatus])
+
+  /**
+   * Issue #1066: reads (no `compensation`) or saves a camera's low-light
+   * compensation. The state and its retries live with the Sources camera row
+   * (`use-camera-low-light.ts`, in the lazy Sources chunk).
+   */
+  const requestCameraLowLight = useCallback<CameraLowLightRequest>(
+    ({ cameraId, compensation }) => {
+      if (!client) return Promise.reject(offlineError())
+      return compensation === undefined
+        ? client.requestTyped('camera.lowLight.get', { cameraId })
+        : client.requestTyped('camera.lowLight.set', { cameraId, compensation })
+    },
+    [client]
+  )
 
   // Plan 090 C5: which encoder the Windows fallback path may use. A change
   // invalidates both things measured under the old choice: the output check
@@ -18975,6 +19055,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
+      requestCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,
@@ -19225,6 +19306,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
+      requestCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,

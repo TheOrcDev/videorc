@@ -284,12 +284,16 @@ Mac, then owner acceptance: live to a private destination, open OBS with the
   not done (S3 is macOS-only).
 - Operational, no code: background agent builds on the streaming Mac can run
   under `taskpolicy -b` until S3 ships.
-- The session audio writer still gives up after 5 s (`WRITE_DEADLINE` in
+- The session audio writer gave up after 5 s (`WRITE_DEADLINE` in
   `session_audio.rs`). On ogre (2026-11-04), a 6 s FFmpeg `SIGSTOP` ended the
   audio transport 5.5 s in with no health event, so the stream carried `apad`
   silence for the rest of the session. With the replay ring on, FFmpeg then
   exited about 15 s later on the ring's audio (`[af#1:1]`, `-28` "No space
-  left on device", the disk not full) and took the stream with it.
+  left on device", the disk not full) and took the stream with it. Fixed
+  2026-11-06: a chunk now waits `OUTPUT_WEDGED_TIMEOUT` (30 s), as the video
+  writers do, and goes out as stale silence once FFmpeg reads again; a
+  filtergraph thread's ENOSPC no longer reports a full disk. Still open: no
+  health event when the audio transport does end mid-session.
 
 ## Evidence locations
 

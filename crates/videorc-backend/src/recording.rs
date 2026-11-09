@@ -1260,6 +1260,10 @@ pub(crate) struct FfmpegProgressBeacon {
     /// Set when Videorc itself sent TERM/KILL. The process monitor reads it so
     /// our own forced stop is never reported as an encoder or FFmpeg crash.
     stop_escalated: Arc<AtomicBool>,
+    /// Set when the Record handover claimed a buffer-only session for an end
+    /// without its flush (`claim_unflushed_handover`): Stop kills FFmpeg and
+    /// the monitor reads the exit as that stop, not as a failure.
+    unflushed_stop: Arc<AtomicBool>,
     first_fatal: Arc<StdMutex<Option<&'static str>>>,
     evidence: Arc<StdMutex<FfmpegEvidenceSnapshot>>,
 }
@@ -1314,6 +1318,14 @@ impl FfmpegProgressBeacon {
 
     fn stop_escalated(&self) -> bool {
         self.stop_escalated.load(Ordering::Acquire)
+    }
+
+    fn mark_unflushed_stop(&self) {
+        self.unflushed_stop.store(true, Ordering::Release);
+    }
+
+    fn unflushed_stop(&self) -> bool {
+        self.unflushed_stop.load(Ordering::Acquire)
     }
 }
 
@@ -1675,7 +1687,8 @@ async fn relay_ffmpeg_stderr_teed<R>(
 /// fails the session: the pipeline is marked failed at the muxer stage and the
 /// FFmpeg child is terminated, so `monitor_session` publishes the exact-session
 /// `Failed` terminal status (which the renderer already surfaces as a
-/// persistent recovery error).
+/// persistent recovery error). A session whose Stop was already requested
+/// only logs the missing proof: the stop path ended FFmpeg on purpose.
 fn spawn_ffmpeg_output_startup_watchdog(
     state: AppState,
     session_id: String,
@@ -1701,19 +1714,36 @@ fn spawn_ffmpeg_output_startup_watchdog(
             }
             Err(error) => {
                 let message = format!("{error:#}");
-                let still_active = {
+                let stop_requested = {
                     let mut recording = state.recording.lock().await;
                     match recording.as_mut() {
                         Some(active) if active.session_id == session_id => {
-                            active
-                                .pipeline
-                                .mark_failed(RecordingPipelineStage::Muxer, &message);
-                            true
+                            if !active.stop_requested {
+                                active
+                                    .pipeline
+                                    .mark_failed(RecordingPipelineStage::Muxer, &message);
+                            }
+                            active.stop_requested
                         }
-                        _ => false,
+                        _ => return,
                     }
                 };
-                if !still_active {
+                if stop_requested {
+                    // A Stop that lands before FFmpeg proved its output (a
+                    // Record hand-over of the buffer-only Clips session, or a
+                    // quick Stop) ends FFmpeg before its first output
+                    // progress. That is the requested stop, not a muxer
+                    // failure, and the stop path owns FFmpeg's exit.
+                    let _ = emit_session_log(
+                        &state,
+                        &session_id,
+                        HealthLevel::Info,
+                        "ffmpeg-output-startup-stopped",
+                        &format!(
+                            "Stop was requested before FFmpeg confirmed output media progress: {message}"
+                        ),
+                        None,
+                    );
                     return;
                 }
                 let _ = emit_health_event(
@@ -1750,15 +1780,19 @@ const fn compositor_consumer_arms_in_place(consumer: CompositorFrameConsumer) ->
 /// raw-YUV bridge is ready only once FFmpeg's reader has taken a complete first
 /// frame, so the same holds there; waiting for the first progress report cost
 /// a fixed ~510 ms of every Record (one 500 ms `-stats_period`, retest 151).
-/// For both the proof becomes a watchdog that fails the session if FFmpeg never
-/// reports progress. Windows keeps the synchronous proof: its raw-pipe and
-/// Media Foundation outputs can spend seconds on a software first frame.
+/// Windows Media Foundation (#1068) is ready only once its first access unit
+/// is in FFmpeg's FIFO (the CPU writer and the D3D11 writer alike), so a slow
+/// software first frame is already paid; waiting on top for the first progress
+/// report cost ~650 ms of every Windows Record.
+/// For all of them the proof becomes a watchdog that fails the session if
+/// FFmpeg never reports progress. Windows' raw pipe keeps the synchronous
+/// proof: it is ready before FFmpeg has read a frame.
 const fn defers_ffmpeg_output_startup_proof(output: EncoderBridgeVideoOutput) -> bool {
     match output {
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => true,
+        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => true,
         EncoderBridgeVideoOutput::RawYuv420p => cfg!(target_os = "linux"),
-        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => false,
     }
 }
 
@@ -2473,6 +2507,7 @@ pub struct ActiveRecording {
     /// it in place (instant-record P4.1). Released after bridge teardown so
     /// the preview returns to its own dimensions and fps.
     #[cfg_attr(target_os = "windows", allow(dead_code))]
+    // Windows releases it through the guard's Drop
     compositor_capture_lease: Option<CompositorCaptureLeaseGuard>,
     /// The compositor run this session started itself (the restart path:
     /// Linux, and macOS sessions that can't arm in place). Stopped by exact
@@ -2516,7 +2551,7 @@ impl CompositorCaptureLeaseGuard {
         }
     }
 
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg(not(target_os = "windows"))]
     async fn release(mut self) {
         self.released = true;
         let _ = release_compositor_capture_lease(&self.state, &self.session_id).await;
@@ -4226,6 +4261,10 @@ async fn start_session_with_timeline(
     ) {
         return Err(crate::replay_buffer::AutoStartSourcesNotReady.into());
     }
+    // #1068: a microphone the hand-over below carries is this start's until
+    // the microphone phase ends (or the start fails); then it closes.
+    let mut microphone_handover_window =
+        (!replay_only).then(|| MicrophoneHandoverWindow(state.microphone_handover.clone()));
     // Plan 181 S7: Record or Go Live while a buffer-only session runs hands
     // over here, so no caller meets "A capture session is already running"
     // because of the buffer. The new session carries its own ring.
@@ -4236,7 +4275,7 @@ async fn start_session_with_timeline(
         if replay_hand_over_pending(&state).await {
             refuse_invalid_request(&state, &params)?;
         }
-        hand_over_replay_only_session(&state).await?;
+        hand_over_replay_only_session(&state, params.sources.microphone_id.as_deref()).await?;
     }
     // Once armed at the Starting edge this guard owns the admission itself, so
     // every uncommitted return publishes the exact-session terminal replacement
@@ -4263,9 +4302,8 @@ async fn start_session_with_timeline(
     // admission instead of refusing outright.
     let cleanup_deadline = Instant::now() + MICROPHONE_CLEANUP_GRACE;
     loop {
-        let pending =
-            crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count())
-                && state.recording.lock().await.is_none();
+        let pending = crate::session_audio::cleanup_pending(standby_microphone_owners(&state))
+            && state.recording.lock().await.is_none();
         if !pending {
             break;
         }
@@ -4659,6 +4697,18 @@ async fn start_session_with_timeline(
         let path = native_audio_fifo_path(&session_id);
         let prepared = async {
             create_native_audio_fifo(&path)?;
+            // #1068: the Clips session's microphone, still running, when it
+            // is this device; otherwise open it.
+            if let Some(carried) = state.microphone_handover.take(&id) {
+                state.emit_log(
+                    "info",
+                    format!(
+                        "Microphone {} carried over from Clips; not reopened.",
+                        carried.device_name()
+                    ),
+                );
+                return Ok(carried);
+            }
             crate::session_audio::prepare_initial_adapter(id, ffmpeg_path.clone()).await
         }
         .await;
@@ -4746,6 +4796,8 @@ async fn start_session_with_timeline(
         }
     }
     timeline.mark(RecordingStartPhase::MicWarm);
+    // A carried microphone this session did not take closes now.
+    drop(microphone_handover_window.take());
     if let Some(prepared) = native_audio_source.as_ref() {
         startup_resources.track_fifo(&prepared.fifo_path);
     }
@@ -8282,6 +8334,7 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
     let output_path = active.output_path.clone();
     let session_id = active.session_id.clone();
     let wait_session_id = session_id.clone();
+    let unflushed_stop = active.replay_only && active.ffmpeg_progress.unflushed_stop();
     set_stop_timeline_session(&state, &session_id);
     let mut force_stop_now = false;
     let mut native_audio_silent_drain_started = false;
@@ -8531,6 +8584,12 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         let _ = stdin.shutdown().await;
     }
 
+    if unflushed_stop {
+        // The handover claimed this ring: its flush feeds a ring `retire`
+        // deletes, so end FFmpeg now. The fallback below stays armed in case
+        // the signal fails.
+        let _ = send_process_signal(pid, "KILL").await;
+    }
     if force_stop_now {
         state.emit_log("warn", "Stop requested again; sending SIGTERM to FFmpeg.");
         mark_ffmpeg_stop_escalated(&state, pid).await;
@@ -10958,6 +11017,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
     let mut ticker = tokio::time::interval(NATIVE_AUDIO_SAMPLE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut silent_mic_reported = false;
+    let mut audio_output_failure_reported = false;
     let mut microphone_generation = 0;
     let microphone_reopen_attempts = Arc::new(AtomicU32::new(0));
     loop {
@@ -10985,6 +11045,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             observation.output_stalls,
                             observation.silence_events,
                             observation.denoise_events,
+                            active.stop_requested,
                         )
                     })
                 }
@@ -11008,10 +11069,30 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             output_stalls,
             silence_events,
             denoise_events,
+            stop_requested,
         )) = counters
         else {
             return;
         };
+
+        // The bus gave up writing PCM because FFmpeg stopped reading it for
+        // its 5 s write deadline (2026-11-03 Iris Xe take: 2.8 s of
+        // microphone, then a silent take that reported nothing). It does not
+        // come back within this session, so say it once, as an error.
+        if audio_transport_failed_mid_session(input_state, stop_requested)
+            && !audio_output_failure_reported
+        {
+            audio_output_failure_reported = true;
+            let message = audio_output_failed_message(capture_elapsed_secs);
+            state.emit_log("error", &message);
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Error,
+                AUDIO_OUTPUT_FAILED_CODE,
+                &message,
+            );
+        }
 
         // Plan 069: a system-audio stream the platform stopped mid-session.
         // The bus already ramped it out; the session keeps its microphone.
@@ -11190,7 +11271,7 @@ fn emit_system_audio_echo_paused_health_event(
 
 fn system_audio_echo_paused_message(lag_ms: u32) -> String {
     format!(
-        "System audio is paused: your stream is playing on this Mac and came back {:.1} seconds later, so viewers heard it twice. Mute that tab, then turn System audio on again.",
+        "System audio is paused: your stream is playing on this computer and came back {:.1} seconds later, so viewers heard it twice. Mute that tab, then turn System audio on again.",
         f64::from(lag_ms) / 1_000.0
     )
 }
@@ -11243,9 +11324,30 @@ fn emit_microphone_noise_reduction_silenced_health_event(
 
 const AUDIO_OUTPUT_STALLED_CODE: &str = "audio-output-stalled";
 
+pub(crate) const AUDIO_OUTPUT_FAILED_CODE: &str = "audio-output-failed";
+
+/// The session audio bus ends with `DownstreamClosed` only when FFmpeg
+/// stopped taking its PCM and the session was not stopping; a stop marks it
+/// `Stopped` instead.
+fn audio_transport_failed_mid_session(
+    input_state: NativeAudioInputState,
+    stop_requested: bool,
+) -> bool {
+    input_state == NativeAudioInputState::DownstreamClosed && !stop_requested
+}
+
+fn audio_output_failed_message(elapsed_secs: Option<f64>) -> String {
+    let when = elapsed_secs
+        .map(|secs| format!(" after {secs:.1} seconds"))
+        .unwrap_or_default();
+    format!(
+        "Recording audio stopped{when}: the encoder stopped accepting sound because this computer could not keep up, so the rest of this take is silent. Stop and record again, at a lower resolution or with the Auto encoder in Settings."
+    )
+}
+
 fn audio_output_stalled_message(report: &crate::session_audio::OutputStallReport) -> String {
     format!(
-        "Videorc's output fell behind for {:.1} seconds while this Mac was busy, so {:.1} seconds of audio are silent. Every input kept working.",
+        "Videorc's output fell behind for {:.1} seconds while this computer was busy, so {:.1} seconds of audio are silent. Every input kept working.",
         report.duration_ms as f64 / 1_000.0,
         report.lost_ms as f64 / 1_000.0
     )
@@ -11832,6 +11934,7 @@ async fn monitor_session(
                     dropped_frames: observation.dropped_frames,
                     capture_session_peak: observation.capture_session_peak,
                     received_capture_frames: observation.received_capture_frames,
+                    recording_window_opened: observation.elapsed_secs.is_some(),
                     input_state: observation.input_state,
                     source_loss_after_ms: observation.source_loss_after_ms,
                     unreported_source_loss_after_ms: observation.losses,
@@ -11844,6 +11947,7 @@ async fn monitor_session(
             MonitoredRecording {
                 stop_intent_preceded_exit,
                 stop_escalated: active.ffmpeg_progress.stop_escalated(),
+                unflushed_stop: active.replay_only && active.ffmpeg_progress.unflushed_stop(),
                 recording_bridge_terminal_failure: active.recording_bridge_terminal_failure(),
                 stream_bridge_terminal_failure: active.stream_bridge_terminal_failure(),
                 ffmpeg_path: active.ffmpeg_path.clone(),
@@ -12352,6 +12456,34 @@ async fn monitor_session(
     let mut recording_file_gone =
         recording_file_gone_failure(monitored_recording.records_file, output_path.as_deref());
     let terminal_status = match status {
+        Ok(exit_status) if ends_unflushed_handover(&monitored_recording) => {
+            // Nothing was kept and nothing failed: the ring is already gone
+            // and the session that asked for the handover starts next.
+            monitored_recording.pipeline.mark_finished();
+            let _ = emit_session_log(
+                &state,
+                &session_id,
+                HealthLevel::Info,
+                "replay-buffer-handed-over",
+                &format!(
+                    "The Clips buffer ended without its flush for the session that follows ({exit_status})."
+                ),
+                None,
+            );
+            RecordingStatus {
+                state: RecordingState::Idle,
+                session_id: Some(session_id),
+                output_path: None,
+                stream_url: None,
+                started_at: None,
+                audio_tracks: Vec::new(),
+                pipeline: Some(monitored_recording.pipeline.status()),
+                duration_ms,
+                message: Some("Clips stopped for the next session.".to_string()),
+                replay_only: monitored_recording.replay_only,
+                accepts_live_scene_edits: None,
+            }
+        }
         Ok(_) if recording_file_gone.is_some() => {
             let (failed_stage, health_code, mut message) = recording_file_gone
                 .take()
@@ -13106,21 +13238,25 @@ fn settle_interrupted_take(
     Some(settled.to_string())
 }
 
-/// Health copy for a settled interrupted-take recovery.
+/// Health copy for a settled interrupted-take recovery. The same copy serves
+/// a take Videorc itself stopped in (recovered on the next start) and one
+/// whose recording failed while Videorc kept running (a full disk, a capture
+/// that died), so it says the recording ended early and never that Videorc
+/// stopped: the failed take's own error already says why.
 fn interrupted_take_recovery_message(recovered: bool, duration_ms: Option<i64>) -> String {
     if !recovered {
-        return "Videorc stopped during this recording and could not make an MP4 from it. \
+        return "This recording ended early, and Videorc could not make an MP4 from it. \
                 The MKV is kept in the recordings folder."
             .to_string();
     }
     match duration_ms.filter(|duration| *duration > 0) {
         Some(duration_ms) => format!(
-            "Recovered after Videorc stopped: {:.1} s saved as MP4, up to where the recording \
-             was interrupted. The original MKV is kept.",
+            "Recovered a recording that ended early: {:.1} s saved as MP4, up to where it \
+             ended. The original MKV is kept.",
             duration_ms as f64 / 1000.0
         ),
-        None => "Recovered after Videorc stopped: saved as MP4 up to where the recording was \
-                 interrupted. The original MKV is kept."
+        None => "Recovered a recording that ended early: saved as MP4 up to where it ended. \
+                 The original MKV is kept."
             .to_string(),
     }
 }
@@ -14714,6 +14850,10 @@ struct NativeAudioStats {
     dropped_frames: u64,
     capture_session_peak: f32,
     received_capture_frames: u64,
+    /// False when the session stopped before FFmpeg opened its audio input:
+    /// the bus never reached the recording window, so the microphone was
+    /// never asked for the take's audio.
+    recording_window_opened: bool,
     input_state: NativeAudioInputState,
     source_loss_after_ms: Option<u64>,
     unreported_source_loss_after_ms: Vec<crate::session_audio::SourceLoss>,
@@ -14729,7 +14869,10 @@ struct NativeAudioStats {
 
 impl NativeAudioStats {
     fn silence_verdict(&self) -> Option<SilentMicKind> {
-        if !self.selected_input || self.input_state == NativeAudioInputState::SourceLost {
+        if !self.selected_input
+            || !self.recording_window_opened
+            || self.input_state == NativeAudioInputState::SourceLost
+        {
             return None;
         }
         silent_mic_verdict(self.received_capture_frames, self.capture_session_peak)
@@ -14740,6 +14883,8 @@ impl NativeAudioStats {
 struct MonitoredRecording {
     stop_intent_preceded_exit: bool,
     stop_escalated: bool,
+    /// The Record handover ended this buffer-only session without its flush.
+    unflushed_stop: bool,
     recording_bridge_terminal_failure: Option<String>,
     stream_bridge_terminal_failure: Option<String>,
     ffmpeg_path: String,
@@ -14766,6 +14911,13 @@ impl MonitoredRecording {
             .tail
             .first_fatal_category
     }
+}
+
+/// A buffer-only session the Record handover ended without its flush, after
+/// its stop: whatever the exit status, that is the stop, not a failure.
+/// Without the stop intent first the exit stays FFmpeg's own.
+fn ends_unflushed_handover(monitored: &MonitoredRecording) -> bool {
+    monitored.replay_only && monitored.unflushed_stop && monitored.stop_intent_preceded_exit
 }
 
 fn should_finalize_recording_session(
@@ -21634,12 +21786,16 @@ fn replay_tee_failure_message(reason: &str) -> String {
 
 /// Appends the ring as one more output: the same audio mix the file gets,
 /// encoded to AAC, and a `-f segment` MPEG-TS ring (plan 181 S2).
+/// `session_codec` and `video_source` are the session's primary output's,
+/// so the ring takes the same `-shortest` bound decision as that output.
 fn append_replay_segment_output(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
     video: ReplayVideoCodec,
     replay: &ReplayOutput,
+    session_codec: OutputAudioCodec,
+    video_source: OutputVideoSource,
 ) {
     match video {
         ReplayVideoCodec::Copy { video_output, fps } => {
@@ -21673,6 +21829,7 @@ fn append_replay_segment_output(
     ));
     // The ring ends with the video, like every bridge output.
     args.push("-shortest".to_string());
+    append_live_pcm_shortest_bound(args, input_layout, session_codec, video_source);
     args.extend(crate::replay_buffer::segment_muxer_args(
         &replay.dir,
         replay.seconds,
@@ -21710,7 +21867,39 @@ fn refuse_invalid_request(state: &AppState, params: &StartSessionParams) -> Resu
     Ok(())
 }
 
-async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
+/// #1068: whether a Clips hand-over carries its live microphone to the session
+/// that replaces it. Windows only for now: its capture-worker open is the
+/// ~1 s this saves. macOS keeps its warm standby microphone, and Linux's
+/// worker path needs a run on the named Linux box before it changes.
+const fn carries_microphone_across_handover() -> bool {
+    cfg!(target_os = "windows")
+}
+
+/// Microphones held open for a session that has not started yet: the warm
+/// standby and a microphone carried across a Clips hand-over (#1068). Neither
+/// is a cleanup still in flight.
+fn standby_microphone_owners(state: &AppState) -> u64 {
+    state.warm_microphone.owned_producer_count() + state.microphone_handover.owned_producer_count()
+}
+
+/// Closes the #1068 hand-over window when the session start that opened it
+/// ends, on every path: a microphone nobody took closes with it.
+struct MicrophoneHandoverWindow(Arc<crate::session_audio::MicrophoneHandover>);
+impl Drop for MicrophoneHandoverWindow {
+    fn drop(&mut self) {
+        if self.0.close() {
+            tracing::info!("A carried microphone was not used by the new session; closed it.");
+        }
+    }
+}
+
+/// `carry_microphone`: the microphone id the next session opens. When the
+/// buffer-only session's bus has that device live, it hands it over instead
+/// of closing it (#1068); the caller holds a [`MicrophoneHandoverWindow`].
+async fn hand_over_replay_only_session(
+    state: &AppState,
+    carry_microphone: Option<&str>,
+) -> Result<()> {
     // The ring re-arms right after every Stop (redesign R2), so the next
     // press can land while that buffer-only start is still between admission
     // and its running session. Wait for it (bounded) and hand over from the
@@ -21749,6 +21938,22 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
     tracing::info!("Replay buffer session {session_id} hands over to a new session.");
+    if let Some(device_id) = carry_microphone.filter(|_| carries_microphone_across_handover()) {
+        let recording = state.recording.lock().await;
+        let offered = recording
+            .as_ref()
+            .filter(|active| active.session_id == session_id && !active.stop_requested)
+            .and_then(|active| active.native_audio.as_ref())
+            .is_some_and(|audio| {
+                audio.offer_microphone_handover(&state.microphone_handover, device_id)
+            });
+        if offered {
+            tracing::info!(
+                "Replay buffer session {session_id} keeps its microphone open for the new session."
+            );
+        }
+    }
+    claim_unflushed_handover(state, &session_id).await;
     let status = stop_recording_with_intent(state.clone(), SessionStopParams::default())
         .await
         .context("Could not stop the replay buffer before starting the session")?;
@@ -21758,8 +21963,9 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
     let deadline = Instant::now() + REPLAY_HANDOVER_CLEANUP_TIMEOUT;
     loop {
         let slot_free = state.recording.lock().await.is_none();
+        // A carried microphone is parked, not closing: it counts as standby.
         let audio_settled =
-            !crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count());
+            !crate::session_audio::cleanup_pending(standby_microphone_owners(state));
         if slot_free && audio_settled {
             return Ok(());
         }
@@ -21768,6 +21974,25 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+/// Marks the buffer-only session for an end without its flush when its ring
+/// allows one (`replay_buffer::claim_unflushed_retire`: no clip save runs or
+/// waits). The stop that follows then kills FFmpeg instead of waiting the
+/// 250 to 300 ms a Linux VAAPI flush takes, since `retire` deletes the ring
+/// the moment FFmpeg exits. A save in flight keeps the flushed stop.
+async fn claim_unflushed_handover(state: &AppState, session_id: &str) -> bool {
+    let recording = state.recording.lock().await;
+    let Some(active) = recording.as_ref().filter(|active| {
+        active.session_id == session_id && active.replay_only && !active.stop_requested
+    }) else {
+        return false;
+    };
+    if !crate::replay_buffer::claim_unflushed_retire(state, session_id) {
+        return false;
+    }
+    active.ffmpeg_progress.mark_unflushed_stop();
+    true
 }
 
 /// Plan 181: a buffer-only session writes nothing permanent, so it blocks no
@@ -21782,7 +22007,7 @@ pub(crate) async fn admit_interruption_over_replay_buffer(
 ) -> std::result::Result<crate::capture_interruption::InterruptionLeaseGrant, String> {
     let mut attempt = 1;
     loop {
-        hand_over_replay_only_session(state)
+        hand_over_replay_only_session(state, None)
             .await
             .map_err(|error| format!("{error:#}"))?;
         match state
@@ -22037,7 +22262,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
             &input_layout,
             &params.audio,
             OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
-            true,
+            OutputVideoSource::for_bridge(video_output),
         );
     }
 
@@ -22152,7 +22377,15 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 }
             }
         };
-        append_replay_segment_output(&mut args, &input_layout, &params.audio, video, replay);
+        append_replay_segment_output(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            video,
+            replay,
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
+            OutputVideoSource::for_bridge(video_output),
+        );
     }
 
     Ok(args)
@@ -22284,7 +22517,7 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
             &input_layout,
             &params.audio,
             OutputAudioCodec::StreamAac,
-            true,
+            OutputVideoSource::EncodedBridge,
         );
         args.push(ffmpeg_file_path(output_path));
     }
@@ -22300,6 +22533,8 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
                 fps: params.output.video.fps,
             },
             replay,
+            OutputAudioCodec::StreamAac,
+            OutputVideoSource::EncodedBridge,
         );
     }
 
@@ -22700,7 +22935,13 @@ fn append_bridge_copy_output_args(
     ) {
         append_media_foundation_h264_copy_metadata_args(args, fps);
     }
-    append_audio_encoding_with_video_clock(args, input_layout, audio, audio_codec, true);
+    append_audio_encoding_with_video_clock(
+        args,
+        input_layout,
+        audio,
+        audio_codec,
+        OutputVideoSource::EncodedBridge,
+    );
 }
 
 /// Output metadata for a stream copy of the Media Foundation MPEG-TS FIFO.
@@ -22955,7 +23196,7 @@ fn ffmpeg_args_with_encoder_and_replay(
             &input_layout,
             &params.audio,
             OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
-            false,
+            OutputVideoSource::Legacy,
         );
     }
 
@@ -23020,6 +23261,8 @@ fn ffmpeg_args_with_encoder_and_replay(
                 encoder_args,
             },
             replay,
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
+            OutputVideoSource::Legacy,
         );
     }
 
@@ -23525,6 +23768,37 @@ fn append_audio_encoding_args(
     args.extend(codec.encoder_args().iter().map(|arg| arg.to_string()));
 }
 
+/// Where an output's video comes from, for its `-shortest` policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputVideoSource {
+    /// The legacy composed graph: FFmpeg captures and encodes the video.
+    Legacy,
+    /// The encoder bridge's raw frames (Linux, and Windows' software and QSV
+    /// fallback): FFmpeg stamps them on arrival and encodes them.
+    RawBridge,
+    /// An encoded bridge (VideoToolbox, Media Foundation): FFmpeg copies it.
+    EncodedBridge,
+}
+
+impl OutputVideoSource {
+    fn for_bridge(video_output: EncoderBridgeVideoOutput) -> Self {
+        match video_output {
+            EncoderBridgeVideoOutput::RawYuv420p => Self::RawBridge,
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => Self::EncodedBridge,
+        }
+    }
+
+    fn is_bridge(self) -> bool {
+        self != Self::Legacy
+    }
+}
+
+/// The `-shortest` sync queue bound for dense live A/V outputs. FFmpeg's
+/// default is 10 s.
+const LIVE_PCM_SHORTEST_BUF_DURATION: &str = "0.25";
+
 /// Applies audio encoding and its duration contract as one inseparable output
 /// policy. Microphone inputs are padded after their existing processing, so a
 /// microphone output must use video EOF as its authoritative clock. Encoder-
@@ -23537,29 +23811,59 @@ fn append_audio_encoding_with_video_clock(
     input_layout: &InputLayout,
     audio: &AudioSettings,
     codec: OutputAudioCodec,
-    preserve_bridge_shortest: bool,
+    video_source: OutputVideoSource,
 ) {
     append_audio_encoding_args(args, input_layout, audio, codec);
-    let microphone_is_padded = input_layout
+    if video_source.is_bridge() || microphone_is_padded(input_layout) {
+        args.push("-shortest".to_string());
+        append_live_pcm_shortest_bound(args, input_layout, codec, video_source);
+    }
+}
+
+fn microphone_is_padded(input_layout: &InputLayout) -> bool {
+    input_layout
         .audio_inputs
         .iter()
-        .any(|input| input.track.source == AudioTrackSource::Microphone);
-    if preserve_bridge_shortest || microphone_is_padded {
-        args.push("-shortest".to_string());
-        if !codec.is_streaming()
-            && (input_layout.microphone_is_linux_pulse
-                || (microphone_is_padded && !preserve_bridge_shortest))
-        {
-            // Live PCM can stall FFmpeg's pre-encode sync queue after the first
-            // audio packets: both Pulse/raw bridge inputs and legacy capture
-            // with padded microphone audio reproduce it. The default 10-second
-            // window can retain an entire short recording. Bound these dense
-            // live A/V queues to 250 ms so the overflow heartbeat advances the
-            // lagging stream, retaining PCM, apad and video-owned EOF. Encoded
-            // bridges and stream outputs keep their existing synchronization;
-            // a record-only take keeps the bound whether it writes PCM or AAC.
-            args.extend(["-shortest_buf_duration".to_string(), "0.25".to_string()]);
-        }
+        .any(|input| input.track.source == AudioTrackSource::Microphone)
+}
+
+/// Appends `-shortest_buf_duration` after an output's `-shortest` when its
+/// live A/V needs the bound. FFmpeg applies the option per output, so every
+/// `-shortest` output of a session (its file or stream, and its replay ring)
+/// takes this one decision; one unbounded output can still stall them all,
+/// because the scheduler chokes inputs for every output at once.
+fn append_live_pcm_shortest_bound(
+    args: &mut Vec<String>,
+    input_layout: &InputLayout,
+    codec: OutputAudioCodec,
+    video_source: OutputVideoSource,
+) {
+    let microphone_is_padded = microphone_is_padded(input_layout);
+    // Live PCM can stall FFmpeg's pre-encode sync queue after the first
+    // audio packets: both Pulse/raw bridge inputs and legacy capture with
+    // padded microphone audio reproduce it. The default 10-second window
+    // can retain an entire short recording. Bound these dense live A/V
+    // queues to 250 ms so the overflow heartbeat advances the lagging
+    // stream, retaining PCM, apad and video-owned EOF. A record-only take
+    // keeps the bound whether it writes PCM or AAC.
+    let bounded_record = !codec.is_streaming()
+        && (input_layout.microphone_is_linux_pulse
+            || (microphone_is_padded && video_source == OutputVideoSource::Legacy));
+    // The raw bridge needs it on stream outputs too (#1166). When its first
+    // encoded video packet reaches the muxer before audio's first AAC
+    // packet (AAC needs two frames), FFmpeg's scheduler chokes every input
+    // whose output already has a packet: video stops, while the sync queue
+    // holds audio until video advances. Nothing moves until the queue
+    // overflows, so the first output froze for the whole 10 s window
+    // (CI run 41878076547, pass 3). Encoded bridges keep their existing
+    // synchronization: FFmpeg encodes no video there.
+    let raw_bridge_live_audio =
+        microphone_is_padded && video_source == OutputVideoSource::RawBridge;
+    if bounded_record || raw_bridge_live_audio {
+        args.extend([
+            "-shortest_buf_duration".to_string(),
+            LIVE_PCM_SHORTEST_BUF_DURATION.to_string(),
+        ]);
     }
 }
 
@@ -24165,7 +24469,7 @@ fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
         || line.contains("could not open encoder")
     {
         Some("encoder-open-failed")
-    } else if line.contains("no space left on device")
+    } else if (line.contains("no space left on device") && !ffmpeg_filter_thread_line(&line))
         // Windows ERROR_DISK_FULL / ERROR_HANDLE_DISK_FULL.
         || line.contains("not enough space on the disk")
         || line.contains("disk is full")
@@ -24178,6 +24482,18 @@ fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// FFmpeg also returns ENOSPC ("No space left on device") for a full
+/// in-memory frame queue. A filtergraph thread (`[af#…]`, `[vf#…]`, `[fc#…]`)
+/// never writes the file, so its ENOSPC is not a full disk: on ogre
+/// (2026-11-06) `apad` filled the `-shortest` queue after the session audio
+/// input ended, and the session told the streamer the recordings folder was
+/// full though no write had failed. A full disk fails in the muxer.
+fn ffmpeg_filter_thread_line(lowercase_line: &str) -> bool {
+    ["[af#", "[vf#", "[fc#"]
+        .iter()
+        .any(|context| lowercase_line.contains(context))
 }
 
 fn audio_output_channels(input_layout: &InputLayout) -> u16 {
@@ -27662,6 +27978,157 @@ pub(crate) fn publish_stream_output_failure_if_active(
     );
 }
 
+pub(crate) const RECORDING_OUTPUT_FAILED_CODE: &str = "recording-output-failed";
+
+/// What a running session does when its recording writer has died.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingOutputFailureAction {
+    /// Not this session's business: stopping already, a performance check
+    /// (which owns its own stop), a Clips-only ring, or no terminal failure.
+    Ignore,
+    /// A separate, healthy stream leg is live: say the recording died and
+    /// keep the stream on air.
+    AnnounceKeepStreaming,
+    /// Nothing else is being produced: say so and end the take, so the file
+    /// up to the failure is recovered instead of the session recording
+    /// nothing until the user presses Stop.
+    EndTake,
+}
+
+fn recording_output_failure_action(
+    stop_requested: bool,
+    performance_check: bool,
+    replay_only: bool,
+    recording_terminal_failure: bool,
+    healthy_stream_leg: bool,
+) -> RecordingOutputFailureAction {
+    if stop_requested || performance_check || replay_only || !recording_terminal_failure {
+        RecordingOutputFailureAction::Ignore
+    } else if healthy_stream_leg {
+        RecordingOutputFailureAction::AnnounceKeepStreaming
+    } else {
+        RecordingOutputFailureAction::EndTake
+    }
+}
+
+fn recording_output_failed_message(error: &str, ending_take: bool) -> String {
+    if ending_take {
+        format!(
+            "Recording stopped: the video encoder stopped accepting frames ({error}), so Videorc ended the take. The recording up to this point is being saved. This computer could not keep up with the selected output; try a lower resolution or the Auto encoder in Settings."
+        )
+    } else {
+        format!(
+            "Recording stopped: the video encoder stopped accepting frames ({error}). Your stream is still live; the recording up to this point will be saved when you stop."
+        )
+    }
+}
+
+/// A stream that rides the recording's encode (always on Linux, plan 0016)
+/// goes off the air when that shared writer dies, and the take ends with it.
+fn shared_stream_output_failed_message(error: &str) -> String {
+    format!(
+        "Streaming stopped: the video encoder your stream shares with the recording stopped accepting frames ({error}). Videorc ended the take; the recording up to this point is being saved."
+    )
+}
+
+/// The session whose dead recording output was already announced.
+static RECORDING_OUTPUT_FAILURE_ANNOUNCED: StdMutex<Option<String>> = StdMutex::new(None);
+
+fn announce_recording_output_failure_once(session_id: &str) -> bool {
+    let mut announced = RECORDING_OUTPUT_FAILURE_ANNOUNCED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if announced.as_deref() == Some(session_id) {
+        return false;
+    }
+    *announced = Some(session_id.to_string());
+    true
+}
+
+/// The recording leg's writer gave up mid-take (2026-11-03 Iris Xe bundle:
+/// "Encoder FIFO write exceeded the complete-frame delivery budget" at
+/// 1:35). Until now nothing reacted: the session kept "recording" with no
+/// video for 47 s, then Stop waited 18 s on FFmpeg and forced it. Announce
+/// it when it happens, and end the take unless a healthy stream is on air.
+///
+/// `shared_with_stream` is a writer that also feeds the stream (always on
+/// Linux, plan 0016). On 2026-11-07 a 40 s FFmpeg freeze on Ogre killed it at
+/// 10 s and the session kept showing live with no warning for 30 s, then
+/// reported only the bridge failure once FFmpeg woke. Its stream is gone with
+/// the recording, so the stream's own event says so too.
+pub(crate) fn handle_recording_output_failure_if_active(
+    state: &AppState,
+    session_id: &str,
+    shared_with_stream: bool,
+) {
+    let (action, failure) = {
+        let Ok(recording) = state.recording.try_lock() else {
+            return;
+        };
+        let Some(active) = recording
+            .as_ref()
+            .filter(|active| active.session_id == session_id)
+        else {
+            return;
+        };
+        let failure = active.recording_bridge_terminal_failure();
+        let healthy_stream_leg = active.encoder_bridge_stream.is_some()
+            && active.stream_bridge_terminal_failure().is_none();
+        (
+            recording_output_failure_action(
+                active.stop_requested,
+                active.performance_check,
+                active.replay_only,
+                failure.is_some(),
+                healthy_stream_leg,
+            ),
+            failure,
+        )
+    };
+    let Some(failure) = failure else {
+        return;
+    };
+    if action == RecordingOutputFailureAction::Ignore
+        || !announce_recording_output_failure_once(session_id)
+    {
+        return;
+    }
+    let ending_take = action == RecordingOutputFailureAction::EndTake;
+    tracing::error!(
+        session_id,
+        failure = failure.as_str(),
+        ending_take,
+        shared_with_stream,
+        "recording output stopped mid-session"
+    );
+    if shared_with_stream && announce_stream_output_failure_once(session_id) {
+        let _ = emit_health_event(
+            state,
+            Some(session_id),
+            HealthLevel::Error,
+            STREAM_OUTPUT_FAILED_CODE,
+            &shared_stream_output_failed_message(&failure),
+        );
+    }
+    let message = recording_output_failed_message(&failure, ending_take);
+    state.emit_log("error", &message);
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Error,
+        RECORDING_OUTPUT_FAILED_CODE,
+        &message,
+    );
+    if ending_take {
+        let stop_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = stop_recording(stop_state).await {
+                tracing::warn!("Ending the take after a dead recording output failed: {error:#}");
+            }
+        });
+    }
+}
+
 async fn publish_ffmpeg_health_event_if_active(state: &AppState, session_id: &str, message: &str) {
     // The stderr consumer has a bounded abort join. Keep its final persistent
     // health write and broadcast behind exact-session ownership in case an
@@ -28762,6 +29229,38 @@ mod tests {
     use crate::capture_input::AVFOUNDATION_VIDEO_PIXEL_FORMAT;
 
     #[test]
+    fn a_media_foundation_stop_drain_ends_well_inside_the_stop_fallback() {
+        // #1074: FFmpeg's EOF waits on the writer's final drain. A drain that
+        // outlasts STOP_TERM_DELAY gets FFmpeg TERMed and the take kept as
+        // recovery media; leave FFmpeg at least as long again to finalize.
+        assert!(
+            crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT * 2 <= STOP_TERM_DELAY,
+            "stop drain {:?} must leave FFmpeg time inside {:?}",
+            crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT,
+            STOP_TERM_DELAY
+        );
+    }
+
+    #[test]
+    fn audio_output_stalled_message_names_no_platform() {
+        // #1175: the warning reached Windows testers as "this Mac was busy".
+        let message = audio_output_stalled_message(&crate::session_audio::OutputStallReport {
+            duration_ms: 3_600,
+            max_lag_ms: 3_600,
+            lost_ms: 3_500,
+        });
+        assert_eq!(
+            message,
+            "Videorc's output fell behind for 3.6 seconds while this computer was busy, so 3.5 seconds of audio are silent. Every input kept working."
+        );
+        assert!(!message.contains("Mac"));
+        // The echo guard runs on Windows and Linux system audio too.
+        let echo = system_audio_echo_paused_message(3_200);
+        assert!(echo.contains("playing on this computer and came back 3.2 seconds later"));
+        assert!(!echo.contains("Mac"));
+    }
+
+    #[test]
     fn audio_levels_event_skips_empty_windows_and_carries_the_session() {
         assert_eq!(
             audio_levels_event("session-1", crate::session_audio::BusLevels::default()),
@@ -28981,6 +29480,7 @@ mod tests {
             dropped_frames: 0,
             capture_session_peak: 0.0,
             received_capture_frames: 0,
+            recording_window_opened: true,
             input_state: NativeAudioInputState::Stopped,
             source_loss_after_ms: None,
             unreported_source_loss_after_ms: vec![],
@@ -28991,6 +29491,11 @@ mod tests {
         };
         assert_eq!(stats.silence_verdict(), None);
         stats.selected_input = true;
+        // A Stop before FFmpeg opened its audio input never asked the
+        // microphone for the take: no verdict on it.
+        stats.recording_window_opened = false;
+        assert_eq!(stats.silence_verdict(), None);
+        stats.recording_window_opened = true;
         assert_eq!(stats.silence_verdict(), Some(SilentMicKind::NoFrames));
         stats.received_capture_frames = 480;
         assert_eq!(stats.silence_verdict(), Some(SilentMicKind::AllSilence));
@@ -30155,14 +30660,11 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
 
-        let wrote_frame = write_screen_overlay_frame_until(
-            &mut writer,
-            &frame,
-            &stop,
-            Duration::from_millis(50),
-            Duration::from_millis(100),
-        )
-        .expect("temporary full-pipe pressure must not terminate the overlay writer");
+        // The production budgets: the hard deadline also covers copying the
+        // 16 MiB frame into fresh memory, which a loaded CI runner can stretch
+        // past a 100 ms test budget.
+        let wrote_frame = write_screen_overlay_frame(&mut writer, &frame, &stop)
+            .expect("temporary full-pipe pressure must not terminate the overlay writer");
 
         assert!(wrote_frame);
         assert!(writer.pressure_reported);
@@ -33292,6 +33794,54 @@ mod tests {
         assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
     }
 
+    /// Plan 181 S7: Record claims an idle buffer-only session for an end
+    /// without its flush, which tells the stop that follows to kill FFmpeg and
+    /// the monitor to read that exit as the stop. A session already stopping,
+    /// a recording that carries a ring, or a ring a clip save still reads
+    /// keeps the flushed stop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_handover_claims_only_an_idle_buffer_only_session_unflushed() {
+        let state = test_state();
+        let recordings =
+            std::env::temp_dir().join(format!("videorc-handover-claim-test-{}", Uuid::new_v4()));
+        let params = crate::replay_buffer::replay_only_test_params();
+        for (session_id, replay_only, stop_requested, saving, claimed) in [
+            ("handover-idle", true, false, false, true),
+            ("handover-stopping", true, true, false, false),
+            ("handover-recording", false, false, false, false),
+            ("handover-saving", true, false, true, false),
+        ] {
+            let _ring = crate::replay_buffer::prepare(
+                &state,
+                crate::replay_buffer::RingRequest {
+                    session_id,
+                    params: &params,
+                    replay_only,
+                    recordings_dir: &recordings,
+                    ffmpeg_path: "ffmpeg",
+                },
+            )
+            .unwrap();
+            if saving {
+                crate::replay_buffer::mark_save_in_progress_for_test(&state);
+            }
+            let mut active = test_active_recording_stub(session_id);
+            active.replay_only = replay_only;
+            active.stop_requested = stop_requested;
+            let beacon = active.ffmpeg_progress.clone();
+            *state.recording.lock().await = Some(active);
+
+            assert_eq!(
+                claim_unflushed_handover(&state, session_id).await,
+                claimed,
+                "{session_id}"
+            );
+            assert_eq!(beacon.unflushed_stop(), claimed, "{session_id}");
+            state.recording.lock().await.take();
+        }
+        assert!(!claim_unflushed_handover(&state, "handover-none").await);
+    }
+
     #[tokio::test]
     async fn a_refused_request_is_refused_before_the_clip_buffer_hands_over() {
         // Retest 152: separate files refused on Linux, but only after Record
@@ -35166,10 +35716,34 @@ mod tests {
     fn interrupted_take_recovery_copy_states_the_saved_length() {
         assert_eq!(
             interrupted_take_recovery_message(true, Some(41_666)),
-            "Recovered after Videorc stopped: 41.7 s saved as MP4, up to where the recording was interrupted. The original MKV is kept."
+            "Recovered a recording that ended early: 41.7 s saved as MP4, up to where it ended. The original MKV is kept."
         );
-        assert!(interrupted_take_recovery_message(true, None).starts_with("Recovered after"));
-        assert!(interrupted_take_recovery_message(false, Some(1)).contains("MKV is kept"));
+        assert_eq!(
+            interrupted_take_recovery_message(true, None),
+            "Recovered a recording that ended early: saved as MP4 up to where it ended. The original MKV is kept."
+        );
+        assert_eq!(
+            interrupted_take_recovery_message(false, Some(1)),
+            "This recording ended early, and Videorc could not make an MP4 from it. The MKV is kept in the recordings folder."
+        );
+    }
+
+    /// A take whose recording failed while Videorc kept running (a full disk
+    /// stop) is recovered the moment it fails. Its recovery copy must not
+    /// read like a crash: Videorc never stopped, and the take's own error
+    /// already said why it ended.
+    #[test]
+    fn interrupted_take_recovery_copy_never_says_videorc_stopped() {
+        for recovered in [true, false] {
+            for duration_ms in [None, Some(0), Some(85_000)] {
+                let message = interrupted_take_recovery_message(recovered, duration_ms);
+                assert!(
+                    !message.contains("Videorc stopped"),
+                    "{recovered} {duration_ms:?}: {message}"
+                );
+                assert!(message.contains("ended early"), "{message}");
+            }
+        }
     }
 
     /// A power-loss capture: a live (headerless-size) Matroska file cut
@@ -35355,7 +35929,7 @@ mod tests {
             finisher.capture_interruption.capture_finished();
         });
         let waited_from = Instant::now();
-        hand_over_replay_only_session(&state)
+        hand_over_replay_only_session(&state, None)
             .await
             .expect("the hand-over waits for the terminal edge");
         assert!(waited_from.elapsed() >= Duration::from_millis(150));
@@ -35364,7 +35938,7 @@ mod tests {
 
         // Nothing finishing and nothing starting: no wait at all.
         let waited_from = Instant::now();
-        hand_over_replay_only_session(&state)
+        hand_over_replay_only_session(&state, None)
             .await
             .expect("idle hand-over");
         assert!(waited_from.elapsed() < Duration::from_millis(100));
@@ -38339,22 +38913,20 @@ mod tests {
     }
 
     #[test]
-    fn live_pulse_pcm_recording_bounds_shortest_buffer_below_startup_deadline() {
-        for (microphone, pulse) in [
-            (
-                Some(MicrophoneInput::LinuxPulse {
-                    source_name: "test-pulse-source".into(),
-                }),
-                true,
-            ),
-            (
-                Some(MicrophoneInput::WindowsDshow {
-                    device_name: "test-directshow-source".into(),
-                }),
-                false,
-            ),
-            (None, false),
+    fn raw_bridge_live_microphone_bounds_shortest_buffer_below_startup_deadline() {
+        for microphone in [
+            Some(MicrophoneInput::LinuxPulse {
+                source_name: "test-pulse-source".into(),
+            }),
+            Some(MicrophoneInput::WindowsDshow {
+                device_name: "test-directshow-source".into(),
+            }),
+            Some(MicrophoneInput::SessionPcm {
+                fifo_path: PathBuf::from("/tmp/test-session-pcm.f32le"),
+            }),
+            None,
         ] {
+            let microphone_is_live = microphone.is_some();
             let capture = CaptureInputs {
                 video: VideoInput::TestPattern,
                 camera_index: None,
@@ -38375,11 +38947,13 @@ mod tests {
                     &layout,
                     &params.audio,
                     OutputAudioCodec::for_session(&params, streaming),
-                    true,
+                    OutputVideoSource::RawBridge,
                 );
 
                 let bound = arg_value(&args, "-shortest_buf_duration");
-                if pulse && !streaming {
+                // Every live microphone on the raw bridge, recorded or
+                // streamed (#1166); the synthetic tone keeps the 10 s default.
+                if microphone_is_live {
                     let seconds: f64 = bound
                         .expect("live PCM needs a bounded queue")
                         .parse()
@@ -38394,10 +38968,7 @@ mod tests {
                     let last_input = args.iter().rposition(|arg| arg == "-i").unwrap();
                     assert!(bound_index > last_input, "the bound belongs to the output");
                 } else {
-                    assert_eq!(
-                        bound, None,
-                        "other device paths and AAC retain their policy"
-                    );
+                    assert_eq!(bound, None, "the synthetic tone retains its policy");
                 }
                 assert!(args.iter().any(|arg| arg == "-shortest"));
             }
@@ -38494,19 +39065,30 @@ mod tests {
             OutputAudioCodec::StreamAac,
         ] {
             let streaming = codec.is_streaming();
-            for bridge in [false, true] {
+            for source in [
+                OutputVideoSource::Legacy,
+                OutputVideoSource::RawBridge,
+                OutputVideoSource::EncodedBridge,
+            ] {
                 let mut args = Vec::new();
                 append_audio_encoding_with_video_clock(
                     &mut args,
                     &layout,
                     &AudioSettings::default(),
                     codec,
-                    bridge,
+                    source,
                 );
+                // Legacy bounds record-only takes; the raw bridge bounds
+                // streams too (#1166); encoded bridges keep FFmpeg's default.
+                let bounded = match source {
+                    OutputVideoSource::Legacy => !streaming,
+                    OutputVideoSource::RawBridge => true,
+                    OutputVideoSource::EncodedBridge => false,
+                };
                 assert_eq!(
                     arg_value(&args, "-shortest_buf_duration"),
-                    (!streaming && !bridge).then_some("0.25"),
-                    "codec={codec:?}, bridge={bridge}: {args:?}"
+                    bounded.then_some(LIVE_PCM_SHORTEST_BUF_DURATION),
+                    "codec={codec:?}, source={source:?}: {args:?}"
                 );
                 assert_eq!(
                     arg_value(&args, "-c:a"),
@@ -38956,7 +39538,35 @@ mod tests {
         }
 
         /// The ring tail every builder must end its replay output with.
+        /// On the raw path with a file, the ring is a tee slave
+        /// (`[f=segment:...]`) instead of a bare `-f segment` output.
         fn assert_ring_output(args: &[String]) {
+            let expected_tee = ring_tee_leg();
+            if let Some(tee_index) = args.iter().position(|arg| arg.contains(&expected_tee)) {
+                // Stream tees put `-use_fifo` / `-fifo_options` between
+                // `-f tee` and the spec; record-only is `-f tee <spec>`.
+                let tee_f = args[..tee_index]
+                    .iter()
+                    .rposition(|arg| arg == "-f")
+                    .expect("-f tee precedes the ring slave");
+                assert_eq!(args[tee_f + 1], "tee", "{args:?}");
+                // The ring shares the file's encode, AAC, and `-shortest`.
+                let ring_start = args[..tee_f].iter().rposition(|arg| arg == "-map").unwrap();
+                let ring = &args[ring_start..tee_f];
+                assert!(
+                    ring.contains(&"aac".to_string()),
+                    "ring audio is AAC: {ring:?}"
+                );
+                // Shared with the file: record AAC is 256k, stream AAC is 160k.
+                assert!(
+                    matches!(arg_value(ring, "-b:a"), Some("256k") | Some("160k")),
+                    "tee-shared AAC bitrate: {ring:?}"
+                );
+                assert_eq!(arg_value(ring, "-ar"), Some("48000"));
+                assert!(ring.contains(&"-shortest".to_string()));
+                return;
+            }
+
             let segment = position(args, "segment");
             assert_eq!(args[segment - 1], "-f");
             // The ring ends with its file pattern; a preview or stream output
@@ -39320,6 +39930,74 @@ mod tests {
                 replay_tee_failure_message(""),
                 "Clips stopped writing, so clips are off. The recording continues."
             );
+        }
+
+        /// #1166: FFmpeg bounds `-shortest` per output, and one unbounded
+        /// output can stall the whole session, so the ring takes the primary
+        /// output's decision: bounded on the raw bridge with a live
+        /// microphone, recorded or streamed; FFmpeg's default when it copies
+        /// an encoded bridge.
+        #[test]
+        fn every_shortest_output_takes_the_sessions_bound() {
+            for (video_output, bounded) in [
+                (EncoderBridgeVideoOutput::RawYuv420p, true),
+                (EncoderBridgeVideoOutput::VideoToolboxH264MpegTs, false),
+            ] {
+                for streaming in [false, true] {
+                    let mut params = base_params(true, streaming);
+                    params.replay = Some(ReplayParams {
+                        seconds: 30,
+                        auto: false,
+                    });
+                    let targets = if streaming {
+                        let streaming = streaming_for(&[(
+                            StreamPlatform::Twitch,
+                            "rtmp://live.twitch.tv/app",
+                            "tw",
+                        )]);
+                        params.streaming = Some(streaming.clone());
+                        stream_targets_from_streaming(&streaming).unwrap()
+                    } else {
+                        Vec::new()
+                    };
+                    let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                        &capture(),
+                        &params,
+                        Some(Path::new("/tmp/videorc-replay-bound.mkv")),
+                        &targets,
+                        Path::new("/tmp/videorc-ring-bound.fifo"),
+                        video_output,
+                        &encoder(),
+                        Some(&ring()),
+                    )
+                    .unwrap();
+                    assert_ring_output(&args);
+                    let shortest = args
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, arg)| *arg == "-shortest")
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    // A separate `-f segment` ring is its own `-shortest`
+                    // output; a tee-embedded ring shares the file's. An
+                    // encoded bridge that streams adds one output per target.
+                    let ring_is_tee = args.iter().any(|arg| arg.contains("[f=segment:"));
+                    assert!(
+                        shortest.len() >= if ring_is_tee { 1 } else { 2 },
+                        "primary and ring outputs, {video_output:?} streaming={streaming}: {args:?}"
+                    );
+                    for index in shortest {
+                        let bound = (args.get(index + 1).map(String::as_str)
+                            == Some("-shortest_buf_duration"))
+                        .then(|| args[index + 2].as_str());
+                        assert_eq!(
+                            bound,
+                            bounded.then_some(LIVE_PCM_SHORTEST_BUF_DURATION),
+                            "-shortest at {index}, {video_output:?} streaming={streaming}: {args:?}"
+                        );
+                    }
+                }
+            }
         }
 
         #[test]
@@ -43553,6 +44231,120 @@ mod tests {
         );
     }
 
+    /// A Stop that lands before FFmpeg proves its output (a quick Stop, or the
+    /// Record hand-over of the buffer-only Clips session) ends FFmpeg on
+    /// purpose: the watchdog logs it and leaves the pipeline unfailed. Without
+    /// a Stop the same missing proof still fails the muxer stage.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ffmpeg_output_startup_watchdog_leaves_a_requested_stop_unfailed() {
+        for stop_requested in [true, false] {
+            let state = test_state();
+            let session_id = format!("output-startup-{stop_requested}-{}", Uuid::new_v4());
+            let params = base_params(true, false);
+            state
+                .database
+                .create_session(&NewSession {
+                    id: session_id.clone(),
+                    title: "Output startup".to_string(),
+                    started_at: Utc::now().to_rfc3339(),
+                    mode: "record".to_string(),
+                    output_path: None,
+                    container: Some("mkv".to_string()),
+                    stream_preset: None,
+                    sources: params.sources,
+                    layout: params.layout,
+                    output: params.output,
+                })
+                .expect("create running session row");
+            let mut active = test_active_recording_stub(&session_id);
+            active.stop_requested = stop_requested;
+            *state.recording.lock().await = Some(active);
+            let mut events = state.events.subscribe();
+            let (ready_sender, ready) = oneshot::channel();
+            ready_sender
+                .send(Err(
+                    "FFmpeg ended before its first output progress".to_string()
+                ))
+                .unwrap();
+
+            // The stub's pid 0 is never signalled: `send_process_signal`
+            // refuses it.
+            spawn_ffmpeg_output_startup_watchdog(
+                state.clone(),
+                session_id.clone(),
+                ready,
+                Instant::now(),
+                FFMPEG_OUTPUT_STARTUP_TIMEOUT,
+                0,
+            );
+
+            let expected = if stop_requested {
+                "ffmpeg-output-startup-stopped"
+            } else {
+                "ffmpeg-output-startup-failed"
+            };
+            let mut codes = timeout(Duration::from_secs(2), async {
+                let mut codes = Vec::new();
+                loop {
+                    let event = events.recv().await.expect("backend event stream");
+                    if matches!(event.event.as_str(), "session.log" | "health.event") {
+                        let code = event.payload["code"].as_str().unwrap_or_default();
+                        codes.push(code.to_string());
+                        if code == expected {
+                            return codes;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the watchdog reports the missing output proof");
+            sleep(Duration::from_millis(50)).await;
+            codes.extend(
+                std::iter::from_fn(|| events.try_recv().ok())
+                    .filter(|event| matches!(event.event.as_str(), "session.log" | "health.event"))
+                    .map(|event| {
+                        event.payload["code"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string()
+                    }),
+            );
+
+            let finalization = state
+                .recording
+                .lock()
+                .await
+                .take()
+                .expect("the session is still installed")
+                .pipeline
+                .status()
+                .finalization;
+            if stop_requested {
+                assert_ne!(
+                    finalization,
+                    crate::protocol::RecordingFinalizationState::Failed
+                );
+                assert!(
+                    !codes
+                        .iter()
+                        .any(|code| code == "ffmpeg-output-startup-failed"),
+                    "{codes:?}"
+                );
+            } else {
+                assert_eq!(
+                    finalization,
+                    crate::protocol::RecordingFinalizationState::Failed
+                );
+                assert!(
+                    !codes
+                        .iter()
+                        .any(|code| code == "ffmpeg-output-startup-stopped"),
+                    "{codes:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn only_platform_encoder_consumers_arm_the_preview_compositor_in_place() {
         assert_eq!(
@@ -43573,16 +44365,16 @@ mod tests {
 
     #[test]
     fn ffmpeg_output_progress_proof_is_a_watchdog_where_the_bridge_already_fed_a_frame() {
-        // VideoToolbox (P4a) and the Linux raw-YUV bridge publish `Recording`
-        // once the first frame is in FFmpeg; Windows keeps the synchronous
-        // proof for its software first frame (retest 151).
+        // VideoToolbox (P4a), the Linux raw-YUV bridge and Windows Media
+        // Foundation (#1068) publish `Recording` once the first frame is in
+        // FFmpeg; Windows' raw pipe keeps the synchronous proof.
         assert!(defers_ffmpeg_output_startup_proof(
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
         ));
         assert!(defers_ffmpeg_output_startup_proof(
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         ));
-        assert!(!defers_ffmpeg_output_startup_proof(
+        assert!(defers_ffmpeg_output_startup_proof(
             EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
         ));
         assert_eq!(
@@ -44031,6 +44823,21 @@ mod tests {
         );
         assert_eq!(
             classify_ffmpeg_fatal_line("av_interleaved_write_frame(): No space left on device"),
+            Some("disk-full")
+        );
+        // Ogre, 2026-11-06: a filter's frame queue, not the recordings folder.
+        for line in [
+            "[af#0:1 @ 0x561c22933d00] Error sending frames to consumers: No space left on device",
+            "[af#0:1 @ 0x561c22933d00] Task finished with error code: -28 (No space left on device)",
+            "[vf#0:0 @ 0x55] Terminating thread with return code -28 (No space left on device)",
+            "[fc#0 @ 0x55] Error sending frames to consumers: No space left on device",
+        ] {
+            assert_eq!(classify_ffmpeg_fatal_line(line), None, "{line}");
+        }
+        assert_eq!(
+            classify_ffmpeg_fatal_line(
+                "[out#0/matroska @ 0x55] Error submitting a packet to the muxer: No space left on device"
+            ),
             Some("disk-full")
         );
         assert_eq!(
@@ -45530,6 +46337,95 @@ mod tests {
     }
 
     #[test]
+    fn a_dead_recording_output_ends_the_take_unless_a_stream_is_on_air() {
+        use RecordingOutputFailureAction::*;
+        // The 2026-11-03 Iris Xe take: record-only, writer gave up.
+        assert_eq!(
+            recording_output_failure_action(false, false, false, true, false),
+            EndTake
+        );
+        // Record + a separate healthy stream leg: the stream stays live.
+        assert_eq!(
+            recording_output_failure_action(false, false, false, true, true),
+            AnnounceKeepStreaming
+        );
+        // Already stopping, a performance check, Clips only, or no terminal
+        // failure (a writer that only saw FFmpeg exit): nothing to do here.
+        for (stop, check, replay, failed) in [
+            (true, false, false, true),
+            (false, true, false, true),
+            (false, false, true, true),
+            (false, false, false, false),
+        ] {
+            assert_eq!(
+                recording_output_failure_action(stop, check, replay, failed, false),
+                Ignore,
+                "stop={stop} check={check} replay={replay} failed={failed}"
+            );
+        }
+        let ending = recording_output_failed_message("FIFO timed out", true);
+        assert!(ending.contains("ended the take"), "{ending}");
+        assert!(ending.contains("FIFO timed out"), "{ending}");
+        let streaming = recording_output_failed_message("FIFO timed out", false);
+        assert!(streaming.contains("stream is still live"), "{streaming}");
+    }
+
+    #[test]
+    fn a_dead_shared_writer_says_the_stream_stopped_with_the_take() {
+        // Linux's shared encode has no separate stream leg to keep on air,
+        // so its death ends the take, and the stream's event names both.
+        assert_eq!(
+            recording_output_failure_action(false, false, false, true, false),
+            RecordingOutputFailureAction::EndTake
+        );
+        let message = shared_stream_output_failed_message("FIFO timed out");
+        assert!(message.starts_with("Streaming stopped"), "{message}");
+        assert!(message.contains("FIFO timed out"), "{message}");
+        assert!(message.contains("ended the take"), "{message}");
+        assert!(
+            !message.contains("recording continued"),
+            "the shared take ends with the stream: {message}"
+        );
+    }
+
+    #[test]
+    fn a_closed_audio_transport_is_an_error_only_when_not_stopping() {
+        assert!(audio_transport_failed_mid_session(
+            NativeAudioInputState::DownstreamClosed,
+            false
+        ));
+        assert!(!audio_transport_failed_mid_session(
+            NativeAudioInputState::DownstreamClosed,
+            true
+        ));
+        for state in [
+            NativeAudioInputState::Starting,
+            NativeAudioInputState::Live,
+            NativeAudioInputState::Silent,
+            NativeAudioInputState::SourceLost,
+            NativeAudioInputState::Stopped,
+        ] {
+            assert!(
+                !audio_transport_failed_mid_session(state, false),
+                "{state:?}"
+            );
+        }
+        let message = audio_output_failed_message(Some(2.76));
+        assert!(message.contains("after 2.8 seconds"), "{message}");
+        assert!(message.contains("rest of this take is silent"), "{message}");
+        assert!(!audio_output_failed_message(None).contains("after"));
+    }
+
+    #[test]
+    fn a_dead_recording_output_is_announced_once_per_session() {
+        let session = format!("announce-{}", Uuid::new_v4());
+        assert!(announce_recording_output_failure_once(&session));
+        assert!(!announce_recording_output_failure_once(&session));
+        let next = format!("announce-{}", Uuid::new_v4());
+        assert!(announce_recording_output_failure_once(&next));
+    }
+
+    #[test]
     fn stream_output_death_preserves_the_recording() {
         // The 2026-07-15 incident: a stream latency failure ended FFmpeg
         // cleanly with NO user stop — the healthy multi-minute recording was
@@ -46484,17 +47380,20 @@ mod tests {
             microphone_graph_gain: false,
             microphone_is_linux_pulse: false,
         };
-        let mut args = Vec::new();
-
-        append_audio_encoding_with_video_clock(
-            &mut args,
-            &input_layout,
-            &AudioSettings::default(),
-            OutputAudioCodec::StreamAac,
-            true,
-        );
-
-        assert_eq!(args, vec!["-shortest"]);
+        for source in [
+            OutputVideoSource::RawBridge,
+            OutputVideoSource::EncodedBridge,
+        ] {
+            let mut args = Vec::new();
+            append_audio_encoding_with_video_clock(
+                &mut args,
+                &input_layout,
+                &AudioSettings::default(),
+                OutputAudioCodec::StreamAac,
+                source,
+            );
+            assert_eq!(args, vec!["-shortest"], "{source:?}");
+        }
     }
 
     #[test]
@@ -47555,7 +48454,7 @@ mod tests {
             &input_layout,
             &audio,
             OutputAudioCodec::StreamAac,
-            false,
+            OutputVideoSource::Legacy,
         );
         args.push(output.display().to_string());
 

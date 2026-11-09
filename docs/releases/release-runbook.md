@@ -85,7 +85,9 @@ lane is `.github/workflows/release-linux-alpha.yml`. It writes only:
 
 It must never write `releases/macos/`, `releases/windows/`, `updates/macos/`,
 `updates/windows/`, `latest-mac.yml`, or the Windows `latest.yml` feed. Public
-download remains disabled. Hold the Linux Discord announcement until that
+download remains disabled. When a Linux step changes
+`VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY` on videorc-web, apply it with
+`pnpm release:web:redeploy` (see "Redeploying videorc-web production"). Hold the Linux Discord announcement until that
 download is public; preview with
 `pnpm release:notify:discord <releaseId> --dry-run`, then send with
 `pnpm release:notify:discord <releaseId>`. Never print
@@ -212,6 +214,33 @@ Rollback: a build without the profile never passes validation; a shipped
 camera problem rolls forward with a higher version like any other. Shipping
 without the camera is a reviewed PR that removes the hook, the entitlements
 split and the validator checks together, never an unset secret.
+
+## Redeploying videorc-web production
+
+Every "redeploy" in this runbook and in [../distribution.md](../distribution.md)
+means this. Use it after you change a videorc-web production env var, such as
+`VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY`,
+`VIDEORC_DOWNLOAD_MANIFEST_OBJECT_KEY` or `VIDEORC_DOWNLOAD_STORAGE_PRIMARY`:
+
+```sh
+pnpm release:web:redeploy   # rebuild production from the GitHub build of videorc-web main, then check it
+pnpm release:web:check      # PASS only when www.videorc.com serves that build
+```
+
+Never run `vercel deploy --prod` or `vercel --prod` from a videorc-web
+checkout. Never `vercel redeploy` whatever production serves now. A CLI deploy
+ships the checkout's files, however long ago it last pulled `main`. On
+2026-11-05 and 2026-11-06, Linux alpha steps deployed this way from a checkout
+last pulled on 2026-10-10, and the 0.20.3 Linux step redeployed that build.
+Production lost 24 merged web PRs, among them the X chat relay fix
+(videorc-web#104). X chat then showed "reconnecting" with HTTP 400
+`x-chat-broadcast-invalid` on every desktop version. `release:web:check` fails
+such a deployment: it follows redeploys back to the first build and requires a
+GitHub build of the current `main`.
+
+If `release:web:redeploy` finds no READY GitHub build of `main`, Vercel's git
+deployment of `main` is still building or has failed. Wait for it or fix it.
+Never deploy a local checkout instead.
 
 ## Storage origins
 
@@ -859,6 +888,9 @@ ever changes again, update `publish.url`, `videorc-web-links.ts`, and the Rust
   presigned URL and is intentionally cached `max-age=60`. Do not restore a long /
   `immutable` cache, or the CDN serves an expired redirect (403). (videorc-web
   `lib/updates-route.ts`.)
+- **Web redeploys build GitHub `main`, never a checkout.** Use
+  `pnpm release:web:redeploy`, then confirm `pnpm release:web:check` PASS (see
+  "Redeploying videorc-web production").
 - **Signed builds only** — unsigned/ad-hoc builds won't self-update.
 - **arm64 only** — `latest-mac.yml` is arm64; Intel Macs are not served or
   updated. Add x64/universal before claiming Intel support.
@@ -869,7 +901,8 @@ ever changes again, update `publish.url`, `videorc-web-links.ts`, and the Rust
 
 Fail closed instead of mutating a bad release — see "Beta Download Rollback" in
 [../distribution.md](../distribution.md): set
-`VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` or repoint the manifest and redeploy, and
+`VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` or repoint the manifest and redeploy
+(`pnpm release:web:redeploy`), and
 cut a `-beta.N+1` rather than overwriting. For the feed, publish a corrected build
 with a **higher** version; the bad one stops being offered once a higher version
 exists. (The flat `updates/macos/` prefix is overwritten each release, so the

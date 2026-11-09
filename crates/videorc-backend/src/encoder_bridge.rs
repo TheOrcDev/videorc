@@ -39,6 +39,7 @@ use crate::diagnostics::{
 #[cfg(any(test, debug_assertions))]
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::FrameHandle;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 #[cfg(target_os = "windows")]
 use crate::preview_camera::PreviewCameraFrameSource;
@@ -60,7 +61,7 @@ use crate::video_toolbox_encoder::{
     VideoToolboxH264Session,
 };
 #[cfg(target_os = "windows")]
-use crate::windows_d3d11_device::{WindowsD3d11EncoderProgress, WindowsD3d11ErrorCode};
+use crate::windows_d3d11_device::WindowsD3d11EncoderProgress;
 #[cfg(target_os = "windows")]
 use crate::windows_d3d11_session::{
     WindowsD3d11EncoderTicketSource, WindowsD3d11EncoderTicketSourceSnapshot,
@@ -114,7 +115,8 @@ const STREAM_OUTPUT_QUEUE_MAX_AGE: Duration = Duration::from_millis(150);
 /// 087). Waiting loses nothing: a skipped tick never reaches the encoder and
 /// every encoded access unit is kept and written in order, so viewers see a
 /// freeze and the file keeps a truthful gap.
-const OUTPUT_WEDGED_TIMEOUT: Duration = Duration::from_secs(30);
+/// The session audio writer waits as long (`session_audio.rs`).
+pub(crate) const OUTPUT_WEDGED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Recording output pressure is recoverable while either VideoToolbox or the
 /// FIFO writer is still advancing. Queue depth/age are pressure signals, not a
 /// liveness verdict; only a complete lack of pipeline progress for this window
@@ -136,7 +138,7 @@ const STREAM_OUTPUT_STALL_NOTICE_THRESHOLD: Duration = Duration::from_secs(2);
 // same integrity contract as encoded output: preserve admitted frames in order
 // inside the role's bounded queue, then stop on bounded no-progress instead of
 // silently replacing content.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long one encoded access unit may wait on a FIFO that accepts no bytes
 /// before the output counts as wedged. Both roles wait out a starved FFmpeg:
@@ -157,11 +159,18 @@ const VIDEORC_TEST_VT_FIFO_PAUSE_REPEAT_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_
 // timing it out truncates a plane, kills FFmpeg, strands the recovery MKV, and
 // loses the remainder of the user's recording. Keep a bounded shutdown escape
 // hatch, but give a progressing Windows recording enough time to recover.
-#[cfg(target_os = "windows")]
+//
+// Linux has the same raw pipe with a slower reader: FFmpeg encoding through
+// VAAPI on a throttled iGPU falls below realtime and pauses its reads for 4-6 s
+// (ogre, 2026-11-06). The two-second budget cut the recording's frame partway,
+// FFmpeg read a short last packet ("packet size 65536 < expected frame_size")
+// and exited, and the take ended at the first such pause
+// (`smoke:multistream-endurance` session B).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "windows")]
 const MEDIA_FOUNDATION_FIFO_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
 // The raw writer's NO-PROGRESS tolerance is a PLATFORM contract, decoupled
 // from the output queue's age budget. Issue #149 (real Windows device): the
@@ -171,10 +180,11 @@ const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = FIFO_FRAME_WRITE_HARD_
 // waited in the output queue was dead before its first byte) and as the sliding
 // no-progress window — making the 30s Windows hard timeout unreachable and
 // killing healthy recordings ~1s in. Late is fine for a file; only a truly
-// wedged pipe (no bytes for this long) is fatal.
-#[cfg(target_os = "windows")]
+// wedged pipe (no bytes for this long) is fatal. Linux's VAAPI pauses need the
+// same window.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE: Duration = Duration::from_secs(10);
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
 const RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT: Duration = Duration::from_millis(2500);
 #[cfg(target_os = "windows")]
@@ -202,9 +212,9 @@ const fn windows_d3d11_primary_sequence_is_newer(
 }
 const FIFO_WRITE_PROGRESS_YIELD_BUDGET: u32 = 64;
 const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(target_os = "macos")]
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(target_os = "macos")]
 const VIDEOTOOLBOX_PROBE_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEOTOOLBOX_PROBE";
 
 type CompositorFrameHandle = FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>;
@@ -2366,7 +2376,8 @@ pub(crate) fn test_source_iso_trace_ms(at: Instant) -> f64 {
 /// A compositor frame fed into the encoder FIFO on one tick.
 #[derive(Clone)]
 struct FedCompositorFrame {
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // held to keep the ISO lease alive; only Metal reads it
     iso_lease: Option<Arc<SourceIsoLeasedFrame>>,
     /// Retains the compositor's immutable allocation through FIFO delivery. Raw
     /// output writes these bytes directly instead of copying them into a second
@@ -2585,12 +2596,79 @@ impl BridgeFrameSource {
 }
 
 /// Steady-state cap for the bridge writer's Media Foundation input-credit
-/// wait: two frame intervals. A stalled MFT then costs one skipped (counted)
-/// frame instead of freezing the CFR schedule for the encoder's 3 s event
-/// timeout (tester: 119 encoded frames in 6.7 s at 1080p60).
+/// wait: two frame intervals, but never under
+/// [`MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR`]. A stalled MFT then costs a
+/// skipped (counted) frame instead of freezing the CFR schedule for the
+/// encoder's 3 s event timeout (tester: 119 encoded frames in 6.7 s at
+/// 1080p60).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn media_foundation_writer_input_credit_timeout(target_fps: u32) -> Duration {
     Duration::from_secs_f64(2.0 / f64::from(target_fps.max(1)))
+        .max(MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR)
+}
+
+/// #1074: NVIDIA's H.264 MFT withholds input credit for 67-167 ms during
+/// ordinary takes (GTX 1650 SUPER, one frame in flight). Two intervals (66 ms
+/// at 30 fps, 33 ms at 60) skipped a frame on every one of those stalls, and
+/// each skip is a permanent hole in the take. Waiting past them costs no
+/// frame: the absolute schedule feeds the ticks it fell behind on at once.
+const MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR: Duration = Duration::from_millis(250);
+
+/// #1074: how long the Media Foundation writer's final drain waits once Stop
+/// was requested. A healthy NVIDIA, Intel or AMD MFT drains in tens of
+/// milliseconds; a stuck NVIDIA MFT held the full 5 s `DRAIN_TIMEOUT` while
+/// FFmpeg waited for the pipe's EOF, Stop's fallback TERMed FFmpeg at 3 s, and
+/// the take was kept as recovery media. Must stay well under
+/// `recording::STOP_TERM_DELAY` (pinned by a test there).
+pub(crate) const MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The final drain's bound: short after Stop (the user is waiting and FFmpeg
+/// needs the EOF), the encoder's full timeout otherwise.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn media_foundation_writer_drain_timeout(stop_requested: bool, full_timeout: Duration) -> Duration {
+    if stop_requested {
+        MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT.min(full_timeout)
+    } else {
+        full_timeout
+    }
+}
+
+/// #1074: a Stop that arrives while the final drain is already waiting (an
+/// encoder error ended the writer loop first, so the drain started with the
+/// full bound) pulls the deadline in to the Stop bound from that moment. It
+/// never moves a deadline out.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn media_foundation_drain_deadline_after_stop(deadline: Instant, stop_seen_at: Instant) -> Instant {
+    deadline.min(stop_seen_at + MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+enum MediaFoundationDrainVerdict {
+    Complete,
+    /// After Stop: the encoder kept its last frames past the bound. The take
+    /// loses them, not its ending.
+    TailDropped {
+        frames: usize,
+    },
+    Failed,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn media_foundation_drain_verdict(
+    stop_requested: bool,
+    complete: bool,
+    abandoned_frames: usize,
+) -> MediaFoundationDrainVerdict {
+    if abandoned_frames == 0 && (complete || stop_requested) {
+        MediaFoundationDrainVerdict::Complete
+    } else if stop_requested {
+        MediaFoundationDrainVerdict::TailDropped {
+            frames: abandoned_frames,
+        }
+    } else {
+        MediaFoundationDrainVerdict::Failed
+    }
 }
 
 /// Classify a tick from the sequence of the frame it fed versus the last fed sequence.
@@ -2701,7 +2779,7 @@ impl EncoderBridgeDrainState {
         downstream_closed
     }
 
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg(any(target_os = "macos", test))]
     fn pending_timeout_is_terminal(
         &self,
         pending_video_toolbox_frames: u64,
@@ -2732,7 +2810,7 @@ impl EncoderBridgeDrainState {
         }
     }
 
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg(target_os = "macos")]
     fn record_video_toolbox_loop_error(
         &mut self,
         terminal_failure: &Arc<StdMutex<Option<String>>>,
@@ -3812,9 +3890,11 @@ struct SyntheticRecordingWriterParams {
     #[cfg(target_os = "windows")]
     d3d11_input: Option<WindowsD3d11EncoderTicketSource>,
     video_output: EncoderBridgeVideoOutput,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     bitrate_kbps: Option<u32>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     mf_input_topology: crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     low_latency: bool,
     diagnostics_tx: watch::Sender<Option<EncoderBridgeWriterEvent>>,
     diagnostics_context: EncoderBridgeDiagnosticsContext,
@@ -3858,12 +3938,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         #[cfg(target_os = "windows")]
         d3d11_input,
         video_output,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         bitrate_kbps,
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            bitrate_kbps: _,
         #[cfg(target_os = "windows")]
         mf_input_topology,
         #[cfg(not(target_os = "windows"))]
             mf_input_topology: _,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         low_latency,
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            low_latency: _,
         diagnostics_tx,
         diagnostics_context,
         video_epoch,
@@ -4093,19 +4179,35 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut raw_video_copied_frames = 0_u64;
     let mut metal_target_copied_frames = 0_u64;
     let mut metal_target_handle_frames = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut zero_copy_frames = 0_u64;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut video_toolbox_probe_frames = 0_u64;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut video_toolbox_probe_bytes = 0_u64;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut video_toolbox_probe_errors = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut video_toolbox_output_frames = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut video_toolbox_output_bytes = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut max_video_toolbox_output_encode_ms: Option<u64> = None;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut pending_video_toolbox_output_frames = 0_u64;
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut pending_video_toolbox_fifo_frames = 0_u64;
     let mut pending_raw_fifo_frames = 0_u64;
     let mut pending_raw_fifo_started_at = VecDeque::<Instant>::new();
@@ -4197,7 +4299,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut video_toolbox_fifo_write_times_ms = Vec::with_capacity(128);
     let mut raw_video_fifo_write_times_ms = Vec::with_capacity(128);
     let mut video_toolbox_fifo_enqueue_times_ms = Vec::with_capacity(128);
-    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut max_video_toolbox_fifo_enqueue_ms: Option<f64> = None;
     let mut writer_loop_times_ms = Vec::with_capacity(128);
     let mut writer_sleep_times_ms = Vec::with_capacity(128);
@@ -4559,16 +4661,15 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         next_frame_at = window_started_at + frame_interval;
         first_frame_wait_sequence = None;
         signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
-    } else if !matches!(
-        video_output,
-        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
-    ) {
+    } else if !video_output.uses_encoded_h264() {
         signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
     }
     // VideoToolbox outputs signal readiness at their FIRST FED FRAME below
     // (instant-record P4): `Recording` then means "the first frame is in the
-    // encoder", not merely "the writer thread exists".
+    // encoder", not merely "the writer thread exists". Media Foundation
+    // signals once its first access unit is in the FIFO (#1068), the same
+    // proof the D3D11 writer gives, so its software first frame is paid
+    // before `Recording` and FFmpeg's progress report can be a watchdog.
 
     while !stop.load(Ordering::Relaxed) {
         // Plan 200 D1: a shed separate file drains to its own last tick, even
@@ -5268,8 +5369,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                         "Recording audio epoch established from first video presentation"
                     );
                 }
-                // No-op for outputs that already signalled at startup.
-                signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+                // No-op for outputs that already signalled at startup. Media
+                // Foundation waits for its first access unit in the FIFO.
+                if !video_output.uses_media_foundation() {
+                    signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+                }
             }
             last_fed_sequence = Some(frame_sequence);
             max_source_to_encode_age_ms =
@@ -5596,6 +5700,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         };
         if write_result.is_ok() && video_toolbox_output_frames > output_frames_before_write {
             last_output_progress_at = Instant::now();
+            if video_output.uses_media_foundation() {
+                // #1068: the first access unit reached FFmpeg's FIFO. Later
+                // writes find the sender already taken.
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+            }
         }
         if let Err(error) = write_result {
             // A closed downstream (EPIPE/EOF: FFmpeg exited or was stopped)
@@ -5610,6 +5719,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 &error,
             );
             terminal_writer_error = Some(error.clone());
+            // Before the first access unit, a waiting session start gets
+            // this error instead of a generic "stopped before ready".
+            signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
             emit_encoder_bridge_diagnostics_from_thread(
                 &diagnostics_tx,
                 session_id.clone(),
@@ -6098,21 +6210,67 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             media_foundation_ts_writer.as_mut(),
         )
     {
-        match encoder
-            .drain(MEDIA_FOUNDATION_DRAIN_TIMEOUT)
-            .and_then(|frames| {
-                write_media_foundation_frames(
-                    frames,
-                    fifo,
-                    ts_writer,
-                    &stop,
-                    &mut zero_copy_frames,
-                    &mut video_toolbox_output_frames,
-                    &mut video_toolbox_output_bytes,
-                    &mut video_toolbox_fifo_write_times_ms,
-                )
-                .map_err(anyhow::Error::from)
-            }) {
+        // #1074: FFmpeg sees the video EOF only when this thread closes the
+        // pipe after the drain, so after Stop the drain must end well inside
+        // Stop's TERM fallback, or a stuck encoder costs the whole take.
+        let stop_requested_now = || {
+            stop.load(Ordering::Relaxed)
+                || graceful_stop_at
+                    .as_ref()
+                    .and_then(|at| at.boundary())
+                    .is_some()
+        };
+        let stop_requested = stop_requested_now();
+        let drain_timeout =
+            media_foundation_writer_drain_timeout(stop_requested, MEDIA_FOUNDATION_DRAIN_TIMEOUT);
+        // A Stop that lands mid-drain must bound the drain too, or a drain
+        // an encoder error started holds the full 5 s past Stop's fallback.
+        let mut late_stop_at: Option<Instant> = None;
+        let drained = encoder.drain_within_until(drain_timeout, |now, deadline| {
+            if late_stop_at.is_none() && !stop_requested && stop_requested_now() {
+                late_stop_at = Some(now);
+            }
+            late_stop_at.map_or(deadline, |at| {
+                media_foundation_drain_deadline_after_stop(deadline, at)
+            })
+        });
+        let stop_requested = stop_requested || late_stop_at.is_some() || stop_requested_now();
+        match drained.and_then(|drain| {
+            let verdict = media_foundation_drain_verdict(
+                stop_requested,
+                drain.complete,
+                drain.abandoned_frames,
+            );
+            write_media_foundation_frames(
+                drain.frames,
+                fifo,
+                ts_writer,
+                &stop,
+                &mut zero_copy_frames,
+                &mut video_toolbox_output_frames,
+                &mut video_toolbox_output_bytes,
+                &mut video_toolbox_fifo_write_times_ms,
+            )
+            .map_err(anyhow::Error::from)?;
+            match verdict {
+                MediaFoundationDrainVerdict::Complete => Ok(()),
+                MediaFoundationDrainVerdict::TailDropped { frames } => {
+                    tracing::warn!(
+                        role = encoder_bridge_output_role_label(output_queue_policy.role),
+                        dropped_frames = frames,
+                        timeout_ms = drain_timeout.as_millis() as u64,
+                        stop_arrived_mid_drain = late_stop_at.is_some(),
+                        "Media Foundation encoder did not return its last frames after Stop; they were dropped so the recording could finish"
+                    );
+                    Ok(())
+                }
+                MediaFoundationDrainVerdict::Failed => Err(anyhow::anyhow!(
+                    "bounded drain did not complete in {}ms (pending timestamps={})",
+                    drain_timeout.as_millis(),
+                    drain.abandoned_frames
+                )),
+            }
+        }) {
             Ok(()) => {
                 queue_depth = encoder.pending_frame_count() as u64;
             }
@@ -6907,7 +7065,7 @@ struct RawVideoFifoWriteBudget {
 /// stream. The two-second raw budget cut frames mid-plane whenever FFmpeg fell
 /// below realtime and paused its reads for 4-6 s (ogre live lab, 2026-11-03);
 /// the short packet ended the stream leg. Recording and shared raw output keep
-/// their platform contract.
+/// their platform contract (ten seconds without progress on Windows and Linux).
 fn raw_video_fifo_write_budget(role: EncoderBridgeOutputRole) -> RawVideoFifoWriteBudget {
     match role {
         EncoderBridgeOutputRole::Stream => RawVideoFifoWriteBudget {
@@ -7305,7 +7463,7 @@ enum BoundedWriterJoinOutcome {
     Detached,
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(target_os = "macos")]
 fn bounded_writer_join<T>(join: std::thread::JoinHandle<T>) -> BoundedWriterJoinOutcome {
     const WRITER_CLOSE_JOIN_GRACE: Duration = Duration::from_secs(3);
     bounded_writer_join_until(join, Instant::now() + WRITER_CLOSE_JOIN_GRACE)
@@ -7728,7 +7886,7 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
         return;
     }
 
-    while !stop.load(Ordering::Relaxed) {
+    'ticks: while !stop.load(Ordering::Relaxed) {
         if let Some(error) = current_input.terminal_error() {
             match wait_for_windows_d3d11_generation_replacement(
                 &input,
@@ -7848,57 +8006,101 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                 scheduled_windows_d3d11_time_100ns(schedule_index.saturating_sub(1), target_fps);
             let next_pts_100ns = scheduled_windows_d3d11_time_100ns(schedule_index, target_fps);
             let duration_100ns = next_pts_100ns.saturating_sub(pts_100ns).max(1);
-            match current_input.client.submit_encoder_texture(
-                ticket,
-                pts_100ns,
-                duration_100ns,
-                encoder_started_at.elapsed().as_micros() as u64,
-            ) {
-                Ok(progress) => {
-                    last_submitted_sequence = Some(sequence);
-                    input_frames = input_frames.saturating_add(1);
-                    queue_depth = progress.status.pending_frame_count as u64;
-                    if let Err(error) = write_windows_d3d11_encoder_progress(
-                        progress,
-                        &mut fifo,
-                        &mut ts_writer,
-                        &stop,
-                        &mut output_frames,
-                        &mut output_bytes,
-                        &mut fifo_write_times_ms,
-                    ) {
-                        terminal_error = Some(format!(
-                            "{:?} D3D11 Media Foundation output stopped: {error}",
-                            current_input.role
-                        ));
-                        break;
-                    }
-                }
-                Err(failure) => {
-                    if let Some(progress) = failure.progress
-                        && let Err(error) = write_windows_d3d11_encoder_progress(
-                            *progress,
+            // #1075: a refused frame (no input credit yet) used to skip its
+            // tick for good, and a 1080p30 take came up 3% short. The credit
+            // came back 2-13 ms later on the GTX 1650 SUPER, so poll the
+            // encoder and submit the newest frame at this tick's time.
+            let mut submission = (sequence, ticket);
+            let mut refused_since: Option<Instant> = None;
+            loop {
+                let (sequence, ticket) = submission;
+                match current_input.client.submit_encoder_texture(
+                    ticket,
+                    pts_100ns,
+                    duration_100ns,
+                    encoder_started_at.elapsed().as_micros() as u64,
+                ) {
+                    Ok(progress) => {
+                        last_submitted_sequence = Some(sequence);
+                        input_frames = input_frames.saturating_add(1);
+                        queue_depth = progress.status.pending_frame_count as u64;
+                        if let Err(error) = write_windows_d3d11_encoder_progress(
+                            progress,
                             &mut fifo,
                             &mut ts_writer,
                             &stop,
                             &mut output_frames,
                             &mut output_bytes,
                             &mut fifo_write_times_ms,
-                        )
-                    {
-                        terminal_error = Some(format!(
-                            "{:?} D3D11 Media Foundation output stopped: {error}",
-                            current_input.role
-                        ));
+                        ) {
+                            terminal_error = Some(format!(
+                                "{:?} D3D11 Media Foundation output stopped: {error}",
+                                current_input.role
+                            ));
+                            break 'ticks;
+                        }
                         break;
                     }
-                    if matches!(
-                        failure.error.code,
-                        WindowsD3d11ErrorCode::CommandQueueFull
-                            | WindowsD3d11ErrorCode::EncoderBackpressure
-                    ) {
-                        pressure_skips = pressure_skips.saturating_add(1);
-                    } else {
+                    Err(failure) => {
+                        if let Some(progress) = failure.progress
+                            && let Err(error) = write_windows_d3d11_encoder_progress(
+                                *progress,
+                                &mut fifo,
+                                &mut ts_writer,
+                                &stop,
+                                &mut output_frames,
+                                &mut output_bytes,
+                                &mut fifo_write_times_ms,
+                            )
+                        {
+                            terminal_error = Some(format!(
+                                "{:?} D3D11 Media Foundation output stopped: {error}",
+                                current_input.role
+                            ));
+                            break 'ticks;
+                        }
+                        if windows_d3d11_submission_is_backpressure(failure.error.code) {
+                            let refused_at = *refused_since.get_or_insert_with(Instant::now);
+                            if stop.load(Ordering::Relaxed)
+                                || !windows_d3d11_backpressure_retry_allowed(
+                                    refused_at.elapsed(),
+                                    frame_interval,
+                                )
+                            {
+                                pressure_skips = pressure_skips.saturating_add(1);
+                                break;
+                            }
+                            thread::sleep(WINDOWS_D3D11_ENCODER_DRAIN_POLL_INTERVAL);
+                            // A failed poll is the next tick's to recover.
+                            let Ok(progress) =
+                                current_input.client.poll_encoder(current_input.role)
+                            else {
+                                pressure_skips = pressure_skips.saturating_add(1);
+                                break;
+                            };
+                            if let Err(error) = write_windows_d3d11_encoder_progress(
+                                progress,
+                                &mut fifo,
+                                &mut ts_writer,
+                                &stop,
+                                &mut output_frames,
+                                &mut output_bytes,
+                                &mut fifo_write_times_ms,
+                            ) {
+                                terminal_error = Some(format!(
+                                    "{:?} D3D11 Media Foundation output stopped: {error}",
+                                    current_input.role
+                                ));
+                                break 'ticks;
+                            }
+                            // The refused ticket was released; lease the newest frame.
+                            let Some((sequence, _, ticket)) = current_input.latest_ticket() else {
+                                pressure_skips = pressure_skips.saturating_add(1);
+                                break;
+                            };
+                            submission = (sequence, ticket);
+                            continue;
+                        }
                         match wait_for_windows_d3d11_generation_replacement(
                             &input,
                             &current_input,
@@ -7923,9 +8125,9 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                             Err(error) => terminal_error = Some(error),
                         }
                         if terminal_error.is_some() {
-                            break;
+                            break 'ticks;
                         }
-                        continue;
+                        continue 'ticks;
                     }
                 }
             }
@@ -8104,6 +8306,30 @@ fn validate_windows_d3d11_encoder_input(
             input.role
         )),
     }
+}
+
+/// A refusal the D3D11 writer waits out instead of failing over: the encoder
+/// has no input credit yet, or the device worker's queue is momentarily full.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_submission_is_backpressure(
+    code: crate::windows_d3d11_device::WindowsD3d11ErrorCode,
+) -> bool {
+    use crate::windows_d3d11_device::WindowsD3d11ErrorCode;
+    matches!(
+        code,
+        WindowsD3d11ErrorCode::CommandQueueFull | WindowsD3d11ErrorCode::EncoderBackpressure
+    )
+}
+
+/// #1075: how long the D3D11 writer keeps resubmitting a refused tick. One
+/// frame interval: the credit returned within 2-13 ms on NVENC, and a longer
+/// wait would only push the next tick off the schedule instead.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_backpressure_retry_allowed(
+    refused_for: Duration,
+    frame_interval: Duration,
+) -> bool {
+    refused_for < frame_interval
 }
 
 #[cfg(target_os = "windows")]
@@ -8419,12 +8645,12 @@ fn oldest_pending_video_toolbox_frame_age(
         .map(|started_at| started_at.elapsed())
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(target_os = "macos")]
 fn encoder_bridge_video_toolbox_probe_enabled() -> bool {
     parse_video_toolbox_probe_enabled(std::env::var(VIDEOTOOLBOX_PROBE_ENV).ok().as_deref())
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 fn parse_video_toolbox_probe_enabled(value: Option<&str>) -> bool {
     let Some(value) = value else {
         return false;
@@ -9184,6 +9410,18 @@ async fn emit_encoder_bridge_diagnostics(
                 crate::protocol::HealthLevel::Warn,
                 "recording-output-pressure",
                 &message,
+            );
+        }
+        // The writer emits one event carrying its error when it gives up.
+        // The handler reads the bridge's own terminal failure, so a writer
+        // that merely saw FFmpeg exit (downstream closed) does not count.
+        // A shared writer carries the stream too (always on Linux, plan 0016).
+        if error.is_some() {
+            crate::recording::handle_recording_output_failure_if_active(
+                state,
+                session_id,
+                effective_encoder_bridge_output_role(diagnostics_context)
+                    == EncoderBridgeOutputRole::Shared,
             );
         }
     }
@@ -10005,6 +10243,73 @@ mod tests {
     }
 
     #[test]
+    fn media_foundation_final_drain_is_short_only_after_stop() {
+        let full = Duration::from_secs(5);
+        assert_eq!(
+            media_foundation_writer_drain_timeout(true, full),
+            MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT
+        );
+        assert_eq!(media_foundation_writer_drain_timeout(false, full), full);
+        // Never longer than the encoder's own bound.
+        assert_eq!(
+            media_foundation_writer_drain_timeout(true, Duration::from_millis(200)),
+            Duration::from_millis(200)
+        );
+    }
+
+    #[test]
+    fn a_stop_that_arrives_mid_drain_pulls_the_drain_deadline_in() {
+        // #1074 review: an encoder error started the drain with the full 5 s
+        // bound, then Stop arrived 300 ms in. The drain must end 1 s after
+        // Stop, inside Stop's TERM fallback, not 5 s after it started.
+        let start = Instant::now();
+        let full_deadline = start + Duration::from_secs(5);
+        let stop_at = start + Duration::from_millis(300);
+        assert_eq!(
+            media_foundation_drain_deadline_after_stop(full_deadline, stop_at),
+            stop_at + MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT
+        );
+        // A deadline already sooner than the Stop bound is never extended.
+        let near_deadline = start + Duration::from_millis(500);
+        assert_eq!(
+            media_foundation_drain_deadline_after_stop(near_deadline, stop_at),
+            near_deadline
+        );
+    }
+
+    #[test]
+    fn a_stuck_encoder_after_stop_drops_its_tail_instead_of_failing_the_take() {
+        // #1074: NVIDIA's MFT held one frame and never signalled
+        // DrainComplete; the take must end with the frame dropped.
+        assert_eq!(
+            media_foundation_drain_verdict(true, false, 1),
+            MediaFoundationDrainVerdict::TailDropped { frames: 1 }
+        );
+        // After Stop, nothing pending is complete even without the event.
+        assert_eq!(
+            media_foundation_drain_verdict(true, false, 0),
+            MediaFoundationDrainVerdict::Complete
+        );
+        assert_eq!(
+            media_foundation_drain_verdict(true, true, 0),
+            MediaFoundationDrainVerdict::Complete
+        );
+        // Without a Stop, an incomplete drain stays a terminal failure.
+        assert_eq!(
+            media_foundation_drain_verdict(false, false, 1),
+            MediaFoundationDrainVerdict::Failed
+        );
+        assert_eq!(
+            media_foundation_drain_verdict(false, false, 0),
+            MediaFoundationDrainVerdict::Failed
+        );
+        assert_eq!(
+            media_foundation_drain_verdict(false, true, 0),
+            MediaFoundationDrainVerdict::Complete
+        );
+    }
+
+    #[test]
     fn main_loop_downstream_close_survives_into_final_drain_timeout_verdict() {
         let terminal_failure = Arc::new(StdMutex::new(None));
         let mut drain_state = EncoderBridgeDrainState::default();
@@ -10529,14 +10834,52 @@ mod tests {
     }
 
     #[test]
-    fn media_foundation_writer_input_credit_cap_is_two_frame_intervals() {
+    fn a_refused_d3d11_tick_waits_out_a_brief_nvenc_credit_gap_but_never_a_whole_frame() {
+        use crate::windows_d3d11_device::WindowsD3d11ErrorCode;
+
+        // #1075: the refusal used to skip the tick and leave a hole.
+        assert!(windows_d3d11_submission_is_backpressure(
+            WindowsD3d11ErrorCode::EncoderBackpressure
+        ));
+        assert!(windows_d3d11_submission_is_backpressure(
+            WindowsD3d11ErrorCode::CommandQueueFull
+        ));
+        // A broken encoder still goes to generation replacement.
+        assert!(!windows_d3d11_submission_is_backpressure(
+            WindowsD3d11ErrorCode::EncoderUnavailable
+        ));
+
+        // The longest measured credit gap (13 ms) is waited out at 30 and 60 fps.
+        for fps in [30_u32, 60] {
+            let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+            assert!(windows_d3d11_backpressure_retry_allowed(
+                Duration::from_millis(13),
+                interval
+            ));
+            // The next tick is due: stop retrying rather than slip the schedule.
+            assert!(!windows_d3d11_backpressure_retry_allowed(
+                interval, interval
+            ));
+        }
+    }
+
+    #[test]
+    fn media_foundation_writer_input_credit_cap_outlasts_an_ordinary_nvenc_stall() {
+        // #1074: stalls of 67-167 ms were measured; neither 30 nor 60 fps
+        // may skip a frame on one.
+        for fps in [24, 30, 60, 120] {
+            let cap = media_foundation_writer_input_credit_timeout(fps);
+            assert!(cap >= Duration::from_millis(167), "{fps} fps cap {cap:?}");
+            assert!(cap < ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD);
+        }
         assert_eq!(
             media_foundation_writer_input_credit_timeout(60),
-            Duration::from_secs_f64(2.0 / 60.0)
+            MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR
         );
+        // Low rates keep two frame intervals.
         assert_eq!(
-            media_foundation_writer_input_credit_timeout(30),
-            Duration::from_secs_f64(2.0 / 30.0)
+            media_foundation_writer_input_credit_timeout(5),
+            Duration::from_secs_f64(2.0 / 5.0)
         );
         // A zero target can never produce an infinite wait.
         assert_eq!(
@@ -11168,7 +11511,7 @@ mod tests {
                 RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
             ),
             RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
-            "macOS/Linux raw fallback keeps its existing two-second contract",
+            "macOS raw fallback keeps its existing two-second contract",
         );
         assert_eq!(
             encoder_bridge_recording_no_progress_timeout(
@@ -12891,7 +13234,7 @@ mod tests {
         // 250ms recording queue budget that killed real recordings in #149.
         assert!(RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE > RECORDING_OUTPUT_QUEUE_MAX_AGE);
         assert!(RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE <= RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         assert_eq!(
             RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
             Duration::from_secs(10)
@@ -12900,16 +13243,45 @@ mod tests {
 
     #[test]
     fn raw_fifo_writer_uses_a_windows_safe_complete_frame_timeout() {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         assert_eq!(
             RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
             Duration::from_secs(30)
         );
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         assert_eq!(
             RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
             FIFO_FRAME_WRITE_HARD_TIMEOUT
         );
+    }
+
+    /// Ogre, 2026-11-06: FFmpeg encoding through VAAPI on a throttled iGPU
+    /// paused its reads for 4-6 s, and the two-second budget ended the take.
+    /// A recording or shared frame now waits the pause out; only a reader
+    /// silent past the platform tolerance still fails it.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn a_raw_recording_frame_survives_ffmpeg_pausing_its_reads_mid_frame() {
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            let budget = raw_video_fifo_write_budget(role);
+            let (result, written, frame_len) =
+                write_full_hd_frame_through_a_starved_reader(budget, Duration::from_secs(6));
+            result.unwrap_or_else(|error| {
+                panic!("a {role:?} frame must wait for FFmpeg to read again: {error}")
+            });
+            assert_eq!(written, frame_len);
+
+            let (result, written, frame_len) = write_full_hd_frame_through_a_starved_reader(
+                budget,
+                budget.stall_tolerance + Duration::from_secs(1),
+            );
+            let error = result.expect_err("a reader silent past the tolerance still fails");
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert!(written < frame_len);
+        }
     }
 
     #[test]
@@ -13321,7 +13693,7 @@ mod tests {
     #[test]
     fn raw_stream_writer_loop_finishes_a_frame_across_a_reader_stall() {
         let stall = Duration::from_millis(2_400);
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         assert!(
             stall > raw_video_fifo_write_budget(EncoderBridgeOutputRole::Recording).stall_tolerance
         );
@@ -13473,7 +13845,9 @@ mod tests {
         assert!(recording_queue_drop_watch_update(&mut watch, "s2", 2));
     }
 
-    use crate::compositor::{CompositorFrameExportHandle, CompositorPixelFormat};
+    #[cfg(target_os = "macos")]
+    use crate::compositor::CompositorFrameExportHandle;
+    use crate::compositor::CompositorPixelFormat;
     #[cfg(target_os = "macos")]
     use crate::metal_compositor::{GpuSource, GpuSourceKind, MetalSceneCompositor};
 
@@ -13796,6 +14170,12 @@ mod tests {
         assert_eq!(fed.frame.bytes, expected);
     }
 
+    // The wait returns the moment the fresh sequence lands, so a passing run
+    // never spends this budget. It only has to outlast a loaded runner that
+    // starves the publisher thread: a full Windows suite once missed 50 ms.
+    // The tests after the wait budget prove the wait stays bounded.
+    const FRESH_SEQUENCE_TEST_WAIT: Duration = Duration::from_secs(10);
+
     #[test]
     fn bridge_waits_for_fresh_compositor_sequence_before_repeating() {
         let width = 8;
@@ -13819,7 +14199,7 @@ mod tests {
         let fed = next_raw_compositor_frame(
             Some(&frame_store),
             Some(11),
-            Duration::from_millis(50),
+            FRESH_SEQUENCE_TEST_WAIT,
             first.len(),
         )
         .expect("fresh compositor frame");
@@ -13882,7 +14262,7 @@ mod tests {
                 );
             })
         };
-        let fed = next_compositor_frame(Some(&frame_store), Some(21), Duration::from_millis(50))
+        let fed = next_compositor_frame(Some(&frame_store), Some(21), FRESH_SEQUENCE_TEST_WAIT)
             .expect("fresh compositor frame");
         publisher.join().expect("publisher");
 

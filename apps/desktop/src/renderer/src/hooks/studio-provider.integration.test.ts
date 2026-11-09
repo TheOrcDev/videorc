@@ -473,7 +473,6 @@ class StudioBackend {
   xPrepareCount = 0
   xPrepareFailuresRemaining = 0
   xPublishCount = 0
-  xPublishTweetError: string | undefined
   xEndFailuresRemaining = 0
   platformAccountValidations: PlatformAccountValidation[] = []
   audioProcessingResponseDelayMs = 0
@@ -1413,7 +1412,6 @@ class StudioBackend {
           mediaKey: `x-media-key-${publishSequence}`,
           shareUrl: `https://x.com/i/broadcasts/${publishSequence}`,
           state: 'running',
-          ...(this.xPublishTweetError ? { tweetError: this.xPublishTweetError } : {}),
           message: 'X broadcast published.'
         }
       }
@@ -8099,6 +8097,226 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
   }, 15_000)
 
+  // The ring holds the session while the camera is turned off, so the idle
+  // scene reload skips it. The ring used to re-arm before that reload ran:
+  // the scene kept the camera and the look never confirmed (Save stayed off).
+  it('loads a camera Off picked during a buffer-only session before the ring re-arms', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    // A scene without the camera, so turning it off leaves nothing to block.
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' &&
+        latest()?.core.canSaveScene === true
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.replayOnly === true && latest()?.core.canSaveScene === true
+    )
+
+    const cameras = latest()!.core.deviceList.devices.filter((device) => device.kind === 'camera')
+    const commandsBefore = backend.sentCommands.length
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest()!.core.captureConfig.sources, cameras, undefined)
+      )
+    })
+    await waitForObservation(() =>
+      backend.sentCommands
+        .slice(commandsBefore)
+        .some((command) => command.method === 'session.start')
+    )
+    const after = backend.sentCommands.slice(commandsBefore)
+    const load = after.findIndex(
+      (command) =>
+        command.method === 'scene.load_from_capture_config' &&
+        (command.params as { sources?: SourceSelection }).sources?.cameraOff === true
+    )
+    const stop = after.findIndex((command) => command.method === 'session.stop')
+    const rearm = after.findIndex((command) => command.method === 'session.start')
+    expect(stop).toBeGreaterThanOrEqual(0)
+    expect(load).toBeGreaterThan(stop)
+    expect(load).toBeLessThan(rearm)
+    expect((after[rearm]!.params as { sources?: SourceSelection }).sources?.cameraOff).toBe(true)
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.replayOnly === true && latest()?.core.canSaveScene === true
+    )
+  }, 15_000)
+
+  // The ring's own start answers after the pick (ogre, 2026-11-06): that start
+  // carried the old camera, and the idle reload skipped the ring it started.
+  it('restarts a buffer-only ring on a camera Off picked while its start is in flight', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' &&
+        latest()?.core.canSaveScene === true
+    )
+    const releaseStart = backend.deferResponse('session.start', BACKEND_RESPONSE)
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'session.start')
+    )
+
+    const cameras = latest()!.core.deviceList.devices.filter((device) => device.kind === 'camera')
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest()!.core.captureConfig.sources, cameras, undefined)
+      )
+    })
+    await waitForObservation(() => latest()?.core.captureConfig.sources.cameraOff === true)
+    const commandsBefore = backend.sentCommands.length
+    await act(async () => {
+      releaseStart()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands
+        .slice(commandsBefore)
+        .some((command) => command.method === 'session.start')
+    )
+    const after = backend.sentCommands.slice(commandsBefore)
+    const stop = after.findIndex((command) => command.method === 'session.stop')
+    const load = after.findIndex(
+      (command) =>
+        command.method === 'scene.load_from_capture_config' &&
+        (command.params as { sources?: SourceSelection }).sources?.cameraOff === true
+    )
+    const rearm = after.findIndex((command) => command.method === 'session.start')
+    expect(stop).toBeGreaterThanOrEqual(0)
+    expect(load).toBeGreaterThan(stop)
+    expect(load).toBeLessThan(rearm)
+    expect((after[rearm]!.params as { sources?: SourceSelection }).sources?.cameraOff).toBe(true)
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.replayOnly === true &&
+        backend.confirmedSources.cameraOff === true &&
+        latest()?.core.canSaveScene === true
+    )
+  }, 15_000)
+
+  // Clips waits for the Screen Recording grant, and turning the screen off
+  // ends the wait with the ring idle between sessions: its start (150 ms) used
+  // to overtake the idle scene reload (250 ms), carry the old scene and,
+  // holding the session, cancel that reload, so Save stayed off (ogre,
+  // 2026-11-06: a camera Off while the ring waited to re-arm).
+  it('loads a screen Off picked while the ring is idle before the ring starts', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'granted',
+        screen: 'not-determined'
+      })
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.mediaAccess?.screen === 'not-determined'
+    )
+    // A scene without the screen, so turning it off leaves nothing to block.
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'camera-only' }))
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'camera-only' &&
+        latest()?.core.canSaveScene === true
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(
+      () => latest()?.replay.armed === true && latest()?.replay.waitReason != null
+    )
+    expect(backend.sentCommands.some((command) => command.method === 'session.start')).toBe(false)
+
+    const screens = latest()!.core.deviceList.devices.filter((device) => device.kind === 'screen')
+    const commandsBefore = backend.sentCommands.length
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive(
+        'capture',
+        buildCaptureSources(latest()!.core.captureConfig.sources, screens, undefined)
+      )
+    })
+    await waitForObservation(() =>
+      backend.sentCommands
+        .slice(commandsBefore)
+        .some((command) => command.method === 'session.start')
+    )
+    const after = backend.sentCommands.slice(commandsBefore)
+    const load = after.findIndex(
+      (command) =>
+        command.method === 'scene.load_from_capture_config' &&
+        (command.params as { sources?: SourceSelection }).sources?.captureOff === true
+    )
+    const start = after.findIndex((command) => command.method === 'session.start')
+    expect(load).toBeGreaterThanOrEqual(0)
+    expect(load).toBeLessThan(start)
+    expect((after[start]!.params as { sources?: SourceSelection }).sources?.captureOff).toBe(true)
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.replayOnly === true && latest()?.core.canSaveScene === true
+    )
+  }, 15_000)
+
   it('records a live camera Off as intent that survives confirmation', async () => {
     const backend = new StudioBackend()
     backend.recordingState = 'recording'
@@ -14103,7 +14321,6 @@ describe('real StudioProvider lifecycle', () => {
   it('ends the actual X broadcast when the session dies during publish', async () => {
     const backend = new StudioBackend()
     enableXOauthForTest(backend)
-    backend.xPublishTweetError = 'The announcement post was rejected.'
     backend.terminalRecordingStatusOnMethod = 'streamTargets.x.publish'
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -14165,10 +14382,9 @@ describe('real StudioProvider lifecycle', () => {
     ).toBe('stopped')
   })
 
-  it('keeps a published X broadcast live when only the announcement post fails', async () => {
+  it('shows a published X broadcast live with its share link and no error', async () => {
     const backend = new StudioBackend()
     enableXOauthForTest(backend)
-    backend.xPublishTweetError = 'The announcement post was rejected.'
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
     const api = createVideorcApi({
@@ -14200,9 +14416,20 @@ describe('real StudioProvider lifecycle', () => {
       latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
     ).toMatchObject({
       state: 'live',
-      lastError: 'The announcement post was rejected.',
+      message: 'X broadcast is live: https://x.com/i/broadcasts/1',
       redactedUrl: 'https://x.com/i/broadcasts/1'
     })
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
+        ?.lastError
+    ).toBeUndefined()
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.publish')
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.not.objectContaining({ region: expect.anything() })
+      })
+    ])
     expect(
       backend.sentCommands.filter((command) => command.method === 'liveChat.x.start')
     ).toHaveLength(1)

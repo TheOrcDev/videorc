@@ -8,10 +8,19 @@ import { analyzeRecording } from './lib/recording-analyzer.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const requireBundled = process.argv.includes('--require-bundled')
-const bundledBin =
+// The per-platform bundle the packaged app ships (recording-studio-gates.mjs's
+// bundledFfmpegPath): Linux has its own, never the macOS `current` build.
+const bundledBin = join(
+  repoRoot,
+  'vendor',
+  'ffmpeg',
   process.platform === 'win32'
-    ? join(repoRoot, 'vendor', 'ffmpeg', 'windows-x64', 'bin')
-    : join(repoRoot, 'vendor', 'ffmpeg', 'current', 'bin')
+    ? 'windows-x64'
+    : process.platform === 'linux'
+      ? 'linux-x64'
+      : 'current',
+  'bin'
+)
 const bundledFfmpeg = join(bundledBin, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
 const bundledFfprobe = join(bundledBin, process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe')
 if (requireBundled && (!existsSync(bundledFfmpeg) || !existsSync(bundledFfprobe))) {

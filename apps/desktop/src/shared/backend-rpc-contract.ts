@@ -6,6 +6,9 @@ import type {
   ScreenPrivacy,
   VirtualCameraPlatformReportParams,
   VirtualCameraSetParams,
+  CameraLowLightParams,
+  CameraLowLightSetParams,
+  CameraLowLightState,
   VirtualCameraStatus,
   SourceSwitchParams,
   BackendHealth,
@@ -543,6 +546,10 @@ export interface BackendRpcMethodMap {
     VirtualCameraStatus
   >
   // --- end Videorc Camera (plan 214 A4) ---
+  // --- Camera low-light compensation (issue #1066) ---
+  'camera.lowLight.get': BackendRpcDefinition<CameraLowLightParams, CameraLowLightState>
+  /** Saved per camera and written to the device now; open or not. */
+  'camera.lowLight.set': BackendRpcDefinition<CameraLowLightSetParams, CameraLowLightState>
   'sounds.list': BackendRpcDefinition<undefined, SoundboardState>
   'sounds.import': BackendRpcDefinition<SoundImportParams, Sound>
   'sounds.update': BackendRpcDefinition<SoundUpdateParams, Sound>
@@ -2596,7 +2603,7 @@ const sessionSummarySchema = boundedSemanticValue(
       // Plan 157: separate-source take membership.
       takeId: optionalSchema(boundedString),
       recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera'])),
-      // A take Videorc stopped mid-recording, recovered on the next start.
+      // A take that ended early, recovered as MP4 (or not).
       interruptionRecovery: optionalSchema(interruptionRecoverySchema)
     },
     { allowUnknown: false }
@@ -3769,6 +3776,19 @@ const virtualCameraSetParamsSchema = objectSchema(
   { on: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<VirtualCameraSetParams>
+const cameraLowLightCameraIdSchema = stringSchema({ minLength: 1, maxLength: 1024 })
+const cameraLowLightParamsSchema = objectSchema(
+  { cameraId: cameraLowLightCameraIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CameraLowLightParams>
+const cameraLowLightSetParamsSchema = objectSchema(
+  { cameraId: cameraLowLightCameraIdSchema, compensation: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CameraLowLightSetParams>
+const cameraLowLightStateSchema = objectSchema(
+  { cameraId: cameraLowLightCameraIdSchema, supported: booleanSchema, compensation: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CameraLowLightState>
 const virtualCameraPlatformReportParamsSchema = objectSchema(
   {
     platformStep: virtualCameraPlatformStepSchema,
@@ -5542,6 +5562,11 @@ const runtimeContracts = {
     result: virtualCameraStatusSchema
   },
   // --- end Videorc Camera (plan 214 A4) ---
+  'camera.lowLight.get': { params: cameraLowLightParamsSchema, result: cameraLowLightStateSchema },
+  'camera.lowLight.set': {
+    params: cameraLowLightSetParamsSchema,
+    result: cameraLowLightStateSchema
+  },
   'sounds.list': { params: undefinedSchema, result: soundboardStateSchema },
   'sounds.import': { params: soundImportParamsSchema, result: soundSchema },
   'sounds.update': { params: soundUpdateParamsSchema, result: soundSchema },

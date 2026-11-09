@@ -5,6 +5,10 @@ import { extname, join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import {
+  captionsPlatformUnavailableReason,
+  captionsSkipLine
+} from './lib/captions-platform-skip.mjs'
+import {
   analyzeCaptionsLiveArtifact,
   formatCaptionsLiveArtifactSummary
 } from './lib/captions-live-artifact.mjs'
@@ -90,6 +94,11 @@ let launched
 let backend
 const listeners = []
 let sessionActive = false
+// Set when the product says this platform can't caption at all (Linux
+// today): every check below is a caption check, so the whole smoke SKIPs
+// with the product's own reason instead of timing out on `desiredEnabled`.
+let captionsUnavailableReason = null
+class CaptionsPlatformSkip extends Error {}
 
 try {
   launched = await launchDevApp({
@@ -109,6 +118,10 @@ try {
   })
   backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
   const smoke = launched.connections['preview-motion-ready']
+  captionsUnavailableReason = await captionsPlatformUnavailableReason(
+    async (code) => (await smokeCommand(smoke, 'eval-js', { code }))?.result
+  )
+  if (captionsUnavailableReason) throw new CaptionsPlatformSkip(captionsUnavailableReason)
 
   fake.state.realtimeAvailable = false
   fake.state.realtimeFailureCode = 'captions-realtime-disabled'
@@ -247,23 +260,25 @@ try {
       `Evidence: ${outputDirectory}`
   )
 } catch (error) {
-  writeFileSync(
-    reportPath,
-    JSON.stringify(
-      {
-        pass: false,
-        error: error instanceof Error ? error.message : String(error),
-        captionsStatus: backend ? await requestSafe(backend, 'captions.status.get', {}) : null,
-        recordingStatus: backend ? await requestSafe(backend, 'recording.status', {}) : null
-      },
-      null,
-      2
+  if (!(error instanceof CaptionsPlatformSkip)) {
+    writeFileSync(
+      reportPath,
+      JSON.stringify(
+        {
+          pass: false,
+          error: error instanceof Error ? error.message : String(error),
+          captionsStatus: backend ? await requestSafe(backend, 'captions.status.get', {}) : null,
+          recordingStatus: backend ? await requestSafe(backend, 'recording.status', {}) : null
+        },
+        null,
+        2
+      )
     )
-  )
-  throw new Error(
-    `${error instanceof Error ? error.message : String(error)} Evidence: ${reportPath}`,
-    { cause: error }
-  )
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)} Evidence: ${reportPath}`,
+      { cause: error }
+    )
+  }
 } finally {
   try {
     if (backend) {
@@ -276,6 +291,11 @@ try {
     await launched?.stop().catch(() => {})
     await fake.close()
   }
+}
+if (captionsUnavailableReason) {
+  console.log(
+    captionsSkipLine('Dual-orientation captions smoke', 'every check', captionsUnavailableReason)
+  )
 }
 
 function rtmpTarget(id, platform, port, orientation) {

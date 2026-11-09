@@ -128,9 +128,15 @@ pub fn pulse_source_listing(stdout: &str, stderr: &str) -> Option<Vec<PulseSourc
         .then(|| parse_pulse_sources(stdout))
 }
 
+/// Microphone rows, the system default first. FFmpeg lists sources in Pulse
+/// index order, where a virtual or earlier-plugged source can come before the
+/// one the sound settings chose, and a profile with no microphone yet (or
+/// whose microphone is gone) takes the first row.
 pub fn pulse_microphone_devices(sources: &[PulseSource]) -> Vec<Device> {
-    sources
-        .iter()
+    let mut ordered: Vec<&PulseSource> = sources.iter().collect();
+    ordered.sort_by_key(|source| !source.is_default);
+    ordered
+        .into_iter()
         .map(|source| Device {
             app: None,
             window_title: None,
@@ -320,6 +326,37 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("system default")
+        );
+    }
+
+    #[test]
+    fn the_system_default_source_is_the_first_microphone_row() {
+        // Ogre with the live lab's virtual microphone: Pulse lists it before
+        // the built-in one the sound settings chose, and a fresh profile
+        // recorded the lab's silent source.
+        let listing = "Auto-detected sources for pulse:\n  videorc_lab_speech.monitor [Monitor of Videorc-Lab-Speech] (none)\n  videorc_lab_mic [Videorc-Lab-Mic] (none)\n  alsa_output.pci-0000_02_00.3.HiFi__Speaker__sink.monitor [Monitor of Apple Audio Device Internal Speakers] (none)\n* alsa_input.pci-0000_02_00.3.HiFi__Mic__source [Apple Audio Device Internal Microphone] (none)\n  alsa_input.usb-Blue_Yeti-00.analog-stereo [Yeti Stereo Microphone [Analog]] (none)\n";
+        let names = |listing: &str| {
+            pulse_microphone_devices(&parse_pulse_sources(listing))
+                .into_iter()
+                .map(|device| device.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(listing),
+            [
+                "Apple Audio Device Internal Microphone",
+                "Videorc-Lab-Mic",
+                "Yeti Stereo Microphone [Analog]"
+            ]
+        );
+        // No input source is the default: Pulse's order stands.
+        assert_eq!(
+            names(&listing.replace("* alsa_input", "  alsa_input")),
+            [
+                "Videorc-Lab-Mic",
+                "Apple Audio Device Internal Microphone",
+                "Yeti Stereo Microphone [Analog]"
+            ]
         );
     }
 

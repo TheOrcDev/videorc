@@ -144,6 +144,14 @@ describe('session runtime recovery', () => {
     expect(toastSpies.success).toHaveBeenCalledTimes(1)
     expect(toastSpies.warning).toHaveBeenCalledTimes(1)
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    // `unavailable` means X ended the broadcast: X's API gives no playback
+    // URL any more, so there is nothing else to "show".
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'X ended your broadcast',
+      expect.objectContaining({
+        description: expect.stringContaining('Your local recording is unaffected.')
+      })
+    )
   })
 
   it('preserves OAuth callback success and failure notifications in the lazy chunk', () => {
@@ -459,6 +467,30 @@ describe('session audio news (plan 076)', () => {
       expect.objectContaining({
         id: 'stream-output',
         description: 'stream-output-failed message',
+        duration: Infinity
+      })
+    )
+  })
+
+  it('says the rest of the take is silent when the audio output stops for good', () => {
+    showSessionHealthEvent(healthEvent('audio-output-failed', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Your recording has no sound from here',
+      expect.objectContaining({
+        id: 'audio-output',
+        description: 'audio-output-failed message',
+        duration: Infinity
+      })
+    )
+  })
+
+  it('says the recording stopped when its encoder stops taking frames (2026-11-03 Iris Xe)', () => {
+    showSessionHealthEvent(healthEvent('recording-output-failed', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Your recording stopped',
+      expect.objectContaining({
+        id: 'recording-output',
+        description: 'recording-output-failed message',
         duration: Infinity
       })
     )

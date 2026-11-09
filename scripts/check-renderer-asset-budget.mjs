@@ -130,9 +130,13 @@ const htmlPath = resolve(
 // recording/folder and Linux OpenH264 wiring) measure 2,322,131 raw /
 // 476,319 gzip. Raise raw to 2,325,000 and gzip to 477,000; keep
 // re-splitting the answer for net-new UI.
+// 2026-11-09: #1241 (#1068: keep the fresher of a camera start reply and the
+// status already held, freshestPreviewCameraStatus) put main at 2,325,142 raw /
+// 477,033 gzip, 142 and 33 bytes over, so every PR's JS job failed. Raise raw
+// to 2,330,000 and gzip to 478,000.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_325_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 477_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_330_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 478_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

@@ -1,5 +1,10 @@
 import { dirname, resolve } from 'node:path'
 
+// electron-builder `linux.executableName`.
+const LINUX_EXECUTABLE_NAME = 'videorc'
+// The desktop entry electron-builder writes at the AppImage's root.
+const LINUX_APPIMAGE_DESKTOP_ENTRY = 'videorc.desktop'
+
 export function defaultPackagedAppExecutable({ repoRoot, platform = process.platform } = {}) {
   if (!repoRoot) {
     throw new Error('repoRoot is required.')
@@ -14,7 +19,7 @@ export function defaultPackagedAppExecutable({ repoRoot, platform = process.plat
     // The unpacked dir target (electron-builder `linux.executableName`); the
     // AppImage wraps the same payload and is exercised through
     // VIDEORC_PACKAGED_APP_EXECUTABLE=<path>.AppImage (Plan 0008).
-    return resolve(repoRoot, 'apps/desktop/release/linux-unpacked/videorc')
+    return resolve(repoRoot, 'apps/desktop/release/linux-unpacked', LINUX_EXECUTABLE_NAME)
   }
   throw new Error(`Packaged app smoke test does not support ${platform}.`)
 }
@@ -44,6 +49,22 @@ export function bundledFfmpegPathForPackagedApp({ appExecutable, platform = proc
  */
 export function isLinuxAppImageExecutable(appExecutable, platform = process.platform) {
   return platform === 'linux' && /\.AppImage$/i.test(String(appExecutable ?? ''))
+}
+
+/**
+ * What `check:packaged-app` reads from an AppImage. The Electron binary (its
+ * fuse wire), `app.asar` (the build flags) and the bundled `videorc.desktop`
+ * (its launch flags) sit inside the squashfs, where the fuse sentinel cannot
+ * be found; the AppImage runtime's `--appimage-extract <member>` writes each
+ * member under `squashfs-root` in its working directory without starting the
+ * app.
+ */
+export function linuxAppImageCheckPayload(extractDirectory) {
+  return {
+    members: [LINUX_EXECUTABLE_NAME, 'resources/app.asar', LINUX_APPIMAGE_DESKTOP_ENTRY],
+    executable: resolve(extractDirectory, 'squashfs-root', LINUX_EXECUTABLE_NAME),
+    desktopEntry: resolve(extractDirectory, 'squashfs-root', LINUX_APPIMAGE_DESKTOP_ENTRY)
+  }
 }
 
 /**

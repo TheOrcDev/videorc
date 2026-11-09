@@ -36,7 +36,8 @@ import {
   disposeRecordLatencyRun,
   startRecordLatencyCycle,
   stopRecordLatencyCycle,
-  waitForPublishedMp4
+  waitForPublishedMp4,
+  warningEvents
 } from './lib/record-latency-events.mjs'
 import {
   RECORD_LATENCY_BUDGETS,
@@ -529,6 +530,7 @@ try {
       (record) => record.event === 'health.event' && record.payload?.code === 'system-audio-lost'
     ).length
   }
+  const warnings = warningEvents(recorder.events)
   const report = {
     generatedAt: new Date().toISOString(),
     commit: gitHead(),
@@ -545,6 +547,7 @@ try {
       replayBuffer
     },
     systemAudioEvidence: systemAudio ? systemAudioEvidence : undefined,
+    warnings,
     budgets,
     enforce,
     verdict,
@@ -567,6 +570,11 @@ try {
       `system audio: ${systemAudioEvidence.mixedStatuses} mixed status event(s), ${systemAudioEvidence.unavailable} unavailable, ${systemAudioEvidence.lost} lost`
     )
   }
+  log(
+    warnings.length === 0
+      ? 'warnings: none'
+      : `warnings: ${warnings.length} (${warnings.map((entry) => `${entry.level} ${entry.code}`).join(', ')})`
+  )
   log(`report written to ${reportPath}`)
   if (!verdict.pass) {
     for (const failure of verdict.failures) log(`budget: ${failure}`)
