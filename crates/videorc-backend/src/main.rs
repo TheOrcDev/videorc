@@ -15405,7 +15405,8 @@ async fn cloud_show_session_stopped(state: &AppState, session_id: Option<&str>) 
 /// or this desktop remembers a show, whatever the cloud switch or the
 /// rollout says (lane 3 F2, `launch_check_due`): a show started before a
 /// rollback is still live on its node, and its Resume and End banner must
-/// show.
+/// show. Until the web has answered, every successful entitlement refresh
+/// calls this again (plan 222 review L4); two at once are one.
 async fn cloud_show_detect_at_launch(state: &AppState) {
     let Some(bearer) = account::stored_session_token() else {
         return;
@@ -15741,6 +15742,9 @@ async fn refresh_account_entitlements(state: &AppState) {
         Option<protocol::EntitlementPlan>,
         Option<protocol::AiCapabilitiesCloud>,
     )> = None;
+    // Plan 222 review L4: a successful read runs the launch check again
+    // while the web has not answered it for this sign-in.
+    let mut capabilities_read = false;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -15803,6 +15807,10 @@ async fn refresh_account_entitlements(state: &AppState) {
                     )),
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
+                capabilities_read = matches!(
+                    &prepared.outcome,
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(_)
+                );
                 apply_prepared_account_entitlement_refresh(prepared.outcome)
             })
             .unwrap_or(false)
@@ -15822,6 +15830,13 @@ async fn refresh_account_entitlements(state: &AppState) {
     if let Some((plan, cloud)) = cloud_block {
         cloud_show_hydrate(state, plan, cloud);
         cloud_show_refresh_announce(state).await;
+        // Plan 222 review L4: the launch check the web could not answer at
+        // launch (or that this sign-in still owes) runs again, on its own
+        // task; `launch_check_due` is false once the web has answered.
+        if capabilities_read {
+            let check_state = state.clone();
+            tokio::spawn(async move { cloud_show_detect_at_launch(&check_state).await });
+        }
     }
     if let Some(enabled) = command_parser {
         cohost::set_command_parser_capability(state, enabled).await;
