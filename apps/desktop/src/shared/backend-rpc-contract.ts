@@ -5754,6 +5754,7 @@ const cloudRoomStatusSchema = objectSchema(
     returnEnabled: booleanSchema,
     stageSet: booleanSchema,
     live: booleanSchema,
+    liveSince: optionalSchema(timestamp),
     message: optionalText
   },
   { allowUnknown: false }

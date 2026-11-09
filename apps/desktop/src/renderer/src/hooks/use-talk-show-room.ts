@@ -55,7 +55,13 @@ export type TalkShowRoomControllerDeps = {
   previewReplacedOverride: boolean
 }
 
-/** The next stage after Bring on or Send backstage: pure, for the tests. */
+/**
+ * The next stage after Bring on or Send backstage: pure, for the tests. The
+ * host is always on stage and leads the list (D8): a stage without them
+ * would take their camera and mic out of the program (the runner composes
+ * only who the stage names), so a Bring on into an empty stage names the
+ * host too, and the host can never be sent backstage.
+ */
 export function stageWith(
   stage: CloudStage,
   identity: string,
@@ -66,10 +72,7 @@ export function stageWith(
   const next = onStage ? [...without, identity] : without
   // The host leads the list so Solo and Spotlight default to them.
   const ordered = hostIdentity
-    ? [
-        ...next.filter((entry) => entry === hostIdentity),
-        ...next.filter((entry) => entry !== hostIdentity)
-      ]
+    ? [hostIdentity, ...next.filter((entry) => entry !== hostIdentity)]
     : next
   return {
     ...stage,

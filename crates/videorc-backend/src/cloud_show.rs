@@ -1243,7 +1243,7 @@ pub(crate) fn new_intent_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -2332,9 +2332,10 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 self.hold_image_sent_on_socket = true;
             }
             // Plan 224: a restarted runner shows the host alone on Solo
-            // until it gets the stage again (`stageSet: false`).
+            // until it gets the stage again (`stageSet: false`). A stage
+            // this desktop never sent is that default already.
             let stage_lost = runtime.talk.as_ref().is_some_and(|talk| {
-                !talk.stage.on_stage.is_empty()
+                talk.stage_sent
                     && state
                         .room
                         .as_ref()
@@ -2345,6 +2346,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             }
             runtime.set_runner(state);
             runtime.talk_layout_from_runner();
+            runtime.talk_live_from_runner();
             runtime.connected = true;
             (session, legs)
         };
@@ -4757,6 +4759,11 @@ mod tests {
         assert!(!room.door_open, "the door is closed by default (D4)");
         assert_eq!(room.limits.map(|limits| limits.guests_on_stage), Some(5));
         assert_eq!(room.participants.len(), 1);
+        // The stage opens as the runner's default, the host alone on Solo
+        // (D8): the first Bring on edits this and so names the host.
+        assert_eq!(room.stage.layout, crate::cloud_talk::CloudStageLayout::Solo);
+        assert_eq!(room.stage.on_stage, vec!["host:sh_abc".to_string()]);
+        assert!(!room.live && room.live_since.is_none());
         assert_eq!(
             status.recording.as_ref().map(|r| r.problem.as_deref()),
             Some(Some("no-target"))
@@ -4836,6 +4843,128 @@ mod tests {
             &["sh_abc".to_string()]
         );
         assert!(!lock(&harness.context.slot).talk_show_open());
+    }
+
+    /// The review of 2026-11-09, H2: the room opened with an empty stage, so
+    /// the renderer's first Bring on (the open stage plus the guest) sent a
+    /// `stage.set` without the host, and the runner took the host's camera
+    /// and mic out of the program. The stage now opens as the runner's own
+    /// default, the host alone, so the first `stage.set` names the host;
+    /// and until this desktop sends a stage of its own (a resume), it shows
+    /// the people the runner flags on stage, so the next Bring on keeps them.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_bring_on_names_the_host_and_a_resumed_stage_keeps_the_runners_people() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created_talk()));
+        let context = harness.context.clone();
+        let open = tokio::spawn(async move {
+            context
+                .open_room(Some("bearer".to_string()), room_open_params(), false)
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome_talk(false));
+        let status = open.await.unwrap().expect("the room opens");
+        let stage = status.room.as_ref().unwrap().stage.clone();
+        assert_eq!(stage.on_stage, vec!["host:sh_abc".to_string()]);
+        // Bring Ada on as the renderer does: the open stage plus her.
+        let mut next = stage.clone();
+        next.layout = crate::cloud_talk::CloudStageLayout::SideBySide;
+        next.on_stage.push("g_ada".to_string());
+        let context = harness.context.clone();
+        let set = tokio::spawn(async move { context.set_stage(next).await });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["kind"], "stage.set");
+        assert_eq!(
+            frame["onStage"],
+            json!(["host:sh_abc", "g_ada"]),
+            "the first stage.set after Bring on names the host"
+        );
+        server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
+        set.await.unwrap().unwrap();
+
+        // A desktop that never sent a stage (as after a resume) shows the
+        // runner's: its layout and who it flags on stage, the host first,
+        // never the runner, never a backstage guest.
+        lock(&harness.context.slot)
+            .talk
+            .as_mut()
+            .unwrap()
+            .stage_sent = false;
+        let participant = |identity: &str, on_stage: bool| {
+            json!({ "identity": identity, "name": identity, "role": "guest", "onStage": on_stage,
+                    "video": true, "audio": true, "muted": false, "screen": false,
+                    "quality": "good", "sinceMs": 10 })
+        };
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 60, "feeds": [], "legs": [],
+            "room": { "connected": true, "participants": [
+                participant("g_ada", true),
+                participant("g_bo", false),
+                participant("runner:sh_abc", true),
+                participant("host:sh_abc", true)
+            ], "layout": "spotlight", "hostAway": false, "returnEnabled": true, "stageSet": true }
+        } }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stage = lock(&harness.context.slot).status().room.unwrap().stage;
+        assert_eq!(stage.layout, crate::cloud_talk::CloudStageLayout::Spotlight);
+        assert_eq!(
+            stage.on_stage,
+            vec!["host:sh_abc".to_string(), "g_ada".to_string()]
+        );
+        // Bring Bo on from there: Ada and the host stay.
+        let mut next = stage;
+        next.on_stage.push("g_bo".to_string());
+        let context = harness.context.clone();
+        let set = tokio::spawn(async move { context.set_stage(next).await });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["onStage"], json!(["host:sh_abc", "g_ada", "g_bo"]));
+        server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
+        set.await.unwrap().unwrap();
+        // From then on the desktop's own stage is the one shown.
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 61, "feeds": [], "legs": [],
+            "room": { "connected": true, "participants": [participant("host:sh_abc", true)],
+                      "layout": "solo", "hostAway": false, "returnEnabled": true, "stageSet": true }
+        } }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stage = lock(&harness.context.slot).status().room.unwrap().stage;
+        assert_eq!(stage.on_stage.len(), 3);
+        assert_eq!(stage.layout, crate::cloud_talk::CloudStageLayout::Spotlight);
+    }
+
+    /// The runner's on-stage people: the host first and always, no runner,
+    /// no duplicate, no more than the runner takes.
+    #[test]
+    fn the_runners_on_stage_people_always_lead_with_the_host() {
+        let person = |identity: &str, on_stage: bool| crate::cloud_talk::RunnerParticipant {
+            identity: identity.to_string(),
+            on_stage,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::cloud_talk::runner_on_stage("host:sh_abc", &[]),
+            vec!["host:sh_abc".to_string()]
+        );
+        let people = vec![
+            person("g_ada", true),
+            person("host:sh_abc", false),
+            person("runner:sh_abc", true),
+            person("g_ada", true),
+            person("", true),
+            person("g_bo", false),
+        ];
+        assert_eq!(
+            crate::cloud_talk::runner_on_stage("host:sh_abc", &people),
+            vec!["host:sh_abc".to_string(), "g_ada".to_string()]
+        );
+        let crowd: Vec<_> = (0..12).map(|n| person(&format!("g_{n}"), true)).collect();
+        assert_eq!(
+            crate::cloud_talk::runner_on_stage("host:sh_abc", &crowd).len(),
+            crate::cloud_talk::MAX_ON_STAGE
+        );
     }
 
     /// Plan 224 D6: a take that records the camera refuses the lend, and
@@ -5029,20 +5158,79 @@ mod tests {
                 .and_then(|patch| patch.platforms.clone()),
             Some(vec!["youtube".to_string(), "twitch".to_string()])
         );
-        // End livestream: the runner has no legs.end yet; the refusal is named.
+        assert!(status.room.as_ref().unwrap().live_since.is_some());
+        // End livestream (D17): `legs.end` with no payload, acked; the
+        // desktop reads off air, the room stays open, the destinations are
+        // forgotten so the next Go Live hands fresh ones over.
         let context = harness.context.clone();
         let end = tokio::spawn(async move { context.legs_end().await });
         let frame = server.next_frame().await;
         assert_eq!(frame["kind"], "legs.end");
-        server
-            .send(json!({ "t": "ack", "id": frame["id"], "ok": false, "error": "unknown intent" }));
-        let error = end.await.unwrap().expect_err("refused");
+        assert_eq!(frame.as_object().unwrap().len(), 3, "no payload: {frame}");
+        server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
+        let status = end.await.unwrap().expect("legs.end is acked");
+        let room = status.room.as_ref().unwrap();
+        assert!(!room.live, "off air once the legs end");
+        assert!(room.live_since.is_none());
+        assert!(room.message.is_none());
+        assert_eq!(room.phase, crate::cloud_talk::CloudRoomPhase::Open);
         assert!(
-            error
-                .to_string()
-                .contains(crate::cloud_talk::LEGS_END_UNSUPPORTED_MESSAGE)
+            lock(&harness.context.slot)
+                .show
+                .as_ref()
+                .unwrap()
+                .destinations
+                .is_empty()
         );
-        assert!(lock(&harness.context.slot).status().room.unwrap().live);
+        // The runner's phase stays `live` with no legs (the wire notes):
+        // on air is the legs, never the phase.
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 25, "feeds": [], "legs": [], "destinationsSet": true,
+            "room": { "connected": true, "participants": [], "layout": "side-by-side", "hostAway": false, "stageSet": true }
+        } }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Live);
+        assert!(
+            !status.room.as_ref().unwrap().live,
+            "phase live with no legs is not on air"
+        );
+        // Go Live again: a fresh destinations.set, on air with a fresh clock.
+        let context = harness.context.clone();
+        let again = tokio::spawn(async move {
+            context
+                .talk_go_live(
+                    Some("bearer".to_string()),
+                    destinations(),
+                    vec!["youtube".to_string()],
+                )
+                .await
+        });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["kind"], "destinations.set");
+        assert_eq!(frame["destinations"].as_array().unwrap().len(), 2);
+        server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
+        let status = again.await.unwrap().unwrap();
+        assert!(status.room.as_ref().unwrap().live);
+        assert!(status.room.as_ref().unwrap().live_since.is_some());
+        // A refusal names the runner's problem and changes nothing.
+        let context = harness.context.clone();
+        let end = tokio::spawn(async move { context.legs_end().await });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["kind"], "legs.end");
+        server.send(
+            json!({ "t": "ack", "id": frame["id"], "ok": false, "error": "the fan-out is busy" }),
+        );
+        let error = end.await.unwrap().expect_err("refused");
+        let expected =
+            "Couldn't end the livestream: the fan-out is busy. Try again, or close the room.";
+        assert_eq!(error.to_string(), expected);
+        let status = lock(&harness.context.slot).status();
+        assert!(status.room.as_ref().unwrap().live);
+        assert_eq!(
+            status.room.as_ref().unwrap().message.as_deref(),
+            Some(expected)
+        );
         // The runner restarts and comes back without the stage: it goes again.
         server.send(json!({ "t": "state", "state": {
             "phase": "live", "liveSeconds": 30, "feeds": [], "legs": [

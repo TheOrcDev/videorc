@@ -5463,8 +5463,10 @@ export interface CloudRoomStatus {
   client: CloudRoomClientState
   returnEnabled: boolean
   stageSet: boolean
-  /** Destinations were handed over during this room: the show is on air. */
+  /** On air: the runner holds platform legs for this room (never its `phase`). */
   live: boolean
+  /** When this desktop handed the destinations over (this Go Live's clock); absent after a resume. */
+  liveSince?: string
   message?: string
 }
 

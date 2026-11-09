@@ -25,6 +25,20 @@ describe('stageWith', () => {
     expect(guestFirst.onStage).toEqual([HOST, 'g_ada'])
   })
 
+  it('never drops the host: a Bring on into an empty stage names them, and backstage is refused', () => {
+    // The runner composes only who the stage names (D8): a stage of one
+    // guest would take the host's camera and mic out of the program.
+    const empty: CloudStage = { layout: 'solo', onStage: [] }
+    expect(stageWith(empty, 'g_ada', true, HOST).onStage).toEqual([HOST, 'g_ada'])
+    const guestOnly: CloudStage = { layout: 'side-by-side', onStage: ['g_ada'] }
+    expect(stageWith(guestOnly, 'g_bo', true, HOST).onStage).toEqual([HOST, 'g_ada', 'g_bo'])
+    expect(stageWith({ layout: 'solo', onStage: [HOST] }, HOST, false, HOST).onStage).toEqual([
+      HOST
+    ])
+    // Without a host identity (the room is not joined) nothing is invented.
+    expect(stageWith(empty, 'g_ada', true, null).onStage).toEqual(['g_ada'])
+  })
+
   it('drops the spotlight and the screen of a person sent backstage', () => {
     const stage: CloudStage = {
       layout: 'screen-people',

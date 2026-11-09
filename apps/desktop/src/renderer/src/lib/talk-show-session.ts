@@ -50,11 +50,15 @@ export function talkShowSessionView(
 }
 
 /**
- * When the show went on air, from the runner's clock, taken once when the
- * room turns live so the transport's clock does not jitter with every
- * status tick.
+ * When the show went on air: this desktop's hand-over stamp (`room.liveSince`,
+ * so a Go Live after End livestream starts a fresh clock; the runner's
+ * `liveSeconds` is never reset by `legs.end`), or after a resume the runner's
+ * clock. Taken once when the room turns live so the transport's clock does
+ * not jitter with every status tick.
  */
 export function talkShowLiveStartedAt(status: CloudStatus | null, nowMs: number): string {
+  const since = status?.room?.liveSince
+  if (since && Number.isFinite(Date.parse(since))) return new Date(Date.parse(since)).toISOString()
   const liveSeconds = status?.liveSeconds ?? 0
   return new Date(nowMs - liveSeconds * 1000).toISOString()
 }

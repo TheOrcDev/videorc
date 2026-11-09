@@ -2715,7 +2715,8 @@
         "client": "connected",
         "returnEnabled": false,
         "stageSet": true,
-        "live": true
+        "live": true,
+        "liveSince": "2026-11-08T12:02:00.000Z"
       },
       "recording": {
         "active": true,

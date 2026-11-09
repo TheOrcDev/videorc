@@ -21,8 +21,9 @@
 //!   notes differ from plan 224, they win: the create's `room` block is
 //!   `{ url, hostToken, name }`, `GET …/room` is `{ room, invite }`, the
 //!   guests list carries a `cursor`, `stage.set` takes `hostShape`,
-//!   `overlay.set`'s rect is normalized, and the runner has no per-leg end
-//!   yet, so End livestream sends `legs.end` and reports a refusal.
+//!   `overlay.set`'s rect is normalized, and End livestream is the runner's
+//!   `legs.end` (D17): every platform leg ends, the room stays, and "on air"
+//!   is read from the runner's legs, never from its `phase`.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -53,10 +54,6 @@ const GUESTS_POLL_REST: Duration = Duration::from_millis(1000);
 const GUESTS_POLL_BACKOFF: Duration = Duration::from_secs(5);
 /// The most people a `stage.set` may name (the runner's `MAX_ON_STAGE`).
 pub const MAX_ON_STAGE: usize = 8;
-/// The runner's `legs.end` is not built yet (wire notes: "Phase 1 has no
-/// per-leg remove"); this is what the host reads until it is.
-pub const LEGS_END_UNSUPPORTED_MESSAGE: &str =
-    "Videorc Cloud can't end the stream without closing the room yet.";
 
 // --- Wire: desktop -> web ---------------------------------------------------
 
@@ -547,8 +544,14 @@ pub struct CloudRoomStatus {
     pub client: CloudRoomClientState,
     pub return_enabled: bool,
     pub stage_set: bool,
-    /// Destinations were handed over during this room: the show is on air.
+    /// On air: the runner holds platform legs for this room (`state.legs`
+    /// non-empty, never its `phase`, which stays `live` after `legs.end`).
     pub live: bool,
+    /// When this desktop handed the destinations over (the on-air clock for
+    /// this Go Live; the runner's `liveSeconds` is not reset by `legs.end`).
+    /// Absent after a resume, when the runner's clock is all there is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_since: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -730,6 +733,37 @@ pub fn host_identity(show_id: &str) -> String {
     format!("host:{show_id}")
 }
 
+/// The people the runner flags on stage, the host first and always (D8:
+/// the runner composes only who the stage names, so a stage without the
+/// host would take their camera and mic out of the program). The runner
+/// itself is never a person on stage.
+pub(crate) fn runner_on_stage(host: &str, participants: &[RunnerParticipant]) -> Vec<String> {
+    let mut on_stage = vec![host.to_string()];
+    for participant in participants {
+        if participant.on_stage
+            && participant.identity != host
+            && !participant.identity.starts_with("runner:")
+            && !participant.identity.is_empty()
+            && !on_stage.contains(&participant.identity)
+            && on_stage.len() < MAX_ON_STAGE
+        {
+            on_stage.push(participant.identity.clone());
+        }
+    }
+    on_stage
+}
+
+/// What End livestream reads when the runner refused `legs.end` or never
+/// answered: the problem itself, and what to do. The legs are still up.
+pub fn legs_end_failure(problem: &str) -> String {
+    let problem = problem.trim().trim_end_matches('.');
+    if problem.is_empty() {
+        "Couldn't end the livestream. Try again, or close the room.".to_string()
+    } else {
+        format!("Couldn't end the livestream: {problem}. Try again, or close the room.")
+    }
+}
+
 // --- The camera hand-over (D6) -----------------------------------------------
 
 /// What the backend does with its camera at the room's edges.
@@ -773,6 +807,11 @@ pub(crate) struct TalkShowState {
     pub client: CloudRoomClientState,
     pub message: Option<String>,
     pub live: bool,
+    /// When this desktop last handed destinations over (`CloudRoomStatus::live_since`).
+    pub live_since: Option<String>,
+    /// A `stage.set` of this desktop's own reached the runner: from then on
+    /// the status shows this desktop's stage, not the runner's layout.
+    pub stage_sent: bool,
     /// The guests long-poll's cursor and the generation its task checks.
     pub poll_cursor: Option<String>,
     pub poll_generation: u64,
@@ -795,7 +834,16 @@ impl std::fmt::Debug for TalkShowState {
 }
 
 impl TalkShowState {
-    fn new(room: ShowRoomAnswer, settings: RoomSettingsRecord, invite: Option<ShowInvite>) -> Self {
+    /// A room that just opened or was resumed. The stage starts as the
+    /// runner's own default, the host alone on Solo (plan 224 D8): a Bring
+    /// on edits this stage, so the first `stage.set` always names the host
+    /// and the host's camera and mic never leave the program.
+    fn new(
+        room: ShowRoomAnswer,
+        settings: RoomSettingsRecord,
+        invite: Option<ShowInvite>,
+        show_id: &str,
+    ) -> Self {
         Self {
             phase: CloudRoomPhase::Open,
             room_url: room.url,
@@ -808,10 +856,18 @@ impl TalkShowState {
             requests: Vec::new(),
             guests: Vec::new(),
             declined_count: 0,
-            stage: CloudStage::default(),
+            stage: CloudStage {
+                layout: CloudStageLayout::Solo,
+                on_stage: vec![host_identity(show_id)],
+                spotlight: None,
+                screen: None,
+                host_shape: None,
+            },
             client: CloudRoomClientState::Idle,
             message: None,
             live: false,
+            live_since: None,
+            stage_sent: false,
             poll_cursor: None,
             poll_generation: 0,
             seen_requests: HashSet::new(),
@@ -848,6 +904,7 @@ impl TalkShowState {
             return_enabled: runner_room.is_some_and(|room| room.return_enabled),
             stage_set: runner_room.is_some_and(|room| room.stage_set),
             live: self.live,
+            live_since: self.live_since.clone(),
             message: self.message.clone(),
         }
     }
@@ -874,7 +931,11 @@ impl CloudShowRuntime {
         self.show.as_ref().map(|show| show.record.id.clone())
     }
 
-    /// The runner's layout as the status shows it, once a `stage.set` landed.
+    /// The runner's stage as the status shows it, once a `stage.set` landed
+    /// (the agent's re-handed one after a resume): until this desktop sends
+    /// a stage of its own, the runner's layout and the people it flags on
+    /// stage are the ones shown, so the first Bring on after a resume edits
+    /// the stage the program has (H2), with the host always first.
     pub(crate) fn talk_layout_from_runner(&mut self) {
         let Some(room) = self.runner.as_ref().and_then(|runner| runner.room.as_ref()) else {
             return;
@@ -882,11 +943,33 @@ impl CloudShowRuntime {
         if !room.stage_set {
             return;
         }
-        if let (Some(layout), Some(talk)) =
-            (CloudStageLayout::parse(&room.layout), self.talk.as_mut())
-            && talk.stage.on_stage.is_empty()
-        {
+        let Some(show_id) = self.show.as_ref().map(|show| show.record.id.clone()) else {
+            return;
+        };
+        let Some(talk) = self.talk.as_mut() else {
+            return;
+        };
+        if talk.stage_sent {
+            return;
+        }
+        if let Some(layout) = CloudStageLayout::parse(&room.layout) {
             talk.stage.layout = layout;
+        }
+        talk.stage.on_stage = runner_on_stage(&host_identity(&show_id), &room.participants);
+    }
+
+    /// On air comes from the runner (D17, the wire notes on `legs.end`): a
+    /// talk show is on air while the runner holds platform legs, whatever
+    /// its `phase` says. The clock (`live_since`) is this desktop's own
+    /// hand-over: Go Live sets it, `legs.end` clears it, and a resume leaves
+    /// it absent so the runner's `liveSeconds` is the clock.
+    pub(crate) fn talk_live_from_runner(&mut self) {
+        let Some(runner) = self.runner.as_ref() else {
+            return;
+        };
+        let on_air = !runner.legs.is_empty();
+        if let Some(talk) = self.talk.as_mut() {
+            talk.live = on_air;
         }
     }
 }
@@ -1049,6 +1132,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     limits: created.limits.unwrap_or_default(),
                 },
                 Some(invite),
+                &show_id,
             );
             talk.poll_generation = runtime.generation + 1;
             let generation = talk.poll_generation;
@@ -1310,8 +1394,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 .as_ref()
                 .map(|talk| talk.stage.clone())
                 .unwrap_or_default();
-            if let Err(problem) = self.send_stage(&stage).await {
-                tracing::warn!("The stage after a remove did not reach the runner: {problem}");
+            match self.send_stage(&stage).await {
+                Ok(()) => {
+                    if let Some(talk) = lock(&self.slot).talk.as_mut() {
+                        talk.stage_sent = true;
+                    }
+                }
+                Err(problem) => {
+                    tracing::warn!("The stage after a remove did not reach the runner: {problem}");
+                }
             }
         }
         self.hooks.emit_from(&self.slot);
@@ -1327,6 +1418,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         })?;
         if let Some(talk) = lock(&self.slot).talk.as_mut() {
             talk.stage = stage;
+            talk.stage_sent = true;
         }
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
@@ -1410,6 +1502,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             if let Some(talk) = runtime.talk.as_mut() {
                 talk.live = true;
+                talk.live_since = Some(crate::cloud_show::now_rfc3339());
+                talk.message = None;
             }
         }
         self.hooks.emit_from(&self.slot);
@@ -1417,9 +1511,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         Ok(lock(&self.slot).status())
     }
 
-    /// End livestream in a talk show (D17): every platform leg ends, the room
-    /// stays. The runner has no such intent yet (wire notes); its refusal is
-    /// reported as `LEGS_END_UNSUPPORTED_MESSAGE`, and nothing else changes.
+    /// End livestream in a talk show (D17, the wire notes on `legs.end`):
+    /// every platform leg ends cleanly, the room, the people, the stage and a
+    /// running cloud recording stay, and the runner's next state lists no
+    /// legs. A later Go Live hands fresh destinations over. A refusal or a
+    /// silent runner is reported with its reason; nothing else changes.
     pub async fn legs_end(&self) -> Result<CloudStatus> {
         self.open_room_show_id()?;
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
@@ -1434,15 +1530,17 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 }
                 if let Some(talk) = runtime.talk.as_mut() {
                     talk.live = false;
+                    talk.live_since = None;
                     talk.message = None;
                 }
             }
             Err(problem) => {
+                let message = legs_end_failure(&problem);
                 if let Some(talk) = lock(&self.slot).talk.as_mut() {
-                    talk.message = Some(LEGS_END_UNSUPPORTED_MESSAGE.to_string());
+                    talk.message = Some(message.clone());
                 }
                 self.hooks.emit_from(&self.slot);
-                bail!("{LEGS_END_UNSUPPORTED_MESSAGE} ({problem})");
+                bail!("{message}");
             }
         }
         self.hooks.emit_from(&self.slot);
@@ -1556,9 +1654,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 },
                 settings.room,
                 settings.invite,
+                &show_id,
             );
             // The runner keeps the legs it holds (C5b): the show is on air
-            // as far as the room knows, until it says otherwise.
+            // while it lists them; its clock is the only one left.
             talk.live = runtime
                 .runner
                 .as_ref()
@@ -1566,6 +1665,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             talk.poll_generation = runtime.generation + 1;
             let generation = talk.poll_generation;
             runtime.talk = Some(talk);
+            // The stage the program has (H2): the host and whoever the
+            // runner still flags on stage, never the host alone over guests.
+            runtime.talk_layout_from_runner();
             runtime.failed = None;
             if let Some(show) = runtime.show.as_mut() {
                 show.resuming = false;

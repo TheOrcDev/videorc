@@ -90,5 +90,19 @@ describe('talkShowSessionView', () => {
     expect(talkShowLiveStartedAt(null, Date.UTC(2026, 10, 8, 12, 0, 0))).toBe(
       '2026-11-08T12:00:00.000Z'
     )
+    // This desktop's hand-over stamp wins over the runner's clock (D17: a
+    // Go Live after End livestream starts a fresh clock).
+    expect(
+      talkShowLiveStartedAt(
+        status({ live: true, liveSince: '2026-11-08T12:30:00.000Z' }, undefined, 3600),
+        Date.UTC(2026, 10, 8, 12, 31, 0)
+      )
+    ).toBe('2026-11-08T12:30:00.000Z')
+    expect(
+      talkShowLiveStartedAt(
+        status({ live: true, liveSince: 'not a date' }, undefined, 90),
+        Date.UTC(2026, 10, 8, 12, 1, 30)
+      )
+    ).toBe('2026-11-08T12:00:00.000Z')
   })
 })
