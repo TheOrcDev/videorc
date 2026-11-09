@@ -2807,8 +2807,13 @@ impl Database {
 
     /// Merge an export file in (D5's rules): account and person rows
     /// last-writer-wins by `updated_at`, attendance a union, a forgotten
-    /// tombstone wins over everything. Returns `(people, merged)`: people in
-    /// the file, and how many met an existing person.
+    /// tombstone wins over everything. An account the import attaches to
+    /// an existing person gets a `manual` link event (the streamer did
+    /// it); an X account joins an existing person only when the file held
+    /// every account of that person too (D4: X links come from the viewer,
+    /// never from a merge here); a person's status is normal or bot (F9).
+    /// Returns `(people, merged)`: people in the file, and how many met an
+    /// existing person.
     pub fn community_import(
         &self,
         file: &CommunityExportFile,
@@ -2884,11 +2889,16 @@ impl Database {
                     break;
                 }
             }
+            // F9: a file never makes a person "forgotten"; tombstones are
+            // the accounts' own (above).
+            let status = match CommunityPersonStatus::parse(&person.status) {
+                CommunityPersonStatus::Bot => CommunityPersonStatus::Bot,
+                _ => CommunityPersonStatus::Normal,
+            };
             let (person_id, existing) = match target {
                 Some(id) => (id, true),
                 None => {
                     let first = live[0];
-                    let status = CommunityPersonStatus::parse(&person.status);
                     let id = insert_person_locked(
                         &transaction,
                         &first.name,
@@ -2902,6 +2912,18 @@ impl Database {
             if existing {
                 merged += 1;
             }
+            // F9: an X account may join an existing person only when the
+            // file held every one of that person's accounts (the viewer
+            // linked them there); a stranger on the local side refuses it.
+            let file_keys: HashSet<&str> = person
+                .accounts
+                .iter()
+                .map(|account| account.account_key.as_str())
+                .collect();
+            let strangers = existing
+                && live_accounts_locked(&transaction, &person_id)?
+                    .iter()
+                    .any(|account| !file_keys.contains(account.account_key.as_str()));
             for account in &live {
                 let Some(platform) = stream_platform_from_id(&account.platform) else {
                     continue;
@@ -2937,6 +2959,19 @@ impl Database {
                         }
                     }
                     None => {
+                        let lands_in = if platform == StreamPlatform::X && strangers {
+                            let own = insert_person_locked(
+                                &transaction,
+                                &account.name,
+                                account.avatar_url.as_deref(),
+                                status,
+                                now,
+                            )?;
+                            touched.push(own.clone());
+                            own
+                        } else {
+                            person_id.clone()
+                        };
                         transaction.execute(
                             "INSERT INTO community_accounts (account_key, platform, author_id, person_id, name,
                                 handle, avatar_url, first_seen_at, last_seen_at, status, updated_at)
@@ -2945,7 +2980,7 @@ impl Database {
                                 account.account_key,
                                 stream_platform_id(platform),
                                 account.author_id,
-                                person_id,
+                                lands_in,
                                 account.name,
                                 account.handle,
                                 account.avatar_url,
@@ -2954,6 +2989,17 @@ impl Database {
                                 account.updated_at
                             ],
                         )?;
+                        if existing && lands_in == person_id {
+                            // F9: the import attached it to a person already
+                            // here: the streamer's doing, on the record.
+                            insert_link_event_locked(
+                                &transaction,
+                                &person_id,
+                                &account.account_key,
+                                CommunityLinkKind::Manual,
+                                now,
+                            )?;
+                        }
                     }
                 }
                 for row in &account.attendance {

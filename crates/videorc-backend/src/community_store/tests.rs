@@ -1777,3 +1777,111 @@ fn youtube_derived_support_milestones_and_best_run_leave_with_the_attendance() {
         "a second import doubles nothing"
     );
 }
+
+/// The review of 2026-11-09, F9: the import's gaps. An account it attaches
+/// to a person already here gets a `manual` link event; an X account joins
+/// an existing person only when the file held every account of that
+/// person (otherwise it lands alone); a file's "forgotten" person status
+/// imports as normal (tombstones are the accounts' own).
+#[test]
+fn the_import_records_its_links_refuses_strange_x_attachments_and_clamps_status() {
+    let file = |people: Vec<ExportPerson>| CommunityExportFile {
+        version: EXPORT_VERSION,
+        exported_at: day(2026, 10, 10).to_rfc3339(),
+        people,
+        streams: Vec::new(),
+    };
+    let account = |key: &str, platform: StreamPlatform, name: &str| ExportAccount {
+        account_key: key.to_string(),
+        platform: stream_platform_id(platform).to_string(),
+        author_id: key.split_once(':').unwrap().1.to_string(),
+        name: name.to_string(),
+        handle: None,
+        avatar_url: None,
+        first_seen_at: day(2026, 10, 1).to_rfc3339(),
+        last_seen_at: day(2026, 10, 9).to_rfc3339(),
+        status: "normal".to_string(),
+        updated_at: day(2026, 10, 9).to_rfc3339(),
+        attendance: Vec::new(),
+        support: Vec::new(),
+    };
+    let person = |id: &str, status: &str, accounts: Vec<ExportAccount>| ExportPerson {
+        id: id.to_string(),
+        status: status.to_string(),
+        updated_at: day(2026, 10, 9).to_rfc3339(),
+        accounts,
+        ..Default::default()
+    };
+    // Locally: Ada on Twitch and Kick (one person), Bo on Kick alone.
+    let database = Database::open_in_memory_for_tests();
+    stream_with(
+        &database,
+        "s1",
+        day(2026, 10, 1),
+        &[
+            (StreamPlatform::Twitch, "ada", "Ada"),
+            (StreamPlatform::Kick, "ada-k", "Ada"),
+            (StreamPlatform::Kick, "bo", "Bo"),
+        ],
+    );
+    let ada = person_of(&database, StreamPlatform::Twitch, "ada");
+    let ada_kick = person_of(&database, StreamPlatform::Kick, "ada-k");
+    database
+        .community_link(&ada.id, &ada_kick.id, CommunityLinkKind::Manual, day(2026, 10, 2))
+        .unwrap();
+    // The file: Ada's Kick and X (the other computer never saw her Twitch),
+    // Bo's Kick and X, and Cy marked "forgotten" with a live account.
+    let imported = file(vec![
+        person(
+            "p-ada",
+            "normal",
+            vec![
+                account("kick:ada-k", StreamPlatform::Kick, "Ada"),
+                account("x:ada-x", StreamPlatform::X, "ada"),
+                account("youtube:UCada", StreamPlatform::Youtube, "ada_dev"),
+            ],
+        ),
+        person(
+            "p-bo",
+            "normal",
+            vec![
+                account("kick:bo", StreamPlatform::Kick, "Bo"),
+                account("x:bo-x", StreamPlatform::X, "bo"),
+            ],
+        ),
+        person(
+            "p-cy",
+            "forgotten",
+            vec![account("twitch:cy", StreamPlatform::Twitch, "Cy")],
+        ),
+    ]);
+    database.community_import(&imported, day(2026, 10, 12)).unwrap();
+    // Ada's X account: the file never held her Twitch account, so it
+    // lands alone; her YouTube account attaches, on the record.
+    let ada = person_of(&database, StreamPlatform::Twitch, "ada");
+    let mut keys: Vec<&str> = ada.accounts.iter().map(|a| a.account_key.as_str()).collect();
+    keys.sort();
+    assert_eq!(keys, vec!["kick:ada-k", "twitch:ada", "youtube:UCada"]);
+    let ada_x = person_of(&database, StreamPlatform::X, "ada-x");
+    assert_ne!(ada_x.id, ada.id, "a stranger on this side refuses the X join");
+    assert_eq!(ada_x.accounts.len(), 1);
+    assert!(
+        ada.link_events.iter().any(|event| event.account_key == "youtube:UCada"
+            && event.kind == CommunityLinkKind::Manual),
+        "{:?}",
+        ada.link_events
+    );
+    // Bo's X account: the file held both of Bo's accounts, so it joins.
+    let bo = person_of(&database, StreamPlatform::Kick, "bo");
+    assert_eq!(bo.accounts.len(), 2);
+    assert!(bo.accounts.iter().any(|a| a.account_key == "x:bo-x"));
+    assert!(
+        bo.link_events
+            .iter()
+            .any(|event| event.account_key == "x:bo-x" && event.kind == CommunityLinkKind::Manual)
+    );
+    // Cy is a normal person with a live account, never "forgotten".
+    let cy = person_of(&database, StreamPlatform::Twitch, "cy");
+    assert_eq!(cy.status, CommunityPersonStatus::Normal);
+    assert!(!cy.id.is_empty());
+}
