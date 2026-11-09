@@ -170,6 +170,14 @@ behaviour changed (not a line number), that is a STOP condition.
   below-the-fold red draft PR #1261 fixes test-side; the smoke script is
   unchanged on this branch. `smoke:recording-studio` not run: no local
   recording step changed (the new `session.start` refusal needs an open room).
+- After the merge of `origin/plan-184-videorc-cloud` (clean, merge commit
+  9be55d89d, 2026-11-09; it brought the owner-approved budget raise
+  03cdf739c and the record-only watchdog fix 22bfaab7e): `cargo fmt`, clippy
+  all targets `-D warnings`, the targeted `watchdog`/`recording`/`cloud_show`/
+  `cloud_talk` tests (778 passed, 0 failed, 13 ignored) green; `pnpm build`
+  green; `check:renderer-assets` green against 2,365,000 raw / 485,000 gzip:
+  eager raw 2,358,466, gzip 484,997 (3 gzip bytes of headroom). No merge
+  conflict, so no smoke was re-run.
 - TODO S-G1 `pnpm smoke:cloud-talk-show`: the runner's talk-show input is
   on `phase-1-runner` (ca94d09); the smoke (headless-Chrome guests,
   `fake-cloud-web.mjs` minting LiveKit tokens and answering the guest
