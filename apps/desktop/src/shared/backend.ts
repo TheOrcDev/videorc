@@ -2906,6 +2906,10 @@ export interface PreviewSurfaceStatus {
   nativePreviewPlacementEventsReceived?: number
   nativePreviewPlacementsCoalesced?: number
   nativePreviewPlacementsApplied?: number
+  /** Placement pushes the surface host refused, each failed try counted (#1272). */
+  nativePreviewPlacementsFailed?: number
+  /** Retries run after a refused placement push (#1272). */
+  nativePreviewPlacementsRetried?: number
   nativePreviewPlacementRoundTripP95Ms?: number
   nativePreviewPresentRoundTripP95Ms?: number
   nativePreviewIosurfaceCacheHits?: number

@@ -8,7 +8,9 @@ import {
   NativePreviewPlacementQueue,
   NativePreviewPumpOwnership,
   handoffNativePreviewPumpOwnership,
-  runPreparedNativePreviewMutation
+  runPreparedNativePreviewMutation,
+  type NativePreviewPlacementFailure,
+  type NativePreviewPlacementRetryClock
 } from './native-preview-operation-queue'
 
 describe('NativePreviewPumpOwnership', () => {
@@ -375,7 +377,288 @@ describe('NativePreviewPlacementQueue', () => {
     expect(queue.telemetryRefreshCount).toBeGreaterThanOrEqual(40)
     expect(queue.telemetryRefreshCount).toBeLessThanOrEqual(41)
   })
+
+  // #1272: a scene or camera switch holds the backend surface lifecycle, the
+  // bounds push answers surface-busy, and the popup emits no further move.
+  // The failed placement must land on its own once the backend frees up.
+  it('retries a refused placement until it lands, with nothing else to move the window', async () => {
+    const clock = new ManualRetryClock()
+    const attemptsX: number[] = []
+    const failures: NativePreviewPlacementFailure[] = []
+    let refusals = 2
+    const queue = new NativePreviewPlacementQueue(
+      async ({ bounds }) => {
+        attemptsX.push(bounds.screenX)
+        if (bounds.screenX === 500 && refusals > 0) {
+          refusals -= 1
+          throw new Error(
+            'The preview surface is busy with another lifecycle operation; retry shortly.'
+          )
+        }
+      },
+      (_error, failure) => failures.push(failure),
+      () => 0,
+      250,
+      [100, 250, 500],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(0), generation: 1 })
+    await queue.waitForIdle()
+    queue.enqueue({ bounds: surfaceBounds(500), generation: 1 })
+    await queue.waitForIdle()
+    expect(queue.retryScheduled).toBe(true)
+    expect(clock.delays).toEqual([100])
+
+    await clock.fire()
+    expect(clock.delays).toEqual([100, 250])
+    await clock.fire()
+
+    expect(attemptsX).toEqual([0, 500, 500, 500])
+    expect(failures).toEqual([
+      { attempt: 1, outcome: 'retry', retryInMs: 100 },
+      { attempt: 2, outcome: 'retry', retryInMs: 250 }
+    ])
+    expect(queue.retryScheduled).toBe(false)
+    // Landed: an echo of the same rect is coalesced, not re-applied.
+    expect(queue.enqueue({ bounds: surfaceBounds(500), generation: 1 })).toBe(false)
+    expect(queue.metrics()).toMatchObject({ applied: 2, failed: 2, retried: 2 })
+  })
+
+  it('gives up after its last backoff and says so once', async () => {
+    const clock = new ManualRetryClock()
+    const failures: NativePreviewPlacementFailure[] = []
+    let attempts = 0
+    const queue = new NativePreviewPlacementQueue(
+      async () => {
+        attempts += 1
+        throw new Error('preview presenter bounds require an active preview surface')
+      },
+      (_error, failure) => failures.push(failure),
+      () => 0,
+      250,
+      [100, 250],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(10), generation: 1 })
+    await queue.waitForIdle()
+    await clock.fire()
+    await clock.fire()
+
+    expect(attempts).toBe(3)
+    expect(failures.map((failure) => failure.outcome)).toEqual(['retry', 'retry', 'gave-up'])
+    expect(failures.at(-1)).toEqual({ attempt: 3, outcome: 'gave-up', retryInMs: null })
+    expect(queue.retryScheduled).toBe(false)
+    expect(clock.pending).toBe(0)
+  })
+
+  it('lets a newer placement replace a scheduled retry instead of moving the picture back', async () => {
+    const clock = new ManualRetryClock()
+    const appliedX: number[] = []
+    let refuseNext = true
+    const queue = new NativePreviewPlacementQueue(
+      async ({ bounds }) => {
+        if (refuseNext) {
+          refuseNext = false
+          throw new Error('surface-busy')
+        }
+        appliedX.push(bounds.screenX)
+      },
+      () => undefined,
+      () => 0,
+      250,
+      [100],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(100), generation: 1 })
+    await queue.waitForIdle()
+    expect(queue.retryScheduled).toBe(true)
+
+    queue.enqueue({ bounds: surfaceBounds(200), generation: 1 })
+    await queue.waitForIdle()
+    expect(queue.retryScheduled).toBe(false)
+    expect(clock.pending).toBe(0)
+    expect(appliedX).toEqual([200])
+  })
+
+  it('runs a fresh push of the refused rect at once rather than waiting out the backoff', async () => {
+    const clock = new ManualRetryClock()
+    const attemptsX: number[] = []
+    let refuseNext = true
+    const queue = new NativePreviewPlacementQueue(
+      async ({ bounds }) => {
+        attemptsX.push(bounds.screenX)
+        if (refuseNext) {
+          refuseNext = false
+          throw new Error('surface-busy')
+        }
+      },
+      () => undefined,
+      () => 0,
+      250,
+      [2_000],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(300), generation: 1 })
+    await queue.waitForIdle()
+    expect(queue.enqueue({ bounds: surfaceBounds(300), generation: 1 })).toBe(true)
+    await queue.waitForIdle()
+
+    expect(attemptsX).toEqual([300, 300])
+    expect(queue.retryScheduled).toBe(false)
+    expect(queue.metrics()).toMatchObject({ applied: 1, failed: 1, retried: 0 })
+  })
+
+  it('drops the retry when the rect returns to where the last placement landed', async () => {
+    const clock = new ManualRetryClock()
+    const appliedX: number[] = []
+    let refuse = false
+    const queue = new NativePreviewPlacementQueue(
+      async ({ bounds }) => {
+        if (refuse) {
+          throw new Error('surface-busy')
+        }
+        appliedX.push(bounds.screenX)
+      },
+      () => undefined,
+      () => 0,
+      250,
+      [100],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(0), generation: 1 })
+    await queue.waitForIdle()
+    refuse = true
+    queue.enqueue({ bounds: surfaceBounds(50), generation: 1 })
+    await queue.waitForIdle()
+    expect(queue.retryScheduled).toBe(true)
+
+    expect(queue.enqueue({ bounds: surfaceBounds(0), generation: 1 })).toBe(false)
+    expect(queue.retryScheduled).toBe(false)
+    expect(clock.pending).toBe(0)
+    expect(appliedX).toEqual([0])
+  })
+
+  it('does not retry a placement a queued one already replaces', async () => {
+    const clock = new ManualRetryClock()
+    const failures: NativePreviewPlacementFailure[] = []
+    const appliedX: number[] = []
+    let releaseFirst!: () => void
+    const firstMayFail = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const queue = new NativePreviewPlacementQueue(
+      async ({ bounds }) => {
+        if (bounds.screenX === 0) {
+          await firstMayFail
+          throw new Error('surface-busy')
+        }
+        appliedX.push(bounds.screenX)
+      },
+      (_error, failure) => failures.push(failure),
+      () => 0,
+      250,
+      [100],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(0), generation: 1 })
+    await Promise.resolve()
+    queue.enqueue({ bounds: surfaceBounds(70), generation: 1 })
+    releaseFirst()
+    await queue.waitForIdle()
+
+    expect(appliedX).toEqual([70])
+    expect(failures).toEqual([{ attempt: 1, outcome: 'superseded', retryInMs: null }])
+    expect(queue.retryScheduled).toBe(false)
+  })
+
+  it('cancels a scheduled retry with the rest of the queued work on teardown', async () => {
+    const clock = new ManualRetryClock()
+    let attempts = 0
+    const queue = new NativePreviewPlacementQueue(
+      async () => {
+        attempts += 1
+        throw new Error('surface-busy')
+      },
+      () => undefined,
+      () => 0,
+      250,
+      [100],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(0), generation: 1 })
+    await queue.waitForIdle()
+    expect(queue.cancelPending()).toBe(true)
+    expect(queue.retryScheduled).toBe(false)
+    expect(clock.pending).toBe(0)
+    expect(attempts).toBe(1)
+  })
+
+  it('reports idle while a retry waits, so hiding or closing never waits out a backoff', async () => {
+    const clock = new ManualRetryClock()
+    const queue = new NativePreviewPlacementQueue(
+      async () => {
+        throw new Error('surface-busy')
+      },
+      () => undefined,
+      () => 0,
+      250,
+      [5_000],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(0), generation: 1 })
+    await queue.waitForIdle()
+
+    expect(queue.requestDepth).toBe(0)
+    expect(queue.pendingCount).toBe(0)
+    expect(queue.retryScheduled).toBe(true)
+  })
 })
+
+class ManualRetryClock implements NativePreviewPlacementRetryClock {
+  readonly delays: number[] = []
+  private readonly scheduled = new Map<number, () => void>()
+  private nextHandle = 1
+
+  get pending(): number {
+    return this.scheduled.size
+  }
+
+  schedule(callback: () => void, delayMs: number): unknown {
+    const handle = this.nextHandle
+    this.nextHandle += 1
+    this.delays.push(delayMs)
+    this.scheduled.set(handle, callback)
+    return handle
+  }
+
+  cancel(handle: unknown): void {
+    this.scheduled.delete(handle as number)
+  }
+
+  /** Runs the one scheduled retry and lets its placement settle. */
+  async fire(): Promise<void> {
+    const entries = [...this.scheduled.entries()]
+    expect(entries).toHaveLength(1)
+    const [handle, callback] = entries[0]!
+    this.scheduled.delete(handle)
+    callback()
+    await flushMicrotasks()
+  }
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let index = 0; index < 10; index += 1) {
+    await Promise.resolve()
+  }
+}
 
 function surfaceBounds(screenX: number): PreviewSurfaceBounds {
   return {

@@ -992,9 +992,19 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
       )
     }, 'placement')
   },
-  (error) => {
-    if (previewWindowIsOpenForSurface()) {
-      safeConsole.error('Preview window placement push failed:', error)
+  (error, { attempt, outcome, retryInMs }) => {
+    if (!previewWindowIsOpenForSurface()) {
+      return
+    }
+    // One line when a placement first fails and one if it gives up; the
+    // retries between are counted in the placement metrics instead.
+    if (outcome === 'gave-up') {
+      safeConsole.error(
+        `Preview window placement push failed after ${attempt} attempt(s); the picture stays at its last placement until the window moves:`,
+        error
+      )
+    } else if (outcome === 'retry' && attempt === 1) {
+      safeConsole.warn(`Preview window placement push failed; retrying in ${retryInMs} ms:`, error)
     }
   }
 )
@@ -5606,6 +5616,8 @@ function nativePreviewPlacementStatusFields(): Pick<
   | 'nativePreviewPlacementEventsReceived'
   | 'nativePreviewPlacementsCoalesced'
   | 'nativePreviewPlacementsApplied'
+  | 'nativePreviewPlacementsFailed'
+  | 'nativePreviewPlacementsRetried'
   | 'nativePreviewPlacementRoundTripP95Ms'
   | 'nativePreviewMutationQueueCapacity'
   | 'nativePreviewMutationQueueDepth'
@@ -5621,6 +5633,8 @@ function nativePreviewPlacementStatusFields(): Pick<
     nativePreviewPlacementEventsReceived: metrics.received,
     nativePreviewPlacementsCoalesced: metrics.coalesced,
     nativePreviewPlacementsApplied: metrics.applied,
+    nativePreviewPlacementsFailed: metrics.failed,
+    nativePreviewPlacementsRetried: metrics.retried,
     nativePreviewPlacementRoundTripP95Ms: metrics.roundTripP95Ms,
     nativePreviewMutationQueueCapacity: mutationMetrics.capacity,
     nativePreviewMutationQueueDepth: mutationMetrics.currentDepth,
@@ -7665,10 +7679,18 @@ async function applyNativePreviewHostCommands(
     }
     return { ...command, bounds: normalizePreviewSurfaceBounds(command.bounds) }
   })
+  // A refused backend push must not also strand the Electron proof window
+  // (#1272): on a move it follows the popup on its own, and the error is
+  // rethrown once it has moved so the placement queue retries the backend
+  // half. A create still fails first, as before.
+  const backendBoundsFailures: unknown[] = []
   if (process.platform === 'win32') {
     for (const command of commands) {
       if (!command.bounds) {
         continue
+      }
+      if (backendBoundsFailures.length > 0 && command.kind !== 'update-bounds') {
+        throw backendBoundsFailures[0]
       }
       await withTrustedPreviewWindowStacking(
         {
@@ -7681,11 +7703,20 @@ async function applyNativePreviewHostCommands(
           elevated
         },
         async (request) => {
-          const status = parseMainPreviewSurfaceStatus(
-            await requestBackendAdmin<unknown>('resource.admin.preview_surface_bounds', {
-              ...request
-            })
-          )
+          let status: PreviewSurfaceStatus
+          try {
+            status = parseMainPreviewSurfaceStatus(
+              await requestBackendAdmin<unknown>('resource.admin.preview_surface_bounds', {
+                ...request
+              })
+            )
+          } catch (error) {
+            if (command.kind !== 'update-bounds') {
+              throw error
+            }
+            backendBoundsFailures.push(error)
+            return null
+          }
           if (
             previewWindowSurfaceGenerationIsCurrent(generation) &&
             previewWindowIsOpenForSurface()
@@ -7740,6 +7771,9 @@ async function applyNativePreviewHostCommands(
       command.kind === 'create'
         ? await createNativePreviewSurface(command.bounds, generation)
         : await updateNativePreviewSurfaceBounds(command.bounds, generation)
+  }
+  if (backendBoundsFailures.length > 0) {
+    throw backendBoundsFailures[0]
   }
   return status
 }
@@ -14321,6 +14355,8 @@ function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record
     nativePreviewPlacementEventsReceived: status.nativePreviewPlacementEventsReceived,
     nativePreviewPlacementsCoalesced: status.nativePreviewPlacementsCoalesced,
     nativePreviewPlacementsApplied: status.nativePreviewPlacementsApplied,
+    nativePreviewPlacementsFailed: status.nativePreviewPlacementsFailed,
+    nativePreviewPlacementsRetried: status.nativePreviewPlacementsRetried,
     nativePreviewPlacementRoundTripP95Ms: status.nativePreviewPlacementRoundTripP95Ms,
     nativePreviewPresentRoundTripP95Ms: status.nativePreviewPresentRoundTripP95Ms,
     nativePreviewIosurfaceCacheHits: status.nativePreviewIosurfaceCacheHits,
