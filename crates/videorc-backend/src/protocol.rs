@@ -2454,6 +2454,9 @@ pub enum WindowsD3d11CursorMode {
     Embedded,
     Separate,
     ExcludedWgc,
+    /// Windows Graphics Capture draws the cursor into the frame (the route a
+    /// hybrid-graphics laptop takes when Desktop Duplication refuses).
+    EmbeddedWgc,
     DisabledFallback,
 }
 
@@ -2563,6 +2566,12 @@ pub struct WindowsD3d11MediaDiagnostics {
     pub texture_pool_pressure: Option<WindowsD3d11TexturePoolPressureDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+    /// Why `capture_backend` is not the Desktop Duplication the session asked
+    /// for while the D3D11 path stays live (issue #906: a hybrid-graphics
+    /// laptop whose panel is driven by the other GPU captures through Windows
+    /// Graphics Capture). Absent when the requested backend opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_route_reason: Option<String>,
 }
 
 /// Why the D3D11 texture pool ran short (#1042). `texture_pool_pressure_events`
@@ -9470,6 +9479,44 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.synchronization_timeouts, 0);
+    }
+
+    #[test]
+    fn windows_d3d11_capture_route_reason_and_embedded_wgc_cursor_are_stable_on_the_wire() {
+        // Issue #906: a hybrid-graphics laptop captures through WGC with the
+        // cursor drawn by Windows and names why in the diagnostics.
+        let diagnostics = WindowsD3d11MediaDiagnostics {
+            state: WindowsD3d11MediaState::Live,
+            capture_backend: Some(WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor),
+            cursor_mode: Some(WindowsD3d11CursorMode::EmbeddedWgc),
+            cursor_requested: true,
+            capture_route_reason: Some(
+                "d3d11-capture-desktop-duplication-cross-adapter".to_string(),
+            ),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&diagnostics).unwrap();
+        assert_eq!(wire["cursorMode"], "embedded-wgc");
+        assert_eq!(
+            wire["captureRouteReason"],
+            "d3d11-capture-desktop-duplication-cross-adapter"
+        );
+        assert!(
+            wire.get("fallbackReason").is_none(),
+            "a named capture route is not a fallback out of the D3D11 path"
+        );
+        let decoded: WindowsD3d11MediaDiagnostics = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, diagnostics);
+
+        let requested_backend_opened = WindowsD3d11MediaDiagnostics {
+            capture_backend: Some(WindowsD3d11CaptureBackend::DesktopDuplication),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&requested_backend_opened).unwrap();
+        assert!(
+            wire.get("captureRouteReason").is_none(),
+            "the route reason is omitted when the requested backend opened"
+        );
     }
 
     #[test]

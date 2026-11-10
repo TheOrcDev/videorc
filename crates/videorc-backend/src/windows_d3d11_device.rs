@@ -1720,6 +1720,21 @@ pub(crate) enum WindowsD3d11CaptureAuthorityKind {
     WindowsGraphicsCapture,
 }
 
+impl WindowsD3d11CaptureAuthorityKind {
+    /// The authority a session records for the capture backend that opened.
+    pub(crate) const fn for_backend(
+        backend: crate::windows_d3d11_capture::WindowsD3d11CaptureBackend,
+    ) -> Self {
+        use crate::windows_d3d11_capture::WindowsD3d11CaptureBackend;
+        match backend {
+            WindowsD3d11CaptureBackend::DesktopDuplication => Self::DesktopDuplication,
+            WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor => {
+                Self::WindowsGraphicsCapture
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WindowsD3d11MediaAuthorityState {
     generation: u64,
@@ -1806,11 +1821,11 @@ mod runtime {
     use super::*;
     use crate::windows_capture_owner::{CaptureOwner, CaptureOwnerCompletion};
     use crate::windows_d3d11_capture::{
-        WindowsD3d11CaptureBackend, WindowsD3d11CaptureDecision, WindowsD3d11CaptureDiagnostics,
-        WindowsD3d11CaptureError, WindowsD3d11CaptureFallbackReason, WindowsD3d11CapturePlan,
+        WindowsD3d11CaptureDecision, WindowsD3d11CaptureDiagnostics, WindowsD3d11CaptureError,
+        WindowsD3d11CaptureFallbackReason, WindowsD3d11CapturePlan,
         WindowsD3d11CaptureSubmissionMetadata, WindowsD3d11DesktopDuplicationCapture,
-        WindowsD3d11DesktopDuplicationState, WindowsD3d11Point, WindowsD3d11RuntimeAcquisition,
-        WindowsD3d11WgcMonitorCapture,
+        WindowsD3d11DesktopDuplicationState, WindowsD3d11OpenedCapture, WindowsD3d11Point,
+        WindowsD3d11RuntimeAcquisition, WindowsD3d11WgcMonitorCapture, open_capture_for_plan,
     };
     use crate::windows_d3d11_compositor::{
         WindowsD3d11BgraUpload, WindowsD3d11ComposedFrame, WindowsD3d11Compositor,
@@ -2379,6 +2394,15 @@ mod runtime {
                 Self::WindowsGraphicsCapture { capture, .. } => capture.diagnostics(),
             }
         }
+
+        /// The plan this runtime opened with, which differs from the one the
+        /// session asked for when Desktop Duplication fell back to WGC.
+        fn plan(&self) -> WindowsD3d11CapturePlan {
+            match self {
+                Self::DesktopDuplication { plan, .. }
+                | Self::WindowsGraphicsCapture { plan, .. } => *plan,
+            }
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -2540,7 +2564,10 @@ mod runtime {
         plan: WindowsD3d11CapturePlan,
         owner: CaptureOwner<CaptureInput, CaptureOutput, WindowsD3d11Error>,
         diagnostics: WindowsD3d11CaptureDiagnostics,
-        opened_diagnostics: Arc<Mutex<Option<WindowsD3d11CaptureDiagnostics>>>,
+        /// The plan and diagnostics of the capture that opened on the worker.
+        /// The plan can differ from `plan` (Desktop Duplication → WGC).
+        opened_diagnostics:
+            Arc<Mutex<Option<(WindowsD3d11CapturePlan, WindowsD3d11CaptureDiagnostics)>>>,
         panic_notified: bool,
         starting: Option<SyncSender<Result<WindowsD3d11CaptureSession, WindowsD3d11Error>>>,
         started_at: Instant,
@@ -4567,31 +4594,43 @@ mod runtime {
             move || {
                 let apartment = ComApartment::initialize()?;
                 let device = factory();
-                let capture = match plan.backend {
-                    WindowsD3d11CaptureBackend::DesktopDuplication => {
+                // Issue #906: on a hybrid-graphics laptop the panel is
+                // enumerated under the GPU the session runs on, most likely
+                // while another GPU drives it, and DuplicateOutput refuses.
+                // The opener then reads the same monitor through Windows
+                // Graphics Capture on the same device, so the compositor and
+                // encoder keep their adapter.
+                let (opened_plan, opened) = open_capture_for_plan(
+                    plan,
+                    |plan| WindowsD3d11DesktopDuplicationCapture::create(&device, plan),
+                    |plan| WindowsD3d11WgcMonitorCapture::create(&device, plan),
+                )
+                .map_err(map_capture_error)?;
+                let capture = match opened {
+                    WindowsD3d11OpenedCapture::DesktopDuplication(capture) => {
                         WindowsD3d11CaptureRuntime::DesktopDuplication {
-                            plan,
-                            capture: WindowsD3d11DesktopDuplicationCapture::create(&device, plan)
-                                .map_err(map_capture_error)?,
+                            plan: opened_plan,
+                            capture,
                             state: WindowsD3d11DesktopDuplicationState::new(
-                                plan.generation,
-                                plan.cursor_requested,
+                                opened_plan.generation,
+                                opened_plan.cursor_requested,
                             )
                             .map_err(map_capture_error)?,
                         }
                     }
-                    WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor => {
+                    WindowsD3d11OpenedCapture::WindowsGraphicsCapture(capture) => {
                         WindowsD3d11CaptureRuntime::WindowsGraphicsCapture {
-                            plan,
-                            capture: WindowsD3d11WgcMonitorCapture::create(&device, plan)
-                                .map_err(map_capture_error)?,
+                            plan: opened_plan,
+                            capture,
                             next_sequence: 1,
                         }
                     }
                 };
 
+                // The plan that actually opened, so the owner reports the
+                // backend that runs rather than the one it asked for.
                 *worker_diagnostics.lock().unwrap_or_else(|p| p.into_inner()) =
-                    Some(capture.diagnostics());
+                    Some((capture.plan(), capture.diagnostics()));
                 Ok(CaptureWorker {
                     capture,
                     device,
@@ -4786,23 +4825,17 @@ mod runtime {
         let mut retire = false;
         if let Some(capture) = runtime.capture.as_mut() {
             if let Some(opened) = capture.owner.take_open_result() {
-                if let Some(diagnostics) = capture
+                if let Some((plan, diagnostics)) = capture
                     .opened_diagnostics
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .take()
                 {
+                    capture.plan = plan;
                     capture.diagnostics = diagnostics;
                 }
                 let response = opened.and_then(|()| {
-                    let kind = match capture.plan.backend {
-                        WindowsD3d11CaptureBackend::DesktopDuplication => {
-                            WindowsD3d11CaptureAuthorityKind::DesktopDuplication
-                        }
-                        WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor => {
-                            WindowsD3d11CaptureAuthorityKind::WindowsGraphicsCapture
-                        }
-                    };
+                    let kind = WindowsD3d11CaptureAuthorityKind::for_backend(capture.plan.backend);
                     runtime.contract.start_capture(generation, kind)?;
                     Ok(WindowsD3d11CaptureSession {
                         plan: capture.plan,

@@ -64,6 +64,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'compositor::tests::windows_d3d11_pixel_formats_keep_preview_and_encoder_surfaces_distinct',
     'diagnostics::tests::windows_d3d11_media_session_end_resets_only_the_ended_session',
     'native_preview_host::tests::windows_d3d11_main_owned_host_bounds_preserve_opaque_handle_and_generation',
+    'protocol::tests::windows_d3d11_capture_route_reason_and_embedded_wgc_cursor_are_stable_on_the_wire',
     'protocol::tests::windows_d3d11_main_owned_preview_bounds_preserve_opaque_hwnd_and_generation',
     'protocol::tests::windows_d3d11_opaque_hwnd_rejects_unsafe_wire_values',
     'protocol::tests::windows_d3d11_presenter_media_generation_is_stable_on_the_wire',
@@ -107,14 +108,17 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_capture::tests::windows_d3d11_capture_copies_before_releasing_duplication_frame',
     'windows_d3d11_capture::tests::windows_d3d11_capture_keeps_recording_when_windows_masks_protected_content',
     'windows_d3d11_capture::tests::windows_d3d11_capture_latest_wins_is_bounded',
+    'windows_d3d11_capture::tests::windows_d3d11_capture_names_cross_adapter_duplication_only_on_multi_gpu_hosts',
     'windows_d3d11_capture::tests::windows_d3d11_capture_pointer_only_publication_is_truthful',
     'windows_d3d11_capture::tests::windows_d3d11_capture_pointer_ownership_is_exactly_once',
     'windows_d3d11_capture::tests::windows_d3d11_capture_qpc_timestamps_are_monotonic',
     'windows_d3d11_capture::tests::windows_d3d11_capture_recovers_duplication_access_loss',
     'windows_d3d11_capture::tests::windows_d3d11_capture_rotation_crop_scale_is_deterministic',
+    'windows_d3d11_capture::tests::windows_d3d11_capture_routes_cross_adapter_duplication_through_wgc',
     'windows_d3d11_capture::tests::windows_d3d11_capture_selects_cursor_safe_backend',
     'windows_d3d11_capture::tests::windows_d3d11_capture_validates_pointer_shape_layouts',
-    'windows_d3d11_capture::tests::windows_d3d11_capture_wgc_cursor_exclusion_fails_closed'
+    'windows_d3d11_capture::tests::windows_d3d11_capture_wgc_cursor_exclusion_fails_closed',
+    'windows_d3d11_capture::tests::windows_d3d11_capture_worker_opens_wgc_when_duplication_is_cross_adapter'
   ]),
   compositor: Object.freeze([
     'windows_d3d11_compositor::runtime::sprite_shader_tests::windows_d3d11_shaders_compile_with_the_buddy_sprite_turn',

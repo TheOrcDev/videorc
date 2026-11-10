@@ -1721,11 +1721,20 @@ mod runtime {
                 // startup display. Current committed BGRA/None supplies frames.
                 authority_adapter_luid
             } else {
-                client
+                let capture = client
                     .start_capture(capture_plan)
-                    .map_err(|error| format!("could not start D3D11 capture: {error}"))?
-                    .diagnostics
-                    .adapter_luid
+                    .map_err(|error| format!("could not start D3D11 capture: {error}"))?;
+                if let Some(reason) = capture.diagnostics.duplication_fallback_reason {
+                    // Issue #906: the session stays on the D3D11 path, so the
+                    // route change is named here rather than as a fallback.
+                    tracing::warn!(
+                        "D3D11 session for {} captures through {} ({}) because Desktop Duplication could not open on this GPU",
+                        plan.screen_id,
+                        capture.plan.backend.as_str(),
+                        reason.as_str()
+                    );
+                }
+                capture.diagnostics.adapter_luid
             };
             if capture_adapter_luid != authority_adapter_luid {
                 let _ = client.stop_capture();
