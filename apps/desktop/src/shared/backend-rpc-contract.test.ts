@@ -1921,6 +1921,89 @@ describe('backend RPC contract', () => {
       })
     )
     expect(validateBackendRpcResult('diagnostics.stats', switchedCapture)).toEqual(switchedCapture)
+    // Issue #906: a hybrid-graphics laptop captures the monitor through
+    // Windows Graphics Capture with the cursor drawn by Windows and names why.
+    const hybridRoute = {
+      ...diagnostics,
+      windowsD3d11Media: {
+        ...windowsD3d11Media,
+        captureBackend: 'windows-graphics-capture-monitor',
+        cursorMode: 'embedded-wgc',
+        cursorPixelsSource: 'wgc-surface',
+        captureRouteReason: 'd3d11-capture-desktop-duplication-cross-adapter'
+      }
+    }
+    expect(validateBackendRpcResult('diagnostics.stats', hybridRoute)).toEqual(hybridRoute)
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          captureRouteReason: ''
+        }
+      })
+    ).toThrow('captureRouteReason')
+
+    // #1042: who held the pool when it ran dry, and how long each role held.
+    const unusedRoleHold = { releases: 0 }
+    const withPoolPressure = JSON.parse(
+      JSON.stringify({
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          texturePoolPressureEvents: 2,
+          texturePoolPressure: {
+            bgraExhaustions: 1,
+            nv12Exhaustions: 1,
+            renderPressureSkips: 2,
+            holders: {
+              writing: 1,
+              compositor: 2,
+              preview: 0,
+              record: 3,
+              stream: 0,
+              awaitingFence: 1
+            },
+            holds: {
+              compositor: { releases: 480, meanMs: 18.5, maxMs: 52.25 },
+              preview: unusedRoleHold,
+              record: { releases: 470, meanMs: 30.1, maxMs: 94 },
+              stream: unusedRoleHold
+            }
+          }
+        }
+      })
+    )
+    expect(validateBackendRpcResult('diagnostics.stats', withPoolPressure)).toEqual(
+      withPoolPressure
+    )
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...withPoolPressure,
+        windowsD3d11Media: {
+          ...withPoolPressure.windowsD3d11Media,
+          texturePoolPressure: {
+            ...withPoolPressure.windowsD3d11Media.texturePoolPressure,
+            holds: {
+              ...withPoolPressure.windowsD3d11Media.texturePoolPressure.holds,
+              record: { releases: 470, meanMs: -1 }
+            }
+          }
+        }
+      })
+    ).toThrow('meanMs')
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...withPoolPressure,
+        windowsD3d11Media: {
+          ...withPoolPressure.windowsD3d11Media,
+          texturePoolPressure: {
+            ...withPoolPressure.windowsD3d11Media.texturePoolPressure,
+            sharedTextureHandle: '0x0000000000000001'
+          }
+        }
+      })
+    ).toThrow('sharedTextureHandle')
 
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {

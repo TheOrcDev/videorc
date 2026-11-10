@@ -2368,7 +2368,12 @@ export type WindowsD3d11CaptureBackend =
   | 'windows-graphics-capture-monitor'
   | 'legacy-ffmpeg'
 
-export type WindowsD3d11CursorMode = 'embedded' | 'separate' | 'excluded-wgc' | 'disabled-fallback'
+export type WindowsD3d11CursorMode =
+  | 'embedded'
+  | 'separate'
+  | 'excluded-wgc'
+  | 'embedded-wgc'
+  | 'disabled-fallback'
 
 /** Scalar-only diagnostics. No COM pointer, texture/shared handle, or HWND is wire-safe. */
 export interface WindowsD3d11MediaDiagnostics {
@@ -2383,6 +2388,12 @@ export interface WindowsD3d11MediaDiagnostics {
   generation?: number
   captureBackend?: WindowsD3d11CaptureBackend
   cursorMode?: WindowsD3d11CursorMode
+  /**
+   * Why captureBackend is not the Desktop Duplication the session asked for
+   * while the D3D11 path stays live, e.g. a hybrid-graphics laptop capturing
+   * through Windows Graphics Capture. Absent when the requested backend opened.
+   */
+  captureRouteReason?: string
   cursorRequested: boolean
   cursorPixelsSource?: string
   cursorExclusionGuaranteed: boolean
@@ -2417,7 +2428,32 @@ export interface WindowsD3d11MediaDiagnostics {
   renderTickOverruns: number
   renderTickLagMaxMs?: number
   renderComposeStageMaxMs?: number
+  /** Per-stage evidence behind `texturePoolPressureEvents` (#1042). */
+  texturePoolPressure?: WindowsD3d11TexturePoolPressureDiagnostics
   fallbackReason?: string
+}
+
+/** Why the D3D11 texture pool ran short (#1042). `texturePoolPressureEvents` is the
+ * pool's exhaustions plus the render loop's pressure skips, so one exhausted compose
+ * counts in both; these fields split it and name what held the textures. */
+export interface WindowsD3d11TexturePoolPressureDiagnostics {
+  bgraExhaustions: number
+  nv12Exhaustions: number
+  renderPressureSkips: number
+  /** Summed over every exhaustion: the exhausted bucket's slots by holder. */
+  holders: {
+    writing: number
+    compositor: number
+    preview: number
+    record: number
+    stream: number
+    awaitingFence: number
+  }
+  /** Publication-to-release time per consumer role. */
+  holds: Record<
+    'compositor' | 'preview' | 'record' | 'stream',
+    { releases: number; meanMs?: number; maxMs?: number }
+  >
 }
 
 /** Cumulative request counts for the HTTP image-polling preview transports. A native

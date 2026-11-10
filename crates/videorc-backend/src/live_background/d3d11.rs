@@ -200,9 +200,9 @@ pub struct LiveDraw<'a> {
 /// This composition's live frame, at the Full internal size.
 pub struct LiveFrame {
     pub texture: ID3D11Texture2D,
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg_attr(not(test), allow(dead_code))] // tests check the Full size
     pub width: u32,
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg_attr(not(test), allow(dead_code))] // tests check the Full size
     pub height: u32,
     pub rendering: LiveBackgroundRendering,
 }

@@ -25,6 +25,9 @@ pub(crate) enum WindowsD3d11CursorMode {
     Embedded,
     Separate,
     ExcludedWgc,
+    /// Windows Graphics Capture draws the cursor into the frame itself. Used
+    /// when Desktop Duplication cannot run on the session's GPU (issue #906).
+    EmbeddedWgc,
     DisabledFallback,
 }
 
@@ -34,6 +37,7 @@ impl WindowsD3d11CursorMode {
             Self::Embedded => "embedded",
             Self::Separate => "separate",
             Self::ExcludedWgc => "excluded-wgc",
+            Self::EmbeddedWgc => "embedded-wgc",
             Self::DisabledFallback => "disabled-fallback",
         }
     }
@@ -44,6 +48,7 @@ pub(crate) enum WindowsD3d11CursorPixelsSource {
     DesktopSurface,
     DuplicationPointerShape,
     ExcludedByWindowsGraphicsCapture,
+    WindowsGraphicsCaptureSurface,
     LegacyFallback,
 }
 
@@ -53,6 +58,7 @@ impl WindowsD3d11CursorPixelsSource {
             Self::DesktopSurface => "desktop-surface",
             Self::DuplicationPointerShape => "duplication-pointer-shape",
             Self::ExcludedByWindowsGraphicsCapture => "excluded-by-wgc",
+            Self::WindowsGraphicsCaptureSurface => "wgc-surface",
             Self::LegacyFallback => "legacy-fallback",
         }
     }
@@ -64,6 +70,12 @@ pub(crate) enum WindowsD3d11CaptureFallbackReason {
     AdapterMismatch,
     OutputUnavailable,
     DesktopDuplicationUnavailable,
+    /// `IDXGIOutput1::DuplicateOutput` answered `DXGI_ERROR_UNSUPPORTED` on a
+    /// host with more than one hardware GPU. The likely cause is hybrid
+    /// graphics (the output is enumerated under the session's adapter while
+    /// another GPU drives it), but the HRESULT does not prove it: Windows also
+    /// returns it for desktop modes Desktop Duplication does not support.
+    DesktopDuplicationCrossAdapter,
     DesktopDuplicationAccessLost,
     DeviceLost,
     ProtectedContent,
@@ -86,6 +98,9 @@ impl WindowsD3d11CaptureFallbackReason {
             Self::AdapterMismatch => "d3d11-capture-adapter-mismatch",
             Self::OutputUnavailable => "d3d11-capture-output-unavailable",
             Self::DesktopDuplicationUnavailable => "d3d11-capture-desktop-duplication-unavailable",
+            Self::DesktopDuplicationCrossAdapter => {
+                "d3d11-capture-desktop-duplication-cross-adapter"
+            }
             Self::DesktopDuplicationAccessLost => "d3d11-capture-desktop-duplication-access-lost",
             Self::DeviceLost => "d3d11-capture-device-lost",
             Self::ProtectedContent => "d3d11-capture-protected-content",
@@ -128,6 +143,30 @@ impl fmt::Display for WindowsD3d11CaptureError {
 
 impl std::error::Error for WindowsD3d11CaptureError {}
 
+/// `DXGI_ERROR_UNSUPPORTED`, which `IDXGIOutput1::DuplicateOutput` returns
+/// when it does not support the current desktop mode or scenario, including
+/// a calling device whose adapter does not drive the output.
+pub(crate) const DXGI_ERROR_UNSUPPORTED_HRESULT: u32 = 0x887A_0004;
+
+/// Names why `DuplicateOutput` failed at creation. This is a heuristic.
+/// `DXGI_ERROR_UNSUPPORTED` on a host with two or more hardware adapters is
+/// most likely the hybrid-graphics case (issue #906: a ThinkPad lists its
+/// panel under the MX550, most likely because the Iris Xe scans it out), but
+/// the HRESULT does not say which GPU drives the panel, and an unsupported
+/// desktop mode returns the same code. Either way Windows Graphics Capture is
+/// worth trying, and a WGC failure is still reported. On a single-GPU host
+/// the same HRESULT stays a plain unavailability.
+pub(crate) const fn duplication_create_fallback_reason(
+    hresult: u32,
+    hardware_adapters: usize,
+) -> WindowsD3d11CaptureFallbackReason {
+    if hresult == DXGI_ERROR_UNSUPPORTED_HRESULT && hardware_adapters >= 2 {
+        WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter
+    } else {
+        WindowsD3d11CaptureFallbackReason::DesktopDuplicationUnavailable
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct WindowsD3d11WgcCursorExclusionProbe {
     pub(crate) graphics_capture_supported: bool,
@@ -161,6 +200,62 @@ impl WindowsD3d11WgcCursorExclusionProbe {
     }
 }
 
+/// The capture the worker opened for a plan, before the worker wraps it in
+/// its runtime state.
+#[derive(Debug)]
+pub(crate) enum WindowsD3d11OpenedCapture<D, W> {
+    DesktopDuplication(D),
+    WindowsGraphicsCapture(W),
+}
+
+/// Opens the capture `plan` names and returns the plan that actually opened
+/// beside it, which the session then reports and records as its capture
+/// authority. A Desktop Duplication plan whose creation fails with the
+/// cross-adapter reason (issue #906) is retried through Windows Graphics
+/// Capture with [`WindowsD3d11CapturePlan::wgc_cursor_embedded_fallback`];
+/// if WGC cannot open either, the error names both failures. Any other
+/// duplication failure is returned as it is. The openers are parameters so
+/// the routing is tested without a GPU.
+pub(crate) fn open_capture_for_plan<D, W>(
+    plan: WindowsD3d11CapturePlan,
+    open_duplication: impl FnOnce(WindowsD3d11CapturePlan) -> Result<D, WindowsD3d11CaptureError>,
+    open_wgc: impl FnOnce(WindowsD3d11CapturePlan) -> Result<W, WindowsD3d11CaptureError>,
+) -> Result<(WindowsD3d11CapturePlan, WindowsD3d11OpenedCapture<D, W>), WindowsD3d11CaptureError> {
+    if plan.backend == WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor {
+        return open_wgc(plan).map(|capture| {
+            (
+                plan,
+                WindowsD3d11OpenedCapture::WindowsGraphicsCapture(capture),
+            )
+        });
+    }
+    let error = match open_duplication(plan) {
+        Ok(capture) => return Ok((plan, WindowsD3d11OpenedCapture::DesktopDuplication(capture))),
+        Err(error) => error,
+    };
+    let Some(fallback_plan) = plan.wgc_cursor_embedded_fallback(&error) else {
+        return Err(error);
+    };
+    tracing::warn!(
+        "Desktop Duplication could not open {}: {error}; capturing it through Windows Graphics Capture with the cursor drawn by Windows",
+        plan.selection.screen_id()
+    );
+    open_wgc(fallback_plan)
+        .map(|capture| {
+            (
+                fallback_plan,
+                WindowsD3d11OpenedCapture::WindowsGraphicsCapture(capture),
+            )
+        })
+        .map_err(|wgc_error| WindowsD3d11CaptureError {
+            reason: wgc_error.reason,
+            detail: format!(
+                "{error}; Windows Graphics Capture could not replace it: {}",
+                wgc_error.detail
+            ),
+        })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WindowsD3d11CapturePlan {
     pub(crate) selection: WindowsDxgiOutputSelection,
@@ -170,9 +265,59 @@ pub(crate) struct WindowsD3d11CapturePlan {
     pub(crate) cursor_mode: Option<WindowsD3d11CursorMode>,
     pub(crate) cursor_pixels_source: Option<WindowsD3d11CursorPixelsSource>,
     pub(crate) cursor_exclusion_guaranteed: bool,
+    /// Set when this plan replaced a Desktop Duplication plan that could not
+    /// open, naming why. `None` for the backend the session asked for.
+    pub(crate) duplication_fallback: Option<WindowsD3d11CaptureFallbackReason>,
 }
 
 impl WindowsD3d11CapturePlan {
+    /// The plan the capture worker opens instead when Desktop Duplication
+    /// cannot run on the session's adapter: the same monitor through Windows
+    /// Graphics Capture on the same D3D11 device, with the cursor drawn by
+    /// WGC. WGC captures through the desktop compositor, so the GPU driving
+    /// the panel does not matter, and the compositor and encoder keep their
+    /// adapter. Only the cross-adapter reason routes here; any other
+    /// duplication failure stays a failure, so a host that cannot duplicate
+    /// for another reason still falls back by name.
+    pub(crate) fn wgc_cursor_embedded_fallback(
+        self,
+        error: &WindowsD3d11CaptureError,
+    ) -> Option<Self> {
+        if self.backend != WindowsD3d11CaptureBackend::DesktopDuplication
+            || error.reason != WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter
+        {
+            return None;
+        }
+        Some(Self {
+            selection: self.selection,
+            generation: self.generation,
+            backend: WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor,
+            cursor_requested: self.cursor_requested,
+            cursor_mode: Some(WindowsD3d11CursorMode::EmbeddedWgc),
+            cursor_pixels_source: Some(
+                WindowsD3d11CursorPixelsSource::WindowsGraphicsCaptureSurface,
+            ),
+            cursor_exclusion_guaranteed: false,
+            duplication_fallback: Some(error.reason),
+        })
+    }
+
+    /// True for the WGC plan that embeds the cursor instead of excluding it.
+    pub(crate) fn is_wgc_cursor_embedded(&self) -> bool {
+        self.backend == WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor
+            && self.cursor_mode == Some(WindowsD3d11CursorMode::EmbeddedWgc)
+            && !self.cursor_exclusion_guaranteed
+    }
+
+    /// True for the WGC plan whose cursor exclusion was confirmed before
+    /// StartCapture.
+    pub(crate) fn is_wgc_cursor_excluded(&self) -> bool {
+        self.backend == WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor
+            && !self.cursor_requested
+            && self.cursor_exclusion_guaranteed
+            && self.cursor_mode == Some(WindowsD3d11CursorMode::ExcludedWgc)
+    }
+
     pub(crate) fn resolve(
         screen_id: &str,
         capture_cursor: bool,
@@ -210,6 +355,7 @@ impl WindowsD3d11CapturePlan {
                 cursor_mode: None,
                 cursor_pixels_source: None,
                 cursor_exclusion_guaranteed: false,
+                duplication_fallback: None,
             });
         }
         if !wgc_probe.confirmed() {
@@ -229,6 +375,7 @@ impl WindowsD3d11CapturePlan {
                 WindowsD3d11CursorPixelsSource::ExcludedByWindowsGraphicsCapture,
             ),
             cursor_exclusion_guaranteed: true,
+            duplication_fallback: None,
         })
     }
 }
@@ -263,6 +410,10 @@ pub(crate) struct WindowsD3d11CaptureDiagnostics {
     pub(crate) device_resets: u64,
     pub(crate) timestamp_corrections: u64,
     pub(crate) fallback_reason: Option<WindowsD3d11CaptureFallbackReason>,
+    /// Why the running backend is not the Desktop Duplication the session
+    /// asked for, while the D3D11 path stays live. `None` when the session's
+    /// own backend opened.
+    pub(crate) duplication_fallback_reason: Option<WindowsD3d11CaptureFallbackReason>,
 }
 
 impl WindowsD3d11CaptureDiagnostics {
@@ -276,6 +427,7 @@ impl WindowsD3d11CaptureDiagnostics {
             cursor_requested: plan.cursor_requested,
             cursor_pixels_source: plan.cursor_pixels_source,
             cursor_exclusion_guaranteed: plan.cursor_exclusion_guaranteed,
+            duplication_fallback_reason: plan.duplication_fallback,
             ..Self::default()
         }
     }
@@ -574,16 +726,26 @@ impl WindowsD3d11CaptureSubmissionMetadata {
         system_relative_hundred_nanoseconds: i64,
         rotation: WindowsD3d11OutputRotation,
     ) -> Result<Self, WindowsD3d11CaptureError> {
-        if plan.backend != WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor
-            || plan.cursor_requested
-            || !plan.cursor_exclusion_guaranteed
-            || plan.cursor_mode != Some(WindowsD3d11CursorMode::ExcludedWgc)
-        {
+        // Two WGC plans are truthful: the cursor-excluded plan whose
+        // exclusion was confirmed before StartCapture, and the cursor-embedded
+        // plan that replaced a Desktop Duplication the GPU refused. Anything
+        // else would claim a cursor state the capture did not establish.
+        let (cursor_mode, cursor_pixels_source) = if plan.is_wgc_cursor_excluded() {
+            (
+                WindowsD3d11CursorMode::ExcludedWgc,
+                WindowsD3d11CursorPixelsSource::ExcludedByWindowsGraphicsCapture,
+            )
+        } else if plan.is_wgc_cursor_embedded() {
+            (
+                WindowsD3d11CursorMode::EmbeddedWgc,
+                WindowsD3d11CursorPixelsSource::WindowsGraphicsCaptureSurface,
+            )
+        } else {
             return Err(WindowsD3d11CaptureError::new(
                 WindowsD3d11CaptureFallbackReason::WgcCursorExclusionUnconfirmed,
-                "WGC submission metadata requires a confirmed cursor-excluded monitor plan",
+                "WGC submission metadata requires a confirmed cursor-excluded or cursor-embedded monitor plan",
             ));
-        }
+        };
         if sequence == 0 || system_relative_hundred_nanoseconds <= 0 {
             return Err(WindowsD3d11CaptureError::new(
                 WindowsD3d11CaptureFallbackReason::WgcUnavailable,
@@ -601,10 +763,10 @@ impl WindowsD3d11CaptureSubmissionMetadata {
             accumulated_frames: 1,
             content_change: WindowsD3d11CaptureContentChange::WindowsGraphicsCaptureFrame,
             rotation,
-            cursor_mode: WindowsD3d11CursorMode::ExcludedWgc,
-            cursor_pixels_source: WindowsD3d11CursorPixelsSource::ExcludedByWindowsGraphicsCapture,
-            cursor_requested: false,
-            cursor_exclusion_guaranteed: true,
+            cursor_mode,
+            cursor_pixels_source,
+            cursor_requested: plan.cursor_requested,
+            cursor_exclusion_guaranteed: plan.cursor_exclusion_guaranteed,
             pointer_shape_revision: 0,
         })
     }
@@ -1142,12 +1304,13 @@ mod runtime {
         DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270,
     };
     use windows::Win32::Graphics::Dxgi::{
-        DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
-        DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_ACCESS_LOST,
+        DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_NOT_FOUND,
+        DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
         DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
         DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
-        IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication,
-        IDXGIResource,
+        IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIOutput1,
+        IDXGIOutputDuplication, IDXGIResource,
     };
     use windows::Win32::Graphics::Gdi::HMONITOR;
     use windows::Win32::System::WinRT::Direct3D11::{
@@ -1392,7 +1555,18 @@ mod runtime {
             // SAFETY: DuplicateOutput receives the same adapter's D3D11
             // device, and the result remains on this media thread.
             let duplication = unsafe { binding.output.DuplicateOutput(device.raw_device()) }
-                .map_err(map_duplication_create_error)?;
+                .map_err(|error| {
+                    let refused = error.code() == windows::Win32::Foundation::E_ACCESSDENIED;
+                    let mut mapped = map_duplication_create_error(error);
+                    if refused {
+                        mapped.detail = format!(
+                            "{} [{}]",
+                            mapped.detail,
+                            duplication_refusal_diagnostics(plan.selection)
+                        );
+                    }
+                    mapped
+                })?;
             Ok(Self {
                 selection: plan.selection,
                 duplication,
@@ -1661,7 +1835,115 @@ mod runtime {
         }))
     }
 
+    /// Hardware DXGI adapters on this host (software adapters such as the
+    /// Microsoft Basic Render Driver are not counted). 0 when DXGI cannot be
+    /// asked, which keeps a `DXGI_ERROR_UNSUPPORTED` a plain unavailability.
+    fn dxgi_hardware_adapter_count() -> usize {
+        // SAFETY: DXGI returns an owned COM interface.
+        let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
+            return 0;
+        };
+        let mut count = 0;
+        let mut index = 0u32;
+        loop {
+            // SAFETY: the index is bounded by DXGI's not-found answer.
+            let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+                break;
+            };
+            index = index.saturating_add(1);
+            // SAFETY: the adapter interface is valid for the call.
+            if let Ok(description) = unsafe { adapter.GetDesc1() }
+                && description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) == 0
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Where an E_ACCESSDENIED from DuplicateOutput comes from, as far as the
+    /// process can tell: the same request from a fresh factory, output and
+    /// device. Windows refuses Desktop Duplication to every process while
+    /// the display is off or the session is locked (issue #1088, measured
+    /// on a UHD 620 laptop, where FFmpeg's ddagrab is refused alike), so a
+    /// refusal the fresh objects repeat names that; one they do not repeat
+    /// lies in the media device or output.
+    fn duplication_refusal_diagnostics(selection: WindowsDxgiOutputSelection) -> String {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+        };
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+
+        fn fresh_duplicate(selection: WindowsDxgiOutputSelection) -> Result<(), i32> {
+            let attempt = || -> windows::core::Result<()> {
+                let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
+                let mut index = 0;
+                let adapter = loop {
+                    let adapter = unsafe { factory.EnumAdapters1(index) }?;
+                    let descriptor = unsafe { adapter.GetDesc1() }?;
+                    let luid = (u64::from(descriptor.AdapterLuid.HighPart as u32) << 32)
+                        | u64::from(descriptor.AdapterLuid.LowPart);
+                    if luid == selection.adapter_luid.as_u64() {
+                        break adapter;
+                    }
+                    index += 1;
+                };
+                let output: IDXGIOutput1 =
+                    unsafe { adapter.EnumOutputs(selection.output_index) }?.cast()?;
+                let adapter: IDXGIAdapter = adapter.cast()?;
+                let mut device: Option<ID3D11Device> = None;
+                unsafe {
+                    D3D11CreateDevice(
+                        &adapter,
+                        D3D_DRIVER_TYPE_UNKNOWN,
+                        HMODULE::default(),
+                        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                        None,
+                        D3D11_SDK_VERSION,
+                        Some(&mut device),
+                        None,
+                        None,
+                    )
+                }?;
+                let device = device.ok_or_else(|| {
+                    windows::core::Error::from_hresult(windows::Win32::Foundation::E_POINTER)
+                })?;
+                let _duplication = unsafe { output.DuplicateOutput(&device) }?;
+                Ok(())
+            };
+            attempt().map_err(|error| error.code().0)
+        }
+
+        match fresh_duplicate(selection) {
+            Ok(()) => "a fresh factory, output and device were allowed, so the refusal lies in the media device or output".to_string(),
+            Err(code) => format!(
+                "a fresh factory, output and device were refused too ({code:#010x}): Windows refuses Desktop Duplication to every process while the display is off or the session is locked"
+            ),
+        }
+    }
+
+    /// Turns a `DuplicateOutput` creation failure into a named capture error.
+    /// `DXGI_ERROR_UNSUPPORTED` is classified by the host's hardware adapter
+    /// count (see [`duplication_create_fallback_reason`]); access lost and
+    /// device removal or reset keep their own reasons; anything else is a
+    /// plain Desktop Duplication unavailability.
     fn map_duplication_create_error(error: windows::core::Error) -> WindowsD3d11CaptureError {
+        if error.code() == DXGI_ERROR_UNSUPPORTED {
+            let hardware_adapters = dxgi_hardware_adapter_count();
+            let reason =
+                duplication_create_fallback_reason(error.code().0 as u32, hardware_adapters);
+            let detail = match reason {
+                WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter => format!(
+                    "IDXGIOutput1::DuplicateOutput failed: {error}; this host has {hardware_adapters} hardware GPUs, so another GPU most likely drives this output (hybrid graphics), though an unsupported desktop mode returns the same error"
+                ),
+                _ => format!(
+                    "IDXGIOutput1::DuplicateOutput failed: {error}; this host reports {hardware_adapters} hardware GPU(s), so Desktop Duplication does not support the current desktop mode or scenario"
+                ),
+            };
+            return WindowsD3d11CaptureError::new(reason, detail);
+        }
         let reason = if error.code() == DXGI_ERROR_ACCESS_LOST {
             WindowsD3d11CaptureFallbackReason::DesktopDuplicationAccessLost
         } else if error.code() == DXGI_ERROR_DEVICE_REMOVED
@@ -1706,12 +1988,14 @@ mod runtime {
             device: &WindowsD3d11Device,
             plan: WindowsD3d11CapturePlan,
         ) -> Result<Self, WindowsD3d11CaptureError> {
-            if plan.backend != WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor
-                || plan.cursor_requested
-            {
+            // WGC serves two plans: the cursor-excluded plan the session asks
+            // for with the cursor off, and the cursor-embedded plan that
+            // replaces a Desktop Duplication the session's GPU refused.
+            let cursor_embedded = plan.is_wgc_cursor_embedded();
+            if !cursor_embedded && !plan.is_wgc_cursor_excluded() {
                 return Err(WindowsD3d11CaptureError::new(
                     WindowsD3d11CaptureFallbackReason::WgcCursorExclusionUnconfirmed,
-                    "WGC monitor capture is reserved for cursor-disabled capture",
+                    "WGC monitor capture requires a cursor-excluded or cursor-embedded plan",
                 ));
             }
             if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
@@ -1801,23 +2085,32 @@ mod runtime {
                     format!("CreateCaptureSession failed: {error}"),
                 )
             })?;
-            session.SetIsCursorCaptureEnabled(false).map_err(|error| {
-                WindowsD3d11CaptureError::new(
-                    WindowsD3d11CaptureFallbackReason::WgcCursorControlUnavailable,
-                    format!("setting IsCursorCaptureEnabled=false failed: {error}"),
-                )
-            })?;
+            session
+                .SetIsCursorCaptureEnabled(cursor_embedded)
+                .map_err(|error| {
+                    WindowsD3d11CaptureError::new(
+                        WindowsD3d11CaptureFallbackReason::WgcCursorControlUnavailable,
+                        format!("setting IsCursorCaptureEnabled={cursor_embedded} failed: {error}"),
+                    )
+                })?;
             let cursor_enabled = session.IsCursorCaptureEnabled().map_err(|error| {
                 WindowsD3d11CaptureError::new(
                     WindowsD3d11CaptureFallbackReason::WgcCursorControlUnavailable,
                     format!("reading IsCursorCaptureEnabled failed: {error}"),
                 )
             })?;
-            if cursor_enabled {
-                return Err(WindowsD3d11CaptureError::new(
-                    WindowsD3d11CaptureFallbackReason::WgcCursorExclusionUnconfirmed,
-                    "WGC cursor-disable property read back true before StartCapture",
-                ));
+            if cursor_enabled != cursor_embedded {
+                return Err(if cursor_embedded {
+                    WindowsD3d11CaptureError::new(
+                        WindowsD3d11CaptureFallbackReason::WgcCursorControlUnavailable,
+                        "WGC cursor-enable property read back false before StartCapture",
+                    )
+                } else {
+                    WindowsD3d11CaptureError::new(
+                        WindowsD3d11CaptureFallbackReason::WgcCursorExclusionUnconfirmed,
+                        "WGC cursor-disable property read back true before StartCapture",
+                    )
+                });
             }
             let callback_count = Arc::new(AtomicU64::new(0));
             let callback_counter = callback_count.clone();
@@ -2277,6 +2570,312 @@ mod tests {
             .expect_err("unconfirmed WGC exclusion must fail closed");
             assert_eq!(error.reason, expected);
         }
+    }
+
+    #[test]
+    fn windows_d3d11_capture_names_cross_adapter_duplication_only_on_multi_gpu_hosts() {
+        // Issue #906: DXGI_ERROR_UNSUPPORTED from DuplicateOutput with two
+        // hardware GPUs is the hybrid-graphics case.
+        assert_eq!(
+            duplication_create_fallback_reason(DXGI_ERROR_UNSUPPORTED_HRESULT, 2),
+            WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter
+        );
+        assert_eq!(
+            duplication_create_fallback_reason(DXGI_ERROR_UNSUPPORTED_HRESULT, 3),
+            WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter
+        );
+        // One GPU (or DXGI unanswered): the same HRESULT is a plain
+        // unavailability, so no route that cannot help is tried.
+        for adapters in [0, 1] {
+            assert_eq!(
+                duplication_create_fallback_reason(DXGI_ERROR_UNSUPPORTED_HRESULT, adapters),
+                WindowsD3d11CaptureFallbackReason::DesktopDuplicationUnavailable
+            );
+        }
+        // Another HRESULT on a multi-GPU host is not the cross-adapter case.
+        assert_eq!(
+            duplication_create_fallback_reason(0x887A_0001, 2),
+            WindowsD3d11CaptureFallbackReason::DesktopDuplicationUnavailable
+        );
+        assert_eq!(
+            WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter.as_str(),
+            "d3d11-capture-desktop-duplication-cross-adapter"
+        );
+        assert_eq!(WindowsD3d11CursorMode::EmbeddedWgc.as_str(), "embedded-wgc");
+        assert_eq!(
+            WindowsD3d11CursorPixelsSource::WindowsGraphicsCaptureSurface.as_str(),
+            "wgc-surface"
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_capture_routes_cross_adapter_duplication_through_wgc() {
+        let requested = WindowsD3d11CapturePlan::resolve(
+            "screen:dxgi:00000000000003f1:2",
+            true,
+            adapter(),
+            7,
+            WindowsD3d11WgcCursorExclusionProbe::default(),
+        )
+        .expect("cursor-enabled capture plans Desktop Duplication");
+        assert_eq!(requested.duplication_fallback, None);
+        assert_eq!(
+            WindowsD3d11CaptureDiagnostics::for_plan(requested).duplication_fallback_reason,
+            None
+        );
+
+        let cross_adapter = WindowsD3d11CaptureError::new(
+            WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter,
+            "another GPU drives the output",
+        );
+        let fallback = requested
+            .wgc_cursor_embedded_fallback(&cross_adapter)
+            .expect("the cross-adapter refusal routes to WGC");
+        assert_eq!(
+            fallback.backend,
+            WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor
+        );
+        assert_eq!(fallback.selection, requested.selection);
+        assert_eq!(fallback.generation, requested.generation);
+        assert!(fallback.cursor_requested);
+        assert_eq!(
+            fallback.cursor_mode,
+            Some(WindowsD3d11CursorMode::EmbeddedWgc)
+        );
+        assert_eq!(
+            fallback.cursor_pixels_source,
+            Some(WindowsD3d11CursorPixelsSource::WindowsGraphicsCaptureSurface)
+        );
+        assert!(!fallback.cursor_exclusion_guaranteed);
+        assert_eq!(
+            fallback.duplication_fallback,
+            Some(WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter)
+        );
+        assert!(fallback.is_wgc_cursor_embedded());
+        assert!(!fallback.is_wgc_cursor_excluded());
+
+        // The diagnostics name the route while the D3D11 path stays live.
+        let diagnostics = WindowsD3d11CaptureDiagnostics::for_plan(fallback);
+        assert_eq!(
+            diagnostics.capture_backend,
+            Some(WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor)
+        );
+        assert_eq!(
+            diagnostics.duplication_fallback_reason,
+            Some(WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter)
+        );
+        assert_eq!(diagnostics.fallback_reason, None);
+
+        // The embedded-cursor plan produces truthful submission metadata.
+        let submission = WindowsD3d11CaptureSubmissionMetadata::windows_graphics_capture(
+            fallback,
+            1,
+            10_000,
+            WindowsD3d11OutputRotation::Identity,
+        )
+        .expect("the cursor-embedded WGC plan submits scalar metadata");
+        assert_eq!(
+            submission.capture_backend,
+            WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor
+        );
+        assert_eq!(submission.cursor_mode, WindowsD3d11CursorMode::EmbeddedWgc);
+        assert_eq!(
+            submission.cursor_pixels_source,
+            WindowsD3d11CursorPixelsSource::WindowsGraphicsCaptureSurface
+        );
+        assert!(submission.cursor_requested);
+        assert!(!submission.cursor_exclusion_guaranteed);
+        assert_eq!(
+            submission.timestamp_kind,
+            WindowsD3d11CaptureTimestampKind::SystemRelativeHundredNanoseconds
+        );
+
+        // Any other duplication failure stays a failure.
+        for reason in [
+            WindowsD3d11CaptureFallbackReason::DesktopDuplicationUnavailable,
+            WindowsD3d11CaptureFallbackReason::DesktopDuplicationAccessLost,
+            WindowsD3d11CaptureFallbackReason::DeviceLost,
+            WindowsD3d11CaptureFallbackReason::OutputUnavailable,
+        ] {
+            let error = WindowsD3d11CaptureError::new(reason, "not the hybrid case");
+            assert_eq!(
+                requested.wgc_cursor_embedded_fallback(&error),
+                None,
+                "{reason:?} must not route through WGC"
+            );
+        }
+        // A plan that already runs WGC has nothing to fall back to.
+        let cursor_disabled = WindowsD3d11CapturePlan::resolve(
+            "screen:dxgi:00000000000003f1:2",
+            false,
+            adapter(),
+            7,
+            confirmed_wgc_probe(),
+        )
+        .expect("confirmed cursor-disabled capture uses WGC");
+        assert_eq!(
+            cursor_disabled.wgc_cursor_embedded_fallback(&cross_adapter),
+            None
+        );
+
+        // A WGC plan claiming both an embedded cursor and a guaranteed
+        // exclusion is contradictory and fails closed.
+        let contradictory = WindowsD3d11CapturePlan {
+            cursor_exclusion_guaranteed: true,
+            ..fallback
+        };
+        let error = WindowsD3d11CaptureSubmissionMetadata::windows_graphics_capture(
+            contradictory,
+            1,
+            10_000,
+            WindowsD3d11OutputRotation::Identity,
+        )
+        .expect_err("a contradictory cursor claim must fail closed");
+        assert_eq!(
+            error.reason,
+            WindowsD3d11CaptureFallbackReason::WgcCursorExclusionUnconfirmed
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_capture_worker_opens_wgc_when_duplication_is_cross_adapter() {
+        use crate::windows_d3d11_device::{
+            WindowsD3d11CaptureAuthorityKind, WindowsD3d11MediaAuthorityState,
+        };
+        use std::cell::RefCell;
+
+        let requested = WindowsD3d11CapturePlan::resolve(
+            "screen:dxgi:00000000000003f1:2",
+            true,
+            adapter(),
+            7,
+            WindowsD3d11WgcCursorExclusionProbe::default(),
+        )
+        .expect("cursor-enabled capture plans Desktop Duplication");
+        let refuse = |reason| {
+            move |_plan| -> Result<&'static str, WindowsD3d11CaptureError> {
+                Err(WindowsD3d11CaptureError::new(
+                    reason,
+                    "DuplicateOutput failed (0x887A0004)",
+                ))
+            }
+        };
+
+        // Duplication refuses with the cross-adapter reason: the worker
+        // opens WGC once, with the cursor-embedded plan, and hands that plan
+        // back so the session reports and records the backend that runs.
+        let wgc_attempts = RefCell::new(Vec::new());
+        let (opened_plan, opened) = open_capture_for_plan(
+            requested,
+            refuse(WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter),
+            |plan| {
+                wgc_attempts.borrow_mut().push(plan);
+                Ok("wgc")
+            },
+        )
+        .expect("WGC replaces the refused duplication");
+        let fallback = requested
+            .wgc_cursor_embedded_fallback(&WindowsD3d11CaptureError::new(
+                WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter,
+                "",
+            ))
+            .expect("the cross-adapter refusal has a WGC plan");
+        assert_eq!(wgc_attempts.into_inner(), vec![fallback]);
+        assert_eq!(opened_plan, fallback);
+        assert!(matches!(
+            opened,
+            WindowsD3d11OpenedCapture::WindowsGraphicsCapture("wgc")
+        ));
+        let kind = WindowsD3d11CaptureAuthorityKind::for_backend(opened_plan.backend);
+        assert_eq!(
+            kind,
+            WindowsD3d11CaptureAuthorityKind::WindowsGraphicsCapture
+        );
+        let mut authority = WindowsD3d11MediaAuthorityState::new(7, true).unwrap();
+        authority.start_capture(7, kind).unwrap();
+        assert_eq!(
+            authority.require_capture(7).unwrap(),
+            WindowsD3d11CaptureAuthorityKind::WindowsGraphicsCapture
+        );
+        assert_eq!(
+            WindowsD3d11CaptureDiagnostics::for_plan(opened_plan).duplication_fallback_reason,
+            Some(WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter)
+        );
+
+        // WGC cannot open either: the error names both failures.
+        let error = open_capture_for_plan(
+            requested,
+            refuse(WindowsD3d11CaptureFallbackReason::DesktopDuplicationCrossAdapter),
+            |_plan| -> Result<&'static str, _> {
+                Err(WindowsD3d11CaptureError::new(
+                    WindowsD3d11CaptureFallbackReason::WgcCursorControlUnavailable,
+                    "IsCursorCaptureEnabled is unavailable",
+                ))
+            },
+        )
+        .expect_err("a WGC failure is still a failure");
+        assert_eq!(
+            error.reason,
+            WindowsD3d11CaptureFallbackReason::WgcCursorControlUnavailable
+        );
+        assert!(error.detail.contains("0x887A0004"), "{}", error.detail);
+        assert!(
+            error
+                .detail
+                .contains("Windows Graphics Capture could not replace it: IsCursorCaptureEnabled"),
+            "{}",
+            error.detail
+        );
+
+        // Any other duplication failure is returned without trying WGC.
+        for reason in [
+            WindowsD3d11CaptureFallbackReason::DesktopDuplicationUnavailable,
+            WindowsD3d11CaptureFallbackReason::DesktopDuplicationAccessLost,
+            WindowsD3d11CaptureFallbackReason::DeviceLost,
+            WindowsD3d11CaptureFallbackReason::OutputUnavailable,
+        ] {
+            let error = open_capture_for_plan(
+                requested,
+                refuse(reason),
+                |_plan| -> Result<&'static str, _> { panic!("{reason:?} must not open WGC") },
+            )
+            .expect_err("the duplication failure is returned");
+            assert_eq!(error.reason, reason);
+        }
+
+        // Duplication that opens keeps the requested plan.
+        let (plan, opened) = open_capture_for_plan(
+            requested,
+            |_plan| Ok::<_, WindowsD3d11CaptureError>("duplication"),
+            |_plan| -> Result<&'static str, _> { panic!("WGC must not open") },
+        )
+        .expect("duplication opens");
+        assert_eq!(plan, requested);
+        assert!(matches!(
+            opened,
+            WindowsD3d11OpenedCapture::DesktopDuplication("duplication")
+        ));
+        assert_eq!(
+            WindowsD3d11CaptureAuthorityKind::for_backend(plan.backend),
+            WindowsD3d11CaptureAuthorityKind::DesktopDuplication
+        );
+
+        // A plan that already asks for WGC never touches duplication.
+        let cursor_disabled = WindowsD3d11CapturePlan::resolve(
+            "screen:dxgi:00000000000003f1:2",
+            false,
+            adapter(),
+            7,
+            confirmed_wgc_probe(),
+        )
+        .expect("confirmed cursor-disabled capture uses WGC");
+        let (plan, _) = open_capture_for_plan(
+            cursor_disabled,
+            |_plan| -> Result<&'static str, _> { panic!("duplication must not open") },
+            |_plan| Ok::<_, WindowsD3d11CaptureError>("wgc"),
+        )
+        .expect("WGC opens");
+        assert_eq!(plan, cursor_disabled);
     }
 
     #[test]

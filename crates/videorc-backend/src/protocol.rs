@@ -287,7 +287,7 @@ pub struct ResolveAppWindowParams {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ResolveAppWindowResult {
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // app scenes are macOS-only
     Found {
         ok: bool,
         #[serde(rename = "windowId")]
@@ -306,9 +306,9 @@ pub enum ResolveAppWindowResult {
 #[serde(rename_all = "kebab-case")]
 pub enum AppWindowUnavailableReason {
     NotRunning,
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // app scenes are macOS-only
     NoWindow,
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Minimized,
 }
 
@@ -316,7 +316,7 @@ pub enum AppWindowUnavailableReason {
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceKind {
     Screen,
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    #[cfg_attr(target_os = "windows", allow(dead_code))] // Windows lists no window sources yet
     Window,
     Camera,
     Microphone,
@@ -2454,6 +2454,9 @@ pub enum WindowsD3d11CursorMode {
     Embedded,
     Separate,
     ExcludedWgc,
+    /// Windows Graphics Capture draws the cursor into the frame (the route a
+    /// hybrid-graphics laptop takes when Desktop Duplication refuses).
+    EmbeddedWgc,
     DisabledFallback,
 }
 
@@ -2558,8 +2561,66 @@ pub struct WindowsD3d11MediaDiagnostics {
     /// Worst observed D3D11 compose_scene stage duration on the render thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_compose_stage_max_ms: Option<f64>,
+    /// Per-stage evidence behind `texture_pool_pressure_events` (#1042).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_pool_pressure: Option<WindowsD3d11TexturePoolPressureDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+    /// Why `capture_backend` is not the Desktop Duplication the session asked
+    /// for while the D3D11 path stays live (issue #906: a hybrid-graphics
+    /// laptop whose panel is driven by the other GPU captures through Windows
+    /// Graphics Capture). Absent when the requested backend opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_route_reason: Option<String>,
+}
+
+/// Why the D3D11 texture pool ran short (#1042). `texture_pool_pressure_events`
+/// stays the gate counter: it is the pool's exhaustions plus the render loop's
+/// pressure skips, so one exhausted compose counts in both. These fields split
+/// it apart and name what held the textures.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11TexturePoolPressureDiagnostics {
+    /// Acquires that found no free capture or preview BGRA texture.
+    pub bgra_exhaustions: u64,
+    /// Acquires that found no free encoder NV12 texture.
+    pub nv12_exhaustions: u64,
+    /// Render-loop ticks skipped for pool exhaustion or a full media queue.
+    pub render_pressure_skips: u64,
+    /// Summed over every exhaustion: the exhausted bucket's slots by holder.
+    pub holders: WindowsD3d11TexturePoolHolders,
+    /// Publication-to-release time per consumer role.
+    pub holds: WindowsD3d11TexturePoolRoleHolds,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11TexturePoolHolders {
+    pub writing: u64,
+    pub compositor: u64,
+    pub preview: u64,
+    pub record: u64,
+    pub stream: u64,
+    pub awaiting_fence: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11TexturePoolRoleHolds {
+    pub compositor: WindowsD3d11TextureRoleHold,
+    pub preview: WindowsD3d11TextureRoleHold,
+    pub record: WindowsD3d11TextureRoleHold,
+    pub stream: WindowsD3d11TextureRoleHold,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11TextureRoleHold {
+    pub releases: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ms: Option<f64>,
 }
 
 /// Cumulative request counts (since backend start) for the HTTP image-polling preview
@@ -9418,6 +9479,44 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.synchronization_timeouts, 0);
+    }
+
+    #[test]
+    fn windows_d3d11_capture_route_reason_and_embedded_wgc_cursor_are_stable_on_the_wire() {
+        // Issue #906: a hybrid-graphics laptop captures through WGC with the
+        // cursor drawn by Windows and names why in the diagnostics.
+        let diagnostics = WindowsD3d11MediaDiagnostics {
+            state: WindowsD3d11MediaState::Live,
+            capture_backend: Some(WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor),
+            cursor_mode: Some(WindowsD3d11CursorMode::EmbeddedWgc),
+            cursor_requested: true,
+            capture_route_reason: Some(
+                "d3d11-capture-desktop-duplication-cross-adapter".to_string(),
+            ),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&diagnostics).unwrap();
+        assert_eq!(wire["cursorMode"], "embedded-wgc");
+        assert_eq!(
+            wire["captureRouteReason"],
+            "d3d11-capture-desktop-duplication-cross-adapter"
+        );
+        assert!(
+            wire.get("fallbackReason").is_none(),
+            "a named capture route is not a fallback out of the D3D11 path"
+        );
+        let decoded: WindowsD3d11MediaDiagnostics = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, diagnostics);
+
+        let requested_backend_opened = WindowsD3d11MediaDiagnostics {
+            capture_backend: Some(WindowsD3d11CaptureBackend::DesktopDuplication),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&requested_backend_opened).unwrap();
+        assert!(
+            wire.get("captureRouteReason").is_none(),
+            "the route reason is omitted when the requested backend opened"
+        );
     }
 
     #[test]

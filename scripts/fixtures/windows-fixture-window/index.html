@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'"
+    />
+    <title>Videorc Fixture Alpha</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        cursor: none;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="fixture"></canvas>
+    <script>
+      // Mirrors FixtureView.draw in scripts/fixtures/fixture-window.swift.
+      const fills = { red: '#d0201f', blue: '#1f3fd0' }
+      const color = new URLSearchParams(location.search).get('color') ?? 'red'
+      const fill = fills[color] ?? fills.red
+      const letter = color === 'blue' ? 'B' : 'A'
+      const canvas = document.getElementById('fixture')
+      const context = canvas.getContext('2d', { alpha: false })
+      let frameCounter = 0
+      let flashUntil = 0
+      let flashWaiters = []
+
+      function resize() {
+        canvas.width = Math.round(window.innerWidth * devicePixelRatio)
+        canvas.height = Math.round(window.innerHeight * devicePixelRatio)
+      }
+
+      function draw(now) {
+        const { width, height } = canvas
+        const flashing = now < flashUntil
+        context.fillStyle = flashing ? '#ffffff' : fill
+        context.fillRect(0, 0, width, height)
+        // The marker letter is a darker shade of the fill, so the centre of
+        // the frame still classifies as the fixture's colour at any size.
+        context.fillStyle = flashing ? 'rgba(0,0,0,0.08)' : 'rgba(0,0,0,0.22)'
+        context.font = `bold ${Math.round(height * 0.55)}px sans-serif`
+        context.textAlign = 'center'
+        context.textBaseline = 'middle'
+        context.fillText(letter, width / 2, height / 2)
+        if (!flashing) {
+          // A counter top-left changes every frame, so the screen never goes still.
+          context.fillStyle = 'rgba(255,255,255,0.9)'
+          context.font = `600 ${Math.round(28 * devicePixelRatio)}px monospace`
+          context.textAlign = 'left'
+          context.textBaseline = 'top'
+          context.fillText(String(frameCounter).padStart(8, '0'), 16, 28)
+          // Motion the probe can see after downscaling: a white block that
+          // sweeps the bottom-left 40% of the width in 12 steps.
+          const sweepWidth = width * 0.4
+          const blockWidth = width * 0.06
+          const step = (frameCounter % 12) / 12
+          context.fillStyle = 'rgba(255,255,255,0.95)'
+          context.fillRect(
+            step * (sweepWidth - blockWidth),
+            height * 0.92,
+            blockWidth,
+            height * 0.08
+          )
+        }
+        frameCounter += 1
+        if (flashing && flashWaiters.length) {
+          const waiters = flashWaiters
+          flashWaiters = []
+          // The white frame is committed with this callback; the next one
+          // runs after it was presented.
+          requestAnimationFrame(() => {
+            const drawnAtMs = Date.now()
+            for (const resolve of waiters) resolve(drawnAtMs)
+          })
+        }
+        requestAnimationFrame(draw)
+      }
+
+      window.__fixtureFlash = (durationMs) =>
+        new Promise((resolve) => {
+          flashUntil = performance.now() + durationMs
+          flashWaiters.push(resolve)
+        })
+
+      window.__fixtureFrames = () => frameCounter
+
+      window.addEventListener('resize', resize)
+      resize()
+      requestAnimationFrame(draw)
+    </script>
+  </body>
+</html>

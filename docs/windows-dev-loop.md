@@ -91,6 +91,30 @@ $env:VIDEORC_ALLOW_UNSUPPORTED_WINDOWS = '1'
 pnpm smoke:dev
 ```
 
+Hide screen on every output leg (#1088, plan 210 D8). It covers the primary
+display with a borderless red fixture window for about half a minute once the
+dev app is up, records and
+streams the DXGI display to a loopback RTMP sink with Clips on, hides for four
+seconds, and checks that the recording, the stream and a saved clip are frosted
+and still for the hidden span and live again after Show:
+
+```powershell
+pnpm smoke:hide-screen:windows                 # or pnpm smoke:smart-scenes
+pnpm smoke:hide-screen:windows -- --media cpu  # force the CPU compositor bridge
+```
+
+The Screen file is a named SKIP: separate source recordings are Mac only.
+Keep the display awake and unlocked. While it is off or the session is
+locked, Windows refuses Desktop Duplication to every process (`0x80070005`,
+FFmpeg's `ddagrab` included) and Windows Graphics Capture drops to a few
+frames a second (issue #1088 measured 3.8 asleep, 26 awake on a UHD 620
+laptop). The smoke holds an awake display on for its whole run, the backend
+build included, but cannot wake one. A refused D3D11 media path falls back to
+the CPU bridge: those legs are still judged, the D3D11 path is a named SKIP
+with the code, and the backend's fallback reason says whether a fresh device
+was refused too (then it is the display or the session, not Videorc).
+`-- --probe-capture` stops after the 5 s capture-rate sample.
+
 Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):
 
@@ -521,7 +545,12 @@ an early-PCM-EOF baseline, then ends captured input at three seconds while timed
 zeros continue until four seconds of video finish and FFmpeg exits. Normal and
 600 ms delayed/queued startup cases retain frame accounting, A/V start skew,
 packet tail, first-output time and video-EOF-to-exit time, plus their differences
-from the matching baseline. The 1500 ms diagnostic deadline bounds this probe;
+from the matching baseline. Like the raw bridge it mirrors, the owned PCM
+command bounds `-shortest` with `-shortest_buf_duration 0.25` (#1166): with
+FFmpeg's 10 s default, a run whose first video packet reached the muxer before
+audio's first AAC packet froze until the queue overflowed, because the scheduler
+chokes video until audio has a packet while the sync queue holds audio until
+video advances. The 1500 ms diagnostic deadline bounds this probe;
 application click-to-idle acceptance still uses the existing latency budget.
 
 `--eof-stability-passes 25` repeats each candidate case 25 times on hosted
