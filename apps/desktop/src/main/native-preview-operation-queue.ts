@@ -219,8 +219,11 @@ type NativePreviewPlacementApply = (request: NativePreviewPlacementRequest) => P
 export interface NativePreviewPlacementFailure {
   /** 1 for the first try of this placement, 2 for its first retry, … */
   attempt: number
-  /** `retry` after `retryInMs`; `superseded` by a newer queued placement; `gave-up`. */
-  outcome: 'retry' | 'superseded' | 'gave-up'
+  /**
+   * `retry` after `retryInMs`; `superseded` by a newer queued placement;
+   * `cancelled` by teardown (`cancelPending`) while it was in flight; `gave-up`.
+   */
+  outcome: 'retry' | 'superseded' | 'cancelled' | 'gave-up'
   retryInMs: number | null
 }
 
@@ -279,6 +282,7 @@ export class NativePreviewPlacementQueue {
   private retry: ScheduledPlacementRetry | null = null
   private failedCount = 0
   private retriedCount = 0
+  private cancelEpoch = 0
   private readonly idleWaiters = new Set<() => void>()
   private receivedCount = 0
   private coalescedCount = 0
@@ -338,6 +342,10 @@ export class NativePreviewPlacementQueue {
     const hadPending = this.pending !== null || this.retry !== null
     this.pending = null
     this.cancelRetry()
+    // A placement already in flight cannot be stopped, but if it fails it
+    // must not schedule a retry: teardown destroyed the surface, and a late
+    // retry would create it again (#1272 review).
+    this.cancelEpoch += 1
     return hadPending
   }
 
@@ -379,6 +387,7 @@ export class NativePreviewPlacementQueue {
   private start(request: NativePreviewPlacementRequest, attempt: number): void {
     this.active = request
     const startedAtMs = this.nowMs()
+    const epoch = this.cancelEpoch
     let failure: { error: unknown } | null = null
     void this.apply(request)
       .then(
@@ -401,12 +410,20 @@ export class NativePreviewPlacementQueue {
         const next = this.pending
         this.pending = null
         // Only the newest placement is worth retrying: a pending one already
-        // replaces this rect.
-        const retryInMs = failure && !next ? (this.retryDelaysMs[attempt - 1] ?? null) : null
+        // replaces this rect, and one cancelled in flight has no surface left.
+        const cancelled = epoch !== this.cancelEpoch
+        const retryInMs =
+          failure && !next && !cancelled ? (this.retryDelaysMs[attempt - 1] ?? null) : null
         if (failure) {
           this.onError(failure.error, {
             attempt,
-            outcome: next ? 'superseded' : retryInMs === null ? 'gave-up' : 'retry',
+            outcome: next
+              ? 'superseded'
+              : cancelled
+                ? 'cancelled'
+                : retryInMs === null
+                  ? 'gave-up'
+                  : 'retry',
             retryInMs
           })
         }

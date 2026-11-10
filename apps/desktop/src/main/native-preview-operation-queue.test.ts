@@ -600,6 +600,46 @@ describe('NativePreviewPlacementQueue', () => {
     expect(attempts).toBe(1)
   })
 
+  // Teardown (preview-surface:destroy, destroyNativePreviewSurface) can run
+  // while a placement is in flight with the Preview window still open. If
+  // that placement then fails, a retry would recreate the destroyed surface.
+  it('never retries an in-flight placement that fails after teardown cancelled the queue', async () => {
+    const clock = new ManualRetryClock()
+    const failures: NativePreviewPlacementFailure[] = []
+    let failInFlight!: () => void
+    const inFlight = new Promise<void>((_resolve, reject) => {
+      failInFlight = () => reject(new Error('surface-busy'))
+    })
+    let attempts = 0
+    const queue = new NativePreviewPlacementQueue(
+      async () => {
+        attempts += 1
+        await inFlight
+      },
+      (_error, failure) => failures.push(failure),
+      () => 0,
+      250,
+      [100],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(0), generation: 1 })
+    await Promise.resolve()
+    queue.cancelPending()
+    failInFlight()
+    await queue.waitForIdle()
+    await flushMicrotasks()
+
+    expect(failures).toEqual([{ attempt: 1, outcome: 'cancelled', retryInMs: null }])
+    expect(queue.retryScheduled).toBe(false)
+    expect(clock.pending).toBe(0)
+    expect(attempts).toBe(1)
+
+    // The queue still works afterwards: a fresh placement runs normally.
+    queue.enqueue({ bounds: surfaceBounds(10), generation: 2 })
+    expect(attempts).toBe(2)
+  })
+
   it('reports idle while a retry waits, so hiding or closing never waits out a backoff', async () => {
     const clock = new ManualRetryClock()
     const queue = new NativePreviewPlacementQueue(
