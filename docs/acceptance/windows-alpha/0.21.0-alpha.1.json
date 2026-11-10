@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "kind": "videorc-windows-alpha-owner-waiver",
+  "status": "OWNER_WAIVED",
+  "releaseId": "0.21.0-alpha.1",
+  "sourceCommit": "c5c1b8a899cba3a2b8053a89fa2398b7d36d539d",
+  "candidateIdentity": "windows:0.21.0-alpha.1:c5c1b8a899cba3a2b8053a89fa2398b7d36d539d:sha256:1867191e1cd2840acf55250beebcb7a491bd163e8a5e6ee2f1807163c03c1557",
+  "candidateStoragePrefix": "candidates/windows/0.21.0-alpha.1/c5c1b8a899cba3a2b8053a89fa2398b7d36d539d",
+  "installer": {
+    "filename": "Videorc-0.21.0-win-x64.exe",
+    "sha256": "1867191e1cd2840acf55250beebcb7a491bd163e8a5e6ee2f1807163c03c1557",
+    "publisherName": "Uros Miric"
+  },
+  "decidedAt": "2026-11-10T16:03:32.571Z",
+  "decidedBy": "release-owner",
+  "basis": "field-use-by-alpha-testers",
+  "physicalAcceptance": {
+    "performed": false
+  },
+  "releaseSequence": {
+    "kind": "successor",
+    "previousReleaseId": "0.20.4-alpha.1"
+  }
+}
