@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { LiveChatMessage } from '@/lib/backend'
-import { renderCommentHighlightCards, type HighlightBitmap } from './caption-overlay'
+import {
+  renderChatOverlayCards,
+  renderCommentHighlightCards,
+  type HighlightBitmap
+} from './caption-overlay'
+import { DEFAULT_OVERLAY_LAYOUT } from './overlay-layout'
 import {
   X_LOGO_WHITE_DATA_URL as X_LOGO_WHITE_URL,
   X_VERIFIED_DATA_URL as X_VERIFIED_URL
@@ -441,5 +446,85 @@ describe('renderCommentHighlightCards X mark and verified check (plan 167)', () 
       warn: vi.fn()
     })
     expect(calls.filter((call) => call.method === 'drawImage')).toHaveLength(1)
+  })
+})
+
+describe('renderChatOverlayCards avatars', () => {
+  beforeEach(() => {
+    calls.length = 0
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas)
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  const stream = { width: 1920, height: 1080, rect: DEFAULT_OVERLAY_LAYOUT.chat.horizontal }
+  const vertical = { width: 1080, height: 1920, rect: DEFAULT_OVERLAY_LAYOUT.chat.vertical }
+  const row = (id: string, authorName: string, authorAvatarUrl?: string): LiveChatMessage =>
+    ({
+      ...message,
+      id,
+      providerMessageId: id,
+      authorName,
+      messageText: `hello ${id}`,
+      ...(authorAvatarUrl ? { authorAvatarUrl } : {})
+    }) as LiveChatMessage
+
+  it('draws each picture beside its name, decoded once per regular, on both boxes', async () => {
+    const remote = 'https://static-cdn.jtvnw.net/jtv_user_pictures/regular-300x300.png'
+    const cacheImage = vi.fn(async () => avatarUrl)
+    const readImage = vi.fn(async () => new Uint8Array([1, 2, 3]))
+    const decode = vi.fn(async () => bitmap)
+    const warn = vi.fn()
+    const cards = await renderChatOverlayCards(
+      [row('1', 'Priyanshu Raj', remote), row('2', 'Snehaa'), row('3', 'Priyanshu Raj', remote)],
+      stream,
+      vertical,
+      { cacheImage, readImage, decode, warn }
+    )
+    expect(cards?.pngBase64).toBeTruthy()
+    expect(cards?.verticalPngBase64).toBeTruthy()
+    // The avatar URL goes to main's allowlisted cache as the platform sent it.
+    expect(cacheImage).toHaveBeenCalledTimes(1)
+    expect(cacheImage).toHaveBeenCalledWith(remote)
+    expect(decode).toHaveBeenCalledTimes(1)
+    // Two rows with the picture, on each of the two boxes.
+    const drawn = calls.filter((call) => call.method === 'drawImage' && call.args[0] === bitmap)
+    expect(drawn).toHaveLength(4)
+    // The picture is a small circle: square, and before its row's name.
+    const names = calls.filter(
+      (call) => call.method === 'fillText' && call.args[0] === 'Priyanshu Raj'
+    )
+    expect(names).toHaveLength(4)
+    for (const [index, { args }] of drawn.entries()) {
+      const [x, , width, height] = args.slice(1).map(Number)
+      expect(width).toBe(height)
+      expect(x + width).toBeLessThan(Number(names[index]!.args[1]))
+    }
+    // The viewer with no picture gets their initials, once per box.
+    const texts = calls.filter((call) => call.method === 'fillText').map((call) => call.args[0])
+    expect(texts.filter((text) => text === 'S')).toHaveLength(2)
+    expect(texts).not.toContain('PR')
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('shows initials when the picture fails, and says so once per picture', async () => {
+    const remote = 'https://pbs.twimg.com/profile_images/1/blocked_normal.jpg'
+    const warn = vi.fn()
+    const deps = {
+      cacheImage: async () => null,
+      readImage: async () => new Uint8Array([1]),
+      decode: async () => bitmap,
+      warn
+    }
+    await renderChatOverlayCards([row('1', 'Orc Dev', remote)], stream, undefined, deps)
+    expect(calls.filter((call) => call.method === 'drawImage')).toHaveLength(0)
+    const texts = calls.filter((call) => call.method === 'fillText').map((call) => call.args[0])
+    expect(texts).toContain('OD')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]?.[0]).toMatch(
+      /1 avatar fell back to initials \(Orc Dev: main did not cache it\)/
+    )
+    // The next repaint tries again but does not repeat the line.
+    await renderChatOverlayCards([row('2', 'Orc Dev', remote)], stream, undefined, deps)
+    expect(warn).toHaveBeenCalledTimes(1)
   })
 })
