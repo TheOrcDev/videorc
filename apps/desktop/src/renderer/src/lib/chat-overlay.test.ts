@@ -153,8 +153,33 @@ describe('chat on stream: the layout', () => {
     expect(layout.boxWidthPx).toBe(Math.floor(rect.w * 1920))
     expect(layout.rows.map((row) => row.id)).toEqual(['1', '2', '3', '4', '5'])
     expect(layout.boxHeightPx).toBeLessThanOrEqual(Math.floor(rect.h * 1080))
-    // The badge leads the row; the name starts after it.
-    expect(layout.rows[0]!.nameXPx).toBe(layout.metrics.iconPx + layout.metrics.identityGapPx)
+    // The badge leads the row, the avatar follows it and the name comes last.
+    const { iconPx, avatarPx, identityGapPx, lineHeightPx } = layout.metrics
+    expect(layout.rows[0]!.avatarXPx).toBe(iconPx + identityGapPx)
+    expect(layout.rows[0]!.nameXPx).toBe(iconPx + identityGapPx + avatarPx + identityGapPx)
+    // A small avatar: a little taller than the name, never past a text line.
+    expect(avatarPx).toBeGreaterThan(layout.metrics.nameFontPx)
+    expect(avatarPx).toBeLessThanOrEqual(lineHeightPx)
+    expect(layout.rows[0]!.identityHeightPx).toBe(Math.max(lineHeightPx, iconPx))
+  })
+
+  it('carries the avatar URL and falls back to initials', () => {
+    const layout = layoutChatOverlay({
+      rows: [
+        { ...rows[0]!, avatarUrl: 'https://static-cdn.jtvnw.net/a.png', initials: 'V1' },
+        { ...rows[1]! }
+      ],
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+      rectWidthPx: 576,
+      rectHeightPx: 475,
+      measure,
+      emoteSize: () => null
+    })!
+    expect(layout.rows[0]!.avatarUrl).toBe('https://static-cdn.jtvnw.net/a.png')
+    expect(layout.rows[0]!.initials).toBe('V1')
+    expect(layout.rows[1]!.avatarUrl).toBeUndefined()
+    expect(layout.rows[1]!.initials).toBe('?')
   })
 
   it('drops the oldest rows first when the rect is short, never the newest', () => {
@@ -182,7 +207,7 @@ describe('chat on stream: the layout', () => {
     expect(tiny.rows.map((row) => row.id)).toEqual(['5'])
   })
 
-  it('gives a row with no icon its whole width for the name', () => {
+  it('starts a row with no icon at its avatar', () => {
     const layout = layoutChatOverlay({
       rows: [{ ...rows[0]!, icon: 'none' }],
       canvasWidth: 1080,
@@ -192,7 +217,8 @@ describe('chat on stream: the layout', () => {
       measure,
       emoteSize: () => null
     })!
-    expect(layout.rows[0]!.nameXPx).toBe(0)
+    expect(layout.rows[0]!.avatarXPx).toBe(0)
+    expect(layout.rows[0]!.nameXPx).toBe(layout.metrics.avatarPx + layout.metrics.identityGapPx)
     expect(layout.rows[0]!.iconWidthPx).toBe(0)
   })
 })
