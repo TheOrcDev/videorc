@@ -185,6 +185,31 @@ describe('userErrorMessage', () => {
       userErrorMessage(backendError('layout-screen-not-ready', 'screen never delivered'), SWITCH)
         .description
     ).toBe("Your screen isn't sending video. Check it in Sources, then try again.")
+    // A layout whose source is set to None or Off is a refusal with a next
+    // step, never "try again" (a Windows tester on 0.20.4 got the generic
+    // copy 28 times in a row).
+    expect(
+      userErrorMessage(
+        backendError(
+          'layout-screen-not-selected',
+          'Layout preset SideBySide needs a screen or window, but none is selected. Pick one, then switch.'
+        ),
+        SWITCH
+      )
+    ).toMatchObject({
+      kind: 'known',
+      title: "Couldn't switch the scene",
+      description:
+        'This scene needs a screen or window. Pick one in Sources, or choose a camera-only scene.',
+      tone: 'warning'
+    })
+    expect(
+      userErrorMessage(backendError('layout-camera-not-selected', 'needs a camera'), SWITCH)
+    ).toMatchObject({
+      description:
+        'This scene needs a camera. Turn one on in Sources, or choose a scene without a camera.',
+      tone: 'warning'
+    })
     // The route's own code stays generic: that is the toast the streamer got
     // on 0.18.0, which named no cause.
     expect(

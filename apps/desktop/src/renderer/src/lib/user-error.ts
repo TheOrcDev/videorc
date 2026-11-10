@@ -100,9 +100,18 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   // its first frame. The backend's code names the source, so the copy can.
   'layout-camera-not-ready':
     "Your camera isn't sending video. Check it in Sources, then try again.",
-  'layout-screen-not-ready': "Your screen isn't sending video. Check it in Sources, then try again."
+  'layout-screen-not-ready':
+    "Your screen isn't sending video. Check it in Sources, then try again.",
+  // A scene whose layout needs a source that is set to None or Off. Trying
+  // again cannot help, so the copy says what to pick instead.
+  'layout-screen-not-selected':
+    'This scene needs a screen or window. Pick one in Sources, or choose a camera-only scene.',
+  'layout-camera-not-selected':
+    'This scene needs a camera. Turn one on in Sources, or choose a scene without a camera.'
 }
 const WARNING_CODES = new Set([
+  'layout-screen-not-selected',
+  'layout-camera-not-selected',
   'command-expired-before-dispatch',
   'command-lane-full',
   'screen-import-busy',
