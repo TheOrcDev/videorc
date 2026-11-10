@@ -6,8 +6,10 @@ saved, starting with their @name, in the chat they asked in (plan 226).
 
 ## Using it
 
-- **Set up** in Setup → Livestream → Chat commands, or from the Stream
-  Manager's ⋯ menu → "Chat commands…". Each command has:
+- **Set up** in Setup → Livestream → Chat commands. From the Stream
+  Manager: type `!` in the composer and pick "Edit chat commands…", or use
+  the bar's **Commands** action (800 px and wider) or ⋯ → "Chat commands…"
+  (below 640 px). Each command has:
   - **Name**: `!go`. Letters, numbers, `_` and `-`, up to 24 characters,
     any case in chat.
   - **Description**: "why I'm learning Go", up to 60 characters. `!commands`
@@ -18,10 +20,15 @@ saved, starting with their @name, in the chat they asked in (plan 226).
 - **What viewers see**: `!go` (or `!GO please`) as the first word gets
   `@coder_x <your reply>`, only in that viewer's chat: a Twitch `!go` is
   answered on Twitch. `why !go`, `!golang` and unknown names get nothing.
-- **`!commands`** is built in. It answers `@name Commands: !faq (most asked
-  question), !go (why I'm learning Go)`, A–Z. When the list doesn't fit one
-  message it drops the descriptions, then ends with "and N more". It stays
-  quiet while you have no commands, and "Answer !commands" turns it off.
+- **`!commands`** is built in. It lists your commands A–Z, each with its
+  description:
+
+  `@name Commands: !faq (most asked question), !go (why I'm learning Go)`
+
+  When the list doesn't fit one message it drops the descriptions, then
+  ends with "and N more". It stays quiet while you have no commands, and
+  "Answer !commands" turns it off.
+
 - **From the Stream Manager**: type `!go` and press Enter to post the reply,
   without a mention, to every chat. `!!go` posts the text `!go` itself. The
   composer suggests your commands after `!`.

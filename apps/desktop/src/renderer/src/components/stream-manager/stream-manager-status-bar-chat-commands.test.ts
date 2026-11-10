@@ -72,7 +72,7 @@ describe('Stream Manager chat commands (plan 226 S4)', () => {
     expect(items.some((row) => row.textContent === 'Chat commands…')).toBe(false)
   })
 
-  it('keeps the door in the bar above 640 px, where the ⋯ menu is hidden', async () => {
+  it('keeps the door in the bar from 800 px, where the ⋯ menu is hidden', async () => {
     const onOpenChatCommands = vi.fn()
     await act(async () =>
       root.render(
@@ -88,6 +88,8 @@ describe('Stream Manager chat commands (plan 226 S4)', () => {
     const door = actions.querySelector<HTMLButtonElement>('[aria-label="Chat commands…"]')
     expect(door).not.toBeNull()
     expect(door!.textContent).toContain('Commands')
+    // Below 800 px the bar has no room for it (the 640 px sweep).
+    expect(door!.className).toContain('@max-[799px]/stream-manager:hidden')
     await act(async () => door!.click())
     expect(onOpenChatCommands).toHaveBeenCalledOnce()
   })

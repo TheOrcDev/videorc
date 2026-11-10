@@ -21,9 +21,11 @@ Each command has three fields:
 - **Changes from the plan while building:**
   - Every mutation returns the whole `ChatCommandsState`, and
     `chatCommands.post` (the Stream Manager's `!go`) was added.
-  - The Stream Manager's door is a "Commands" action in the bar above
-    640 px and "Chat commands…" in the ⋯ menu below it. The ⋯ menu only
-    exists below 640 px.
+  - The Stream Manager has three doors to the editor, because the ⋯ menu
+    only exists below 640 px and the 640 px bar has no room for another
+    chip (`probe:comments-window`'s sweep): a bare `!` in the composer
+    offers "Edit chat commands…" last (every width), the bar's "Commands"
+    action from 800 px, and ⋯ → "Chat commands…" below 640 px.
   - `chatCommands.post` waits for X's first part only; the second follows
     in the background. A mutation past 10 s restarts the backend, and two
     8 s X posts in a row could pass it.

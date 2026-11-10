@@ -351,8 +351,9 @@ export function StreamManagerStatusBar({
    * recordings too). `sounds` is null until Studio has read the board. */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => unknown
-  /** Plan 226 S4: Chat commands… (the bar's action, the ⋯ menu below
-   * 640 px) opens Livestream → Setup → Chat commands in the main window. */
+  /** Plan 226 S4: Chat commands… (the bar's action from 800 px, the ⋯
+   * menu below 640 px, the composer's bare `!` at every width) opens
+   * Livestream → Setup → Chat commands in the main window. */
   onOpenChatCommands?: () => void
   onOpenPreview?: () => void
   /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each
@@ -647,8 +648,12 @@ export function StreamManagerStatusBar({
                   onClick={requestClear}
                 />
               ) : null}
+              {/* From 800 px only: at 640 px the bar has no room for one more
+                  chip. Below 800 the composer's bare `!` and, below 640, the
+                  ⋯ menu carry the door. */}
               {onOpenChatCommands ? (
                 <StatusBarAction
+                  className="@max-[799px]/stream-manager:hidden"
                   hint="Add or change the !commands viewers type"
                   icon={<ChatCommandsIcon aria-hidden />}
                   label="Chat commands…"

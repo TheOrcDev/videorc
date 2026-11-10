@@ -587,6 +587,42 @@ describe('!name in the composer (plan 226 S4)', () => {
     expect(onChatCommand).toHaveBeenCalledExactlyOnceWith('faq')
   })
 
+  it('offers Edit chat commands… last under a bare !, and only there', async () => {
+    const onOpenChatCommands = vi.fn()
+    onSend.mockClear()
+    await act(async () =>
+      root.render(
+        createElement(Composer, {
+          providers: writable,
+          pending: false,
+          failures: [],
+          operation: null,
+          prefill: null,
+          cohostNudge: false,
+          markerContext: { sessionId: 's1', available: true },
+          onSend,
+          chatCommands,
+          onChatCommand: vi.fn(async () => ({ sent: 2, failed: 0 })),
+          onOpenChatCommands
+        })
+      )
+    )
+    await type('!')
+    expect(completionList().at(-1)).toBe('Edit chat commands…')
+    await type('!wow')
+    expect(completionList()).toEqual([])
+    await enter()
+    expect(onSend).toHaveBeenLastCalledWith('!wow', {})
+    expect(onOpenChatCommands).not.toHaveBeenCalled()
+    await type('!')
+    const door = [
+      ...container.querySelectorAll<HTMLElement>('[aria-label="Local commands"] [cmdk-item]')
+    ].find((item) => item.textContent === 'Edit chat commands…')!
+    await act(async () => door.click())
+    expect(onOpenChatCommands).toHaveBeenCalledOnce()
+    expect(input().value).toBe('')
+  })
+
   it('leaves ! as ordinary chat where the window cannot post a reply', async () => {
     await mountCommands(null)
     await type('!')

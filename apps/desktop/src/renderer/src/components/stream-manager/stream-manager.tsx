@@ -1315,6 +1315,7 @@ export function StreamManager({
             onSound={inHistory ? undefined : onSound}
             chatCommands={live ? chatCommands : null}
             onChatCommand={live ? onChatCommand : undefined}
+            onOpenChatCommands={onOpenChatCommands}
             chatCommandFailures={live ? liveChatCommandFailures : NO_CHAT_COMMAND_FAILURES}
             onBuddy={inHistory ? undefined : onBuddy}
             onUseSignIn={inHistory ? undefined : onUseSignIn}

@@ -178,6 +178,7 @@ export function ChatPane({
   chatCommands = null,
   onChatCommand,
   chatCommandFailures,
+  onOpenChatCommands,
   onBuddy,
   prefill = null,
   cohostNudge = false,
@@ -244,6 +245,9 @@ export function ChatPane({
   chatCommands?: ChatCommandsSummary | null
   onChatCommand?: (name: string) => Promise<ChatCommandPostResult>
   chatCommandFailures?: readonly ChatCommandReplyFailed[]
+  /** Plan 226: a bare `!` offers "Edit chat commands…" last, which opens
+   * the editor in the main window (the door at every width). */
+  onOpenChatCommands?: () => void
   /** Plan 209 S20: `/buddy <words>`; resolves to Buddy's final answer. */
   onBuddy?: (sentence: string) => Promise<CohostActAnswer>
   onSend?: (text: string, options?: ChatSendOptions) => void
@@ -674,6 +678,7 @@ export function ChatPane({
           onSound={onSound}
           chatCommands={chatCommands}
           onChatCommand={onChatCommand}
+          onOpenChatCommands={onOpenChatCommands}
           onBuddy={onBuddy}
           cohostNudge={cohostNudge}
           failures={sendFailures}
@@ -692,6 +697,10 @@ export function ChatPane({
 }
 
 /** The composer's own commands, in the order the completion list offers them. */
+/** Plan 226: the completion row that opens the chat command editor. Not a
+ * command anyone can type: it has no `/` or `!`. */
+const EDIT_CHAT_COMMANDS = 'edit-chat-commands'
+
 const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
   { value: '/hide', hint: ' · Hide screen' },
   { value: '/show', hint: ' · Show screen' },
@@ -734,6 +743,7 @@ export function Composer({
   onSound,
   chatCommands = null,
   onChatCommand,
+  onOpenChatCommands,
   onBuddy
 }: {
   markerContext?: MarkerContext | null
@@ -762,6 +772,8 @@ export function Composer({
    */
   chatCommands?: ChatCommandsSummary | null
   onChatCommand?: (name: string) => Promise<ChatCommandPostResult>
+  /** Plan 226: "Edit chat commands…", the last row under a bare `!`. */
+  onOpenChatCommands?: () => void
   /**
    * Plan 209 S20: `/buddy <words>` asks Buddy's planner through Studio.
    * Resolves to the final answer; its sentence is the composer's notice
@@ -838,7 +850,7 @@ export function Composer({
     : targets.length > 0 && !pending
   // Under `/banner` and `/sound`, the names (plans 186, 189); after `!`, the
   // chat commands (plan 226); otherwise the commands.
-  const completions: readonly ComposerCompletion[] =
+  const listed: readonly ComposerCompletion[] =
     (bannerList && bannerCompletions(draft, bannerList)) ??
     (soundBoard && soundCompletions(draft, soundBoard)) ??
     chatCommandCompletions(draft, commandSummary) ??
@@ -851,9 +863,22 @@ export function Composer({
         (onBuddy || entry.value !== BUDDY_COMMAND) &&
         entry.value.startsWith(draft.toLowerCase())
     )
+  // Plan 226: only a bare `!` offers the editor, so Enter on `!wow` still
+  // sends `!wow`.
+  const completions: readonly ComposerCompletion[] =
+    onOpenChatCommands && draft.trim() === '!'
+      ? [...listed, { value: EDIT_CHAT_COMMANDS, hint: '' }]
+      : listed
   const showCompletions = completions.length > 0 && !completionDismissed
   const selectedCompletion = completions[completionIndex] ?? completions[0]
   const complete = (value: string): void => {
+    if (value === EDIT_CHAT_COMMANDS) {
+      setDraft('')
+      setCompletionDismissed(true)
+      setCompletionIndex(0)
+      onOpenChatCommands?.()
+      return
+    }
     setDraft(value + (COMMANDS_WITH_ARGUMENT.has(value) ? ' ' : ''))
     // `/banner` and `/sound` go straight on to the names (plans 186, 189).
     setCompletionDismissed(!COMMANDS_WITH_NAMES.has(value))
@@ -1250,7 +1275,7 @@ export function Composer({
             <CommandList>
               {completions.map(({ value, hint }) => (
                 <CommandItem key={value} value={value} onSelect={() => complete(value)}>
-                  {value}
+                  {value === EDIT_CHAT_COMMANDS ? 'Edit chat commands…' : value}
                   {value === '/clip'
                     ? ` · Save the last ${clipSeconds(clipContext)} as a clip`
                     : hint}
