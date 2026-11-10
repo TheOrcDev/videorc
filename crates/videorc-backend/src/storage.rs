@@ -9668,6 +9668,7 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
             .and_then(|json| serde_json::from_str(&json).ok()),
         first_message: row.get::<_, Option<bool>>(20)?.unwrap_or(false),
         first_in_session: false,
+        author_handle: None,
         author_affiliation: row
             .get::<_, Option<String>>(21)?
             .and_then(|json| serde_json::from_str(&json).ok()),
@@ -12579,6 +12580,7 @@ mod tests {
             reply: None,
             first_message: false,
             first_in_session: false,
+            author_handle: None,
             author_affiliation: None,
             author_verified: None,
         }

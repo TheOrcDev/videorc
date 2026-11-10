@@ -644,6 +644,7 @@ fn base_message(
         reply: None,
         first_message: false,
         first_in_session: false,
+        author_handle: None,
         author_affiliation: None,
         author_verified: None,
     }
@@ -679,6 +680,12 @@ fn normalize_chat_message(
         .as_str()
         .unwrap_or("Twitch viewer")
         .to_string();
+    // Plan 226: a localized display name doesn't @-mention; the login does.
+    message.author_handle = event["chatter_user_login"]
+        .as_str()
+        .map(str::trim)
+        .filter(|login| !login.is_empty())
+        .map(ToOwned::to_owned);
     message.author_roles = roles_from_badges(&badges);
     message.author_badges = badges;
     message.message_text = event["message"]["text"]

@@ -5848,6 +5848,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "chatCommands.save"
         | "chatCommands.delete"
         | "chatCommands.setListEnabled"
+        | "chatCommands.post"
         | "preview.live.start"
         | "preview.live.stop"
         | "screen.hide"
@@ -6102,6 +6103,8 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
             Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance)
         }
         "liveChat.send"
+        // Plan 226: the streamer's `!go` posts to every chat, like a send.
+        | "chatCommands.post"
         | "liveChat.moderation.request"
         | "liveChat.moderation.confirm"
         | "liveChat.moderation.cancel" => Some(WebSocketIsolatedCommandLaneKind::DurableChat),
@@ -13697,6 +13700,21 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "chatCommands.post" => {
+            match serde_json::from_value::<chat_commands::ChatCommandPostParams>(command.params) {
+                Ok(params) => match chat_commands::post(state, &params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "chat-command-post-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "screens.list" => match state.database.list_stream_screens() {
             Ok(screens) => ServerResponse::ok(command.id, screens),
             Err(error) => {
@@ -17608,6 +17626,7 @@ mod tests {
 
         for method in [
             "liveChat.send",
+            "chatCommands.post",
             "liveChat.moderation.request",
             "liveChat.moderation.confirm",
             "liveChat.moderation.cancel",
