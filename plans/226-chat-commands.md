@@ -169,14 +169,23 @@ The `!commands` switch is an `app_settings` key,
 
 ### RPCs (`main.rs`, `backend-rpc-contract.ts`, protocol fixtures)
 
-| Method                           | Params → result                                                                                                     |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `chatCommands.list`              | `{}` → `{ commands: ChatCommand[], listEnabled: boolean }` (A–Z)                                                    |
-| `chatCommands.save`              | `{ id?, name, description, reply, enabled }` → `ChatCommand`. Validated in Rust with the TS rules. No `id` creates. |
-| `chatCommands.delete`            | `{ id }` → `{ deleted: boolean }`                                                                                   |
-| `chatCommands.setListEnabled`    | `{ enabled }` → `{ listEnabled }`                                                                                   |
-| event `chatCommands.changed`     | the `list` result, after every change                                                                               |
-| event `chatCommands.replyFailed` | `{ sessionId, destinationId, platform, command, reason }`                                                           |
+Every mutation answers with the whole state, `ChatCommandsState =
+{ commands: ChatCommand[] (A–Z), listEnabled: boolean }`.
+
+| Method                           | Params → result                                                                                                                                               |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chatCommands.list`              | none → `ChatCommandsState`                                                                                                                                    |
+| `chatCommands.save`              | `{ id?, name, description, reply, enabled }` → `ChatCommandsState`. No `id` creates. The backend normalizes the name and refuses with the editor's words.     |
+| `chatCommands.delete`            | `{ id }` → `ChatCommandsState`                                                                                                                                |
+| `chatCommands.setListEnabled`    | `{ enabled }` → `ChatCommandsState`                                                                                                                           |
+| `chatCommands.post`              | `{ sessionId, name }` → `{ sent, failed }`: the streamer's `!go` from the Stream Manager, the reply without a mention to every chat that can take posts (D9). |
+| event `chatCommands.changed`     | `ChatCommandsState`, after every change                                                                                                                       |
+| event `chatCommands.replyFailed` | `{ sessionId, destinationId, platform, command, reason }`                                                                                                     |
+
+The wire shapes are pinned in `protocol-fixtures/high-risk-contracts.json`
+(`chatCommand`). The rules both languages hold (names, limits, mentions, the
+`!commands` text, the X split) are pinned in
+`protocol-fixtures/chat-commands.json`.
 
 `ChatCommand = { id, name, description, reply, enabled, createdAt, updatedAt }`.
 
