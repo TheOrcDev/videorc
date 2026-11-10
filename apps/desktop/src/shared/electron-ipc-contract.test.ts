@@ -83,8 +83,10 @@ describe('Electron IPC contract', () => {
     // Settings, removal and setup).
     // 160: plan 215 A3 adds comments-window:sign-in-videorc ("Sign in to
     // Videorc" on a chat row; the main window starts the sign-in).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(160)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(160)
+    // 167: plan 226 S4 adds the Stream Manager's chat commands (get, push),
+    // its `!go` relay pair, the failed replies (get, push) and ⋯ Chat commands….
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(167)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(167)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -1558,6 +1560,182 @@ describe('Stream Manager soundboard IPC (plan 189 S9)', () => {
       answer({ requestId: 'r-press', ok: false, error: "That sound isn't available anymore." })
     ).toBe(true)
     await expect(refused).rejects.toThrow("That sound isn't available anymore.")
+    expect(broker.pendingCount).toBe(0)
+  })
+})
+
+describe('Stream Manager chat commands IPC (plan 226 S4)', () => {
+  const summary = {
+    commands: [
+      { name: 'faq', description: 'most asked question' },
+      { name: 'go', description: "why I'm learning Go" }
+    ],
+    listEnabled: true
+  }
+  const failure = {
+    sessionId: 'live-1',
+    destinationId: 'youtube-main',
+    platform: 'youtube',
+    command: 'go',
+    reason: 'reconnect YouTube to allow chat posts.'
+  }
+
+  it('pushes the enabled commands from Studio, names and descriptions only, never a reply', () => {
+    expect(electronInvokeApiMethods['comments-window:chat-commands-get']).toBe(
+      'getCommentsChatCommands'
+    )
+    expect(validateElectronInvokeArgs('comments-window:chat-commands-push', [summary])).toEqual([
+      summary
+    ])
+    expect(validateElectronInvokeArgs('comments-window:chat-commands-push', [null])).toEqual([null])
+    expect(validateElectronInvokeResult('comments-window:chat-commands-get', summary)).toEqual(
+      summary
+    )
+    expect(validateElectronEventPayload('comments-window:chat-commands', summary)).toEqual(summary)
+    for (const forged of [
+      { ...summary, commands: [{ ...summary.commands[0], reply: 'Read the pinned post.' }] },
+      { ...summary, commands: [{ ...summary.commands[0], id: 'id-faq' }] },
+      { ...summary, commands: [{ ...summary.commands[0], name: 'FAQ' }] },
+      { ...summary, commands: [{ ...summary.commands[0], name: '!faq' }] },
+      { ...summary, commands: [{ ...summary.commands[0], name: 'x'.repeat(25) }] },
+      { ...summary, commands: [{ ...summary.commands[0], description: '' }] },
+      { commands: summary.commands },
+      summary.commands
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:chat-commands-push', [forged])
+      ).toThrow()
+      expect(() => validateElectronEventPayload('comments-window:chat-commands', forged)).toThrow()
+      expect(() =>
+        validateElectronInvokeResult('comments-window:chat-commands-get', forged)
+      ).toThrow()
+    }
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:chat-commands-push', [
+        { ...summary, commands: Array.from({ length: 101 }, () => summary.commands[0]) }
+      ])
+    ).toThrow()
+  })
+
+  it('relays one `!name` for a live session, and answers the counts or the sentence why not', () => {
+    const command = { requestId: 'r1', sessionId: 'live-1', name: 'go' }
+    expect(validateElectronInvokeArgs('comments-window:chat-command', [command])).toEqual([command])
+    expect(validateElectronEventPayload('comments-window:chat-command-request', command)).toEqual(
+      command
+    )
+    for (const forged of [
+      { ...command, name: 'GO' },
+      { ...command, name: '!go' },
+      { ...command, name: '' },
+      { ...command, sessionId: '' },
+      { ...command, requestId: '' },
+      { ...command, reply: 'Because.' },
+      { requestId: 'r1', name: 'go' }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:chat-command', [forged])).toThrow()
+    }
+    const counts = { sent: 2, failed: 1 }
+    expect(validateElectronInvokeResult('comments-window:chat-command', counts)).toEqual(counts)
+    expect(() =>
+      validateElectronInvokeResult('comments-window:chat-command', { sent: -1, failed: 0 })
+    ).toThrow()
+    const refused = { requestId: 'r1', ok: false, error: "Couldn't post the !go reply." }
+    for (const resolution of [{ requestId: 'r1', ok: true, value: counts }, refused]) {
+      expect(
+        validateElectronInvokeArgs('comments-window:chat-command-result-push', [resolution])
+      ).toEqual([resolution])
+    }
+    for (const resolution of [
+      { requestId: 'r1', ok: true },
+      { requestId: 'r1', ok: true, value: true },
+      { requestId: 'r1', ok: false, error: '' },
+      { requestId: 'r1', ok: true, value: counts, error: 'x' }
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:chat-command-result-push', [resolution])
+      ).toThrow()
+    }
+  })
+
+  it('carries a bounded list of failed replies with a known platform', () => {
+    expect(
+      validateElectronInvokeArgs('comments-window:chat-command-failures-push', [[failure]])
+    ).toEqual([[failure]])
+    expect(validateElectronInvokeResult('comments-window:chat-command-failures-get', [])).toEqual(
+      []
+    )
+    expect(
+      validateElectronEventPayload('comments-window:chat-command-failures', [failure])
+    ).toEqual([failure])
+    for (const forged of [
+      [{ ...failure, platform: 'myspace' }],
+      [{ ...failure, command: '!go' }],
+      [{ ...failure, reason: '' }],
+      [{ ...failure, viewer: 'coder_x' }],
+      Array.from({ length: 21 }, () => failure),
+      failure,
+      null
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:chat-command-failures-push', [forged])
+      ).toThrow()
+      expect(() =>
+        validateElectronEventPayload('comments-window:chat-command-failures', forged)
+      ).toThrow()
+    }
+  })
+
+  it('opens the section with nothing but a request id, and tells the main window with nothing', () => {
+    expect(
+      validateElectronInvokeArgs('comments-window:open-chat-commands', [{ requestId: 'open-1' }])
+    ).toEqual([{ requestId: 'open-1' }])
+    for (const forged of [{ requestId: '' }, { requestId: 'r', tab: 'setup' }, 'open', null]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:open-chat-commands', [forged])
+      ).toThrow()
+    }
+    expect(validateElectronInvokeResult('comments-window:open-chat-commands', true)).toBe(true)
+    expect(validateElectronEventPayload('livestream:open-chat-commands', undefined)).toBeUndefined()
+    expect(() =>
+      validateElectronEventPayload('livestream:open-chat-commands', { section: 'x' })
+    ).toThrow()
+  })
+
+  it('lets the Stream Manager read and ask, and only Studio push and answer', () => {
+    for (const channel of [
+      'comments-window:chat-commands-get',
+      'comments-window:chat-command',
+      'comments-window:chat-command-failures-get',
+      'comments-window:open-chat-commands'
+    ] as const) {
+      expect(roleCanInvokeChannel('comments', channel)).toBe(true)
+      expect(roleCanInvokeChannel('main', channel)).toBe(true)
+      for (const role of ['notes', 'captions'] as const) {
+        expect(roleCanInvokeChannel(role, channel)).toBe(false)
+      }
+    }
+    for (const channel of [
+      'comments-window:chat-commands-push',
+      'comments-window:chat-command-result-push',
+      'comments-window:chat-command-failures-push'
+    ] as const) {
+      expect(roleCanInvokeChannel('comments', channel)).toBe(false)
+      expect(roleCanInvokeChannel('main', channel)).toBe(true)
+    }
+  })
+
+  it('relays a `!go` through the broker and returns the counts or the refusal', async () => {
+    const broker = new CommentsCommandBroker(1_000)
+    const posted = broker.request<{ sent: number; failed: number }>('r-go', () => true)
+    expect(broker.resolve({ requestId: 'r-go', ok: true, value: { sent: 3, failed: 0 } })).toBe(
+      true
+    )
+    await expect(posted).resolves.toEqual({ sent: 3, failed: 0 })
+    const refused = broker.request('r-no', () => true)
+    expect(
+      broker.resolve({ requestId: 'r-no', ok: false, error: "Couldn't post the !go reply." })
+    ).toBe(true)
+    await expect(refused).rejects.toThrow("Couldn't post the !go reply.")
     expect(broker.pendingCount).toBe(0)
   })
 })

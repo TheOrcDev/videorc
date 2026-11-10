@@ -18,6 +18,7 @@ use crate::banners::{
     BannerUpdate, NewBanner, REFUSAL_FOUR_SHOWING, REFUSAL_TOO_MANY, banner_image_file_name,
     banner_thumbnail_file_name,
 };
+use crate::chat_commands::{ChatCommand, ChatCommandDraft, ChatCommandsState};
 use crate::diagnostics::permission_pane_for_log;
 use crate::live_chat::{
     CommentsSendOperation, CommentsSendOperationPhase, LiveChatAuthorVerified,
@@ -7684,6 +7685,139 @@ impl Database {
         })
     }
 
+    // --- Chat commands (plan 226) -------------------------------------------
+
+    /// `chatCommands.list` and `chatCommands.changed`: every command A–Z by
+    /// name and the `!commands` switch (default on), in one read.
+    pub(crate) fn chat_commands_state(&self) -> Result<ChatCommandsState> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {CHAT_COMMAND_COLUMNS} FROM chat_commands ORDER BY name ASC"
+        ))?;
+        let commands = stmt
+            .query_map([], chat_command_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        let list_enabled = conn
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                params![crate::chat_commands::LIST_ENABLED_SETTING_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value_json| serde_json::from_str::<bool>(&value_json).ok())
+            .unwrap_or(true);
+        Ok(ChatCommandsState {
+            commands,
+            list_enabled,
+        })
+    }
+
+    /// Creates (`id` absent) or replaces one validated command. An unknown
+    /// id, a name another command holds and the count cap are checked inside
+    /// the transaction, so two saves can never break them; a refusal rolls
+    /// back with the editor's words.
+    pub(crate) fn save_chat_command(
+        &self,
+        id: Option<&str>,
+        draft: &ChatCommandDraft,
+    ) -> Result<ChatCommand> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let existing = match id {
+            Some(id) => Some(
+                transaction
+                    .query_row(
+                        &format!("SELECT {CHAT_COMMAND_COLUMNS} FROM chat_commands WHERE id = ?1"),
+                        params![id],
+                        chat_command_from_row,
+                    )
+                    .optional()?
+                    .context(crate::chat_commands::REFUSAL_GONE)?,
+            ),
+            None => None,
+        };
+        let holder: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM chat_commands WHERE name = ?1",
+                params![draft.name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if holder.is_some_and(|holder| Some(holder.as_str()) != id) {
+            bail!(crate::chat_commands::duplicate_name_error(&draft.name));
+        }
+        let command = match existing {
+            Some(existing) => {
+                let command = ChatCommand {
+                    name: draft.name.clone(),
+                    description: draft.description.clone(),
+                    reply: draft.reply.clone(),
+                    enabled: draft.enabled,
+                    updated_at: now,
+                    ..existing
+                };
+                transaction.execute(
+                    "UPDATE chat_commands SET name = ?2, description = ?3, reply = ?4,
+                        enabled = ?5, updated_at = ?6
+                     WHERE id = ?1",
+                    params![
+                        command.id,
+                        command.name,
+                        command.description,
+                        command.reply,
+                        command.enabled,
+                        command.updated_at,
+                    ],
+                )?;
+                command
+            }
+            None => {
+                let count: i64 =
+                    transaction
+                        .query_row("SELECT COUNT(*) FROM chat_commands", [], |row| row.get(0))?;
+                if usize::try_from(count).unwrap_or(usize::MAX) >= crate::chat_commands::MAX_COUNT {
+                    bail!(crate::chat_commands::REFUSAL_TOO_MANY);
+                }
+                let command = ChatCommand {
+                    id: Uuid::new_v4().to_string(),
+                    name: draft.name.clone(),
+                    description: draft.description.clone(),
+                    reply: draft.reply.clone(),
+                    enabled: draft.enabled,
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                transaction.execute(
+                    "INSERT INTO chat_commands (
+                        id, name, description, reply, enabled, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        command.id,
+                        command.name,
+                        command.description,
+                        command.reply,
+                        command.enabled,
+                        command.created_at,
+                        command.updated_at,
+                    ],
+                )?;
+                command
+            }
+        };
+        transaction.commit()?;
+        Ok(command)
+    }
+
+    pub(crate) fn delete_chat_command(&self, id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute("DELETE FROM chat_commands WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            bail!(crate::chat_commands::REFUSAL_GONE);
+        }
+        Ok(())
+    }
+
     pub(crate) fn active_stream_screen_selection(&self) -> Result<ActiveStreamScreenSelection> {
         let conn = self.lock()?;
         let Some(screen_id) = self.active_screen_id_locked(&conn)? else {
@@ -8226,6 +8360,16 @@ impl Database {
             );
             INSERT OR IGNORE INTO sound_settings (id, volume_db, monitor, starters_seeded)
                 VALUES (1, 0, 1, 0);
+
+            CREATE TABLE IF NOT EXISTS chat_commands (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL,
+                reply TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS platform_accounts (
                 id TEXT PRIMARY KEY,
@@ -8912,6 +9056,21 @@ const BANNER_COLUMNS: &str = "id, name, image_file, thumbnail_file, width, heigh
 const SOUND_COLUMNS: &str = "id, name, file, duration_ms, loudness_lufs, level_db, volume_db, \
      mode, hotkey, starter, sort_order, created_at, updated_at";
 
+/// The `chat_commands` columns in `chat_command_from_row` order (plan 226).
+const CHAT_COMMAND_COLUMNS: &str = "id, name, description, reply, enabled, created_at, updated_at";
+
+fn chat_command_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatCommand> {
+    Ok(ChatCommand {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        reply: row.get(3)?,
+        enabled: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
 /// The wire string of a mode (`oneShot`), the form the `mode` column holds.
 fn sound_mode_to_db(mode: SoundMode) -> String {
     serde_json::to_value(mode)
@@ -9509,6 +9668,7 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
             .and_then(|json| serde_json::from_str(&json).ok()),
         first_message: row.get::<_, Option<bool>>(20)?.unwrap_or(false),
         first_in_session: false,
+        author_handle: None,
         author_affiliation: row
             .get::<_, Option<String>>(21)?
             .and_then(|json| serde_json::from_str(&json).ok()),
@@ -12420,6 +12580,7 @@ mod tests {
             reply: None,
             first_message: false,
             first_in_session: false,
+            author_handle: None,
             author_affiliation: None,
             author_verified: None,
         }

@@ -8777,6 +8777,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Plan 189: the soundboard reads its board on this connection,
         // outside the batch: nothing on startup waits for it.
         soundboard.connect(nextClient)
+        // Plan 226: chat commands follow this connection from their own chunk.
+        void import('@/lib/chat-commands-host').then(
+          ({ attachChatCommands }) => generationIsCurrent() && attachChatCommands(nextClient),
+          () => undefined
+        )
         // Seed the Stream Manager's GIF mode relay outside the bootstrap
         // batch: nothing on startup waits for it, and a failure costs only
         // the default (Animated) until the next liveChat.emotes event.

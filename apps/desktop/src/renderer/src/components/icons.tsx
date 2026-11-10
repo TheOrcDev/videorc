@@ -282,6 +282,8 @@ export {
   TerminalWindow as TerminalIcon,
   TextAa as TextIcon,
   ChatCircle as ChatIcon,
+  // Plan 226: the !commands viewers type, never the composer's / commands.
+  ChatCircleText as ChatCommandsIcon,
   PaperPlaneRight as SendIcon,
   PushPin as PinIcon,
   Sun as LightModeIcon,

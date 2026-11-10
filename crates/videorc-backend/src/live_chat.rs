@@ -443,6 +443,12 @@ pub struct LiveChatMessage {
     /// returning chatter.
     #[serde(skip)]
     pub first_in_session: bool,
+    /// The @-mentionable login where the platform has one apart from the
+    /// display name: Twitch `chatter_user_login`, X `username` (plan 226's
+    /// command replies). Local only, like `first_in_session`: never on the
+    /// wire or in SQLite, so only a delivery straight from a connector has it.
+    #[serde(skip)]
+    pub author_handle: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1191,6 +1197,10 @@ pub struct ProviderSendReceipt {
 
 pub struct LiveChatCoordinator {
     session_id: Option<String>,
+    /// When `start_session` began this session. Chat published before it is
+    /// history (YouTube hands recent chat over on connect), which plan 226's
+    /// command replies never answer.
+    session_started_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Monotonic lifecycle ticket. Provider deliveries capture it before
     /// persistence and must still own it before emitting into the renderer.
     generation: u64,
@@ -1303,6 +1313,7 @@ impl LiveChatCoordinator {
     pub fn new(max_messages: usize) -> Self {
         Self {
             session_id: None,
+            session_started_at: None,
             generation: 0,
             session_generation: 0,
             providers: Vec::new(),
@@ -1498,6 +1509,7 @@ impl LiveChatCoordinator {
         self.generation = self.generation.wrapping_add(1);
         self.session_generation = self.session_generation.wrapping_add(1);
         self.session_id = Some(session_id);
+        self.session_started_at = Some(chrono::Utc::now());
         self.providers = providers;
         self.messages.clear();
         self.seen.clear();
@@ -1525,6 +1537,7 @@ impl LiveChatCoordinator {
             }
         }
         self.session_id = None;
+        self.session_started_at = None;
         self.senders.clear();
         self.reattach.clear();
         self.fake_echo.clear();
@@ -3024,6 +3037,8 @@ async fn execute_send_live_chat_message(
     // Plan 068 D9: the echo of this text in chat is the streamer, never a
     // viewer to greet.
     crate::cohost::note_own_send_started(state, &operation.session_id, &operation.text).await;
+    // Plan 226 D10: no echo of a Videorc post ever fires a chat command.
+    crate::chat_commands::note_own_send(state, &operation.session_id, &operation.text);
 
     let client = reqwest::Client::new();
     let pending = operation
@@ -3679,7 +3694,14 @@ pub(crate) async fn try_deliver_messages(
     let messages = decorate_seventv_emotes(state, messages).await;
     let coordinator_inputs = messages.clone();
     let _delivery = state.live_chat_persistence.begin_delivery().await;
-    let (delivery_generation, delivery_session_id, undos, authoritative_messages) = {
+    let (
+        delivery_generation,
+        delivery_session_id,
+        session_started_at,
+        undos,
+        authoritative_messages,
+        new_message_ids,
+    ) = {
         // Coordinator ingest can turn an eligible message into a tombstone.
         // Publish that authority under the same short fence used by the final
         // highlight install; persistence remains outside the fence below.
@@ -3704,8 +3726,12 @@ pub(crate) async fn try_deliver_messages(
             ));
         }
         let delivery_generation = coordinator.generation;
+        let session_started_at = coordinator.session_started_at;
         let mut undos = Vec::with_capacity(messages.len());
         let mut authoritative_messages = Vec::with_capacity(messages.len());
+        // Plan 226: only chat seen for the first time may fire a command,
+        // never a tombstone update; the persisted rows below lose the outcome.
+        let mut new_message_ids = HashSet::new();
         for message in messages {
             // Ordinary retained duplicates never reach SQLite. Validate their
             // immutable owner before that fast path can hide a conflicting ID.
@@ -3728,7 +3754,11 @@ pub(crate) async fn try_deliver_messages(
             }
             let ingested = coordinator.ingest_reversible(message);
             match ingested.outcome {
-                IngestOutcome::New(message) | IngestOutcome::Updated(message) => {
+                IngestOutcome::New(message) => {
+                    new_message_ids.insert(message.id.clone());
+                    authoritative_messages.push(message);
+                }
+                IngestOutcome::Updated(message) => {
                     authoritative_messages.push(message);
                 }
                 IngestOutcome::Duplicate => {}
@@ -3738,8 +3768,10 @@ pub(crate) async fn try_deliver_messages(
         (
             delivery_generation,
             delivery_session_id,
+            session_started_at,
             undos,
             authoritative_messages,
+            new_message_ids,
         )
     };
     if authoritative_messages.is_empty() {
@@ -3848,6 +3880,16 @@ pub(crate) async fn try_deliver_messages(
     drop(_highlight_commit);
     crate::cohost::note_messages_under_lifecycle_fence(state, &_delivery, &authoritative_messages)
         .await;
+    drop(_delivery);
+    // Plan 226: chat commands match in memory with no lock held and spawn
+    // each reply, so delivery never waits on a send.
+    crate::chat_commands::note_delivered_messages(
+        state,
+        &delivery_session_id,
+        session_started_at,
+        &authoritative_messages,
+        &new_message_ids,
+    );
     Ok(())
 }
 
@@ -4459,6 +4501,7 @@ pub(crate) fn fake_message(
         reply: None,
         first_message: false,
         first_in_session: false,
+        author_handle: None,
         author_affiliation: None,
         // Fake X chat shows each of X's checks and an unverified viewer, so
         // the dev Stream Manager and the smokes see all of them (plan 167).
@@ -7868,6 +7911,7 @@ mod tests {
             reply: None,
             first_message: false,
             first_in_session: false,
+            author_handle: None,
             author_affiliation: None,
             author_verified: None,
         };

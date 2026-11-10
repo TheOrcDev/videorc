@@ -184,6 +184,16 @@ export const IPC_INVOKE_ROLES = {
   // refuses any other sender); Studio replies with Buddy's answer.
   'comments-window:buddy-act': MAIN_AND_COMMENTS,
   'comments-window:buddy-act-result-push': MAIN_ONLY,
+  // Chat commands (plan 226 S4): the Stream Manager reads the commands and
+  // the failed replies Studio pushes, and asks for a `!go` post or the
+  // section (each handler refuses any other sender); Studio replies.
+  'comments-window:chat-commands-get': MAIN_AND_COMMENTS,
+  'comments-window:chat-commands-push': MAIN_ONLY,
+  'comments-window:chat-command': MAIN_AND_COMMENTS,
+  'comments-window:chat-command-result-push': MAIN_ONLY,
+  'comments-window:chat-command-failures-get': MAIN_AND_COMMENTS,
+  'comments-window:chat-command-failures-push': MAIN_ONLY,
+  'comments-window:open-chat-commands': MAIN_AND_COMMENTS,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
   'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
   // The Buddy pane's behaviour chips open Buddy → Chat (plan 174 S3.14a):
