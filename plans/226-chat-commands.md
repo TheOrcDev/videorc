@@ -365,4 +365,55 @@ S3 can run in parallel. S4 needs S1 and the S2 event.
 
 ## S0 findings
 
-_To be filled in by S0._
+Checked against `b62ff1063` + `592ae4f6d` on 2026-11-10.
+
+1. **The name a mention needs.**
+   - **Twitch:** `author_name` is `chatter_user_name`, the display name
+     (`twitch_chat.rs` `normalize_chat_message`). For an ASCII name it is
+     the login with capitals and @-mentions fine; a localized display name
+     (CJK) does not. `chatter_user_login` comes in every
+     `channel.chat.message` (fixtures `twitch-chat-gif.json`,
+     `twitch-chat-message-intro.json`) but is dropped. **S2:** an internal
+     `author_handle` on `LiveChatMessage`, `#[serde(skip)]` like
+     `first_in_session` (never on the wire or in SQLite, so no contract
+     change), set from `chatter_user_login`. The mention uses the display
+     name when it equals the login ignoring case, else the login.
+   - **YouTube:** `authorDetails.displayName`, as is. The repo fixtures
+     carry plain names (`Tipper`); a channel with a handle gets `@handle`.
+     The prefix drops one leading `@`, so it never doubles (fixture case
+     `@YouTubeHandle`).
+   - **Kick:** `sender.username` (`kick_chat.rs`), the account's username.
+     It mentions as is.
+   - **X:** `author_name` is `author.name`, the display name ("Viewer
+     Name"); `author.username` is kept only on Follow rows. **S2:** the same
+     `author_handle`, from `author.username`; the mention uses it.
+   - **Owner:** `author_roles` holds `owner` (YouTube) or `broadcaster`
+     (Twitch, Kick and the fake echo rows). Both mean the streamer, the way
+     `cohost::normalize_role` reads them: no mention.
+2. **X posts work in production when X Live is authorized.**
+   `chat_capability` gives X `write: Ready` only with the OAuth 1.0a X Live
+   credentials (`ChatSenderConfig::X` posts to `/2/broadcasts/:id/chat`),
+   else `ReadOnly`, which the engine skips quietly. `send_to_destination`
+   refuses more than 140 characters, so the split is needed. Fake X chat is
+   always `ReadOnly`, so the S5 smoke can't drive X; the split is unit
+   tested only.
+3. **Cohost's own-send record can't be asked.** `note_own_send_started`
+   reaches `cohost_ack`'s ledger (collapsed text, 120 s, 20 entries) only
+   inside a running Buddy session (`session_for_mut`), skips texts under 6
+   characters (`!go` is 3), and `is_own_echo` is private. With Buddy off
+   nothing is recorded. **S2:** the engine keeps its own short ledger:
+   `execute_send_live_chat_message` notes every send's text (the
+   streamer's, Buddy's, an agent's and the replies) for the chat session,
+   whitespace collapsed, 120 s, 32 entries. A command message whose text
+   matches is an echo.
+4. **YouTube's history lands as new chat.** The connector's first
+   `liveChatMessages.list` (no page token, and again after an invalid page
+   token) returns recent chat with its original `snippet.publishedAt`, and
+   delivers it through `try_deliver_messages` like any other page, as
+   `IngestOutcome::New`. **S2:** the coordinator records
+   `session_started_at` in `start_session`; the gate drops anything
+   published before it or more than 60 s ago, and the per-session answered
+   ids cover a re-fetch.
+5. **New against Updated:** `try_deliver_messages` rebuilds its list from
+   the persisted rows, which loses the ingest outcome. **S2:** collect the
+   ids of `IngestOutcome::New` in the ingest block and pass them on.
