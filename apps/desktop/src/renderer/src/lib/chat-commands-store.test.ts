@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type {
-  ChatCommand,
-  ChatCommandReplyFailed,
-  ChatCommandsState
-} from '../../../shared/chat-commands'
 import {
   CHAT_COMMAND_FAILURES_MAX,
+  type ChatCommand,
+  type ChatCommandReplyFailed,
+  type ChatCommandsState
+} from '../../../shared/chat-commands'
+import {
   createChatCommandsStore,
   nextChatCommandFailures,
   type ChatCommandsClient

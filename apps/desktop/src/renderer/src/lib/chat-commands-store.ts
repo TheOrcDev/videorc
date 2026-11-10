@@ -5,13 +5,14 @@
 // the host on connect.
 
 import type { BackendClient } from '@/backendClient'
-import type { ChatCommandReplyFailed, ChatCommandsState } from '../../../shared/chat-commands'
+import {
+  CHAT_COMMAND_FAILURES_MAX,
+  type ChatCommandReplyFailed,
+  type ChatCommandsState
+} from '../../../shared/chat-commands'
 
 /** The part of the backend client chat commands use. */
 export type ChatCommandsClient = Pick<BackendClient, 'requestTyped' | 'on'>
-
-/** The most failures one live chat session keeps (one per chat and reason). */
-export const CHAT_COMMAND_FAILURES_MAX = 20
 
 /** The section's element id, so the Stream Manager's door can scroll to it. */
 export const CHAT_COMMANDS_SECTION_ID = 'chat-commands'

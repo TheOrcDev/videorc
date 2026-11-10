@@ -43,6 +43,32 @@ describe('preload API policy', () => {
     }
   })
 
+  it('gives the Stream Manager the chat commands to read and a `!go` to ask, never a push or an answer', () => {
+    const comments = apiForRendererRole(fakeApi, 'comments')
+    for (const key of [
+      'getCommentsChatCommands',
+      'onCommentsChatCommands',
+      'chatCommandFromCommentsWindow',
+      'getChatCommandFailures',
+      'onChatCommandFailures',
+      'openChatCommandsFromCommentsWindow'
+    ]) {
+      expect(comments).toHaveProperty(key)
+    }
+    for (const key of [
+      'pushCommentsChatCommands',
+      'onChatCommandRequest',
+      'pushChatCommandResult',
+      'pushChatCommandFailures',
+      'onOpenChatCommands'
+    ]) {
+      expect(comments).not.toHaveProperty(key)
+    }
+    for (const role of ['notes', 'captions'] as const) {
+      expect(apiForRendererRole(fakeApi, role)).not.toHaveProperty('chatCommandFromCommentsWindow')
+    }
+  })
+
   it('gives the Stream Manager the banner list to read and a show or hide to ask, never a push', () => {
     const comments = apiForRendererRole(fakeApi, 'comments')
     expect(comments).toHaveProperty('getCommentsBanners')

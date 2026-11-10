@@ -336,6 +336,17 @@ describe('Chat commands section (plan 226 S3)', () => {
     )
   })
 
+  it('scrolls itself into view once when the Stream Manager asks for it (plan 226 S4)', async () => {
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {})
+    const { store } = await render([command('go')])
+    expect(scrolled).not.toHaveBeenCalled()
+    await act(async () => store.requestReveal())
+    expect(scrolled).toHaveBeenCalledOnce()
+    expect(document.activeElement).toBe(section())
+    expect(store.getSnapshot().revealPending).toBe(false)
+    scrolled.mockRestore()
+  })
+
   it('says why Add command… is off', () => {
     expect(chatCommandAddBlockedReason({ offline: false, loaded: true, count: 3 })).toBeNull()
     expect(chatCommandAddBlockedReason({ offline: true, loaded: true, count: 3 })).toBe(

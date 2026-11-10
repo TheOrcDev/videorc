@@ -310,6 +310,7 @@ export function StreamManagerStatusBar({
   onBanner,
   sounds = null,
   onSound,
+  onOpenChatCommands,
   onOpenPreview,
   onSearchChat,
   onFocusComposer,
@@ -349,6 +350,9 @@ export function StreamManagerStatusBar({
    * recordings too). `sounds` is null until Studio has read the board. */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => unknown
+  /** Plan 226 S4: ⋯ Chat commands… opens Livestream → Setup → Chat
+   * commands in the main window. */
+  onOpenChatCommands?: () => void
   onOpenPreview?: () => void
   /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each
    * is still clickable; below 1,040 px only the key shows, below 640 px they
@@ -785,6 +789,9 @@ export function StreamManagerStatusBar({
                     >
                       Sounds…
                     </DropdownMenuItem>
+                  ) : null}
+                  {onOpenChatCommands ? (
+                    <DropdownMenuItem onClick={onOpenChatCommands}>Chat commands…</DropdownMenuItem>
                   ) : null}
                   {onOpenPreview ? (
                     <DropdownMenuItem onClick={onOpenPreview}>

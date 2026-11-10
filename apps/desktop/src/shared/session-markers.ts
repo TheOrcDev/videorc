@@ -21,6 +21,7 @@ import {
 } from './banner-commands'
 import { classifySoundCommand, type SoundRelayAction, type SoundSummary } from './sound-commands'
 import { classifyBuddyCommand } from './buddy-act'
+import { classifyChatCommandDraft, type ChatCommandsSummary } from './chat-commands'
 
 export interface SessionMarker {
   id: string
@@ -280,20 +281,26 @@ export type ComposerCommand =
   | { kind: 'sound'; action: SoundRelayAction }
   /** Plan 209 S20: ask Buddy to do something; never posts to chat. */
   | { kind: 'buddy'; sentence: string }
+  /** Plan 226 D9: post a chat command's reply to every chat, without a mention. */
+  | { kind: 'chatCommand'; name: string }
   | { kind: 'privacy'; hidden: boolean }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 /**
  * Leading slash commands never reach a provider. Double slash escapes once.
  * `banners` and `sounds` are what the window knows (plans 186, 189):
- * `/banner <name>` and `/sound <name>` resolve against them.
+ * `/banner <name>` and `/sound <name>` resolve against them. `chatCommands`
+ * (plan 226) makes exactly `!name` post that command's reply, and `!!name`
+ * the literal `!name`; any other `!` text is ordinary chat.
  */
 export function classifyComposerDraft(
   raw: string,
   banners: readonly BannerSummary[] = [],
-  sounds: readonly SoundSummary[] = []
+  sounds: readonly SoundSummary[] = [],
+  chatCommands: ChatCommandsSummary | null = null
 ): ComposerCommand {
   const text = raw.trim()
+  if (text.startsWith('!')) return classifyChatCommandDraft(text, chatCommands)
   if (!text.startsWith('/')) return { kind: 'chat', text }
   if (text.startsWith('//')) return { kind: 'chat', text: text.slice(1) }
   if (/^\/hide\s*$/i.test(text)) return { kind: 'privacy', hidden: true }
