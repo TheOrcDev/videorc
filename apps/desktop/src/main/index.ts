@@ -649,6 +649,7 @@ import {
   previewDockedInsideMainWindow,
   proofSurfaceHostedInWindowOn,
   proofSurfaceParentWindow,
+  proofSurfaceReshowBounds,
   withTrustedPreviewWindowStacking,
   type NativePreviewRealSurfaceDriverKind
 } from './native-preview-window-stacking'
@@ -7636,7 +7637,10 @@ async function showNativePreviewProofSurfaceIfVisible(): Promise<void> {
   ) {
     return
   }
-  const bounds = nativePreviewSurfaceStatus.bounds
+  const bounds = proofSurfaceReshowBounds(
+    nativePreviewSurfaceStatus.bounds,
+    previewWindowSurfaceBounds()
+  )
   if (!bounds) {
     return
   }
@@ -7948,7 +7952,16 @@ async function applyNativePreviewSurfaceScene(
     protectNativePreviewSceneRevision(params.revision)
   }
   nativePreviewSurfaceScene = buildPreviewSurfaceScene(params)
-  await reconcileNativePreviewSurfaceForPreviewWindow()
+  try {
+    await reconcileNativePreviewSurfaceForPreviewWindow()
+  } catch (error) {
+    // A refused bounds push (the backend is busy with this very switch) must
+    // not drop the scene update or its re-show (#1272): the proof window has
+    // already followed the popup, and the placement queue retries the
+    // backend half until it lands.
+    safeConsole.warn('Preview scene placement was refused; retrying it:', error)
+    pushPreviewWindowPlacement()
+  }
   if (!nativePreviewPresentationAllowedForGeneration(generation)) {
     return nativePreviewSurfaceStatus
   }

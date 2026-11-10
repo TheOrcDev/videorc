@@ -5,6 +5,7 @@ import {
   previewDockedInsideMainWindow,
   proofSurfaceHostedInWindowOn,
   proofSurfaceParentWindow,
+  proofSurfaceReshowBounds,
   withTrustedPreviewWindowStacking
 } from './native-preview-window-stacking'
 
@@ -24,6 +25,34 @@ const bounds = (
 const windowWithHandle = (handle: Buffer) => ({
   isDestroyed: () => false,
   getNativeWindowHandle: vi.fn(() => handle)
+})
+
+// #1272: a scene update re-shows the proof surface. The saved bounds can be a
+// placement the backend refused while the popup moved on.
+describe('proof surface re-show bounds', () => {
+  it('follows the Preview window to its live rect', () => {
+    const saved = bounds({ screenX: 10, screenY: 20 })
+    const live = bounds({ screenX: 410, screenY: 220, width: 720, height: 405 })
+    expect(proofSurfaceReshowBounds(saved, live)).toMatchObject({
+      screenX: 410,
+      screenY: 220,
+      width: 720,
+      height: 405,
+      visible: true
+    })
+  })
+
+  it('keeps a surface hidden on purpose hidden', () => {
+    const live = bounds({ screenX: 410 })
+    expect(proofSurfaceReshowBounds(bounds({ visible: false }), live)?.visible).toBe(false)
+    expect(proofSurfaceReshowBounds(bounds(), bounds({ visible: false }))?.visible).toBe(false)
+  })
+
+  it('falls back to whichever rect exists', () => {
+    expect(proofSurfaceReshowBounds(bounds({ screenX: 5 }), null)?.screenX).toBe(5)
+    expect(proofSurfaceReshowBounds(undefined, bounds({ screenX: 7 }))?.screenX).toBe(7)
+    expect(proofSurfaceReshowBounds(null, null)).toBeNull()
+  })
 })
 
 describe('trusted preview-window stacking', () => {

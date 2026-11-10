@@ -123,6 +123,26 @@ export function withTrustedPreviewWindowStacking<T>(
 }
 
 /**
+ * Where the proof surface goes when it is shown again after a scene update
+ * (#1272): the Preview window's live rect, since the last saved bounds can
+ * be a placement the backend refused while the popup kept moving. The saved
+ * visibility still counts, so a surface hidden on purpose (app focus policy,
+ * hidden window) is not shown by a scene update.
+ */
+export function proofSurfaceReshowBounds(
+  saved: PreviewSurfaceBounds | null | undefined,
+  live: PreviewSurfaceBounds | null | undefined
+): PreviewSurfaceBounds | null {
+  if (!live) {
+    return saved ?? null
+  }
+  if (!saved) {
+    return live
+  }
+  return { ...live, visible: (saved.visible ?? true) && (live.visible ?? true) }
+}
+
+/**
  * The window the Electron proof surface hangs off: the one the Preview is seen
  * in. An in-window dock (plan 213 D3) keeps the preview window hidden, and on
  * macOS showing a child window orders its hidden parent on screen too, so the
