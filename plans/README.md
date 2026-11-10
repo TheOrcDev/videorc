@@ -1,5 +1,15 @@
 # Implementation Plans
 
+- 2026-11-10: [Plan 226](226-chat-commands.md), a streamer's request:
+  viewers type `!go` and Videorc answers as the streamer, `@viewer <reply>`,
+  in the chat they asked in; `!commands` lists every command. PLANNED, not
+  started:
+  - Owner calls: replies post on their own (only the streamer's text, never
+    AI), one message up to 170 characters (X in 2 parts), edited on Setup →
+    Livestream with a Stream Manager shortcut and `!` completions, free.
+  - Guards: first-word match, a 30 s cooldown per command and chat (YouTube
+    60 s), YouTube replies stop at 80 % of the daily budget, no history or
+    echo replies.
 - 2026-11-05: [Plan 218](218-the-stream-holds-its-frame-rate.md), a
   streamer's support bundle (0.18.0): "laggy on YouTube, streaming 1080,
   saving 1440". PLANNED, not started:
