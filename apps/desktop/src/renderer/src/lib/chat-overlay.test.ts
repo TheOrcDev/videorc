@@ -207,6 +207,25 @@ describe('chat on stream: the layout', () => {
     expect(tiny.rows.map((row) => row.id)).toEqual(['5'])
   })
 
+  it('cuts a pasted link to the box width instead of squeezing it', () => {
+    const link = 'https://ramx.in/blog/how-to-be-me-learn-build-and-crush-it'
+    const layout = layoutChatOverlay({
+      rows: [{ ...rows[0]!, text: link }],
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+      rectWidthPx: 576,
+      rectHeightPx: 475,
+      measure,
+      emoteSize: () => null
+    })!
+    const [line] = layout.rows[0]!.lines
+    expect(layout.rows[0]!.lines).toHaveLength(1)
+    const word = line!.items[0]!
+    expect(word.kind === 'word' && word.text.startsWith('https://ramx.in/')).toBe(true)
+    expect(word.kind === 'word' && word.text.endsWith('…')).toBe(true)
+    expect(line!.widthPx).toBeLessThanOrEqual(layout.metrics.maxTextWidthPx)
+  })
+
   it('starts a row with no icon at its avatar', () => {
     const layout = layoutChatOverlay({
       rows: [{ ...rows[0]!, icon: 'none' }],

@@ -148,11 +148,43 @@ type Measured =
   | { kind: 'emote'; url: string; overlays: readonly string[]; widthPx: number; heightPx: number }
 
 /**
+ * `text` cut to `maxWidthPx` with a trailing ellipsis, or unchanged when it
+ * fits. The painter's `fillText` `maxWidth` would squeeze a long word (a
+ * pasted link) into narrow glyphs, so it is cut instead. At least one
+ * character stays before the ellipsis.
+ */
+export function truncateHighlightWord(
+  text: string,
+  maxWidthPx: number,
+  measureText: (text: string) => number
+): { text: string; widthPx: number } {
+  const widthPx = measureText(text)
+  if (widthPx <= maxWidthPx) return { text, widthPx }
+  const chars = Array.from(text.endsWith('…') ? text.slice(0, -1) : text)
+  // The longest head that fits with its ellipsis (binary search: links run
+  // to a hundred characters and more).
+  let low = 1
+  let high = chars.length - 1
+  let best = 1
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2)
+    if (measureText(`${chars.slice(0, middle).join('')}…`) <= maxWidthPx) {
+      best = middle
+      low = middle + 1
+    } else {
+      high = middle - 1
+    }
+  }
+  const cut = `${chars.slice(0, best).join('')}…`
+  return { text: cut, widthPx: measureText(cut) }
+}
+
+/**
  * Greedy wrap of mixed tokens into at most HIGHLIGHT_MAX_TEXT_LINES lines.
  * Like `wrapHighlightText`, overflow keeps the HEAD with a trailing ellipsis.
- * An emote whose image did not load is laid out as its name. A single token
- * wider than the line stands alone on its line (the painter's `maxWidth`
- * squeezes a word; an emote is already capped).
+ * An emote whose image did not load is laid out as its name. A word wider
+ * than the line (a pasted link) stands alone on its line, cut to the line's
+ * width with an ellipsis; an emote is already capped.
  */
 export function wrapHighlightTokens(
   tokens: readonly HighlightToken[],
@@ -160,23 +192,21 @@ export function wrapHighlightTokens(
   measure: HighlightTextMeasurer,
   emoteSize: HighlightEmoteSizer
 ): HighlightLine[] {
+  const measureText = (text: string): number =>
+    measure(text, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
+  const word = (text: string): Measured => ({
+    kind: 'word',
+    ...truncateHighlightWord(text, metrics.maxTextWidthPx, measureText)
+  })
   const measured: Measured[] = []
   for (const token of tokens) {
     if (token.kind === 'word') {
-      measured.push({
-        kind: 'word',
-        text: token.text,
-        widthPx: measure(token.text, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
-      })
+      measured.push(word(token.text))
       continue
     }
     const box = highlightEmoteBox(emoteSize(token.url), metrics)
     if (!box) {
-      measured.push({
-        kind: 'word',
-        text: token.name,
-        widthPx: measure(token.name, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
-      })
+      measured.push(word(token.name))
       continue
     }
     measured.push({ kind: 'emote', url: token.url, overlays: token.overlays, ...box })
@@ -228,11 +258,19 @@ function ellipsize(
   while (items.length > 0) {
     const last = items[items.length - 1]!
     if (last.kind === 'word') {
-      const text = `${last.text}…`
+      const text = last.text.endsWith('…') ? last.text : `${last.text}…`
       const widthPx = measure(text, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
-      if (last.xPx + widthPx <= metrics.maxTextWidthPx || items.length === 1) {
+      if (last.xPx + widthPx <= metrics.maxTextWidthPx) {
         items[items.length - 1] = { ...last, text, widthPx }
         return { items, widthPx: last.xPx + widthPx }
+      }
+      if (items.length === 1) {
+        // A lone word on the cut line is cut to fit, never squeezed.
+        const cut = truncateHighlightWord(text, metrics.maxTextWidthPx - last.xPx, (value) =>
+          measure(value, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
+        )
+        items[0] = { ...last, ...cut }
+        return { items, widthPx: last.xPx + cut.widthPx }
       }
     } else {
       const xPx = last.xPx + last.widthPx + spacePx
