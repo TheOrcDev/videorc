@@ -14,4 +14,11 @@ describe('monogramInitials', () => {
     expect(monogramInitials('   ')).toBe('?')
     expect(monogramInitials('🦊 fox')).toBe('🦊F')
   })
+
+  it('skips a leading symbol, like the @ of a YouTube handle', () => {
+    expect(monogramInitials('@ramxcodes')).toBe('R')
+    expect(monogramInitials('@Arvindkumar-c8m')).toBe('A')
+    expect(monogramInitials('_orc_ dev')).toBe('OD')
+    expect(monogramInitials('@@@')).toBe('@')
+  })
 })
