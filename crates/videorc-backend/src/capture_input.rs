@@ -200,6 +200,8 @@ pub fn append_windows_dshow_video_input_mode_opts(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowsDshowInputFormat<'a> {
     Codec(&'a str),
+    /// Raw DirectShow modes. Windows and tests construct this (#1277).
+    #[cfg(any(target_os = "windows", test))]
     PixelFormat(&'a str),
 }
 
@@ -238,6 +240,7 @@ pub fn append_windows_dshow_video_input_native_mode(
         Some(WindowsDshowInputFormat::Codec(codec)) => {
             args.extend(["-vcodec".to_string(), codec.to_string()]);
         }
+        #[cfg(any(target_os = "windows", test))]
         Some(WindowsDshowInputFormat::PixelFormat(pixel_format)) => {
             args.extend(["-pixel_format".to_string(), pixel_format.to_string()]);
         }
