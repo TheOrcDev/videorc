@@ -9,10 +9,14 @@ import {
   CHAT_COMMAND_REPLY_MAX_CHARS,
   CHAT_COMMAND_X_POST_MAX_CHARS,
   CHAT_COMMANDS_LIST_NAME,
+  CHAT_COMMAND_TYPICAL_MENTION,
   chatCommandDescriptionError,
   chatCommandNameError,
+  chatCommandNeedsTwoXPosts,
   chatCommandOneLine,
+  chatCommandRefusal,
   chatCommandReplyError,
+  chatCommandReplyRoom,
   chatCommandsSummary,
   chatCommandTextLength,
   normalizeChatCommandName,
@@ -104,6 +108,32 @@ describe('chat command rules (plan 226)', () => {
         command('faq')
       ])
     ).toBeNull()
+  })
+
+  it('counts the reply room and when X needs 2 posts, the way the editor shows them', () => {
+    expect(chatCommandReplyRoom('')).toBe(CHAT_COMMAND_REPLY_MAX_CHARS)
+    expect(chatCommandReplyRoom('  🚀🚀  ')).toBe(CHAT_COMMAND_REPLY_MAX_CHARS - 2)
+    expect(chatCommandReplyRoom('x'.repeat(CHAT_COMMAND_REPLY_MAX_CHARS + 3))).toBe(-3)
+    // `@viewer_name ` is 13 code points: 127 more fit one X post, 128 don't.
+    expect(CHAT_COMMAND_TYPICAL_MENTION).toHaveLength(13)
+    expect(chatCommandNeedsTwoXPosts('x'.repeat(127))).toBe(false)
+    expect(chatCommandNeedsTwoXPosts('x'.repeat(128))).toBe(true)
+    expect(chatCommandNeedsTwoXPosts('🚀'.repeat(127))).toBe(false)
+  })
+
+  it('recognizes every refusal the rules write, under the field it is about', () => {
+    const fields = [
+      ['name', cases.names],
+      ['description', cases.descriptions],
+      ['reply', cases.replies]
+    ] as const
+    for (const [field, list] of fields) {
+      for (const { error } of list) {
+        if (!error) continue
+        expect(chatCommandRefusal(`invalid-params: ${error}`)).toEqual({ field, sentence: error })
+      }
+    }
+    expect(chatCommandRefusal("Videorc's engine couldn't do that.")).toBeNull()
   })
 
   it('pushes only enabled commands, name and description, to the Stream Manager', () => {

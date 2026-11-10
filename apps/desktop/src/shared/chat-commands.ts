@@ -207,3 +207,56 @@ export function chatCommandsSummary(state: ChatCommandsState): ChatCommandsSumma
     listEnabled: state.listEnabled
   }
 }
+
+// --- The editor's helpers (plan 226 S3) ---
+
+/** The mention the editor's X note counts with: a typical `@name `. */
+export const CHAT_COMMAND_TYPICAL_MENTION = '@viewer_name '
+
+/** How many characters the reply has left; negative when it is over. */
+export function chatCommandReplyRoom(reply: string): number {
+  return CHAT_COMMAND_REPLY_MAX_CHARS - chatCommandTextLength(reply.trim())
+}
+
+/** True when `@viewer_name <reply>` won't fit one X post, so X gets it in 2. */
+export function chatCommandNeedsTwoXPosts(reply: string): boolean {
+  return (
+    chatCommandTextLength(CHAT_COMMAND_TYPICAL_MENTION + reply.trim()) >
+    CHAT_COMMAND_X_POST_MAX_CHARS
+  )
+}
+
+const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** Every sentence the rules above say, as the field it belongs to. */
+const REFUSALS: readonly (readonly [keyof ChatCommandDraftErrors, RegExp])[] = [
+  ['name', /Name the command\./],
+  ['name', new RegExp(`Keep the name to ${CHAT_COMMAND_NAME_MAX_CHARS} characters\\.`)],
+  ['name', /Use letters, numbers, _ and - only\./],
+  ['name', new RegExp(`!${escaped(CHAT_COMMANDS_LIST_NAME)} is built in\\.`)],
+  ['name', /![a-z0-9_-]+ already exists\./],
+  ['description', /Add a short description\./],
+  ['description', /Keep the description on one line\./],
+  [
+    'description',
+    new RegExp(`Keep the description to ${CHAT_COMMAND_DESCRIPTION_MAX_CHARS} characters\\.`)
+  ],
+  ['reply', /Write the reply\./],
+  ['reply', /Keep the reply on one line\./],
+  ['reply', new RegExp(`Keep the reply to ${CHAT_COMMAND_REPLY_MAX_CHARS} characters\\.`)]
+]
+
+/**
+ * A `chatCommands.save` refusal the backend wrote in the editor's own words
+ * ("!go already exists."), with the field it is about, so the dialog shows it
+ * under that field. Null for any other failure.
+ */
+export function chatCommandRefusal(
+  raw: string
+): { field: keyof ChatCommandDraftErrors; sentence: string } | null {
+  for (const [field, pattern] of REFUSALS) {
+    const match = pattern.exec(raw)
+    if (match) return { field, sentence: match[0] }
+  }
+  return null
+}
