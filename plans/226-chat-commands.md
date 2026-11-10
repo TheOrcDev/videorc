@@ -14,9 +14,22 @@ Each command has three fields:
 
 ## Status and scope
 
-- **Status: PLANNED 2026-11-10, not started.** Base: `origin/main`
-  `b62ff1063`. The plan is in `~/projects/videorc-wt-226`, branch
-  `plan-226-chat-commands`.
+- **Status: IMPLEMENTED 2026-11-10** on branch `plan-226-chat-commands`
+  (base `origin/main` `b62ff1063`). S0–S5 are done; local verification is
+  in the PR. Two parallel tracks built it from one contract commit: the
+  backend (S0–S2) and the UI (S3–S4, on `plan-226-ui`, merged in).
+- **Changes from the plan while building:**
+  - Every mutation returns the whole `ChatCommandsState`, and
+    `chatCommands.post` (the Stream Manager's `!go`) was added.
+  - The Stream Manager's door is a "Commands" action in the bar above
+    640 px and "Chat commands…" in the ⋯ menu below it. The ⋯ menu only
+    exists below 640 px.
+  - `chatCommands.post` waits for X's first part only; the second follows
+    in the background. A mutation past 10 s restarts the backend, and two
+    8 s X posts in a row could pass it.
+  - The Twitch login and X username ride an internal `author_handle`
+    (`#[serde(skip)]`), never the wire.
+  - The engine keeps its own echo ledger (S0 finding 3).
 - **Free.** No Premium gate. Every chat bot gives this away, and plan 221
   keeps the free promise.
 - **Not in v1:** variables (`{user}`, `{uptime}`), per-command cooldown

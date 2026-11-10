@@ -918,6 +918,64 @@ async fn post_to(
     Ok(())
 }
 
+/// `chatCommands.post`'s path to one destination. The RPC is a mutation, and
+/// the backend restarts on one that runs past its 10 s contract, so it waits
+/// for the first post only (one provider deadline, 8 s). X's second part
+/// follows in the background and reports its own failure.
+async fn post_first_part(
+    state: &AppState,
+    session_id: &str,
+    destination_id: &str,
+    platform: StreamPlatform,
+    command: &str,
+    text: &str,
+) -> std::result::Result<(), String> {
+    let mut parts = parts_for(platform, text).into_iter();
+    let Some(first) = parts.next() else {
+        return Ok(());
+    };
+    let operation = send_live_chat_message(
+        state,
+        send_params(session_id, first, vec![destination_id.to_string()]),
+    )
+    .await
+    .map_err(|_| SEND_FAILED_REASON.to_string())?;
+    delivery_outcome(&operation, destination_id, platform)?;
+    let rest: Vec<String> = parts.collect();
+    if !rest.is_empty() {
+        let state = state.clone();
+        let session_id = session_id.to_string();
+        let destination_id = destination_id.to_string();
+        let command = command.to_string();
+        tokio::spawn(async move {
+            for part in rest {
+                let outcome = match send_live_chat_message(
+                    &state,
+                    send_params(&session_id, part, vec![destination_id.clone()]),
+                )
+                .await
+                {
+                    Ok(operation) => delivery_outcome(&operation, &destination_id, platform),
+                    Err(_) => Err(SEND_FAILED_REASON.to_string()),
+                };
+                if let Err(reason) = outcome {
+                    report_failure(
+                        &state,
+                        &session_id,
+                        &destination_id,
+                        platform,
+                        &command,
+                        &reason,
+                    )
+                    .await;
+                    break;
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
 fn delivery_outcome(
     operation: &CommentsSendOperation,
     destination_id: &str,
@@ -1038,7 +1096,7 @@ pub(crate) async fn post(
     let text = answer_text(&commands, resolved, "");
     let session_id = params.session_id.as_str();
     // Every chat that takes the text whole shares one post; X's parts go on
-    // their own.
+    // their own, and the RPC waits for X's first part only (`post_first_part`).
     let (whole, split): (Vec<PostTarget>, Vec<PostTarget>) = targets
         .into_iter()
         .filter(|target| target.write == CommentsWriteState::Ready)
@@ -1068,11 +1126,12 @@ pub(crate) async fn post(
         }
     };
     let post_split = futures_util::future::join_all(split.iter().map(|target| async {
-        let outcome = post_to(
+        let outcome = post_first_part(
             state,
             session_id,
             &target.destination_id,
             target.platform,
+            &name,
             &text,
         )
         .await;

@@ -2,8 +2,8 @@
 
 - 2026-11-10: [Plan 226](226-chat-commands.md), a streamer's request:
   viewers type `!go` and Videorc answers as the streamer, `@viewer <reply>`,
-  in the chat they asked in; `!commands` lists every command. PLANNED, not
-  started:
+  in the chat they asked in; `!commands` lists every command. IMPLEMENTED
+  2026-11-10 (`smoke:chat-commands`):
   - Owner calls: replies post on their own (only the streamer's text, never
     AI), one message up to 170 characters (X in 2 parts), edited on Setup →
     Livestream with a Stream Manager shortcut and `!` completions, free.
