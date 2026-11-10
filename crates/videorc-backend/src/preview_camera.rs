@@ -33,7 +33,6 @@ use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats, SurfaceBackingTrackerHandle};
 use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 #[cfg(any(target_os = "windows", test))]
-use crate::protocol::{CameraAspect, CameraShape, CameraSize, CameraTransformMode, LayoutPreset};
 use crate::protocol::{
     CameraCapabilityFormat, LayoutSettings, PreviewCameraDropReasonStats, PreviewCameraStartParams,
     PreviewCameraState, PreviewCameraStatus, SourceSelection, VideoSettings,
@@ -44,10 +43,6 @@ use crate::state::{AppState, CaptureRecoveryExplicitCameraMutationLease};
 
 const PREVIEW_CAMERA_DEFAULT_PNG_WIDTH: u32 = 1280;
 const PREVIEW_CAMERA_MAX_PNG_WIDTH: u32 = 1920;
-#[cfg(any(target_os = "windows", test))]
-const CAMERA_REFERENCE_WIDTH: u32 = 1280;
-#[cfg(any(target_os = "windows", test))]
-const CAMERA_REFERENCE_HEIGHT: u32 = 720;
 #[cfg(target_os = "macos")]
 const CAMERA_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_CAMERA_CAPTURE_CPU_COPY";
 /// Must stay inside the 10 s mutation contract together with the up-to-2 s
@@ -4505,14 +4500,17 @@ impl SelectedCameraSource {
     }
 }
 
+/// The box a Windows camera fills: the full output canvas for every preset,
+/// the same layout-invariant box `camera_capture_target_dimensions` gives the
+/// restart key (issue #1066). The inset presets used to pipe an overlay-sized
+/// frame, but a preset switch never restarts the camera, so a camera started
+/// under Screen + Camera kept piping ~540x304 after a switch to camera-only
+/// and the compositor stretched it to the canvas (a custom inset enlarged by
+/// hand did the same). Each attempt still pipes its mode's native size fitted
+/// into this box (`windows_camera_attempt_output_dimensions`), and the
+/// compositor fits that frame into whatever box the scene gives it.
 #[cfg(any(target_os = "windows", test))]
 fn windows_camera_preview_output_dimensions(config: &NativeCameraPreviewConfig) -> (u32, u32) {
-    if matches!(
-        config.layout.layout_preset,
-        LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera
-    ) {
-        return camera_overlay_target_dimensions(&config.layout, &config.video);
-    }
     camera_capture_target_dimensions(&config.layout, &config.video)
 }
 
@@ -5274,73 +5272,8 @@ fn camera_capture_target_dimensions(_layout: &LayoutSettings, video: &VideoSetti
     // scaling down only improves inset quality, and a preset switch can now
     // NEVER invalidate a running camera session. Only genuine output-canvas
     // changes (video preset/orientation) re-derive capture geometry.
-    // The Windows D3D11 overlay path does its own overlay sizing in
-    // windows_camera_preview_output_dimensions.
+    // Windows uses the same box (windows_camera_preview_output_dimensions).
     (video.width, video.height)
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn camera_overlay_target_dimensions(layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
-    if let (CameraTransformMode::Custom, Some(transform)) =
-        (layout.camera_transform_mode, layout.camera_transform)
-    {
-        (
-            scale_camera_dimension(
-                (transform.width.clamp(0.0, 1.0) * f64::from(video.width.max(1))).round(),
-            ),
-            scale_camera_dimension(
-                (transform.height.clamp(0.0, 1.0) * f64::from(video.height.max(1))).round(),
-            ),
-        )
-    } else {
-        scaled_camera_box_size(
-            &layout.camera_size,
-            &layout.camera_shape,
-            &layout.camera_aspect,
-            video,
-        )
-    }
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn scaled_camera_box_size(
-    size: &CameraSize,
-    shape: &CameraShape,
-    aspect: &CameraAspect,
-    video: &VideoSettings,
-) -> (u32, u32) {
-    let scale = camera_output_scale(video);
-    let width = match size {
-        CameraSize::Small => 260,
-        CameraSize::Medium => 360,
-        CameraSize::Large => 480,
-    };
-    // Must mirror scene::camera_box_size — the preview box and the composed
-    // box are the same box or the preview lies.
-    let height = match shape {
-        CameraShape::Circle => width,
-        CameraShape::Rectangle | CameraShape::Rounded => match aspect {
-            CameraAspect::Source => (width * 9 + 8) / 16,
-            CameraAspect::Square => width,
-            CameraAspect::Portrait => (width * 4u32).div_ceil(3),
-        },
-    };
-
-    (
-        scale_camera_dimension(f64::from(width) * scale),
-        scale_camera_dimension(f64::from(height) * scale),
-    )
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn camera_output_scale(video: &VideoSettings) -> f64 {
-    (f64::from(video.width) / f64::from(CAMERA_REFERENCE_WIDTH))
-        .min(f64::from(video.height) / f64::from(CAMERA_REFERENCE_HEIGHT))
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn scale_camera_dimension(value: f64) -> u32 {
-    value.round().max(1.0).min(f64::from(u32::MAX)) as u32
 }
 
 #[derive(Debug)]
@@ -11184,22 +11117,64 @@ Error opening input file video=HP HD Camera."#;
     }
 
     #[test]
-    fn windows_screen_camera_preview_uses_overlay_sized_bgra_buffer() {
-        let mut layout = test_layout(false);
-        layout.layout_preset = LayoutPreset::ScreenCamera;
-        layout.camera_size = CameraSize::Medium;
-        layout.camera_shape = CameraShape::Rectangle;
-        let config = NativeCameraPreviewConfig {
+    fn windows_camera_box_is_the_canvas_for_every_preset() {
+        // Issue #1066: a preset switch never restarts the camera (the restart
+        // key is layout-invariant), so the box a Windows camera pipes into
+        // must not depend on the preset or the inset either. An inset-sized
+        // box left a camera started under Screen + Camera at ~540x304 after
+        // a switch to camera-only, stretched to the canvas.
+        let config_for = |layout: LayoutSettings| NativeCameraPreviewConfig {
             camera_id: "camera:windows-dshow:5553422043616d657261".to_string(),
             unique_id: "USB Camera".to_string(),
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout,
         };
+        let camera_only = test_layout(false);
+        let mut inset = test_layout(false);
+        inset.layout_preset = LayoutPreset::ScreenCamera;
+        inset.camera_size = CameraSize::Small;
+        inset.camera_shape = CameraShape::Circle;
+        let mut custom = inset.clone();
+        custom.camera_transform_mode = CameraTransformMode::Custom;
+        custom.camera_transform = Some(crate::protocol::CameraTransform {
+            x: 0.7,
+            y: 0.7,
+            width: 0.2,
+            height: 0.2,
+        });
+        let mut vertical = inset.clone();
+        vertical.layout_preset = LayoutPreset::VerticalScreenCamera;
 
+        let canvas = (test_video().width, test_video().height);
+        for layout in [camera_only, inset, custom, vertical] {
+            let config = config_for(layout);
+            assert_eq!(windows_camera_preview_output_dimensions(&config), canvas);
+            assert_eq!(
+                windows_camera_preview_output_dimensions(&config),
+                camera_capture_target_dimensions(&config.layout, &config.video)
+            );
+        }
+
+        // A 720p mode under the inset pipes its own 1280x720, not the inset.
+        let mode = DshowVideoMode {
+            format: DshowModeFormat::Mjpeg,
+            width: 1280,
+            height: 720,
+            min_fps: 5.0,
+            max_fps: 30.0,
+        };
         assert_eq!(
-            windows_camera_preview_output_dimensions(&config),
-            (540, 305)
+            windows_camera_attempt_output_dimensions(
+                &WindowsCameraCaptureAttempt::Mode {
+                    mode,
+                    fps: 30.0,
+                    best_listed: true,
+                },
+                canvas,
+                None,
+            ),
+            (1280, 720)
         );
     }
 
