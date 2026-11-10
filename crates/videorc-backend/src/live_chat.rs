@@ -3333,10 +3333,11 @@ async fn send_to_destination(
                 }),
                 FakeChatSendBehavior::Failed => Err("Fake provider rejected the send.".to_string()),
                 FakeChatSendBehavior::Timeout => {
-                    sleep(CHAT_SEND_TIMEOUT + Duration::from_millis(25)).await;
-                    Ok(ProviderSendReceipt {
-                        provider_message_id: Some("fake-probe-timeout-late".to_string()),
-                    })
+                    // Hang until the per-destination deadline cancels this
+                    // future. Sleeping `CHAT_SEND_TIMEOUT + 25ms` then returning
+                    // Ok races Windows' ~16ms timer: the late Ok can land first
+                    // and the fanout records Sent instead of TimedOutUnknown.
+                    std::future::pending().await
                 }
             }
         }
@@ -6340,6 +6341,9 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_fanout_isolates_timeout_and_persists_every_terminal_destination() {
+        // Twitch's FakeProbe Timeout hangs (never returns Ok). YouTube still
+        // completes inside the test deadline so the two sends overlap. A
+        // sleep just past CHAT_SEND_TIMEOUT used to race Windows timers.
         let probe = Arc::new(FakeSendProbe::default());
         let operation_id = uuid::Uuid::new_v4().to_string();
         let state = send_test_state(
