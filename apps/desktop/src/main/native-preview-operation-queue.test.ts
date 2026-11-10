@@ -714,6 +714,52 @@ describe('NativePreviewPlacementQueue', () => {
     expect(queue.retryScheduled).toBe(false)
   })
 
+  // #1272 end to end through the queue. The apply follows
+  // applyNativePreviewHostCommands' Windows contract for a move: the proof
+  // window follows the popup first, then a backend refusal is thrown as the
+  // typed deferred error. The popup moves once and then stays still.
+  it('lands a move the backend refuses once: the proof window follows at once and the backend half retries', async () => {
+    const clock = new ManualRetryClock()
+    const proofWindowRects: number[] = []
+    const backendRects: number[] = []
+    let backendRefusals = 1
+    const queue = new NativePreviewPlacementQueue(
+      async ({ bounds }) => {
+        proofWindowRects.push(bounds.screenX)
+        if (bounds.screenX === 620 && backendRefusals > 0) {
+          backendRefusals -= 1
+          throw new NativePreviewBackendBoundsRefusedError(
+            new Error(
+              'The preview surface is busy with another lifecycle operation; retry shortly.'
+            )
+          )
+        }
+        backendRects.push(bounds.screenX)
+      },
+      () => undefined,
+      () => 0,
+      250,
+      [100],
+      clock
+    )
+    const popupRect = surfaceBounds(620)
+
+    queue.enqueue({ bounds: surfaceBounds(100), generation: 1 })
+    await queue.waitForIdle()
+    queue.enqueue({ bounds: popupRect, generation: 1 })
+    await queue.waitForIdle()
+
+    // The picture is already at the popup's rect; the backend is not yet.
+    expect(proofWindowRects.at(-1)).toBe(620)
+    expect(backendRects).toEqual([100])
+    expect(queue.retryScheduled).toBe(true)
+
+    await clock.fire()
+    expect(proofWindowRects.at(-1)).toBe(620)
+    expect(backendRects).toEqual([100, 620])
+    expect(queue.retryScheduled).toBe(false)
+  })
+
   it('decides a failed scene placement by what failed', () => {
     const refused = new NativePreviewBackendBoundsRefusedError(new Error('surface-busy'))
     // Deferred refusal: retried, the scene update carries on.
