@@ -443,6 +443,12 @@ export class NativePreviewPlacementQueue {
         (error: unknown) => {
           failure = { error }
           this.failedCount += 1
+          // A forced placement can fail for the very rect recorded as last
+          // applied; that rect is then not known to have landed, and an echo
+          // of it must run instead of being coalesced away.
+          if (this.lastApplied && placementRequestsEqual(this.lastApplied, request)) {
+            this.lastApplied = null
+          }
         }
       )
       .finally(() => {

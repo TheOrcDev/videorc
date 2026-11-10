@@ -680,6 +680,40 @@ describe('NativePreviewPlacementQueue', () => {
     expect(appliedX).toEqual([40, 40])
   })
 
+  it('runs an ordinary echo of a forced placement that failed for the last applied rect', async () => {
+    const clock = new ManualRetryClock()
+    const attemptsX: number[] = []
+    let refuseForced = false
+    const queue = new NativePreviewPlacementQueue(
+      async ({ bounds }) => {
+        attemptsX.push(bounds.screenX)
+        if (refuseForced) {
+          refuseForced = false
+          throw new Error('surface-busy')
+        }
+      },
+      () => undefined,
+      () => 0,
+      250,
+      [2_000],
+      clock
+    )
+
+    queue.enqueue({ bounds: surfaceBounds(40), generation: 1 })
+    await queue.waitForIdle()
+    refuseForced = true
+    queue.enqueue({ bounds: surfaceBounds(40), generation: 1 }, { force: true })
+    await queue.waitForIdle()
+    expect(queue.retryScheduled).toBe(true)
+
+    // A focus or show echo of the same rect during the backoff replaces the
+    // retry, so it must run, not be coalesced against the stale record.
+    expect(queue.enqueue({ bounds: surfaceBounds(40), generation: 1 })).toBe(true)
+    await queue.waitForIdle()
+    expect(attemptsX).toEqual([40, 40, 40])
+    expect(queue.retryScheduled).toBe(false)
+  })
+
   it('decides a failed scene placement by what failed', () => {
     const refused = new NativePreviewBackendBoundsRefusedError(new Error('surface-busy'))
     // Deferred refusal: retried, the scene update carries on.
