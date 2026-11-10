@@ -38,6 +38,7 @@ mod capture_input;
 mod capture_interruption;
 mod capture_log;
 mod capture_recovery;
+mod chat_commands;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
@@ -5844,6 +5845,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sounds.play"
         | "sounds.press"
         | "sounds.stop"
+        | "chatCommands.save"
+        | "chatCommands.delete"
+        | "chatCommands.setListEnabled"
         | "preview.live.start"
         | "preview.live.stop"
         | "screen.hide"
@@ -6036,6 +6040,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screens.list"
         | "banners.list"
         | "sounds.list"
+        | "chatCommands.list"
         | "repair.assess_file"
         | "noiseCleanup.list"
         | "cleanCut.get"
@@ -13635,6 +13640,63 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 226: chat commands. Every mutation answers with the whole
+        // state and ends in `chat_commands::on_chat_commands_changed`, which
+        // reloads the list chat delivery matches against and publishes it.
+        // Refusals come back in the editor's words.
+        "chatCommands.list" => match chat_commands::list(state) {
+            Ok(list) => ServerResponse::ok(command.id, list),
+            Err(error) => {
+                ServerResponse::error(command.id, "chat-commands-list-failed", error.to_string())
+            }
+        },
+        "chatCommands.save" => {
+            match serde_json::from_value::<chat_commands::ChatCommandSaveParams>(command.params) {
+                Ok(params) => match chat_commands::save(state, &params) {
+                    Ok(list) => ServerResponse::ok(command.id, list),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "chat-command-save-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "chatCommands.delete" => {
+            match serde_json::from_value::<chat_commands::ChatCommandIdParams>(command.params) {
+                Ok(params) => match chat_commands::delete(state, &params.id) {
+                    Ok(list) => ServerResponse::ok(command.id, list),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "chat-command-delete-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "chatCommands.setListEnabled" => {
+            match serde_json::from_value::<chat_commands::ChatCommandsListEnabledParams>(
+                command.params,
+            ) {
+                Ok(params) => match chat_commands::set_list_enabled(state, params.enabled) {
+                    Ok(list) => ServerResponse::ok(command.id, list),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "chat-commands-settings-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "screens.list" => match state.database.list_stream_screens() {
             Ok(screens) => ServerResponse::ok(command.id, screens),
             Err(error) => {
@@ -17121,6 +17183,7 @@ mod tests {
             "screens.list",
             "banners.list",
             "sounds.list",
+            "chatCommands.list",
             "recording.status",
             "capture.recovery.status",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,

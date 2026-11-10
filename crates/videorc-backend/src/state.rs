@@ -1083,6 +1083,9 @@ pub struct AppState {
     /// The soundboard player (plan 189): the decoded library, the playing
     /// voices and the session bus they go into.
     pub soundboard: Arc<crate::sound_player::SoundPlayer>,
+    /// Chat commands (plan 226): the saved list chat delivery matches against
+    /// in memory, and its publication order.
+    pub chat_commands: Arc<crate::chat_commands::ChatCommandsRuntime>,
     /// Completion truth for layout/live-control mutations across reconnects.
     pub operator_command_fence: Arc<CommandCompletionFence>,
     /// Physical camera/screen transition completion, independent from the
@@ -1394,6 +1397,7 @@ impl AppState {
             banner_timer_wake: Arc::new(tokio::sync::Notify::new()),
             sound_list_publication: Arc::new(StdMutex::new(())),
             soundboard: Arc::new(crate::sound_player::SoundPlayer::default()),
+            chat_commands: Arc::new(crate::chat_commands::ChatCommandsRuntime::load(&database)),
             operator_command_fence: Arc::new(CommandCompletionFence::default()),
             source_transition_fence: Arc::new(CommandCompletionFence::default()),
             live_control_command_order: Arc::new(CommandCompletionFence::default()),
