@@ -5,6 +5,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { HIGHLIGHT_ANCHOR_LABELS, HighlightAnchorOptions } from '@/components/comments-header'
 import { providerBadgeTitle } from '@/components/comments-destination-status'
 import {
+  ChatCommandsIcon,
   ClipIcon,
   FrameIcon,
   HiddenFromStreamIcon,
@@ -350,8 +351,8 @@ export function StreamManagerStatusBar({
    * recordings too). `sounds` is null until Studio has read the board. */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => unknown
-  /** Plan 226 S4: ⋯ Chat commands… opens Livestream → Setup → Chat
-   * commands in the main window. */
+  /** Plan 226 S4: Chat commands… (the bar's action, the ⋯ menu below
+   * 640 px) opens Livestream → Setup → Chat commands in the main window. */
   onOpenChatCommands?: () => void
   onOpenPreview?: () => void
   /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each
@@ -644,6 +645,15 @@ export function StreamManagerStatusBar({
                   label="Clear view"
                   text="Clear"
                   onClick={requestClear}
+                />
+              ) : null}
+              {onOpenChatCommands ? (
+                <StatusBarAction
+                  hint="Add or change the !commands viewers type"
+                  icon={<ChatCommandsIcon aria-hidden />}
+                  label="Chat commands…"
+                  text={<span className={WIDE_LABEL}>Commands</span>}
+                  onClick={onOpenChatCommands}
                 />
               ) : null}
               {onOpenPreview ? (

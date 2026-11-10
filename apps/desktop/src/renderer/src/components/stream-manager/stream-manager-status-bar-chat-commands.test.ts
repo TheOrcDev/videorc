@@ -72,6 +72,26 @@ describe('Stream Manager chat commands (plan 226 S4)', () => {
     expect(items.some((row) => row.textContent === 'Chat commands…')).toBe(false)
   })
 
+  it('keeps the door in the bar above 640 px, where the ⋯ menu is hidden', async () => {
+    const onOpenChatCommands = vi.fn()
+    await act(async () =>
+      root.render(
+        createElement(StreamManagerStatusBar, {
+          providers: [],
+          audience: null,
+          alwaysOnTop: false,
+          onOpenChatCommands
+        })
+      )
+    )
+    const actions = container.querySelector('[data-slot="stream-manager-actions"]')!
+    const door = actions.querySelector<HTMLButtonElement>('[aria-label="Chat commands…"]')
+    expect(door).not.toBeNull()
+    expect(door!.textContent).toContain('Commands')
+    await act(async () => door!.click())
+    expect(onOpenChatCommands).toHaveBeenCalledOnce()
+  })
+
   it('names each failed reply with the platform, once, until dismissed', async () => {
     const failures = [
       {
