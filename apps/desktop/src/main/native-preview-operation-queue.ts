@@ -221,6 +221,28 @@ type NativePreviewPlacementApply = (request: NativePreviewPlacementRequest) => P
  * defer to the retrying placement queue; a failed surface create or setup
  * is not wrapped and still fails its caller.
  */
+/**
+ * What a scene update does when its placement reconcile fails (#1272).
+ *
+ * - A deferred backend refusal (the proof window already moved) is retried
+ *   and the scene update carries on.
+ * - A failed create, with no surface left, is retried as well so the Preview
+ *   does not stay empty, but the error still fails the scene update.
+ * - Any other failure fails the scene update, as before, with no retry.
+ *
+ * Every retry is forced: the queue's last applied rect can be the very one
+ * that was just refused, and must not swallow it.
+ */
+export function scenePlacementFailureAction(
+  error: unknown,
+  surfaceExists: boolean
+): { retry: boolean; rethrow: boolean } {
+  if (error instanceof NativePreviewBackendBoundsRefusedError) {
+    return { retry: true, rethrow: false }
+  }
+  return { retry: !surfaceExists, rethrow: true }
+}
+
 export class NativePreviewBackendBoundsRefusedError extends Error {
   constructor(readonly refusal: unknown) {
     super(

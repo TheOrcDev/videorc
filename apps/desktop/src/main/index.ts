@@ -188,7 +188,8 @@ import {
   NativePreviewPumpOwnership,
   handoffNativePreviewPumpOwnership,
   type NativePreviewPumpOwnershipTicket,
-  runPreparedNativePreviewMutation
+  runPreparedNativePreviewMutation,
+  scenePlacementFailureAction
 } from './native-preview-operation-queue'
 import { NativePreviewRunAuthority } from './native-preview-run-authority'
 import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surface-loader'
@@ -7958,22 +7959,26 @@ async function applyNativePreviewSurfaceScene(
   try {
     await reconcileNativePreviewSurfaceForPreviewWindow()
   } catch (error) {
-    // Only the backend's refusal of a bounds update is deferred (#1272): the
-    // proof window has already followed the popup, and the scene update and
-    // its re-show must not be dropped for it. A failed surface create or
-    // setup still fails the scene update.
-    if (!(error instanceof NativePreviewBackendBoundsRefusedError)) {
-      throw error
-    }
-    safeConsole.warn('Preview scene placement was refused; retrying it:', error.refusal)
-    const bounds = previewWindowSurfaceBounds()
+    // #1272, scenePlacementFailureAction: a backend refusal of a bounds
+    // update is deferred (the proof window already followed the popup), so
+    // the scene update and its re-show go on. A failed create still fails the
+    // scene update, but is retried too, so the Preview is not left empty.
+    const action = scenePlacementFailureAction(error, nativePreviewSurfaceWindowExists())
+    const bounds = action.retry ? previewWindowSurfaceBounds() : null
     if (bounds) {
-      // Forced: the queue's last applied rect may be this one, but the
-      // backend has just refused it, so it must not be coalesced away.
+      safeConsole.warn(
+        'Preview scene placement failed; retrying it:',
+        error instanceof NativePreviewBackendBoundsRefusedError ? error.refusal : error
+      )
+      // Forced: the queue's last applied rect may be this one, but it has
+      // just failed, so it must not be coalesced away.
       nativePreviewPlacementQueue.enqueue(
         { bounds, generation: previewWindowSurfaceGeneration() },
         { force: true }
       )
+    }
+    if (action.rethrow) {
+      throw error
     }
   }
   if (!nativePreviewPresentationAllowedForGeneration(generation)) {

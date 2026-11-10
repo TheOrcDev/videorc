@@ -10,6 +10,7 @@ import {
   NativePreviewPumpOwnership,
   handoffNativePreviewPumpOwnership,
   runPreparedNativePreviewMutation,
+  scenePlacementFailureAction,
   type NativePreviewPlacementFailure,
   type NativePreviewPlacementRetryClock
 } from './native-preview-operation-queue'
@@ -657,6 +658,37 @@ describe('NativePreviewPlacementQueue', () => {
     await queue.waitForIdle()
 
     expect(appliedX).toEqual([40, 40])
+  })
+
+  // The scene update's decision, end to end with the queue: a direct create
+  // fails with the surface absent and the very rect the queue last applied.
+  it('retries a failed scene create for the last applied rect and still fails the update', async () => {
+    const appliedX: number[] = []
+    const queue = new NativePreviewPlacementQueue(async ({ bounds }) => {
+      appliedX.push(bounds.screenX)
+    })
+    queue.enqueue({ bounds: surfaceBounds(40), generation: 1 })
+    await queue.waitForIdle()
+
+    const createFailure = new Error('Native preview proof surface could not be created')
+    const action = scenePlacementFailureAction(createFailure, false)
+    expect(action).toEqual({ retry: true, rethrow: true })
+    expect(
+      queue.enqueue({ bounds: surfaceBounds(40), generation: 1 }, { force: action.retry })
+    ).toBe(true)
+    await queue.waitForIdle()
+    expect(appliedX).toEqual([40, 40])
+  })
+
+  it('decides a failed scene placement by what failed', () => {
+    const refused = new NativePreviewBackendBoundsRefusedError(new Error('surface-busy'))
+    // Deferred refusal: retried, the scene update carries on.
+    expect(scenePlacementFailureAction(refused, true)).toEqual({ retry: true, rethrow: false })
+    // Setup failure with the surface still there: fails as before, no retry.
+    expect(scenePlacementFailureAction(new Error('script failed'), true)).toEqual({
+      retry: false,
+      rethrow: true
+    })
   })
 
   it('names a deferred backend refusal apart from other failures', () => {
