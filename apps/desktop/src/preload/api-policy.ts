@@ -46,6 +46,14 @@ export const AUXILIARY_API_KEYS = {
     'soundFromCommentsWindow',
     // `/buddy <words>` (plan 209 S20): ask, never answer or push.
     'buddyActFromCommentsWindow',
+    // Chat commands (plan 226 S4): read the commands and the failed replies,
+    // ask for a `!go` post or the section; never push, answer or post itself.
+    'getCommentsChatCommands',
+    'onCommentsChatCommands',
+    'chatCommandFromCommentsWindow',
+    'getChatCommandFailures',
+    'onChatCommandFailures',
+    'openChatCommandsFromCommentsWindow',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',
     // Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5).

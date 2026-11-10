@@ -267,6 +267,11 @@ import type {
   StarterSoundFile
 } from '../shared/sound-commands'
 import { BUDDY_ACT_RESULT_TIMEOUT_MS, type CohostActAnswer } from '../shared/buddy-act'
+import type {
+  ChatCommandPostResult,
+  ChatCommandReplyFailed,
+  ChatCommandsSummary
+} from '../shared/chat-commands'
 import {
   SOUND_IMPORT_EXTENSIONS,
   STARTER_SOUNDS_MANIFEST,
@@ -889,6 +894,11 @@ let latestCommentsBanners: import('../shared/banner-commands').BannerSummary[] |
 /** The soundboard the Stream Manager shows (plan 189 S9): `{id, name, mode}`
  * and what plays, from the Studio renderer; null until it has read the board. */
 let latestCommentsSounds: SoundboardSummary | null = null
+/** The chat commands the Stream Manager knows (plan 226 S4): the enabled
+ * commands' names and descriptions, null until Studio has read them. */
+let latestCommentsChatCommands: ChatCommandsSummary | null = null
+/** The replies that couldn't go out in the newest live chat session (plan 226 D12). */
+let latestChatCommandFailures: ChatCommandReplyFailed[] = []
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -17560,6 +17570,25 @@ app.whenReady().then(async () => {
       return true
     }
   )
+  // Plan 226 S4: ⋯ Chat commands… in the Stream Manager. Main shows the main
+  // window; the shell opens Livestream → Setup and scrolls to the section.
+  secureIpcHandle(
+    'comments-window:open-chat-commands',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can open chat commands.')
+      }
+      commentsCommandRequestId(value)
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+        return false
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      sendElectronEvent(mainWindow.webContents, 'livestream:open-chat-commands', undefined)
+      return true
+    }
+  )
   // Plan 215 A3: "Sign in to Videorc" on a chat row that waits on it. Main
   // shows the main window and asks it to start the sign-in it owns (the same
   // door as the sidebar's Sign in); the Chat window never sees the authorize
@@ -17788,6 +17817,45 @@ app.whenReady().then(async () => {
     )
   })
   secureIpcHandle('comments-window:buddy-act-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
+  // Chat commands (plan 226 S4): the same relay as sounds. Studio pushes the
+  // enabled commands and the replies that couldn't go out, and the Stream
+  // Manager follows them; the streamer's `!go` relays to the MAIN renderer,
+  // which owns the `chatCommands.post` call, for the live session only.
+  secureIpcHandle('comments-window:chat-commands-get', () => latestCommentsChatCommands)
+  secureIpcHandle('comments-window:chat-commands-push', (event, summary) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    latestCommentsChatCommands = summary
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:chat-commands', summary)
+    return true
+  })
+  secureIpcHandle('comments-window:chat-command-failures-get', () => latestChatCommandFailures)
+  secureIpcHandle('comments-window:chat-command-failures-push', (event, failures) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    latestChatCommandFailures = failures
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(
+        commentsWindow.webContents,
+        'comments-window:chat-command-failures',
+        failures
+      )
+    return true
+  })
+  secureIpcHandle('comments-window:chat-command', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can post a chat command reply here.'))
+    }
+    assertLiveCommentsCommandSession(command.sessionId)
+    return commentsCommandBroker.request<ChatCommandPostResult>(command.requestId, () => {
+      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+      sendElectronEvent(mainWindow.webContents, 'comments-window:chat-command-request', command)
+      return true
+    })
+  })
+  secureIpcHandle('comments-window:chat-command-result-push', (event, resolution) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
     return commentsCommandBroker.resolve(resolution)
   })

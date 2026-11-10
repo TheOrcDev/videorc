@@ -9,11 +9,19 @@ import {
   CHAT_COMMAND_REPLY_MAX_CHARS,
   CHAT_COMMAND_X_POST_MAX_CHARS,
   CHAT_COMMANDS_LIST_NAME,
+  CHAT_COMMAND_TYPICAL_MENTION,
   chatCommandDescriptionError,
   chatCommandNameError,
+  chatCommandNeedsTwoXPosts,
   chatCommandOneLine,
+  chatCommandRefusal,
   chatCommandReplyError,
+  chatCommandReplyRoom,
   chatCommandsSummary,
+  chatCommandCompletions,
+  chatCommandPostNotice,
+  chatCommandReplyFailedLine,
+  classifyChatCommandDraft,
   chatCommandTextLength,
   normalizeChatCommandName,
   validateChatCommandDraft,
@@ -104,6 +112,86 @@ describe('chat command rules (plan 226)', () => {
         command('faq')
       ])
     ).toBeNull()
+  })
+
+  it('counts the reply room and when X needs 2 posts, the way the editor shows them', () => {
+    expect(chatCommandReplyRoom('')).toBe(CHAT_COMMAND_REPLY_MAX_CHARS)
+    expect(chatCommandReplyRoom('  🚀🚀  ')).toBe(CHAT_COMMAND_REPLY_MAX_CHARS - 2)
+    expect(chatCommandReplyRoom('x'.repeat(CHAT_COMMAND_REPLY_MAX_CHARS + 3))).toBe(-3)
+    // `@viewer_name ` is 13 code points: 127 more fit one X post, 128 don't.
+    expect(CHAT_COMMAND_TYPICAL_MENTION).toHaveLength(13)
+    expect(chatCommandNeedsTwoXPosts('x'.repeat(127))).toBe(false)
+    expect(chatCommandNeedsTwoXPosts('x'.repeat(128))).toBe(true)
+    expect(chatCommandNeedsTwoXPosts('🚀'.repeat(127))).toBe(false)
+  })
+
+  it('recognizes every refusal the rules write, under the field it is about', () => {
+    const fields = [
+      ['name', cases.names],
+      ['description', cases.descriptions],
+      ['reply', cases.replies]
+    ] as const
+    for (const [field, list] of fields) {
+      for (const { error } of list) {
+        if (!error) continue
+        expect(chatCommandRefusal(`invalid-params: ${error}`)).toEqual({ field, sentence: error })
+      }
+    }
+    expect(chatCommandRefusal("Videorc's engine couldn't do that.")).toBeNull()
+  })
+
+  it('completes the names after !, then !commands while it answers', () => {
+    const summary = chatCommandsSummary({
+      commands: [command('faq'), command('go'), command('golang'), command('stream', false)],
+      listEnabled: true
+    })
+    expect(chatCommandCompletions('!', summary)).toEqual([
+      { value: '!faq', hint: ' · about faq' },
+      { value: '!go', hint: ' · about go' },
+      { value: '!golang', hint: ' · about golang' },
+      { value: '!commands', hint: ' · List your commands' }
+    ])
+    expect(chatCommandCompletions('!GO', summary)?.map((entry) => entry.value)).toEqual([
+      '!go',
+      '!golang'
+    ])
+    expect(chatCommandCompletions('!com', summary)).toEqual([
+      { value: '!commands', hint: ' · List your commands' }
+    ])
+    expect(chatCommandCompletions('!com', { ...summary, listEnabled: false })).toEqual([])
+    for (const draft of ['', 'go', '/sound', '!go now', '!!go']) {
+      expect(chatCommandCompletions(draft, summary), draft).toBeNull()
+    }
+    expect(chatCommandCompletions('!', null)).toBeNull()
+  })
+
+  it('classifies only exactly !name for a command it knows', () => {
+    const summary = { commands: [{ name: 'go', description: 'why Go' }], listEnabled: true }
+    expect(classifyChatCommandDraft('!go', summary)).toEqual({ kind: 'chatCommand', name: 'go' })
+    expect(classifyChatCommandDraft('!!go', summary)).toEqual({ kind: 'chat', text: '!go' })
+    expect(classifyChatCommandDraft('!go!', summary)).toEqual({ kind: 'chat', text: '!go!' })
+  })
+
+  it("says what the streamer's !go did, in the composer's words", () => {
+    expect(chatCommandPostNotice('go', { sent: 3, failed: 0 })).toBe('Posted the !go reply.')
+    expect(chatCommandPostNotice('go', { sent: 2, failed: 1 })).toBe(
+      "Posted the !go reply to 2 chats. 1 couldn't take it."
+    )
+    expect(chatCommandPostNotice('go', { sent: 1, failed: 2 })).toBe(
+      "Posted the !go reply to 1 chat. 2 couldn't take it."
+    )
+    expect(chatCommandPostNotice('go', { sent: 0, failed: 2 })).toBe(
+      "Couldn't post the !go reply. No chat could take it."
+    )
+    expect(chatCommandPostNotice('go', { sent: 0, failed: 0 })).toBe(
+      "Couldn't post the !go reply. No chat can take posts right now."
+    )
+    expect(
+      chatCommandReplyFailedLine(
+        { command: 'go', reason: 'reconnect YouTube to allow chat posts.' },
+        'YouTube'
+      )
+    ).toBe("!go couldn't answer on YouTube: reconnect YouTube to allow chat posts.")
   })
 
   it('pushes only enabled commands, name and description, to the Stream Manager', () => {

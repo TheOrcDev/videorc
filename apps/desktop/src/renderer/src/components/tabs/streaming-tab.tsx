@@ -7,6 +7,12 @@ import { LIVESTREAM_SETUP_GRID, PAGE_LEAD_COLUMN } from '@/lib/page-layout'
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
+// Plan 226: Chat commands loads on its own, after the page.
+const ChatCommandsSection = lazy(() =>
+  import('@/components/streaming/chat-commands-section').then((m) => ({
+    default: m.ChatCommandsSection
+  }))
+)
 
 import { GroupedList } from '@/components/list-row'
 import { LockAlert, SessionLockAlert } from '@/components/lock-alert'
@@ -381,6 +387,11 @@ function StreamingSetup({
         {/* Plan 187: tell the streamer's Discord server when they go live. It
             stays editable while live; changes apply to the next stream. */}
         <DiscordSection sessionActive={isSessionActive} targets={streaming.targets} />
+        {/* Plan 226: viewers type !name and Videorc answers as you. Free, and
+            editable while live: a change answers the next !name. */}
+        <Suspense fallback={null}>
+          <ChatCommandsSection />
+        </Suspense>
       </div>
 
       <GoLivePanel onOpenDestination={openDestination} />

@@ -129,6 +129,11 @@ import {
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
 import type { SoundRelayAction, SoundboardSummary } from '../../../../shared/sound-commands'
+import type {
+  ChatCommandPostResult,
+  ChatCommandReplyFailed,
+  ChatCommandsSummary
+} from '../../../../shared/chat-commands'
 import type { CohostActAnswer } from '../../../../shared/buddy-act'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
@@ -141,6 +146,7 @@ import { WINDOW_NAMES } from '../../../../shared/window-names'
 const BUDDY_SHORTCUT = shortcutLabel(shortcutAccelerator('cohost-focus'))
 
 const NO_MODERATION_OPERATIONS: readonly ModerationOperation[] = []
+const NO_CHAT_COMMAND_FAILURES: readonly ChatCommandReplyFailed[] = []
 const NO_COHOST_UTTERANCES: readonly CohostUtterance[] = []
 const NO_IDS: readonly string[] = []
 
@@ -313,6 +319,17 @@ export interface StreamManagerProps {
    */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /**
+   * Chat commands (plan 226 S4): the enabled commands Studio pushed (null
+   * until it reads them), for the composer's `!` completions; the streamer's
+   * `!go`, which posts the reply to every chat (absent off air); the replies
+   * that couldn't go out (D12); and ⋯ Chat commands…, which opens the section
+   * in the main window.
+   */
+  chatCommands?: ChatCommandsSummary | null
+  onChatCommand?: (name: string) => Promise<ChatCommandPostResult>
+  chatCommandFailures?: readonly ChatCommandReplyFailed[]
+  onOpenChatCommands?: () => void
   /** Plan 209 S20: `/buddy <words>`, relayed to Studio; resolves to Buddy's
    * final answer, which the composer shows. */
   onBuddy?: (sentence: string) => Promise<CohostActAnswer>
@@ -442,6 +459,10 @@ export function StreamManager({
   onBanner,
   sounds,
   onSound,
+  chatCommands = null,
+  onChatCommand,
+  chatCommandFailures = NO_CHAT_COMMAND_FAILURES,
+  onOpenChatCommands,
   onBuddy,
   markerContext,
   onMarker,
@@ -515,6 +536,11 @@ export function StreamManager({
     highlightState?.phase === 'live' ? (highlightState.messageId ?? null) : highlightedId
   const inHistory = viewMode?.kind === 'history'
   const live = !inHistory && Boolean(snapshot.sessionId)
+  // Only this live chat session's failed replies (D12): a new session starts clean.
+  const liveChatCommandFailures = useMemo(
+    () => chatCommandFailures.filter((failure) => failure.sessionId === snapshot.sessionId),
+    [chatCommandFailures, snapshot.sessionId]
+  )
   const mode = inHistory ? 'History' : live ? 'Live' : messages.length > 0 ? 'History' : 'Idle'
 
   // One clock: seconds while on air (the session clock) or while a removal
@@ -1287,6 +1313,9 @@ export function StreamManager({
             onBanner={inHistory ? undefined : onBanner}
             sounds={sounds}
             onSound={inHistory ? undefined : onSound}
+            chatCommands={live ? chatCommands : null}
+            onChatCommand={live ? onChatCommand : undefined}
+            chatCommandFailures={live ? liveChatCommandFailures : NO_CHAT_COMMAND_FAILURES}
             onBuddy={inHistory ? undefined : onBuddy}
             onUseSignIn={inHistory ? undefined : onUseSignIn}
             chatOnStream={inHistory ? undefined : chatOnStream}
@@ -1349,6 +1378,7 @@ export function StreamManager({
         onBanner={onBanner}
         sounds={sounds}
         onSound={onSound}
+        onOpenChatCommands={onOpenChatCommands}
         onOpenPreview={onOpenPreview}
         onSearchChat={searchChat}
         onStatsLayoutChange={changeStatsLayout}
