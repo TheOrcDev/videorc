@@ -215,6 +215,23 @@ export interface NativePreviewPlacementRequest {
 
 type NativePreviewPlacementApply = (request: NativePreviewPlacementRequest) => Promise<void>
 
+/**
+ * The backend refused a bounds update after the Electron proof window had
+ * already followed the Preview window (#1272). Only this refusal is safe to
+ * defer to the retrying placement queue; a failed surface create or setup
+ * is not wrapped and still fails its caller.
+ */
+export class NativePreviewBackendBoundsRefusedError extends Error {
+  constructor(readonly refusal: unknown) {
+    super(
+      `The preview backend refused the surface bounds: ${
+        refusal instanceof Error ? refusal.message : String(refusal)
+      }`
+    )
+    this.name = 'NativePreviewBackendBoundsRefusedError'
+  }
+}
+
 /** What becomes of a failed placement. */
 export interface NativePreviewPlacementFailure {
   /** 1 for the first try of this placement, 2 for its first retry, … */
@@ -315,13 +332,19 @@ export class NativePreviewPlacementQueue {
     return this.retry !== null
   }
 
-  enqueue(request: NativePreviewPlacementRequest): boolean {
+  /**
+   * Queue a placement. `force` is for one the caller knows did not land
+   * (a refused reconcile outside this queue): it is not coalesced against
+   * the last placement this queue applied, which may no longer be true of
+   * the backend.
+   */
+  enqueue(request: NativePreviewPlacementRequest, options: { force?: boolean } = {}): boolean {
     this.receivedCount += 1
     // Every push reads the window's live rect, so the newest one supersedes a
     // retry: a fresh push of the failed rect runs now instead of waiting out
     // the backoff, and one back at the last landed rect needs no retry at all.
     this.cancelRetry()
-    const desired = this.pending ?? this.active ?? this.lastApplied
+    const desired = this.pending ?? this.active ?? (options.force ? null : this.lastApplied)
     if (desired && placementRequestsEqual(desired, request)) {
       this.coalescedCount += 1
       return false

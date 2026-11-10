@@ -183,6 +183,7 @@ import { NativePreviewMotionReconciler } from './native-preview-motion-reconcile
 import { drainNativePreviewHostCommands as drainNativePreviewHostCommandsWith } from './native-preview-host-command-drain'
 import {
   NativePreviewMutationQueue,
+  NativePreviewBackendBoundsRefusedError,
   NativePreviewPlacementQueue,
   NativePreviewPumpOwnership,
   handoffNativePreviewPumpOwnership,
@@ -7780,7 +7781,9 @@ async function applyNativePreviewHostCommands(
         : await updateNativePreviewSurfaceBounds(command.bounds, generation)
   }
   if (backendBoundsFailures.length > 0) {
-    throw backendBoundsFailures[0]
+    // Typed so callers can tell this deferred refusal (the proof window has
+    // already moved) from a failed create or setup.
+    throw new NativePreviewBackendBoundsRefusedError(backendBoundsFailures[0])
   }
   return status
 }
@@ -7955,12 +7958,23 @@ async function applyNativePreviewSurfaceScene(
   try {
     await reconcileNativePreviewSurfaceForPreviewWindow()
   } catch (error) {
-    // A refused bounds push (the backend is busy with this very switch) must
-    // not drop the scene update or its re-show (#1272): the proof window has
-    // already followed the popup, and the placement queue retries the
-    // backend half until it lands.
-    safeConsole.warn('Preview scene placement was refused; retrying it:', error)
-    pushPreviewWindowPlacement()
+    // Only the backend's refusal of a bounds update is deferred (#1272): the
+    // proof window has already followed the popup, and the scene update and
+    // its re-show must not be dropped for it. A failed surface create or
+    // setup still fails the scene update.
+    if (!(error instanceof NativePreviewBackendBoundsRefusedError)) {
+      throw error
+    }
+    safeConsole.warn('Preview scene placement was refused; retrying it:', error.refusal)
+    const bounds = previewWindowSurfaceBounds()
+    if (bounds) {
+      // Forced: the queue's last applied rect may be this one, but the
+      // backend has just refused it, so it must not be coalesced away.
+      nativePreviewPlacementQueue.enqueue(
+        { bounds, generation: previewWindowSurfaceGeneration() },
+        { force: true }
+      )
+    }
   }
   if (!nativePreviewPresentationAllowedForGeneration(generation)) {
     return nativePreviewSurfaceStatus

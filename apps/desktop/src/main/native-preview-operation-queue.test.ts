@@ -5,6 +5,7 @@ import {
   NATIVE_PREVIEW_MUTATION_QUEUE_CAPACITY,
   NativePreviewMutationQueue,
   NativePreviewMutationQueueCapacityError,
+  NativePreviewBackendBoundsRefusedError,
   NativePreviewPlacementQueue,
   NativePreviewPumpOwnership,
   handoffNativePreviewPumpOwnership,
@@ -638,6 +639,33 @@ describe('NativePreviewPlacementQueue', () => {
     // The queue still works afterwards: a fresh placement runs normally.
     queue.enqueue({ bounds: surfaceBounds(10), generation: 2 })
     expect(attempts).toBe(2)
+  })
+
+  // A scene update's own reconcile can be refused for the very rect this
+  // queue last applied (the backend lost it with the surface). Its forced
+  // hand-off must run, not be coalesced against that stale `lastApplied`.
+  it('runs a forced placement even when it matches the last one applied', async () => {
+    const appliedX: number[] = []
+    const queue = new NativePreviewPlacementQueue(async ({ bounds }) => {
+      appliedX.push(bounds.screenX)
+    })
+
+    queue.enqueue({ bounds: surfaceBounds(40), generation: 1 })
+    await queue.waitForIdle()
+    expect(queue.enqueue({ bounds: surfaceBounds(40), generation: 1 })).toBe(false)
+    expect(queue.enqueue({ bounds: surfaceBounds(40), generation: 1 }, { force: true })).toBe(true)
+    await queue.waitForIdle()
+
+    expect(appliedX).toEqual([40, 40])
+  })
+
+  it('names a deferred backend refusal apart from other failures', () => {
+    const refusal = new Error('The preview surface is busy with another lifecycle operation')
+    const error = new NativePreviewBackendBoundsRefusedError(refusal)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.refusal).toBe(refusal)
+    expect(error.message).toContain('busy with another lifecycle operation')
+    expect(new Error('create failed')).not.toBeInstanceOf(NativePreviewBackendBoundsRefusedError)
   })
 
   it('reports idle while a retry waits, so hiding or closing never waits out a backoff', async () => {
