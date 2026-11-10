@@ -8469,7 +8469,9 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         if let Some(boundary) = iso_stop_at {
             encoder_bridge.stop_at(boundary);
         } else {
-            encoder_bridge.stop();
+            // #1075: a lagging Windows Media Foundation writer first writes
+            // the ticks it owes up to now; every other leg stops at once.
+            encoder_bridge.stop_for_user();
         }
     } else if let Some(stdin) = active.stdin.take() {
         legacy_ffmpeg_stdin = Some(stdin);
@@ -29281,6 +29283,14 @@ mod tests {
             "stop drain {:?} must leave FFmpeg time inside {:?}",
             crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT,
             STOP_TERM_DELAY
+        );
+        // #1075: a lagging writer first catches up to Stop, then drains; both
+        // together must still leave FFmpeg a drain's worth of time to finish.
+        let catch_up = crate::encoder_bridge::MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET;
+        assert!(
+            catch_up + crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT * 2
+                <= STOP_TERM_DELAY,
+            "stop catch-up {catch_up:?} plus the drain must fit inside {STOP_TERM_DELAY:?}"
         );
     }
 
