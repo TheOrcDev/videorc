@@ -7700,7 +7700,10 @@ async function applyNativePreviewHostCommands(
           currentGeneration: previewWindowSurfaceGeneration(),
           previewWindowOpen: previewWindowIsOpenForSurface(),
           previewWindow,
-          elevated
+          elevated,
+          // The D3D11 presenter is DPI-aware: it is placed in physical pixels,
+          // converted at the display nearest the Preview window (#1272).
+          dipToScreenRect: (rect) => screen.dipToScreenRect(previewWindow, rect)
         },
         async (request) => {
           let status: PreviewSurfaceStatus
@@ -12760,8 +12763,19 @@ async function runSmokePreviewMotionCommand(
   if (command === 'preview-window-state') {
     const surface = nativePreviewSurfaceWindow
     const mutationQueue = nativePreviewSurfaceMutationQueue.metrics()
+    const windowState = previewWindowState()
     return {
-      ...previewWindowState(),
+      ...windowState,
+      // Windows: the Preview's video rect in physical screen pixels, the
+      // space the DPI-aware D3D11 presenter reports its actual bounds in
+      // (#1272). Comparing those with the DIP rect only agrees at 100%.
+      contentBoundsPhysical:
+        process.platform === 'win32' &&
+        windowState.contentBounds &&
+        previewWindow &&
+        !previewWindow.isDestroyed()
+          ? screen.dipToScreenRect(previewWindow, windowState.contentBounds)
+          : null,
       ...smokeNativeWindowIdentity(previewWindow),
       // macOS: a docked window must cast no shadow (applyDockedPreviewChrome).
       hasShadow: previewWindow && !previewWindow.isDestroyed() ? previewWindow.hasShadow() : null,

@@ -2029,6 +2029,20 @@ const opaqueNativeWindowHandleSchema = runtimeSchema<string>(
   }
 )
 
+const previewPresenterPhysicalPlacementSchema = objectSchema(
+  {
+    screenX: numberSchema(),
+    screenY: numberSchema(),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    clipX: optionalSchema(numberSchema()),
+    clipY: optionalSchema(numberSchema()),
+    clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
+  },
+  { allowUnknown: false }
+)
+
 const mainOwnedPreviewBoundsSchema = objectSchema(
   {
     screenX: numberSchema(),
@@ -2044,6 +2058,7 @@ const mainOwnedPreviewBoundsSchema = objectSchema(
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
     orderAboveWindowHandle: optionalSchema(opaqueNativeWindowHandleSchema),
+    physicalPlacement: optionalSchema(previewPresenterPhysicalPlacementSchema),
     elevated: optionalSchema(booleanSchema),
     cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
     hostX: optionalSchema(numberSchema()),

@@ -2527,6 +2527,23 @@ export type OpaqueNativeWindowHandle = `0x${string}`
  */
 export interface MainOwnedPreviewSurfaceBounds extends PreviewSurfaceBounds {
   orderAboveWindowHandle?: OpaqueNativeWindowHandle
+  /**
+   * Windows: the same geometry in physical screen pixels
+   * (`screen.dipToScreenRect`), for the DPI-aware D3D11 presenter (#1272).
+   */
+  physicalPlacement?: PreviewPresenterPhysicalPlacement
+}
+
+/** A preview rect and its optional visible clip in physical screen pixels. */
+export interface PreviewPresenterPhysicalPlacement {
+  screenX: number
+  screenY: number
+  width: number
+  height: number
+  clipX?: number
+  clipY?: number
+  clipWidth?: number
+  clipHeight?: number
 }
 
 export interface MainOwnedPreviewSurfaceBoundsParams {

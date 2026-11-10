@@ -77,6 +77,52 @@ describe('trusted preview-window stacking', () => {
     expect(result.bounds.orderAboveWindowHandle).toBe('0x00000000fedcba98')
   })
 
+  // #1272: a 150% display. The full rect and the clip are converted one by
+  // one, so the clip keeps its place inside the scaled rect.
+  it('adds the physical placement the DPI-aware presenter is placed in', () => {
+    const handle = Buffer.alloc(8)
+    handle.writeBigUInt64LE(5n)
+    const toPhysical = vi.fn((rect: { x: number; y: number; width: number; height: number }) => ({
+      x: rect.x * 1.5,
+      y: rect.y * 1.5,
+      width: rect.width * 1.5,
+      height: rect.height * 1.5
+    }))
+    const result = withTrustedPreviewWindowStacking(
+      {
+        platform: 'win32',
+        bounds: bounds({
+          screenX: 200,
+          screenY: 148,
+          clipX: 200,
+          clipY: 168,
+          clipWidth: 960,
+          clipHeight: 400
+        }),
+        generation: 4,
+        currentGeneration: 4,
+        previewWindowOpen: true,
+        previewWindow: windowWithHandle(handle),
+        elevated: false,
+        dipToScreenRect: toPhysical
+      },
+      (params) => params
+    )
+    expect(result.bounds.physicalPlacement).toEqual({
+      screenX: 300,
+      screenY: 222,
+      width: 1440,
+      height: 810,
+      clipX: 300,
+      clipY: 252,
+      clipWidth: 1440,
+      clipHeight: 600
+    })
+    expect(toPhysical).toHaveBeenCalledTimes(2)
+    // The DIP numbers stay what the proof window and the backend size from.
+    expect(result.bounds).toMatchObject({ screenX: 200, screenY: 148, width: 960 })
+  })
+
   it('reads a fresh handle for every command', () => {
     let value = 1n
     const previewWindow = {

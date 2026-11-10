@@ -144,6 +144,34 @@ test('presenter readback proves styles, ownership, bounds, focus, and sequence p
   ])
 })
 
+// #1272: on a 150% display the DPI-aware presenter reads its rect back in
+// physical pixels. A presenter placed with the DIP numbers matched the DIP
+// content rect and passed while it covered 2/3 of the Preview.
+test('the D3D11 presenter is judged against the physical video rect when main reports one', () => {
+  const state = d3dState()
+  state.contentBoundsPhysical = { x: 180, y: 120, width: 1440, height: 810 }
+  state.surfaceStatus.windowsD3d11Presenter.actualBounds = {
+    x: 120,
+    y: 80,
+    width: 960,
+    height: 540
+  }
+  assert.deepEqual(windowsPreviewPresenterFailures(state), [
+    'presenter x=120 did not match content x=180',
+    'presenter y=80 did not match content y=120',
+    'presenter width=960 did not match content width=1440',
+    'presenter height=540 did not match content height=810'
+  ])
+
+  state.surfaceStatus.windowsD3d11Presenter.actualBounds = {
+    x: 180,
+    y: 120,
+    width: 1440,
+    height: 810
+  }
+  assert.deepEqual(windowsPreviewPresenterFailures(state), [])
+})
+
 test('linux proof mode asserts the Electron proof surface and never a native claim', () => {
   assert.equal(
     parseWindowsPreviewLifecycleMode(['--gate'], { VIDEORC_EXPECT_LINUX_PROOF: '1' }),

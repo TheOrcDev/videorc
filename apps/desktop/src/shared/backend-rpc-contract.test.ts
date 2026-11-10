@@ -242,6 +242,41 @@ describe('backend RPC contract', () => {
     }
   })
 
+  // #1272: the DPI-aware D3D11 presenter's placement in physical pixels.
+  it('accepts an exact physical placement beside the DIP bounds', () => {
+    const request = {
+      bounds: {
+        screenX: 10,
+        screenY: 20,
+        width: 1280,
+        height: 720,
+        scaleFactor: 1.5,
+        orderAboveWindowHandle: '0x000000000000abcd',
+        physicalPlacement: {
+          screenX: 15,
+          screenY: 30,
+          width: 1920,
+          height: 1080,
+          clipX: 15,
+          clipY: 60,
+          clipWidth: 1920,
+          clipHeight: 900
+        }
+      },
+      generation: 7
+    }
+    expect(validateMainOwnedPreviewSurfaceBoundsParams(request)).toEqual(request)
+    expect(() =>
+      validateMainOwnedPreviewSurfaceBoundsParams({
+        ...request,
+        bounds: {
+          ...request.bounds,
+          physicalPlacement: { ...request.bounds.physicalPlacement, hwnd: '0x1' }
+        }
+      })
+    ).toThrow()
+  })
+
   it('types role-authoritative encoder bridge process diagnostics', () => {
     expectTypeOf<
       DiagnosticStats['encoderBridgeRecordingRawVideoCopiedFrames']
