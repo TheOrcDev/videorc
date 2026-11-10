@@ -186,6 +186,34 @@ pub fn append_windows_dshow_video_input_mode_opts(
     video_size: Option<(u32, u32)>,
     codec: Option<&str>,
 ) {
+    append_windows_dshow_video_input_native_mode(
+        args,
+        device_name,
+        fps.map(|fps| fps.to_string()).as_deref(),
+        video_size,
+        codec.map(WindowsDshowInputFormat::Codec),
+    );
+}
+
+/// The format half of an explicit DirectShow mode: a compressed codec
+/// (`-vcodec mjpeg`) or a raw pixel format (`-pixel_format yuyv422`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowsDshowInputFormat<'a> {
+    Codec(&'a str),
+    PixelFormat(&'a str),
+}
+
+/// DirectShow video input with an optional explicit native mode: the rate as
+/// the camera lists it (`29.97`, `7.5`), the size and the format. Issue
+/// #1271: a camera that lists only raw modes is asked for one by pixel
+/// format and size, so DirectShow cannot pick a slow mode of its own.
+pub fn append_windows_dshow_video_input_native_mode(
+    args: &mut Vec<String>,
+    device_name: &str,
+    framerate: Option<&str>,
+    video_size: Option<(u32, u32)>,
+    format: Option<WindowsDshowInputFormat<'_>>,
+) {
     args.extend([
         "-fflags".to_string(),
         "nobuffer".to_string(),
@@ -200,14 +228,20 @@ pub fn append_windows_dshow_video_input_mode_opts(
         "-f".to_string(),
         "dshow".to_string(),
     ]);
-    if let Some(fps) = fps {
-        args.extend(["-framerate".to_string(), fps.to_string()]);
+    if let Some(framerate) = framerate {
+        args.extend(["-framerate".to_string(), framerate.to_string()]);
     }
     if let Some((width, height)) = video_size {
         args.extend(["-video_size".to_string(), format!("{width}x{height}")]);
     }
-    if let Some(codec) = codec {
-        args.extend(["-vcodec".to_string(), codec.to_string()]);
+    match format {
+        Some(WindowsDshowInputFormat::Codec(codec)) => {
+            args.extend(["-vcodec".to_string(), codec.to_string()]);
+        }
+        Some(WindowsDshowInputFormat::PixelFormat(pixel_format)) => {
+            args.extend(["-pixel_format".to_string(), pixel_format.to_string()]);
+        }
+        None => {}
     }
     args.extend(["-i".to_string(), format!("video={device_name}")]);
 }
@@ -520,6 +554,35 @@ mod tests {
                 .any(|pair| pair == ["-vcodec", "mjpeg"])
         );
         assert_eq!(args[input_index + 1], "video=USB Camera");
+    }
+
+    #[test]
+    fn windows_dshow_camera_input_asks_a_raw_mode_by_pixel_format() {
+        // Issue #1271: a YUY2-only camera is asked for its own mode.
+        let mut args = Vec::new();
+        append_windows_dshow_video_input_native_mode(
+            &mut args,
+            "LifeCam",
+            Some("29.97"),
+            Some((640, 480)),
+            Some(WindowsDshowInputFormat::PixelFormat("yuyv422")),
+        );
+
+        let input_index = args.iter().position(|arg| arg == "-i").unwrap();
+        let input = &args[..input_index];
+        assert!(input.windows(2).any(|pair| pair == ["-framerate", "29.97"]));
+        assert!(
+            input
+                .windows(2)
+                .any(|pair| pair == ["-video_size", "640x480"])
+        );
+        assert!(
+            input
+                .windows(2)
+                .any(|pair| pair == ["-pixel_format", "yuyv422"])
+        );
+        assert!(!input.iter().any(|arg| arg == "-vcodec"));
+        assert_eq!(args[input_index + 1], "video=LifeCam");
     }
 
     #[test]
