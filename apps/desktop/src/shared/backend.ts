@@ -4754,6 +4754,23 @@ export interface RuntimeInfo {
   /** Plan 216 D3: the Preview's first-frame watchdog's last decisions
    * (oldest first, last 20), so a bundle says why the Preview fell back. */
   firstFrameDecisions?: FirstFrameDecisionRecord[]
+  /** The updater's current status and its last lines (oldest first). The
+   * main process has no console in a packaged build, so without this a bundle
+   * said nothing about an update that kept failing. */
+  updater?: UpdaterDiagnostics
+}
+
+/** One updater log line kept in main for the support bundle. */
+export interface UpdaterLogEntry {
+  /** ISO timestamp. */
+  at: string
+  level: 'info' | 'warn' | 'error'
+  message: string
+}
+
+export interface UpdaterDiagnostics {
+  status: UpdateStatus
+  recentEvents: UpdaterLogEntry[]
 }
 
 /** Flat evidence a watchdog decision saw: numbers, flags and short words. */

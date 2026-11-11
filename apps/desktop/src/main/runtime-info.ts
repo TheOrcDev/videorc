@@ -46,6 +46,8 @@ export interface RuntimeInfoInput {
   backendCrashes?: readonly BackendCrashRecord[]
   /** The Preview watchdog's last decisions (see first-frame-decisions.ts). */
   firstFrameDecisions?: readonly FirstFrameDecisionRecord[]
+  /** The updater's status and last lines (see updater-log.ts). */
+  updater?: RuntimeInfo['updater']
   windowGlass?: RuntimeInfo['windowGlass']
   /** Why this session can't hold a global shortcut (see global-shortcut-lifecycle.ts). */
   globalShortcutsUnavailable?: string | null
@@ -122,6 +124,7 @@ export function buildRuntimeInfo({
   },
   backendCrashes = [],
   firstFrameDecisions = [],
+  updater,
   windowGlass,
   globalShortcutsUnavailable = null,
   env
@@ -140,6 +143,7 @@ export function buildRuntimeInfo({
     gpuFallback,
     backendCrashes: [...backendCrashes],
     firstFrameDecisions: [...firstFrameDecisions],
+    ...(updater ? { updater } : {}),
     ...(windowGlass ? { windowGlass } : {}),
     ...(globalShortcutsUnavailable ? { globalShortcutsUnavailable } : {}),
     isPackaged,
