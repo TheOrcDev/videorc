@@ -850,8 +850,8 @@ mod runtime {
     use crate::preview_camera::{PreviewCameraFrameSource, PreviewCameraPixelFormat};
     use crate::protocol::{LayoutSettings, SceneSourceKind};
     use crate::scene_geometry::{
-        CHROMA_KEY_SATURATION_FLOOR, SceneFit, SceneMask, camera_chroma_key, camera_mask,
-        resolved_camera_transform, scene_crop_from_transform, scene_source_fit,
+        SceneFit, SceneMask, camera_chroma_key, camera_mask, resolved_camera_transform,
+        scene_crop_from_transform, scene_source_fit,
     };
     use crate::state::{
         WindowsD3d11MediaCoordinatorSlot, WindowsD3d11MediaRoleHandle, acquire_windows_d3d11_media,
@@ -3454,13 +3454,8 @@ mod runtime {
         {
             let transform = resolved_camera_transform(layout, dimensions.width, dimensions.height);
             let crop = scene_crop_from_transform(&transform);
-            let chroma_key = camera_chroma_key(layout).map(|key| WindowsD3d11ChromaKey {
-                key_rgb: key.key_rgb,
-                angle_threshold_degrees: key.max_angle_deg as f32,
-                softness_degrees: key.band_deg as f32,
-                spill_suppression: key.spill as f32,
-                saturation_floor: (CHROMA_KEY_SATURATION_FLOOR / 255.0) as f32,
-            });
+            let chroma_key =
+                camera_chroma_key(layout).map(|key| WindowsD3d11ChromaKey::from_spec(&key));
             layers.push(WindowsD3d11SceneLayerInput {
                 source_id: CAMERA_SOURCE_ID,
                 source_kind: WindowsD3d11SceneSourceKind::CameraUpload,
@@ -3656,15 +3651,10 @@ mod runtime {
                             } else {
                                 1.0
                             },
-                            chroma_key: is_camera.then(|| camera_chroma_key(layout)).flatten().map(
-                                |key| WindowsD3d11ChromaKey {
-                                    key_rgb: key.key_rgb,
-                                    angle_threshold_degrees: key.max_angle_deg as f32,
-                                    softness_degrees: key.band_deg as f32,
-                                    spill_suppression: key.spill as f32,
-                                    saturation_floor: (CHROMA_KEY_SATURATION_FLOOR / 255.0) as f32,
-                                },
-                            ),
+                            chroma_key: is_camera
+                                .then(|| camera_chroma_key(layout))
+                                .flatten()
+                                .map(|key| WindowsD3d11ChromaKey::from_spec(&key)),
                             ..Default::default()
                         },
                         z_index: order as i32,

@@ -122,6 +122,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
   ]),
   compositor: Object.freeze([
     'windows_d3d11_compositor::runtime::sprite_shader_tests::windows_d3d11_shaders_compile_with_the_buddy_sprite_turn',
+    'windows_d3d11_compositor::tests::windows_d3d11_chroma_key_carries_the_reference_floor_and_hide_edges',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_bt709_video_range_matches_reference_fixtures',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_filters_scene_layers_per_output_leg',
     'windows_d3d11_compositor::tests::windows_d3d11_compositor_layout_plan_preserves_horizontal_and_vertical_geometry',

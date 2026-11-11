@@ -511,6 +511,26 @@ impl CameraLook {
     }
 }
 
+/// Hide edges (plan 227 B): how much of each side of the camera, as the
+/// streamer sees it (mirror applied), the green-screen key makes
+/// see-through. Percent of the camera frame, 0–25 per side
+/// (`scene_geometry::CAMERA_KEY_EDGE_MAX_PCT`); only applies while the key
+/// is on. `scene_geometry::camera_chroma_key` resolves the mirror.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct CameraKeyEdges {
+    pub left_pct: u32,
+    pub top_pct: u32,
+    pub right_pct: u32,
+    pub bottom_pct: u32,
+}
+
+impl CameraKeyEdges {
+    pub fn is_none(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutSettings {
@@ -559,6 +579,10 @@ pub struct LayoutSettings {
     /// other channels' maximum on kept pixels, killing the green/blue fringe.
     #[serde(default = "default_camera_chroma_key_spill_pct")]
     pub camera_chroma_key_spill_pct: u32,
+    /// Hide edges for the key (plan 227 B). Omitted while every side is 0,
+    /// so layouts saved before it round-trip unchanged.
+    #[serde(default, skip_serializing_if = "CameraKeyEdges::is_none")]
+    pub camera_chroma_key_edges: CameraKeyEdges,
     pub camera_margin: u32,
     #[serde(default = "default_camera_fit")]
     pub camera_fit: CameraFit,
@@ -1283,6 +1307,7 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         camera_chroma_key_similarity_pct: default_camera_chroma_key_similarity_pct(),
         camera_chroma_key_smoothness_pct: default_camera_chroma_key_smoothness_pct(),
         camera_chroma_key_spill_pct: default_camera_chroma_key_spill_pct(),
+        camera_chroma_key_edges: CameraKeyEdges::default(),
         camera_margin: 32,
         camera_fit: default_camera_fit(),
         camera_mirror: false,
@@ -7875,6 +7900,7 @@ mod tests {
             camera_chroma_key_similarity_pct: 40,
             camera_chroma_key_smoothness_pct: 8,
             camera_chroma_key_spill_pct: 10,
+            camera_chroma_key_edges: Default::default(),
         };
         let json = serde_json::to_string(&layout).unwrap();
         assert!(json.contains("\"layoutPreset\":\"side-by-side\""));
