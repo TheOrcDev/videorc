@@ -68,10 +68,11 @@ use crate::protocol::{
     SceneSource, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
-    ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, SceneMaskTester, SignedPixelRect,
-    background_stage_margin, background_zoom_crop, camera_chroma_key, camera_mask,
-    chroma_key_alpha, chroma_key_despill, contain_rect_pixels, scene_crop_from_transform,
-    scene_source_fit, scene_source_rect_pixels, scene_source_render_transform,
+    CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS, ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask,
+    SceneMaskTester, SignedPixelRect, background_stage_margin, background_zoom_crop,
+    camera_chroma_key, camera_mask, chroma_key_alpha_rgb, chroma_key_despill, contain_rect_pixels,
+    scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
+    scene_source_render_transform,
 };
 #[cfg(target_os = "macos")]
 pub use crate::source_mask::SourceMask;
@@ -12872,20 +12873,27 @@ fn blit_rgba_to_yuv420p(
     // None means the pixel keys fully out. Grade after despill, keeping the
     // original pixel's key alpha unchanged. Hide edges (plan 227 B) test the
     // sampled source texel: outside the kept box the pixel keys fully out.
+    // The key judges the texel's 5×5 neighbourhood (plan 229), built once
+    // for both passes; the pixel keeps its own colour.
+    let judged = options
+        .chroma_key
+        .is_some()
+        .then(|| KeyJudgedPlane::build(source));
     let keyed_pixel = |r: u8, g: u8, b: u8, x: u32, y: u32| -> Option<(u8, u8, u8, u8)> {
-        let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
-            if !spec.edges.keeps_texel(x, y, source.width, source.height) {
-                return None;
-            }
-            let alpha = chroma_key_alpha(spec, r, g, b);
-            if alpha == 0 {
-                return None;
-            }
-            let (r, g, b) = chroma_key_despill(spec, r, g, b);
-            (r, g, b, alpha)
-        } else {
-            (r, g, b, 255)
-        };
+        let (r, g, b, key_alpha) =
+            if let (Some(spec), Some(judged)) = (options.chroma_key.as_ref(), judged.as_ref()) {
+                if !spec.edges.keeps_texel(x, y, source.width, source.height) {
+                    return None;
+                }
+                let alpha = chroma_key_alpha_rgb(spec, judged.rgb(x, y));
+                if alpha == 0 {
+                    return None;
+                }
+                let (r, g, b) = chroma_key_despill(spec, r, g, b);
+                (r, g, b, alpha)
+            } else {
+                (r, g, b, 255)
+            };
         let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
         Some((r, g, b, key_alpha))
     };
@@ -13028,6 +13036,92 @@ impl LinearTap {
     }
 }
 
+/// Plan 229: the colour the key judges for every texel of a keyed source,
+/// `scene_geometry::chroma_key_neighbourhood_rgb` built once per blit and
+/// shared by the luma and chroma passes. Separable: `[1 4 6 4 1]` across,
+/// then down, as integer sums over 256 (at most 255 × 256, so they fit a
+/// `u16`). Texels past the frame's edge repeat the edge.
+struct KeyJudgedPlane {
+    width: usize,
+    sums: Vec<[u16; 3]>,
+}
+
+impl KeyJudgedPlane {
+    fn build(source: &RgbaSource<'_>) -> Self {
+        let (width, height) = (source.width as usize, source.height as usize);
+        let clamped = |centre: usize, offset: usize, len: usize| {
+            (centre + offset).saturating_sub(2).min(len.max(1) - 1)
+        };
+        let mut across = vec![[0u16; 3]; width * height];
+        across
+            .par_chunks_mut(width.max(1))
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    let mut sum = [0u16; 3];
+                    for (offset, weight) in CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS.into_iter().enumerate()
+                    {
+                        let column = clamped(x, offset, width) as u32;
+                        let (r, g, b, _) = read_source_rgba(source, column, y as u32);
+                        let weight = weight as u16;
+                        sum[0] += weight * u16::from(r);
+                        sum[1] += weight * u16::from(g);
+                        sum[2] += weight * u16::from(b);
+                    }
+                    *out = sum;
+                }
+            });
+        let mut sums = vec![[0u16; 3]; width * height];
+        sums.par_chunks_mut(width.max(1))
+            .enumerate()
+            .for_each(|(y, row)| {
+                let rows: [usize; 5] = std::array::from_fn(|offset| clamped(y, offset, height));
+                for (x, out) in row.iter_mut().enumerate() {
+                    let mut sum = [0u32; 3];
+                    for (row, weight) in rows.into_iter().zip(CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS) {
+                        let partial = across[row * width + x];
+                        for channel in 0..3 {
+                            sum[channel] += weight * u32::from(partial[channel]);
+                        }
+                    }
+                    *out = sum.map(|total| total as u16);
+                }
+            });
+        Self { width, sums }
+    }
+
+    /// The judged colour of texel (`x`, `y`), in 0..=255 units.
+    #[inline(always)]
+    fn rgb(&self, x: u32, y: u32) -> [f64; 3] {
+        self.sums[y as usize * self.width + x as usize].map(|sum| f64::from(sum) / 256.0)
+    }
+
+    /// The judged colour at a bilinear sample: the plane read with the
+    /// sample's own taps. On a texel centre it is [`Self::rgb`]; the shaders
+    /// reach the same kernel with nine bilinear taps, within a fraction of a
+    /// level between texels.
+    #[inline(always)]
+    fn rgb_linear(&self, column: LinearTap, row: LinearTap) -> [f64; 3] {
+        let (top_left, top_right) = (
+            self.rgb(column.first, row.first),
+            self.rgb(column.second, row.first),
+        );
+        let (bottom_left, bottom_right) = (
+            self.rgb(column.first, row.second),
+            self.rgb(column.second, row.second),
+        );
+        let (wx, wy) = (
+            f64::from(column.weight) / 256.0,
+            f64::from(row.weight) / 256.0,
+        );
+        std::array::from_fn(|channel| {
+            let top = top_left[channel] * (1.0 - wx) + top_right[channel] * wx;
+            let bottom = bottom_left[channel] * (1.0 - wx) + bottom_right[channel] * wx;
+            top * (1.0 - wy) + bottom * wy
+        })
+    }
+}
+
 /// One axis of bilinear source mapping (plan 200 D3), the GPU sampler's
 /// rule: the destination pixel's centre maps into the source, the sample
 /// stays half a texel inside the crop (the Metal crop clamp), so a scaled
@@ -13116,10 +13210,18 @@ fn blit_linear_rgba_to_yuv420p(
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
     let uv_height = canvas_height.div_ceil(2);
-    // Hide edges (plan 227 B) test the texel nearest the bilinear sample.
+    // Hide edges (plan 227 B) test the texel nearest the bilinear sample. The
+    // key judges the sample's neighbourhood (plan 229), built once for both
+    // passes.
+    let judged = options
+        .chroma_key
+        .is_some()
+        .then(|| KeyJudgedPlane::build(source));
     let keyed_pixel =
         |r: u8, g: u8, b: u8, column: LinearTap, row: LinearTap| -> Option<(u8, u8, u8, u8)> {
-            let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
+            let (r, g, b, key_alpha) = if let (Some(spec), Some(judged)) =
+                (options.chroma_key.as_ref(), judged.as_ref())
+            {
                 if !spec.edges.keeps_texel(
                     column.nearest(),
                     row.nearest(),
@@ -13128,7 +13230,7 @@ fn blit_linear_rgba_to_yuv420p(
                 ) {
                     return None;
                 }
-                let alpha = chroma_key_alpha(spec, r, g, b);
+                let alpha = chroma_key_alpha_rgb(spec, judged.rgb_linear(column, row));
                 if alpha == 0 {
                     return None;
                 }
@@ -14050,6 +14152,7 @@ mod tests {
     use crate::protocol::{
         SceneConfigParams, SourceSelection, StreamScreenStatus, VideoPreset, VideoSettings,
     };
+    use crate::scene_geometry::chroma_key_alpha;
     use crate::storage::Database;
     use crate::windows_d3d11_device::{
         WindowsD3d11SynchronizationToken, WindowsD3d11TextureLeaseId,
@@ -15477,14 +15580,17 @@ mod tests {
 
     #[test]
     fn yuv_blit_keys_out_green_and_keeps_foreground() {
-        // Top row: key green (keys out) + red (survives). Bottom row mirrors
-        // it so the 2×2 UV block's top-left sample is the KEYED pixel — the
-        // block must keep the background chroma, like the binary mask does.
+        // Top row: key green (keys out) + a skin tone (survives). Bottom row
+        // mirrors it so the 2×2 UV block's top-left sample is the KEYED pixel
+        // — the block must keep the background chroma, like the binary mask
+        // does. In a 2×2 frame every texel is an edge of the key's 5×5
+        // neighbourhood (plan 229), so the foreground is skin, the subject's
+        // real chroma, not pure red, whose chroma equals pure green's.
         let source: Vec<u8> = [
             [0u8, 255, 0, 255],
-            [255, 0, 0, 255],
+            [200, 150, 120, 255],
             [0, 255, 0, 255],
-            [255, 0, 0, 255],
+            [200, 150, 120, 255],
         ]
         .concat();
         let mut bytes = blue_yuv_canvas_2x2();
@@ -15516,16 +15622,132 @@ mod tests {
             },
         ));
         let (blue_y, blue_u, blue_v) = rgb_to_yuv(0, 0, 255);
-        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        let (skin_y, _, _) = rgb_to_yuv(200, 150, 120);
         assert_eq!(bytes[0], blue_y, "keyed pixel keeps the background");
-        assert_eq!(bytes[1], red_y, "red foreground lands");
+        assert_eq!(bytes[1], skin_y, "skin foreground lands");
         assert_eq!(bytes[2], blue_y);
-        assert_eq!(bytes[3], red_y);
+        assert_eq!(bytes[3], skin_y);
         assert_eq!(
             (bytes[4], bytes[5]),
             (blue_u, blue_v),
             "UV block sampled on the keyed pixel keeps background chroma"
         );
+    }
+
+    /// Plan 229, the owner's "snow" through both CPU blits: a 2×2 speck of
+    /// real screen texels that keys only part way alone (rgb 9,107,53, 25°
+    /// from the key), in the lit screen around it (rgb 21,124,55). It keys
+    /// with the screen at 1:1 (the point blit) and scaled ×2 (the bilinear
+    /// blit, which reads the judged plane bilinearly).
+    #[test]
+    fn cpu_blits_key_a_speck_with_the_screen_around_it() {
+        let spec = chroma_key_test_spec();
+        assert!(chroma_key_alpha(&spec, 9, 107, 53) > 40, "the speck alone");
+        let size = 9u32;
+        let source: Vec<u8> = (0..size * size)
+            .flat_map(|index| {
+                let (x, y) = (index % size, index / size);
+                if (4..6).contains(&x) && (4..6).contains(&y) {
+                    [9u8, 107, 53, 255]
+                } else {
+                    [21, 124, 55, 255]
+                }
+            })
+            .collect();
+        let (blue_y, blue_u, blue_v) = rgb_to_yuv(0, 0, 255);
+        for (canvas, linear) in [(size, false), (size * 2, true)] {
+            let pixels = (canvas * canvas) as usize;
+            let mut bytes = vec![blue_u; raw_yuv420p_len(canvas, canvas)];
+            bytes[..pixels].fill(blue_y);
+            let chroma = canvas.div_ceil(2).pow(2) as usize;
+            bytes[pixels + chroma..].fill(blue_v);
+            assert!(blit_rgba_to_yuv420p(
+                &RgbaSource {
+                    bytes: &source,
+                    width: size,
+                    height: size,
+                    format: SourcePixelFormat::Rgba,
+                },
+                &mut bytes,
+                canvas,
+                canvas,
+                PixelRect {
+                    x: 0,
+                    y: 0,
+                    width: canvas,
+                    height: canvas,
+                },
+                SourceRenderOptions {
+                    crop: SceneCrop::none(),
+                    pan: (0.0, 0.0),
+                    contain: false,
+                    mirror_x: false,
+                    mask: SceneMask::None,
+                    chroma_key: Some(spec),
+                    camera_look: crate::protocol::CameraLook::default(),
+                    linear,
+                },
+            ));
+            let kept = bytes[..pixels]
+                .iter()
+                .filter(|&&luma| luma != blue_y)
+                .count();
+            assert_eq!(
+                kept, 0,
+                "{canvas}×{canvas} (linear {linear}): every pixel keys"
+            );
+        }
+    }
+
+    /// Plan 229: the CPU blits' separable plane is the reference
+    /// neighbourhood at every texel of an odd-sized, noisy frame (edges and
+    /// corners included), and its bilinear read is the plane on a texel.
+    #[test]
+    fn key_judged_plane_is_the_reference_neighbourhood_at_every_texel() {
+        let (width, height) = (13u32, 7u32);
+        let mut state = 0x2545_f491_u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let bytes: Vec<u8> = (0..width * height * 4).map(|_| next() as u8).collect();
+        for format in [SourcePixelFormat::Rgba, SourcePixelFormat::Bgra] {
+            let source = RgbaSource {
+                bytes: &bytes,
+                width,
+                height,
+                format,
+            };
+            let plane = KeyJudgedPlane::build(&source);
+            for y in 0..height {
+                for x in 0..width {
+                    let reference = crate::scene_geometry::chroma_key_neighbourhood_rgb(
+                        |column, row| {
+                            let (r, g, b, _) = read_source_rgba(&source, column, row);
+                            [r, g, b]
+                        },
+                        x,
+                        y,
+                        width,
+                        height,
+                    );
+                    assert_eq!(plane.rgb(x, y), reference, "texel ({x}, {y})");
+                    let on_texel = LinearTap {
+                        first: x,
+                        second: (x + 1).min(width - 1),
+                        weight: 0,
+                    };
+                    let row = LinearTap {
+                        first: y,
+                        second: (y + 1).min(height - 1),
+                        weight: 0,
+                    };
+                    assert_eq!(plane.rgb_linear(on_texel, row), reference);
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -15610,7 +15832,10 @@ mod tests {
             .expect("metal compose");
 
         // Same Y for every pixel within rounding: the CPU keys in YUV space,
-        // the GPU keys in RGB then converts — linear ops that must agree.
+        // the GPU keys in RGB then converts — linear ops that must agree. In
+        // a 2×2 frame each texel's 5×5 neighbourhood (plan 229) mixes all
+        // four, so this also pins the CPU's integer kernel to the shader's
+        // nine bilinear taps, clamped at the frame's edge.
         for pixel in 0..4 {
             let b = gpu_pixels[pixel * 4];
             let g = gpu_pixels[pixel * 4 + 1];
@@ -15622,13 +15847,37 @@ mod tests {
                 "pixel {pixel}: cpu Y {cpu_y} vs gpu Y {gpu_y}"
             );
         }
-        // The keyed pixel is exactly the background on both paths.
+
+        // Each tone on its own (a flat frame judges its own colour): the
+        // screen tone is exactly the background on both paths, red and grey
+        // stay, and the ramp tone blends part way.
         let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
-        assert_eq!(cpu[0], blue_y);
-        assert_eq!(gpu_pixels[0], 255, "gpu keyed pixel keeps blue");
-        assert!(gpu_pixels[1] <= 2 && gpu_pixels[2] <= 2);
-        // The partial pixel genuinely blended on both paths (neither the
-        // background nor the despilled source survives verbatim).
+        for (label, tone) in [
+            ("shadowed screen", pixels[0]),
+            ("red", pixels[1]),
+            ("ramp tone", pixels[2]),
+            ("grey", pixels[3]),
+        ] {
+            let Some((cpu, gpu)) = cpu_and_gpu_keyed_luma([tone; 4], spec) else {
+                return;
+            };
+            assert!(
+                (i16::from(gpu[0]) - i16::from(cpu[0])).abs() <= 4,
+                "{label}: cpu Y {} vs gpu Y {}",
+                cpu[0],
+                gpu[0]
+            );
+            let own_y = rgb_to_yuv(tone[0], tone[1], tone[2]).0;
+            match label {
+                "shadowed screen" => assert_eq!(cpu[0], blue_y, "{label} keys"),
+                "ramp tone" => assert!(
+                    cpu[0] != blue_y && cpu[0] != own_y,
+                    "{label} blends part way, got Y {}",
+                    cpu[0]
+                ),
+                _ => assert_eq!(cpu[0], own_y, "{label} stays"),
+            }
+        }
         let partial_alpha = chroma_key_alpha(&spec, 100, 135, 100);
         assert!(
             partial_alpha > 0 && partial_alpha < 255,
@@ -15733,6 +15982,8 @@ mod tests {
             return;
         };
         let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        // Mixed, each texel's neighbourhood (plan 229) blends all four: the
+        // two paths still agree.
         for pixel in 0..4 {
             assert!(
                 (i16::from(gpu[pixel]) - i16::from(cpu[pixel])).abs() <= 4,
@@ -15741,10 +15992,28 @@ mod tests {
                 gpu[pixel]
             );
         }
-        assert_eq!(cpu[0], blue_y, "deep shadow keys on the CPU");
-        assert_eq!(cpu[3], blue_y, "shadow keys on the CPU");
-        assert_eq!(cpu[1], rgb_to_yuv(27, 23, 25).0, "t-shirt kept on the CPU");
-        assert_eq!(cpu[2], rgb_to_yuv(6, 9, 6).0, "mic arm kept on the CPU");
+        // Each tone as a flat frame keys or stays on both paths.
+        for (label, tone, keys) in [
+            ("deep shadow", pixels[0], true),
+            ("t-shirt", pixels[1], false),
+            ("mic arm", pixels[2], false),
+            ("shadow", pixels[3], true),
+        ] {
+            let Some((cpu, gpu)) = cpu_and_gpu_keyed_luma([tone; 4], chroma_key_test_spec()) else {
+                return;
+            };
+            let expected = if keys {
+                blue_y
+            } else {
+                rgb_to_yuv(tone[0], tone[1], tone[2]).0
+            };
+            assert_eq!(cpu[0], expected, "{label} on the CPU");
+            assert!(
+                (i16::from(gpu[0]) - i16::from(expected)).abs() <= 4,
+                "{label} in Metal: Y {} vs {expected}",
+                gpu[0]
+            );
+        }
     }
 
     /// Plan 227 B: Hide edges cut the same source column on both paths.
@@ -15794,6 +16063,20 @@ mod tests {
         assert_eq!(
             crate::windows_d3d11_compositor::windows_chroma_key_floor_params(),
             reference.map(|value| value as f32)
+        );
+        // Plan 229: the judged neighbourhood's taps, mirrored the same way.
+        let neighbourhood = [
+            crate::scene_geometry::CHROMA_KEY_NEIGHBOURHOOD_TAP_OFFSET as f32,
+            crate::scene_geometry::CHROMA_KEY_NEIGHBOURHOOD_SIDE_TAP_WEIGHT as f32,
+        ];
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            crate::metal_compositor::CHROMA_KEY_NEIGHBOURHOOD_PARAMS,
+            [neighbourhood[0], neighbourhood[1], 0.0, 0.0]
+        );
+        assert_eq!(
+            crate::windows_d3d11_compositor::windows_chroma_key_neighbourhood_params(),
+            neighbourhood
         );
     }
 
