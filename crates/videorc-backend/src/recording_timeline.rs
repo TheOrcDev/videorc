@@ -51,14 +51,22 @@ pub enum RecordingStartPhase {
     StartingPublished,
     FfmpegSpawn,
     BridgeFifoOpen,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeMfStartup,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeMftEnumerate,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeMftActivate,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeInputSetup,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeMftConfigure,
     BridgeFirstFrame,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeFirstInput,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeOutputRenegotiated,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeFirstOutput,
     BridgeReady,
     MuxerProgress,
