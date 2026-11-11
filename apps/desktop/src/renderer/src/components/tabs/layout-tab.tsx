@@ -41,7 +41,7 @@ import {
 } from '@/components/scene/overlay-stage'
 import { HideScreenSection } from '@/components/scene/hide-screen-section'
 import { SceneList } from '@/components/scene/scene-list'
-import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
+import { SceneStage, stageLayoutOnlyNote, type StagePhase } from '@/components/scene/scene-stage'
 import { ScreenSizeField } from '@/components/scene/screen-size-field'
 import { ScreenZoomField } from '@/components/scene/screen-zoom-field'
 import { presetCameraCornerRect } from '@/components/scene/stage-corner'
@@ -699,6 +699,18 @@ export function LayoutTab(): ReactElement {
       ? dockHiddenDisplay(previewWindow.dockHiddenReason ?? 'no-slot-report')
       : null
   const liveHint = liveHidden ? `${liveHidden.title}. ${liveHidden.detail}` : null
+  // Without the live canvas the stage is a diagram, so it says where the
+  // picture is (issue #1274). The vertical view has its own line.
+  const layoutOnlyNote =
+    !liveCanvasSupported && !verticalView ? stageLayoutOnlyNote(previewWindow) : null
+  const layoutOnlyAction = layoutOnlyNote?.action
+  const showPictureFromLayoutOnly = useCallback(() => {
+    if (layoutOnlyAction === 'pop-out') {
+      void setPreviewWindowMode('floating')
+      return
+    }
+    void openPreviewWindow()
+  }, [layoutOnlyAction, openPreviewWindow, setPreviewWindowMode])
   // The Buddy's still, drawn in its zone on the schematic canvas (the live
   // canvas shows the pet itself while it is selected or dragged).
   const buddyPicture = buddyStateImageUrl(
@@ -959,6 +971,8 @@ export function LayoutTab(): ReactElement {
               // outputs move on release.
               draftsRefused={isSessionActive}
               liveHint={verticalView ? 'Vertical stream: overlay placement only.' : liveHint}
+              layoutOnlyNote={layoutOnlyNote}
+              onLayoutOnlyAction={showPictureFromLayoutOnly}
               liveSurface={!verticalView && liveSurface}
               // The preview floating in its own window follows a drag too.
               previewFollowsGestures={
