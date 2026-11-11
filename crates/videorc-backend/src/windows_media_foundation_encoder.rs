@@ -290,6 +290,48 @@ pub struct MediaFoundationH264Encoder {
     com_started: bool,
 }
 
+/// An unused [`MediaFoundationH264Encoder`] between two threads: built and
+/// configured on one, adopted by another with
+/// [`MediaFoundationThreadHandoff::adopt_on_current_thread`].
+pub struct MediaFoundationThreadHandoff {
+    encoder: MediaFoundationH264Encoder,
+}
+
+// SAFETY: the encoder's `!Send` marker guards its per-thread COM reference,
+// which `into_thread_handoff` already returned. What travels are free-threaded
+// MTA objects (the async MFT, its activation and event generator; the process
+// holds the MTA for its lifetime, see windows_com_lifetime.rs) and D3D11
+// objects, none of them in use: an encoder that took a frame is refused the
+// hand-off, and only one thread holds the wrapper. `RetiredTransform` moves
+// the same objects to the reaper thread on the same argument.
+unsafe impl Send for MediaFoundationThreadHandoff {}
+
+impl MediaFoundationThreadHandoff {
+    /// Joins the MTA on the calling thread and gives it the encoder, whose
+    /// drop then leaves the MTA here. Refused (and the encoder dropped,
+    /// balanced) when its upload device was removed while it waited.
+    pub fn adopt_on_current_thread(self) -> Result<MediaFoundationH264Encoder> {
+        let mut encoder = self.encoder;
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_err() {
+            // The encoder holds no COM reference of this thread; dropping it
+            // here releases its interfaces and its MFStartup reference only.
+            bail!(
+                "standby encoder adoption could not join the MTA: HRESULT=0x{:08X}",
+                hr.0 as u32
+            );
+        }
+        encoder.com_started = true;
+        ensure!(
+            !encoder.input_device_removed(),
+            "standby encoder's D3D11 upload device was removed while it waited"
+        );
+        // Its construction stamps are from the idle period, not this start.
+        encoder.startup_steps.steps.clear();
+        Ok(encoder)
+    }
+}
+
 /// Steps of an encoder's start that the bridge folds into the session's start
 /// timeline (#1267). Telemetry only: stamping never changes behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1116,6 +1158,55 @@ impl MediaFoundationH264Encoder {
     /// first access unit is out.
     pub fn take_startup_steps(&mut self) -> Vec<(MediaFoundationStartupStep, Instant)> {
         self.startup_steps.take()
+    }
+
+    /// Releases this thread's COM reference and wraps the encoder so another
+    /// thread can adopt it (the standby encoder, see `windows_mf_standby`).
+    ///
+    /// Only an encoder that never took a frame may move: its MFT has begun
+    /// streaming but holds no input, output or surface in flight. The
+    /// encoder's `MFStartup` reference travels with it (Media Foundation
+    /// counts per process), and its COM reference is returned here, on the
+    /// thread that took it; the adopting thread takes its own. Neither can
+    /// tear the apartment down: `windows_com_lifetime` holds the MTA and one
+    /// `MFStartup` reference for the whole process.
+    pub fn into_thread_handoff(
+        mut self,
+    ) -> std::result::Result<MediaFoundationThreadHandoff, Self> {
+        if self.drained
+            || !self.submitted_pts.is_empty()
+            || self.last_output_pts.is_some()
+            || self.input_credits > 0
+        {
+            return Err(self);
+        }
+        if self.com_started {
+            unsafe { CoUninitialize() };
+            self.com_started = false;
+        }
+        Ok(MediaFoundationThreadHandoff { encoder: self })
+    }
+
+    /// True when the D3D11 device this encoder uploads through was removed
+    /// (driver reset, TDR, adapter change) since it was built.
+    fn input_device_removed(&self) -> bool {
+        let context = self
+            .d3d11_cpu_upload
+            .as_ref()
+            .map(|input| &input.immediate_context)
+            .or_else(|| {
+                self.d3d11_input
+                    .as_ref()
+                    .map(|input| &input.immediate_context)
+            });
+        let Some(context) = context else {
+            return false;
+        };
+        unsafe {
+            context
+                .GetDevice()
+                .is_ok_and(|device| device.GetDeviceRemovedReason().is_err())
+        }
     }
 
     fn record_submitted_frame(&mut self) {

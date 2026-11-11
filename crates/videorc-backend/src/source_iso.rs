@@ -1019,6 +1019,7 @@ pub fn start_source_iso_writers(
                 video_epoch.clone(),
                 start_barrier.clone(),
                 0,
+                crate::encoder_bridge::MediaFoundationStandbyUse::None,
             )
             .with_context(|| {
                 format!(

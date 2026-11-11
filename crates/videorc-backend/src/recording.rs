@@ -62,8 +62,9 @@ use crate::encoder_bridge::gate_encoder_bridge_lifecycle_persistence;
 use crate::encoder_bridge::{
     EncoderBridgeDiagnosticsContext, EncoderBridgeLifecycleSnapshot, EncoderBridgeOutputProfile,
     EncoderBridgeOutputRole, EncoderBridgeRecordingSession, EncoderBridgeShutdownBatch,
-    EncoderBridgeShutdownBatchReport, EncoderBridgeVideoOutput, begin_encoder_bridge_shutdown,
-    start_synthetic_recording_bridge, wait_for_encoder_bridge_start_admission,
+    EncoderBridgeShutdownBatchReport, EncoderBridgeVideoOutput, MediaFoundationStandbyUse,
+    begin_encoder_bridge_shutdown, start_synthetic_recording_bridge,
+    wait_for_encoder_bridge_start_admission,
 };
 use crate::entitlements;
 use crate::ffmpeg::ffmpeg_file_path;
@@ -7185,6 +7186,14 @@ async fn start_session_with_timeline(
             // Applied only when this writer runs the stream policy (a
             // stream-only session); a recording keeps its own budget.
             stream_queue_allowance_ms,
+            // The idle Clips ring builds the next Record's encoder; every
+            // other session takes it when the profile matches and releases
+            // it otherwise, so no stale encoder session outlives a start.
+            if replay_only {
+                MediaFoundationStandbyUse::Arm
+            } else {
+                MediaFoundationStandbyUse::Adopt
+            },
         ) {
             Ok(bridge) => Some(bridge),
             Err(error) => {
@@ -7251,6 +7260,7 @@ async fn start_session_with_timeline(
                         video_epoch.clone(),
                         source_iso_start_barrier.clone(),
                         stream_queue_allowance_ms,
+                        MediaFoundationStandbyUse::None,
                     )?)
                 }
                 _ => None,

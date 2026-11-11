@@ -245,6 +245,20 @@ impl EncoderBridgeVideoOutput {
     }
 }
 
+/// What a bridge writer does with the standby Media Foundation encoder
+/// (`windows_mf_standby`, #1267 follow-up). Ignored off Windows and by every
+/// output that is not the CPU-fed Media Foundation path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaFoundationStandbyUse {
+    #[default]
+    None,
+    /// The Record's own leg: take the standby when its profile matches.
+    Adopt,
+    /// The replay-only Clips ring, running while the user is idle: once its
+    /// first access unit is out, build a standby for the next Record.
+    Arm,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncoderBridgeOutputRole {
     Shared,
@@ -3737,6 +3751,7 @@ pub fn start_synthetic_recording_bridge(
     // interleave it with the later audio (`stream_queue_allowance_ms` in
     // recording.rs). Applied only when this writer runs the stream policy.
     stream_queue_allowance_ms: u32,
+    mf_standby: MediaFoundationStandbyUse,
 ) -> Result<EncoderBridgeRecordingSession> {
     let byte_len = raw_yuv420p_len(width, height)?;
     #[cfg(unix)]
@@ -3844,6 +3859,7 @@ pub fn start_synthetic_recording_bridge(
                 video_epoch,
                 start_barrier,
                 stream_queue_allowance_ms,
+                mf_standby,
                 lifecycle: writer_lifecycle,
             };
             write_synthetic_recording_frames(params);
@@ -4076,6 +4092,8 @@ struct SyntheticRecordingWriterParams {
     /// Plan 218 S3b: FFmpeg's deliberate interleave hold on this stream's
     /// frames; zero for a recording.
     stream_queue_allowance_ms: u32,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    mf_standby: MediaFoundationStandbyUse,
     lifecycle: EncoderBridgeWriterLifecycle,
 }
 
@@ -4130,6 +4148,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         video_epoch,
         start_barrier,
         stream_queue_allowance_ms,
+        #[cfg(target_os = "windows")]
+        mf_standby,
+        #[cfg(not(target_os = "windows"))]
+            mf_standby: _,
         lifecycle,
     } = params;
     let _iso_membership_guard = IsoBatchWriterGuard(iso_member.clone());
@@ -4174,62 +4196,92 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // already exists (recording.rs creates it before spawning FFmpeg), so
     // FFmpeg's open succeeds while the encoder is still being built, and a
     // failed build leaves only an unopened pipe that session cleanup removes.
+    // The standby the Clips ring arms once its own first unit is out.
     #[cfg(target_os = "windows")]
-    let prepared_media_foundation_encoder =
-        if media_foundation_encoder_precedes_fifo_open(video_output, d3d11_input.is_some()) {
-            let config = MediaFoundationEncoderConfig {
-                width,
-                height,
-                fps: target_fps.max(1),
-                bitrate_kbps: bitrate_kbps.unwrap_or(6_000),
-                low_latency,
-                input_topology: mf_input_topology,
-            };
-            let first_direct_texture = direct_d3d11_source
-                .as_ref()
-                .and_then(PreviewScreenD3D11FrameSource::latest_frame)
-                .and_then(|frame| frame.source_d3d11_texture.clone());
-            let encoder_result = match first_direct_texture.as_ref() {
-                Some(texture) => {
-                    MediaFoundationH264Encoder::new_with_d3d11_texture(config, texture)
-                }
-                None if direct_d3d11_source.is_some() => Err(anyhow::anyhow!(
-                    "direct D3D11 recording source had no retained capture texture"
-                )),
-                None => MediaFoundationH264Encoder::new(config),
-            };
-            let encoder = match encoder_result {
-                Ok(mut encoder) => {
-                    encoder.configure_for_bridge_writer(
-                        media_foundation_writer_input_credit_timeout(target_fps),
-                        accounts_session_frames,
-                    );
-                    stamp_media_foundation_startup_steps(&startup_trace, &mut encoder);
-                    encoder
-                }
-                Err(error) => {
-                    let error = record_encoder_bridge_terminal_failure(
-                        &terminal_failure,
-                        format!(
-                            "Could not prepare Media Foundation encoder bridge output: {error}"
-                        ),
-                    );
-                    signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
-                    emit_encoder_bridge_diagnostics_from_thread(
-                        &diagnostics_tx,
-                        session_id.clone(),
-                        target_fps,
-                        EncoderBridgeRuntimeStats::default(),
-                        diagnostics_context,
-                        Some(error),
-                    );
-                    return;
-                }
-            };
-            Some(encoder)
-        } else {
-            None
+    let mut standby_arm_config = None::<MediaFoundationEncoderConfig>;
+    #[cfg(target_os = "windows")]
+    let prepared_media_foundation_encoder = if media_foundation_encoder_precedes_fifo_open(
+        video_output,
+        d3d11_input.is_some(),
+    ) {
+        let config = MediaFoundationEncoderConfig {
+            width,
+            height,
+            fps: target_fps.max(1),
+            bitrate_kbps: bitrate_kbps.unwrap_or(6_000),
+            low_latency,
+            input_topology: mf_input_topology,
         };
+        let first_direct_texture = direct_d3d11_source
+            .as_ref()
+            .and_then(PreviewScreenD3D11FrameSource::latest_frame)
+            .and_then(|frame| frame.source_d3d11_texture.clone());
+        let cpu_fed = first_direct_texture.is_none() && direct_d3d11_source.is_none();
+        if cpu_fed && mf_standby == MediaFoundationStandbyUse::Arm {
+            standby_arm_config = Some(config.clone());
+        }
+        let mut adopted_standby = false;
+        let encoder_result = match first_direct_texture.as_ref() {
+            Some(texture) => MediaFoundationH264Encoder::new_with_d3d11_texture(config, texture),
+            None if direct_d3d11_source.is_some() => Err(anyhow::anyhow!(
+                "direct D3D11 recording source had no retained capture texture"
+            )),
+            None if mf_standby == MediaFoundationStandbyUse::Adopt => {
+                match crate::windows_mf_standby::take(&config) {
+                    crate::windows_mf_standby::StandbyTake::Adopted { encoder, waited } => {
+                        tracing::info!(
+                            "[mf-standby] Record adopted standby encoder {} for {} (waited {} ms)",
+                            encoder.identity(),
+                            config.profile_label(),
+                            waited.as_millis()
+                        );
+                        adopted_standby = true;
+                        Ok(encoder)
+                    }
+                    crate::windows_mf_standby::StandbyTake::Missed(reason) => {
+                        tracing::info!(
+                            "[mf-standby] Record builds its own encoder for {}: {reason}",
+                            config.profile_label()
+                        );
+                        MediaFoundationH264Encoder::new(config)
+                    }
+                }
+            }
+            None => MediaFoundationH264Encoder::new(config),
+        };
+        let encoder = match encoder_result {
+            Ok(mut encoder) => {
+                encoder.configure_for_bridge_writer(
+                    media_foundation_writer_input_credit_timeout(target_fps),
+                    accounts_session_frames,
+                );
+                stamp_media_foundation_startup_steps(&startup_trace, &mut encoder);
+                if adopted_standby {
+                    startup_trace.stamp(RecordingStartPhase::BridgeMftStandby);
+                }
+                encoder
+            }
+            Err(error) => {
+                let error = record_encoder_bridge_terminal_failure(
+                    &terminal_failure,
+                    format!("Could not prepare Media Foundation encoder bridge output: {error}"),
+                );
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
+                emit_encoder_bridge_diagnostics_from_thread(
+                    &diagnostics_tx,
+                    session_id.clone(),
+                    target_fps,
+                    EncoderBridgeRuntimeStats::default(),
+                    diagnostics_context,
+                    Some(error),
+                );
+                return;
+            }
+        };
+        Some(encoder)
+    } else {
+        None
+    };
     let fifo = match open_recording_fifo_writer(&fifo_path, &stop, true) {
         Ok(fifo) => {
             startup_trace.stamp(RecordingStartPhase::BridgeFifoOpen);
@@ -4991,6 +5043,15 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             );
         }
         let sleep_started_at = Instant::now();
+        // The Clips ring is up (its first unit reached FFmpeg): build the
+        // next Record's encoder now, off the click path.
+        #[cfg(target_os = "windows")]
+        if startup_ready_tx.is_none()
+            && media_foundation_encoder.is_some()
+            && let Some(config) = standby_arm_config.take()
+        {
+            crate::windows_mf_standby::arm(config);
+        }
         // #1267: until the first access unit is in the FIFO, answer the MFT
         // between ticks. It asks for its output type again and emits that
         // unit well inside one frame interval, but read only at each submit
