@@ -52,6 +52,7 @@ use crate::protocol::{
 };
 #[cfg(any(test, debug_assertions))]
 use crate::protocol::{EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult};
+use crate::recording_timeline::{BridgeStartupTrace, RecordingStartPhase};
 #[cfg(target_os = "windows")]
 use crate::scene_geometry::{PixelRect, SceneCrop, SceneMask};
 use crate::state::AppState;
@@ -69,7 +70,7 @@ use crate::windows_d3d11_session::{
 #[cfg(target_os = "windows")]
 use crate::windows_media_foundation_encoder::{
     D3D11BgraOverlay, DRAIN_TIMEOUT as MEDIA_FOUNDATION_DRAIN_TIMEOUT, MediaFoundationEncodedFrame,
-    MediaFoundationEncoderConfig, MediaFoundationH264Encoder,
+    MediaFoundationEncoderConfig, MediaFoundationH264Encoder, MediaFoundationStartupStep,
 };
 
 const ENCODER_BRIDGE_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(2);
@@ -2834,6 +2835,88 @@ impl EncoderBridgeDrainState {
     }
 }
 
+/// #1267: a CPU-fed Media Foundation writer builds its encoder while FFmpeg
+/// is still starting, before it waits for the video FIFO to be opened. The
+/// D3D11 ticket writer gets its encoder from the media thread instead.
+#[cfg(any(test, target_os = "windows"))]
+const fn media_foundation_encoder_precedes_fifo_open(
+    video_output: EncoderBridgeVideoOutput,
+    d3d11_ticket_input: bool,
+) -> bool {
+    video_output.uses_media_foundation() && !d3d11_ticket_input
+}
+
+/// How often the bridge asks the MFT for its first access unit between ticks.
+#[cfg(target_os = "windows")]
+const MEDIA_FOUNDATION_FIRST_OUTPUT_POLL: Duration = Duration::from_millis(2);
+
+/// #1267: polls the MFT until `until` (the next frame tick) for the
+/// session's first access unit and writes whatever it emits to the FIFO.
+/// `Ok(true)` means at least one access unit reached FFmpeg. An error is the
+/// same failure the next submit would have met; the caller hands it to the
+/// tick's write path, which already knows how to end the writer on it.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn poll_media_foundation_first_access_unit(
+    encoder: &mut MediaFoundationH264Encoder,
+    fifo: &mut File,
+    ts_writer: &mut MpegTsH264Writer,
+    stop: &AtomicBool,
+    until: Instant,
+    zero_copy_frames: &mut u64,
+    output_frames: &mut u64,
+    output_bytes: &mut u64,
+    fifo_write_times_ms: &mut Vec<f64>,
+) -> io::Result<bool> {
+    loop {
+        let frames = encoder
+            .poll_output()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if !frames.is_empty() {
+            let written_before = *output_frames;
+            write_media_foundation_frames(
+                frames,
+                fifo,
+                ts_writer,
+                stop,
+                zero_copy_frames,
+                output_frames,
+                output_bytes,
+                fifo_write_times_ms,
+            )?;
+            return Ok(*output_frames > written_before);
+        }
+        let now = Instant::now();
+        if now >= until || stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        thread::sleep((until - now).min(MEDIA_FOUNDATION_FIRST_OUTPUT_POLL));
+    }
+}
+
+/// Folds the encoder's start-step stamps into the bridge's trace (#1267).
+#[cfg(target_os = "windows")]
+fn stamp_media_foundation_startup_steps(
+    trace: &BridgeStartupTrace,
+    encoder: &mut MediaFoundationH264Encoder,
+) {
+    for (step, at) in encoder.take_startup_steps() {
+        let phase = match step {
+            MediaFoundationStartupStep::RuntimeStarted => RecordingStartPhase::BridgeMfStartup,
+            MediaFoundationStartupStep::Enumerated => RecordingStartPhase::BridgeMftEnumerate,
+            MediaFoundationStartupStep::Activated => RecordingStartPhase::BridgeMftActivate,
+            MediaFoundationStartupStep::InputSetup => RecordingStartPhase::BridgeInputSetup,
+            MediaFoundationStartupStep::Configured => RecordingStartPhase::BridgeMftConfigure,
+            MediaFoundationStartupStep::FirstInput => RecordingStartPhase::BridgeFirstInput,
+            MediaFoundationStartupStep::OutputRenegotiated => {
+                RecordingStartPhase::BridgeOutputRenegotiated
+            }
+            MediaFoundationStartupStep::FirstOutput => RecordingStartPhase::BridgeFirstOutput,
+        };
+        trace.stamp_at(phase, at);
+    }
+}
+
 fn signal_encoder_bridge_startup(
     sender: &mut Option<oneshot::Sender<std::result::Result<(), String>>>,
     result: std::result::Result<(), String>,
@@ -2850,6 +2933,9 @@ pub struct EncoderBridgeRecordingSession {
     iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready: Option<oneshot::Receiver<std::result::Result<(), String>>>,
+    /// The writer thread's start-step stamps (#1267), folded into the
+    /// session's start timeline once the bridge is ready.
+    startup_trace: Arc<BridgeStartupTrace>,
     bootstrap_reader: StdMutex<Option<std::fs::File>>,
     fifo_path: PathBuf,
     writer: Option<thread::JoinHandle<()>>,
@@ -2995,6 +3081,10 @@ impl EncoderBridgeRecordingSession {
         read_encoder_bridge_terminal_failure(&self.terminal_failure)
     }
 
+    pub fn startup_trace(&self) -> &BridgeStartupTrace {
+        &self.startup_trace
+    }
+
     pub async fn wait_until_ready(&mut self) -> Result<()> {
         let Some(startup_ready) = self.startup_ready.take() else {
             return Ok(());
@@ -3034,6 +3124,7 @@ impl EncoderBridgeRecordingSession {
                 iso_member: None,
                 terminal_failure: Arc::new(StdMutex::new(None)),
                 startup_ready: None,
+                startup_trace: Arc::default(),
                 bootstrap_reader: StdMutex::new(None),
                 fifo_path: PathBuf::from("/nonexistent-test-fifo"),
                 writer: Some(writer),
@@ -3619,6 +3710,8 @@ pub fn start_synthetic_recording_bridge(
     let writer_iso_member = iso_member.clone();
     let terminal_failure = Arc::new(StdMutex::new(None));
     let (startup_ready_tx, startup_ready_rx) = oneshot::channel();
+    let startup_trace = Arc::new(BridgeStartupTrace::default());
+    let writer_startup_trace = startup_trace.clone();
     let writer_stop = stop.clone();
     let writer_terminal_failure = terminal_failure.clone();
     let writer_fifo_path = fifo_path.clone();
@@ -3671,6 +3764,7 @@ pub fn start_synthetic_recording_bridge(
                 iso_member: writer_iso_member,
                 terminal_failure: writer_terminal_failure,
                 startup_ready_tx: Some(startup_ready_tx),
+                startup_trace: writer_startup_trace,
                 diagnostics_tx,
                 video_epoch,
                 start_barrier,
@@ -3694,6 +3788,7 @@ pub fn start_synthetic_recording_bridge(
         terminal_failure,
         bootstrap_reader: StdMutex::new(bootstrap_reader),
         startup_ready: Some(startup_ready_rx),
+        startup_trace,
         fifo_path,
         writer: Some(writer),
         diagnostics_task: Some(diagnostics_task),
@@ -3881,6 +3976,7 @@ struct SyntheticRecordingWriterParams {
     iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    startup_trace: Arc<BridgeStartupTrace>,
     fifo_path: PathBuf,
     frame_store: Option<CompositorFrameStore>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -3927,6 +4023,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         iso_member,
         terminal_failure,
         mut startup_ready_tx,
+        startup_trace,
         fifo_path,
         frame_store,
         #[cfg(target_os = "windows")]
@@ -3991,8 +4088,75 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // Only the recording leg (or the shared leg) feeds the session's frame
     // accounting; a dedicated stream writer must not double-count it.
     let accounts_session_frames = output_queue_policy.role != EncoderBridgeOutputRole::Stream;
+    // #1267: build the Media Foundation encoder BEFORE waiting for FFmpeg to
+    // open the video FIFO. FFmpeg opens its audio input first and reaches
+    // this pipe only after its own start and the audio probe (about 0.5 s
+    // warm on a UHD 620 laptop); MFT activation and configuration (0.3-0.5 s
+    // warm, 1 s cold) used to start only after that. The pipe instance
+    // already exists (recording.rs creates it before spawning FFmpeg), so
+    // FFmpeg's open succeeds while the encoder is still being built, and a
+    // failed build leaves only an unopened pipe that session cleanup removes.
+    #[cfg(target_os = "windows")]
+    let prepared_media_foundation_encoder =
+        if media_foundation_encoder_precedes_fifo_open(video_output, d3d11_input.is_some()) {
+            let config = MediaFoundationEncoderConfig {
+                width,
+                height,
+                fps: target_fps.max(1),
+                bitrate_kbps: bitrate_kbps.unwrap_or(6_000),
+                low_latency,
+                input_topology: mf_input_topology,
+            };
+            let first_direct_texture = direct_d3d11_source
+                .as_ref()
+                .and_then(PreviewScreenD3D11FrameSource::latest_frame)
+                .and_then(|frame| frame.source_d3d11_texture.clone());
+            let encoder_result = match first_direct_texture.as_ref() {
+                Some(texture) => {
+                    MediaFoundationH264Encoder::new_with_d3d11_texture(config, texture)
+                }
+                None if direct_d3d11_source.is_some() => Err(anyhow::anyhow!(
+                    "direct D3D11 recording source had no retained capture texture"
+                )),
+                None => MediaFoundationH264Encoder::new(config),
+            };
+            let encoder = match encoder_result {
+                Ok(mut encoder) => {
+                    encoder.configure_for_bridge_writer(
+                        media_foundation_writer_input_credit_timeout(target_fps),
+                        accounts_session_frames,
+                    );
+                    stamp_media_foundation_startup_steps(&startup_trace, &mut encoder);
+                    encoder
+                }
+                Err(error) => {
+                    let error = record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        format!(
+                            "Could not prepare Media Foundation encoder bridge output: {error}"
+                        ),
+                    );
+                    signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
+                    emit_encoder_bridge_diagnostics_from_thread(
+                        &diagnostics_tx,
+                        session_id.clone(),
+                        target_fps,
+                        EncoderBridgeRuntimeStats::default(),
+                        diagnostics_context,
+                        Some(error),
+                    );
+                    return;
+                }
+            };
+            Some(encoder)
+        } else {
+            None
+        };
     let fifo = match open_recording_fifo_writer(&fifo_path, &stop, true) {
-        Ok(fifo) => fifo,
+        Ok(fifo) => {
+            startup_trace.stamp(RecordingStartPhase::BridgeFifoOpen);
+            fifo
+        }
         Err(error) => {
             let error = record_encoder_bridge_terminal_failure(
                 &terminal_failure,
@@ -4082,51 +4246,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         mut media_foundation_encoder,
         mut media_foundation_fifo,
         mut media_foundation_ts_writer,
-    ) = if video_output.uses_media_foundation() {
-        let config = MediaFoundationEncoderConfig {
-            width,
-            height,
-            fps: target_fps.max(1),
-            bitrate_kbps: bitrate_kbps.unwrap_or(6_000),
-            low_latency,
-            input_topology: mf_input_topology,
-        };
-        let first_direct_texture = direct_d3d11_source
-            .as_ref()
-            .and_then(PreviewScreenD3D11FrameSource::latest_frame)
-            .and_then(|frame| frame.source_d3d11_texture.clone());
-        let encoder_result = match first_direct_texture.as_ref() {
-            Some(texture) => MediaFoundationH264Encoder::new_with_d3d11_texture(config, texture),
-            None if direct_d3d11_source.is_some() => Err(anyhow::anyhow!(
-                "direct D3D11 recording source had no retained capture texture"
-            )),
-            None => MediaFoundationH264Encoder::new(config),
-        };
-        let encoder = match encoder_result {
-            Ok(mut encoder) => {
-                encoder.configure_for_bridge_writer(
-                    media_foundation_writer_input_credit_timeout(target_fps),
-                    accounts_session_frames,
-                );
-                encoder
-            }
-            Err(error) => {
-                let error = record_encoder_bridge_terminal_failure(
-                    &terminal_failure,
-                    format!("Could not prepare Media Foundation encoder bridge output: {error}"),
-                );
-                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
-                emit_encoder_bridge_diagnostics_from_thread(
-                    &diagnostics_tx,
-                    session_id.clone(),
-                    target_fps,
-                    EncoderBridgeRuntimeStats::default(),
-                    diagnostics_context,
-                    Some(error),
-                );
-                return;
-            }
-        };
+    ) = if let Some(encoder) = prepared_media_foundation_encoder {
         (
             None,
             Some(encoder),
@@ -4239,6 +4359,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let encoded_access_unit_dropped_frames = 0_u64;
     let mut output_pressure_active = false;
     let mut last_output_progress_at = Instant::now();
+    #[cfg(target_os = "windows")]
+    let mut media_foundation_startup_poll_error: Option<io::Error> = None;
     let mut observed_raw_fifo_write_progress_epoch = raw_fifo_writer
         .as_ref()
         .map_or(0, RawVideoFifoWriter::write_progress_epoch);
@@ -4752,8 +4874,42 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             );
         }
         let sleep_started_at = Instant::now();
-        if now < next_frame_at {
-            thread::sleep(next_frame_at - now);
+        // #1267: until the first access unit is in the FIFO, answer the MFT
+        // between ticks. It asks for its output type again and emits that
+        // unit well inside one frame interval, but read only at each submit
+        // they waited for two ticks (67 ms at 30 fps) on every Record.
+        #[cfg(target_os = "windows")]
+        if startup_ready_tx.is_some()
+            && let (Some(encoder), Some(fifo), Some(ts_writer)) = (
+                media_foundation_encoder.as_mut(),
+                media_foundation_fifo.as_mut(),
+                media_foundation_ts_writer.as_mut(),
+            )
+            && encoder.pending_frame_count() > 0
+        {
+            match poll_media_foundation_first_access_unit(
+                encoder,
+                fifo,
+                ts_writer,
+                &stop,
+                next_frame_at,
+                &mut zero_copy_frames,
+                &mut video_toolbox_output_frames,
+                &mut video_toolbox_output_bytes,
+                &mut video_toolbox_fifo_write_times_ms,
+            ) {
+                Ok(true) => {
+                    last_output_progress_at = Instant::now();
+                    stamp_media_foundation_startup_steps(&startup_trace, encoder);
+                    signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+                }
+                Ok(false) => {}
+                Err(error) => media_foundation_startup_poll_error = Some(error),
+            }
+        }
+        let sleep_from = Instant::now();
+        if sleep_from < next_frame_at {
+            thread::sleep(next_frame_at - sleep_from);
         }
         let active_started_at = Instant::now();
         writer_sleep_times_ms.push(
@@ -4843,7 +4999,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         } else {
             raw_fifo_drain_error
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        let mut pipeline_error =
+            raw_fifo_drain_error.or(media_foundation_startup_poll_error.take());
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
         let mut pipeline_error = raw_fifo_drain_error;
 
         // Plan 218 S3a: a leg that overflowed or a pressured stream queue
@@ -5359,6 +5518,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     .as_ref()
                     .and_then(|frame| frame.frame.metadata.presentation_at())
                     .unwrap_or(fed_at);
+                startup_trace.stamp_at(RecordingStartPhase::BridgeFirstFrame, fed_at);
                 let epoch = recording_epoch(captured_at, presented_at, frame_interval);
                 if video_epoch.set(epoch).is_ok() {
                     tracing::info!(
@@ -5703,6 +5863,12 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             if video_output.uses_media_foundation() {
                 // #1068: the first access unit reached FFmpeg's FIFO. Later
                 // writes find the sender already taken.
+                #[cfg(target_os = "windows")]
+                if startup_ready_tx.is_some()
+                    && let Some(encoder) = media_foundation_encoder.as_mut()
+                {
+                    stamp_media_foundation_startup_steps(&startup_trace, encoder);
+                }
                 signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
             }
         }
@@ -10538,6 +10704,7 @@ mod tests {
             iso_member: None,
             terminal_failure: Arc::new(StdMutex::new(None)),
             startup_ready: None,
+            startup_trace: Arc::default(),
             bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
@@ -10701,6 +10868,7 @@ mod tests {
             iso_member: None,
             terminal_failure,
             startup_ready: None,
+            startup_trace: Arc::default(),
             bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: None,
@@ -10920,6 +11088,7 @@ mod tests {
             iso_member: None,
             terminal_failure,
             startup_ready: None,
+            startup_trace: Arc::default(),
             bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
@@ -11050,6 +11219,28 @@ mod tests {
             media_foundation_writer_input_credit_timeout(0),
             Duration::from_secs(2)
         );
+    }
+
+    #[test]
+    fn only_a_cpu_fed_media_foundation_writer_builds_its_encoder_before_the_fifo_opens() {
+        // #1267: the MFT is built while FFmpeg is still reaching the video
+        // FIFO. The D3D11 ticket writer's encoder comes from the media thread,
+        // and every other output has no in-process encoder to build.
+        assert!(media_foundation_encoder_precedes_fifo_open(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            false
+        ));
+        assert!(!media_foundation_encoder_precedes_fifo_open(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            true
+        ));
+        for output in [
+            EncoderBridgeVideoOutput::RawYuv420p,
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        ] {
+            assert!(!media_foundation_encoder_precedes_fifo_open(output, false));
+        }
     }
 
     #[test]
@@ -13112,6 +13303,7 @@ mod tests {
             iso_member: None,
             terminal_failure: terminal_failure.clone(),
             startup_ready: None,
+            startup_trace: Arc::default(),
             bootstrap_reader: StdMutex::new(None),
             fifo_path: std::env::temp_dir().join(format!(
                 "videorc-missing-terminal-signal-test-{}",

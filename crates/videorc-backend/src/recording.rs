@@ -7274,6 +7274,12 @@ async fn start_session_with_timeline(
         let bridge_startup_failure = uncommitted_capture_process
             .prime_bridges(&ffmpeg_progress, bridge_startup)
             .await;
+        // #1267: split `bridge-ready` into the recording writer's own steps.
+        if let Some(bridge) = recording_bridge.as_ref() {
+            for (phase, at) in bridge.startup_trace().ordered() {
+                timeline.mark_at(phase, at);
+            }
+        }
         timeline.mark(RecordingStartPhase::BridgeReady);
         if let Some((origin, error)) = bridge_startup_failure {
             uncommitted_capture_process.set_failure(origin, &format!("{error:#}"));
