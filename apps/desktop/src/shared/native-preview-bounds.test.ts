@@ -166,6 +166,57 @@ describe('main-owned Windows preview stacking', () => {
     })
   })
 
+  // #1272: the DPI-aware D3D11 presenter is placed in physical pixels.
+  it('carries a main-derived physical placement beside the DIP bounds', () => {
+    const physical = {
+      screenX: 15,
+      screenY: 30,
+      width: 960,
+      height: 540,
+      clipX: 15,
+      clipY: 60,
+      clipWidth: 960,
+      clipHeight: 300
+    }
+    const params = mainOwnedPreviewSurfaceBoundsParams(bounds, 7, '0x000000000000abcd', physical)
+    expect(params.bounds.physicalPlacement).toEqual(physical)
+    // The DIP geometry is untouched: the backend still sizes from it.
+    expect(params.bounds).toMatchObject({ screenX: 10, width: 640, scaleFactor: 2 })
+    // Survives the JSON hop to the backend unchanged.
+    expect(JSON.parse(JSON.stringify(params)).bounds.physicalPlacement).toEqual(physical)
+  })
+
+  it('drops an incomplete clip and refuses a non-finite physical placement', () => {
+    expect(
+      mainOwnedPreviewSurfaceBoundsParams(bounds, 7, undefined, {
+        screenX: 15,
+        screenY: 30,
+        width: 960,
+        height: 540,
+        clipX: 15
+      }).bounds.physicalPlacement
+    ).toEqual({ screenX: 15, screenY: 30, width: 960, height: 540 })
+    expect(
+      mainOwnedPreviewSurfaceBoundsParams(bounds, 7, undefined, {
+        screenX: Number.NaN,
+        screenY: 30,
+        width: 960,
+        height: 540
+      }).bounds
+    ).not.toHaveProperty('physicalPlacement')
+  })
+
+  it('never trusts a physical placement that arrives inside renderer bounds', () => {
+    const forged = {
+      ...bounds,
+      physicalPlacement: { screenX: 0, screenY: 0, width: 4000, height: 4000 }
+    } as PreviewSurfaceBounds
+    expect(normalizePreviewSurfaceBounds(forged)).not.toHaveProperty('physicalPlacement')
+    expect(mainOwnedPreviewSurfaceBoundsParams(forged, 7).bounds).not.toHaveProperty(
+      'physicalPlacement'
+    )
+  })
+
   it('rejects zero, truncated, malformed, and unsafe identities', () => {
     for (const handle of [
       '0x0000000000000000',

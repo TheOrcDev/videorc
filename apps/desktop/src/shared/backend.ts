@@ -2544,6 +2544,23 @@ export type OpaqueNativeWindowHandle = `0x${string}`
  */
 export interface MainOwnedPreviewSurfaceBounds extends PreviewSurfaceBounds {
   orderAboveWindowHandle?: OpaqueNativeWindowHandle
+  /**
+   * Windows: the same geometry in physical screen pixels
+   * (`screen.dipToScreenRect`), for the DPI-aware D3D11 presenter (#1272).
+   */
+  physicalPlacement?: PreviewPresenterPhysicalPlacement
+}
+
+/** A preview rect and its optional visible clip in physical screen pixels. */
+export interface PreviewPresenterPhysicalPlacement {
+  screenX: number
+  screenY: number
+  width: number
+  height: number
+  clipX?: number
+  clipY?: number
+  clipWidth?: number
+  clipHeight?: number
 }
 
 export interface MainOwnedPreviewSurfaceBoundsParams {
@@ -2923,6 +2940,10 @@ export interface PreviewSurfaceStatus {
   nativePreviewPlacementEventsReceived?: number
   nativePreviewPlacementsCoalesced?: number
   nativePreviewPlacementsApplied?: number
+  /** Placement pushes the surface host refused, each failed try counted (#1272). */
+  nativePreviewPlacementsFailed?: number
+  /** Retries run after a refused placement push (#1272). */
+  nativePreviewPlacementsRetried?: number
   nativePreviewPlacementRoundTripP95Ms?: number
   nativePreviewPresentRoundTripP95Ms?: number
   nativePreviewIosurfaceCacheHits?: number

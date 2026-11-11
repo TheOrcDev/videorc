@@ -1,4 +1,4 @@
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 use crate::native_preview_host::NativePreviewHostBounds;
 use crate::protocol::{WindowsD3d11PresenterBounds, WindowsD3d11PresenterDiagnostics};
 use crate::windows_d3d11_device::DxgiAdapterLuid;
@@ -85,22 +85,70 @@ impl WindowsD3d11PreviewPlacement {
             .and_then(|value| value.trim().parse::<u32>().ok())
             .filter(|pid| *pid != 0)
             .ok_or_else(|| "authenticated Electron supervisor PID is unavailable".to_string())?;
-        Ok(Self {
+        Ok(Self::with_geometry(
             media_generation,
             preview_generation,
             adapter_luid,
             target_window_handle,
             expected_owner_process_id,
-            screen_x: bounds.screen_x,
-            screen_y: bounds.screen_y,
-            width: bounds.width,
-            height: bounds.height,
-            clip_x: bounds.clip_x,
-            clip_y: bounds.clip_y,
-            clip_width: bounds.clip_width,
-            clip_height: bounds.clip_height,
+            bounds,
+        ))
+    }
+
+    /// The presenter is a per-monitor-DPI-aware window: every number here is a
+    /// physical screen pixel (`SetWindowPos`, the swap chain, the visual
+    /// offset). Electron main sends that placement beside the DIP bounds; fed
+    /// the DIPs, the presenter sat at 2/3 size, up and left of Preview, on a
+    /// 150% display (#1272). Without it (an older main, or 100% scaling, where
+    /// the two agree) the DIP numbers are used as before.
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn with_geometry(
+        media_generation: u64,
+        preview_generation: u64,
+        adapter_luid: DxgiAdapterLuid,
+        target_window_handle: u64,
+        expected_owner_process_id: u32,
+        bounds: &NativePreviewHostBounds,
+    ) -> Self {
+        let (screen_x, screen_y, width, height, clip_x, clip_y, clip_width, clip_height) =
+            match bounds.physical_placement {
+                Some(physical) => (
+                    physical.screen_x,
+                    physical.screen_y,
+                    physical.width,
+                    physical.height,
+                    physical.clip_x,
+                    physical.clip_y,
+                    physical.clip_width,
+                    physical.clip_height,
+                ),
+                None => (
+                    bounds.screen_x,
+                    bounds.screen_y,
+                    bounds.width,
+                    bounds.height,
+                    bounds.clip_x,
+                    bounds.clip_y,
+                    bounds.clip_width,
+                    bounds.clip_height,
+                ),
+            };
+        Self {
+            media_generation,
+            preview_generation,
+            adapter_luid,
+            target_window_handle,
+            expected_owner_process_id,
+            screen_x,
+            screen_y,
+            width,
+            height,
+            clip_x,
+            clip_y,
+            clip_width,
+            clip_height,
             visible: bounds.visible.unwrap_or(true),
-        })
+        }
     }
 
     pub(crate) fn visible_bounds(self) -> Option<WindowsD3d11PresenterBounds> {
@@ -1689,6 +1737,86 @@ mod tests {
         assert_eq!(diagnostics.successful_presents, 1);
         assert_eq!(diagnostics.hidden_drops, 1);
         assert_eq!(diagnostics.busy_drops, 1);
+    }
+
+    // #1272: on a 150% display Electron main's DIP rect (200,148 960x540) is
+    // (300,222 1440x810) in the physical pixels a DPI-aware presenter is
+    // placed in. Before, the presenter took the DIPs and sat at 2/3 size, up
+    // and left of Preview.
+    #[test]
+    fn windows_d3d11_preview_places_the_presenter_in_physical_pixels() {
+        let bounds = NativePreviewHostBounds {
+            screen_x: 200.0,
+            screen_y: 148.0,
+            width: 960.0,
+            height: 540.0,
+            scale_factor: 1.5,
+            clip_x: Some(200.0),
+            clip_y: Some(168.0),
+            clip_width: Some(960.0),
+            clip_height: Some(400.0),
+            physical_placement: Some(crate::protocol::PreviewPresenterPhysicalPlacement {
+                screen_x: 300.0,
+                screen_y: 222.0,
+                width: 1440.0,
+                height: 810.0,
+                clip_x: Some(300.0),
+                clip_y: Some(252.0),
+                clip_width: Some(1440.0),
+                clip_height: Some(600.0),
+            }),
+            ..Default::default()
+        };
+        let placement = WindowsD3d11PreviewPlacement::with_geometry(
+            3,
+            9,
+            DxgiAdapterLuid::from_u64(7),
+            55,
+            9001,
+            &bounds,
+        );
+        assert_eq!(
+            placement.visible_bounds(),
+            Some(WindowsD3d11PresenterBounds {
+                x: 300,
+                y: 252,
+                width: 1440,
+                height: 600,
+            })
+        );
+        // The visual offset and the swap-chain scale are physical too.
+        assert_eq!(placement.visual_offset(), (0.0, -30.0));
+        assert_eq!((placement.width, placement.height), (1440.0, 810.0));
+    }
+
+    #[test]
+    fn windows_d3d11_preview_without_a_physical_placement_keeps_the_dip_numbers() {
+        let bounds = NativePreviewHostBounds {
+            screen_x: 200.0,
+            screen_y: 148.0,
+            width: 960.0,
+            height: 540.0,
+            scale_factor: 1.0,
+            visible: Some(true),
+            ..Default::default()
+        };
+        let placement = WindowsD3d11PreviewPlacement::with_geometry(
+            3,
+            9,
+            DxgiAdapterLuid::from_u64(7),
+            55,
+            9001,
+            &bounds,
+        );
+        assert_eq!(
+            placement.visible_bounds(),
+            Some(WindowsD3d11PresenterBounds {
+                x: 200,
+                y: 148,
+                width: 960,
+                height: 540,
+            })
+        );
     }
 
     #[test]

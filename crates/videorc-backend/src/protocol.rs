@@ -3962,6 +3962,31 @@ pub struct MainOwnedPreviewSurfaceBounds {
     pub bounds: PreviewSurfaceBounds,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_above_window_handle: Option<OpaqueNativeWindowHandle>,
+    /// Windows: the same geometry in physical screen pixels, converted by
+    /// Electron main (`screen.dipToScreenRect`). The D3D11 presenter is a
+    /// per-monitor-DPI-aware window, so `SetWindowPos` takes physical pixels;
+    /// fed the DIP numbers it sat at 2/3 size, up and left, on a 150% display
+    /// (#1272). Absent = DIPs are pixels (100%), the old behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_placement: Option<PreviewPresenterPhysicalPlacement>,
+}
+
+/// A preview rect and its optional visible clip in physical screen pixels.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPresenterPhysicalPlacement {
+    pub screen_x: f64,
+    pub screen_y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_height: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -8172,7 +8197,17 @@ mod tests {
                 "visible": true,
                 "orderAboveWindowId": 42,
                 "orderAboveWindowHandle": "0x000000001234abcd",
-                "elevated": false
+                "elevated": false,
+                "physicalPlacement": {
+                    "screenX": 15.0,
+                    "screenY": 42.5,
+                    "width": 1600.0,
+                    "height": 900.0,
+                    "clipX": 15.0,
+                    "clipY": 60.0,
+                    "clipWidth": 1600.0,
+                    "clipHeight": 700.0
+                }
             },
             "generation": 9
         });
@@ -8189,6 +8224,14 @@ mod tests {
         );
         assert_eq!(request.bounds.bounds.order_above_window_id, Some(42));
         assert_eq!(request.bounds.bounds.elevated, Some(false));
+        // #1272: the presenter's physical placement survives beside the DIPs.
+        let physical = request
+            .bounds
+            .physical_placement
+            .expect("physical placement");
+        assert_eq!((physical.width, physical.height), (1600.0, 900.0));
+        assert_eq!(physical.clip_height, Some(700.0));
+        assert_eq!(request.bounds.bounds.width, 1280.0);
         assert_eq!(serde_json::to_value(request).unwrap(), wire);
     }
 

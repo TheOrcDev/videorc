@@ -5,6 +5,7 @@ import {
   previewDockedInsideMainWindow,
   proofSurfaceHostedInWindowOn,
   proofSurfaceParentWindow,
+  proofSurfaceReshowBounds,
   withTrustedPreviewWindowStacking
 } from './native-preview-window-stacking'
 
@@ -24,6 +25,34 @@ const bounds = (
 const windowWithHandle = (handle: Buffer) => ({
   isDestroyed: () => false,
   getNativeWindowHandle: vi.fn(() => handle)
+})
+
+// #1272: a scene update re-shows the proof surface. The saved bounds can be a
+// placement the backend refused while the popup moved on.
+describe('proof surface re-show bounds', () => {
+  it('follows the Preview window to its live rect', () => {
+    const saved = bounds({ screenX: 10, screenY: 20 })
+    const live = bounds({ screenX: 410, screenY: 220, width: 720, height: 405 })
+    expect(proofSurfaceReshowBounds(saved, live)).toMatchObject({
+      screenX: 410,
+      screenY: 220,
+      width: 720,
+      height: 405,
+      visible: true
+    })
+  })
+
+  it('keeps a surface hidden on purpose hidden', () => {
+    const live = bounds({ screenX: 410 })
+    expect(proofSurfaceReshowBounds(bounds({ visible: false }), live)?.visible).toBe(false)
+    expect(proofSurfaceReshowBounds(bounds(), bounds({ visible: false }))?.visible).toBe(false)
+  })
+
+  it('falls back to whichever rect exists', () => {
+    expect(proofSurfaceReshowBounds(bounds({ screenX: 5 }), null)?.screenX).toBe(5)
+    expect(proofSurfaceReshowBounds(undefined, bounds({ screenX: 7 }))?.screenX).toBe(7)
+    expect(proofSurfaceReshowBounds(null, null)).toBeNull()
+  })
 })
 
 describe('trusted preview-window stacking', () => {
@@ -75,6 +104,52 @@ describe('trusted preview-window stacking', () => {
       (params) => params
     )
     expect(result.bounds.orderAboveWindowHandle).toBe('0x00000000fedcba98')
+  })
+
+  // #1272: a 150% display. The full rect and the clip are converted one by
+  // one, so the clip keeps its place inside the scaled rect.
+  it('adds the physical placement the DPI-aware presenter is placed in', () => {
+    const handle = Buffer.alloc(8)
+    handle.writeBigUInt64LE(5n)
+    const toPhysical = vi.fn((rect: { x: number; y: number; width: number; height: number }) => ({
+      x: rect.x * 1.5,
+      y: rect.y * 1.5,
+      width: rect.width * 1.5,
+      height: rect.height * 1.5
+    }))
+    const result = withTrustedPreviewWindowStacking(
+      {
+        platform: 'win32',
+        bounds: bounds({
+          screenX: 200,
+          screenY: 148,
+          clipX: 200,
+          clipY: 168,
+          clipWidth: 960,
+          clipHeight: 400
+        }),
+        generation: 4,
+        currentGeneration: 4,
+        previewWindowOpen: true,
+        previewWindow: windowWithHandle(handle),
+        elevated: false,
+        dipToScreenRect: toPhysical
+      },
+      (params) => params
+    )
+    expect(result.bounds.physicalPlacement).toEqual({
+      screenX: 300,
+      screenY: 222,
+      width: 1440,
+      height: 810,
+      clipX: 300,
+      clipY: 252,
+      clipWidth: 1440,
+      clipHeight: 600
+    })
+    expect(toPhysical).toHaveBeenCalledTimes(2)
+    // The DIP numbers stay what the proof window and the backend size from.
+    expect(result.bounds).toMatchObject({ screenX: 200, screenY: 148, width: 960 })
   })
 
   it('reads a fresh handle for every command', () => {

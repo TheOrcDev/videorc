@@ -183,11 +183,13 @@ import { NativePreviewMotionReconciler } from './native-preview-motion-reconcile
 import { drainNativePreviewHostCommands as drainNativePreviewHostCommandsWith } from './native-preview-host-command-drain'
 import {
   NativePreviewMutationQueue,
+  NativePreviewBackendBoundsRefusedError,
   NativePreviewPlacementQueue,
   NativePreviewPumpOwnership,
   handoffNativePreviewPumpOwnership,
   type NativePreviewPumpOwnershipTicket,
-  runPreparedNativePreviewMutation
+  runPreparedNativePreviewMutation,
+  scenePlacementFailureAction
 } from './native-preview-operation-queue'
 import { NativePreviewRunAuthority } from './native-preview-run-authority'
 import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surface-loader'
@@ -649,6 +651,7 @@ import {
   previewDockedInsideMainWindow,
   proofSurfaceHostedInWindowOn,
   proofSurfaceParentWindow,
+  proofSurfaceReshowBounds,
   withTrustedPreviewWindowStacking,
   type NativePreviewRealSurfaceDriverKind
 } from './native-preview-window-stacking'
@@ -992,9 +995,19 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
       )
     }, 'placement')
   },
-  (error) => {
-    if (previewWindowIsOpenForSurface()) {
-      safeConsole.error('Preview window placement push failed:', error)
+  (error, { attempt, outcome, retryInMs }) => {
+    if (!previewWindowIsOpenForSurface()) {
+      return
+    }
+    // One line when a placement first fails and one if it gives up; the
+    // retries between are counted in the placement metrics instead.
+    if (outcome === 'gave-up') {
+      safeConsole.error(
+        `Preview window placement push failed after ${attempt} attempt(s); the picture stays at its last placement until the window moves:`,
+        error
+      )
+    } else if (outcome === 'retry' && attempt === 1) {
+      safeConsole.warn(`Preview window placement push failed; retrying in ${retryInMs} ms:`, error)
     }
   }
 )
@@ -5606,6 +5619,8 @@ function nativePreviewPlacementStatusFields(): Pick<
   | 'nativePreviewPlacementEventsReceived'
   | 'nativePreviewPlacementsCoalesced'
   | 'nativePreviewPlacementsApplied'
+  | 'nativePreviewPlacementsFailed'
+  | 'nativePreviewPlacementsRetried'
   | 'nativePreviewPlacementRoundTripP95Ms'
   | 'nativePreviewMutationQueueCapacity'
   | 'nativePreviewMutationQueueDepth'
@@ -5621,6 +5636,8 @@ function nativePreviewPlacementStatusFields(): Pick<
     nativePreviewPlacementEventsReceived: metrics.received,
     nativePreviewPlacementsCoalesced: metrics.coalesced,
     nativePreviewPlacementsApplied: metrics.applied,
+    nativePreviewPlacementsFailed: metrics.failed,
+    nativePreviewPlacementsRetried: metrics.retried,
     nativePreviewPlacementRoundTripP95Ms: metrics.roundTripP95Ms,
     nativePreviewMutationQueueCapacity: mutationMetrics.capacity,
     nativePreviewMutationQueueDepth: mutationMetrics.currentDepth,
@@ -7622,7 +7639,10 @@ async function showNativePreviewProofSurfaceIfVisible(): Promise<void> {
   ) {
     return
   }
-  const bounds = nativePreviewSurfaceStatus.bounds
+  const bounds = proofSurfaceReshowBounds(
+    nativePreviewSurfaceStatus.bounds,
+    previewWindowSurfaceBounds()
+  )
   if (!bounds) {
     return
   }
@@ -7665,10 +7685,18 @@ async function applyNativePreviewHostCommands(
     }
     return { ...command, bounds: normalizePreviewSurfaceBounds(command.bounds) }
   })
+  // A refused backend push must not also strand the Electron proof window
+  // (#1272): on a move it follows the popup on its own, and the error is
+  // rethrown once it has moved so the placement queue retries the backend
+  // half. A create still fails first, as before.
+  const backendBoundsFailures: unknown[] = []
   if (process.platform === 'win32') {
     for (const command of commands) {
       if (!command.bounds) {
         continue
+      }
+      if (backendBoundsFailures.length > 0 && command.kind !== 'update-bounds') {
+        throw backendBoundsFailures[0]
       }
       await withTrustedPreviewWindowStacking(
         {
@@ -7678,14 +7706,26 @@ async function applyNativePreviewHostCommands(
           currentGeneration: previewWindowSurfaceGeneration(),
           previewWindowOpen: previewWindowIsOpenForSurface(),
           previewWindow,
-          elevated
+          elevated,
+          // The D3D11 presenter is DPI-aware: it is placed in physical pixels,
+          // converted at the display nearest the Preview window (#1272).
+          dipToScreenRect: (rect) => screen.dipToScreenRect(previewWindow, rect)
         },
         async (request) => {
-          const status = parseMainPreviewSurfaceStatus(
-            await requestBackendAdmin<unknown>('resource.admin.preview_surface_bounds', {
-              ...request
-            })
-          )
+          let status: PreviewSurfaceStatus
+          try {
+            status = parseMainPreviewSurfaceStatus(
+              await requestBackendAdmin<unknown>('resource.admin.preview_surface_bounds', {
+                ...request
+              })
+            )
+          } catch (error) {
+            if (command.kind !== 'update-bounds') {
+              throw error
+            }
+            backendBoundsFailures.push(error)
+            return null
+          }
           if (
             previewWindowSurfaceGenerationIsCurrent(generation) &&
             previewWindowIsOpenForSurface()
@@ -7740,6 +7780,11 @@ async function applyNativePreviewHostCommands(
       command.kind === 'create'
         ? await createNativePreviewSurface(command.bounds, generation)
         : await updateNativePreviewSurfaceBounds(command.bounds, generation)
+  }
+  if (backendBoundsFailures.length > 0) {
+    // Typed so callers can tell this deferred refusal (the proof window has
+    // already moved) from a failed create or setup.
+    throw new NativePreviewBackendBoundsRefusedError(backendBoundsFailures[0])
   }
   return status
 }
@@ -7911,7 +7956,31 @@ async function applyNativePreviewSurfaceScene(
     protectNativePreviewSceneRevision(params.revision)
   }
   nativePreviewSurfaceScene = buildPreviewSurfaceScene(params)
-  await reconcileNativePreviewSurfaceForPreviewWindow()
+  try {
+    await reconcileNativePreviewSurfaceForPreviewWindow()
+  } catch (error) {
+    // #1272, scenePlacementFailureAction: a backend refusal of a bounds
+    // update is deferred (the proof window already followed the popup), so
+    // the scene update and its re-show go on. A failed create still fails the
+    // scene update, but is retried too, so the Preview is not left empty.
+    const action = scenePlacementFailureAction(error, nativePreviewSurfaceWindowExists())
+    const bounds = action.retry ? previewWindowSurfaceBounds() : null
+    if (bounds) {
+      safeConsole.warn(
+        'Preview scene placement failed; retrying it:',
+        error instanceof NativePreviewBackendBoundsRefusedError ? error.refusal : error
+      )
+      // Forced: the queue's last applied rect may be this one, but it has
+      // just failed, so it must not be coalesced away.
+      nativePreviewPlacementQueue.enqueue(
+        { bounds, generation: previewWindowSurfaceGeneration() },
+        { force: true }
+      )
+    }
+    if (action.rethrow) {
+      throw error
+    }
+  }
   if (!nativePreviewPresentationAllowedForGeneration(generation)) {
     return nativePreviewSurfaceStatus
   }
@@ -12726,8 +12795,19 @@ async function runSmokePreviewMotionCommand(
   if (command === 'preview-window-state') {
     const surface = nativePreviewSurfaceWindow
     const mutationQueue = nativePreviewSurfaceMutationQueue.metrics()
+    const windowState = previewWindowState()
     return {
-      ...previewWindowState(),
+      ...windowState,
+      // Windows: the Preview's video rect in physical screen pixels, the
+      // space the DPI-aware D3D11 presenter reports its actual bounds in
+      // (#1272). Comparing those with the DIP rect only agrees at 100%.
+      contentBoundsPhysical:
+        process.platform === 'win32' &&
+        windowState.contentBounds &&
+        previewWindow &&
+        !previewWindow.isDestroyed()
+          ? screen.dipToScreenRect(previewWindow, windowState.contentBounds)
+          : null,
       ...smokeNativeWindowIdentity(previewWindow),
       // macOS: a docked window must cast no shadow (applyDockedPreviewChrome).
       hasShadow: previewWindow && !previewWindow.isDestroyed() ? previewWindow.hasShadow() : null,
@@ -14321,6 +14401,8 @@ function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record
     nativePreviewPlacementEventsReceived: status.nativePreviewPlacementEventsReceived,
     nativePreviewPlacementsCoalesced: status.nativePreviewPlacementsCoalesced,
     nativePreviewPlacementsApplied: status.nativePreviewPlacementsApplied,
+    nativePreviewPlacementsFailed: status.nativePreviewPlacementsFailed,
+    nativePreviewPlacementsRetried: status.nativePreviewPlacementsRetried,
     nativePreviewPlacementRoundTripP95Ms: status.nativePreviewPlacementRoundTripP95Ms,
     nativePreviewPresentRoundTripP95Ms: status.nativePreviewPresentRoundTripP95Ms,
     nativePreviewIosurfaceCacheHits: status.nativePreviewIosurfaceCacheHits,
