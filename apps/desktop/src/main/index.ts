@@ -583,7 +583,7 @@ import {
   mainPumpStatusCompatibilityMayPresent
 } from './native-preview-main-pump-health'
 import { discoverObs, readObsSetup, readObsStreamKey } from './obs-import'
-import { initAutoUpdater, registerUpdaterIpc } from './updater'
+import { initAutoUpdater, registerUpdaterIpc, updaterDiagnostics } from './updater'
 import {
   sanitizedChildProcessEnvironment,
   scrubReleaseAuthorityEnvironment
@@ -15472,6 +15472,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
     },
     backendCrashes: backendCrashRecords,
     firstFrameDecisions: firstFrameDecisions.snapshot(),
+    updater: updaterDiagnostics(),
     windowGlass: mainWindowGlassInfo(),
     globalShortcutsUnavailable,
     env: process.env
@@ -16975,7 +16976,9 @@ app.whenReady().then(async () => {
     // Signed-in Windows installs follow the pilot feed with a short-lived token
     // the backend mints from the account session (null when not entitled).
     requestWindowsPilotUpdateGrant: () =>
-      requestBackendAdmin<unknown>('account.windows_pilot_update_token', {}, 20_000)
+      requestBackendAdmin<unknown>('account.windows_pilot_update_token', {}, 20_000),
+    // A packaged build has no console: updater lines land in backend.log too.
+    log: (level, message) => logBackend(level, `[auto-update] ${message}`)
   })
   registerUpdaterIpc(
     () => mainWindow,
