@@ -2622,6 +2622,49 @@ const MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR: Duration = Duration::from_mill
 /// `recording::STOP_TERM_DELAY` (pinned by a test there).
 pub(crate) const MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// #1075: how long after the user's Stop the Windows Media Foundation
+/// recording writer may keep encoding the ticks it still owes before the Stop
+/// instant. The CPU compositor can leave the writer 0.4-0.8 s behind its
+/// schedule at 1440p60, 4K30 or noisy 1080p60 (i5-8400, GTX 1650 SUPER), and a
+/// writer that quit at the Stop flag ended the take that much early, taking the
+/// matching audio with it. With the Stop drain it must stay under
+/// `recording::STOP_TERM_DELAY` (pinned by a test there).
+pub(crate) const MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET: Duration = Duration::from_secs(1);
+
+/// What the Media Foundation recording writer does with its next tick once the
+/// user pressed Stop at `stop_at` (#1075).
+#[derive(Debug, PartialEq, Eq)]
+enum MediaFoundationStopCatchUp {
+    /// The tick is due at or before Stop: encode it.
+    Continue,
+    /// Every tick up to Stop is written.
+    Complete,
+    /// The catch-up budget ran out with `owed_ticks` still unwritten; the take
+    /// ends early by that much, as it did before #1075.
+    OutOfTime { owed_ticks: u64 },
+}
+
+fn media_foundation_stop_catch_up(
+    tick_at: Instant,
+    stop_at: Instant,
+    now: Instant,
+    frame_interval: Duration,
+) -> MediaFoundationStopCatchUp {
+    if tick_at > stop_at {
+        return MediaFoundationStopCatchUp::Complete;
+    }
+    if now >= stop_at + MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET {
+        let owed = stop_at.saturating_duration_since(tick_at);
+        let owed_ticks = if frame_interval.is_zero() {
+            1
+        } else {
+            (owed.as_nanos() / frame_interval.as_nanos()) as u64 + 1
+        };
+        return MediaFoundationStopCatchUp::OutOfTime { owed_ticks };
+    }
+    MediaFoundationStopCatchUp::Continue
+}
+
 /// The final drain's bound: short after Stop (the user is waiting and FFmpeg
 /// needs the EOF), the encoder's full timeout otherwise.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -2847,6 +2890,9 @@ fn signal_encoder_bridge_startup(
 pub struct EncoderBridgeRecordingSession {
     stop: Arc<AtomicBool>,
     graceful_stop_at: Option<Arc<IsoVideoStopBoundary>>,
+    /// #1075: the user's Stop instant on a Windows Media Foundation recording
+    /// leg, which first writes the ticks it owes up to it. `None` elsewhere.
+    stop_catch_up: Option<Arc<OnceLock<Instant>>>,
     iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready: Option<oneshot::Receiver<std::result::Result<(), String>>>,
@@ -2869,6 +2915,26 @@ impl EncoderBridgeRecordingSession {
         if let Some(member) = self.iso_member.as_ref() {
             member.retire();
         }
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.stop_signalled();
+        }
+    }
+
+    /// The user's Stop. A Windows Media Foundation recording leg running behind
+    /// its schedule first encodes the ticks it owes up to this instant, within
+    /// [`MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET`], so the take keeps the last
+    /// moments the user saw and heard (#1075). Every other leg stops at once,
+    /// and Abort, Drop and teardown still use [`Self::stop`].
+    pub fn stop_for_user(&self) {
+        let Some(catch_up) = self.stop_catch_up.as_ref() else {
+            self.stop();
+            return;
+        };
+        self.bootstrap_reader
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        let _ = catch_up.set(Instant::now());
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.stop_signalled();
         }
@@ -3031,6 +3097,7 @@ impl EncoderBridgeRecordingSession {
             Self {
                 stop: stop.clone(),
                 graceful_stop_at: None,
+                stop_catch_up: None,
                 iso_member: None,
                 terminal_failure: Arc::new(StdMutex::new(None)),
                 startup_ready: None,
@@ -3613,6 +3680,13 @@ pub fn start_synthetic_recording_bridge(
             })
         });
     let writer_graceful_stop_at = graceful_stop_at.clone();
+    let stop_catch_up = (cfg!(target_os = "windows")
+        && video_output.uses_media_foundation()
+        && graceful_stop_at.is_none()
+        && effective_encoder_bridge_output_role(diagnostics_context)
+            == EncoderBridgeOutputRole::Recording)
+        .then(|| Arc::new(OnceLock::new()));
+    let writer_stop_catch_up = stop_catch_up.clone();
     let iso_member = start_barrier
         .as_ref()
         .and_then(|barrier| barrier.member_for(frame_store.as_ref()));
@@ -3668,6 +3742,7 @@ pub fn start_synthetic_recording_bridge(
                 diagnostics_context,
                 stop: writer_stop,
                 graceful_stop_at: writer_graceful_stop_at,
+                stop_catch_up: writer_stop_catch_up,
                 iso_member: writer_iso_member,
                 terminal_failure: writer_terminal_failure,
                 startup_ready_tx: Some(startup_ready_tx),
@@ -3690,6 +3765,7 @@ pub fn start_synthetic_recording_bridge(
     Ok(EncoderBridgeRecordingSession {
         stop,
         graceful_stop_at,
+        stop_catch_up,
         iso_member,
         terminal_failure,
         bootstrap_reader: StdMutex::new(bootstrap_reader),
@@ -3878,6 +3954,7 @@ struct SyntheticRecordingWriterParams {
     byte_len: usize,
     stop: Arc<AtomicBool>,
     graceful_stop_at: Option<Arc<IsoVideoStopBoundary>>,
+    stop_catch_up: Option<Arc<OnceLock<Instant>>>,
     iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
@@ -3924,6 +4001,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         byte_len,
         stop,
         graceful_stop_at,
+        stop_catch_up,
         iso_member,
         terminal_failure,
         mut startup_ready_tx,
@@ -4671,7 +4749,46 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // proof the D3D11 writer gives, so its software first frame is paid
     // before `Recording` and FFmpeg's progress report can be a watchdog.
 
+    let mut stop_catch_up_ticks = 0_u64;
     while !stop.load(Ordering::Relaxed) {
+        // #1075: after the user's Stop, write the ticks still owed up to the
+        // Stop instant before closing the pipe, within a bound.
+        if let Some(stop_at) = stop_catch_up.as_ref().and_then(|at| at.get().copied()) {
+            match media_foundation_stop_catch_up(
+                next_frame_at,
+                stop_at,
+                Instant::now(),
+                frame_interval,
+            ) {
+                MediaFoundationStopCatchUp::Continue => {
+                    stop_catch_up_ticks = stop_catch_up_ticks.saturating_add(1);
+                    // An encoder that stalls at Stop must not hold the
+                    // writer past the catch-up budget in a 3 s wait.
+                    #[cfg(target_os = "windows")]
+                    if let Some(encoder) = media_foundation_encoder.as_mut() {
+                        encoder.bound_waits_until(stop_at + MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET);
+                    }
+                }
+                MediaFoundationStopCatchUp::Complete => {
+                    if stop_catch_up_ticks > 1 {
+                        tracing::info!(
+                            ticks = stop_catch_up_ticks,
+                            "Media Foundation recording writer caught up to Stop before closing the take"
+                        );
+                    }
+                    break;
+                }
+                MediaFoundationStopCatchUp::OutOfTime { owed_ticks } => {
+                    tracing::warn!(
+                        ticks = stop_catch_up_ticks,
+                        owed_ticks,
+                        budget_ms = MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET.as_millis() as u64,
+                        "Media Foundation recording writer could not catch up to Stop; the take ends early"
+                    );
+                    break;
+                }
+            }
+        }
         // Plan 200 D1: a shed separate file drains to its own last tick, even
         // while output pressure keeps it from selecting another frame.
         install_iso_shed_boundary(
@@ -6215,6 +6332,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         // Stop's TERM fallback, or a stuck encoder costs the whole take.
         let stop_requested_now = || {
             stop.load(Ordering::Relaxed)
+                || stop_catch_up.as_ref().is_some_and(|at| at.get().is_some())
                 || graceful_stop_at
                     .as_ref()
                     .and_then(|at| at.boundary())
@@ -10442,6 +10560,60 @@ mod tests {
     }
 
     #[test]
+    fn a_writer_behind_its_schedule_at_stop_writes_the_ticks_it_owes_first() {
+        // #1075: the CPU compositor left the writer 820 ms behind at noisy
+        // 1080p60; quitting at the Stop flag ended the take 0.8 s early.
+        let interval = Duration::from_secs_f64(1.0 / 60.0);
+        let stop_at = Instant::now();
+        let behind = stop_at - Duration::from_millis(820);
+        assert_eq!(
+            media_foundation_stop_catch_up(behind, stop_at, stop_at, interval),
+            MediaFoundationStopCatchUp::Continue
+        );
+        // The tick due exactly at Stop is still written; the next one isn't.
+        assert_eq!(
+            media_foundation_stop_catch_up(stop_at, stop_at, stop_at, interval),
+            MediaFoundationStopCatchUp::Continue
+        );
+        assert_eq!(
+            media_foundation_stop_catch_up(stop_at + interval, stop_at, stop_at, interval),
+            MediaFoundationStopCatchUp::Complete
+        );
+        // A writer on schedule completes at once: Stop costs it nothing.
+        assert_eq!(
+            media_foundation_stop_catch_up(
+                stop_at + Duration::from_millis(5),
+                stop_at,
+                stop_at - Duration::from_millis(3),
+                interval
+            ),
+            MediaFoundationStopCatchUp::Complete
+        );
+    }
+
+    #[test]
+    fn a_writer_that_cannot_catch_up_to_stop_gives_up_within_its_budget() {
+        let interval = Duration::from_secs_f64(1.0 / 30.0);
+        let stop_at = Instant::now();
+        let behind = stop_at - interval * 3;
+        let just_inside =
+            stop_at + MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET - Duration::from_millis(1);
+        assert_eq!(
+            media_foundation_stop_catch_up(behind, stop_at, just_inside, interval),
+            MediaFoundationStopCatchUp::Continue
+        );
+        assert_eq!(
+            media_foundation_stop_catch_up(
+                behind,
+                stop_at,
+                stop_at + MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET,
+                interval
+            ),
+            MediaFoundationStopCatchUp::OutOfTime { owed_ticks: 4 }
+        );
+    }
+
+    #[test]
     fn a_stuck_encoder_after_stop_drops_its_tail_instead_of_failing_the_take() {
         // #1074: NVIDIA's MFT held one frame and never signalled
         // DrainComplete; the take must end with the frame dropped.
@@ -10535,6 +10707,7 @@ mod tests {
         EncoderBridgeRecordingSession {
             stop,
             graceful_stop_at: None,
+            stop_catch_up: None,
             iso_member: None,
             terminal_failure: Arc::new(StdMutex::new(None)),
             startup_ready: None,
@@ -10698,6 +10871,7 @@ mod tests {
         let session = EncoderBridgeRecordingSession {
             stop,
             graceful_stop_at: None,
+            stop_catch_up: None,
             iso_member: None,
             terminal_failure,
             startup_ready: None,
@@ -10917,6 +11091,7 @@ mod tests {
         let session = EncoderBridgeRecordingSession {
             stop,
             graceful_stop_at: None,
+            stop_catch_up: None,
             iso_member: None,
             terminal_failure,
             startup_ready: None,
@@ -13109,6 +13284,7 @@ mod tests {
         let session = EncoderBridgeRecordingSession {
             stop: Arc::new(AtomicBool::new(false)),
             graceful_stop_at: None,
+            stop_catch_up: None,
             iso_member: None,
             terminal_failure: terminal_failure.clone(),
             startup_ready: None,

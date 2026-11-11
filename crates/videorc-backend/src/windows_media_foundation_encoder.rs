@@ -277,6 +277,9 @@ pub struct MediaFoundationH264Encoder {
     /// waits feed [`RECORDING_FRAME_ACCOUNTING`].
     accounts_session_frames: bool,
     input_credit_timeouts: u64,
+    /// #1075: once the user pressed Stop, no credit or surface wait may run
+    /// past this instant; a frame that would have to wait longer is skipped.
+    wait_deadline: Option<Instant>,
     /// Consecutive `MF_E_TRANSFORM_STREAM_CHANGE` answers since the last frame.
     stream_changes: StreamChangeBudget,
     drained: bool,
@@ -826,6 +829,7 @@ impl MediaFoundationH264Encoder {
             saw_first_input_credit: false,
             accounts_session_frames: false,
             input_credit_timeouts: 0,
+            wait_deadline: None,
             stream_changes: StreamChangeBudget::default(),
             drained: false,
             mf_started,
@@ -843,6 +847,19 @@ impl MediaFoundationH264Encoder {
     ) {
         self.input_credit_timeout = input_credit_timeout.min(EVENT_TIMEOUT);
         self.accounts_session_frames = accounts_session_frames;
+    }
+
+    /// #1075: the writer keeps encoding the ticks it owes after the user's
+    /// Stop, but NVIDIA's MFT often stalls right at Stop, and a 3 s credit or
+    /// surface wait then outlasts Stop's TERM fallback. From now on every wait
+    /// ends by `deadline` and a frame that cannot get its credit or surface by
+    /// then is skipped, never failed.
+    pub fn bound_waits_until(&mut self, deadline: Instant) {
+        self.wait_deadline = Some(deadline);
+    }
+
+    fn bounded_wait(&self, timeout: Duration) -> Duration {
+        bounded_wait_timeout(self.wait_deadline, timeout, Instant::now())
     }
 
     pub fn identity(&self) -> &str {
@@ -881,7 +898,12 @@ impl MediaFoundationH264Encoder {
         let use_d3d11_cpu_upload = self.input_subtype == MediaFoundationInputSubtype::Nv12
             && self.d3d11_cpu_upload.is_some();
         if use_d3d11_cpu_upload {
-            output.extend(self.wait_for_d3d11_cpu_upload_surface(EVENT_TIMEOUT)?);
+            let (surface_output, surface) =
+                self.wait_for_d3d11_cpu_upload_surface(self.bounded_wait(EVENT_TIMEOUT))?;
+            output.extend(surface_output);
+            if !surface {
+                return Ok(output);
+            }
         }
         let pts = scheduled_time_100ns(frame_index, self.config.fps)?;
         let duration = scheduled_duration_100ns(frame_index, self.config.fps)?;
@@ -963,7 +985,12 @@ impl MediaFoundationH264Encoder {
         if !credit {
             return Ok(output);
         }
-        output.extend(self.wait_for_d3d11_surface(EVENT_TIMEOUT)?);
+        let (surface_output, surface) =
+            self.wait_for_d3d11_surface(self.bounded_wait(EVENT_TIMEOUT))?;
+        output.extend(surface_output);
+        if !surface {
+            return Ok(output);
+        }
         let pts = scheduled_time_100ns(frame_index, self.config.fps)?;
         let duration = scheduled_duration_100ns(frame_index, self.config.fps)?;
         let (sample, surface_slot) = self
@@ -1014,11 +1041,11 @@ impl MediaFoundationH264Encoder {
     fn acquire_input_credit_for_frame(
         &mut self,
     ) -> Result<(Vec<MediaFoundationEncodedFrame>, bool)> {
-        let timeout = if self.saw_first_input_credit {
+        let timeout = self.bounded_wait(if self.saw_first_input_credit {
             self.input_credit_timeout
         } else {
             EVENT_TIMEOUT
-        };
+        });
         let wait_started_at = Instant::now();
         let (output, credit) = self.poll_input_credit(timeout)?;
         if self.accounts_session_frames {
@@ -1180,13 +1207,13 @@ impl MediaFoundationH264Encoder {
     fn wait_for_d3d11_surface(
         &mut self,
         timeout: Duration,
-    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
+    ) -> Result<(Vec<MediaFoundationEncodedFrame>, bool)> {
         if self
             .d3d11_input
             .as_ref()
             .is_some_and(D3D11SurfaceInput::has_available_surface)
         {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), true));
         }
         let deadline = Instant::now() + timeout;
         let mut output = Vec::new();
@@ -1199,7 +1226,7 @@ impl MediaFoundationH264Encoder {
                         .as_ref()
                         .is_some_and(D3D11SurfaceInput::has_available_surface)
                     {
-                        return Ok(output);
+                        return Ok((output, true));
                     }
                 }
                 Some(event_type) if event_type == METransformNeedInput.0 as u32 => {
@@ -1208,6 +1235,10 @@ impl MediaFoundationH264Encoder {
                 Some(_) => {}
                 None => thread::sleep(EVENT_POLL_INTERVAL),
             }
+        }
+        if self.wait_deadline.is_some() {
+            // #1075: after Stop, skip the frame rather than fail the take.
+            return Ok((output, false));
         }
         bail!(
             "Media Foundation probe stage=d3d11-surface-pool encoder={:?} input=NV12-D3D11 profile={}: no reusable surface within {}ms",
@@ -1220,13 +1251,13 @@ impl MediaFoundationH264Encoder {
     fn wait_for_d3d11_cpu_upload_surface(
         &mut self,
         timeout: Duration,
-    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
+    ) -> Result<(Vec<MediaFoundationEncodedFrame>, bool)> {
         if self
             .d3d11_cpu_upload
             .as_ref()
             .is_some_and(D3D11CpuUploadInput::has_available_surface)
         {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), true));
         }
         let deadline = Instant::now() + timeout;
         let mut output = Vec::new();
@@ -1239,7 +1270,7 @@ impl MediaFoundationH264Encoder {
                         .as_ref()
                         .is_some_and(D3D11CpuUploadInput::has_available_surface)
                     {
-                        return Ok(output);
+                        return Ok((output, true));
                     }
                 }
                 Some(event_type) if event_type == METransformNeedInput.0 as u32 => {
@@ -1248,6 +1279,10 @@ impl MediaFoundationH264Encoder {
                 Some(_) => {}
                 None => thread::sleep(EVENT_POLL_INTERVAL),
             }
+        }
+        if self.wait_deadline.is_some() {
+            // #1075: after Stop, skip the frame rather than fail the take.
+            return Ok((output, false));
         }
         bail!(
             "Media Foundation probe stage=d3d11-cpu-upload-surface-pool encoder={:?} input=NV12-D3D11 profile={}: no reusable surface within {}ms",
@@ -4047,6 +4082,13 @@ fn frame_index_from_100ns(pts: i64, fps: u32) -> Result<u64> {
     u64::try_from(value).context("Media Foundation frame index exceeded u64")
 }
 
+/// A wait of `timeout` that may not run past `deadline` (#1075).
+fn bounded_wait_timeout(deadline: Option<Instant>, timeout: Duration, now: Instant) -> Duration {
+    deadline.map_or(timeout, |deadline| {
+        timeout.min(deadline.saturating_duration_since(now))
+    })
+}
+
 fn i420_to_nv12_strided(
     i420: &[u8],
     width: u32,
@@ -4352,6 +4394,33 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(values.windows(2).all(|pair| pair[1] > pair[0]));
         assert_eq!(values[60], 10_000_000);
+    }
+
+    #[test]
+    fn a_wait_after_stop_never_runs_past_the_catch_up_deadline() {
+        // #1075: a stalled MFT at Stop used to hold a 3 s surface wait.
+        let now = Instant::now();
+        assert_eq!(
+            bounded_wait_timeout(None, EVENT_TIMEOUT, now),
+            EVENT_TIMEOUT
+        );
+        let deadline = now + Duration::from_millis(400);
+        assert_eq!(
+            bounded_wait_timeout(Some(deadline), EVENT_TIMEOUT, now),
+            Duration::from_millis(400)
+        );
+        assert_eq!(
+            bounded_wait_timeout(Some(deadline), Duration::from_millis(250), now),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            bounded_wait_timeout(
+                Some(deadline),
+                EVENT_TIMEOUT,
+                deadline + Duration::from_millis(5)
+            ),
+            Duration::ZERO
+        );
     }
 
     #[test]
