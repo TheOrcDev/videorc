@@ -7863,6 +7863,49 @@ mod tests {
         });
         let layout: LayoutSettings = serde_json::from_value(legacy).unwrap();
         assert_eq!(layout.layout_preset, LayoutPreset::ScreenCamera);
+        assert!(
+            layout.camera_chroma_key_edges.is_none(),
+            "no edges before plan 227"
+        );
+    }
+
+    /// Plan 227 B: Hide edges ride the layout as `cameraChromaKeyEdges`, stay
+    /// off the wire while every side is 0 (layouts saved before them are
+    /// unchanged), fill a missing side with 0 and refuse an unknown one.
+    #[test]
+    fn layout_settings_carry_hide_edges_and_omit_them_when_none() {
+        let layout = default_layout_settings();
+        let wire = serde_json::to_value(&layout).unwrap();
+        assert!(wire.get("cameraChromaKeyEdges").is_none(), "{wire}");
+
+        let mut edged = wire.clone();
+        edged["cameraChromaKeyEdges"] =
+            serde_json::json!({ "leftPct": 2, "topPct": 0, "rightPct": 0, "bottomPct": 5 });
+        let parsed: LayoutSettings = serde_json::from_value(edged).unwrap();
+        assert_eq!(
+            parsed.camera_chroma_key_edges,
+            CameraKeyEdges {
+                left_pct: 2,
+                top_pct: 0,
+                right_pct: 0,
+                bottom_pct: 5,
+            }
+        );
+        let back = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(
+            back["cameraChromaKeyEdges"],
+            serde_json::json!({ "leftPct": 2, "topPct": 0, "rightPct": 0, "bottomPct": 5 })
+        );
+
+        let mut partial = wire.clone();
+        partial["cameraChromaKeyEdges"] = serde_json::json!({ "rightPct": 3 });
+        let parsed: LayoutSettings = serde_json::from_value(partial).unwrap();
+        assert_eq!(parsed.camera_chroma_key_edges.right_pct, 3);
+        assert_eq!(parsed.camera_chroma_key_edges.left_pct, 0);
+
+        let mut unknown = wire;
+        unknown["cameraChromaKeyEdges"] = serde_json::json!({ "centerPct": 1 });
+        assert!(serde_json::from_value::<LayoutSettings>(unknown).is_err());
     }
 
     #[test]
