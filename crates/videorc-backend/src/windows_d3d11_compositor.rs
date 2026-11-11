@@ -352,6 +352,24 @@ pub(crate) struct WindowsD3d11ChromaKey {
     /// Plan 227 B, Hide edges: the kept box in source uv `[u_min, v_min,
     /// u_max, v_max]`.
     pub(crate) kept_uv: [f32; 4],
+    /// Plan 229: the neighbourhood the key judges, `(tap_offset_texels,
+    /// side_tap_weight)`, the reference keyer's constants.
+    pub(crate) neighbourhood: [f32; 2],
+}
+
+/// A neighbourhood the shader can use: taps at most four texels out and a
+/// side weight that leaves the centre tap a non-negative share.
+fn windows_chroma_key_neighbourhood_is_valid([tap_offset, side_weight]: [f32; 2]) -> bool {
+    (0.0..=4.0).contains(&tap_offset) && (0.0..=0.5).contains(&side_weight)
+}
+
+/// The reference keyer's neighbourhood constants as the D3D11 shader reads
+/// them.
+pub(crate) fn windows_chroma_key_neighbourhood_params() -> [f32; 2] {
+    [
+        crate::scene_geometry::CHROMA_KEY_NEIGHBOURHOOD_TAP_OFFSET as f32,
+        crate::scene_geometry::CHROMA_KEY_NEIGHBOURHOOD_SIDE_TAP_WEIGHT as f32,
+    ]
 }
 
 /// A floor the shader can use: `0 ≤ min ≤ max ≤ 255`, a non-negative luma
@@ -389,6 +407,7 @@ impl WindowsD3d11ChromaKey {
             spill_suppression: spec.spill as f32,
             saturation_floor: windows_chroma_key_floor_params(),
             kept_uv: spec.edges.kept_uv().map(|value| value as f32),
+            neighbourhood: windows_chroma_key_neighbourhood_params(),
         }
     }
 }
@@ -845,12 +864,14 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
         .into_iter()
         .chain(key.saturation_floor)
         .chain(key.kept_uv)
+        .chain(key.neighbourhood)
         .all(f32::is_finite)
             || !(0.0..=180.0).contains(&key.angle_threshold_degrees)
             || !(0.0..=180.0).contains(&key.softness_degrees)
             || !(0.0..=1.0).contains(&key.spill_suppression)
             || !windows_chroma_key_floor_is_valid(key.saturation_floor)
-            || !windows_chroma_key_kept_uv_is_valid(key.kept_uv))
+            || !windows_chroma_key_kept_uv_is_valid(key.kept_uv)
+            || !windows_chroma_key_neighbourhood_is_valid(key.neighbourhood))
     {
         return Err(WindowsD3d11CompositorError::invalid(format!(
             "{} layer {} has invalid chroma-key controls",
@@ -1185,6 +1206,9 @@ mod runtime {
         chroma_key_floor: [f32; 4],
         /// Plan 227 B: Hide edges' kept box in source uv.
         chroma_key_edges: [f32; 4],
+        /// Plan 229: the judged neighbourhood (tap_offset_texels,
+        /// side_tap_weight, reserved, reserved).
+        chroma_key_neighbourhood: [f32; 4],
     }
 
     pub(crate) struct WindowsD3d11Compositor {
@@ -2021,7 +2045,7 @@ mod runtime {
             WindowsD3d11SceneSourceKind::TestPattern => (2.0, [0.0; 4]),
             _ => (0.0, [0.0; 4]),
         };
-        let (key_color, key_controls, key_floor, key_edges) =
+        let (key_color, key_controls, key_floor, key_edges, key_neighbourhood) =
             if let Some(key) = layer.effects.chroma_key {
                 (
                     [
@@ -2038,9 +2062,10 @@ mod runtime {
                     ],
                     key.saturation_floor,
                     key.kept_uv,
+                    [key.neighbourhood[0], key.neighbourhood[1], 0.0, 0.0],
                 )
             } else {
-                ([0.0; 4], [0.0; 4], [0.0; 4], [0.0, 0.0, 1.0, 1.0])
+                ([0.0; 4], [0.0; 4], [0.0; 4], [0.0, 0.0, 1.0, 1.0], [0.0; 4])
             };
         DrawConstants {
             destination: layer.destination_normalized,
@@ -2084,6 +2109,7 @@ mod runtime {
             camera_look: [layer.effects.brightness, layer.effects.contrast, 0.0, 0.0],
             chroma_key_floor: key_floor,
             chroma_key_edges: key_edges,
+            chroma_key_neighbourhood: key_neighbourhood,
         }
     }
 
@@ -2981,7 +3007,7 @@ mod runtime {
                     .unwrap_or_else(|error| panic!("{entry_point}: {}", error.detail));
                 assert!(!bytecode.is_empty(), "{entry_point} has bytecode");
             }
-            assert_eq!(std::mem::size_of::<super::DrawConstants>(), 14 * 16);
+            assert_eq!(std::mem::size_of::<super::DrawConstants>(), 15 * 16);
             assert_eq!(
                 std::mem::offset_of!(super::DrawConstants, sprite_affine),
                 9 * 16
@@ -2998,6 +3024,11 @@ mod runtime {
             assert_eq!(
                 std::mem::offset_of!(super::DrawConstants, chroma_key_edges),
                 13 * 16
+            );
+            // Plan 229: the judged neighbourhood follows Hide edges.
+            assert_eq!(
+                std::mem::offset_of!(super::DrawConstants, chroma_key_neighbourhood),
+                14 * 16
             );
         }
     }
@@ -3097,6 +3128,8 @@ mod tests {
         // Left as seen through the mirror is the source's right side.
         assert_eq!(key.kept_uv, [0.0, 0.0, 0.96, 0.9]);
         assert_eq!(key.angle_threshold_degrees, 24.0);
+        // Plan 229: the reference keyer's 5x5 neighbourhood.
+        assert_eq!(key.neighbourhood, [1.2, 5.0 / 16.0]);
 
         let keyed_layer = |key: WindowsD3d11ChromaKey| {
             let mut camera = layer(
@@ -3127,6 +3160,14 @@ mod tests {
             },
             WindowsD3d11ChromaKey {
                 saturation_floor: [5.0, f32::NAN, 14.0, 0.4],
+                ..key
+            },
+            WindowsD3d11ChromaKey {
+                neighbourhood: [1.2, 0.75],
+                ..key
+            },
+            WindowsD3d11ChromaKey {
+                neighbourhood: [f32::INFINITY, 5.0 / 16.0],
                 ..key
             },
         ] {

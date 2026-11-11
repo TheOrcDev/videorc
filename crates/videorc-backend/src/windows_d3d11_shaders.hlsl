@@ -40,6 +40,10 @@ cbuffer DrawConstants : register(b0)
     // Plan 227 B, Hide edges: the kept box in source uv (uMin, vMin, uMax,
     // vMax). A sample outside it keys fully out.
     float4 chromaKeyEdges;
+    // Plan 229: the neighbourhood the key judges (tap offset in source
+    // texels, side tap weight, reserved, reserved), scene_geometry's
+    // CHROMA_KEY_NEIGHBOURHOOD_*. Offset 0 judges the sample alone.
+    float4 chromaKeyNeighbourhood;
 };
 
 Texture2D<float4> sourceTexture : register(t0);
@@ -177,11 +181,37 @@ float maskAlpha(float2 uv)
     return 1.0 - smoothstep(-feather, feather, signedDistance);
 }
 
+// Plan 229: the colour the key judges for a sample, the Metal shader's and
+// scene_geometry::chroma_key_neighbourhood_rgb's 5x5 binomial: nine bilinear
+// taps at 0 and +-offset source texels, weighing 1 - 2 * side and side per
+// axis, so a speck of camera noise keys with the screen around it.
+float3 chromaKeyJudgedRgb(float2 sourceUv)
+{
+    float2 tapStep = chromaKeyNeighbourhood.x * sourceInfo.xy;
+    float side = chromaKeyNeighbourhood.y;
+    float3 weights = float3(side, 1.0 - 2.0 * side, side);
+    float3 judged = float3(0.0, 0.0, 0.0);
+    [unroll]
+    for (int j = 0; j < 3; ++j)
+    {
+        [unroll]
+        for (int i = 0; i < 3; ++i)
+        {
+            float2 at = sourceUv + float2(i - 1, j - 1) * tapStep;
+            // SampleLevel: no derivatives inside the key's flow control.
+            judged += weights[i] * weights[j] *
+                sourceTexture.SampleLevel(linearClampSampler, at, 0.0).rgb;
+        }
+    }
+    return judged;
+}
+
 // scene_geometry::chroma_key_alpha in f32, the same model as the Metal
 // shader (plan 227): full-range BT.601 CbCr in 8-bit units, the angle to the
 // key direction ramping linearly across the band, a saturation floor that
 // scales with luma and ramps to fully keyable, and Hide edges keying out a
-// sample outside the kept box.
+// sample outside the kept box. A sampled source is judged by its
+// neighbourhood (plan 229); a solid or test pattern by its own colour.
 float chromaKeyAlpha(float3 rgb, float2 sourceUv)
 {
     if (chromaKeyColor.w < 0.5)
@@ -194,7 +224,8 @@ float chromaKeyAlpha(float3 rgb, float2 sourceUv)
         return 0.0;
     }
 
-    float3 bytes = rgb * 255.0;
+    float3 judged = sourceInfo.w < 0.5 ? chromaKeyJudgedRgb(sourceUv) : rgb;
+    float3 bytes = judged * 255.0;
     float2 chroma = float2(
         dot(bytes, float3(-43.0, -85.0, 128.0)) / 256.0,
         dot(bytes, float3(128.0, -107.0, -21.0)) / 256.0
@@ -271,7 +302,8 @@ float4 ScenePs(VertexOutput input) : SV_TARGET
 
     float keyAlpha = chromaKeyAlpha(color.rgb, sceneSourceUv(input.uv));
     color.rgb = chromaKeyDespill(color.rgb);
-    // Key the original pixel, then grade the despilled gamma-encoded RGB.
+    // Key the original pixel (judged by its neighbourhood), then grade the
+    // despilled gamma-encoded RGB.
     float luma = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
     color.rgb = saturate(luma + cameraLook.x + (cameraLook.y - 1.0) * (luma - 0.5)
         + effects.y * (color.rgb - luma));
