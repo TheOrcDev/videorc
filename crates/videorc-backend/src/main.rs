@@ -207,6 +207,8 @@ mod windows_media_foundation_encoder;
 mod windows_mf_probe;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_mf_rejections;
+#[cfg(target_os = "windows")]
+mod windows_mf_standby;
 mod x_chat;
 mod x_live;
 mod x_oauth1;
