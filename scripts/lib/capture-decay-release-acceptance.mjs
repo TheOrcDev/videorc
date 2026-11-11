@@ -142,6 +142,7 @@ export const CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS = Object.freeze([
   'scripts/lib/camera-extension-packaging.mjs',
   'scripts/lib/camera-look-ffmpeg-filters.mjs',
   'scripts/lib/changelog.mjs',
+  'scripts/lib/chroma-key-ffmpeg-filters.mjs',
   'scripts/lib/clean-cut-ffmpeg-filters.mjs',
   'scripts/lib/ffmpeg-sibling-paths.mjs',
   'scripts/lib/final-recording-path.mjs',
