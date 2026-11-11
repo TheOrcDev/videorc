@@ -3,7 +3,7 @@ import { useState, type ReactElement } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Button } from '@/components/ui/button'
-import { defaultCaptureConfig } from '@/lib/capture'
+import { defaultCaptureConfig, NO_CAMERA_KEY_EDGES } from '@/lib/capture'
 
 /**
  * The shipped camera defaults: placement, frame, lens and chroma key. Never
@@ -28,12 +28,13 @@ export const CAMERA_SETTINGS_DEFAULTS = {
   cameraChromaKeyColor: defaultCaptureConfig.layout.cameraChromaKeyColor,
   cameraChromaKeySimilarityPct: 40,
   cameraChromaKeySmoothnessPct: 8,
-  cameraChromaKeySpillPct: 10
+  cameraChromaKeySpillPct: 10,
+  cameraChromaKeyEdges: NO_CAMERA_KEY_EDGES
 } as const
 
 /**
  * "Reset camera settings" (plan 174 S0.3, C-18): one committed patch back to
- * the defaults, behind a question, because it rewrites eighteen values at
+ * the defaults, behind a question, because it rewrites nineteen values at
  * once, on a running stream or recording too.
  */
 export function CameraResetButton({

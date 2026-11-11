@@ -44,12 +44,14 @@ describe('CameraResetButton (plan 174 S0.3, C-18)', () => {
     expect(byTestId('camera-reset-dialog')).toBeNull()
   })
 
-  it('keeps the eighteen shipped defaults', () => {
-    expect(Object.keys(CAMERA_SETTINGS_DEFAULTS)).toHaveLength(18)
+  it('keeps the nineteen shipped defaults', () => {
+    expect(Object.keys(CAMERA_SETTINGS_DEFAULTS)).toHaveLength(19)
     expect(CAMERA_SETTINGS_DEFAULTS).toMatchObject({
       cameraTransformMode: 'preset',
       cameraCorner: 'bottom-right',
-      cameraChromaKeyEnabled: false
+      cameraChromaKeyEnabled: false,
+      // Plan 227 B: the key's Hide edges reset with the key.
+      cameraChromaKeyEdges: { leftPct: 0, topPct: 0, rightPct: 0, bottomPct: 0 }
     })
   })
 })

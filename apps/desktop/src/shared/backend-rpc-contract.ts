@@ -1736,6 +1736,17 @@ const layoutSchema = objectSchema(
     cameraChromaKeySimilarityPct: numberSchema({ min: 0, max: 100 }),
     cameraChromaKeySmoothnessPct: numberSchema({ min: 0, max: 100 }),
     cameraChromaKeySpillPct: numberSchema({ min: 0, max: 100 }),
+    cameraChromaKeyEdges: optionalSchema(
+      objectSchema(
+        {
+          leftPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          topPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          rightPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          bottomPct: numberSchema({ integer: true, min: 0, max: 25 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraMargin: numberSchema({ min: 0 }),
     cameraFit: enumSchema(['fit', 'fill']),
     cameraMirror: booleanSchema,
