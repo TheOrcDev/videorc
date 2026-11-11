@@ -8149,6 +8149,7 @@ fn scene_chroma_key_into_metal(
         band_rad: spec.band_deg.to_radians() as f32,
         spill: spec.spill as f32,
         spill_is_blue: spec.spill_is_blue(),
+        kept_uv: spec.edges.kept_uv().map(|value| value as f32),
     })
 }
 
@@ -12869,9 +12870,13 @@ fn blit_rgba_to_yuv420p(
 
     // Chroma key: resolve the source pixel to (rgb after despill, key alpha).
     // None means the pixel keys fully out. Grade after despill, keeping the
-    // original pixel's key alpha unchanged.
-    let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
+    // original pixel's key alpha unchanged. Hide edges (plan 227 B) test the
+    // sampled source texel: outside the kept box the pixel keys fully out.
+    let keyed_pixel = |r: u8, g: u8, b: u8, x: u32, y: u32| -> Option<(u8, u8, u8, u8)> {
         let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
+            if !spec.edges.keeps_texel(x, y, source.width, source.height) {
+                return None;
+            }
             let alpha = chroma_key_alpha(spec, r, g, b);
             if alpha == 0 {
                 return None;
@@ -12931,7 +12936,8 @@ fn blit_rgba_to_yuv420p(
                         if a < 16 {
                             continue;
                         }
-                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b, source_x, source_y)
+                        else {
                             continue;
                         };
                         // This pass writes luma only (plan 191).
@@ -12967,7 +12973,8 @@ fn blit_rgba_to_yuv420p(
                         if a < 16 {
                             continue;
                         }
-                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b, source_x, source_y)
+                        else {
                             continue;
                         };
                         let (u_value, v_value) = rgb_to_uv(r, g, b);
@@ -13008,6 +13015,17 @@ struct LinearTap {
     first: u32,
     second: u32,
     weight: u16,
+}
+
+impl LinearTap {
+    /// The texel that carries most of the sample's weight.
+    fn nearest(self) -> u32 {
+        if self.weight < 128 {
+            self.first
+        } else {
+            self.second
+        }
+    }
 }
 
 /// One axis of bilinear source mapping (plan 200 D3), the GPU sampler's
@@ -13098,20 +13116,30 @@ fn blit_linear_rgba_to_yuv420p(
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
     let uv_height = canvas_height.div_ceil(2);
-    let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
-        let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
-            let alpha = chroma_key_alpha(spec, r, g, b);
-            if alpha == 0 {
-                return None;
-            }
-            let (r, g, b) = chroma_key_despill(spec, r, g, b);
-            (r, g, b, alpha)
-        } else {
-            (r, g, b, 255)
+    // Hide edges (plan 227 B) test the texel nearest the bilinear sample.
+    let keyed_pixel =
+        |r: u8, g: u8, b: u8, column: LinearTap, row: LinearTap| -> Option<(u8, u8, u8, u8)> {
+            let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
+                if !spec.edges.keeps_texel(
+                    column.nearest(),
+                    row.nearest(),
+                    source.width,
+                    source.height,
+                ) {
+                    return None;
+                }
+                let alpha = chroma_key_alpha(spec, r, g, b);
+                if alpha == 0 {
+                    return None;
+                }
+                let (r, g, b) = chroma_key_despill(spec, r, g, b);
+                (r, g, b, alpha)
+            } else {
+                (r, g, b, 255)
+            };
+            let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
+            Some((r, g, b, key_alpha))
         };
-        let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
-        Some((r, g, b, key_alpha))
-    };
     let uv_left = draw_left / 2;
     let uv_top = draw_top / 2;
     let uv_right = draw_right.div_ceil(2).min(uv_width);
@@ -13176,7 +13204,9 @@ fn blit_linear_rgba_to_yuv420p(
                         if a < 16 {
                             continue;
                         }
-                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                        let Some((r, g, b, key_alpha)) =
+                            keyed_pixel(r, g, b, source_column, source_row)
+                        else {
                             continue;
                         };
                         let y_value = rgb_to_y(r, g, b);
@@ -13212,7 +13242,9 @@ fn blit_linear_rgba_to_yuv420p(
                         if a < 16 {
                             continue;
                         }
-                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                        let Some((r, g, b, key_alpha)) =
+                            keyed_pixel(r, g, b, source_column, source_row)
+                        else {
                             continue;
                         };
                         let (u_value, v_value) = rgb_to_uv(r, g, b);
@@ -15601,6 +15633,167 @@ mod tests {
         assert!(
             partial_alpha > 0 && partial_alpha < 255,
             "fixture pixel must ramp, got {partial_alpha}"
+        );
+    }
+
+    /// A 2×2 RGBA fixture keyed by the CPU blit and the Metal shader over a
+    /// blue canvas: (cpu Y plane, gpu Y per pixel). None without Metal.
+    #[cfg(target_os = "macos")]
+    fn cpu_and_gpu_keyed_luma(
+        pixels: [[u8; 4]; 4],
+        spec: crate::scene_geometry::ChromaKeySpec,
+    ) -> Option<([u8; 4], [u8; 4])> {
+        use crate::metal_compositor::{GpuSource, GpuSourceKind, MetalSceneCompositor, SourceMask};
+        let Some(mut gpu) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return None;
+        };
+        let mut cpu = blue_yuv_canvas_2x2();
+        assert!(blit_rgba_to_yuv420p(
+            &RgbaSource {
+                bytes: &pixels.concat(),
+                width: 2,
+                height: 2,
+                format: SourcePixelFormat::Rgba,
+            },
+            &mut cpu,
+            2,
+            2,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            SourceRenderOptions {
+                crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
+                contain: false,
+                mirror_x: false,
+                mask: SceneMask::None,
+                chroma_key: Some(spec),
+                camera_look: crate::protocol::CameraLook::default(),
+                linear: false,
+            },
+        ));
+        let bgra: Vec<u8> = pixels
+            .iter()
+            .flat_map(|[r, g, b, a]| [*b, *g, *r, *a])
+            .collect();
+        let gpu_pixels = gpu
+            .compose_bgra(
+                2,
+                2,
+                [0.0, 0.0, 1.0, 1.0],
+                &[GpuSource {
+                    kind: GpuSourceKind::Camera,
+                    bgra: &bgra,
+                    content_key: None,
+                    iosurface: None,
+                    pixel_buffer: None,
+                    texture: None,
+                    width: 2,
+                    height: 2,
+                    dest: [0.0, 0.0, 1.0, 1.0],
+                    crop: [0.0; 4],
+                    mirror: false,
+                    mask: SourceMask::None,
+                    blend: true,
+                    chroma_key: scene_chroma_key_into_metal(&spec),
+                    camera_look: None,
+                    corners: None,
+                    sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                    opacity: 1.0,
+                }],
+            )
+            .expect("metal compose");
+        let gpu_y = std::array::from_fn(|pixel| {
+            let (y, _, _) = rgb_to_yuv(
+                gpu_pixels[pixel * 4 + 2],
+                gpu_pixels[pixel * 4 + 1],
+                gpu_pixels[pixel * 4],
+            );
+            y
+        });
+        Some(([cpu[0], cpu[1], cpu[2], cpu[3]], gpu_y))
+    }
+
+    /// Plan 227: the owner's shadowed-screen and near-black subject tones key
+    /// the same on the CPU and in the Metal shader (the luma floor mirror).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_keyers_agree_on_the_shadowed_screen_or_skips() {
+        let pixels: [[u8; 4]; 4] = [
+            [1, 23, 6, 255],   // deep shadow: keys
+            [27, 23, 25, 255], // black t-shirt: kept
+            [6, 9, 6, 255],    // mic arm: kept
+            [0, 26, 9, 255],   // shadow: keys
+        ];
+        let Some((cpu, gpu)) = cpu_and_gpu_keyed_luma(pixels, chroma_key_test_spec()) else {
+            return;
+        };
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        for pixel in 0..4 {
+            assert!(
+                (i16::from(gpu[pixel]) - i16::from(cpu[pixel])).abs() <= 4,
+                "pixel {pixel}: cpu Y {} vs gpu Y {}",
+                cpu[pixel],
+                gpu[pixel]
+            );
+        }
+        assert_eq!(cpu[0], blue_y, "deep shadow keys on the CPU");
+        assert_eq!(cpu[3], blue_y, "shadow keys on the CPU");
+        assert_eq!(cpu[1], rgb_to_yuv(27, 23, 25).0, "t-shirt kept on the CPU");
+        assert_eq!(cpu[2], rgb_to_yuv(6, 9, 6).0, "mic arm kept on the CPU");
+    }
+
+    /// Plan 227 B: Hide edges cut the same source column on both paths.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_hide_the_same_edge_or_skips() {
+        let red = [255u8, 0, 0, 255];
+        let mut spec = chroma_key_test_spec();
+        spec.edges = crate::scene_geometry::ChromaKeyEdges {
+            left: 0.5,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+        };
+        let Some((cpu, gpu)) = cpu_and_gpu_keyed_luma([red; 4], spec) else {
+            return;
+        };
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        assert_eq!(
+            [cpu[0], cpu[2]],
+            [blue_y, blue_y],
+            "left column hidden (CPU)"
+        );
+        assert_eq!([cpu[1], cpu[3]], [red_y, red_y], "right column kept (CPU)");
+        for pixel in 0..4 {
+            assert!(
+                (i16::from(gpu[pixel]) - i16::from(cpu[pixel])).abs() <= 4,
+                "pixel {pixel}: cpu Y {} vs gpu Y {}",
+                cpu[pixel],
+                gpu[pixel]
+            );
+        }
+    }
+
+    /// The Metal shader and the D3D11 shader read mirrored floor constants
+    /// (metal_compositor.rs also builds into the preview helper, which has no
+    /// scene_geometry); pin them to the reference.
+    #[test]
+    fn shader_floor_constants_mirror_the_reference_keyer() {
+        let reference = crate::scene_geometry::CHROMA_KEY_SATURATION_FLOOR_PARAMS;
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            crate::metal_compositor::CHROMA_KEY_SATURATION_FLOOR_PARAMS,
+            reference.map(|value| value as f32)
+        );
+        assert_eq!(
+            crate::windows_d3d11_compositor::windows_chroma_key_floor_params(),
+            reference.map(|value| value as f32)
         );
     }
 

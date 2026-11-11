@@ -12521,6 +12521,7 @@ mod tests {
                 camera_chroma_key_similarity_pct: 40,
                 camera_chroma_key_smoothness_pct: 8,
                 camera_chroma_key_spill_pct: 10,
+                camera_chroma_key_edges: Default::default(),
             },
             output: OutputSettings {
                 keep_original_mkv: false,
@@ -12875,6 +12876,7 @@ mod tests {
             camera_chroma_key_similarity_pct: 40,
             camera_chroma_key_smoothness_pct: 8,
             camera_chroma_key_spill_pct: 10,
+            camera_chroma_key_edges: Default::default(),
         };
         let sources = SourceSelection {
             screen_id: Some("screen:avfoundation:1".to_string()),

@@ -965,6 +965,17 @@ const layoutSettingsSchema = objectSchema(
     cameraChromaKeySimilarityPct: numberSchema(),
     cameraChromaKeySmoothnessPct: numberSchema(),
     cameraChromaKeySpillPct: numberSchema(),
+    cameraChromaKeyEdges: optionalSchema(
+      objectSchema(
+        {
+          leftPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          topPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          rightPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          bottomPct: numberSchema({ integer: true, min: 0, max: 25 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraMargin: numberSchema(),
     cameraFit: enumSchema(['fit', 'fill']),
     cameraMirror: booleanSchema,

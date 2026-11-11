@@ -62,7 +62,7 @@ struct FragParams {
     float radius;
     // Chroma key, mirroring scene_geometry's f64 reference keyer (ANGLE
     // model): chroma_key = (enabled, key_dir_cb, key_dir_cr, max_angle_rad);
-    // chroma_key2 = (band_rad, spill, spill_is_blue, saturation_floor).
+    // chroma_key2 = (band_rad, spill, spill_is_blue, reserved).
     // CbCr uses the SAME -43/-85/128 and 128/-107/-21 coefficient family as
     // color.rs. If these drift, the CPU and GPU keyers disagree.
     float4 chroma_key;
@@ -73,6 +73,12 @@ struct FragParams {
     // crop so a scaled draw never blends in pixels the crop removed.
     float4 layer;
     float4 camera_look; // brightness, contrast, saturation, enabled
+    // Plan 227: the luma-scaled saturation floor (min, per_luma, max,
+    // ramp_ratio), mirroring scene_geometry's CHROMA_KEY_SATURATION_FLOOR_*.
+    float4 chroma_key_floor;
+    // Plan 227 B, Hide edges: the kept box in source uv (u_min, v_min,
+    // u_max, v_max); a sample outside it keys fully out.
+    float4 chroma_key_edges;
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
@@ -136,16 +142,21 @@ fragment float4 f_main(VOut in [[stage_in]],
     float4 color = tex.sample(samp, src);
     // Chroma key (scene_geometry::chroma_key_alpha / chroma_key_despill in
     // f32, ANGLE model): the angle between the pixel's CbCr vector and the
-    // key direction ramps alpha 0->1 across the band; a saturation floor
-    // (ramp width 6.0, mirroring CHROMA_KEY_SATURATION_RAMP) pulls greys
-    // back to opaque. Spill pulls the dominant key channel down toward the
-    // other channels' max. The quad must be drawn on the blending pipeline
-    // for the computed alpha to matter.
+    // key direction ramps alpha 0->1 across the band; a saturation floor that
+    // scales with luma (plan 227, chroma_key_floor) pulls greys back to
+    // opaque. Spill pulls the dominant key channel down toward the other
+    // channels' max. Hide edges (chroma_key_edges) key the sample out when
+    // it lies outside the kept box. The quad must be drawn on the blending
+    // pipeline for the computed alpha to matter.
     if (params.chroma_key.x > 0.5) {
         float r = color.r * 255.0, g = color.g * 255.0, b = color.b * 255.0;
         float vcb = (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0;
         float vcr = (128.0 * r - 107.0 * g - 21.0 * b) / 256.0;
         float saturation = sqrt(vcb * vcb + vcr * vcr);
+        float luma = (77.0 * r + 150.0 * g + 29.0 * b) / 256.0;
+        float floor_value = clamp(params.chroma_key_floor.y * luma,
+            params.chroma_key_floor.x, params.chroma_key_floor.z);
+        float ramp = max(floor_value * params.chroma_key_floor.w, 1e-4);
         float angle_alpha = 1.0;
         if (saturation > 1e-4) {
             float cos_theta = clamp(
@@ -157,8 +168,14 @@ fragment float4 f_main(VOut in [[stage_in]],
                 ? clamp((theta - max_angle) / band, 0.0, 1.0)
                 : (theta <= max_angle ? 0.0 : 1.0);
         }
-        float eligibility = clamp((saturation - params.chroma_key2.w) / 6.0, 0.0, 1.0);
+        float eligibility = (saturation <= floor_value)
+            ? 0.0
+            : clamp((saturation - floor_value) / ramp, 0.0, 1.0);
         float alpha = 1.0 - eligibility * (1.0 - angle_alpha);
+        float4 kept = params.chroma_key_edges;
+        if (src.x < kept.x || src.x > kept.z || src.y < kept.y || src.y > kept.w) {
+            alpha = 0.0;
+        }
         float spill = params.chroma_key2.y;
         if (spill > 0.0) {
             if (params.chroma_key2.z > 0.5) {
@@ -202,6 +219,10 @@ struct FragParams {
     /// (opacity, reserved, reserved, reserved); see the MSL comment.
     layer: [f32; 4],
     camera_look: [f32; 4],
+    /// Plan 227: (min, per_luma, max, ramp_ratio) of the saturation floor.
+    chroma_key_floor: [f32; 4],
+    /// Plan 227 B: the kept box in source uv (u_min, v_min, u_max, v_max).
+    chroma_key_edges: [f32; 4],
 }
 
 /// Per-quad chroma key in shader units, converted once from
@@ -216,26 +237,38 @@ pub struct GpuChromaKey {
     pub band_rad: f32,
     pub spill: f32,
     pub spill_is_blue: bool,
+    /// Hide edges (plan 227 B): the kept box in source uv `[u_min, v_min,
+    /// u_max, v_max]`; `[0, 0, 1, 1]` keeps the whole frame.
+    pub kept_uv: [f32; 4],
 }
 
-/// Mirrors scene_geometry::CHROMA_KEY_SATURATION_FLOOR / _RAMP — if these
-/// drift the CPU and GPU keyers disagree about which greys survive.
-const CHROMA_KEY_SATURATION_FLOOR: f32 = 14.0;
-const CHROMA_KEY_SATURATION_RAMP: f32 = 6.0;
+/// Mirrors scene_geometry::CHROMA_KEY_SATURATION_FLOOR_PARAMS (min, per_luma,
+/// max, ramp_ratio) — if these drift the CPU and GPU keyers disagree about
+/// which greys survive. This file also builds into the preview helper, which
+/// has no scene_geometry, so the constants are mirrored and a compositor test
+/// pins them equal.
+pub(crate) const CHROMA_KEY_SATURATION_FLOOR_PARAMS: [f32; 4] = [5.0, 0.15, 14.0, 6.0 / 14.0];
+
+/// The kept box of a key with no Hide edges.
+pub const CHROMA_KEY_KEEP_ALL_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 impl GpuChromaKey {
-    fn frag_params(source: Option<&GpuChromaKey>) -> ([f32; 4], [f32; 4]) {
+    /// `(chroma_key, chroma_key2, chroma_key_floor, chroma_key_edges)` for
+    /// the fragment shader.
+    fn frag_params(source: Option<&GpuChromaKey>) -> [[f32; 4]; 4] {
         match source {
-            Some(key) => (
+            Some(key) => [
                 [1.0, key.key_dir_cb, key.key_dir_cr, key.max_angle_rad],
                 [
                     key.band_rad,
                     key.spill,
                     if key.spill_is_blue { 1.0 } else { 0.0 },
-                    CHROMA_KEY_SATURATION_FLOOR,
+                    0.0,
                 ],
-            ),
-            None => ([0.0; 4], [0.0; 4]),
+                CHROMA_KEY_SATURATION_FLOOR_PARAMS,
+                key.kept_uv,
+            ],
+            None => [[0.0; 4], [0.0; 4], [0.0; 4], CHROMA_KEY_KEEP_ALL_UV],
         }
     }
 }
@@ -1524,7 +1557,8 @@ impl MetalSceneCompositor {
             } else {
                 1.0
             };
-            let (chroma_key, chroma_key2) = GpuChromaKey::frag_params(source.chroma_key.as_ref());
+            let [chroma_key, chroma_key2, chroma_key_floor, chroma_key_edges] =
+                GpuChromaKey::frag_params(source.chroma_key.as_ref());
             let params = FragParams {
                 crop: source.crop,
                 mirror: f32::from(u8::from(source.mirror)),
@@ -1533,6 +1567,8 @@ impl MetalSceneCompositor {
                 radius: source.mask.shader_radius(),
                 chroma_key,
                 chroma_key2,
+                chroma_key_floor,
+                chroma_key_edges,
                 camera_look: source
                     .camera_look
                     .map_or([0.0, 1.0, 1.0, 0.0], |[b, c, s]| [b, c, s, 1.0]),
@@ -2765,6 +2801,8 @@ fn encode_texture_present(
         chroma_key2: [0.0; 4],
         layer: [1.0, 0.0, 0.0, 0.0],
         camera_look: [0.0, 1.0, 1.0, 0.0],
+        chroma_key_floor: [0.0; 4],
+        chroma_key_edges: CHROMA_KEY_KEEP_ALL_UV,
     };
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -3113,6 +3151,7 @@ mod tests {
             band_rad: band_deg.to_radians(),
             spill,
             spill_is_blue: false,
+            kept_uv: CHROMA_KEY_KEEP_ALL_UV,
         }
     }
 
@@ -3205,6 +3244,70 @@ mod tests {
             [255, 0, 0],
             "corner masked to the blue frame"
         );
+    }
+
+    /// Plan 227: the owner's deep-shadowed screen keys and the near-black
+    /// subject (t-shirt, mic arm) stays, through the real shader.
+    #[test]
+    fn chroma_key_keys_the_shadowed_screen_and_keeps_near_black_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // BGRA texels over a BLUE frame.
+        let camera = [
+            6u8, 23, 1, 255, // deep shadow (rgb 1,23,6): keys
+            9, 26, 0, 255, // shadow (rgb 0,26,9): keys
+            25, 23, 27, 255, // black t-shirt (rgb 27,23,25): kept
+            6, 9, 6, 255, // mic arm (rgb 6,9,6): kept
+        ];
+        let mut source = full_frame(&camera, 4, 1, false, SourceMask::None, [0.0; 4]);
+        source.blend = true;
+        source.chroma_key = Some(green_key(24.0, 4.8, 0.0));
+        let px = compositor
+            .compose_bgra(4, 1, [0.0, 0.0, 1.0, 1.0], &[source])
+            .unwrap();
+        assert_eq!(pixel(&px, 4, 0, 0)[..3], [255, 0, 0], "deep shadow keys");
+        assert_eq!(pixel(&px, 4, 1, 0)[..3], [255, 0, 0], "shadow keys");
+        assert_eq!(pixel(&px, 4, 2, 0)[..3], [25, 23, 27], "t-shirt kept");
+        assert_eq!(pixel(&px, 4, 3, 0)[..3], [6, 9, 6], "mic arm kept");
+    }
+
+    /// Plan 227 B: Hide edges keys out everything outside the kept box, in
+    /// SOURCE uv, so a mirrored quad hides the source's right column on the
+    /// canvas's left.
+    #[test]
+    fn chroma_key_hide_edges_follow_the_source_through_a_mirror_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        let red = [0u8, 0, 255, 255].repeat(4);
+        let mut source = full_frame(&red, 4, 1, false, SourceMask::None, [0.0; 4]);
+        source.blend = true;
+        let mut key = green_key(24.0, 4.8, 0.0);
+        key.kept_uv = [0.25, 0.0, 1.0, 1.0];
+        source.chroma_key = Some(key);
+        let px = compositor
+            .compose_bgra(4, 1, [0.0, 0.0, 1.0, 1.0], &[source])
+            .unwrap();
+        assert_eq!(
+            pixel(&px, 4, 0, 0)[..3],
+            [255, 0, 0],
+            "source column 0 hidden"
+        );
+        assert_eq!(pixel(&px, 4, 1, 0)[..3], [0, 0, 255], "column 1 kept");
+
+        source.mirror = true;
+        let px = compositor
+            .compose_bgra(4, 1, [0.0, 0.0, 1.0, 1.0], &[source])
+            .unwrap();
+        assert_eq!(
+            pixel(&px, 4, 3, 0)[..3],
+            [255, 0, 0],
+            "mirrored: hidden on the right"
+        );
+        assert_eq!(pixel(&px, 4, 0, 0)[..3], [0, 0, 255], "mirrored: left kept");
     }
 
     #[test]

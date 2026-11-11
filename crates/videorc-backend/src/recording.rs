@@ -24986,9 +24986,46 @@ fn camera_chroma_key_filter(layout: &LayoutSettings) -> String {
     } else {
         String::new()
     };
+    let edges = camera_chroma_key_edges_filter(layout);
     format!(
-        "chromakey=color=0x{r:02X}{g:02X}{b:02X}:similarity={similarity:.4}:blend={blend:.4}{despill},"
+        "chromakey=color=0x{r:02X}{g:02X}{b:02X}:similarity={similarity:.4}:blend={blend:.4}{despill}{edges},"
     )
+}
+
+/// Hide edges (plan 227 B) on the FFmpeg leg: one transparent box per hidden
+/// side, right after the key. `drawbox`'s `replace=1` writes the box's alpha
+/// (0) instead of blending, so the edge becomes see-through like the CPU,
+/// Metal and D3D11 paths. This leg mirrors with `hflip` BEFORE keying, so it
+/// takes the edges as the streamer sees them, not the mirror-resolved spec.
+fn camera_chroma_key_edges_filter(layout: &LayoutSettings) -> String {
+    let edges = crate::scene_geometry::camera_chroma_key_edges_as_seen(layout);
+    let clear = "color=black@0:t=fill:replace=1";
+    let mut filters = String::new();
+    if edges.left > 0.0 {
+        filters.push_str(&format!(
+            ",drawbox=x=0:y=0:w=iw*{:.6}:h=ih:{clear}",
+            edges.left
+        ));
+    }
+    if edges.right > 0.0 {
+        filters.push_str(&format!(
+            ",drawbox=x=iw-iw*{0:.6}:y=0:w=iw*{0:.6}:h=ih:{clear}",
+            edges.right
+        ));
+    }
+    if edges.top > 0.0 {
+        filters.push_str(&format!(
+            ",drawbox=x=0:y=0:w=iw:h=ih*{:.6}:{clear}",
+            edges.top
+        ));
+    }
+    if edges.bottom > 0.0 {
+        filters.push_str(&format!(
+            ",drawbox=x=0:y=ih-ih*{0:.6}:w=iw:h=ih*{0:.6}:{clear}",
+            edges.bottom
+        ));
+    }
+    filters
 }
 
 /// Effective key color + similarity radius (CbCr units) for the chromakey
@@ -33954,6 +33991,7 @@ mod tests {
                 camera_chroma_key_similarity_pct: 40,
                 camera_chroma_key_smoothness_pct: 8,
                 camera_chroma_key_spill_pct: 10,
+                camera_chroma_key_edges: Default::default(),
             },
             scene: None,
             output: OutputSettings {
@@ -42360,11 +42398,110 @@ mod tests {
             ("skin", [200u8, 160, 140]),
             ("dark hair", [40, 30, 25]),
             ("white shirt", [230, 230, 230]),
+            // Plan 227, the owner's recording: near-black subject.
+            ("black t-shirt", [27, 23, 25]),
+            ("mic arm", [6, 9, 6]),
         ] {
             assert!(
                 distance(rgb) > similarity_units + 10.0,
                 "{label} must stay clearly outside the disc ({:.1})",
                 distance(rgb)
+            );
+        }
+        // Plan 227: the owner's shadowed screen. Its mean tones key; the
+        // deepest sit in the blend band (partial), the bounded divergence
+        // from the angle keyer's luma floor, which keys them fully. A wider
+        // disc would start keying the near-black subject above.
+        for (label, rgb) in [
+            ("shadowed corner mean", [1u8, 34, 12]),
+            ("shadowed side mean", [4, 56, 20]),
+        ] {
+            assert!(
+                distance(rgb) <= similarity_units,
+                "{label} must be inside the chromakey disc ({:.1})",
+                distance(rgb)
+            );
+        }
+        let blend_units = spec.band_deg.to_radians() * FFMPEG_CHROMA_KEY_REFERENCE_SATURATION;
+        for (label, rgb) in [("deep shadow", [1u8, 23, 6]), ("shadow", [0, 26, 9])] {
+            let distance = distance(rgb);
+            assert!(
+                distance > similarity_units && distance < similarity_units + blend_units,
+                "{label} sits in the blend band ({distance:.1})"
+            );
+        }
+    }
+
+    /// Plan 227 B: Hide edges on the FFmpeg leg are transparent boxes
+    /// after the key, as the streamer sees the camera (this leg flips first).
+    #[test]
+    fn camera_chroma_key_filter_hides_edges_with_transparent_boxes() {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_chroma_key_edges = crate::protocol::CameraKeyEdges {
+            left_pct: 1,
+            top_pct: 2,
+            right_pct: 3,
+            bottom_pct: 40,
+        };
+        assert_eq!(camera_chroma_key_filter(&layout), "", "no key, no edges");
+        layout.camera_chroma_key_enabled = true;
+        layout.camera_mirror = true;
+        assert_eq!(
+            camera_chroma_key_filter(&layout),
+            "chromakey=color=0x44AB43:similarity=0.1175:blend=0.0128,despill=type=green:mix=0.1000,\
+drawbox=x=0:y=0:w=iw*0.010000:h=ih:color=black@0:t=fill:replace=1,\
+drawbox=x=iw-iw*0.030000:y=0:w=iw*0.030000:h=ih:color=black@0:t=fill:replace=1,\
+drawbox=x=0:y=0:w=iw:h=ih*0.020000:color=black@0:t=fill:replace=1,\
+drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,",
+            "as seen (no mirror swap: hflip runs first), bottom clamped to 25 %"
+        );
+        layout.camera_chroma_key_edges = crate::protocol::CameraKeyEdges {
+            right_pct: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            camera_chroma_key_edges_filter(&layout),
+            ",drawbox=x=iw-iw*0.050000:y=0:w=iw*0.050000:h=ih:color=black@0:t=fill:replace=1"
+        );
+    }
+
+    /// Plan 227: the keyer chain may only name the filters every bundle
+    /// policy requires (`ffmpegFilters` in protocol-fixtures/chroma-key.json,
+    /// mirrored by scripts/lib/chroma-key-ffmpeg-filters.mjs), so a bundle
+    /// that cannot key fails its package gate instead of a session.
+    #[test]
+    fn camera_chroma_key_chain_names_only_bundle_policy_filters() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol-fixtures/chroma-key.json"))
+                .unwrap();
+        let policy: Vec<String> = serde_json::from_value(fixture["ffmpegFilters"].clone()).unwrap();
+        assert_eq!(policy, ["chromakey", "despill", "drawbox"]);
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_chroma_key_enabled = true;
+        layout.camera_chroma_key_edges = crate::protocol::CameraKeyEdges {
+            left_pct: 1,
+            top_pct: 1,
+            right_pct: 1,
+            bottom_pct: 1,
+        };
+        let chain = camera_chroma_key_filter(&layout);
+        let names = ffmpeg_chain_filter_names(&chain);
+        assert_eq!(
+            names,
+            [
+                "chromakey",
+                "despill",
+                "drawbox",
+                "drawbox",
+                "drawbox",
+                "drawbox"
+            ],
+            "{chain}"
+        );
+        for name in &names {
+            assert!(
+                policy.contains(name),
+                "{name} is outside the bundle policy: {chain}"
             );
         }
     }

@@ -9,6 +9,7 @@ import type {
   CaptionStyleId,
   AutomaticSourceFallbackEvent,
   AutomaticSourceFallbackSourceKind,
+  CameraKeyEdges,
   CameraLook,
   CameraTransform,
   CameraTransformMode,
@@ -33,6 +34,7 @@ import type {
   VideoSettings
 } from '../../../shared/backend'
 import {
+  CAMERA_KEY_EDGE_MAX_PCT,
   HORIZONTAL_LAYOUT_PRESETS,
   LAYOUT_PRESET_VALUES,
   SYSTEM_AUDIO_GAIN_DB_DEFAULT,
@@ -1931,10 +1933,40 @@ export function normalizeSourceVisibility(raw: unknown): { camera: boolean; capt
   return { camera: value.camera !== false, capture: value.capture !== false }
 }
 
+/** No Hide edges: the key keeps the whole camera. */
+export const NO_CAMERA_KEY_EDGES: CameraKeyEdges = {
+  leftPct: 0,
+  topPct: 0,
+  rightPct: 0,
+  bottomPct: 0
+}
+
+/**
+ * Hide edges (plan 227 B), each side a whole percent in 0–25. Undefined when
+ * every side is 0, so a layout without edges matches one saved before them
+ * (the backend omits them the same way).
+ */
+export function normalizeCameraKeyEdges(raw: unknown): CameraKeyEdges | undefined {
+  const value = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const side = (key: keyof CameraKeyEdges): number =>
+    clampNumber(value[key], 0, 0, CAMERA_KEY_EDGE_MAX_PCT)
+  const edges: CameraKeyEdges = {
+    leftPct: side('leftPct'),
+    topPct: side('topPct'),
+    rightPct: side('rightPct'),
+    bottomPct: side('bottomPct')
+  }
+  return Object.values(edges).some((pct) => pct > 0) ? edges : undefined
+}
+
 export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
-  const { cameraLook: storedLook, ...candidate } =
-    layout && typeof layout === 'object' ? (layout as Partial<LayoutSettings>) : {}
+  const {
+    cameraLook: storedLook,
+    cameraChromaKeyEdges: storedKeyEdges,
+    ...candidate
+  } = layout && typeof layout === 'object' ? (layout as Partial<LayoutSettings>) : {}
   const cameraLook = normalizeCameraLook(storedLook)
+  const cameraChromaKeyEdges = normalizeCameraKeyEdges(storedKeyEdges)
   const cameraTransform = normalizeCameraTransform(candidate.cameraTransform)
   const cameraTransformMode: CameraTransformMode =
     candidate.cameraTransformMode === 'custom' && cameraTransform ? 'custom' : 'preset'
@@ -1943,6 +1975,7 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
     ...defaultCaptureConfig.layout,
     ...candidate,
     ...(cameraLook ? { cameraLook } : {}),
+    ...(cameraChromaKeyEdges ? { cameraChromaKeyEdges } : {}),
     layoutPreset: isLayoutPreset(candidate.layoutPreset)
       ? candidate.layoutPreset
       : (typeof candidate.layoutPreset === 'string' &&

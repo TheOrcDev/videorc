@@ -805,6 +805,27 @@ describe('Electron IPC contract', () => {
         }
       ])
     ).toThrow('one of screen-camera')
+    // Plan 227 B: Hide edges cross this preload too, whole percents 0–25.
+    const cameraChromaKeyEdges = { leftPct: 3, topPct: 0, rightPct: 0, bottomPct: 25 }
+    expect(
+      validateElectronInvokeArgs('preview-surface:update-scene', [
+        {
+          revision: 4,
+          scene: null,
+          layout: { ...layout, cameraChromaKeyEdges },
+          activeScreen: null
+        }
+      ])
+    ).toHaveLength(1)
+    expect(() =>
+      validateElectronInvokeArgs('preview-surface:update-scene', [
+        {
+          revision: 4,
+          scene: null,
+          layout: { ...layout, cameraChromaKeyEdges: { ...cameraChromaKeyEdges, bottomPct: 40 } }
+        }
+      ])
+    ).toThrow()
 
     for (const sourceVisibility of [
       null,

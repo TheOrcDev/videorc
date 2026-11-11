@@ -770,6 +770,21 @@ export interface CameraLook {
   saturation: number
 }
 
+/**
+ * Hide edges (plan 227 B): how much of each side of the camera, as you see
+ * it, the green-screen key makes see-through. Percent of the camera frame,
+ * 0–25 per side (`CAMERA_KEY_EDGE_MAX_PCT`); only while the key is on.
+ */
+export interface CameraKeyEdges {
+  leftPct: number
+  topPct: number
+  rightPct: number
+  bottomPct: number
+}
+
+/** The largest share of the camera one side of Hide edges may take (%). */
+export const CAMERA_KEY_EDGE_MAX_PCT = 25
+
 export interface LayoutSettings {
   /** Per-camera setting injected at the output boundary; omitted when neutral. */
   cameraLook?: CameraLook
@@ -793,6 +808,8 @@ export interface LayoutSettings {
   cameraChromaKeySmoothnessPct: number
   /** Spill suppression strength (%): kills the green/blue fringe. */
   cameraChromaKeySpillPct: number
+  /** Hide edges for the key (plan 227 B); omitted while every side is 0. */
+  cameraChromaKeyEdges?: CameraKeyEdges
   cameraMargin: number
   cameraFit: CameraFit
   cameraMirror: boolean

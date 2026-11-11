@@ -17,7 +17,8 @@ cbuffer DrawConstants : register(b0)
     float4 mask;
     // key R, G, B, enabled
     float4 chromaKeyColor;
-    // angle threshold, softness, spill, saturation floor (all normalized)
+    // angle threshold, softness (both normalized by 180 degrees), spill,
+    // reserved
     float4 chromaKeyControls;
     // source texel X/Y, blur radius in source pixels, source kind
     // source kind: 0 sampled, 1 solid, 2 test pattern
@@ -32,6 +33,13 @@ cbuffer DrawConstants : register(b0)
     float4 spritePivot;
     // brightness, contrast, reserved, reserved
     float4 cameraLook;
+    // Plan 227: the luma-scaled saturation floor in 8-bit CbCr units
+    // (min, per_luma, max, ramp_ratio), scene_geometry's
+    // CHROMA_KEY_SATURATION_FLOOR_PARAMS.
+    float4 chromaKeyFloor;
+    // Plan 227 B, Hide edges: the kept box in source uv (uMin, vMin, uMax,
+    // vMax). A sample outside it keys fully out.
+    float4 chromaKeyEdges;
 };
 
 Texture2D<float4> sourceTexture : register(t0);
@@ -94,10 +102,16 @@ VertexOutput FullScreenVs(uint vertexId : SV_VertexID)
     return output;
 }
 
-float4 sampleSource(float2 uv)
+// Where an output uv samples the source texture (mirror, then crop).
+float2 sceneSourceUv(float2 uv)
 {
     float2 mirrored = float2(mask.x > 0.5 ? 1.0 - uv.x : uv.x, uv.y);
-    float2 sourceUv = sourceCrop.xy + mirrored * sourceCrop.zw;
+    return sourceCrop.xy + mirrored * sourceCrop.zw;
+}
+
+float4 sampleSource(float2 uv)
+{
+    float2 sourceUv = sceneSourceUv(uv);
     float blurRadius = sourceInfo.z;
     if (blurRadius <= 0.01)
     {
@@ -163,34 +177,80 @@ float maskAlpha(float2 uv)
     return 1.0 - smoothstep(-feather, feather, signedDistance);
 }
 
-float chromaKeyAlpha(float3 rgb)
+// scene_geometry::chroma_key_alpha in f32, the same model as the Metal
+// shader (plan 227): full-range BT.601 CbCr in 8-bit units, the angle to the
+// key direction ramping linearly across the band, a saturation floor that
+// scales with luma and ramps to fully keyable, and Hide edges keying out a
+// sample outside the kept box.
+float chromaKeyAlpha(float3 rgb, float2 sourceUv)
 {
     if (chromaKeyColor.w < 0.5)
     {
         return 1.0;
     }
+    if (sourceUv.x < chromaKeyEdges.x || sourceUv.x > chromaKeyEdges.z ||
+        sourceUv.y < chromaKeyEdges.y || sourceUv.y > chromaKeyEdges.w)
+    {
+        return 0.0;
+    }
 
-    // Full-range BT.601 is the repository's shared chroma-key feature space.
+    float3 bytes = rgb * 255.0;
     float2 chroma = float2(
-        dot(rgb, float3(-43.0, -85.0, 128.0)) / 255.0,
-        dot(rgb, float3(128.0, -107.0, -21.0)) / 255.0
+        dot(bytes, float3(-43.0, -85.0, 128.0)) / 256.0,
+        dot(bytes, float3(128.0, -107.0, -21.0)) / 256.0
     );
+    float3 keyBytes = chromaKeyColor.rgb * 255.0;
     float2 keyChroma = float2(
-        dot(chromaKeyColor.rgb, float3(-43.0, -85.0, 128.0)) / 255.0,
-        dot(chromaKeyColor.rgb, float3(128.0, -107.0, -21.0)) / 255.0
+        dot(keyBytes, float3(-43.0, -85.0, 128.0)) / 256.0,
+        dot(keyBytes, float3(128.0, -107.0, -21.0)) / 256.0
     );
     float saturation = length(chroma);
-    float keySaturation = max(length(keyChroma), 0.0001);
-    if (saturation < chromaKeyControls.w)
+    float keySaturation = length(keyChroma);
+    if (keySaturation < 1.0)
+    {
+        // A grey key colour has no direction: nothing keys.
+        return 1.0;
+    }
+    float luma = dot(bytes, float3(77.0, 150.0, 29.0)) / 256.0;
+    float floorValue = clamp(chromaKeyFloor.y * luma, chromaKeyFloor.x, chromaKeyFloor.z);
+    if (saturation <= floorValue)
     {
         return 1.0;
     }
+    float ramp = max(floorValue * chromaKeyFloor.w, 0.0001);
 
     float cosine = clamp(dot(chroma, keyChroma) / (saturation * keySaturation), -1.0, 1.0);
     float angle = acos(cosine) / 3.14159265;
     float threshold = chromaKeyControls.x;
-    float softness = max(chromaKeyControls.y, 0.0001);
-    return smoothstep(threshold, threshold + softness, angle);
+    float softness = chromaKeyControls.y;
+    float angleAlpha = softness > 0.0
+        ? saturate((angle - threshold) / softness)
+        : (angle <= threshold ? 0.0 : 1.0);
+    float eligibility = saturate((saturation - floorValue) / ramp);
+    return 1.0 - eligibility * (1.0 - angleAlpha);
+}
+
+// scene_geometry::chroma_key_despill: on every pixel of a keyed layer, pull
+// the key channel down toward the other channels' max where it dominates
+// both, scaled by the spill strength.
+float3 chromaKeyDespill(float3 rgb)
+{
+    float spill = saturate(chromaKeyControls.z);
+    if (chromaKeyColor.w < 0.5 || spill <= 0.0)
+    {
+        return rgb;
+    }
+    if (chromaKeyColor.b > chromaKeyColor.g)
+    {
+        float limit = max(rgb.r, rgb.g);
+        rgb.b = rgb.b > limit ? rgb.b - spill * (rgb.b - limit) : rgb.b;
+    }
+    else
+    {
+        float limit = max(rgb.r, rgb.b);
+        rgb.g = rgb.g > limit ? rgb.g - spill * (rgb.g - limit) : rgb.g;
+    }
+    return rgb;
 }
 
 float4 ScenePs(VertexOutput input) : SV_TARGET
@@ -209,12 +269,8 @@ float4 ScenePs(VertexOutput input) : SV_TARGET
         color = sampleSource(input.uv);
     }
 
-    float keyAlpha = chromaKeyAlpha(color.rgb);
-    if (chromaKeyColor.w > 0.5 && keyAlpha < 1.0)
-    {
-        float spill = (1.0 - keyAlpha) * saturate(chromaKeyControls.z);
-        color.g = lerp(color.g, max(color.r, color.b), spill);
-    }
+    float keyAlpha = chromaKeyAlpha(color.rgb, sceneSourceUv(input.uv));
+    color.rgb = chromaKeyDespill(color.rgb);
     // Key the original pixel, then grade the despilled gamma-encoded RGB.
     float luma = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
     color.rgb = saturate(luma + cameraLook.x + (cameraLook.y - 1.0) * (luma - 0.5)

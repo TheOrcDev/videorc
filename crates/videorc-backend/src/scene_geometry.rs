@@ -495,7 +495,9 @@ pub fn camera_mask(layout: &LayoutSettings) -> SceneMask {
 /// 35–62, putting their DISTANCE at 75–101 units regardless of hue — above
 /// any usable threshold (owner report + numeric repro, 2026-07-14). Angle is
 /// lighting-invariant: bright and shadowed screen tones cluster within ~8° of
-/// the key direction while subjects sit 90°+ away.
+/// the key direction while subjects sit 90°+ away. The saturation floor
+/// scales with luma for the same reason (plan 227, see
+/// [`chroma_key_saturation_floor`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChromaKeySpec {
     pub key_rgb: [u8; 3],
@@ -507,6 +509,86 @@ pub struct ChromaKeySpec {
     pub band_deg: f64,
     /// Spill suppression strength, 0..=1.
     pub spill: f64,
+    /// Hide edges (plan 227 B): the part of the camera's SOURCE frame the
+    /// key keeps. Everything outside is see-through, green or not, so a
+    /// curtain or light stand at the frame's edge never shows.
+    pub edges: ChromaKeyEdges,
+}
+
+/// The largest share of the camera frame Hide edges may take from one side
+/// (percent). Mirrored by `CAMERA_KEY_EDGE_MAX_PCT` in the renderer and the
+/// RPC contracts.
+pub const CAMERA_KEY_EDGE_MAX_PCT: u32 = 25;
+
+/// Hide edges as fractions of the camera's SOURCE frame (texture space,
+/// before any mirror): `left`/`top`/`right`/`bottom` are how much of each
+/// source side is see-through. The streamer sets them as seen (mirror
+/// applied); [`camera_chroma_key`] resolves the mirror once, so every path
+/// tests the texel it samples.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChromaKeyEdges {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
+
+impl ChromaKeyEdges {
+    pub const NONE: Self = Self {
+        left: 0.0,
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+    };
+
+    /// The streamer's percents, as seen (clamped to
+    /// [`CAMERA_KEY_EDGE_MAX_PCT`] each). Not mirror-resolved.
+    pub fn from_as_seen_pct(edges: &crate::protocol::CameraKeyEdges) -> Self {
+        let fraction = |pct: u32| f64::from(pct.min(CAMERA_KEY_EDGE_MAX_PCT)) / 100.0;
+        Self {
+            left: fraction(edges.left_pct),
+            top: fraction(edges.top_pct),
+            right: fraction(edges.right_pct),
+            bottom: fraction(edges.bottom_pct),
+        }
+    }
+
+    /// The same edges seen through a horizontal mirror.
+    pub fn mirrored(self) -> Self {
+        Self {
+            left: self.right,
+            right: self.left,
+            ..self
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        *self == Self::NONE
+    }
+
+    /// The kept box in normalized source coordinates: `[u_min, v_min, u_max,
+    /// v_max]` (the shaders' form).
+    pub fn kept_uv(&self) -> [f64; 4] {
+        [self.left, self.top, 1.0 - self.right, 1.0 - self.bottom]
+    }
+
+    /// Whether source texel (`x`, `y`) of a `width`×`height` frame survives;
+    /// its centre is tested, like the shaders test the sample position.
+    #[inline]
+    pub fn keeps_texel(&self, x: u32, y: u32, width: u32, height: u32) -> bool {
+        if self.is_none() {
+            return true;
+        }
+        let u = (f64::from(x) + 0.5) / f64::from(width.max(1));
+        let v = (f64::from(y) + 0.5) / f64::from(height.max(1));
+        self.keeps_uv(u, v)
+    }
+
+    #[inline]
+    pub fn keeps_uv(&self, u: f64, v: f64) -> bool {
+        let [u_min, v_min, u_max, v_max] = self.kept_uv();
+        u >= u_min && u <= u_max && v >= v_min && v <= v_max
+    }
 }
 
 /// Similarity/smoothness percent → degrees. 100% maps to 60°; the default
@@ -514,12 +596,41 @@ pub struct ChromaKeySpec {
 /// the key direction, subjects sit 90°+ away, so defaults key with margin.
 const CHROMA_KEY_PCT_TO_DEGREES: f64 = 0.6;
 
-/// Chroma saturation (|CbCr vector|) below which a pixel can never key —
-/// greys, whites, and blacks have no meaningful hue direction. Ramps to fully
-/// keyable over `CHROMA_KEY_SATURATION_RAMP` units. The Metal shader mirrors
-/// both constants.
-pub const CHROMA_KEY_SATURATION_FLOOR: f64 = 14.0;
-pub const CHROMA_KEY_SATURATION_RAMP: f64 = 6.0;
+/// Chroma saturation (|CbCr vector|) floor: at or below it a pixel can never
+/// key — greys, whites and blacks have no meaningful hue direction. Above it
+/// the pixel ramps to fully keyable over `floor × RAMP_RATIO` units.
+///
+/// Plan 227 (owner recording, 2026-11-11): the floor used to be a fixed 14,
+/// and chroma shrinks with brightness, so a green screen in shadow — the
+/// right hue, `(1,23,6)` is 16° off the key — has chroma 9–12 and stayed on
+/// the picture. The floor now scales with the pixel's luma, so it is
+/// lighting-invariant like the angle: `clamp(PER_LUMA × Y, MIN, MAX)`.
+/// Mid and bright pixels (Y ≥ ~93) keep the old 14 exactly; near-black
+/// subject pixels (a black t-shirt, the mic arm: chroma under 2) stay below
+/// `MIN`. The Metal shader and the D3D11 shader mirror all four constants.
+pub const CHROMA_KEY_SATURATION_FLOOR_MIN: f64 = 5.0;
+pub const CHROMA_KEY_SATURATION_FLOOR_PER_LUMA: f64 = 0.15;
+pub const CHROMA_KEY_SATURATION_FLOOR_MAX: f64 = 14.0;
+/// The ramp's width as a share of the floor (the old fixed 6 over 14).
+pub const CHROMA_KEY_SATURATION_RAMP_RATIO: f64 = 6.0 / 14.0;
+
+/// The four floor constants in shader order: `(min, per_luma, max,
+/// ramp_ratio)`.
+pub const CHROMA_KEY_SATURATION_FLOOR_PARAMS: [f64; 4] = [
+    CHROMA_KEY_SATURATION_FLOOR_MIN,
+    CHROMA_KEY_SATURATION_FLOOR_PER_LUMA,
+    CHROMA_KEY_SATURATION_FLOOR_MAX,
+    CHROMA_KEY_SATURATION_RAMP_RATIO,
+];
+
+/// `(floor, ramp)` for a pixel of full-range BT.601 luma `luma` (0..=255).
+pub fn chroma_key_saturation_floor(luma: f64) -> (f64, f64) {
+    let floor = (CHROMA_KEY_SATURATION_FLOOR_PER_LUMA * luma).clamp(
+        CHROMA_KEY_SATURATION_FLOOR_MIN,
+        CHROMA_KEY_SATURATION_FLOOR_MAX,
+    );
+    (floor, floor * CHROMA_KEY_SATURATION_RAMP_RATIO)
+}
 
 impl ChromaKeySpec {
     pub fn key_cb(&self) -> f64 {
@@ -562,6 +673,13 @@ fn rgb_cr_f64(rgb: [u8; 3]) -> f64 {
     128.0 + (128.0 * r - 107.0 * g - 21.0 * b) / 256.0
 }
 
+/// Full-range BT.601 Y of the same family (`color.rs`'s 77/150/29), in f64:
+/// what the saturation floor scales with. The shaders mirror it.
+fn rgb_luma_f64(rgb: [u8; 3]) -> f64 {
+    let [r, g, b] = rgb.map(f64::from);
+    (77.0 * r + 150.0 * g + 29.0 * b) / 256.0
+}
+
 /// Parse `#RRGGBB` (leading `#` optional, case-insensitive).
 pub fn parse_hex_rgb(value: &str) -> Option<[u8; 3]> {
     let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
@@ -586,6 +704,14 @@ pub fn camera_chroma_key(layout: &LayoutSettings) -> Option<ChromaKeySpec> {
         );
         [0, 255, 0]
     });
+    // Hide edges are set as the streamer sees the camera; the CPU, Metal and
+    // D3D11 paths sample the unmirrored source, so resolve the mirror here.
+    let as_seen = camera_chroma_key_edges_as_seen(layout);
+    let edges = if layout.camera_mirror {
+        as_seen.mirrored()
+    } else {
+        as_seen
+    };
     Some(ChromaKeySpec {
         key_rgb,
         max_angle_deg: f64::from(layout.camera_chroma_key_similarity_pct.min(100))
@@ -593,15 +719,24 @@ pub fn camera_chroma_key(layout: &LayoutSettings) -> Option<ChromaKeySpec> {
         band_deg: f64::from(layout.camera_chroma_key_smoothness_pct.min(100))
             * CHROMA_KEY_PCT_TO_DEGREES,
         spill: f64::from(layout.camera_chroma_key_spill_pct.min(100)) / 100.0,
+        edges,
     })
+}
+
+/// Hide edges as the streamer sees the camera (mirror applied), for paths
+/// that mirror BEFORE keying (the FFmpeg leg runs `hflip` first). Every
+/// other path uses the mirror-resolved [`ChromaKeySpec::edges`].
+pub fn camera_chroma_key_edges_as_seen(layout: &LayoutSettings) -> ChromaKeyEdges {
+    ChromaKeyEdges::from_as_seen_pct(&layout.camera_chroma_key_edges)
 }
 
 /// Alpha for one source pixel. Angle model: θ = angle between the pixel's
 /// CbCr vector and the key direction; 0 at/below `max_angle_deg`, 255 at/above
-/// `max_angle_deg + band_deg`, linear ramp between. The saturation floor then
-/// pulls low-chroma pixels back toward opaque (greys never key). This f64
-/// form is the reference the CPU path calls directly and the Metal shader
-/// mirrors in f32.
+/// `max_angle_deg + band_deg`, linear ramp between. The luma-scaled saturation
+/// floor then pulls low-chroma pixels back toward opaque (greys never key).
+/// This f64 form is the reference the CPU path calls directly and the Metal
+/// and D3D11 shaders mirror in f32. Hide edges are positional, so callers
+/// test [`ChromaKeySpec::edges`] with the texel they sampled.
 pub fn chroma_key_alpha(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> u8 {
     let Some((dir_cb, dir_cr)) = spec.key_direction() else {
         return 255;
@@ -609,7 +744,8 @@ pub fn chroma_key_alpha(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> u8 {
     let cb = rgb_cb_f64([r, g, b]) - 128.0;
     let cr = rgb_cr_f64([r, g, b]) - 128.0;
     let saturation = (cb * cb + cr * cr).sqrt();
-    if saturation <= CHROMA_KEY_SATURATION_FLOOR {
+    let (floor, ramp) = chroma_key_saturation_floor(rgb_luma_f64([r, g, b]));
+    if saturation <= floor {
         return 255;
     }
     let cos_theta = ((cb * dir_cb + cr * dir_cr) / saturation).clamp(-1.0, 1.0);
@@ -621,8 +757,7 @@ pub fn chroma_key_alpha(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> u8 {
     } else {
         (theta_deg - spec.max_angle_deg) / spec.band_deg * 255.0
     };
-    let eligibility =
-        ((saturation - CHROMA_KEY_SATURATION_FLOOR) / CHROMA_KEY_SATURATION_RAMP).clamp(0.0, 1.0);
+    let eligibility = ((saturation - floor) / ramp).clamp(0.0, 1.0);
     (255.0 - eligibility * (255.0 - angle_alpha)).round() as u8
 }
 
@@ -1484,7 +1619,128 @@ mod tests {
             max_angle_deg: 24.0,
             band_deg: 4.8,
             spill: 0.0,
+            edges: ChromaKeyEdges::NONE,
         }
+    }
+
+    /// Plan 227 S0, the owner's recording (2026-11-11, raw camera take): the
+    /// green screen falls into deep shadow in the bottom corners. These are
+    /// its real tones — 13–17° from the key, chroma 9–25 — and they must key
+    /// with the shipped defaults. The fixed floor of 14 kept them all.
+    #[test]
+    fn chroma_key_keys_a_deep_shadowed_screen() {
+        let spec = default_green_spec();
+        for (label, rgb) in [
+            ("bottom-right deep shadow", [1u8, 23, 6]),
+            ("bottom-right shadow", [0, 26, 9]),
+            ("bottom-right fold", [3, 22, 9]),
+            ("bottom-right corner", [1, 25, 6]),
+            ("bottom-right mean", [1, 34, 12]),
+            ("left-edge shadow", [8, 32, 13]),
+            ("bottom-left mean", [4, 56, 20]),
+        ] {
+            assert_eq!(
+                chroma_key_alpha(&spec, rgb[0], rgb[1], rgb[2]),
+                0,
+                "{label} {rgb:?} must key with defaults"
+            );
+        }
+    }
+
+    /// Plan 227 S0: the same recording's near-black SUBJECT and the real
+    /// curtain at the frame's edge. Their chroma is under 4 and every one of
+    /// them must stay opaque, or the t-shirt and the mic arm get holes.
+    #[test]
+    fn chroma_key_keeps_near_black_subjects() {
+        let spec = default_green_spec();
+        for (label, rgb) in [
+            ("black t-shirt", [27u8, 23, 25]),
+            ("mic arm", [6, 9, 6]),
+            ("mic arm shadow", [1, 4, 1]),
+            ("near-black codec noise", [2, 7, 3]),
+            ("t-shirt with green spill", [10, 18, 12]),
+            ("curtain strip", [17, 19, 16]),
+            ("curtain black", [6, 6, 6]),
+            ("pure black", [0, 0, 0]),
+        ] {
+            assert_eq!(
+                chroma_key_alpha(&spec, rgb[0], rgb[1], rgb[2]),
+                255,
+                "{label} {rgb:?} must survive with defaults"
+            );
+        }
+    }
+
+    #[test]
+    fn chroma_key_saturation_floor_scales_with_luma_and_keeps_the_old_floor_up_high() {
+        assert_eq!(chroma_key_saturation_floor(0.0), (5.0, 5.0 * 6.0 / 14.0));
+        assert_eq!(chroma_key_saturation_floor(20.0).0, 5.0);
+        assert!((chroma_key_saturation_floor(60.0).0 - 9.0).abs() < 1e-9);
+        // From Y ≈ 93.3 up the floor is the old 14 with the old ramp of 6.
+        for luma in [94.0, 128.0, 255.0] {
+            let (floor, ramp) = chroma_key_saturation_floor(luma);
+            assert_eq!(floor, 14.0);
+            assert!((ramp - 6.0).abs() < 1e-9);
+        }
+        assert_eq!(
+            CHROMA_KEY_SATURATION_FLOOR_PARAMS,
+            [5.0, 0.15, 14.0, 6.0 / 14.0]
+        );
+        assert!((rgb_luma_f64([255, 255, 255]) - 255.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hide_edges_resolve_the_mirror_and_clamp_each_side() {
+        let mut layout = layout();
+        layout.camera_chroma_key_enabled = true;
+        assert!(
+            camera_chroma_key(&layout)
+                .expect("keying enabled")
+                .edges
+                .is_none(),
+            "no edges by default"
+        );
+        layout.camera_chroma_key_edges = crate::protocol::CameraKeyEdges {
+            left_pct: 2,
+            top_pct: 0,
+            right_pct: 90,
+            bottom_pct: 5,
+        };
+        let spec = camera_chroma_key(&layout).expect("keying enabled");
+        assert_eq!(
+            spec.edges,
+            ChromaKeyEdges {
+                left: 0.02,
+                top: 0.0,
+                right: 0.25,
+                bottom: 0.05,
+            },
+            "each side clamps to 25 %"
+        );
+        assert_eq!(camera_chroma_key_edges_as_seen(&layout), spec.edges);
+        // Mirrored, "left as you see it" is the source's right side.
+        layout.camera_mirror = true;
+        let mirrored = camera_chroma_key(&layout).expect("keying enabled");
+        assert_eq!((mirrored.edges.left, mirrored.edges.right), (0.25, 0.02));
+        assert_eq!(camera_chroma_key_edges_as_seen(&layout).left, 0.02);
+        assert_eq!(mirrored.edges.kept_uv(), [0.25, 0.0, 0.98, 0.95]);
+    }
+
+    #[test]
+    fn hide_edges_test_the_texel_centre() {
+        let edges = ChromaKeyEdges {
+            left: 0.25,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.5,
+        };
+        // 4×2 frame: column 0 (centre 0.125) is hidden, column 1 (0.375) kept;
+        // row 1 (centre 0.75) is below the kept half.
+        assert!(!edges.keeps_texel(0, 0, 4, 2));
+        assert!(edges.keeps_texel(1, 0, 4, 2));
+        assert!(edges.keeps_texel(3, 0, 4, 2));
+        assert!(!edges.keeps_texel(3, 1, 4, 2));
+        assert!(ChromaKeyEdges::NONE.keeps_texel(0, 0, 1, 1));
     }
 
     /// THE calibration pin (2026-07-14 owner report): the keyer must key a
@@ -1584,6 +1840,7 @@ mod tests {
             max_angle_deg: 24.0,
             band_deg: 4.8,
             spill: 1.0,
+            edges: ChromaKeyEdges::NONE,
         };
         assert_eq!(chroma_key_despill(&green, 100, 200, 80), (100, 100, 80));
         let half = ChromaKeySpec {

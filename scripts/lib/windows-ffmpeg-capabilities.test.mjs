@@ -68,11 +68,17 @@ const CAMERA_LOOK_FILTER_LINES = [
   ' ... scale            V->V       Scale the input video size and/or convert the image format.',
   ' TS. lutyuv           V->V       Compute and apply a lookup table to the YUV input video.'
 ]
+const CHROMA_KEY_FILTER_LINES = [
+  ' TS chromakey         V->V       Turns a certain color into transparency. Operates on YUV colors.',
+  ' TS despill           V->V       Despill video.',
+  ' T. drawbox           V->V       Draw a colored box on the input video.'
+]
 const FILTERS_WITH_NOISE_CLEANUP = [
   'Filters:',
   ' TS afftdn A->A Denoise audio samples using FFT.',
   ...CLEAN_CUT_FILTER_LINES,
-  ...CAMERA_LOOK_FILTER_LINES
+  ...CAMERA_LOOK_FILTER_LINES,
+  ...CHROMA_KEY_FILTER_LINES
 ].join('\n')
 
 test('a fully capable ffmpeg passes', () => {
@@ -259,7 +265,8 @@ test('the Windows bundle requires the model-free noise cleanup filter', () => {
       'Filters:',
       ' T. loudnorm A->A EBU R128 loudness normalization',
       ...CLEAN_CUT_FILTER_LINES,
-      ...CAMERA_LOOK_FILTER_LINES
+      ...CAMERA_LOOK_FILTER_LINES,
+      ...CHROMA_KEY_FILTER_LINES
     ].join('\n')
   })
   assert.deepEqual(result.missing, ['filter:afftdn'])

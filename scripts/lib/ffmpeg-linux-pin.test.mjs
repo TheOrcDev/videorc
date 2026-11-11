@@ -86,6 +86,9 @@ describe('Linux FFmpeg capability policy', () => {
     ' ... format           V->V       Convert the input video to one of the specified pixel formats.',
     ' ... scale            V->V       Scale the input video size and/or convert the image format.',
     ' TS. lutyuv           V->V       Compute and apply a lookup table to the YUV input video.',
+    ' TS chromakey         V->V       Turns a certain color into transparency. Operates on YUV colors.',
+    ' TS despill           V->V       Despill video.',
+    ' T. drawbox           V->V       Draw a colored box on the input video.',
     ' ... hwupload         V->V       Upload a normal frame to a hardware frame'
   ].join('\n')
   const muxersOutput = [
@@ -129,6 +132,9 @@ describe('Linux FFmpeg capability policy', () => {
       'format',
       'scale',
       'lutyuv',
+      'chromakey',
+      'despill',
+      'drawbox',
       'hwupload'
     ])
   })

@@ -962,6 +962,28 @@ describe('backend RPC contract', () => {
       layout: { ...layoutParams.layout, sourceVisibility: { camera: false, capture: true } }
     }
     expect(validateBackendRpcParams('scene.layout.apply_live', hidden)).toEqual(hidden)
+    // Plan 227 B: Hide edges ride the layout, whole percents 0–25 a side.
+    const edged = {
+      ...layoutParams,
+      layout: {
+        ...layoutParams.layout,
+        cameraChromaKeyEdges: { leftPct: 2, topPct: 0, rightPct: 25, bottomPct: 5 }
+      }
+    }
+    expect(validateBackendRpcParams('scene.layout.apply_live', edged)).toEqual(edged)
+    for (const cameraChromaKeyEdges of [
+      { leftPct: 26, topPct: 0, rightPct: 0, bottomPct: 0 },
+      { leftPct: -1, topPct: 0, rightPct: 0, bottomPct: 0 },
+      { leftPct: 1.5, topPct: 0, rightPct: 0, bottomPct: 0 },
+      { leftPct: 1, topPct: 0, rightPct: 0, bottomPct: 0, centerPct: 0 }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('scene.layout.apply_live', {
+          ...layoutParams,
+          layout: { ...layoutParams.layout, cameraChromaKeyEdges }
+        })
+      ).toThrow()
+    }
     for (const sourceVisibility of [{ camera: 'false' }, { microphone: false }, null]) {
       expect(() =>
         validateBackendRpcParams('scene.layout.apply_live', {
