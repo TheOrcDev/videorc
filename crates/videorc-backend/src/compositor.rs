@@ -5854,6 +5854,12 @@ pub(crate) struct CompositorSourceEdit {
     auxiliary: Option<CompositorSceneSnapshot>,
 }
 impl CompositorSourceEdit {
+    /// The committed scene revision this edit composes.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn revision(&self) -> u64 {
+        self.primary.revision
+    }
+
     #[cfg(all(target_os = "windows", test))]
     pub(crate) fn test_from_scenes(
         primary: Scene,
@@ -6066,6 +6072,26 @@ impl CompositorRuntime {
     ) -> NativeSourceOutputLease {
         self.native_source_output_authority
             .claim(session_id, generation)
+    }
+
+    /// The Windows D3D11 media session draws the program while this
+    /// compositor is stopped, so no CPU frame evidence ever reports a drawn
+    /// scene. The session reports the scene revision of the frame it just
+    /// published to every leg, and the Studio's scene-change proof
+    /// (`frameSceneRevision`) sees a switch reach the recording and Clips.
+    /// A running CPU compositor reports its own frames instead. Returns
+    /// whether the status changed, for one `compositor.status` event.
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn record_windows_media_frame_scene(&mut self, edit: &CompositorSourceEdit) -> bool {
+        if self.run_id.is_some() || !self.source_edit_is_current(edit) {
+            return false;
+        }
+        let drawn = Some(edit.primary.revision);
+        if self.status.frame_scene_revision == drawn {
+            return false;
+        }
+        self.status.frame_scene_revision = drawn;
+        true
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -21181,6 +21207,51 @@ mod tests {
             sequential.active_screen_id.as_deref(),
             Some("sequential-same-revision")
         );
+    }
+
+    /// "Couldn't confirm the scene change" on Windows: with Clips or a
+    /// recording on, the D3D11 media session draws the program and this
+    /// compositor is stopped, so only the session can report the drawn scene.
+    #[tokio::test]
+    async fn windows_media_session_reports_the_scene_it_drew() {
+        let state = test_state();
+        let scene_update = |revision| CompositorSceneUpdateParams {
+            transition_ms: None,
+            revision,
+            scene: Some(crate::scene::default_scene()),
+            layout: crate::protocol::default_layout_settings(),
+            active_screen: None,
+        };
+        update_compositor_scene(&state, scene_update(10)).await;
+        let mut compositor = state.compositor.lock().await;
+        assert_eq!(compositor.run_id, None, "the CPU compositor is stopped");
+        assert_eq!(compositor.status.frame_scene_revision, None);
+        let drawn = compositor.source_edit_snapshot().expect("committed scene");
+
+        assert!(compositor.record_windows_media_frame_scene(&drawn));
+        assert_eq!(compositor.status.scene_revision, Some(10));
+        assert_eq!(compositor.status.frame_scene_revision, Some(10));
+        assert!(
+            !compositor.record_windows_media_frame_scene(&drawn),
+            "an unchanged revision sends no second status"
+        );
+        drop(compositor);
+
+        // A switch committed after the session took its snapshot: the frame
+        // in hand is the old scene and does not prove the new one.
+        update_compositor_scene(&state, scene_update(11)).await;
+        let mut compositor = state.compositor.lock().await;
+        assert!(!compositor.record_windows_media_frame_scene(&drawn));
+        assert_eq!(compositor.status.frame_scene_revision, Some(10));
+        let next = compositor.source_edit_snapshot().expect("committed scene");
+        assert!(compositor.record_windows_media_frame_scene(&next));
+        assert_eq!(compositor.status.frame_scene_revision, Some(11));
+
+        // A running CPU compositor reports its own frames.
+        compositor.run_id = Some("cpu-run".into());
+        compositor.status.frame_scene_revision = None;
+        assert!(!compositor.record_windows_media_frame_scene(&next));
+        assert_eq!(compositor.status.frame_scene_revision, None);
     }
 
     #[tokio::test]

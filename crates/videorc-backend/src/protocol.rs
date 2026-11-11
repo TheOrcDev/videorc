@@ -4087,6 +4087,10 @@ pub struct WindowsD3d11PresenterDiagnostics {
     pub successful_presents: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_presented_sequence: Option<u64>,
+    /// The committed scene revision the last presented frame was composed
+    /// from: the Studio's proof that the Preview shows a scene switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presented_scene_revision: Option<u64>,
     pub latest_wins_drops: u64,
     pub hidden_drops: u64,
     pub busy_drops: u64,

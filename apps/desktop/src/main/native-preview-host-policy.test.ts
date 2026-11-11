@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { PreviewSurfaceStatus } from '../shared/backend'
+import { nativePreviewStatusProvesSceneRevision } from '../shared/native-preview-scene-authority'
 import {
   nativePreviewClosedWindowUnsuppressStatus,
   nativePreviewDriverFailureFallbackStatus,
@@ -417,6 +418,37 @@ describe('native preview host policy', () => {
     })
     expect(unmeasured.presentFps).toBeUndefined()
     expect(unmeasured.inputToPresentLatencyP95Ms).toBeUndefined()
+  })
+
+  it("proves a scene switch from the D3D11 presenter's presented scene revision", () => {
+    // "Preview may be behind" on every switch with Clips on: the presenter
+    // draws the Preview then, and only it knows which scene it showed.
+    const current = surfaceStatus({
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      nativePreviewHostKind: 'proof-surface',
+      sourcePixelsPresent: true,
+      nativePreviewPresentedSceneRevision: 99
+    })
+    const input = {
+      platform: 'win32' as const,
+      previewWindowOpen: true,
+      generation: 7,
+      trustedGeneration: 7
+    }
+    const presented = reconcileWindowsD3d11PresenterStatus(
+      current,
+      d3d11BackendStatus({ presentedSceneRevision: 12 }),
+      input
+    )
+    expect(presented.nativePreviewPresentedSceneRevision).toBe(12)
+    expect(nativePreviewStatusProvesSceneRevision(presented, 12, 'win32')).toBe(true)
+    expect(nativePreviewStatusProvesSceneRevision(presented, 13, 'win32')).toBe(false)
+
+    // No presented scene yet: the proof surface's old value is not evidence.
+    const unproven = reconcileWindowsD3d11PresenterStatus(current, d3d11BackendStatus(), input)
+    expect(unproven.nativePreviewPresentedSceneRevision).toBeUndefined()
+    expect(nativePreviewStatusProvesSceneRevision(unproven, 12, 'win32')).toBe(false)
   })
 
   it('adopts the backend D3D11 triple only after all first-present evidence is true', () => {

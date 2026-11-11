@@ -291,6 +291,9 @@ pub(crate) struct WindowsD3d11PreviewFrameMetadata {
     pub(crate) adapter_luid: DxgiAdapterLuid,
     pub(crate) sequence: u64,
     pub(crate) source_live: bool,
+    /// The committed scene revision this frame was composed from; `None`
+    /// for a frame with no committed scene (a startup test pattern).
+    pub(crate) scene_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +442,7 @@ impl WindowsD3d11PreviewContract {
             self.diagnostics.first_present_succeeded = false;
             self.diagnostics.source_live = false;
             self.diagnostics.last_presented_sequence = None;
+            self.diagnostics.presented_scene_revision = None;
             self.timing.reset();
         }
         self.preview_generation = Some(placement.preview_generation);
@@ -535,6 +539,7 @@ impl WindowsD3d11PreviewContract {
                 self.diagnostics.successful_presents =
                     self.diagnostics.successful_presents.saturating_add(1);
                 self.diagnostics.last_presented_sequence = Some(frame.sequence);
+                self.diagnostics.presented_scene_revision = frame.scene_revision;
                 self.diagnostics.first_present_succeeded = true;
                 self.diagnostics.source_live = frame.source_live;
                 self.diagnostics.fallback_reason = if !self.configuration_ready {
@@ -1492,6 +1497,7 @@ mod tests {
                 adapter_luid: DxgiAdapterLuid::from_u64(7),
                 sequence: 1,
                 source_live: false,
+                scene_revision: None,
             },
             WindowsD3d11PreviewPresentOutcome::Presented,
         );
@@ -1503,6 +1509,7 @@ mod tests {
                 adapter_luid: DxgiAdapterLuid::from_u64(7),
                 sequence: 2,
                 source_live: true,
+                scene_revision: None,
             },
             WindowsD3d11PreviewPresentOutcome::Presented,
         );
@@ -1535,6 +1542,7 @@ mod tests {
             adapter_luid: DxgiAdapterLuid::from_u64(7),
             sequence: 1,
             source_live: true,
+            scene_revision: None,
         };
         let mut readback = trusted_readback();
         readback.target_exists = false;
@@ -1679,6 +1687,7 @@ mod tests {
             adapter_luid: DxgiAdapterLuid::from_u64(7),
             sequence: 1,
             source_live: true,
+            scene_revision: None,
         };
         let start = Instant::now();
         contract.observe_present_timing(start, start);
@@ -1728,6 +1737,7 @@ mod tests {
             adapter_luid: DxgiAdapterLuid::from_u64(7),
             sequence: 1,
             source_live: true,
+            scene_revision: None,
         };
         contract.observe_present(frame, WindowsD3d11PreviewPresentOutcome::Presented);
         contract.observe_present(frame, WindowsD3d11PreviewPresentOutcome::Hidden);
@@ -1817,6 +1827,46 @@ mod tests {
                 height: 540,
             })
         );
+    }
+
+    /// The Studio's "Preview may be behind" proof reads the scene revision of
+    /// the frame the presenter actually put on screen, never a dropped one.
+    #[test]
+    fn windows_d3d11_preview_reports_the_presented_scene_revision() {
+        let mut contract = WindowsD3d11PreviewContract::new(3, DxgiAdapterLuid::from_u64(7));
+        contract.configure(placement(3, 9), trusted_readback());
+        let frame = |sequence, scene_revision| WindowsD3d11PreviewFrameMetadata {
+            media_generation: 3,
+            preview_generation: 9,
+            adapter_luid: DxgiAdapterLuid::from_u64(7),
+            sequence,
+            source_live: true,
+            scene_revision,
+        };
+        assert_eq!(contract.diagnostics().presented_scene_revision, None);
+        contract.observe_present(
+            frame(1, Some(41)),
+            WindowsD3d11PreviewPresentOutcome::Presented,
+        );
+        assert_eq!(contract.diagnostics().presented_scene_revision, Some(41));
+        contract.observe_present(
+            frame(2, Some(42)),
+            WindowsD3d11PreviewPresentOutcome::Hidden,
+        );
+        contract.observe_present(frame(3, Some(42)), WindowsD3d11PreviewPresentOutcome::Busy);
+        assert_eq!(
+            contract.diagnostics().presented_scene_revision,
+            Some(41),
+            "a dropped frame does not prove its scene"
+        );
+        contract.observe_present(
+            frame(4, Some(42)),
+            WindowsD3d11PreviewPresentOutcome::Presented,
+        );
+        assert_eq!(contract.diagnostics().presented_scene_revision, Some(42));
+        // A new preview window starts with no proof.
+        contract.configure(placement(3, 10), trusted_readback());
+        assert_eq!(contract.diagnostics().presented_scene_revision, None);
     }
 
     #[test]

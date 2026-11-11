@@ -3006,6 +3006,8 @@ export interface WindowsD3d11PresenterDiagnostics {
   firstPresentSucceeded: boolean
   successfulPresents: number
   lastPresentedSequence?: number
+  /** The committed scene revision of the last presented frame. */
+  presentedSceneRevision?: number
   latestWinsDrops: number
   hiddenDrops: number
   busyDrops: number
