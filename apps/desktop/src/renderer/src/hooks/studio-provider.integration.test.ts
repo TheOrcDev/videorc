@@ -7361,12 +7361,24 @@ describe('real StudioProvider lifecycle', () => {
       stale = latest().applySavedScene(first.id)
     })
     await waitForObservation(() => latest().savedScenePendingId === first.id)
+    // Issue #1275: the pending switch keeps the scene's name and says what it waits for.
+    await waitForObservation(() => latest().sceneSwitchProgress?.phase === 'starting')
+    expect(latest().sceneSwitchProgress).toMatchObject({ target: 'A', replaced: null })
     expect(latest().canSaveScene).toBe(false)
     await act(async () => {
       expect(latest().saveScene('Uncommitted')).toBe(false)
     })
+    // B takes the pending switch to A over, and says so while it runs.
+    const releaseSecond = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
+    let switchToSecond: Promise<boolean> | undefined
     await act(async () => {
-      expect(await latest().applySavedScene(second.id)).toBe(true)
+      switchToSecond = latest().applySavedScene(second.id)
+    })
+    await waitForObservation(() => latest().sceneSwitchProgress?.target === 'B')
+    expect(latest().sceneSwitchProgress?.replaced).toBe('A')
+    await act(async () => {
+      releaseSecond()
+      expect(await switchToSecond).toBe(true)
     })
     await waitForObservation(() => latest().canSaveScene)
     await act(async () => {
@@ -7380,6 +7392,7 @@ describe('real StudioProvider lifecycle', () => {
       await stale
     })
     expect(latest().activeSavedSceneId).toBe(first.id)
+    expect(latest().sceneSwitchProgress).toBeNull()
     expect(latest().captureConfig.layout.cameraZoom).toBe(first.visual.layout.cameraZoom)
     expect(latest().savedScenes).toHaveLength(2)
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
