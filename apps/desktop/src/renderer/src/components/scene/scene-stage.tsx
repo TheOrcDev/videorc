@@ -185,6 +185,39 @@ export function stageDraftsEnabled({
 /** What the stage is doing: a pointer gesture, a released commit still landing, or nothing. */
 export type StagePhase = 'idle' | 'dragging' | 'pending'
 
+/** The line under a canvas that is a layout diagram only (issue #1274), and
+ * the one action that puts the picture on screen. */
+export type StageLayoutOnlyNote = {
+  text: string
+  actionLabel: string
+  /** `open` opens or raises the Preview; `pop-out` floats a Preview docked
+   * in the Studio panel, which is hidden while this tab is mounted. */
+  action: 'open' | 'pop-out'
+}
+
+/**
+ * Where the picture is when the canvas cannot show it (no live canvas: every
+ * platform but macOS, issue #1274). A visible camera drawn as a grey box must
+ * never read as a broken camera, so the canvas always says where to look.
+ */
+export function stageLayoutOnlyNote(preview: {
+  open: boolean
+  mode: 'docked' | 'floating'
+}): StageLayoutOnlyNote {
+  if (preview.open && preview.mode === 'docked') {
+    return {
+      text: `Layout only. The ${WINDOW_NAMES.preview} is stuck to the Studio panel.`,
+      actionLabel: `Pop out ${WINDOW_NAMES.preview}`,
+      action: 'pop-out'
+    }
+  }
+  return {
+    text: `Layout only. The picture is in the ${WINDOW_NAMES.preview}.`,
+    actionLabel: preview.open ? `Show ${WINDOW_NAMES.preview}` : `Open ${WINDOW_NAMES.preview}`,
+    action: 'open'
+  }
+}
+
 /** A schematic editor: pointer samples never start capture; the only IPC a
  * gesture crosses is the live draft below, and only over the live canvas.
  *
@@ -227,6 +260,8 @@ export function SceneStage({
   previewFollowsGestures = false,
   liveDocked = false,
   liveHint = null,
+  layoutOnlyNote = null,
+  onLayoutOnlyAction,
   draftsRefused = false,
   slotRef,
   onPopOut,
@@ -274,6 +309,10 @@ export function SceneStage({
   liveDocked?: boolean
   /** Tertiary copy under the canvas while the docked surface is hidden. */
   liveHint?: string | null
+  /** The canvas is a diagram only (no live canvas on this platform): the
+   * line under it says where the picture is (issue #1274). */
+  layoutOnlyNote?: StageLayoutOnlyNote | null
+  onLayoutOnlyAction?: () => void
   /** A recording or livestream is running (plan 215 D1): the compositor
    * refuses drafts, so none go out and the chrome is painted over the live
    * picture. The outputs move on release. */
@@ -1436,6 +1475,24 @@ export function SceneStage({
           >
             Open Sources
           </Button>
+        </p>
+      ) : layoutOnlyNote ? (
+        <p
+          className="flex flex-wrap items-center justify-center gap-x-1 px-3 pb-3 text-center text-xs text-muted-foreground"
+          data-videorc-stage-layout-only
+        >
+          {layoutOnlyNote.text}
+          {onLayoutOnlyAction ? (
+            <Button
+              className="h-auto p-0 text-xs font-normal"
+              data-videorc-stage-layout-only-action={layoutOnlyNote.action}
+              size="xs"
+              variant="link"
+              onClick={onLayoutOnlyAction}
+            >
+              {layoutOnlyNote.actionLabel}
+            </Button>
+          ) : null}
         </p>
       ) : null}
       <Separator />

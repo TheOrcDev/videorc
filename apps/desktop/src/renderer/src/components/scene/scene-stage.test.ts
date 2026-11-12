@@ -8,7 +8,7 @@ import { defaultCaptureConfig } from '@/lib/capture'
 import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 
 import { bannerStageId, bannerStageItems, overlayStageItems } from './overlay-stage'
-import { SceneStage, stageDraftsEnabled } from './scene-stage'
+import { SceneStage, stageDraftsEnabled, stageLayoutOnlyNote } from './scene-stage'
 
 // Plan 205 S3: on the live canvas (macOS, the Preview docked in the Scene
 // tab) the stage is hit-only, so its own badges are invisible, and the
@@ -185,6 +185,62 @@ const scene: Scene = {
   ],
   outputs: []
 }
+
+// Issue #1274: without the live canvas (every platform but macOS) the stage
+// is a diagram, so a visible camera drawn as a grey box must say where its
+// picture is, with the one action that shows it.
+describe('a layout-only canvas says where the picture is (#1274)', () => {
+  it('names the Preview and opens it, or raises it when it is already open', () => {
+    expect(stageLayoutOnlyNote({ open: false, mode: 'floating' })).toEqual({
+      text: 'Layout only. The picture is in the Preview.',
+      actionLabel: 'Open Preview',
+      action: 'open'
+    })
+    expect(stageLayoutOnlyNote({ open: false, mode: 'docked' }).actionLabel).toBe('Open Preview')
+    expect(stageLayoutOnlyNote({ open: true, mode: 'floating' })).toEqual({
+      text: 'Layout only. The picture is in the Preview.',
+      actionLabel: 'Show Preview',
+      action: 'open'
+    })
+  })
+
+  it('pops out a Preview stuck to the Studio panel, which this tab hides', () => {
+    expect(stageLayoutOnlyNote({ open: true, mode: 'docked' })).toEqual({
+      text: 'Layout only. The Preview is stuck to the Studio panel.',
+      actionLabel: 'Pop out Preview',
+      action: 'pop-out'
+    })
+  })
+
+  it('draws the line under a canvas with sources, and its action runs', async () => {
+    const onLayoutOnlyAction = vi.fn()
+    await renderStage(
+      stageProps({
+        scene,
+        liveSurface: false,
+        liveDocked: false,
+        layoutOnlyNote: stageLayoutOnlyNote({ open: true, mode: 'floating' }),
+        onLayoutOnlyAction
+      })
+    )
+    const note = document.querySelector('[data-videorc-stage-layout-only]')!
+    expect(note.textContent).toBe('Layout only. The picture is in the Preview.Show Preview')
+    const action = note.querySelector<HTMLButtonElement>(
+      '[data-videorc-stage-layout-only-action="open"]'
+    )!
+    await act(async () => action.click())
+    expect(onLayoutOnlyAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the empty-scene line instead, and stays away from the live canvas', async () => {
+    const note = stageLayoutOnlyNote({ open: false, mode: 'floating' })
+    await renderStage(stageProps({ liveSurface: false, liveDocked: false, layoutOnlyNote: note }))
+    expect(document.querySelector('[data-videorc-stage-layout-only]')).toBeNull()
+    expect(document.body.textContent).toContain('No sources in the scene yet.')
+    await renderStage(stageProps({ scene }))
+    expect(document.querySelector('[data-videorc-stage-layout-only]')).toBeNull()
+  })
+})
 
 describe('no draft while live (plan 215 D1)', () => {
   it('drafts only where the picture shows, with the RPCs wired, and never while a session runs', () => {
