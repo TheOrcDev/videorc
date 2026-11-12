@@ -132,7 +132,12 @@ hiddenFromStream}`); `hiddenFromStream` says viewers really do not see it
   streamer or the key places the window (a move or resize by hand is told
   apart by Electron's `will-move`/`will-resize`, which `setBounds` and the
   OS's own moves never fire; Linux sends neither, so there the next settled
-  move counts).
+  move counts). Only a screen that is added, removed, moved or resized
+  starts this; a work-area change (the Dock or the taskbar) does not, so a
+  snap with Win+Arrow or a window manager still saves. The settings file
+  lands whole (a temp file, then a rename; a direct write if a Windows
+  scanner blocks the rename), and a
+  file that cannot be read right now is never overwritten.
 - **D7. Tap and hold.** A tap (released within 500 ms) moves the window. A
   hold brings it to the front where it is, with the focus, or closes it
   when it already has the focus; a closed window opens where it was last.
