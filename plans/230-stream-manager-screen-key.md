@@ -96,7 +96,14 @@ went back to first principles:
   addon activates it by pid and bundle id (`activate_app`): never
   `open -b`, which sends a reopen event (a new Finder or browser window,
   maybe on stream) and launches an app that quit. On Windows `blur()`
-  hands the focus to the window behind. Nothing on Linux.
+  hands the focus to the window behind; Windows lets no app read or pick
+  another app's window, so main blurs each Videorc window that ends up
+  with the focus in turn (`handFocusPastOwnWindows`, at most one step per
+  window) until the focus leaves Videorc. Nothing on Linux. A minimized
+  window counts as one that may take the focus: on Windows it comes back
+  with `showInactive()` instead of `restore()`, which activates it; on
+  macOS `restore()` is the only way out of the Dock, so the focus goes
+  back to the last app after (review of #1306).
 
 ## Decisions
 
@@ -131,8 +138,19 @@ hiddenFromStream}`); `hiddenFromStream` says viewers really do not see it
   OS chose after a monitor change is never saved; saves resume once the
   streamer or the key places the window (a move or resize by hand is told
   apart by Electron's `will-move`/`will-resize`, which `setBounds` and the
-  OS's own moves never fire; Linux sends neither, so there the next settled
-  move counts).
+  OS's own moves never fire; Linux sends neither, so there the hold ends
+  with its 2 s time window and the next settled move counts). On Windows a
+  move across screens with different scaling can land with the old
+  display's size, so a frame that came out different is set once more
+  (`setBoundsExactly`).
+- **D8. X11 only on Linux.** Wayland drops the position of every move, so
+  `remote.describe` gains `screenMoves: 'supported' | 'wayland'` (Electron's
+  resolved `ozone-platform`, the same test as the global shortcuts). On
+  Wayland the key reads **Not on Wayland**, a tap sends nothing (main
+  refuses `streamManagerScreenSwap` with `wayland` for any other client),
+  and a hold still works. A plugin facing a Videorc without `screens` in
+  describe reads **Update Videorc** and sends nothing, and its property
+  inspector says to update.
 - **D7. Tap and hold.** A tap (released within 500 ms) moves the window. A
   hold brings it to the front where it is, with the focus, or closes it
   when it already has the focus; a closed window opens where it was last.
@@ -157,8 +175,14 @@ and a hold are one key.
   missing screen refused by main on any host, and a real move and a hold
   between two screens when the host has them.
 - `pnpm smoke:remote-lan` (the phone sees the new fields).
-- Owed: a move on Windows, where `setBounds` across screens with different
-  scaling can size the window wrong; and a hold with another app in front,
+- Owed: a move on Windows across screens with different scaling (the
+  second `setBounds` must land the frame); a tap to the Monitor screen on
+  Windows with the Studio or the preview window behind the Stream Manager
+  (the focus must reach the presenting app); a minimized window tapped to
+  the Monitor screen on Windows (it must come back without the focus) and
+  on macOS 14+ (the focus must return to the presenting app); a Wayland
+  session (the key reads Not on Wayland, a hold works) and X11 (a tap
+  moves); and a hold with another app in front,
   on macOS and Windows, which may refuse to give a background app the
   focus (the window then comes up without it); the same for a tap to the
   Presenting screen, and the focus coming back on the tap to the Monitor

@@ -31,10 +31,18 @@ on each screen. The key never changes Hide from stream: that switch stays in
 the Stream Manager and ⌘K. A tap to the Presenting screen gives the
 window the focus, so you can answer viewers at once. A tap to the Monitor
 screen while the Stream Manager has the focus hands it to the app you used
-last before Videorc, if it still runs (macOS brings that app to the front;
-Windows hands the focus to the window behind). Otherwise a tap to the
-Monitor screen leaves the focus where it is (on Windows, restoring a
-minimized window may still take it).
+last before Videorc, if it still runs. macOS brings that app to the front.
+Windows lets no app pick another app's window, so there the window gives
+the focus up and Windows hands it to the window behind; Videorc's own
+windows (the Studio, the preview, Notes) are passed over until the focus
+reaches another app, usually the one you present from. Otherwise a tap to
+the Monitor screen leaves the focus where it is: a minimized window comes
+back without it on Windows, and on macOS, where restoring a window
+activates Videorc, the focus goes back to the app you used last.
+
+The tap moves the window on macOS, Windows and Linux on X11. Wayland gives
+no app a say in where its window goes, so in a Wayland session the key
+reads **Not on Wayland** and a tap does nothing; a hold still works.
 
 Hold the key for half a second to bring the Stream Manager to the front
 where it is, with the focus: for example when another app covers it on the
@@ -46,7 +54,9 @@ The title says where the window is: **Present**, **Monitor**, or **Hidden**
 when it sits on the Presenting screen and viewers really do not see it
 (Hide from stream is on, and this computer can hide it). It reads **Closed** while the window is closed or minimized,
 **Away** while it sits on another screen, and **Pick screens** until both
-screens are picked, connected and different. A tap refuses while either
+screens are picked, connected and different. With a Videorc older than the
+key (one that sends no screen list), it reads **Update Videorc**, a press
+does nothing, and its settings say to update. A tap refuses while either
 screen is not connected ("That screen isn't connected. Pick your screens
 again."), and says so when the window did not reach its screen.
 
