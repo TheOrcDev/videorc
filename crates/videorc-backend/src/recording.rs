@@ -5159,7 +5159,11 @@ async fn start_session_with_timeline(
     // split-leg plan, an auxiliary render. Outside those shapes the captions
     // stay UI-only — say so instead of silently skipping pixels.
     {
-        let burn_requested = session_caption_plan.primary || session_caption_plan.aux;
+        // Only a bar the streamer's own setting puts on the stream is worth a
+        // warning. A leg pre-armed for a possible mid-stream opt-in (captions
+        // Off or skipped at start) draws nothing unless they turn it on.
+        let burn_requested = (session_caption_plan.primary || session_caption_plan.aux)
+            && caption_burn_wanted_at_start(&params);
         let split_needed_but_missing = session_caption_plan.force_same_profile_split
             && params.output.record_enabled
             && params.output.stream_enabled
@@ -25896,6 +25900,15 @@ fn resolve_split_output_profiles(params: &StartSessionParams) -> Result<SplitOut
     };
 
     Ok(SplitOutputProfiles { recording, stream })
+}
+
+/// The streamer's own saved setting burns captions into the stream for this
+/// session (not skipped with "Go live without captions"). A pre-armed leg
+/// (`caption_burn_target`) alone does not count.
+fn caption_burn_wanted_at_start(params: &StartSessionParams) -> bool {
+    params.captions.as_ref().is_some_and(|captions| {
+        !captions.suppressed_for_session && captions.effective_burn_target().burns_stream()
+    })
 }
 
 fn caption_burn_target(params: &StartSessionParams) -> crate::captions::CaptionBurnTarget {
@@ -50454,6 +50467,52 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 }
             }
         }
+    }
+
+    #[test]
+    fn burn_in_warning_follows_the_saved_setting_not_the_prearmed_leg() {
+        use crate::captions::CaptionBurnTarget;
+        let captions = |enabled, suppressed, target| {
+            let mut params = base_params(false, true);
+            params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+            params.captions = Some(crate::protocol::CaptionsSessionParams {
+                enabled,
+                suppressed_for_session: suppressed,
+                burn_target: target,
+                ..Default::default()
+            });
+            params
+        };
+        // Pre-armed for a mid-stream opt-in, yet nobody asked for a bar.
+        let off = captions(false, false, CaptionBurnTarget::Off);
+        assert!(caption_leg_plan(&off).primary);
+        assert!(!caption_burn_wanted_at_start(&off));
+        assert!(!caption_burn_wanted_at_start(&captions(
+            true,
+            true,
+            CaptionBurnTarget::Stream
+        )));
+        assert!(!caption_burn_wanted_at_start(&captions(
+            true,
+            false,
+            CaptionBurnTarget::Recording
+        )));
+        // The saved setting burns the stream: the warning applies, on or off.
+        for enabled in [false, true] {
+            assert!(caption_burn_wanted_at_start(&captions(
+                enabled,
+                false,
+                CaptionBurnTarget::Stream
+            )));
+        }
+        assert!(caption_burn_wanted_at_start(&captions(
+            true,
+            false,
+            CaptionBurnTarget::Both
+        )));
+        let mut no_captions = base_params(false, true);
+        no_captions.captions = None;
+        assert!(!caption_burn_wanted_at_start(&no_captions));
     }
 
     #[test]
