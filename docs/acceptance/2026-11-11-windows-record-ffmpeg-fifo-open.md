@@ -1,7 +1,8 @@
 # Windows Record: FFmpeg's time to the video pipe (#1267 follow-up), 2026-11-11
 
 Scope: the follow-up the standby Media Foundation encoder note
-(`2026-11-11-windows-standby-mf-encoder.md`, draft PR #1298) named. With the
+(`2026-11-11-windows-standby-mf-encoder.md`, PR #1298, since merged with the
+standby on by default) named. With the
 standby on, every Record adopted a ready encoder, yet warm click → `recording`
 barely moved (941 → 921 ms p50), because the writer then waited
 **658 ms p50 / 1058 ms p95** after `ffmpeg-spawn` for FFmpeg to open the
@@ -159,8 +160,9 @@ That is outside this task.
 
 - **The standby encoder works on the shipped path.** The standby note
   concluded "do not merge yet" because FFmpeg's ≈0.65 s to the pipe hid the
-  win. On the packaged route that span is 86 ms, so the encoder build is the
-  critical path again, and adopting a ready encoder cuts warm click →
+  win; #1298 has since merged with the standby on by default, and this A/B
+  backs that. On the packaged route that span is 86 ms, so the encoder build
+  is the critical path again, and adopting a ready encoder cuts warm click →
   `recording` from 792 to 346 ms at p50 and from 935 to 390 ms at p95. That
   is the standby PR's own A/B, rerun on the right route.
 - **What is left after `ffmpeg-spawn`** with the standby: 86 ms to the pipe
