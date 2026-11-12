@@ -4341,6 +4341,7 @@ const cohostCommandSchema = objectSchema(
       'hide-banners',
       'show-buddy',
       'hide-buddy',
+      'greet',
       'act'
     ]),
     status: enumSchema([

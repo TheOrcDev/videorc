@@ -7377,6 +7377,7 @@ export interface CohostErrorDetail {
  * at once: `done`, `not-found` or `refused`, with the sentence in `message`.
  */
 export type CohostCommandKind =
+  | 'greet'
   | 'highlight'
   | 'clear'
   | 'remove'

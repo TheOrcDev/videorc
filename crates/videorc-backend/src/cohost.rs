@@ -1385,6 +1385,8 @@ pub struct CohostDeadAirNudge {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CohostCommandKind {
+    /// A streamer-requested greeting in the bubble, never a chat post.
+    Greet,
     Highlight,
     Clear,
     Remove,
@@ -2336,6 +2338,7 @@ struct BuddyActLane {
 pub(crate) struct PreparedCommandParse {
     pub(crate) request: CohostCommandRequest,
     command_id: Option<String>,
+    voice_greeting_seq: u64,
 }
 
 /// What a wake-word utterance the grammar missed turned into.
@@ -6486,6 +6489,8 @@ pub struct CohostEngine {
     command_availability: Option<CohostCommandAvailability>,
     /// The cloud command parser (plan 140 S8).
     command_parser: CommandParserLane,
+    /// Concurrent greetings keep only the newest spoken request.
+    voice_greeting_seq: u64,
     /// Buddy's tool planner (plan 209 S19).
     buddy_act: BuddyActLane,
     /// Plan 164 Phase D: greetings, answers, banter and the Say box. Engine
@@ -6513,6 +6518,7 @@ impl CohostEngine {
             auto_highlight_generation: 0,
             command_availability: None,
             command_parser: CommandParserLane::default(),
+            voice_greeting_seq: 0,
             buddy_act: BuddyActLane::default(),
             auto_chat: AutoChatLane::default(),
             web_tick_version: None,
@@ -6692,6 +6698,7 @@ impl CohostEngine {
         Some(PreparedCommandParse {
             request,
             command_id,
+            voice_greeting_seq: self.voice_greeting_seq,
         })
     }
 
@@ -6710,12 +6717,13 @@ impl CohostEngine {
         {
             self.command_parser.off_until = now.checked_add(pause);
         }
-        self.session.as_ref().is_some_and(|session| {
-            session.session_id == scope.session_id
-                && session.generation == scope.generation
-                && session.command.as_ref().map(|record| &record.wire.id)
-                    == prepared.command_id.as_ref()
-        })
+        self.voice_greeting_seq == prepared.voice_greeting_seq
+            && self.session.as_ref().is_some_and(|session| {
+                session.session_id == scope.session_id
+                    && session.generation == scope.generation
+                    && session.command.as_ref().map(|record| &record.wire.id)
+                        == prepared.command_id.as_ref()
+            })
     }
 
     pub fn settings(&self) -> &CohostSettings {
@@ -8680,6 +8688,18 @@ async fn run_detected_command(
         command.heard
     );
     let intent = match command.kind {
+        CommandKind::Greet => {
+            return run_voice_greeting_with(state, scope, command, premium, |request| async move {
+                let Some(token) = crate::account::stored_session_token() else {
+                    return Err(CohostApiError::network("Not signed in."));
+                };
+                match VideorcApiClient::new() {
+                    Ok(client) => client.post_cohost_greet(&token, &request).await,
+                    Err(error) => Err(CohostApiError::network(error.to_string())),
+                }
+            })
+            .await;
+        }
         CommandKind::Confirm => {
             // Plan 209 review fix 17 (D14): going live or ending what runs
             // needs "Buddy, yes". A bare "yes" (a text-to-speech alert, a
@@ -8757,6 +8777,203 @@ async fn run_detected_command(
     .await;
 }
 
+/// A named voice greeting bypasses the planner and the automatic greeting
+/// throttle. The greet endpoint may personalize it for at most 1.5 seconds;
+/// every failure falls back locally. Like the Say box, it pre-empts the
+/// bubble and never enters the chat-post lane, even in Suggest mode.
+async fn run_voice_greeting_with<C, F>(
+    state: &AppState,
+    scope: &CommandSession,
+    command: DetectedCommand,
+    premium: bool,
+    call: C,
+) where
+    C: FnOnce(CohostGreetRequest) -> F,
+    F: std::future::Future<Output = Result<CohostGreetResponse, CohostApiError>>,
+{
+    if !command.wake_word {
+        return;
+    }
+    let ctx = command_context(state, premium).await;
+    let refusal = command_gate(&ctx, None).map(str::to_string).or_else(|| {
+        (!crate::overlay_layout::load_overlay_layout(&state.database)
+            .buddy
+            .show_on_stream)
+            .then(|| "Buddy isn't on stream, so it can't show the bubble.".to_string())
+    });
+    if let Some(message) = refusal {
+        record_instant_command(
+            state,
+            scope,
+            CohostCommandKind::Greet,
+            &command.heard,
+            CohostCommandStatus::Unavailable,
+            message,
+            &ctx,
+        )
+        .await;
+        return;
+    }
+    let CommandTarget::Name(spoken) = &command.target else {
+        return;
+    };
+    let (seq, previous_command, fallback, request) = {
+        let mut engine = state.cohost.lock().await;
+        if !engine.settings.enabled
+            || !engine.command_session_current(scope)
+            || !engine
+                .session
+                .as_ref()
+                .is_some_and(|session| session.consent)
+        {
+            return;
+        }
+        let session = engine.session.as_ref().expect("current session");
+        // This is the same recent-author matcher as highlights: exact forms
+        // beat partial forms, and multiple authors never pick one at random.
+        let viewer = match session.resolve_command_name(spoken, false, ctx.now) {
+            CommandResolution::One(id) => session.known.get(&id),
+            CommandResolution::NotFound(_) => None,
+            CommandResolution::Several(_) => {
+                drop(engine);
+                record_instant_command(
+                    state,
+                    scope,
+                    CohostCommandKind::Greet,
+                    &command.heard,
+                    CohostCommandStatus::NotFound,
+                    format!("More than one viewer matches {spoken}. Say their full name."),
+                    &ctx,
+                )
+                .await;
+                return;
+            }
+        };
+        let name = truncate_utf16(
+            viewer.map_or(spoken.as_str(), |v| v.author_name.as_str()),
+            120,
+        );
+        let fallback = format!("Hi {name}, welcome to the stream!");
+        let request = viewer.and_then(|viewer| {
+            let ai = engine.greet_ai_context(premium)?;
+            Some(CohostGreetRequest {
+                client_version: ai.client_version,
+                consent_to_process_chat: true,
+                session_client_id: ai.session_id,
+                seq: engine.voice_greeting_seq.saturating_add(1),
+                tone: ai.tone,
+                persona: ai.persona,
+                introduce: false,
+                items: vec![crate::videorc_api::CohostGreetItem {
+                    id: "voice-greeting".to_string(),
+                    kind: crate::cohost_greetings::GreetingKind::FirstTime
+                        .wire()
+                        .to_string(),
+                    platform: viewer.platform,
+                    names: vec![name],
+                    others: 0,
+                    months: None,
+                    streak: None,
+                    count: None,
+                    amount: None,
+                    reward: None,
+                    first_message_text: None,
+                    fallback_line: fallback.clone(),
+                }],
+            })
+        });
+        engine.voice_greeting_seq = engine.voice_greeting_seq.saturating_add(1);
+        (
+            engine.voice_greeting_seq,
+            engine.latest_command_id(),
+            fallback,
+            request,
+        )
+    };
+    let mut text = fallback;
+    let mut mood = CohostUtteranceState::Talk;
+    if let Some(request) = request {
+        let expected_name = request.items[0].names[0].clone();
+        match tokio::time::timeout(Duration::from_millis(1500), call(request)).await {
+            Ok(Ok(response)) => {
+                if let Some(line) = response
+                    .lines
+                    .iter()
+                    .find(|line| line.id == "voice-greeting")
+                    && let Some(line_text) = crate::cohost_auto_chat::ai_greeting_text(&line.text)
+                        .filter(|text| {
+                            let words = name_tokens(text);
+                            name_forms_match(
+                                &words,
+                                &match_candidates(&words),
+                                &name_match_forms(&expected_name),
+                            )
+                        })
+                {
+                    text = line_text;
+                    mood = utterance_state_for_mood(line.mood);
+                }
+            }
+            _ => tracing::info!("Buddy used its local spoken-greeting fallback."),
+        }
+    }
+    let ctx = command_context(state, premium).await;
+    let delivery = state.live_chat_persistence.begin_delivery().await;
+    let (utterance, effects, snapshot) = {
+        let mut engine = state.cohost.lock().await;
+        if !engine.command_session_current(scope)
+            || !engine.settings.enabled
+            || !engine
+                .session
+                .as_ref()
+                .is_some_and(|session| session.consent)
+            || engine.voice_greeting_seq != seq
+            || engine.latest_command_id() != previous_command
+        {
+            return;
+        }
+        // Recheck visibility and voice gates after the await. A late line
+        // cannot pop up after consent/session retirement or a newer command.
+        let refusal = command_gate(&ctx, None).map(str::to_string).or_else(|| {
+            (!crate::overlay_layout::load_overlay_layout(&state.database)
+                .buddy
+                .show_on_stream)
+                .then(|| "Buddy isn't on stream, so it can't show the bubble.".to_string())
+        });
+        let (status, message) = refusal.map_or_else(
+            || {
+                (
+                    CohostCommandStatus::Done,
+                    "Buddy said hello in its bubble.".to_string(),
+                )
+            },
+            |message| (CohostCommandStatus::Unavailable, message),
+        );
+        let effects = engine
+            .command_session_mut(scope)
+            .expect("current session")
+            .note_instant_command(
+                CohostCommandKind::Greet,
+                &command.heard,
+                status,
+                message,
+                &ctx,
+            );
+        let utterance = (status == CohostCommandStatus::Done).then(|| {
+            engine.follow_auto_chat_session(&scope.session_id);
+            engine.say(&text, mood, ctx.now, &ctx.now_iso())
+        });
+        mirror_command_slot(state, &engine);
+        (utterance, effects, engine.snapshot())
+    };
+    emit_state(state, &snapshot, &delivery);
+    if let Some(utterance) = utterance {
+        crate::buddy_overlay::show_for_utterance(state, &utterance).await;
+    }
+    drop(delivery);
+    run_command_effects(state, scope, effects, false).await;
+}
+
 /// Plan 186 S11: a banner command ("show the sponsor banner", "take the
 /// banner down", "hide the banners"). The voice gates apply as to every
 /// command (the kill switch, Premium) and nothing else: Buddy is Premium, so
@@ -8781,6 +8998,7 @@ async fn run_banner_command(
         | CommandKind::Cancel
         | CommandKind::Choose(_)
         | CommandKind::Unknown
+        | CommandKind::Greet
         | CommandKind::ShowBuddy
         | CommandKind::HideBuddy => return,
     };
@@ -8915,6 +9133,7 @@ fn kind_label(kind: CohostCommandKind) -> &'static str {
         CohostCommandKind::HideBanners => "banners",
         CohostCommandKind::ShowBuddy | CohostCommandKind::HideBuddy => "presence",
         CohostCommandKind::Act => "act",
+        CohostCommandKind::Greet => "greet",
     }
 }
 
@@ -9043,6 +9262,7 @@ async fn banner_command_outcome(
         | CommandKind::Cancel
         | CommandKind::Choose(_)
         | CommandKind::Unknown
+        | CommandKind::Greet
         | CommandKind::ShowBuddy
         | CommandKind::HideBuddy => (
             CohostCommandStatus::NotFound,
@@ -9355,7 +9575,7 @@ where
 {
     let voice_enabled = crate::service_flags::buddy_voice_commands_enabled(state);
     let on_stream = live_card_message_id(state).await;
-    let (seq, pool, command_id) = {
+    let (seq, pool, command_id, voice_greeting_seq) = {
         let mut engine = state.cohost.lock().await;
         if !engine.buddy_act_ready_for(scope, premium, voice_enabled) {
             return false;
@@ -9369,6 +9589,7 @@ where
             engine.next_buddy_act_seq(),
             pool,
             engine.latest_command_id(),
+            engine.voice_greeting_seq,
         )
     };
     let Some(token) = token() else {
@@ -9390,8 +9611,14 @@ where
     // A newer command, session or consent since: this answer is stale.
     let current = {
         let engine = state.cohost.lock().await;
-        engine.command_session_current(scope) && engine.latest_command_id() == command_id
+        engine.command_session_current(scope)
+            && engine.latest_command_id() == command_id
+            && engine.voice_greeting_seq == voice_greeting_seq
     };
+    if !current {
+        tracing::info!("Buddy dropped a planner answer: a newer command or session came first.");
+        return true;
+    }
     let response = match result {
         Ok(response) => response,
         Err(error) if planner_refused(&error) => {
@@ -9409,16 +9636,10 @@ where
                 "Buddy's planner failed: {}",
                 error.message()
             );
-            if current {
-                note_unheard_command(state, scope, heard, premium).await;
-            }
+            note_unheard_command(state, scope, heard, premium).await;
             return true;
         }
     };
-    if !current {
-        tracing::info!("Buddy dropped a planner answer: a newer command or session came first.");
-        return true;
-    }
     match crate::buddy_act::plan(&response, &snapshot.names) {
         Err(problem) => {
             tracing::info!("Buddy's planner answer was malformed: {problem}");
@@ -9744,9 +9965,10 @@ pub(crate) async fn execute_resolved_command(
         CommandKind::Highlight => CommandIntent::Highlight,
         CommandKind::Clear => CommandIntent::Clear,
         CommandKind::Remove => CommandIntent::Remove,
-        // The cloud parser knows comments only; it never picks a banner or
-        // the Buddy itself.
-        CommandKind::Confirm
+        // The cloud parser knows comments only; greetings, banners and
+        // Buddy's presence stay with their local commands.
+        CommandKind::Greet
+        | CommandKind::Confirm
         | CommandKind::Cancel
         | CommandKind::Choose(_)
         | CommandKind::Unknown
@@ -20409,6 +20631,274 @@ mod tests {
             .into_iter()
             .map(|banner| banner.name)
             .collect()
+    }
+
+    fn voice_greeting() -> DetectedCommand {
+        crate::cohost_command::CommandDetector::default()
+            .observe_final(
+                COMMAND_SESSION,
+                1,
+                "Buddy, say hello to Jay in the chat.",
+                Instant::now(),
+                &DetectContext::default(),
+            )
+            .expect("local greeting")
+    }
+
+    async fn voice_greeting_state() -> (AppState, CommandSession) {
+        let rows = [command_row(1, "Jay_99", StreamPlatform::Twitch, "hello")];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
+        {
+            let mut engine = state.cohost.lock().await;
+            engine.settings.persona.name = "Golmar".to_string();
+            engine.settings.persona.personality = "A cheerful stone golem".to_string();
+            engine.set_web_greet_version(Some(1));
+        }
+        (state, scope)
+    }
+
+    #[tokio::test]
+    async fn voice_greeting_uses_the_persona_and_only_the_bubble_in_every_talk_mode() {
+        for mode in [
+            CohostTalkMode::Off,
+            CohostTalkMode::Bubble,
+            CohostTalkMode::Suggest,
+        ] {
+            let (state, scope) = voice_greeting_state().await;
+            state.cohost.lock().await.settings.auto_chat.talk = Some(mode);
+            run_voice_greeting_with(
+                &state,
+                &scope,
+                voice_greeting(),
+                true,
+                |request| async move {
+                    assert_eq!(request.persona.as_ref().unwrap().name, "Golmar");
+                    assert_eq!(request.items[0].names, ["Jay_99"]);
+                    assert!(!request.introduce);
+                    Ok(CohostGreetResponse {
+                        lines: vec![crate::videorc_api::CohostGreetLine {
+                            id: request.items[0].id.clone(),
+                            text: "Jay_99! A rock-solid welcome from Golmar!".to_string(),
+                            mood: Some(CohostTickMood::Amused),
+                        }],
+                        model: "local-fake".to_string(),
+                    })
+                },
+            )
+            .await;
+            let bubble = crate::buddy_overlay::status(&state).await;
+            assert_eq!(
+                bubble.bubble.unwrap().text,
+                "Jay_99! A rock-solid welcome from Golmar!"
+            );
+            assert_eq!(bubble.state, CohostAvatarState::Laugh);
+            let snapshot = state.cohost.lock().await.snapshot();
+            assert_eq!(snapshot.command.unwrap().kind, CohostCommandKind::Greet);
+            assert_eq!(snapshot.auto_chat_sends, 0);
+            assert_eq!(snapshot.utterances.len(), 1);
+            assert_eq!(
+                snapshot.utterances[0].status,
+                CohostUtteranceStatus::BubbleOnly
+            );
+            assert!(snapshot.utterances[0].destination_ids.is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn voice_greeting_falls_back_on_failure_bad_text_or_timeout() {
+        for case in [
+            "failure",
+            "timeout",
+            "bad-text",
+            "wrong-viewer",
+            "missing-line",
+        ] {
+            let (state, scope) = voice_greeting_state().await;
+            let start = tokio::time::Instant::now();
+            run_voice_greeting_with(&state, &scope, voice_greeting(), true, |_| async move {
+                match case {
+                    "timeout" => std::future::pending().await,
+                    "bad-text" | "wrong-viewer" => Ok(CohostGreetResponse {
+                        lines: vec![crate::videorc_api::CohostGreetLine {
+                            id: "voice-greeting".to_string(),
+                            text: if case == "bad-text" {
+                                "https://example.com"
+                            } else {
+                                "Welcome, everybody!"
+                            }
+                            .to_string(),
+                            mood: None,
+                        }],
+                        model: String::new(),
+                    }),
+                    "missing-line" => Ok(CohostGreetResponse::default()),
+                    _ => Err(CohostApiError::network("AI unavailable")),
+                }
+            })
+            .await;
+            assert!(start.elapsed() <= Duration::from_millis(1500));
+            assert_eq!(
+                crate::buddy_overlay::status(&state)
+                    .await
+                    .bubble
+                    .unwrap()
+                    .text,
+                "Hi Jay_99, welcome to the stream!"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_greeting_reports_off_stream_and_obeys_the_voice_gates() {
+        let (state, scope) = voice_greeting_state().await;
+        let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
+        layout.buddy.show_on_stream = false;
+        layout.buddy.show_in_recording = true;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
+        run_voice_greeting_with(&state, &scope, voice_greeting(), true, |_| async {
+            panic!("off stream must not call AI")
+        })
+        .await;
+        assert_eq!(
+            state_command(&state).await.message,
+            "Buddy isn't on stream, so it can't show the bubble."
+        );
+        assert!(crate::buddy_overlay::status(&state).await.bubble.is_none());
+        run_voice_greeting_with(&state, &scope, voice_greeting(), false, |_| async {
+            panic!("Premium gate must not call AI")
+        })
+        .await;
+        assert_eq!(
+            state_command(&state).await.status,
+            CohostCommandStatus::Unavailable
+        );
+        assert!(state.cohost.lock().await.snapshot().utterances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn voice_greeting_without_ai_still_bubbles_and_ambiguous_authors_need_a_full_name() {
+        let (state, scope) = voice_greeting_state().await;
+        state.cohost.lock().await.set_web_greet_version(None);
+        run_detected_command(&state, &scope, voice_greeting(), true).await;
+        assert_eq!(
+            crate::buddy_overlay::status(&state)
+                .await
+                .bubble
+                .unwrap()
+                .text,
+            "Hi Jay_99, welcome to the stream!"
+        );
+
+        let (state, scope) = voice_greeting_state().await;
+        state.cohost.lock().await.note_messages(&[command_row(
+            2,
+            "Jay_88",
+            StreamPlatform::Twitch,
+            "hello too",
+        )]);
+        run_voice_greeting_with(&state, &scope, voice_greeting(), true, |_| async {
+            panic!("ambiguous author must not call AI")
+        })
+        .await;
+        assert_eq!(
+            state_command(&state).await.status,
+            CohostCommandStatus::NotFound
+        );
+        assert!(
+            state_command(&state)
+                .await
+                .message
+                .contains("Say their full name")
+        );
+        assert!(crate::buddy_overlay::status(&state).await.bubble.is_none());
+    }
+
+    #[tokio::test]
+    async fn voice_greeting_drops_late_text_after_consent_or_a_new_command() {
+        for retire_consent in [true, false] {
+            let (state, scope) = voice_greeting_state().await;
+            run_voice_greeting_with(&state, &scope, voice_greeting(), true, |_| async {
+                if retire_consent {
+                    state.cohost.lock().await.update_consent(false);
+                } else {
+                    run_detected_command(
+                        &state,
+                        &scope,
+                        detected(
+                            CommandKind::Clear,
+                            CommandTarget::None,
+                            "buddy clear it",
+                            None,
+                        ),
+                        true,
+                    )
+                    .await;
+                }
+                Err(CohostApiError::network("late answer"))
+            })
+            .await;
+            assert!(crate::buddy_overlay::status(&state).await.bubble.is_none());
+            assert!(state.cohost.lock().await.snapshot().utterances.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_greeting_retires_an_older_planner_while_greeting_ai_is_still_pending() {
+        let (state, scope) = voice_greeting_state().await;
+        set_buddy_act_capability(&state, true).await;
+        let (planner_started, wait_for_planner) = tokio::sync::oneshot::channel();
+        let (greeting_started, wait_for_greeting) = tokio::sync::oneshot::channel();
+        let (release_greeting, finish_greeting) = tokio::sync::oneshot::channel();
+        let old_planner = async {
+            run_buddy_act_by_voice_with(
+                &state,
+                &scope,
+                "buddy say something",
+                true,
+                || Some("local-test-token".to_string()),
+                |_, _| async {
+                    planner_started.send(()).unwrap();
+                    wait_for_greeting.await.unwrap();
+                    Ok(planner_answer(
+                        serde_json::json!([
+                            { "tool": "buddy_say", "args": { "text": "The old request." } }
+                        ]),
+                        "The old request.",
+                    ))
+                },
+            )
+            .await;
+            release_greeting.send(()).unwrap();
+        };
+        let new_greeting = async {
+            wait_for_planner.await.unwrap();
+            run_voice_greeting_with(&state, &scope, voice_greeting(), true, |_| async {
+                greeting_started.send(()).unwrap();
+                finish_greeting.await.unwrap();
+                Err(CohostApiError::network("local greet unavailable"))
+            })
+            .await;
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(old_planner, new_greeting);
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::buddy_overlay::status(&state)
+                .await
+                .bubble
+                .unwrap()
+                .text,
+            "Hi Jay_99, welcome to the stream!"
+        );
+        assert!(
+            buddy_rows(&state).is_empty(),
+            "the older planned tool never ran"
+        );
     }
 
     /// "Buddy, show up" flips the one on-stream switch and tells every
