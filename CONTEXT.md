@@ -297,8 +297,9 @@ _Avoid_: comments
 **Presenting screen**, **Monitor screen**:
 The two screens of the Stream Deck's Stream Manager Screen key (plan 230).
 The Presenting screen is the one viewers see; the Monitor screen is where
-the streamer reads chat. A press moves the Stream Manager from one to the
-other. On the key: Present and Monitor.
+the streamer reads chat. A tap moves the Stream Manager from one to the
+other; from anywhere else it goes to the Monitor screen. On the key:
+Present and Monitor.
 _Avoid_: main screen, second screen, shared screen, chat screen
 
 **Chat command**:

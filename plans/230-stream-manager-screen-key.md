@@ -2,12 +2,13 @@
 
 ## Status
 
-- **Status**: BUILT 2026-11-12, one desktop PR. The owner tried the first
-  version on stream screens the same day and asked for this redesign
-  (see Owner answers).
+- **Status**: BUILT 2026-11-12, PR #1306 (desktop, backend, native addon
+  and Stream Deck plugin). The owner tried each version on stream screens
+  the same day and shaped it through the Owner answers below.
 - **Priority**: P1 (owner request, 2026-11-12).
-- **Effort**: S to M. One remote intent, one main-process move, one Stream
-  Deck action. No capture, preview or encoder change.
+- **Effort**: M. Two remote intents (tap and hold), the main-process move,
+  frame memory and focus rules, one native call, one Stream Deck action.
+  No capture, preview or encoder change.
 - **Risk**: LOW. The key only moves a window; it never changes what the
   capture includes.
 
@@ -27,12 +28,17 @@
 
 1. In the key's settings, the streamer picks a **Presenting screen** (the
    one viewers see) and a **Monitor screen** (where they read chat).
-2. A press moves the Stream Manager to the other screen. The key's title
-   says where it is: **Present** or **Monitor**.
+2. A **tap** moves the Stream Manager to the other screen. From closed,
+   minimized or a third screen it goes to the Monitor screen.
 3. Each screen keeps its own place: the window comes back to the frame it
    had last time on that screen, so the streamer places it once on each.
-4. If Hide from stream is on while the window sits on the Presenting
-   screen, the title reads **Hidden**: viewers see nothing.
+4. A tap to the Presenting screen gives the window the focus; a tap back
+   hands the focus to the last app the streamer used.
+5. A **hold** brings the window to the front where it is (when another app
+   covers it), or closes it when the streamer is using it.
+6. The title says where it is: **Present**, **Monitor**, **Hidden** (on the
+   Presenting screen and viewers do not see it), **Closed**, **Away**, or
+   **Pick screens**.
 
 ## Owner answers (2026-11-12)
 
@@ -106,13 +112,17 @@ went back to first principles:
   current size, fitted and centred in its work area. A window already on
   the target screen stays where it is, and a closed window opens straight
   on its screen. A tap takes the focus on the Presenting screen only (Q13),
-  and the tap back gives it to the presented app again (Q14).
+  and a tap to the Monitor screen hands it to the last app the streamer
+  used (Q14). A minimized window goes to its screen before it restores, so
+  it never shows on the old one.
 - **D5. What the remotes learn.** `remote.describe` gains `screens`
   (`{id, name}`, the monitor's name as the OS shows it, "DELL U2723QE",
   never a serial number; twins get their size, then a number).
   `remote.state` gains `streamManager` (`{screenId, visible,
-hiddenFromStream}`). A paired phone sees the same: monitor names are no
-  more private than the scene names it sees already.
+hiddenFromStream}`); `hiddenFromStream` says viewers really do not see it
+  (the switch is on and the platform hides it), not only the switch. A
+  paired phone sees the same: monitor names are no more private than the
+  scene names it sees already.
 - **D6. Screens by display id.** If either screen is gone (unplugged) the
   key refuses and asks the streamer to pick the screens again; it never
   guesses. Until both screens are picked, connected and different, the key
@@ -121,11 +131,12 @@ hiddenFromStream}`). A paired phone sees the same: monitor names are no
   OS chose after a monitor change is never saved; saves resume once the
   streamer or the key places the window (a move or resize by hand is told
   apart by Electron's `will-move`/`will-resize`, which `setBounds` and the
-  OS's own moves never fire).
+  OS's own moves never fire; Linux sends neither, so there the next settled
+  move counts).
 - **D7. Tap and hold.** A tap (released within 500 ms) moves the window. A
   hold brings it to the front where it is, with the focus, or closes it
-  when it already has the focus. The plugin times the press; main decides
-  front or close.
+  when it already has the focus; a closed window opens where it was last.
+  The plugin times the press; main decides front or close.
 
 ## Wire
 
@@ -142,8 +153,9 @@ and a hold are one key.
 - Desktop unit tests for the move rules, the frame fit, the screen names,
   the executor, the IPC schema and the surface values.
 - Stream Deck plugin tests for the key's title, state and intent.
-- `pnpm smoke:remote-control`, with a step for this key: refusals, and a
-  real move between two screens when the host has them.
+- `pnpm smoke:remote-control`, with a step for this key: refusals, a
+  missing screen refused by main on any host, and a real move and a hold
+  between two screens when the host has them.
 - `pnpm smoke:remote-lan` (the phone sees the new fields).
 - Owed: a move on Windows, where `setBounds` across screens with different
   scaling can size the window wrong; and a hold with another app in front,
@@ -151,4 +163,9 @@ and a hold are one key.
   focus (the window then comes up without it); the same for a tap to the
   Presenting screen, and the focus coming back on the tap to the Monitor
   screen (on Windows also with Keep on top on, where `blur()` can pick
-  another always-on-top window such as Notes).
+  another always-on-top window such as Notes); a tap on a window minimized
+  on the Presenting screen (it moves before it restores; check that
+  `setBounds` on a minimized window takes on Windows); a full-screen
+  window; a drag by the glass bar on macOS (`will-move` must fire); a
+  reused display id on Windows after a monitor reconnect; and the settings
+  panel of an existing key (Window) and of this key, reloaded.

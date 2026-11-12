@@ -38,12 +38,13 @@ minimized window may still take it).
 
 Hold the key for half a second to bring the Stream Manager to the front
 where it is, with the focus: for example when another app covers it on the
-Monitor screen. A hold while you are using it (it has the focus) closes it.
-The key shows its tick when the hold lands.
+Monitor screen. A hold on a closed window opens it where it was last. A
+hold while you are using it (it has the focus) closes it. The key shows its
+tick when the hold lands.
 
 The title says where the window is: **Present**, **Monitor**, or **Hidden**
-when it sits on the Presenting screen with Hide from stream on (viewers see
-nothing). It reads **Closed** while the window is closed or minimized,
+when it sits on the Presenting screen and viewers really do not see it
+(Hide from stream is on, and this computer can hide it). It reads **Closed** while the window is closed or minimized,
 **Away** while it sits on another screen, and **Pick screens** until both
 screens are picked, connected and different. A tap refuses while either
 screen is not connected ("That screen isn't connected. Pick your screens
@@ -55,22 +56,24 @@ Each toggle key of the plugin has two states, and Videorc's confirmed state
 picks one: state 0 when off, state 1 when on. Give each state its own image
 in the Stream Deck app to see what the audience sees at a glance.
 
-| Key                   | On (state 1) while                                                            |
-| --------------------- | ----------------------------------------------------------------------------- |
-| Record                | a session runs with recording on                                              |
-| Go Live               | a session runs with streaming on                                              |
-| Mic                   | the mic is not muted                                                          |
-| System audio          | the session mixes system audio                                                |
-| Buddy                 | Buddy Live is on                                                              |
-| Layout                | its layout is on the picture                                                  |
-| Scene                 | its saved scene is the active one                                             |
-| Takeover              | its own takeover shows                                                        |
-| Banner                | its banner shows                                                              |
-| Play sound            | its sound plays                                                               |
-| Hide screen           | the screen is hidden                                                          |
-| Stream Manager Screen | the Stream Manager shows on the Presenting screen and Hide from stream is off |
+| Key                   | On (state 1) while                                                   |
+| --------------------- | -------------------------------------------------------------------- |
+| Record                | a session runs with recording on                                     |
+| Go Live               | a session runs with streaming on                                     |
+| Mic                   | the mic is not muted                                                 |
+| System audio          | the session mixes system audio                                       |
+| Buddy                 | Buddy Live is on                                                     |
+| Layout                | its layout is on the picture                                         |
+| Scene                 | its saved scene is the active one                                    |
+| Takeover              | its own takeover shows                                               |
+| Banner                | its banner shows                                                     |
+| Play sound            | its sound plays                                                      |
+| Hide screen           | the screen is hidden                                                 |
+| Stream Manager Screen | the Stream Manager shows on the Presenting screen and viewers see it |
 
-A press follows the state the key shows. An off Record or Go Live key
+A press follows the state the key shows. The Stream Manager Screen key is
+the exception: it is not a toggle. Its state only says whether viewers see
+the window, and a tap goes where its section above says. An off Record or Go Live key
 starts (Videorc refuses while another session runs, and the key alerts);
 an on key stops the session. A Takeover key shows its takeover, switching
 from any other, and hides it when it already shows. When Videorc is
@@ -143,7 +146,8 @@ since plan 174 S2.3a; absent from older apps), `takeovers` (`{id, name}`),
 `banners` (`{id, name, shown}` in Assets order, since plan 186; absent from
 older apps), `sounds` (`{id, name, playing}` in board order, since plan 189;
 absent from older apps), `windows`, and `screens` (`{id, name}`: each
-display's id and the monitor's name as the OS shows it, for the Stream
+display's id and the monitor's name as the OS shows it (twin monitors get
+their size, then a number; a display without a name is "Screen N"), for the Stream
 Manager Screen key, since plan 230; absent from older apps).
 
 `describe` changes too: a banner shown or hidden flips its `shown` there, and
@@ -216,7 +220,8 @@ layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable, sa
   Live is on, and `false` until Buddy's settings load. Apps up to 0.20.2
   omit it. `streamManager` is `{ screenId, visible, hiddenFromStream }`:
   the display the Stream Manager sits on (`null` while closed), whether it
-  shows (open and not minimized), and its Hide from stream switch (plan 230).
+  shows (open and not minimized), and whether viewers really do not see it:
+  its Hide from stream switch is on and this computer hides it (plan 230).
   Apps up to 0.22.1 omit it.
 - `remote.ack` — `{ intentId, ok, message? }` after the renderer executed
   (or refused) an accepted intent.
