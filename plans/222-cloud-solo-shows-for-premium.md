@@ -481,7 +481,9 @@ A1 keeps it as a soak metric.
     shared by every Neon product. The rate past it is in plan 185
     ([plans](https://neon.com/docs/introduction/plans)).
   - Object Storage credentials are scoped to a branch with read or write.
-    There is no key-prefix scope, and `expires_at` isn't enforced
+    There is no key-prefix scope. The 2026-11-12 recheck confirms
+    `expires_at` is enforced; cloud recordings isolate each show's key
+    in its own sibling storage branch (224 D10)
     ([authentication](https://neon.com/docs/storage/authentication)).
   - The full list is in plan 184 Outside facts.
 - **The VM host** (plan 184 D9; the owner confirms the provider).

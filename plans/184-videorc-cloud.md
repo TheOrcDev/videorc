@@ -452,7 +452,7 @@ Desktop `origin/main` `4c798067`. `rec` means
   Helsinki only. The US sites were cloud-only
   ([locations](https://docs.hetzner.com/cloud/general/locations/)). The
   prices that stood here moved to plan 185 (private).
-- **Neon** (checked 2026-11-08). Neon is the backend: Postgres, Auth,
+- **Neon** (compute checked 2026-11-08; storage rechecked 2026-11-12). Neon is the backend: Postgres, Auth,
   Object Storage and Functions (D9).
   - Functions run JS/TS on Node.js 24 only ("Other runtimes and language
     targets aren't currently supported"). They accept HTTP, SSE and
@@ -480,8 +480,9 @@ Desktop `origin/main` `4c798067`. `rec` means
     [presign](https://neon.com/docs/reference/api/buckets/presign-project-branch-bucket-object)).
   - A credential is scoped to a branch and its descendants, with
     `storage:read` or `storage:write`. There is no bucket or key-prefix
-    scope and no session token, and `expires_at` "is not currently
-    enforced"
+    scope and no session token. `expires_at` is now enforced: expired
+    S3 credentials return `403 InvalidAccessKeyId`. This supersedes the
+    2026-11-08 check
     ([authentication](https://neon.com/docs/storage/authentication)).
 - **The VM host** (checked 2026-11-08; the owner confirms the provider,
   D9).
@@ -727,13 +728,12 @@ What this choice costs (accepted):
   node IPs (a reserved IP per node, DNS only). Spain blocks Cloudflare IPs
   on football nights, which are prime streaming time
   ([[videorc-spain-laliga-cloudflare-block]]).
-- **Cloud recordings stay on R2 ⚑** (plan 224 D10). Neon Object Storage
-  credentials can't be limited to one show's key prefix, and their expiry
-  isn't enforced. Objects also stop at 10 GiB today, less than a 12-hour
-  show. R2's temporary credentials are limited to a prefix and expire, and
-  R2 downloads are free.
-  - Move recordings to Neon when Neon offers prefix-scoped, expiring
-    credentials.
+- **Cloud recordings use Neon Object Storage + Neon Postgres ⚑**
+  (owner, 2026-11-12; plan 224 D10). No Cloudflare for recordings.
+  Credentials expire and are restricted to a show's isolated storage
+  branch, forked from a dedicated empty parent. The runner rotates files
+  near 8 GiB, below Neon's 10 GiB object limit. The web retains nonsecret
+  storage metadata and deletes expired objects and branches.
 - **Runner binaries (I3) go to Neon Object Storage**, in their own
   project, like the desktop release origin.
 

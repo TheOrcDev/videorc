@@ -194,8 +194,9 @@ The owner said "put all to that pr we have". So:
   and MediaMTX don't change, and move to a VM host.
 - **Recommended host: DigitalOcean CPU-Optimized droplets, owner to
   confirm.** The alternatives are OVHcloud, Vultr and Fly.io.
-- **Cloud recordings stay on R2**: Neon Object Storage keys can't be
-  limited to one show's prefix.
+- **2026-11-12, the owner: Neon Object Storage + Neon Postgres; no
+  Cloudflare for recordings.** Each show gets an isolated storage branch
+  and expiring credentials; the runner splits files below 10 GiB (224 D10).
 - **The reasoning and facts** are in plan 184 D9 and Outside facts, and
   plan 222 D8, I1 and I3. Costs are in plan 185 (private).
 - **What it replaced**: Hetzner bare metal (plan 184 D9, 2026-10-16).
@@ -257,7 +258,7 @@ Y (the YouTube answer), LiveKit Cloud, Creem, the recordings bucket, and live te
 | 224 | 4. Where invites live | A Guests tab on the Livestream page |
 | 224 | 5. Preview during a talk show | Hide it and show the Show stage, pending S0b |
 | 224 | 6. Guest screen share | Off per guest until the host allows it |
-| 224 | 7. Recording storage | A separate R2 bucket under the same account, with its own scoped key (owner creates). Kept after U8: Neon Object Storage keys can't be limited to a show's prefix |
+| 224 | 7. Recording storage | Neon Object Storage + Neon Postgres, no Cloudflare for recordings (owner, 2026-11-12). One isolated storage branch per show; expiring credentials; file rollover below 10 GiB |
 | 224 | 8. Invite while live | Into a running talk show: yes. Solo to talk show mid-stream: not in v1 |
 | 224 | 9. Consent line | "This show goes out live on {platforms} and may be recorded. Your camera and voice are part of it." |
 | 225 | 1 to 14 | Every recommended answer in plan 225's Open questions. Sync (10) is built last, and only if H4's legal read allows it |
@@ -281,8 +282,10 @@ The work around each item carries on. Each item blocks only what it names.
 5. **The YouTube compliance answer** (222 Y1). Agents draft it, and the
    owner sends it. No one but the owner goes live through the cloud with
    YouTube before it.
-6. **The cloud recordings bucket** (224 Q7): a separate R2 bucket and a
-   scoped key.
+6. **The cloud recordings project** (224 Q7): a dedicated Neon project
+   with an empty storage parent, parent S3 key and management API key.
+   Branch capacity must cover all retained shows; the maintenance cron
+   removes expired branches. Keys remain in private deployment config.
 7. **Web push keys (VAPID), set in Vercel env** (223 D1). Agents generate
    the pair locally and never commit it, and the owner sets the env.
 8. **The beta cohort list** (222 Q8).

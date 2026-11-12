@@ -660,8 +660,8 @@ Nothing in Phases 1 to 4 starts before the three notes say go.
 
 ### D10. Record in a talk show records in the cloud
 
-- The Record button starts a cloud recording of the program (R-G6): one
-  segmented MP4 per orientation in object storage, finalized at show end,
+- The Record button starts a cloud recording of the program (R-G6): fragmented MP4 files per orientation in object storage, finalized at
+  stop, show end, encoder restart or size rollover,
   shown on videorc.com/account under "Cloud recordings" with a download, and
   kept `recordingRetentionDays` (Max 30; Premium per D15).
 - Recording works without going live, and going live without recording
@@ -673,17 +673,29 @@ Nothing in Phases 1 to 4 starts before the three notes say go.
   later (plan 184 X1).
 - The object store is the owner's choice (OQ7). The web signs a short-lived
   download URL; the runner writes with a node-scoped key.
-- 2026-11-08: Neon became the whole backend (plan 184 D9), and **the
-  recordings stay on R2 ⚑**.
-  - Neon Object Storage keys are scoped to a whole branch. They can't be
-    limited to `talk/<user>/<show>/`, and their `expires_at` isn't
-    enforced.
-  - Neon's presigned URLs are single PUTs, so every multipart part would
-    need the web mid-show.
-  - Objects stop at 10 GiB, less than a 12-hour show.
-  - R2's temporary credentials do all of this, and R2 downloads are free
-    (plan 184 Outside facts).
-  - Revisit when Neon offers prefix-scoped, expiring credentials.
+- **2026-11-12, the owner: Neon Object Storage + Neon Postgres; no
+  Cloudflare for recordings.** Supersedes the 2026-11-08 R2 exception.
+  - Neon now enforces credential expiry. Keys cover their branch and
+    descendants, so each show gets a sibling branch from a dedicated
+    empty parent. The web refuses parents or children with inherited
+    buckets. Never use the application's or releases' branch as parent.
+  - A private bucket and expiring storage credential are created for
+    each show. Only that child's endpoint and key reach the runner;
+    parent credentials remain on the web. Uploads go directly to Neon
+    with multipart SigV4, without a session token or mid-show web calls.
+  - The runner splits at a keyframe near 8 GiB into independently playable
+    files, below Neon's 10 GiB object limit. File keys, progress and crash
+    recovery are independent so finalizing one cannot disturb the next.
+  - Neon Postgres holds recording rows and a nonsecret allocation journal.
+    The journal is written before branch creation so a lost API response
+    cannot orphan a branch. Retention maintenance deletes expired files
+    and whole expired branches, including unreported objects and incomplete
+    uploads. Failed deletes retain the journal for retry.
+  - Configure a dedicated recordings project with capacity for every
+    retained show branch. Apply the web migration, deploy the compatible
+    runner, then configure the web and verify against real Neon before
+    enabling launch switches. No production provisioning is implied by
+    these repository changes.
 
 ### D11. Audio mix without echo
 
@@ -1436,10 +1448,9 @@ Stop and ask the owner when:
    hide, pending S0b.**
 6. **Guest screen share (D14)**: off per guest until the host allows it?
    **Recommended: yes.**
-7. **Object store for cloud recordings (D10)**: the R2 account the releases
-   already use, or a separate bucket and account? **Recommended: a separate
-   R2 bucket under the same account, with its own scoped key.** Re-checked
-   2026-11-08 after Neon became the backend: still R2 (D10).
+7. **Object store for cloud recordings (D10)**: **Answered 2026-11-12:
+   Neon Object Storage + Neon Postgres; no Cloudflare for recordings.**
+   A dedicated empty parent and one isolated storage branch per show.
 8. **Invite while live (D18)**: inviting into a running talk show is in;
    solo → talk mid-stream is out for v1? **Recommended: yes.**
 9. **Consent line (D13)**: "This show goes out live on {platforms} and may
