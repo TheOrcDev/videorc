@@ -1170,6 +1170,8 @@ impl MediaFoundationH264Encoder {
     /// thread that took it; the adopting thread takes its own. Neither can
     /// tear the apartment down: `windows_com_lifetime` holds the MTA and one
     /// `MFStartup` reference for the whole process.
+    // The refused encoder comes back by value so the caller keeps using it.
+    #[allow(clippy::result_large_err)]
     pub fn into_thread_handoff(
         mut self,
     ) -> std::result::Result<MediaFoundationThreadHandoff, Self> {

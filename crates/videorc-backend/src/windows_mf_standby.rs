@@ -58,6 +58,8 @@ static SLOT: Mutex<Option<StandbySlot>> = Mutex::new(None);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// What [`take`] found, for the bridge's log and the start timeline.
+// Taken once per Record start and moved straight out; boxing buys nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum StandbyTake {
     Adopted {
         encoder: MediaFoundationH264Encoder,
