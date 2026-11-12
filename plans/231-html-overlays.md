@@ -462,7 +462,8 @@ S1 to S6 are built, on macOS.
   raised.
 - `pnpm smoke:html-overlay`: PASS in recording, streaming, both and
   full-frame, 9 artifacts; and again interleaved (`both,full-frame` twice).
-- `pnpm smoke:banners`: see the PR.
+- `pnpm smoke:banners`: PASS in recording, streaming and both, 5
+  artifacts.
 - Not run here: the full Rust suite (owner rule: targeted tests), the
   release clippy build, `smoke:recording-studio` as a bundle, and the
   Windows and Linux compile (CI).
