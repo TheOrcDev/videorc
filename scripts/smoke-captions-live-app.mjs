@@ -547,7 +547,7 @@ try {
       2
     )
   )
-  await proveStreamOnlyMidSession(smoke, target, outputAuthorization.capabilityId)
+  await proveStreamOnlyMidSession(smoke, target)
 
   console.log(formatCaptionsLiveArtifactSummary(streamArtifact))
   console.log(formatCaptionsLiveArtifactSummary(captionedArtifact))
@@ -646,11 +646,17 @@ async function enableCaptionsMidSession(smoke) {
   })
 }
 
-async function proveStreamOnlyMidSession(smoke, target, outputDirectoryCapability) {
+async function proveStreamOnlyMidSession(smoke, target) {
   // Deliberately keep saved record+stream: actual stream-only status must
   // choose the primary raster leg, independent of the saved mode.
   await seedRendererCaptionsProfile(smoke)
   await waitForCaptionStatus(backend, (status) => status.state === 'idle')
+  // A resource capability is single-use: the first session consumed its own.
+  const { capabilityId: outputDirectoryCapability } = await smokeCommand(
+    smoke,
+    'authorize-smoke-resource',
+    { kind: 'output-directory', path: outputDirectory }
+  )
   const path = join(outputDirectory, 'captions-stream-only-mid-session.flv')
   listener = spawnRtmpListener(target, path)
   await sleep(listenerBindMs)
