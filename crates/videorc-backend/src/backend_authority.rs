@@ -234,6 +234,9 @@ fn admin_only_method(method: &str) -> bool {
                 // Plan 214 A4: only main knows the extension's activation or
                 // the Windows setup step; the renderer never forges it.
                 | "virtualCamera.platform.report"
+                // Plan 231: only main hosts the overlay pages; the renderer
+                // never says how one stands.
+                | "htmlOverlays.host.report"
                 | "preview.surface.take_native_host_commands"
                 | "sessions.delete.resolve"
                 | "sessions.delete.complete"

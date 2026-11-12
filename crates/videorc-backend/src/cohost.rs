@@ -20386,6 +20386,7 @@ mod tests {
             .database
             .insert_banner(
                 crate::banners::NewBanner {
+                    kind: crate::protocol::BannerKind::Image,
                     id: id.to_string(),
                     name: name.to_string(),
                     width: 2400,

@@ -5606,6 +5606,10 @@ pub struct ReorderScreensParams {
 pub struct Banner {
     pub id: String,
     pub name: String,
+    /// Plan 231: what the banner's picture is. Omitted on the wire for an
+    /// image, so every older row, fixture and client reads as before.
+    #[serde(default, skip_serializing_if = "BannerKind::is_image")]
+    pub kind: BannerKind,
     pub image_file: String,
     pub thumbnail_file: String,
     pub width: u32,
@@ -5626,12 +5630,135 @@ pub struct Banner {
     pub updated_at: String,
 }
 
+/// What a banner's picture is (plan 231). An image is drawn from a prepared
+/// bitmap; an HTML overlay is a web page main renders offscreen, whose frames
+/// reach the compositor through `html_overlay`. For an HTML overlay `width`
+/// and `height` are the page size in CSS pixels.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BannerKind {
+    #[default]
+    Image,
+    Html,
+}
+
+impl BannerKind {
+    pub fn is_image(&self) -> bool {
+        matches!(self, Self::Image)
+    }
+
+    /// The `banners.kind` column value.
+    pub fn column(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Html => "html",
+        }
+    }
+
+    /// An unknown column value reads as an image: the row then draws nothing
+    /// rather than run a page nobody imported.
+    pub fn from_column(value: &str) -> Self {
+        match value {
+            "html" => Self::Html,
+            _ => Self::Image,
+        }
+    }
+}
+
 /// `banners.importImage` after main's `sourceCapability` has been resolved to
 /// a path (the same exchange `screens.importImage` makes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportBannerImageParams {
     pub path: String,
+}
+
+/// `banners.importHtml` (plan 231) after main's `sourceCapability` has been
+/// resolved: an `.html` file, or a folder with `index.html`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBannerHtmlParams {
+    pub path: String,
+}
+
+/// One HTML overlay main should render now (plan 231 "Targets"): the page
+/// size in CSS pixels, the frame size in device pixels and the rate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlOverlayTarget {
+    pub id: String,
+    pub page_width: u32,
+    pub page_height: u32,
+    pub frame_width: u32,
+    pub frame_height: u32,
+    pub fps: u32,
+}
+
+/// `htmlOverlays.targets` (event) and `htmlOverlays.targets.get` (result).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlOverlayTargets {
+    pub targets: Vec<HtmlOverlayTarget>,
+}
+
+/// What main says about a page it hosts (`htmlOverlays.host.report`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HtmlOverlayHostState {
+    Loading,
+    Live,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HtmlOverlayHostReportParams {
+    pub id: String,
+    pub state: HtmlOverlayHostState,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Requests the page made that the network rule cancelled (plan 231 D5).
+    #[serde(default)]
+    pub blocked_requests: Option<u32>,
+}
+
+/// Where a showing HTML overlay stands, for the UI.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HtmlOverlayState {
+    /// The page is loading, or no frame has arrived yet.
+    Loading,
+    /// Frames arrive and the overlay is on the picture.
+    Live,
+    /// The page did not load or its process went away.
+    Failed,
+    /// It cannot be drawn here (the running session, the platform).
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlOverlayStatus {
+    pub id: String,
+    pub state: HtmlOverlayState,
+    /// The one sentence to show when the overlay is not live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The size of the last frame, when one has arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_height: Option<u32>,
+    /// Requests the network rule cancelled (D5); omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_requests: Option<u32>,
+}
+
+/// `htmlOverlays.status` (event) and `htmlOverlays.status.get` (result).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlOverlayStatuses {
+    pub overlays: Vec<HtmlOverlayStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

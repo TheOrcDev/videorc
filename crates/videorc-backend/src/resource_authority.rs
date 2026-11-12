@@ -28,6 +28,8 @@ const MAX_ACTIVE_RESOURCE_CAPABILITIES: usize = 1024;
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceCapabilityKind {
     InputFile,
+    /// Plan 231: a folder the streamer picked to import (an HTML overlay).
+    InputDirectory,
     OutputDirectory,
     OpenPath,
     RevealPath,
@@ -45,7 +47,7 @@ impl ResourceCapabilityKind {
     }
 
     fn requires_directory(self) -> bool {
-        matches!(self, Self::OutputDirectory)
+        matches!(self, Self::OutputDirectory | Self::InputDirectory)
     }
 }
 

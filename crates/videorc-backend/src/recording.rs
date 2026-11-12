@@ -2934,6 +2934,9 @@ fn prepare_legacy_banner_layers(
     let orientation = crate::overlay_layout::OverlayOrientation::for_canvas(width, height);
     shown
         .iter()
+        // Plan 231 D9: an HTML overlay's stored image is a still of a page
+        // that moves; this frame never carries it.
+        .filter(|(banner, _, _)| banner.kind == crate::protocol::BannerKind::Image)
         .filter_map(|(banner, path, _)| {
             let image = match crate::banner_prepare::decode_banner_file(path) {
                 Ok(image) => image,
@@ -3356,6 +3359,21 @@ fn session_accepts_banners(
 pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
     let recording = state.recording.lock().await;
     recording.as_ref().map(ActiveRecording::accepts_banners)
+}
+
+/// Plan 231 D9: `Some(accepts)` for the recording or livestream that runs,
+/// `None` when nothing runs or only the replay-only Clips ring does (the
+/// user is idle then, and the Preview is what they watch). An HTML overlay
+/// is drawn by the compositor from frames that arrive live, so only a
+/// session the compositor composes carries one: the same sessions that take
+/// a live scene edit. The legacy FFmpeg graph and the direct D3D11 recording
+/// cannot.
+pub async fn active_session_accepts_html_overlays(state: &AppState) -> Option<bool> {
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()
+        .filter(|active| !active.replay_only)
+        .map(ActiveRecording::accepts_live_scene_edits)
 }
 
 /// Plan 215 D1: whether a session takes a scene edit (a source's position,
@@ -30432,6 +30450,7 @@ mod tests {
             .save(&takeover_path)
             .unwrap();
         let banner = crate::protocol::Banner {
+            kind: crate::protocol::BannerKind::Image,
             id: "b1".to_string(),
             name: "b1".to_string(),
             image_file: "banner.png".to_string(),

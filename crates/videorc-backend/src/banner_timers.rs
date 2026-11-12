@@ -245,6 +245,7 @@ mod tests {
 
     fn banner(id: &str, shown: bool, hide_after: Option<u32>, repeat: Option<u32>) -> Banner {
         Banner {
+            kind: crate::protocol::BannerKind::Image,
             id: id.to_string(),
             name: id.to_string(),
             image_file: format!("{id}.png"),

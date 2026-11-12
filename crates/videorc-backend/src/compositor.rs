@@ -1122,7 +1122,8 @@ impl CompositorRuntime {
         let canvases = self.banner_canvases();
         let mut requests = Vec::new();
         for layer in &self.banners.layers {
-            if layer.fade.hides() {
+            // An HTML overlay (plan 231) has no bitmap to prepare.
+            if layer.fade.hides() || layer.banner.kind == crate::protocol::BannerKind::Html {
                 continue;
             }
             let Some(file_revision) = layer.file_revision else {
@@ -1249,7 +1250,8 @@ pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
     // Stat the files before taking the lock.
     let shown = banners_with_files(shown, &state.database.banner_assets_dir());
     for (banner, path, revision) in &shown {
-        if revision.is_none() {
+        // An HTML overlay (plan 231) draws its page's frames, not this file.
+        if revision.is_none() && banner.kind == crate::protocol::BannerKind::Image {
             // Said, not hidden: the banner stays in the set but draws nothing.
             tracing::warn!(
                 banner = %banner.id,
@@ -1271,6 +1273,23 @@ pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Plan 231: what the HTML overlay targets follow: every HTML banner in the
+/// set (and whether it is fading out), the run's canvases and its rate.
+pub async fn html_overlay_view(state: &AppState) -> crate::html_overlay::HtmlOverlayView {
+    let compositor = state.compositor.lock().await;
+    crate::html_overlay::HtmlOverlayView {
+        layers: compositor
+            .banners
+            .layers
+            .iter()
+            .filter(|layer| layer.banner.kind == crate::protocol::BannerKind::Html)
+            .map(|layer| (layer.banner.clone(), layer.fade.hides()))
+            .collect(),
+        canvases: compositor.banner_canvases(),
+        fps: compositor.status.target_fps,
+    }
+}
+
 /// The session shape banner leg plans follow from now on (`Some` from a
 /// session's compositor start, `None` back on the idle preview). The stop
 /// and lease-release paths clear it themselves; this is for the session
@@ -1284,6 +1303,8 @@ pub async fn set_banner_session_shape(state: &AppState, shape: Option<OverlaySes
     for request in requests {
         state.banner_prepare.request(request);
     }
+    // Plan 231: a session start or stop changes which overlays main renders.
+    state.html_overlays.wake();
 }
 
 /// The canvases a Show is budgeted against (`banners.show`): the live run's
@@ -10417,7 +10438,7 @@ async fn publish_compositor_frame(
         (width, height),
         published_at,
         banner_draft_of(editor_draft),
-        &state.banner_prepare,
+        BannerPixels::of(state),
     );
     let mut bytes;
     let mut retain_previous_native_frame = false;
@@ -10658,7 +10679,7 @@ async fn publish_compositor_frame(
             (stream_output.width.max(1), stream_output.height.max(1)),
             published_at,
             None,
-            &state.banner_prepare,
+            BannerPixels::of(state),
         );
         // Plan 193 (D1): the stream leg draws the live frame the primary leg
         // rendered at `live_at`, never one of its own; the vertical simulcast
@@ -10956,7 +10977,7 @@ async fn publish_compositor_frame(
             (width, height),
             published_at,
             banner_draft_of(editor_draft),
-            &state.banner_prepare,
+            BannerPixels::of(state),
         );
         // Plan 193: the live frame the primary leg rendered at `live_at`,
         // complete by now (its command buffer was waited for).
@@ -11296,6 +11317,10 @@ pub(crate) struct BannerDraw {
     pub image: (u32, u32),
     pub rect: OverlayRect,
     pub opacity: f32,
+    /// Plan 231: the bitmap is a live HTML overlay frame, rasterised for the
+    /// largest canvas that carries it. A leg that draws it at another size
+    /// scales it: the Metal sampler always does, the CPU path only for these.
+    pub scales_to_rect: bool,
 }
 
 impl BannerDraw {
@@ -11338,13 +11363,35 @@ pub(crate) fn banner_draws_for_leg(
     canvas: (u32, u32),
     now: Instant,
     draft: Option<(&str, OverlayRect)>,
-    prepare: &BannerPrepareService,
+    pixels: BannerPixels<'_>,
 ) -> Vec<BannerDraw> {
+    let BannerPixels {
+        prepare,
+        html_overlays,
+    } = pixels;
     let orientation = OverlayOrientation::for_canvas(canvas.0, canvas.1);
     let mut draws = Vec::new();
     for layer in &set.layers {
         let fade = layer.fade.value_at(now);
         if fade <= 0.0 || !banner_leg_carries(shape, leg, &layer.banner) {
+            continue;
+        }
+        if layer.banner.kind == crate::protocol::BannerKind::Html {
+            // Plan 231: the page's latest frame, already straight alpha. No
+            // frame yet (the page is loading, or this platform or session
+            // cannot draw one) draws nothing. The frame carries no opacity,
+            // so the banner's rides the layer with the fade.
+            let Some(bitmap) = html_overlays.latest_frame(&layer.banner.id) else {
+                continue;
+            };
+            draws.push(BannerDraw {
+                bitmap,
+                slot: layer.metal_slot(),
+                image: (layer.banner.width, layer.banner.height),
+                rect: banner_rect_for(&layer.banner, orientation, draft),
+                opacity: fade * layer.banner.opacity as f32,
+                scales_to_rect: true,
+            });
             continue;
         }
         let Some(file_revision) = layer.file_revision else {
@@ -11373,9 +11420,39 @@ pub(crate) fn banner_draws_for_leg(
             image: (layer.banner.width, layer.banner.height),
             rect,
             opacity: fade,
+            scales_to_rect: false,
         });
     }
     draws
+}
+
+/// Where a leg's banner pixels come from: prepared bitmaps for images, the
+/// latest page frame for HTML overlays (plan 231).
+#[derive(Clone, Copy)]
+pub(crate) struct BannerPixels<'a> {
+    pub prepare: &'a BannerPrepareService,
+    pub html_overlays: &'a crate::html_overlay::HtmlOverlayService,
+}
+
+impl<'a> BannerPixels<'a> {
+    pub(crate) fn of(state: &'a AppState) -> Self {
+        Self {
+            prepare: &state.banner_prepare,
+            html_overlays: &state.html_overlays,
+        }
+    }
+
+    /// Prepared bitmaps only: a path that draws no HTML overlay (plan 231
+    /// D9: the Windows D3D11 session) and the image tests.
+    #[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+    pub(crate) fn images_only(prepare: &'a BannerPrepareService) -> Self {
+        static NO_HTML_OVERLAYS: std::sync::LazyLock<crate::html_overlay::HtmlOverlayService> =
+            std::sync::LazyLock::new(crate::html_overlay::HtmlOverlayService::default);
+        Self {
+            prepare,
+            html_overlays: &NO_HTML_OVERLAYS,
+        }
+    }
 }
 
 /// The `(stage id, rect)` of a live draft with a transform, for
@@ -11439,17 +11516,38 @@ fn composite_banners(inputs: &CompositorRenderInputs<'_>, dest: &mut [u8]) {
     let canvas_width = inputs.width.max(1) as usize;
     for draw in inputs.banners {
         let bitmap = &*draw.bitmap;
-        let (x, y, _, _) = draw.draw_rect(inputs.width, inputs.height);
-        let draw_width = (bitmap.width as usize).min(canvas_width.saturating_sub(x));
-        if draw_width == 0 {
+        let (x, y, rect_width, rect_height) = draw.draw_rect(inputs.width, inputs.height);
+        // Plan 231: an HTML overlay frame made for another canvas is scaled
+        // to this leg's rect (nearest neighbour: this is the fallback path).
+        let scaled = (draw.scales_to_rect
+            && (bitmap.width as usize, bitmap.height as usize) != (rect_width, rect_height))
+            .then(|| {
+                scale_bgra_nearest(
+                    &bitmap.bgra,
+                    bitmap.width as usize,
+                    bitmap.height as usize,
+                    rect_width,
+                    rect_height,
+                )
+            });
+        let (bytes, width, height) = match scaled.as_deref() {
+            Some(bytes) => (bytes, rect_width, rect_height),
+            None => (
+                bitmap.bgra.as_slice(),
+                bitmap.width as usize,
+                bitmap.height as usize,
+            ),
+        };
+        let draw_width = width.min(canvas_width.saturating_sub(x));
+        if draw_width == 0 || height == 0 {
             continue;
         }
         composite_straight_alpha_at(
             StraightAlphaBitmap {
-                bytes: &bitmap.bgra,
+                bytes,
                 order: OverlayPixelOrder::Bgra,
-                width: bitmap.width as usize,
-                height: bitmap.height as usize,
+                width,
+                height,
             },
             inputs.width,
             inputs.height,
@@ -11458,6 +11556,38 @@ fn composite_banners(inputs: &CompositorRenderInputs<'_>, dest: &mut [u8]) {
             draw.opacity,
         );
     }
+}
+
+/// A straight-alpha BGRA bitmap resampled to `to_width` × `to_height` with
+/// nearest neighbour (plan 231, the CPU path's HTML overlay frames). Empty
+/// when either size is zero or the source is short.
+pub(crate) fn scale_bgra_nearest(
+    bgra: &[u8],
+    width: usize,
+    height: usize,
+    to_width: usize,
+    to_height: usize,
+) -> Vec<u8> {
+    if width == 0
+        || height == 0
+        || to_width == 0
+        || to_height == 0
+        || bgra.len() < width * height * 4
+    {
+        return Vec::new();
+    }
+    let mut scaled = vec![0_u8; to_width * to_height * 4];
+    let columns: Vec<usize> = (0..to_width)
+        .map(|x| ((x * 2 + 1) * width / (to_width * 2)).min(width - 1) * 4)
+        .collect();
+    for (y, row) in scaled.chunks_exact_mut(to_width * 4).enumerate() {
+        let source_row = ((y * 2 + 1) * height / (to_height * 2)).min(height - 1) * width * 4;
+        for (pixel, column) in row.chunks_exact_mut(4).zip(&columns) {
+            let at = source_row + column;
+            pixel.copy_from_slice(&bgra[at..at + 4]);
+        }
+    }
+    scaled
 }
 
 /// Where the Buddy's bubble lands: above the pet's head on a leg that has a
@@ -25273,6 +25403,7 @@ mod banner_tests {
 
     fn banner_row(id: &str, width: u32, height: u32) -> Banner {
         Banner {
+            kind: crate::protocol::BannerKind::Image,
             id: id.to_string(),
             name: id.to_string(),
             image_file: format!("{id}.png"),
@@ -25315,6 +25446,7 @@ mod banner_tests {
             image: (banner.width, banner.height),
             rect,
             opacity: fade,
+            scales_to_rect: false,
         }
     }
 
@@ -25729,7 +25861,7 @@ mod banner_tests {
             primary_canvas,
             now,
             None,
-            &service,
+            BannerPixels::images_only(&service),
         );
         let aux = banner_draws_for_leg(
             &set,
@@ -25738,7 +25870,7 @@ mod banner_tests {
             vertical_canvas,
             now,
             None,
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(primary.len(), 1);
         assert_eq!(aux.len(), 1);
@@ -25774,7 +25906,7 @@ mod banner_tests {
                 primary_canvas,
                 now,
                 None,
-                &service
+                BannerPixels::images_only(&service)
             )
             .is_empty()
         );
@@ -25786,7 +25918,7 @@ mod banner_tests {
                 primary_canvas,
                 now,
                 None,
-                &service
+                BannerPixels::images_only(&service)
             )
             .len(),
             1
@@ -25820,7 +25952,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             None,
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws.len(), 1);
         assert!(
@@ -26027,7 +26159,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             banner_draft_of(Some(&draft)),
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws.len(), 1);
         assert_eq!(draws[0].rect, dragged);
@@ -26052,7 +26184,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             banner_draft_of(Some(&draft)),
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (0, 0, 800, 400));
         assert!(!draws[0].is_exact_on(WIDTH, HEIGHT));
@@ -26066,7 +26198,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             banner_draft_of(Some(&draft)),
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws[0].rect, banner.horizontal);
         // A source drag leaves banners alone.
@@ -26084,7 +26216,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             banner_draft_of(Some(&draft)),
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws[0].rect, banner.horizontal);
         // Faded out: nothing draws, even with a draft.
@@ -26106,7 +26238,7 @@ mod banner_tests {
                 (WIDTH, HEIGHT),
                 now,
                 None,
-                &service
+                BannerPixels::images_only(&service)
             )
             .is_empty()
         );
