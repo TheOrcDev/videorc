@@ -4026,3 +4026,34 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
     expectTypeOf<BackendEventMap['virtualCamera.changed']>().toEqualTypeOf<VirtualCameraStatus>()
   })
 })
+
+describe('caption service outage contract', () => {
+  it('accepts paused captions and blocked listening on the strict event path', () => {
+    const status = {
+      state: 'degraded',
+      desiredEnabled: true,
+      transport: 'chunked',
+      audioSource: 'microphone',
+      audioFramesSeen: 120,
+      droppedAudioFrames: 0,
+      droppedAudioSeconds: 0,
+      providerReady: false,
+      reasonCode: 'service-unavailable',
+      message: 'Captions paused: Videorc AI is unavailable. They come back on their own.',
+      sessionClientId: 'caption-outage'
+    }
+    expect(validateBackendEventPayload('captions.status', status)).toEqual(status)
+    expect(validateBackendRpcResult('captions.status.get', status)).toEqual(status)
+    const listening = {
+      state: 'blocked',
+      reasonCode: 'service-unavailable',
+      message: "Videorc AI is unavailable, so Buddy can't hear you right now."
+    }
+    expect(
+      validateBackendEventPayload('session.marker.voice.status', { sessionId: 'live', listening })
+    ).toEqual({ sessionId: 'live', listening })
+    expect(() =>
+      validateBackendEventPayload('captions.status', { ...status, secret: 'refuse unknown fields' })
+    ).toThrow()
+  })
+})

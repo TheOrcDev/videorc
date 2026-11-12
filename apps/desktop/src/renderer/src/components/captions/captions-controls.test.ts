@@ -160,3 +160,14 @@ describe('Captions page (plan 174 S3.7)', () => {
     ).toContain('60 min left this month')
   })
 })
+
+it('shows the caption outage beside the switch using the shared status primitives', () => {
+  const message = 'Captions paused: Videorc AI is unavailable. They come back on their own.'
+  const markup = render({
+    enabled: true,
+    status: { state: 'degraded', desiredEnabled: true, reasonCode: 'service-unavailable', message }
+  })
+  expect(markup).toContain('Paused')
+  expect(markup).toContain(message)
+  expect(markup).not.toContain('Higher delay')
+})

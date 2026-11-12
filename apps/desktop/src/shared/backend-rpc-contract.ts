@@ -668,6 +668,7 @@ export interface BackendRpcMethodMap {
     { sessionId: string },
     ModerationOperation[]
   >
+  'captions.status.get': BackendRpcDefinition<undefined, import('./backend').CaptionsStatus>
   'session.marker.voice.configure': BackendRpcDefinition<
     { sessionId: string; consent: boolean },
     import('./backend').CohostListening
@@ -752,6 +753,7 @@ export interface BackendEventMap {
   'cohost.pet.sheet.generated': BuddyPetSheetGeneratedEvent
   'cohost.pet.build.progress': BuddyPetBuildProgressEvent
   // --- end Buddy pets (plan 168, Phase F) ---
+  'captions.status': import('./backend').CaptionsStatus
   'session.marker.voice.status': {
     sessionId: string
     listening: import('./backend').CohostListening
@@ -4303,6 +4305,38 @@ const clipMarkedEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMarkedEvent>
 
+// Caption outage presentation uses the existing degraded state and the shared
+// service-unavailable reason. Keep every wire field explicit: main rejects
+// unknown keys on registered events, including during an outage.
+export const captionsStatusSchema = objectSchema(
+  {
+    state: enumSchema([
+      'idle',
+      'ready',
+      'starting',
+      'listening',
+      'reconnecting',
+      'degraded',
+      'blocked',
+      'error',
+      'live'
+    ]),
+    desiredEnabled: optionalSchema(booleanSchema),
+    transport: optionalSchema(enumSchema(['realtime', 'chunked'])),
+    audioSource: optionalSchema(enumSchema(['microphone'])),
+    audioFramesSeen: optionalSchema(nonNegativeInteger),
+    droppedAudioFrames: optionalSchema(nonNegativeInteger),
+    droppedAudioSeconds: optionalSchema(numberSchema({ min: 0 })),
+    providerReady: optionalSchema(booleanSchema),
+    // Includes service-unavailable; older servers may supply other safe codes.
+    reasonCode: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    message: optionalSchema(stringSchema({ maxLength: 16_384 })),
+    remainingSeconds: optionalSchema(nonNegativeInteger),
+    sessionClientId: optionalSchema(boundedString)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<import('./backend').CaptionsStatus>
+
 // Plan 068: whether Buddy hears the streamer. Every optional field is omitted
 // by the backend when absent (never null).
 const cohostListeningSchema = objectSchema(
@@ -5869,6 +5903,7 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(moderationOperationSchema, { maxLength: 200 })
   },
+  'captions.status.get': { params: undefinedSchema, result: captionsStatusSchema },
   'session.marker.voice.configure': {
     params: objectSchema(
       { sessionId: boundedString, consent: booleanSchema },
@@ -5997,6 +6032,7 @@ const runtimeEventSchemas = {
   'cohost.pet.sheet.generated': buddyPetSheetGeneratedEventSchema,
   'cohost.pet.build.progress': buddyPetBuildProgressEventSchema,
   // --- end Buddy pets (plan 168, Phase F) ---
+  'captions.status': captionsStatusSchema,
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },
     { allowUnknown: false }

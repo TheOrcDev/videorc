@@ -3643,6 +3643,17 @@ fn set_status(state: &AppState, coordinator: &mut CaptionsCoordinator, status: C
 /// captions present (plan 068 D1).
 async fn publish_status(session: &CaptionSession, status: CaptionsStatus) {
     let mut coordinator = session.state.captions.lock().await;
+    // A known service outage survives transport fallback setup. A successful
+    // chunk (provider_ready) is the evidence that may clear it.
+    if status.reason_code.as_deref() == Some("realtime-fallback")
+        && !status.provider_ready
+        && coordinator
+            .shadow_status
+            .as_ref()
+            .is_some_and(|previous| previous.reason_code.as_deref() == Some("service-unavailable"))
+    {
+        return;
+    }
     coordinator.shadow_status = Some(status.clone());
     if !session.presenting() {
         return;
@@ -4429,6 +4440,13 @@ async fn start_listen_with_bearer_for_epoch(
     }
     coordinator.listen_wanted = true;
     if coordinator_task_alive(&coordinator) {
+        if coordinator
+            .shadow_status
+            .as_ref()
+            .is_some_and(|status| status.reason_code.as_deref() == Some("service-unavailable"))
+        {
+            return CohostListening::blocked("service-unavailable", LISTEN_SERVICE_UNAVAILABLE);
+        }
         // Captions (or an earlier listen) already run the task: join it.
         let ready = coordinator.listen_ready
             || coordinator
@@ -5110,7 +5128,7 @@ impl CaptionSession {
             if !coordinator.listen_wanted || coordinator.listen_epoch != epoch {
                 return;
             }
-            coordinator.listen_ready = true;
+            coordinator.listen_ready = listening.state == crate::cohost::CohostListeningState::On;
             if coordinator.marker_started_at.is_some() {
                 if let Some(session_id) = coordinator.marker_session_id.as_ref() {
                     self.state.emit_event(
@@ -6081,7 +6099,26 @@ async fn run_streaming_caption_sockets(
                     &message,
                 );
             }
-            Err(CaptionChunkFailure::Transient { code, message }) => {
+            Err(CaptionChunkFailure::Transient { code, message, .. }) => {
+                if code.as_deref() == Some("ai-service-unavailable") {
+                    let mut status = CaptionsStatus::active(
+                        CaptionsState::Degraded,
+                        CaptionsTransport::Chunked,
+                        &session.session_client_id,
+                    );
+                    status.reason_code = Some("service-unavailable".into());
+                    status.message = Some(CAPTIONS_SERVICE_UNAVAILABLE.into());
+                    publish_status(session, status).await;
+                    session
+                        .note_listen_ready(
+                            session.admitted_listen_epoch().await,
+                            crate::cohost::CohostListening::blocked(
+                                "service-unavailable",
+                                LISTEN_SERVICE_UNAVAILABLE,
+                            ),
+                        )
+                        .await;
+                }
                 if let Some(code) = code.as_deref() {
                     tracing::warn!(
                         reason_code = code,
@@ -7645,6 +7682,46 @@ async fn await_caption_chunk_upload(
     }
 }
 
+const CAPTIONS_SERVICE_UNAVAILABLE: &str =
+    "Captions paused: Videorc AI is unavailable. They come back on their own.";
+const LISTEN_SERVICE_UNAVAILABLE: &str =
+    "Videorc AI is unavailable, so Buddy can't hear you right now.";
+
+/// Five consecutive legacy 502s distinguish a sustained outage from a provider
+/// blip. A stable service code is authoritative immediately. Stay paused until
+/// a successful upload, including across silence and bounded-buffer drops.
+#[derive(Default)]
+struct CaptionServiceAvailability {
+    consecutive_502s: u8,
+    unavailable: bool,
+}
+
+impl CaptionServiceAvailability {
+    fn failed(&mut self, status: Option<u16>, code: Option<&str>) -> bool {
+        self.consecutive_502s = if status == Some(502) {
+            self.consecutive_502s.saturating_add(1)
+        } else {
+            0
+        };
+        self.unavailable |= code == Some("ai-service-unavailable") || self.consecutive_502s >= 5;
+        self.unavailable
+    }
+
+    fn retry_delay(&self, normal: std::time::Duration) -> std::time::Duration {
+        if self.unavailable {
+            std::time::Duration::from_secs(300)
+        } else {
+            normal
+        }
+    }
+
+    fn succeeded(&mut self) -> bool {
+        let recovered = self.unavailable;
+        *self = Self::default();
+        recovered
+    }
+}
+
 async fn run_chunked_caption_session(
     session: &mut CaptionSession,
     sequence: &CaptionSequence,
@@ -7664,6 +7741,17 @@ async fn run_chunked_caption_session(
     let mut next_upload_allowed_at = tokio::time::Instant::now();
     let mut degraded_reason: Option<String> = None;
     let mut provider_confirmed = false;
+    let mut service = CaptionServiceAvailability {
+        unavailable: session
+            .state
+            .captions
+            .lock()
+            .await
+            .shadow_status
+            .as_ref()
+            .is_some_and(|status| status.reason_code.as_deref() == Some("service-unavailable")),
+        ..Default::default()
+    };
     let mut listen_readiness = ListenReadiness::default();
     let mut last_reported_tap_drops = TAP_FRAMES_DROPPED.load(Ordering::Relaxed);
     let mut heartbeat_tick = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -7693,8 +7781,8 @@ async fn run_chunked_caption_session(
                 tracing::trace!(seq = chunk.seq, "Skipped a silent transcription chunk.");
                 // Quiet is not "still starting": a skipped chunk after real
                 // frames proves the path, so Buddy reads as listening.
-                if let Some(listening) =
-                    listen_readiness.silent_chunk_skipped(audio_heartbeat.has_seen_frame())
+                if let Some(listening) = listen_readiness
+                    .silent_chunk_skipped(audio_heartbeat.has_seen_frame() && !service.unavailable)
                 {
                     session
                         .note_listen_ready(chunk.admission.listen_epoch, listening)
@@ -7820,7 +7908,11 @@ async fn run_chunked_caption_session(
                 let caption_metered = purpose == crate::videorc_api::CaptionChunkPurpose::Captions;
                 match result {
                     Ok(response) => {
-                        let recovered = degraded_reason.take().is_some();
+                        let service_recovered = service.succeeded();
+                        if service_recovered {
+                            listen_readiness = ListenReadiness::default();
+                        }
+                        let recovered = degraded_reason.take().is_some() || service_recovered;
                         if recovered {
                             session.emit_health(
                                 crate::protocol::HealthLevel::Info,
@@ -7886,7 +7978,8 @@ async fn run_chunked_caption_session(
                             }
                         }
                     }
-                    Err(CaptionChunkFailure::Transient { message, .. }) => {
+                    Err(CaptionChunkFailure::Transient { status: http_status, code, message }) => {
+                        let unavailable = service.failed(http_status, code.as_deref());
                         let transition = apply_caption_chunk_transient_failure(
                             receiver_open,
                             chunk,
@@ -7905,7 +7998,7 @@ async fn run_chunked_caption_session(
                             .await;
                         }
                         let CaptionChunkTransientAction::RetryWithBackoff {
-                            wait: next_backoff,
+                            wait: mut next_backoff,
                         } = transition.action
                         else {
                             session.marker_utterance.lock().unwrap_or_else(|e| e.into_inner()).cancel();
@@ -7914,11 +8007,21 @@ async fn run_chunked_caption_session(
                             );
                             continue;
                         };
+                        if unavailable {
+                            next_backoff = service.retry_delay(next_backoff);
+                            next_upload_allowed_at = tokio::time::Instant::now() + next_backoff;
+                            provider_confirmed = false;
+                            session.note_listen_ready(
+                                session.admitted_listen_epoch().await,
+                                crate::cohost::CohostListening::blocked("service-unavailable", LISTEN_SERVICE_UNAVAILABLE),
+                            ).await;
+                        }
                         tracing::warn!(
                             "Live caption chunk failed (retrying in {}s): {message}",
                             next_backoff.as_secs()
                         );
-                        if degraded_reason.as_deref() != Some(message.as_str()) {
+                        let reason = if unavailable { "service-unavailable" } else { message.as_str() };
+                        if degraded_reason.as_deref() != Some(reason) {
                             session.emit_health(
                                 crate::protocol::HealthLevel::Warn,
                                 "captions-upload-failed",
@@ -7930,10 +8033,10 @@ async fn run_chunked_caption_session(
                                 &session.session_client_id,
                             );
                             status.provider_ready = provider_confirmed;
-                            status.reason_code = Some("chunk-upload-retrying".to_string());
-                            status.message = Some(format!("Captions retrying: {message}"));
+                            status.reason_code = Some(if unavailable { "service-unavailable" } else { "chunk-upload-retrying" }.to_string());
+                            status.message = Some(if unavailable { CAPTIONS_SERVICE_UNAVAILABLE.to_string() } else { format!("Captions retrying: {message}") });
                             publish_status(session, status).await;
-                            degraded_reason = Some(message);
+                            degraded_reason = Some(reason.to_string());
                         }
                     }
                 }
@@ -8032,6 +8135,17 @@ async fn surface_chunked_audio_drop(
         "captions-audio-dropped",
         &detail,
     );
+    if session
+        .state
+        .captions
+        .lock()
+        .await
+        .shadow_status
+        .as_ref()
+        .is_some_and(|status| status.reason_code.as_deref() == Some("service-unavailable"))
+    {
+        return;
+    }
     let mut status = CaptionsStatus::active(
         CaptionsState::Degraded,
         CaptionsTransport::Chunked,
@@ -9094,6 +9208,32 @@ mod tests {
             !after.tap_active,
             "shutdown must remain the final tap owner"
         );
+    }
+
+    #[test]
+    fn caption_service_outage_code_and_legacy_502s_recover_on_success() {
+        let mut service = CaptionServiceAvailability::default();
+        assert!(service.failed(Some(502), Some("ai-service-unavailable")));
+        assert!(
+            service.failed(None, None),
+            "an outage stays paused until success"
+        );
+        assert_eq!(service.retry_delay(secs(30)), secs(300));
+        assert!(service.succeeded());
+        assert_eq!(service.retry_delay(secs(2)), secs(2));
+        for _ in 0..4 {
+            assert!(!service.failed(Some(502), Some("unknown")));
+        }
+        assert!(
+            !service.failed(Some(500), None),
+            "only consecutive 502s count"
+        );
+        for _ in 0..4 {
+            assert!(!service.failed(Some(502), None));
+        }
+        assert!(service.failed(Some(502), None));
+        assert!(service.succeeded());
+        assert!(!service.failed(Some(502), None));
     }
 
     #[test]
@@ -13984,6 +14124,50 @@ mod tests {
 
     /// Finding 11: a listen intent that joins a task already proven ready
     /// reads `on` at once, not `starting`.
+    #[tokio::test]
+    async fn caption_service_outage_blocks_marker_listening_and_recovers() {
+        let state = test_caption_app_state();
+        let session = test_caption_session(&state, true);
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.listen_wanted = true;
+            coordinator.listen_epoch = 7;
+            coordinator.listen_ready = true;
+            coordinator.marker_session_id = Some("capture-a".into());
+            coordinator.marker_started_at = Some(std::time::Instant::now());
+        }
+        session
+            .note_listen_ready(
+                Some(7),
+                crate::cohost::CohostListening::blocked(
+                    "service-unavailable",
+                    LISTEN_SERVICE_UNAVAILABLE,
+                ),
+            )
+            .await;
+        {
+            let coordinator = state.captions.lock().await;
+            assert!(!coordinator.listen_ready);
+            assert_eq!(
+                coordinator
+                    .marker_listening
+                    .as_ref()
+                    .unwrap()
+                    .reason_code
+                    .as_deref(),
+                Some("service-unavailable")
+            );
+        }
+        let mut readiness = ListenReadiness::default();
+        let recovered = readiness
+            .upload_succeeded(None, std::time::Instant::now())
+            .unwrap();
+        session.note_listen_ready(Some(7), recovered.clone()).await;
+        let coordinator = state.captions.lock().await;
+        assert!(coordinator.listen_ready);
+        assert_eq!(coordinator.marker_listening, Some(recovered));
+    }
+
     #[tokio::test]
     async fn shared_provider_readiness_preserves_blocked_or_ended_marker_status() {
         let state = test_caption_app_state();

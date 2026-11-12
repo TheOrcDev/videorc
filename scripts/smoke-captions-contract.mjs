@@ -88,6 +88,7 @@ try {
   await proveVoiceDialectFallback({ backend, fake })
   await proveAssistantResponseFallback({ backend, observed, fake })
   await proveChunkFallback({ backend, observed, fake })
+  await proveServiceUnavailableBeforeSpeech({ backend, fake })
   const listenChunks = await proveListenOnlySession({ backend, observed, fake })
 
   console.log(
@@ -433,6 +434,28 @@ async function proveChunkFallback({ backend, observed, fake }) {
 // never see a caption event or an active caption status, while the upload
 // says purpose=listen (metered apart on the web) and the transcript record
 // is still kept for the recording's SRT.
+async function proveServiceUnavailableBeforeSpeech({ backend, fake }) {
+  await request(backend, timeoutMs, 'captions.stop', {})
+  fake.state.realtimeAvailable = false
+  fake.state.realtimeFailureCode = 'ai-service-unavailable'
+  await request(backend, timeoutMs, 'captions.start', { language: 'en' })
+  const snapshot = await waitForSnapshot(
+    backend,
+    (candidate) => candidate.status?.reasonCode === 'service-unavailable'
+  )
+  if (
+    snapshot.status.providerReady !== false ||
+    snapshot.status.message !==
+      'Captions paused: Videorc AI is unavailable. They come back on their own.'
+  ) {
+    throw new Error(
+      `Service outage was not presented before speech: ${JSON.stringify(snapshot.status)}`
+    )
+  }
+  await request(backend, timeoutMs, 'captions.stop', {})
+  fake.state.realtimeFailureCode = 'captions-realtime-unavailable'
+}
+
 async function proveListenOnlySession({ backend, observed, fake }) {
   // The previous scenario leaves a blocked caption session; end it first.
   await request(backend, timeoutMs, 'captions.stop', {})
@@ -519,6 +542,20 @@ async function proveListenOnlySession({ backend, observed, fake }) {
       `Buddy listening did not carry the service allowance: ${JSON.stringify(listening.listening)}`
     )
   }
+
+  // A service-wide outage blocks Buddy hearing even when captions are off.
+  // Use the production compatibility response: stable code with HTTP 502.
+  fake.state.chunkFailureCode = 'ai-service-unavailable'
+  fake.state.chunkFailureStatus = 502
+  await request(backend, timeoutMs, 'captions.test.inject-audio', { durationMs: 5_000 })
+  await waitForCohost(
+    backend,
+    (candidate) =>
+      candidate.listening?.state === 'blocked' &&
+      candidate.listening?.reasonCode === 'service-unavailable'
+  )
+  fake.state.chunkFailureCode = null
+  fake.state.chunkFailureStatus = null
 
   await request(backend, timeoutMs, 'cohost.stop', {})
   // The listen-only task ends with Buddy: the tap is gone, nothing is queued.

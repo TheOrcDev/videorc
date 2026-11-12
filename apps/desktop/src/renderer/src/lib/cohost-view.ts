@@ -714,7 +714,7 @@ const COHOST_LISTEN_BLOCKED_REASONS: ReadonlyMap<string, string> = new Map([
   ['unauthorized', 'sign in'],
   ['signing-out', 'signing out'],
   ['shutting-down', 'Videorc is closing'],
-  ['service-unavailable', "can't reach Videorc"],
+  ['service-unavailable', 'Videorc AI is unavailable'],
   ['consent-required', 'allow cloud AI'],
   ['cloud-ai-premium-required', 'needs Premium'],
   ['listen-monthly-quota-exhausted', 'monthly listening time used up'],

@@ -961,7 +961,7 @@ export function buildStreamOutputTopologyProbeParams(
   const streamProfile = providerPlan.streamVideo
   const streamProfiles = providerPlan.targets.map(({ video }) => video)
   const captionOutputReadiness = captionSessionOutputReadiness({
-    burnTarget: captureConfig.captions.burnTarget,
+    burnTarget: 'stream',
     recordEnabled: captureConfig.recordEnabled,
     streamEnabled: true,
     recordingVideo: recordingProfile,
@@ -969,11 +969,12 @@ export function buildStreamOutputTopologyProbeParams(
   })
   const burnsStream =
     captureConfig.captions.burnTarget === 'stream' || captureConfig.captions.burnTarget === 'both'
+  const prearmCaptions =
+    !captureConfig.captions.enabled ||
+    suppressCaptionsForSession ||
+    captureConfig.captions.burnTarget === 'off'
   const forceSameProfileSplit =
-    captureConfig.recordEnabled &&
-    !suppressCaptionsForSession &&
-    burnsStream &&
-    (captureConfig.captions.enabled || captionOutputReadiness.ready)
+    captureConfig.recordEnabled && (prearmCaptions ? captionOutputReadiness.ready : burnsStream)
   const split =
     captureConfig.recordEnabled &&
     (forceSameProfileSplit || !sameTopologyVideoProfile(recordingProfile, streamProfile))
@@ -4105,8 +4106,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [captureConfig]
   )
   const captionOutputReadiness = useMemo(
-    () => captionReadinessForIntent(activeStartIntent ?? savedModeIntent(captureConfig)),
-    [activeStartIntent, captionReadinessForIntent, captureConfig]
+    () =>
+      captionReadinessForIntent(
+        remoteOutputIntent({
+          sessionActive: isActiveRecordingState(recording.state),
+          startIntent: activeStartIntent,
+          status: recording,
+          config: captureConfig,
+          previous: null
+        })
+      ),
+    [activeStartIntent, captionReadinessForIntent, captureConfig, recording]
   )
   // The Go Live dialog asks about a Go Live, whatever the saved mode is.
   const goLiveCaptionOutputReadiness = useMemo(
@@ -13465,6 +13475,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     wsStatus
   ])
 
+  // Isolated dev-app smoke: change the same persisted intent as the switch.
+  // It never manufactures transcript pixels or calls an overlay RPC.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    const smokeWindow = window as Window & {
+      __videorcSmokeSetCaptionsEnabled?: (enabled: boolean) => void
+    }
+    smokeWindow.__videorcSmokeSetCaptionsEnabled = (enabled) => {
+      setCaptureConfig((current) => ({ ...current, captions: { ...current.captions, enabled } }))
+    }
+    return () => {
+      delete smokeWindow.__videorcSmokeSetCaptionsEnabled
+    }
+  }, [])
+
+  const captionsWereEnabledRef = useRef(captureConfig.captions.enabled)
+  useEffect(() => {
+    if (captionsWereEnabledRef.current && !captureConfig.captions.enabled) {
+      setSuppressCaptionsForSession(false)
+    }
+    captionsWereEnabledRef.current = captureConfig.captions.enabled
+  }, [captureConfig.captions.enabled])
+
   // Persisted consent is intent; the backend snapshot remains runtime truth.
   // One attempt per capture/toggle/client edge prevents blocked/error states
   // from spinning, while explicit retry edges deliberately try once again.
@@ -13506,7 +13539,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           outputReadiness: captionOutputReadiness
         })
       ) {
-        setSuppressCaptionsForSession(true)
+        captionsStartAttemptedRef.current = true
+        commitCaptionsStatus({
+          state: 'blocked',
+          desiredEnabled: true,
+          reasonCode: 'captions-output-unsupported',
+          message: captionOutputReadiness.description
+        })
         toast.warning("Live captions can't start in this session", {
           id: 'captions-output-unsupported',
           description:
@@ -13542,6 +13581,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.captions.enabled,
     captureConfig.captions.language,
     client,
+    commitCaptionsStatus,
     startCaptions,
     stopCaptions,
     suppressCaptionsForSession,
@@ -13698,18 +13738,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!client) {
       return
     }
+    const sessionConfig = captureConfigForIntent(
+      captureConfig,
+      remoteOutputIntent({
+        sessionActive: isSessionActive,
+        startIntent: activeStartIntent,
+        status: recording,
+        config: captureConfig,
+        previous: null
+      })
+    )
     const latest = captionLines.at(-1)
     const streamVideo = auxiliaryStreamOutputVideoSettings(
-      captureConfig.video,
-      captureConfig.streamEnabled ? captureConfig.streaming : undefined
+      sessionConfig.video,
+      sessionConfig.streamEnabled ? sessionConfig.streaming : undefined
     )
     const outputs = captionOverlayTargetPlan({
       burnTarget: captureConfig.captions.burnTarget,
-      recordEnabled: captureConfig.recordEnabled,
-      streamEnabled: captureConfig.streamEnabled,
-      recordingVideo: captureConfig.video,
+      recordEnabled: sessionConfig.recordEnabled,
+      streamEnabled: sessionConfig.streamEnabled,
+      recordingVideo: sessionConfig.video,
       streamVideo,
-      verticalLeg: simulcastLegLiveRequest(captureConfig)?.video,
+      verticalLeg: simulcastLegLiveRequest(sessionConfig)?.video,
       captionsLayout: overlayLayout.captions
     })
     const candidateKey = latest
@@ -13782,6 +13832,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captionLines,
     captionsStatus,
     isSessionActive,
+    activeStartIntent,
+    recording.state,
+    recording.streamUrl,
+    recording.outputPath,
     captureConfig.captions,
     captureConfig.recordEnabled,
     captureConfig.video,

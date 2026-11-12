@@ -825,7 +825,7 @@ describe('listening (plan 068)', () => {
     )
     expect(label('consent-required')).toBe('Not listening: allow cloud AI')
     expect(label('no-capture')).toBe('Not listening: not live')
-    expect(label('service-unavailable')).toBe("Not listening: can't reach Videorc")
+    expect(label('service-unavailable')).toBe('Not listening: Videorc AI is unavailable')
     expect(label('signing-out')).toBe('Not listening: signing out')
     expect(label('shutting-down')).toBe('Not listening: Videorc is closing')
     expect(label('listen-disabled')).toBe('Not listening: unavailable right now')
