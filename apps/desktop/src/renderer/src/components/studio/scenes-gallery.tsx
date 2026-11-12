@@ -11,6 +11,7 @@ import { lazy, Suspense, type ReactElement } from 'react'
 const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
 
 import { PanelSection } from '@/components/panel-section'
+import { SceneSwitchPending, SceneSwitchStatus } from '@/components/scene/scene-switch-status'
 import { SectionLabel } from '@/components/section-label'
 import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
 import { Button } from '@/components/ui/button'
@@ -187,9 +188,11 @@ export function ScenesGallery(): ReactElement {
               key={preset.id}
               data-scene-preset={preset.id}
               disabled={gaps.length > 0}
-              label={presetSwitching(layoutSwitchPending, preset.id) ? 'Switching…' : preset.label}
+              label={preset.label}
               meta={
-                shortcut ? (
+                presetSwitching(layoutSwitchPending, preset.id) ? (
+                  <SceneSwitchPending />
+                ) : shortcut ? (
                   <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />
                 ) : undefined
               }
@@ -205,6 +208,8 @@ export function ScenesGallery(): ReactElement {
           )
         })}
       </div>
+      {/* Issue #1275: what a slow switch is waiting for. */}
+      <SceneSwitchStatus />
       {/* Why some scenes can't be chosen, once, under the gallery (B-20). */}
       <SceneGalleryReason
         action={
