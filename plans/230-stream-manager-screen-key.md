@@ -97,6 +97,11 @@ went back to first principles:
   `open -b`, which sends a reopen event (a new Finder or browser window,
   maybe on stream) and launches an app that quit. On Windows `blur()`
   hands the focus to the window behind. Nothing on Linux.
+- **Q15, a hold on a closed window.** It reopens where it was closed, with
+  the focus, even on the Presenting screen (a tap on a closed window goes
+  to the Monitor screen). "I may want to quickly hide the stream manager
+  to show the thing that's under it (what I was presenting) and bring it
+  back to the Presenting screen, so Hold for that works well."
 
 ## Decisions
 
@@ -140,7 +145,8 @@ hiddenFromStream}`); `hiddenFromStream` says viewers really do not see it
   file that cannot be read right now is never overwritten.
 - **D7. Tap and hold.** A tap (released within 500 ms) moves the window. A
   hold brings it to the front where it is, with the focus, or closes it
-  when it already has the focus; a closed window opens where it was last.
+  when it already has the focus; a closed window opens where it was last
+  (Q15).
   The plugin times the press; main decides front or close.
 
 ## Wire
