@@ -61,6 +61,10 @@ pub enum RecordingStartPhase {
     BridgeInputSetup,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeMftConfigure,
+    /// The writer adopted the standby encoder built while idle, in place of
+    /// `bridge-mf-startup` … `bridge-mft-configure` (`windows_mf_standby`).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeMftStandby,
     BridgeFirstFrame,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     BridgeFirstInput,
@@ -96,6 +100,7 @@ impl RecordingStartPhase {
             Self::BridgeMftActivate => "bridge-mft-activate",
             Self::BridgeInputSetup => "bridge-input-setup",
             Self::BridgeMftConfigure => "bridge-mft-configure",
+            Self::BridgeMftStandby => "bridge-mft-standby",
             Self::BridgeFirstFrame => "bridge-first-frame",
             Self::BridgeFirstInput => "bridge-first-input",
             Self::BridgeOutputRenegotiated => "bridge-output-renegotiated",

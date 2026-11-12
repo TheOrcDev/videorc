@@ -1,5 +1,16 @@
 # Implementation Plans
 
+- 2026-11-11: [Plan 229](229-green-screen-without-snow.md), the owner's
+  stream on 0.22.0: "snow" around the subject, specks of green screen one to
+  three pixels across in a new place every frame. IMPLEMENTED 2026-11-11:
+  - Cause: camera chroma noise (one 4:2:0 sample per 2×2 pixels) pushed
+    single samples past the 24° cone, or under the floor in shadow, and the
+    CPU, Metal and D3D11 keyer judged each pixel alone. The screen sits
+    16–20° from `#00FF00`, so the margin is 4–8°.
+  - The key now judges the colour smoothed over a 5×5 binomial around the
+    pixel and draws the pixel's own colour, on the CPU, Metal and D3D11
+    paths. FFmpeg's `chromakey` already judges a 3×3 neighbourhood.
+  - Owed: the owner's own take with the green screen.
 - 2026-11-11: [Plan 227](227-green-screen-keys-its-own-shadows.md), the
   owner's recording: with Key out background on, the camera's bottom corners
   kept dark patches that read as the curtain. IMPLEMENTED 2026-11-11 (the
