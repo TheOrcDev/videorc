@@ -10301,10 +10301,13 @@ async fn publish_compositor_frame(
     #[cfg(not(test))]
     let live_at = published_at;
     if let Some(input) = render_cache.live_background.as_mut() {
+        // The guard takes no reading while a takeover screen stands in for
+        // the scene (the compose below draws it in place of the sources).
         input.tick = crate::live_background::LiveBackgroundTick {
             at: live_at,
             ..live.tick
-        };
+        }
+        .under_takeover(active_image_source.is_some());
     }
     let captured_at = compositor_frame_content_captured_at(
         primary_camera_frame,
@@ -27546,6 +27549,33 @@ mod live_background_metal_tests {
         fn shared_frame(&self, at: Instant) -> Option<SharedLiveFrame> {
             self.slot.as_ref()?.frame_at(at)
         }
+
+        /// Take the takeover screen off, as `update_compositor_active_screen`
+        /// commits it: the same scene at the next revision.
+        async fn take_off_the_takeover(&self) {
+            let mut compositor = self.state.compositor.lock().await;
+            let snapshot = compositor.scene.as_mut().expect("a committed scene");
+            snapshot.active_screen = None;
+            snapshot.revision += 1;
+        }
+
+        /// `ticks` loop ticks 100 ms apart from `from`, every live frame
+        /// read as `gpu_ms` (61 ticks span three of the guard's 2 s windows).
+        async fn run_timed(&mut self, sequence: &mut u64, from: Instant, ticks: u32, gpu_ms: f64) {
+            for tick in 0..ticks {
+                if let Some(renderer) = self.slot.as_mut() {
+                    renderer.inject_gpu_ms(Some(gpu_ms));
+                }
+                *sequence += 1;
+                self.tick(*sequence, from + Duration::from_millis(100) * tick)
+                    .await;
+            }
+        }
+
+        fn live_status(&self) -> Option<crate::protocol::LiveBackgroundStatus> {
+            let input = self.render_cache.live_background.as_ref()?;
+            input.board.snapshot().0
+        }
     }
 
     /// The stage of `background` on a canvas, in luma pixels.
@@ -27951,6 +27981,116 @@ mod live_background_metal_tests {
                 &recording_stage,
             ),
             "recording",
+        );
+    }
+
+    /// Owner report 2026-11-12: an animated background stayed still after a
+    /// takeover screen came off, until another background was picked. The
+    /// guard was fed through the takeover and put the background on its
+    /// poster for good. Here every reading is 60 % of a frame for three guard
+    /// windows under the takeover and for 1.9 s after it comes off; the same
+    /// background still moves on the recording and the stream.
+    #[tokio::test]
+    async fn the_background_moves_again_after_a_takeover_comes_off() {
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let half = (WIDTH / 2, HEIGHT / 2);
+        // The run starts with its takeover screen up.
+        let Some(mut run) =
+            RecordAndStream::start((WIDTH, HEIGHT), half, Some(spec.clone()), None).await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let guard_level =
+            |run: &RecordAndStream| run.slot.as_ref().map(|renderer| renderer.guard_level());
+        let start = Instant::now();
+        let mut sequence = 0;
+        // Ticks at 0 to 6.0 s under the takeover.
+        run.run_timed(&mut sequence, start, 61, 10.0).await;
+        assert_eq!(
+            guard_level(&run),
+            Some(crate::live_background::GuardLevel::Full),
+            "readings under a takeover never step the guard"
+        );
+        run.take_off_the_takeover().await;
+        // Ticks at 6.1 to 7.9 s: the scene's sources come back.
+        let off = start + Duration::from_millis(6100);
+        run.run_timed(&mut sequence, off, 19, 10.0).await;
+        assert_eq!(
+            guard_level(&run),
+            Some(crate::live_background::GuardLevel::Full),
+            "nor do the readings just after it comes off"
+        );
+        if let Some(renderer) = run.slot.as_mut() {
+            renderer.inject_gpu_ms(None);
+        }
+        let after = start + Duration::from_secs(9);
+        let (recording_first, stream_first, _) = run.tick(sequence + 1, after).await;
+        let (recording_later, stream_later, _) =
+            run.tick(sequence + 2, after + Duration::from_secs(1)).await;
+        for (first, later, canvas, what) in [
+            (
+                recording_first,
+                recording_later,
+                (WIDTH, HEIGHT),
+                "recording",
+            ),
+            (stream_first, stream_later, half, "stream"),
+        ] {
+            let stage = stage_of(&background(Some(spec.clone())), canvas);
+            assert_ring_moves(&ring(&first, &later, canvas, &stage), what);
+        }
+        assert_eq!(
+            run.live_status()
+                .map(|status| (status.rendering, status.reason)),
+            Some((LiveBackgroundRendering::Shader, None))
+        );
+    }
+
+    /// The guard's protection stays: the same slow readings with no takeover
+    /// up put the background on its poster on both legs, as before.
+    #[tokio::test]
+    async fn an_overload_with_no_takeover_up_still_falls_to_the_poster() {
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let half = (WIDTH / 2, HEIGHT / 2);
+        let Some(mut run) =
+            RecordAndStream::start((WIDTH, HEIGHT), half, Some(spec.clone()), None).await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        run.take_off_the_takeover().await;
+        let start = Instant::now();
+        let mut sequence = 0;
+        run.run_timed(&mut sequence, start, 61, 10.0).await;
+        assert_eq!(
+            run.slot.as_ref().map(|renderer| renderer.guard_level()),
+            Some(crate::live_background::GuardLevel::Still)
+        );
+        let later = start + Duration::from_secs(7);
+        let (recording_first, stream_first, _) = run.tick(sequence + 1, later).await;
+        let (recording_later, stream_later, _) =
+            run.tick(sequence + 2, later + Duration::from_secs(1)).await;
+        let (blue, _, _) = rgb_to_yuv(0, 0, 255);
+        for (first, later, canvas, what) in [
+            (
+                recording_first,
+                recording_later,
+                (WIDTH, HEIGHT),
+                "recording",
+            ),
+            (stream_first, stream_later, half, "stream"),
+        ] {
+            let stage = stage_of(&background(Some(spec.clone())), canvas);
+            assert_ring_is_poster(&ring(&first, &later, canvas, &stage), blue, what);
+        }
+        assert_eq!(
+            run.live_status()
+                .map(|status| (status.rendering, status.reason)),
+            Some((
+                LiveBackgroundRendering::Still,
+                Some(LiveBackgroundStillReason::GpuBudget)
+            ))
         );
     }
 

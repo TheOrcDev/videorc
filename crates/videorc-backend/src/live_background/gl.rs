@@ -215,12 +215,7 @@ impl LiveBackgroundGlRenderer {
         let tick = input.tick;
         let render_ms = self.poll_worker();
         self.guard.follow(input.spec.id);
-        self.guard.record(
-            tick.at,
-            render_ms,
-            tick.missed_deadline,
-            tick.frame_interval,
-        );
+        self.guard.observe(&tick, render_ms);
         let p95 = self.guard.last_p95_ms();
         if let Some(reason) = preflight {
             self.stop_worker();

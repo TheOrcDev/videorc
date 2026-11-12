@@ -21,12 +21,16 @@ use crate::protocol::{EffectiveSceneBackground, LiveBackgroundSpec, LiveBackgrou
 /// leg of the tick shares (so every leg reads the same phase), the loop's
 /// frame interval and whether this tick missed its deadline (the loop's own
 /// late-tick signal: a tick gap that skipped an interval, or a previous
-/// publish that ran past the interval). The guard reads the last two.
+/// publish that ran past the interval). The guard reads the last two, and
+/// `takeover`: whether a takeover screen stands in for the scene this tick.
 #[derive(Debug, Clone, Copy)]
 pub struct LiveBackgroundTick {
     pub at: Instant,
     pub frame_interval: Duration,
     pub missed_deadline: bool,
+    /// A takeover screen is drawn in place of the scene's sources this tick.
+    /// The guard takes no reading on such a tick (`guard.rs`).
+    pub takeover: bool,
 }
 
 impl LiveBackgroundTick {
@@ -35,7 +39,13 @@ impl LiveBackgroundTick {
             at,
             frame_interval,
             missed_deadline,
+            takeover: false,
         }
+    }
+
+    /// The same tick with a takeover screen up (`true`) or not.
+    pub fn under_takeover(self, takeover: bool) -> Self {
+        Self { takeover, ..self }
     }
 
     /// A tick whose deadline nobody measured (tests, the cache refresh before

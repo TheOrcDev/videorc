@@ -483,8 +483,7 @@ impl LiveBackgroundD3d11Renderer {
         let tick = input.tick;
         let gpu_ms = self.take_last_gpu_ms();
         self.guard.follow(input.spec.id);
-        self.guard
-            .record(tick.at, gpu_ms, tick.missed_deadline, tick.frame_interval);
+        self.guard.observe(&tick, gpu_ms);
         let p95 = self.guard.last_p95_ms();
         let frame_size = internal_size(input.spec.id, output, GuardLevel::Full);
         let still = if let Some(reason) = preflight {

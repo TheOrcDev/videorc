@@ -24,9 +24,9 @@
 //! The budget guard (`guard.rs`) is fed at the start of each tick with the
 //! previous tick's live command buffer GPU time (`GPUEndTime - GPUStartTime`,
 //! complete long before, since the compose on the same queue already waited)
-//! and the tick's missed-deadline flag from the render loop. Full → Half
-//! re-renders at half the internal size; Still shows the poster with reason
-//! `gpu-budget`.
+//! and the tick's missed-deadline flag from the render loop (it takes no
+//! reading while a takeover screen is up). Full → Half re-renders at half the
+//! internal size; Still shows the poster with reason `gpu-budget`.
 
 #![cfg(target_os = "macos")]
 
@@ -1985,8 +1985,7 @@ impl LiveBackgroundMetalRenderer {
         self.last_frame = None;
         let gpu_ms = self.take_last_gpu_ms();
         self.guard.follow(input.spec.id);
-        self.guard
-            .record(tick.at, gpu_ms, tick.missed_deadline, tick.frame_interval);
+        self.guard.observe(&tick, gpu_ms);
         let p95 = self.guard.last_p95_ms();
         if let Some(reason) = preflight {
             // Forced (or any other preflight) still: hold nothing at all.

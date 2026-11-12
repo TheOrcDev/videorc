@@ -218,6 +218,11 @@ interval and checks the compositor's missed deadlines:
 - It never climbs back for the same background (a new look or motion
   included). A different background starts again at full size, since the ten
   cost very different amounts (`live_background/guard.rs`).
+- It takes no reading while a takeover screen is up, nor for 2 s after one
+  comes off, and the level it had stays. A takeover uploads its picture on
+  every leg and takes the scene's sources out of the frame and back; the late
+  ticks around that are not the background's. Judged on them, a background
+  stayed on its poster after the takeover until another one was picked.
 
 ## For developers
 

@@ -4,6 +4,15 @@
 //! steps Full → Half → Still. It never climbs back for the same background
 //! (a new look or motion included); a different background starts at Full,
 //! since the five cost very different amounts.
+//!
+//! Because a step is for good, the guard judges only what the background
+//! costs behind the scene. It takes no reading while a takeover screen is up,
+//! nor for [`GUARD_SETTLE_AFTER_TAKEOVER`] after one comes off. A takeover
+//! going up uploads its picture on every leg and takes the scene's sources
+//! out of the frame; coming off, it brings them back. The late ticks around
+//! that are not the background's, and judged on them a background stayed on
+//! its poster after the takeover until another one was picked (owner report,
+//! 2026-11-12). The level it had before the takeover stays.
 
 use std::time::{Duration, Instant};
 
@@ -18,6 +27,9 @@ pub const GUARD_SHARE_WITH_MISSES: f64 = 0.1;
 pub const GUARD_MISSES_PER_WINDOW: u32 = 3;
 /// A window needs this many timed frames before it can judge.
 pub const GUARD_MIN_SAMPLES: usize = 10;
+/// After a takeover screen comes off, the guard waits this long before it
+/// opens a window again.
+pub const GUARD_SETTLE_AFTER_TAKEOVER: Duration = GUARD_WINDOW;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GuardLevel {
@@ -36,6 +48,8 @@ pub struct LiveBackgroundGuard {
     samples: Vec<f64>,
     missed: u32,
     last_p95_ms: Option<f64>,
+    /// No reading before this instant: a takeover screen was up.
+    settle_until: Option<Instant>,
 }
 
 impl LiveBackgroundGuard {
@@ -61,6 +75,35 @@ impl LiveBackgroundGuard {
     /// The p95 of the last finished window, for status.
     pub fn last_p95_ms(&self) -> Option<f64> {
         self.last_p95_ms
+    }
+
+    /// What one tick tells the guard: its reading, or nothing while a
+    /// takeover screen is up and while the scene settles after one. Returns
+    /// the new level when it changes.
+    pub fn observe(
+        &mut self,
+        tick: &super::runtime::LiveBackgroundTick,
+        render_ms: Option<f64>,
+    ) -> Option<GuardLevel> {
+        if tick.takeover {
+            // The open window goes too: the next one holds only readings
+            // taken behind the scene.
+            self.window_started = None;
+            self.samples.clear();
+            self.missed = 0;
+            self.settle_until = Some(tick.at + GUARD_SETTLE_AFTER_TAKEOVER);
+            return None;
+        }
+        if self.settle_until.is_some_and(|until| tick.at < until) {
+            return None;
+        }
+        self.settle_until = None;
+        self.record(
+            tick.at,
+            render_ms,
+            tick.missed_deadline,
+            tick.frame_interval,
+        )
     }
 
     /// Feed one frame: its render time (`None` when the API can't time it)
@@ -119,6 +162,7 @@ impl LiveBackgroundGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live_background::LiveBackgroundTick;
 
     const SIXTY: Duration = Duration::from_nanos(16_666_667);
 
@@ -191,6 +235,105 @@ mod tests {
             run_window(&mut guard, Instant::now(), 2.0, true),
             Some(GuardLevel::Half)
         );
+    }
+
+    /// A tick of a 60 fps loop, `frame` frames after `start`.
+    fn tick(start: Instant, frame: u32) -> LiveBackgroundTick {
+        LiveBackgroundTick::new(start + SIXTY * frame, SIXTY, true)
+    }
+
+    /// Feed `frames` through `observe`, every deadline missed: the last
+    /// level change, if any.
+    fn observe_frames(
+        guard: &mut LiveBackgroundGuard,
+        start: Instant,
+        frames: std::ops::RangeInclusive<u32>,
+        ms: f64,
+        takeover: bool,
+    ) -> Option<GuardLevel> {
+        let mut change = None;
+        for frame in frames {
+            let tick = tick(start, frame).under_takeover(takeover);
+            change = guard.observe(&tick, Some(ms)).or(change);
+        }
+        change
+    }
+
+    /// Owner report 2026-11-12: slow readings and missed deadlines while a
+    /// takeover screen was up left the background on its poster for good.
+    #[test]
+    fn readings_under_a_takeover_never_step_the_guard() {
+        let mut guard = LiveBackgroundGuard::new();
+        let start = Instant::now();
+        // 8 s at 60 % of the frame, every deadline missed: four windows.
+        assert_eq!(observe_frames(&mut guard, start, 0..=480, 10.0, true), None);
+        assert_eq!(guard.level(), GuardLevel::Full);
+        assert_eq!(guard.last_p95_ms(), None, "no window was judged");
+        // The takeover comes off: the background is judged again, and passes.
+        assert_eq!(
+            observe_frames(&mut guard, start, 481..=800, 0.9, false),
+            None
+        );
+        assert_eq!(guard.level(), GuardLevel::Full);
+        assert_eq!(guard.last_p95_ms(), Some(0.9));
+    }
+
+    #[test]
+    fn the_scene_settles_after_a_takeover_before_the_guard_judges_again() {
+        let mut guard = LiveBackgroundGuard::new();
+        let start = Instant::now();
+        assert_eq!(observe_frames(&mut guard, start, 0..=0, 10.0, true), None);
+        // 1.98 s of slow readings and missed deadlines as the scene's sources
+        // come back: none is taken.
+        assert_eq!(
+            observe_frames(&mut guard, start, 1..=119, 10.0, false),
+            None
+        );
+        // Then cheap ones for a window: only those are judged.
+        assert_eq!(
+            observe_frames(&mut guard, start, 120..=241, 0.9, false),
+            None
+        );
+        assert_eq!(guard.level(), GuardLevel::Full);
+        assert_eq!(guard.last_p95_ms(), Some(0.9));
+        // A background that is over budget behind the scene still steps down.
+        assert_eq!(
+            observe_frames(&mut guard, start, 242..=362, 10.0, false),
+            Some(GuardLevel::Half)
+        );
+        assert_eq!(
+            observe_frames(&mut guard, start, 363..=483, 10.0, false),
+            Some(GuardLevel::Still)
+        );
+    }
+
+    #[test]
+    fn a_takeover_drops_the_open_window_and_keeps_the_level() {
+        let mut guard = LiveBackgroundGuard::new();
+        let start = Instant::now();
+        // The first window closes at frame 120, over budget.
+        assert_eq!(
+            observe_frames(&mut guard, start, 0..=120, 10.0, false),
+            Some(GuardLevel::Half)
+        );
+        // 1.9 s more of slow readings: their window would close over budget
+        // at frame 240. The takeover at frame 235 drops them.
+        assert_eq!(
+            observe_frames(&mut guard, start, 121..=234, 10.0, false),
+            None
+        );
+        assert_eq!(
+            observe_frames(&mut guard, start, 235..=235, 10.0, true),
+            None
+        );
+        assert_eq!(guard.level(), GuardLevel::Half, "the level it had stays");
+        // The first window after it holds only readings taken after it.
+        assert_eq!(
+            observe_frames(&mut guard, start, 236..=480, 0.9, false),
+            None
+        );
+        assert_eq!(guard.level(), GuardLevel::Half);
+        assert_eq!(guard.last_p95_ms(), Some(0.9));
     }
 
     #[test]
