@@ -7,7 +7,7 @@
 
 ## Status
 
-- **Status**: S1 to S6 BUILT 2026-11-12 on `feat/html-overlays` (draft PR).
+- **Status**: S1 to S6 BUILT 2026-11-12 on `feat/html-overlays` (draft PR #1323).
   S7 onward are follow-ups. See "As built".
 - **Priority**: P1 (owner request, 2026-11-12).
 - **Effort**: L. A new banner kind in the store, an import, a sandboxed
