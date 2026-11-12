@@ -133,6 +133,23 @@ presenter fallback during the check fails as `presenter-fell-back`. On the UHD
 620 laptop the idle Preview is the proof surface. A refused or asleep DXGI
 display is a named SKIP, and the smoke holds an awake display on.
 
+System audio and the soundboard (#1088). Both need the capture worker beside
+the bundled FFmpeg: without `vendor/ffmpeg/windows-x64/bin/ffmpeg-capture.exe`
+FFmpeg opens the microphone itself, the session has no audio bus, and the
+smokes refuse up front with the fix. Build it with
+`pnpm ffmpeg:build:capture:windows` (MSYS2 UCRT64), or copy it from an
+installed Videorc's `resources\ffmpeg\bin`.
+
+```powershell
+pnpm smoke:system-audio   # ~2 min: on, toggles, off, self-exclusion, stream, Clips
+pnpm smoke:soundboard     # ~1.5 min: idle, on air, with System audio
+```
+
+Both run with no microphone (the Studio's None) and play a 1 kHz tone through
+the default output (a pre-armed PowerShell `Media.SoundPlayer`), so run them
+somewhere quiet: they record what the computer plays. Toggle-on gets 30 ms of
+Windows attach latency on top of the macOS gate until #1319 is fixed.
+
 Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):
 

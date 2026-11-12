@@ -90,6 +90,6 @@ imports them once per profile (`sounds:starter-files`, then
 
 **Proof.** `pnpm smoke:soundboard-fixture` (the real bus, a fixture press,
 placement within one chunk plus 5 ms, never in the Microphone file) is part
-of `smoke:recording-studio`. `pnpm smoke:soundboard` drives the dev app:
+of `smoke:recording-studio`. `pnpm smoke:soundboard` drives the dev app (macOS and Windows):
 idle presses are monitor-only, a press lands once in a recording, and with
 System audio on the monitor never doubles it.

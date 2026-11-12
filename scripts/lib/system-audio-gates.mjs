@@ -45,6 +45,9 @@ export const SYSTEM_AUDIO_GATES = Object.freeze({
   // wall clock) on the capture's first buffer, so a sound already playing
   // enters between the cutover and the cutover + the playout delay.
   playoutDelayMs: 150,
+  // Extra time a platform's capture takes to reach the mix after it joins.
+  // 0 on macOS; see systemAudioGatesFor for Windows.
+  attachLatencyMs: 0,
   // A window inside a tone more than this far under its median is a dropout.
   dropoutDb: 6,
   interiorMarginMs: 60,
@@ -64,6 +67,19 @@ export const SYSTEM_AUDIO_GATES = Object.freeze({
   // playing this long after (or had started this long before) it.
   cutProofMs: 1000
 })
+
+/**
+ * The gates for a platform. Windows process loopback lets already-playing
+ * sound in ~56 ms after the playout delay on a mid-session On (206 and 208 ms
+ * after the cutover against 200 ms, Windows 11 build 26300, issue #1319). Until
+ * the backend places those first packets at the cutover, Windows gets 30 ms
+ * of attach latency on that one check; every other gate is the same.
+ */
+export function systemAudioGatesFor(platform = process.platform) {
+  return platform === 'win32'
+    ? Object.freeze({ ...SYSTEM_AUDIO_GATES, attachLatencyMs: 30 })
+    : SYSTEM_AUDIO_GATES
+}
 
 export function amplitudeToDbfs(amplitude) {
   return amplitude > 0 ? 20 * Math.log10(amplitude) : -Infinity
@@ -644,9 +660,10 @@ export function evaluateToggleOnCase(
       failures.push(
         `toggle on: the tone entered at ${region.start.toFixed(3)}s, ${(-deltaMs).toFixed(0)} ms BEFORE the attach cutover (${cutoverSeconds.toFixed(3)}s)`
       )
-    } else if (deltaMs > gates.playoutDelayMs + gates.toggleToleranceMs) {
+    } else if (deltaMs > gates.playoutDelayMs + gates.attachLatencyMs + gates.toggleToleranceMs) {
+      const latency = gates.attachLatencyMs ? ` + ${gates.attachLatencyMs} ms attach latency` : ''
       failures.push(
-        `toggle on: the tone entered ${deltaMs.toFixed(0)} ms after the attach cutover (allowed ${gates.playoutDelayMs} ms playout + ${gates.toggleToleranceMs} ms)`
+        `toggle on: the tone entered ${deltaMs.toFixed(0)} ms after the attach cutover (allowed ${gates.playoutDelayMs} ms playout${latency} + ${gates.toggleToleranceMs} ms)`
       )
     }
     if (region.start < expectedPlay.start + gates.cutProofMs / 1000) {
