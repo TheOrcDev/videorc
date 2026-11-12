@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import { KebabMenu } from '@/components/kebab-menu'
 import { AppIconImage } from '@/components/scene/app-icon'
 import { useSceneDialogs } from '@/components/scene/scene-dialogs'
+import { SceneSwitchPending } from '@/components/scene/scene-switch-status'
 import { SectionLabel } from '@/components/section-label'
 import { SceneCard } from '@/components/studio/scene-card'
 import { LayoutThumb } from '@/components/studio/scenes-gallery'
@@ -109,10 +110,11 @@ export function ScenePresetControls(): ReactElement {
               <SceneCard
                 key={entry.id}
                 data-saved-scene={entry.id}
-                disabled={blocked !== null || dialogs.busy || pending}
+                // Another scene's click takes a pending switch over (issue #1275).
+                disabled={blocked !== null || pending}
                 disabledReason={blocked}
                 icon={app ? <AppIconImage icon={icons.get(app.bundleId)} /> : undefined}
-                label={pending ? 'Switching…' : entry.name}
+                label={entry.name}
                 menu={
                   <KebabMenu
                     items={dialogs.menuItems(entry)}
@@ -121,12 +123,16 @@ export function ScenePresetControls(): ReactElement {
                   />
                 }
                 meta={
-                  blocked ??
-                  (!app && dialogs.needsSources(entry) ? (
-                    'Resolve sources'
-                  ) : shortcut ? (
-                    <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />
-                  ) : undefined)
+                  pending ? (
+                    <SceneSwitchPending />
+                  ) : (
+                    (blocked ??
+                    (!app && dialogs.needsSources(entry) ? (
+                      'Resolve sources'
+                    ) : shortcut ? (
+                      <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />
+                    ) : undefined))
+                  )
                 }
                 selected={selected}
                 thumb={

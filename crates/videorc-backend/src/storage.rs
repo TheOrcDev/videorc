@@ -9302,19 +9302,20 @@ fn resolve_managed_screen_image_path(root: &Path, screen_id: &str, path: &Path) 
 }
 
 pub(crate) fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        false
-    }
+    metadata.file_type().is_symlink() || metadata_is_reparse_point(metadata)
+}
+
+#[cfg(target_os = "windows")]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Only Windows has reparse points beyond symlinks.
+#[cfg(not(target_os = "windows"))]
+fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn chat_fact(value: u64) -> Result<i64> {

@@ -32,14 +32,34 @@
 //
 // Passes: Clips on; Clips off; Clips on with Record pressed during rung 2.
 // Every pass is evaluated so one run names every failure.
+//
+// Windows (issue #1088): the program's screen is a DXGI display picked the
+// way the Hide screen smoke picks it (`selectWindowsHideScreen`); a refused or
+// asleep display is a named SKIP. The Preview the user sees is the Electron
+// proof surface, which main composes itself from `compositor.status` (raw
+// screen layers and banners), so `preview.debug.sample` is not what is on
+// screen there. The oracle is main's dev/smoke-only `preview-surface-sample`
+// command instead: it captures the proof surface's `#scene-root` and reads the
+// same rects. A test-pattern layer in the proof surface's own scene is
+// `test-pattern-scene-source` too. While the backend D3D11 presenter owns the
+// Preview (a separate window no page capture can see), the pixel failures
+// (`synthetic-frame-presented`, `preview-not-program`, the read half of
+// `preview-not-back`) are a named SKIP, and the presenter's own diagnostics are
+// judged instead: `presenter-fell-back` names a presenter that left the
+// Preview during the check. The display is held awake for the run.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import {
+  selectWindowsHideScreen,
+  windowsScreenStartSkip
+} from './lib/hide-screen-windows-gates.mjs'
 import { acquireHostSmokeLock, waitForHostMemory } from './lib/host-lock.mjs'
 import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { scenePresetStateReadCode } from './lib/scene-presets-smoke-state.mjs'
@@ -49,14 +69,30 @@ import {
   meanRectsRgb24,
   syntheticStripRects
 } from './lib/synthetic-frame-strip.mjs'
+import { holdWindowsDisplayAwake } from './lib/windows-display-awake.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-assert.equal(process.platform, 'darwin', 'The Preview check smoke requires the macOS dev app')
+const isWindows = process.platform === 'win32'
+assert(
+  process.platform === 'darwin' || isWindows,
+  'The Preview check smoke requires the macOS or Windows dev app'
+)
 delete process.env.ELECTRON_RUN_AS_NODE
 const outputDirectory = mkdtempSync(join(tmpdir(), 'videorc-preview-check-invisible-'))
 const userDataDir = join(outputDirectory, 'profile')
 mkdirSync(userDataDir)
-const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+const vendoredFfmpeg = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'vendor',
+  'ffmpeg',
+  'windows-x64',
+  'bin',
+  'ffmpeg.exe'
+)
+const ffmpegPath =
+  process.env.VIDEORC_SMOKE_FFMPEG_PATH ??
+  (isWindows && existsSync(vendoredFfmpeg) ? vendoredFfmpeg : 'ffmpeg')
 const timeoutMs = 120_000
 const verbose = process.env.VIDEORC_SMOKE_VERBOSE === '1'
 // Every rung taller than this fails, so the ladder steps down at least once
@@ -117,6 +153,15 @@ const passRows = []
 const evidence = {}
 let launch, ws, smoke
 let skipped = false
+let displayAwake = null
+/**
+ * Windows: who presents the Preview. 'proof-surface' is read by the oracle;
+ * 'd3d11-presenter' cannot be captured, so its pixel failures are a named
+ * SKIP and its diagnostics are judged.
+ */
+let windowsPreviewOwner = null
+/** A named SKIP raised from inside the run (a refused DXGI display). */
+class SmokeSkip extends Error {}
 const rpc = (method, params = {}) => request(ws, timeoutMs, method, params)
 const command = (name, params = {}) => requestSmokeCommand(smoke, name, params, { timeoutMs })
 const evaluate = async (code, params = {}) => {
@@ -206,11 +251,45 @@ function createPng(outputPath, source) {
   if (result.status !== 0) throw new Error(`Could not create ${outputPath}: ${result.stderr}`)
 }
 
+/**
+ * The frame the Preview shows. macOS: the backend's lease-free dev oracle over
+ * the frame main is handed. Windows: main's capture of the proof surface the
+ * user sees, with the surface's own scene kinds and presenter state.
+ */
+async function readOracle(rects) {
+  if (!isWindows) {
+    const frame = await rpc('preview.debug.sample', { rects })
+    return { ...frame, surface: null }
+  }
+  const frame = await command('preview-surface-sample', { rects })
+  const surface = {
+    transport: frame.transport,
+    hostKind: frame.hostKind,
+    state: frame.state,
+    sceneKinds: frame.sceneKinds ?? [],
+    liveLayers: frame.liveLayers ?? [],
+    presenterFallback: frame.presenter?.fallbackReason ?? null,
+    proofWindowVisible: frame.proofWindowVisible
+  }
+  if (frame.error) {
+    const error = new Error(
+      `${frame.error} (transport ${frame.transport}, host ${frame.hostKind ?? 'none'})`
+    )
+    error.surface = surface
+    throw error
+  }
+  return { ...frame, frameId: frame.capturedAt, surface }
+}
+
+/** Is the backend D3D11 presenter showing the Preview (no proof surface to read)? */
+const presenterOwns = (surface) =>
+  surface?.hostKind === 'backend-d3d11-presenter' && surface?.proofWindowVisible === false
+
 /** One oracle read: the strip verdict and the program mismatch list. */
 async function sampleOnce() {
   const at = Date.now()
   try {
-    const frame = await rpc('preview.debug.sample', { rects: oracleRects })
+    const frame = await readOracle(oracleRects)
     const cells = frame.samples.slice(0, stripRects.length)
     const program = frame.samples.slice(stripRects.length).map(({ r, g, b }) => [r, g, b])
     return {
@@ -219,20 +298,32 @@ async function sampleOnce() {
       size: `${frame.width}x${frame.height}`,
       strip: decodeSyntheticStrip(cells),
       mismatch: programMismatch(program),
-      program
+      program,
+      surface: frame.surface
     }
   } catch (error) {
-    return { at, error: error.message }
+    return { at, error: error.message, surface: error.surface ?? null }
   }
 }
 
-/** Wait until the oracle shows the program, or return the last read. */
+/**
+ * Wait until the oracle shows the program, or return the last read. While
+ * the D3D11 presenter owns a Windows Preview there is nothing to read: the
+ * presenter's own status stands in (live, no fallback).
+ */
 async function waitForProgram(deadlineMs) {
   const until = Date.now() + deadlineMs
   let last
   do {
     last = await sampleOnce()
     if (!last.error && last.mismatch.length === 0) return last
+    if (
+      windowsPreviewOwner === 'd3d11-presenter' &&
+      presenterOwns(last.surface) &&
+      !last.surface.presenterFallback
+    ) {
+      return { ...last, error: null, mismatch: [], program: [], presenter: true }
+    }
     await sleep(50)
   } while (Date.now() < until)
   return last
@@ -428,7 +519,12 @@ async function runPass({ name, clips, record = false }) {
   const windowEnd = completedAt + TAIL_MS
   const inWindow = samples.filter((s) => s.at >= windowStart && s.at <= windowEnd)
   const read = inWindow.filter((s) => !s.error)
-  const unread = inWindow.filter((s) => s.error)
+  // Windows: a read the D3D11 presenter answered (its window shows the
+  // Preview, no proof surface to capture) is judged by its diagnostics, not
+  // as a missing frame.
+  const presenterHeld = (s) => s.error && presenterOwns(s.surface) && !s.surface.presenterFallback
+  const presenterReads = inWindow.filter(presenterHeld)
+  const unread = inWindow.filter((s) => s.error && !presenterHeld(s))
   const rungs = progress.map((p) => `${p.video?.width}x${p.video?.height}@${p.video?.fps}`)
   notes.push(
     `rungs: ${rungs.join(' -> ') || 'none'}; ${read.length} frames read, ${unread.length} reads without a frame, check ${((completedAt - startedAt) / 1000).toFixed(1)} s`
@@ -437,6 +533,50 @@ async function runPass({ name, clips, record = false }) {
     notes.push(
       `only ${progress.length} rung(s) ran; VIDEORC_PERFORMANCE_CHECK_FORCE_FAIL_ABOVE_HEIGHT=${forceFailAboveHeight}`
     )
+  }
+  if (isWindows) {
+    const owners = new Map()
+    for (const s of inWindow) {
+      const owner = presenterHeld(s)
+        ? 'd3d11-presenter'
+        : s.error
+          ? `unread (${s.error})`
+          : `proof-surface ${s.surface?.transport ?? '?'}`
+      owners.set(owner, (owners.get(owner) ?? 0) + 1)
+    }
+    notes.push(
+      `Preview owner per read: ${[...owners].map(([owner, n]) => `${owner} x${n}`).join(', ')}`
+    )
+    if (presenterReads.length) {
+      notes.push(
+        `SKIP pixels for ${presenterReads.length} read(s): the backend D3D11 presenter showed the Preview, which no page capture can read; its diagnostics stood in (live, no fallback)`
+      )
+    }
+    // The presenter left the Preview with a reason while the check ran.
+    const fellBack = inWindow.filter(
+      (s) => s.surface?.hostKind === 'backend-d3d11-presenter' && s.surface.presenterFallback
+    )
+    if (fellBack.length) {
+      fail(
+        name,
+        'presenter-fell-back',
+        `the D3D11 presenter reported a fallback in ${fellBack.length} of ${inWindow.length} reads; first at +${((fellBack[0].at - startedAt) / 1000).toFixed(2)} s: ${fellBack[0].surface.presenterFallback}`
+      )
+    }
+    // The proof surface composes its own scene: a test-pattern layer there is
+    // on screen whatever the backend's scene says.
+    const surfacePattern = inWindow.filter(
+      (s) =>
+        s.surface?.sceneKinds?.includes('test-pattern') ||
+        s.surface?.liveLayers?.includes('test-pattern')
+    )
+    if (surfacePattern.length) {
+      fail(
+        name,
+        'test-pattern-scene-source',
+        `the proof surface's own scene held a test-pattern layer in ${surfacePattern.length} of ${inWindow.length} reads; first at +${((surfacePattern[0].at - startedAt) / 1000).toFixed(2)} s, kinds ${JSON.stringify(surfacePattern[0].surface.sceneKinds)}`
+      )
+    }
   }
 
   const synthetic = read.filter((s) => s.strip.synthetic)
@@ -504,7 +644,9 @@ async function runPass({ name, clips, record = false }) {
   // program (banners, no strip) and the scene no longer carries a
   // test-pattern source.
   const afterBack = inWindow.filter((s) => s.at >= completedAt + BACK_WITHIN_MS)
-  const notBack = afterBack.filter((s) => s.error || s.mismatch.length || s.strip?.synthetic)
+  const notBack = afterBack.filter(
+    (s) => (s.error && !presenterHeld(s)) || s.mismatch?.length || s.strip?.synthetic
+  )
   const patternAfter = statuses.filter(
     (s) => s.at >= completedAt + BACK_WITHIN_MS && s.kinds?.includes('test-pattern')
   )
@@ -575,7 +717,8 @@ async function runPass({ name, clips, record = false }) {
       synthetic: s.strip?.synthetic,
       sequence: s.strip?.sequence,
       mismatch: s.mismatch,
-      program: s.program?.map(fmt)
+      program: s.program?.map(fmt),
+      surface: s.surface ?? undefined
     })),
     statuses: statuses.map((s) => ({ ...s, at: s.at - startedAt })),
     checkLogs,
@@ -604,6 +747,13 @@ async function runPass({ name, clips, record = false }) {
 try {
   await acquireHostSmokeLock({ log })
   await waitForHostMemory({ log })
+  if (isWindows) {
+    // A sleeping display refuses Desktop Duplication to every process and
+    // slows capture to a few frames a second (issue #1088). This keeps an
+    // awake display on; it cannot wake one that is already off.
+    displayAwake = await holdWindowsDisplayAwake()
+    if (!displayAwake.held) log(`could not hold the display awake: ${displayAwake.reason}`)
+  }
   launch = await launchDevApp({
     env: {
       // The command server without VIDEORC_SMOKE_PREVIEW_MOTION: frame
@@ -632,42 +782,53 @@ try {
       // not JSON
     }
   })
-  const oracleProbe = await rpc('preview.debug.sample', { rects: [programRects[3]] }).catch(
-    (error) => ({ error: error.message })
-  )
-  if (/preview-debug-disabled|refused in packaged/.test(oracleProbe.error ?? '')) {
-    throw new Error(
-      'preview.debug.sample is disabled: the oracle needs the debug backend (cargo build -p videorc-backend, no --release)'
+  if (!isWindows) {
+    const oracleProbe = await rpc('preview.debug.sample', { rects: [programRects[3]] }).catch(
+      (error) => ({ error: error.message })
     )
+    if (/preview-debug-disabled|refused in packaged/.test(oracleProbe.error ?? '')) {
+      throw new Error(
+        'preview.debug.sample is disabled: the oracle needs the debug backend (cargo build -p videorc-backend, no --release)'
+      )
+    }
   }
   // The program needs the real screen (see the header): SKIP by name without it.
   const devices = await rpc('devices.list', { ffmpegPath })
-  const grantMissing = (devices.devices ?? []).find(
-    (device) =>
-      (device.kind === 'screen' || device.kind === 'window') &&
-      device.status === 'permission-required' &&
-      String(device.id).includes('screencapturekit')
-  )
-  const screen = (devices.devices ?? []).find(
-    (device) =>
-      device.kind === 'screen' &&
-      device.status === 'available' &&
-      String(device.id).includes('screencapturekit')
-  )
-  if (grantMissing || !screen) {
-    const reason = grantMissing
-      ? `the dev app has no Screen Recording grant on this host (${grantMissing.detail ?? grantMissing.id})`
-      : 'no available ScreenCaptureKit screen on this host'
-    console.log(`SKIP preview-check-invisible: ${reason}`)
-    passRows.push({ pass: 'all', result: 'SKIP', failures: reason })
+  let skipReason = null
+  if (isWindows) {
+    const picked = selectWindowsHideScreen(devices.devices ?? [])
+    if (picked.skip) skipReason = `${picked.skip.reason} [${picked.skip.flag}]`
+    else screenId = picked.screen.id
+  } else {
+    const grantMissing = (devices.devices ?? []).find(
+      (device) =>
+        (device.kind === 'screen' || device.kind === 'window') &&
+        device.status === 'permission-required' &&
+        String(device.id).includes('screencapturekit')
+    )
+    const screen = (devices.devices ?? []).find(
+      (device) =>
+        device.kind === 'screen' &&
+        device.status === 'available' &&
+        String(device.id).includes('screencapturekit')
+    )
+    if (grantMissing || !screen) {
+      skipReason = grantMissing
+        ? `the dev app has no Screen Recording grant on this host (${grantMissing.detail ?? grantMissing.id})`
+        : 'no available ScreenCaptureKit screen on this host'
+    } else screenId = screen.id
+  }
+  if (skipReason) throw new SmokeSkip(skipReason)
+  await runAll()
+} catch (error) {
+  if (error instanceof SmokeSkip) {
+    console.log(`SKIP preview-check-invisible: ${error.message}`)
+    passRows.push({ pass: 'all', result: 'SKIP', failures: error.message })
     skipped = true
   } else {
-    screenId = screen.id
-    await runAll()
+    console.error(error.stack)
+    failures.push({ pass: 'harness', name: 'harness', detail: error.message })
   }
-} catch (error) {
-  console.error(error.stack)
-  failures.push({ pass: 'harness', name: 'harness', detail: error.message })
 } finally {
   console.table(passRows)
   if (failures.length) {
@@ -695,6 +856,7 @@ try {
     ws.close()
   }
   await launch?.stop()
+  displayAwake?.release()
   console.log(
     failures.length
       ? `preview-check-invisible: FAIL (${failures.length} named failure(s))`
@@ -774,6 +936,12 @@ async function runAll() {
     }
     await sleep(250)
   }
+  if (isWindows && steady !== 2) {
+    // A display that refused Desktop Duplication is a named SKIP, not a FAIL.
+    const screenStatus = await rpc('preview.screen.status').catch(() => null)
+    const refusal = windowsScreenStartSkip(screenStatus)
+    if (refusal) throw new SmokeSkip(`${refusal.reason} [${refusal.flag}]`)
+  }
   assert.equal(
     steady,
     2,
@@ -790,6 +958,28 @@ async function runAll() {
       showOnStream: true,
       showInRecording: true
     })
+  }
+  if (isWindows) {
+    // Who shows the idle Preview: the proof surface (read by the oracle) or
+    // the backend D3D11 presenter (its own window; judged by diagnostics).
+    const until = Date.now() + 3000
+    const owners = []
+    while (Date.now() < until) {
+      owners.push(await sampleOnce())
+      await sleep(100)
+    }
+    const last = owners.at(-1)
+    windowsPreviewOwner = owners.some((s) => presenterOwns(s.surface))
+      ? 'd3d11-presenter'
+      : 'proof-surface'
+    evidence.windowsPreviewOwner = {
+      owner: windowsPreviewOwner,
+      surface: last?.surface ?? null,
+      error: last?.error ?? null
+    }
+    log(
+      `Windows Preview owner at idle: ${windowsPreviewOwner} (transport ${last?.surface?.transport}, host ${last?.surface?.hostKind}, proof window ${last?.surface?.proofWindowVisible ? 'visible' : 'hidden'})`
+    )
   }
   const baseline = await waitForProgram(10_000)
   evidence.baseline = baseline

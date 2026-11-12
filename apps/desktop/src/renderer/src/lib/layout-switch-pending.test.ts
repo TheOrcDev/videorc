@@ -7,10 +7,10 @@ import {
   presetSwitching
 } from './layout-switch-pending'
 
-// Plan 216 A4: one "Switching…" label. The streamer's Freeform click lit both
+// Plan 216 A4: one pending control. The streamer's Freeform click lit both
 // the "Screen + camera" button and the Freeform toggle.
 
-describe('which control says "Switching…"', () => {
+describe('which control shows the pending mark', () => {
   it('entering Freeform from a preset lights Freeform only', () => {
     const pending = layoutSwitchTarget({
       layoutPreset: 'screen-camera',
