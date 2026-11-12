@@ -579,6 +579,8 @@ export interface DirectoryFacts {
 
 export type ResourceCapabilityKind =
   | 'input-file'
+  /** Plan 232: a folder picked to import (an HTML overlay). */
+  | 'input-directory'
   | 'output-directory'
   | 'open-path'
   | 'reveal-path'
@@ -5641,6 +5643,8 @@ export interface VideorcApi {
   /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
    * `input-file` capability for `banners.importImage`. */
   pickBannerImage: () => Promise<ResourceSelection | null>
+  /** Assets → Banners → Import HTML… (plan 232): an `.html` file or a folder. */
+  pickBannerHtml: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
   checkDirectory: (directoryHandleId: string) => Promise<DirectoryFacts>
@@ -6808,15 +6812,31 @@ export const BANNER_MAX_SHOWN = 4
 export const BANNER_OPACITY_MIN = 0.2
 export const BANNER_OPACITY_MAX = 1
 
+/**
+ * What a banner's picture is (plan 232). Only `'html'` is ever on the wire:
+ * an image banner carries no `kind` at all.
+ */
+export type BannerKind = 'html'
+
 export interface Banner {
   /** Stable UUID, used by remotes, the Stream Deck and `/banner`. */
   id: string
   name: string
-  /** Basename in the managed Banners dir, `<id>.png`. Never a path. */
+  /**
+   * Plan 232: `'html'` for an HTML overlay, a web page with a transparent
+   * background that main renders offscreen. Omitted for an image, never
+   * `null`.
+   */
+  kind?: BannerKind
+  /**
+   * Basename in the managed Banners dir, `<id>.png`. Never a path. For an
+   * HTML overlay it is the page's own picture, which exists a second after
+   * the overlay first shows.
+   */
   imageFile: string
   /** Basename of the ~480 px thumbnail, `<id>.thumb.png`. */
   thumbnailFile: string
-  /** Pixel size of the stored image. */
+  /** Pixel size of the stored image; for an HTML overlay, the page size in CSS pixels. */
   width: number
   height: number
   hasAlpha: boolean
@@ -6843,6 +6863,84 @@ export interface Banner {
 /** `banners.importImage`: a main-issued `input-file` capability. */
 export interface BannerImportImageParams {
   sourceCapability: string
+}
+
+/**
+ * `banners.importHtml` (plan 232): a main-issued `input-file` capability for
+ * one `.html` file, or `input-directory` for a folder with `index.html`.
+ */
+export interface BannerImportHtmlParams {
+  sourceCapability: string
+}
+
+/** The largest frame main sends for one HTML overlay: a 1080p frame (plan 232 D7). */
+export const HTML_OVERLAY_MAX_FRAME_PIXELS = 1920 * 1080
+/** The highest rate an HTML overlay renders at (plan 232 D7). */
+export const HTML_OVERLAY_MAX_FPS = 30
+/** The most HTML overlays main ever renders at once: the banners showing. */
+export const HTML_OVERLAY_MAX_TARGETS = BANNER_MAX_SHOWN
+
+/**
+ * One HTML overlay main renders now (plan 232 "Targets"): the page size in
+ * CSS pixels, the frame size in device pixels, and the rate.
+ */
+export interface HtmlOverlayTarget {
+  id: string
+  pageWidth: number
+  pageHeight: number
+  frameWidth: number
+  frameHeight: number
+  fps: number
+}
+
+/** `htmlOverlays.targets` (event) and `htmlOverlays.targets.get`. */
+export interface HtmlOverlayTargets {
+  targets: HtmlOverlayTarget[]
+}
+
+/** What main says about a page it hosts. */
+export type HtmlOverlayHostState = 'loading' | 'live' | 'failed'
+
+/** `htmlOverlays.host.report`, main only (the admin role). */
+export interface HtmlOverlayHostReportParams {
+  id: string
+  state: HtmlOverlayHostState
+  /** Why the page failed, in words the streamer can read. */
+  detail?: string
+  /** Requests the network rule cancelled (plan 232 D5). */
+  blockedRequests?: number
+}
+
+/**
+ * Where a showing HTML overlay stands. `unavailable`: it cannot be drawn
+ * here (the running session); `detail` is the sentence to show.
+ */
+export type HtmlOverlayState = 'loading' | 'live' | 'failed' | 'unavailable'
+
+export interface HtmlOverlayStatus {
+  id: string
+  state: HtmlOverlayState
+  /** The one sentence to show when the overlay is not live. Omitted otherwise. */
+  detail?: string
+  /** The size of the last frame, while live. */
+  frameWidth?: number
+  frameHeight?: number
+  /** Requests the network rule cancelled; omitted when none. */
+  blockedRequests?: number
+}
+
+/** `htmlOverlays.status` (event) and `htmlOverlays.status.get`. */
+export interface HtmlOverlayStatuses {
+  overlays: HtmlOverlayStatus[]
+}
+
+/** `htmlOverlays.stats`: the backend's side of the frame transport, for the smoke and the measured cost. */
+export interface HtmlOverlayStats {
+  framesReceived: number
+  framesDropped: number
+  bytesReceived: number
+  convertMicros: number
+  uploadsOpened: number
 }
 
 /** `banners.update`: only the fields to change. A timer of `0` turns it off. */

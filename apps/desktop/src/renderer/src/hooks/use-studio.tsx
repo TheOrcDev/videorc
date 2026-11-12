@@ -23,7 +23,11 @@ import {
   type SystemAccessContext
 } from '@/lib/system-access'
 import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover-import'
-import { createBannerImporter, type BannerImportPhase } from '@/lib/banner-import'
+import {
+  createBannerImporter,
+  type BannerImportKind,
+  type BannerImportPhase
+} from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
@@ -446,6 +450,8 @@ import type {
   BackendConnection,
   Banner,
   BannerUpdateParams,
+  HtmlOverlayStatus,
+  HtmlOverlayStatuses,
   BackendHealth,
   BackendLifecycleEvent,
   BackendLogEvent,
@@ -1929,13 +1935,18 @@ export type StudioBannersContextValue = {
   /** Videorc is reconnecting: every banner action waits for it. */
   bannersOffline: boolean
   bannerImportPhase: BannerImportPhase
+  /** Which import is running while the phase is not idle (plan 232). */
+  bannerImportKind: BannerImportKind
+  /** Where each showing HTML overlay stands (plan 232): loading, live, or why not. */
+  htmlOverlayStatuses: readonly HtmlOverlayStatus[]
   /** The banner the Scene page selects (Assets → Place on Scene); null when none, or deleted. */
   selectedBannerId: string | null
   selectBanner: (id: string | null) => void
   /** Assets → Import image…: the picker, then `banners.importImage`, which shows the new banner
    * (plan 205 D3) unless four already show or a running session can't take one: then it
-   * arrives hidden (with four showing, the Scene list's limit reason says why). */
-  importBanner: () => Promise<void>
+   * arrives hidden (with four showing, the Scene list's limit reason says why).
+   * `'html'` is Import HTML… (plan 232): an `.html` file or a folder with `index.html`. */
+  importBanner: (kind?: BannerImportKind) => Promise<void>
   updateBanner: (id: string, patch: Omit<BannerUpdateParams, 'id'>) => Promise<Banner | null>
   /** Every banner id in the new Assets order (`bannerOrderAfterMove`). */
   reorderBanners: (ids: string[]) => Promise<boolean>
@@ -1955,6 +1966,8 @@ export type StudioCaptionsContextValue = {
 const NO_SCREENS: StreamScreen[] = []
 /** The banner list before it loads: one stable empty array. */
 const NO_BANNERS: Banner[] = []
+/** No HTML overlay shows (plan 232): one stable empty array. */
+const NO_HTML_OVERLAY_STATUSES: readonly HtmlOverlayStatus[] = []
 /** What a failed takeover Show names, offline or busy (plan 195 S4). */
 const SHOW_TAKEOVER: UserErrorContext = { action: 'show', object: 'the takeover' }
 /** What a failed takeover Take off names, offline or busy (plan 195 S4). */
@@ -4351,6 +4364,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const screenListEventRevision = useRef(0)
   const activeScreenEventRevision = useRef(0)
   const [bannerImportPhase, setBannerImportPhase] = useState<BannerImportPhase>('idle')
+  const [bannerImportKind, setBannerImportKind] = useState<BannerImportKind>('image')
+  // Plan 232: where each showing HTML overlay stands. Empty until the
+  // backend says otherwise, and empty again when the connection goes.
+  const [htmlOverlayStatuses, setHtmlOverlayStatuses] =
+    useState<readonly HtmlOverlayStatus[]>(NO_HTML_OVERLAY_STATUSES)
   const bannerImporter = useRef(createBannerImporter())
   // Bumped by every `banners.changed`: the reliable full list wins over a
   // late reply, the way the takeover list does.
@@ -4360,6 +4378,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setScreenImportPhase('idle')
     bannerImporter.current.reset()
     setBannerImportPhase('idle')
+    if (wsStatus !== 'connected') setHtmlOverlayStatuses(NO_HTML_OVERLAY_STATUSES)
     const importer = screenImporter.current
     const bannerImport = bannerImporter.current
     return () => {
@@ -8495,6 +8514,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bannerListEventRevision.current += 1
         setBanners(payload)
       }),
+      // Plan 232: an HTML overlay that is loading, or cannot be drawn, says so.
+      nextClient.on('htmlOverlays.status', (payload) => setHtmlOverlayStatuses(payload.overlays)),
       // Plan 189: the soundboard lives outside React (lib/soundboard-store).
       nextClient.on('sounds.changed', (payload) => soundboard.acceptBoard(payload)),
       nextClient.on('sounds.playback', (payload) => soundboard.acceptPlayback(payload)),
@@ -8906,6 +8927,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               setBanners(nextBanners)
           },
           (error: unknown) => console.warn('[banners] list read failed:', error)
+        )
+        // Plan 232: the same way, and as optional: an event that arrives
+        // first is newer than this read's answer only if it is not empty.
+        void bootstrapRequest<HtmlOverlayStatuses>('htmlOverlays.status.get').then(
+          (statuses) => {
+            if (generationIsCurrent())
+              setHtmlOverlayStatuses((current) =>
+                current.length > 0 ? current : statuses.overlays
+              )
+          },
+          (error: unknown) => console.warn('[banners] overlay status read failed:', error)
         )
         const [
           nextHealth,
@@ -12596,35 +12628,44 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     []
   )
 
-  const importBanner = useCallback(async () => {
-    const context = { action: 'import', object: 'the image' }
-    if (!client || wsStatus !== 'connected') {
-      toastOffline(context)
-      return
-    }
-    if (!window.videorc?.pickBannerImage) {
-      console.warn('[banners] no image picker in this renderer')
-      return
-    }
-    const revision = bannerListEventRevision.current
-    await bannerImporter.current.run({
-      pick: () => window.videorc.pickBannerImage(),
-      importImage: (selection) => {
-        setLastError(null)
-        return client.requestTyped('banners.importImage', {
-          sourceCapability: selection.capabilityId
-        })
-      },
-      isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
-      onPhase: setBannerImportPhase,
-      // The new tile is the confirmation. The backend shows the new banner
-      // unless it can't (plan 205 D3); the answer says which, as `shown`.
-      onImported: (banner) => {
-        if (bannerListEventRevision.current === revision) commitBanner(banner)
-      },
-      onError: (error) => reportBannerError(error, context)
-    })
-  }, [client, commitBanner, reportBannerError, wsStatus])
+  const importBanner = useCallback(
+    async (kind: BannerImportKind = 'image') => {
+      const html = kind === 'html'
+      const context = { action: 'import', object: html ? 'the HTML banner' : 'the image' }
+      if (!client || wsStatus !== 'connected') {
+        toastOffline(context)
+        return
+      }
+      const pick = html ? window.videorc?.pickBannerHtml : window.videorc?.pickBannerImage
+      if (!pick) {
+        console.warn('[banners] no picker for this import in this renderer')
+        return
+      }
+      const revision = bannerListEventRevision.current
+      await bannerImporter.current.run({
+        pick: () => pick(),
+        importImage: (selection) => {
+          setLastError(null)
+          return client.requestTyped(html ? 'banners.importHtml' : 'banners.importImage', {
+            sourceCapability: selection.capabilityId
+          })
+        },
+        isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
+        onPhase: (phase) => {
+          // The kind is the import that got to run, never one that was refused.
+          if (phase === 'choosing') setBannerImportKind(kind)
+          setBannerImportPhase(phase)
+        },
+        // The new tile is the confirmation. The backend shows the new banner
+        // unless it can't (plan 205 D3); the answer says which, as `shown`.
+        onImported: (banner) => {
+          if (bannerListEventRevision.current === revision) commitBanner(banner)
+        },
+        onError: (error) => reportBannerError(error, context)
+      })
+    },
+    [client, commitBanner, reportBannerError, wsStatus]
+  )
 
   const updateBanner = useCallback(
     (id: string, patch: Omit<BannerUpdateParams, 'id'>) =>
@@ -18902,6 +18943,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       bannersLoaded: bannerList !== null,
       bannersOffline: wsStatus !== 'connected',
       bannerImportPhase,
+      bannerImportKind,
+      htmlOverlayStatuses,
       // A deleted banner is never the selected one.
       selectedBannerId: banners.some((banner) => banner.id === selectedBannerId)
         ? selectedBannerId
@@ -18916,10 +18959,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       toggleBanner
     }
   }, [
+    bannerImportKind,
     bannerImportPhase,
     bannerList,
     deleteBanner,
     hideBanner,
+    htmlOverlayStatuses,
     importBanner,
     reorderBanners,
     selectedBannerId,

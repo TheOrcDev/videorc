@@ -2241,7 +2241,7 @@ mod runtime {
             primary_canvas,
             now,
             None,
-            &input.banner_prepare,
+            crate::compositor::BannerPixels::images_only(&input.banner_prepare),
         );
         let auxiliary_draws = match plan.auxiliary {
             Some(video) => {
@@ -2256,7 +2256,7 @@ mod runtime {
                         canvas,
                         now,
                         None,
-                        &input.banner_prepare,
+                        crate::compositor::BannerPixels::images_only(&input.banner_prepare),
                     ),
                 ))
             }
@@ -2285,7 +2285,7 @@ mod runtime {
                 primary_canvas,
                 now,
                 None,
-                &input.banner_prepare,
+                crate::compositor::BannerPixels::images_only(&input.banner_prepare),
             ),
         };
         let program_index_of = |slot: u64, ring_index: usize| {

@@ -30,7 +30,7 @@ use crate::overlay_layout::{
     OverlayOrientation, OverlayRect, OverlaySessionShape, OverlaySwitches, PORTRAIT_SIDE_MARGIN,
     PORTRAIT_TOP_MARGIN, RECT_EPSILON, overlay_leg_plan, program_shows, round6,
 };
-use crate::protocol::{Banner, UpdateBannerParams};
+use crate::protocol::{Banner, BannerKind, UpdateBannerParams};
 use crate::state::AppState;
 use crate::storage::{Database, metadata_is_symlink_or_reparse};
 
@@ -326,7 +326,7 @@ pub(crate) fn resize_straight_alpha(
     })
 }
 
-fn encode_png(image: &image::RgbaImage) -> Result<Vec<u8>> {
+pub(crate) fn encode_png(image: &image::RgbaImage) -> Result<Vec<u8>> {
     use image::ImageEncoder;
     let mut bytes = Vec::new();
     image::codecs::png::PngEncoder::new_with_quality(
@@ -346,7 +346,7 @@ fn encode_png(image: &image::RgbaImage) -> Result<Vec<u8>> {
 
 /// Publish `bytes` at `destination` through a staged sibling and an atomic
 /// replace, so a crash never leaves a half-written banner behind.
-fn write_file_atomically(destination: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_file_atomically(destination: &Path, bytes: &[u8]) -> Result<()> {
     let parent = destination
         .parent()
         .context("Banner file has no parent directory")?;
@@ -411,6 +411,8 @@ fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>> {
 pub(crate) struct NewBanner {
     pub id: String,
     pub name: String,
+    /// Plan 232: an image, or an HTML overlay (`html_overlay`).
+    pub kind: BannerKind,
     pub width: u32,
     pub height: u32,
     pub has_alpha: bool,
@@ -474,6 +476,7 @@ pub(crate) fn import_banner(database: &Database, source_path: &Path) -> Result<B
             NewBanner {
                 id: id.clone(),
                 name: banner_name_from_path(source_path),
+                kind: BannerKind::Image,
                 width,
                 height,
                 has_alpha,
@@ -558,6 +561,11 @@ pub(crate) fn delete_banner(database: &Database, id: &str, session_active: bool)
         &banner.thumbnail_file,
         BannerFileKind::Thumbnail,
     )?;
+    // Plan 232: an HTML overlay also owns its page folder.
+    let overlay_dir = match banner.kind {
+        BannerKind::Html => crate::html_overlay::managed_html_overlay_dir(&root, &banner.id)?,
+        BannerKind::Image => None,
+    };
     database.delete_banner_row(id)?;
     for path in [image, thumbnail].into_iter().flatten() {
         if let Err(error) = std::fs::remove_file(&path) {
@@ -566,6 +574,14 @@ pub(crate) fn delete_banner(database: &Database, id: &str, session_active: bool)
                 "Could not remove deleted banner file after database commit: {error}"
             );
         }
+    }
+    if let Some(path) = overlay_dir
+        && let Err(error) = std::fs::remove_dir_all(&path)
+    {
+        tracing::warn!(
+            path = %path.display(),
+            "Could not remove a deleted HTML overlay's folder after database commit: {error}"
+        );
     }
     Ok(())
 }
@@ -1105,8 +1121,18 @@ pub(crate) fn show_banner_within_budget(
 ) -> Result<Banner> {
     let candidate = database.banner_by_id(id)?;
     if !candidate.shown {
+        // Plan 232 D9: an HTML overlay draws on the macOS compositor only,
+        // and never on a session that composes elsewhere.
+        let html = candidate.kind == BannerKind::Html;
+        if html && !crate::html_overlay::html_overlays_supported() {
+            bail!(crate::html_overlay::REFUSAL_UNSUPPORTED);
+        }
         if session_accepts_banners == Some(false) {
-            bail!(REFUSAL_SESSION_CANNOT_ADD);
+            bail!(if html {
+                crate::html_overlay::REFUSAL_SESSION_CANNOT_DRAW
+            } else {
+                REFUSAL_SESSION_CANNOT_ADD
+            });
         }
         let shown = shown_banners_for_compositor(database)?;
         if shown.len() >= BANNER_MAX_SHOWN
@@ -1118,6 +1144,22 @@ pub(crate) fn show_banner_within_budget(
     database.show_banner(id, BANNER_MAX_SHOWN)
 }
 
+/// What the running session says to showing banner `id` now, for
+/// `show_banner`: `Some(false)` when it cannot draw it, `None` when nothing
+/// runs. An image follows `active_session_accepts_banners`; an HTML overlay
+/// (plan 232) needs a session the compositor composes.
+pub(crate) async fn session_accepts_showing(state: &AppState, id: &str) -> Option<bool> {
+    let html = state
+        .database
+        .banner_by_id(id)
+        .is_ok_and(|banner| banner.kind == BannerKind::Html);
+    if html {
+        crate::recording::active_session_accepts_html_overlays(state).await
+    } else {
+        crate::recording::active_session_accepts_banners(state).await
+    }
+}
+
 /// Plan 205 D3 (owner): a banner you add shows. `banners.importImage` shows
 /// the row `import_banner` just created (hidden, as its store tests pin)
 /// under the same gates as `banners.show`: the cap of four, the prepared
@@ -1127,7 +1169,7 @@ pub(crate) fn show_banner_within_budget(
 /// copy says why. The caller republishes once for the import and the show.
 pub(crate) async fn show_imported_banner(state: &AppState, banner: Banner) -> Banner {
     let canvases = crate::compositor::banner_prepare_canvases(state).await;
-    let session_accepts_banners = crate::recording::active_session_accepts_banners(state).await;
+    let session_accepts_banners = session_accepts_showing(state, &banner.id).await;
     match show_banner(
         &state.database,
         &banner.id,
@@ -1155,7 +1197,7 @@ pub(crate) async fn show_banner_and_publish(state: &AppState, id: &str) -> Resul
         &canvases,
         // A session that cannot draw a banner added after its start refuses
         // it here too (plan 186 S4).
-        crate::recording::active_session_accepts_banners(state).await,
+        session_accepts_showing(state, id).await,
     )?;
     if let Err(error) = on_banners_changed(state).await {
         tracing::warn!("Could not publish the banner list after a voice show: {error:#}");
@@ -1270,6 +1312,8 @@ pub(crate) async fn on_banners_changed(state: &AppState) -> Result<Vec<Banner>> 
     // Plan 186 S10: "Hide after" and "Show every" follow every change,
     // however it was made.
     state.banner_timer_wake.notify_one();
+    // Plan 232: and so do the HTML overlays main renders.
+    state.html_overlays.wake();
     Ok(banners)
 }
 
@@ -1916,6 +1960,7 @@ pub(crate) mod tests {
     fn a_banner_with_no_timer_emits_no_null_and_no_timer_keys() {
         let (horizontal, vertical) = banner_default_places(512, 512);
         let banner = Banner {
+            kind: crate::protocol::BannerKind::Image,
             id: Uuid::new_v4().to_string(),
             name: "Logo".to_string(),
             image_file: "x.png".to_string(),
@@ -2299,6 +2344,7 @@ pub(crate) mod tests {
     pub(crate) fn sample_banner(id: &str, sort_order: i64) -> Banner {
         let (horizontal, vertical) = banner_default_places(2400, 400);
         Banner {
+            kind: crate::protocol::BannerKind::Image,
             id: id.to_string(),
             name: id.to_string(),
             image_file: format!("{id}.png"),

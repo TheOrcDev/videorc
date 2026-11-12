@@ -67,6 +67,7 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
+mod html_overlay;
 mod preview_debug_sample;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
@@ -636,6 +637,8 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     }
     // Plan 186 S10: "Hide after" and "Show every" for the whole process.
     tokio::spawn(banner_timers::run_banner_timers(state.clone()));
+    // Plan 232: which HTML overlays main renders, and where each stands.
+    tokio::spawn(html_overlay::run_html_overlay_targets(state.clone()));
     // Plan 214 D4: Videorc Camera comes back on when it was on.
     virtual_camera_service::start_from_settings(&state).await;
     let app = Router::new()
@@ -671,6 +674,11 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             post(consume_interruption_lease_handler),
         )
         .route("/oauth/callback", get(oauth_callback_handler))
+        // Plan 232: Electron main's HTML overlay frames (admin token only).
+        .route(
+            "/html-overlays/frames",
+            post(html_overlay::frames_upload_handler),
+        )
         .route("/ws", get(ws_handler))
         .with_state(state.clone())
         .layer(axum::middleware::map_response(default_no_store));
@@ -5857,6 +5865,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screen.show"
         | "virtualCamera.set"
         | "virtualCamera.platform.report"
+        | "htmlOverlays.host.report"
         | "camera.lowLight.set" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.source.switch" => Some(Mutation {
@@ -5873,6 +5882,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sessions.delete.complete"
         | "screens.importImage"
         | "banners.importImage"
+        | "banners.importHtml"
         | "sounds.import" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
@@ -6042,6 +6052,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.x.capability"
         | "screens.list"
         | "banners.list"
+        | "htmlOverlays.targets.get"
+        | "htmlOverlays.status.get"
+        | "htmlOverlays.stats"
         | "sounds.list"
         | "chatCommands.list"
         | "repair.assess_file"
@@ -6093,7 +6106,7 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
     match command.method.as_str() {
         // Plan 186: one image import process-wide, takeovers and banners
         // alike; plan 189: a sound decode shares the lane.
-        "screens.importImage" | "banners.importImage" | "sounds.import" => {
+        "screens.importImage" | "banners.importImage" | "banners.importHtml" | "sounds.import" => {
             Some(WebSocketIsolatedCommandLaneKind::AssetImport)
         }
         "account.refresh"
@@ -9028,6 +9041,42 @@ fn resolve_banner_import_resource(
     role: BackendRole,
 ) -> Result<()> {
     resolve_screen_import_resource(state, params, role)
+}
+
+/// Plan 232: `banners.importHtml` takes a folder (`input-directory`) or one
+/// `.html` file (`input-file`). A wrong-kind attempt never burns a
+/// capability, so the folder kind is tried first and the file kind second.
+fn resolve_banner_html_import_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    let object = params.as_object_mut().context("params must be an object")?;
+    let capability = object.get("sourceCapability").cloned();
+    let as_directory = consume_resource_field(
+        state,
+        object,
+        role,
+        "sourceCapability",
+        "path",
+        resource_authority::ResourceCapabilityKind::InputDirectory,
+        true,
+    );
+    match (as_directory, capability) {
+        (Err(error), Some(capability)) if error.to_string().contains("kind mismatch") => {
+            object.insert("sourceCapability".to_string(), capability);
+            consume_resource_field(
+                state,
+                object,
+                role,
+                "sourceCapability",
+                "path",
+                resource_authority::ResourceCapabilityKind::InputFile,
+                true,
+            )
+        }
+        (outcome, _) => outcome,
+    }
 }
 
 /// Plan 189: `sounds.import` makes the same exchange; main's picker (and the
@@ -13325,6 +13374,79 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 232: an HTML overlay is a banner whose picture is a web page.
+        // The import copies the page (or its folder) into the managed
+        // Banners folder; main renders it and sends the frames.
+        "banners.importHtml" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_banner_html_import_resource(state, &mut params_value, role)
+            {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<protocol::ImportBannerHtmlParams>(params_value) {
+                Ok(params) => {
+                    let database = state.database.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        html_overlay::import_html_overlay(
+                            &database,
+                            std::path::Path::new(&params.path),
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(anyhow::anyhow!(
+                            "HTML overlay import worker failed: {error}"
+                        ))
+                    });
+                    match result {
+                        Ok(banner) => {
+                            // Plan 205 D3: a banner you add shows, under the
+                            // same gates as `banners.show`.
+                            let banner = banners::show_imported_banner(state, banner).await;
+                            let _ = banners::on_banners_changed(state).await;
+                            ServerResponse::ok(command.id, banner)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "banner-import-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "htmlOverlays.targets.get" => ServerResponse::ok(command.id, state.html_overlays.targets()),
+        "htmlOverlays.status.get" => ServerResponse::ok(command.id, state.html_overlays.statuses()),
+        "htmlOverlays.stats" => ServerResponse::ok(command.id, state.html_overlays.stats()),
+        // Admin only (`backend_authority::admin_only_method`): only main
+        // hosts the pages, so only main says how one stands.
+        "htmlOverlays.host.report" => {
+            match serde_json::from_value::<protocol::HtmlOverlayHostReportParams>(command.params) {
+                Ok(params) => {
+                    state.html_overlays.report_host(
+                        &params.id,
+                        html_overlay::HostReport {
+                            state: params.state,
+                            detail: params.detail,
+                            blocked_requests: params.blocked_requests.unwrap_or(0),
+                        },
+                    );
+                    // The published statuses; the report lands in them on
+                    // the targets task's next pass.
+                    ServerResponse::ok(command.id, state.html_overlays.statuses())
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "banners.update" => {
             match serde_json::from_value::<protocol::UpdateBannerParams>(command.params) {
                 Ok(params) => {
@@ -13409,8 +13531,9 @@ async fn handle_text_message_with_role(
                     // canvases the compositor draws right now.
                     &compositor::banner_prepare_canvases(state).await,
                     // A session that cannot draw a banner added after its
-                    // start refuses a new one (plan 186 S4).
-                    recording::active_session_accepts_banners(state).await,
+                    // start refuses a new one (plan 186 S4; plan 232 for an
+                    // HTML overlay).
+                    banners::session_accepts_showing(state, &params.id).await,
                 ) {
                     Ok(banner) => {
                         let _ = banners::on_banners_changed(state).await;
@@ -17784,6 +17907,7 @@ mod tests {
         for method in [
             "screens.importImage",
             "banners.importImage",
+            "banners.importHtml",
             "sounds.import",
             "sessions.delete",
             "sessions.delete.complete",

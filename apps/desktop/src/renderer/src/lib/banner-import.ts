@@ -7,6 +7,13 @@ import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover
 
 export type BannerImportPhase = TakeoverImportPhase
 
+/**
+ * What Assets → Banners imports: an image (Import image…), or an HTML
+ * overlay (Import HTML…, plan 232): an `.html` file or a folder with
+ * `index.html`. Both run through the one importer, one at a time.
+ */
+export type BannerImportKind = 'image' | 'html'
+
 export type BannerImporter = ReturnType<typeof createTakeoverImporter>
 
 /**

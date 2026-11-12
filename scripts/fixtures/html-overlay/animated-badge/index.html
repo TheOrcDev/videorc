@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- The page size Videorc lays this overlay out at (plan 232 D3). -->
+    <meta name="videorc-overlay-size" content="640x360" />
+    <title>Animated badge</title>
+    <link rel="stylesheet" href="badge.css" />
+  </head>
+  <body>
+    <!--
+      Plan 232 fixture: an animated badge on a transparent background.
+
+      The top half is four known blocks `pnpm smoke:html-overlay` reads back
+      from the recording and the stream:
+        a  opaque magenta
+        b  cyan at half alpha (it must blend with what is under it)
+        c  nothing at all (the picture under the overlay must show through);
+           it turns green only if a network request ever succeeds
+        d  yellow and blue in turn, one second each: the colours come from
+           badge.css and the class that picks one from badge.js, so the block
+           stays empty unless both loaded from this folder and the page runs
+      The bottom half is the badge a person looks at.
+    -->
+    <div class="blocks">
+      <div class="block block-a"></div>
+      <div class="block block-b"></div>
+      <div class="block block-c" id="hole"></div>
+      <div class="block block-d" id="blink"></div>
+    </div>
+    <div class="badge">
+      <span class="dot"></span>
+      <span class="label">LIVE</span>
+      <span class="ticker"><span class="ticker-text" id="ticker">Videorc HTML overlay</span></span>
+    </div>
+    <script src="badge.js"></script>
+  </body>
+</html>

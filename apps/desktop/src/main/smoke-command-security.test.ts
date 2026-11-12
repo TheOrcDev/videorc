@@ -111,6 +111,25 @@ describe('smoke command security', () => {
         stateDirectory
       )
     ).toEqual({ kind: 'output-directory', path: realpathSync(stateDirectory) })
+    // Plan 232: a folder to import (an HTML banner), under the same rules.
+    expect(
+      validateSmokeResourceAuthorization(
+        { kind: 'input-directory', path: outputDirectory },
+        stateDirectory
+      )
+    ).toEqual({ kind: 'input-directory', path: realpathSync(outputDirectory) })
+    expect(() =>
+      validateSmokeResourceAuthorization(
+        { kind: 'input-directory', path: inputFile },
+        stateDirectory
+      )
+    ).toThrow(/must be a directory/)
+    expect(() =>
+      validateSmokeResourceAuthorization(
+        { kind: 'input-directory', path: outsideDirectory },
+        stateDirectory
+      )
+    ).toThrow(/inside the smoke state directory/)
     expect(() =>
       validateSmokeResourceAuthorization({ kind: 'input-file', path: outsideFile }, stateDirectory)
     ).toThrow(/inside the smoke state directory/)

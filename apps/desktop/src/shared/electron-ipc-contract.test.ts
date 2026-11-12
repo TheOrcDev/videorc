@@ -88,8 +88,9 @@ describe('Electron IPC contract', () => {
     // 169: plan 230 adds comments-window:swap-screen and
     // comments-window:front-or-close (the Stream Manager Screen key's tap
     // and hold).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(169)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(169)
+    // 170: plan 232 adds banners:pick-html (Assets → Banners → Import HTML…).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(170)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(170)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -1235,6 +1236,33 @@ it('preserves and validates queue-loss revisions through delivery IPC mirrors', 
         snapshot: { ...view.snapshot, delivery: { ...view.snapshot.delivery, lossRevision } }
       })
     ).toThrow()
+})
+
+describe('HTML overlay picker IPC (plan 232)', () => {
+  it('takes no arguments and returns null, a file capability or a folder capability', () => {
+    expect(isElectronInvokeChannel('banners:pick-html')).toBe(true)
+    expect(electronInvokeApiMethods['banners:pick-html']).toBe('pickBannerHtml')
+    expect(boundedPassthroughElectronInvokeChannels).not.toContain('banners:pick-html')
+    expectTypeOf<ElectronInvokeResult<'banners:pick-html'>>().toEqualTypeOf<
+      Awaited<ReturnType<VideorcApi['pickBannerHtml']>>
+    >()
+    expect(validateElectronInvokeArgs('banners:pick-html', [])).toEqual([])
+    // The renderer never names a path: main's own dialog does.
+    expect(() => validateElectronInvokeArgs('banners:pick-html', ['/tmp/overlay'])).toThrow()
+
+    const file = { capabilityId: 'cap-1', kind: 'input-file', displayName: 'badge.html' }
+    const folder = { capabilityId: 'cap-2', kind: 'input-directory', displayName: 'Badge' }
+    expect(validateElectronInvokeResult('banners:pick-html', null)).toBeNull()
+    expect(validateElectronInvokeResult('banners:pick-html', file)).toStrictEqual(file)
+    expect(validateElectronInvokeResult('banners:pick-html', folder)).toStrictEqual(folder)
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-html', { ...folder, kind: 'output-directory' })
+    ).toThrow()
+    // Never a path beside the capability.
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-html', { ...folder, path: '/tmp/overlay' })
+    ).toThrow()
+  })
 })
 
 describe('banner image picker IPC (plan 186)', () => {

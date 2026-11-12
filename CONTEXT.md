@@ -159,6 +159,14 @@ stays over a takeover and under captions, Buddy and the highlight card.
 _Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
 name)
 
+**HTML banner**:
+A banner whose picture is a web page with a transparent background, so it
+can move: an animated badge, a ticker, a lower third (plan 232). Assets →
+Banners → "Import HTML…" takes an `.html` file or a folder with
+`index.html`. It is a banner in every other way. Code and wire names say
+`html overlay`; copy never does.
+_Avoid_: HTML overlay (in copy), browser source, web source, widget
+
 **Live background**:
 An animated background behind the screen and camera: Silk, Side Rays, Plasma
 Wave, Liquid Chrome or Line Waves, from React Bits (plan 190). Assets →

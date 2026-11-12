@@ -257,6 +257,8 @@ export {
   NotePencil as NoteIcon,
   ImageSquare as ImageIcon,
   ImageBroken as ImageBrokenIcon,
+  // An HTML overlay (plan 232): a banner whose picture is a web page.
+  Code as CodeIcon,
   Eye as PreviewIcon
 } from '@phosphor-icons/react'
 /**

@@ -62,6 +62,8 @@ export const IPC_INVOKE_ROLES = {
   'screens:pick-image': MAIN_ONLY,
   // Assets → Banners → Import image… (plan 186): the Studio renderer only.
   'banners:pick-image': MAIN_ONLY,
+  // Assets → Banners → Import HTML… (plan 232): the Studio renderer only.
+  'banners:pick-html': MAIN_ONLY,
   // Assets → Sounds and the starter seeding (plan 189): the Studio renderer only.
   'sounds:pick-files': MAIN_ONLY,
   'sounds:starter-list': MAIN_ONLY,

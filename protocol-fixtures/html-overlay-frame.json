@@ -1,0 +1,27 @@
+{
+  "description": "Plan 232: the header of one HTML overlay frame record on Electron main's upload to the backend (POST /html-overlays/frames). Little endian: magic \"VHOF\", version 1, flags 0, reserved 0, the banner's UUID (16 bytes), width, height (u32), sequence (u64, a decimal string here). Width x height x 4 bytes of premultiplied BGRA follow. The Rust parser (html_overlay.rs) and the TypeScript encoder (main/html-overlay-frames.ts) must both reproduce every case.",
+  "headerBytes": 40,
+  "headers": [
+    {
+      "id": "0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6",
+      "width": 640,
+      "height": 360,
+      "sequence": "1",
+      "hex": "56484f46010000000f9d1c2e5b7a4c3d9e8fa1b2c3d4e5f680020000680100000100000000000000"
+    },
+    {
+      "id": "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "width": 1920,
+      "height": 1080,
+      "sequence": "4294967297",
+      "hex": "56484f46010000007a1b2c3d4e5f4a6b8c7d9e0f1a2b3c4d80070000380400000100000001000000"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "width": 2,
+      "height": 2,
+      "sequence": "0",
+      "hex": "56484f46010000000000000000004000800000000000000102000000020000000000000000000000"
+    }
+  ]
+}

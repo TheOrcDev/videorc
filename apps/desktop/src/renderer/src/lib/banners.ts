@@ -1,5 +1,5 @@
 import { BANNER_MAX_COUNT, type Banner } from '@/lib/backend'
-import type { BannerImportPhase } from '@/lib/banner-import'
+import type { BannerImportKind, BannerImportPhase } from '@/lib/banner-import'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { OFFLINE_REASON, UserFacingError, type UserErrorContext } from '@/lib/user-error'
 import type { BannerRelayAction, BannerSummary } from '../../../shared/banner-commands'
@@ -13,6 +13,8 @@ import type { BannerRelayAction, BannerSummary } from '../../../shared/banner-co
 export const BANNER_COUNT_LIMIT_REASON = 'You have 24 banners. Delete one to import another.'
 /** Show refused at the cap (plan 186 D7, `BANNER_MAX_SHOWN`). */
 export const BANNER_SHOWN_LIMIT_REASON = 'Four banners are showing. Hide one first.'
+/** HTML banners draw on the macOS compositor only for now (plan 232 D9). */
+export const HTML_OVERLAY_UNSUPPORTED_REASON = 'HTML banners work on macOS only for now.'
 
 /**
  * The backend's refusals, verbatim (plan 186 "Refusals"). Each one is "can't
@@ -27,7 +29,14 @@ export const BANNER_REFUSALS: readonly string[] = [
   BANNER_COUNT_LIMIT_REASON,
   BANNER_SHOWN_LIMIT_REASON,
   "This recording can't add banners after it starts. Show the banner before you press Record.",
-  'Hide this banner before you delete it.'
+  'Hide this banner before you delete it.',
+  // HTML banners (plan 232 "Refusals").
+  HTML_OVERLAY_UNSUPPORTED_REASON,
+  "This isn't an HTML file. Choose an .html file or a folder with index.html.",
+  'This folder has no index.html.',
+  'This HTML banner is too large. Use one under 64 MB and 512 files.',
+  'This HTML banner has a link to a file outside its folder. Copy the file in.',
+  "HTML banners can't join this recording. Hide it, or record at 30 fps."
 ]
 
 /** The refusal sentence a failed `banners.*` call carries, or null for any other failure. */
@@ -45,13 +54,20 @@ export function bannerRefusalError(error: unknown): UserFacingError | null {
   return sentence ? new UserFacingError(sentence, 'warning') : null
 }
 
-/** The Import button's words: what it does, then what it is doing. */
-export function bannerImportLabel(phase: BannerImportPhase): string {
-  return phase === 'choosing'
-    ? 'Choosing image…'
-    : phase === 'importing'
-      ? 'Importing…'
-      : 'Import image…'
+/**
+ * An Import button's words: what it does, then what it is doing. `kind` is
+ * the button (Import image…, or Import HTML… for an HTML banner, plan 232);
+ * `running` is the import that is running, so only its own button says so.
+ */
+export function bannerImportLabel(
+  phase: BannerImportPhase,
+  kind: BannerImportKind = 'image',
+  running: BannerImportKind = kind
+): string {
+  const html = kind === 'html'
+  if (running !== kind || phase === 'idle') return html ? 'Import HTML…' : 'Import image…'
+  if (phase === 'importing') return 'Importing…'
+  return html ? 'Choosing HTML…' : 'Choosing image…'
 }
 
 /**
@@ -68,6 +84,24 @@ export function bannerImportBlockedReason(state: {
   if (state.phase !== 'idle') return 'Wait for this import to finish.'
   if (state.count >= BANNER_MAX_COUNT) return BANNER_COUNT_LIMIT_REASON
   return null
+}
+
+/**
+ * Why Import HTML… is off, or null when it can run: off macOS the one
+ * sentence that says so (plan 232 D9), otherwise the image import's reasons.
+ */
+export function bannerHtmlImportBlockedReason(state: {
+  mac: boolean
+  offline: boolean
+  phase: BannerImportPhase
+  count: number
+}): string | null {
+  return state.mac ? bannerImportBlockedReason(state) : HTML_OVERLAY_UNSUPPORTED_REASON
+}
+
+/** The delete question: an HTML banner (plan 232) keeps files, an image banner one image. */
+export function bannerDeleteDescription(banner: Pick<Banner, 'name' | 'kind'>): string {
+  return `“${banner.name}” and its ${banner.kind === 'html' ? 'files' : 'image'} will be deleted. This can't be undone.`
 }
 
 /**

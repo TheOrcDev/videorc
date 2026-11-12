@@ -7,6 +7,8 @@ import {
   parseMainBannersChangedEvent,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
+  parseMainHtmlOverlayTargets,
+  parseMainHtmlOverlayTargetsEvent,
   parseMainPreviewSurfaceStatus,
   parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatusEvent,
@@ -59,6 +61,43 @@ describe('main backend event trust boundary', () => {
     expect(() =>
       parseMainBackendWireMessage(JSON.stringify({ event: 'recording.status', payload: {} }))
     ).toThrow('recording.status')
+  })
+})
+
+describe('the HTML overlay targets on the main socket (plan 232)', () => {
+  const target = {
+    id: '0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6',
+    pageWidth: 640,
+    pageHeight: 360,
+    frameWidth: 384,
+    frameHeight: 216,
+    fps: 30
+  }
+
+  it('isolates the feed: a bad target list never retires the capture socket', () => {
+    expect(MAIN_ISOLATED_BACKEND_EVENTS.has('htmlOverlays.targets')).toBe(true)
+    const bad = { event: 'htmlOverlays.targets', payload: { targets: [{ id: '../../etc' }] } }
+    expect(parseMainBackendWireMessage(JSON.stringify(bad))).toEqual(bad)
+    // The handler validates at use, strictly: main opens no window for it.
+    expect(() => parseMainHtmlOverlayTargetsEvent(bad.payload)).toThrow('htmlOverlays.targets')
+    expect(() => parseMainHtmlOverlayTargets({})).toThrow('htmlOverlays.targets.get')
+  })
+
+  it('accepts exactly what the backend names, and nothing main could misuse', () => {
+    expect(parseMainHtmlOverlayTargetsEvent({ targets: [target] })).toEqual({ targets: [target] })
+    expect(parseMainHtmlOverlayTargets({ targets: [] })).toEqual({ targets: [] })
+    for (const bad of [
+      // An id is a folder name and a host name in main: only a banner id.
+      { ...target, id: 'not-a-uuid/../x' },
+      // A frame larger than a side can be.
+      { ...target, frameWidth: 100_000 },
+      // Above the rate an overlay may render at.
+      { ...target, fps: 240 },
+      // A path is never the backend's to hand main.
+      { ...target, folder: '/Users/me/Desktop' }
+    ]) {
+      expect(() => parseMainHtmlOverlayTargetsEvent({ targets: [bad] })).toThrow()
+    }
   })
 })
 
