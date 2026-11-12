@@ -113,6 +113,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'open-tab',
   'preview-lifecycle-allow-app-quit',
   'preview-lifecycle-attempt-app-quit',
+  'preview-surface-sample',
   'preview-surface-scene-state',
   'preview-window-close',
   'preview-window-open',

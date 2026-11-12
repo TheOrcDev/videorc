@@ -6,6 +6,7 @@ import { PanelSection } from '@/components/panel-section'
 import { KebabMenu } from '@/components/kebab-menu'
 import { SceneGlyphIcon } from '@/components/scene/app-icon'
 import { useSceneDialogs } from '@/components/scene/scene-dialogs'
+import { SceneSwitchPending } from '@/components/scene/scene-switch-status'
 import { SectionLabel } from '@/components/section-label'
 import { SceneGalleryReason } from '@/components/studio/scene-card'
 import { Badge } from '@/components/ui/badge'
@@ -251,7 +252,6 @@ export function SceneList({
                 icon={<SceneGlyphIcon glyph={glyphs.get(entry.id)!} icons={icons} />}
                 menu={dialogs.menuItems(entry)}
                 needsSources={!entry.visual.sources.app && dialogs.needsSources(entry)}
-                busy={dialogs.busy}
                 switching={savedScenePendingId === entry.id}
                 platform={platform}
                 readOnly={readOnly}
@@ -292,7 +292,8 @@ export function SceneList({
             key={layout.id}
             active={active.kind === 'layout' && active.preset === layout.id}
             blockedReason={layout.gaps.length > 0 ? layoutReason : null}
-            label={presetSwitching(layoutSwitchPending, layout.id) ? 'Switching…' : layout.label}
+            label={layout.label}
+            switching={presetSwitching(layoutSwitchPending, layout.id)}
             platform={platform}
             preset={layout.id}
             shortcut={settings.globalShortcuts?.layouts?.[layout.id]}
@@ -325,7 +326,6 @@ function SavedSceneRow({
   active,
   blocked,
   needsSources,
-  busy,
   switching,
   readOnly,
   shortcut,
@@ -346,9 +346,7 @@ function SavedSceneRow({
   /** Why it can't go on stream now ("Figma isn't open"), or null. */
   blocked: string | null
   needsSources: boolean
-  /** Another scene is going on stream: rows wait for it. */
-  busy: boolean
-  /** This scene is going on stream. */
+  /** This scene is going on stream. Another row's click takes it over (issue #1275). */
   switching: boolean
   readOnly: boolean
   shortcut: string | undefined
@@ -383,9 +381,11 @@ function SavedSceneRow({
         dropEdge === 'bottom' && 'before:bottom-0'
       )}
       context={
-        switching
-          ? 'Switching…'
-          : (blocked ?? (needsSources ? 'Resolve sources' : sceneShows(scene)))
+        switching ? (
+          <SceneSwitchPending />
+        ) : (
+          (blocked ?? (needsSources ? 'Resolve sources' : sceneShows(scene)))
+        )
       }
       data-saved-scene={scene.id}
       draggable={!readOnly}
@@ -402,7 +402,7 @@ function SavedSceneRow({
                 : `${shortcutAriaKeys(MOVE_SCENE_UP_ACCELERATOR, platform)} ${shortcutAriaKeys(MOVE_SCENE_DOWN_ACCELERATOR, platform)}`
             }
             className="disabled:text-muted-foreground"
-            disabled={blocked !== null || busy || switching}
+            disabled={blocked !== null || switching}
             onClick={onSelect}
             onKeyDown={moveFromKeyboard}
           >
@@ -439,6 +439,7 @@ function SavedSceneRow({
 function LayoutRow({
   preset,
   label,
+  switching,
   active,
   blockedReason,
   shortcut,
@@ -447,6 +448,8 @@ function LayoutRow({
 }: {
   preset: LayoutPreset
   label: string
+  /** This layout is being applied: the name stays, with the pending mark (issue #1275). */
+  switching: boolean
   active: boolean
   blockedReason: string | null
   shortcut: string | undefined
@@ -456,6 +459,7 @@ function LayoutRow({
   return (
     <ListRow
       className="relative"
+      context={switching ? <SceneSwitchPending /> : undefined}
       data-scene-preset={preset}
       icon={<LayoutIcon aria-hidden className="text-muted-foreground" />}
       interactive={!blockedReason}
