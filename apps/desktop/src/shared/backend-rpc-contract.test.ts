@@ -3109,6 +3109,7 @@ describe('backend RPC contract', () => {
       'unknown',
       // Plan 186 S11: banner commands finish at once, without a target.
       'show-banner',
+      'greet',
       'hide-banner',
       'hide-banners'
     ]) {

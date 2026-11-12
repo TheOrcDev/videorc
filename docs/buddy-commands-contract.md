@@ -119,6 +119,28 @@ The wire kinds `show-banner`, `hide-banner` and `hide-banners` join part B's
 `kind` enum; a banner command carries no `target`, `candidates`,
 `operationId` or `reason`.
 
+## Spoken greetings (desktop)
+
+"Buddy, say hello to Jay", "Buddy, say hi to Jay in the chat", "Buddy, tell
+Jay welcome" and "Buddy, greet Jay" take the local `greet` command. Buddy's
+persona name also works; `Bodhi` is accepted as a transcription of Buddy.
+These shapes always need the wake word, regardless of `wakeWordRequired`.
+Reported speech ("I said hello to Jay") does nothing. Free-form "Buddy,
+say …" stays on the existing planner path.
+
+The recent-author matcher resolves the spoken name, preferring exact names;
+ambiguous names ask for the full name. A viewer who has not chatted yet can
+still receive a fixed greeting using the spoken name. With greeting AI enabled
+and available, the existing greet endpoint writes a short line in the current
+persona, with a 1.5-second deadline. Failure, timeout, invalid or missing text
+uses "Hi {name}, welcome to the stream!".
+
+This command uses the Say lane: the bubble appears immediately, replacing a
+current bubble, in every talk mode. "In the chat" never authorizes a chat
+post. With Show on stream off, the command surface says "Buddy isn't on
+stream, so it can't show the bubble." Session, consent and voice gates are
+checked again after the AI call; a newer command retires the old greeting.
+
 ## A. Chat moderation (desktop, S4)
 
 Moderation is a chat feature. Manual removal is free; voice-sourced removal is
@@ -238,7 +260,7 @@ A provider's own deletion keeps its provider type (Twitch
 {
   "id": "cmd-uuid",
   "heard": "buddy highlight the comment from coders x",
-  "kind": "highlight|clear|remove|confirm|cancel|unknown|show-banner|hide-banner|hide-banners",
+  "kind": "highlight|clear|remove|confirm|cancel|unknown|show-banner|hide-banner|hide-banners|show-buddy|hide-buddy|greet|act",
   "status": "done|not-found|ambiguous|confirm|refused|unavailable|cancelled|expired",
   "message": "Highlighted coders_x's comment.",
   "target": { "messageId": "…", "authorName": "coders_x", "platform": "twitch", "excerpt": "…" },

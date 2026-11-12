@@ -24,6 +24,10 @@
 //! addressed "Buddy" followed by a closed sentence that matches nothing. When
 //! unsure, the detector says nothing.
 //!
+//! Named greetings ("say hello to Jay", "tell Jay welcome", "greet Jay")
+//! require an address and use a bubble-only local command. "In the chat"
+//! identifies the viewer. Other "say" requests stay with the planner.
+//!
 //! Banner commands (plan 186 S11): "show the sponsor banner", "put up the
 //! sponsor banner", "hide the sponsor banner", "take the sponsor banner
 //! down", "hide the banners". They need the wake word. The word "banner" (or
@@ -70,12 +74,15 @@ const HEARD_MAX_CHARS: usize = 140;
 // --- Vocabulary -----------------------------------------------------------------
 
 /// The wake word that always works (plan 164 D2; "buddy" since plan 171 D5),
-/// then the "Orcle" spellings speech models produce, kept as hidden aliases
+/// its "Bodhi" transcription, then the "Orcle" spellings speech models
+/// produce, kept as hidden aliases
 /// for one release (remove after 0.9.140). The weak "oracle"/"orca" entries
 /// are gone. "buddy" is an everyday word, so it only wakes the detector: a
 /// command still needs its phrase after it ("thanks buddy" is talk). The
 /// persona's own name is added per process by `set_persona_wake_tokens`.
-const WAKE_WORDS: &[&str] = &["buddy", "orcle", "orkle", "orcel", "orkel", "orcl", "orcal"];
+const WAKE_WORDS: &[&str] = &[
+    "buddy", "bodhi", "orcle", "orkle", "orcel", "orkel", "orcl", "orcal",
+];
 /// The shortest name word that can wake the Buddy.
 const NAME_TOKEN_MIN_LETTERS: usize = 3;
 
@@ -459,6 +466,8 @@ pub struct DetectContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
+    /// A named greeting, spoken only in Buddy's bubble.
+    Greet,
     Highlight,
     Clear,
     Remove,
@@ -487,6 +496,7 @@ impl CommandKind {
     /// Plain words for logs and the command strip.
     pub fn label(&self) -> String {
         match self {
+            Self::Greet => "greet".to_string(),
             Self::Highlight => "highlight".to_string(),
             Self::Clear => "clear".to_string(),
             Self::Remove => "remove".to_string(),
@@ -983,6 +993,7 @@ fn scan_commands(
             || matches!(
                 detection.command.kind,
                 CommandKind::Highlight
+                    | CommandKind::Greet
                     | CommandKind::Clear
                     | CommandKind::Remove
                     | CommandKind::ShowBanner
@@ -1108,12 +1119,27 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
             end: sentence_end,
         });
     }
-    // Plan 186 S11: "banner" in the sentence said to Buddy hands the
-    // utterance to the banner grammar, and it never falls through to the
-    // highlight and clear grammar (the marker precedence). A later sentence
-    // that only mentions a banner ("Buddy, highlight that comment. Nice
-    // banner.") leaves the command alone, unless the command reaches into
-    // that sentence.
+    // Greetings own their words, including a viewer called Banner. They
+    // always need an address, even when structured commands need no wake.
+    if let Some(parsed) = parse_greeting(words, wake, sentence_end)
+        && words[parsed.end].final_index == newest
+    {
+        let dedupe = Some(dedupe_key(&parsed));
+        return WakeOutcome::Command(Detection {
+            command: DetectedCommand {
+                kind: parsed.kind,
+                target: parsed.target,
+                question: false,
+                reason: None,
+                heard: text_of(&words[wake..=parsed.end]),
+                wake_word: true,
+            },
+            dedupe,
+            end: parsed.end,
+        });
+    }
+    // Plan 186 S11: other sentences mentioning a banner belong to the
+    // banner grammar before highlight/clear can interpret their nouns.
     if has_banner_noun(&words[from..=sentence_end]) {
         return parse_banner_wake(words, wake, from, span_end, newest);
     }
@@ -1173,6 +1199,59 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
             }
         }
     }
+}
+
+/// Deliberately small: free-form "say …" stays with the planner. In these
+/// shapes "in the chat" identifies the viewer, never a posting destination.
+fn parse_greeting(words: &[Word], wake: usize, end: usize) -> Option<Parsed> {
+    let address = &words[wake];
+    if address.possessive
+        || !(address.sentence_start
+            || address.pause_after
+            || (wake > 0 && LEAD_INS.contains(&words[wake - 1].text.as_str())))
+    {
+        return None;
+    }
+    let mut start = wake + 1;
+    while start <= end && FILLERS.contains(&words[start].text.as_str()) {
+        start += 1;
+    }
+    let span = words.get(start..=end)?;
+    let texts: Vec<&str> = span.iter().map(|word| word.text.as_str()).collect();
+    let mut tail = texts.as_slice();
+    if let Some(rest) = tail.strip_suffix(&["please"]) {
+        tail = rest;
+    }
+    for suffix in [&["in", "the", "chat"][..], &["in", "chat"][..]] {
+        if let Some(rest) = tail.strip_suffix(suffix) {
+            tail = rest;
+            break;
+        }
+    }
+    let names = match tail {
+        ["say", "hello" | "hi" | "welcome", "to", names @ ..] => names,
+        ["tell", names @ .., "welcome" | "hello" | "hi"] => names,
+        ["greet", names @ ..] => names,
+        _ => return None,
+    };
+    if names.is_empty()
+        || names.len() > NAME_MAX_WORDS
+        || names.iter().any(|word| {
+            matches!(
+                *word,
+                "and" | "then" | "to" | "in" | "chat" | "say" | "tell" | "greet"
+            )
+        })
+    {
+        return None;
+    }
+    Some(Parsed {
+        kind: CommandKind::Greet,
+        target: CommandTarget::Name(names.join(" ")),
+        question: false,
+        reason: None,
+        end,
+    })
 }
 
 /// A structured phrase without the wake word, starting at its verb.
@@ -1969,6 +2048,56 @@ fn detect_choice(newest: &[Word]) -> Option<(u8, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spoken_greeting_uses_the_local_bubble_command() {
+        let command = detect_one("Buddy, say hello to Jay in the chat.", &PLAIN).unwrap();
+        assert_eq!(command.kind.label(), "greet");
+        assert_eq!(command.target, name("jay"));
+    }
+
+    #[test]
+    fn spoken_greeting_table_requires_an_address_and_a_named_greeting() {
+        for text in [
+            "Buddy, say hello to Jay",
+            "buddy, say hi to Jay in the chat.",
+            "Buddy, tell Jay welcome.",
+            "Buddy, greet Jay!",
+            "Bodhi, say hello to Jay.",
+            "Hey Buddy, could you please say hello to Jay in chat?",
+            "Buddy, greet Jay please.",
+        ] {
+            for ctx in [&PLAIN, &WAKE_REQUIRED, &ANSWERING] {
+                let command = detect_one(text, ctx).unwrap_or_else(|| panic!("{text}"));
+                assert_eq!(command.kind, CommandKind::Greet, "{text}");
+                assert_eq!(command.target, name("jay"), "{text}");
+                assert!(command.wake_word);
+            }
+        }
+        for text in [
+            "say hello to Jay",
+            "say hello",
+            "I said hello to Jay.",
+            "I told Buddy to say hello to Jay.",
+            "Buddy said hello to Jay.",
+            "Bodhi is saying hello to Jay.",
+            "My buddy says hello to Jay.",
+        ] {
+            assert!(detect_one(text, &PLAIN).is_none(), "{text}");
+        }
+        // Arbitrary speech and compound orders retain the planner path.
+        for text in [
+            "Buddy, say the stream starts soon.",
+            "Buddy, tell Jay to delete the chat.",
+            "Buddy, greet Jay and Sam.",
+        ] {
+            assert_ne!(
+                detect_one(text, &PLAIN).map(|c| c.kind),
+                Some(CommandKind::Greet),
+                "{text}"
+            );
+        }
+    }
+
     use super::*;
 
     const PLAIN: DetectContext = DetectContext {
@@ -3346,6 +3475,11 @@ mod tests {
         // A name the persona does not have is talk.
         assert_eq!(highlight("Zarquon, highlight the last comment"), None);
         set_persona_wake_tokens("Zarquon the Goblin");
+        assert_eq!(
+            detect_one("Zarquon, say hello to Jay.", &WAKE_REQUIRED)
+                .map(|command| (command.kind, command.target)),
+            Some((CommandKind::Greet, name("jay")))
+        );
         assert_eq!(
             highlight("Zarquon, highlight the last comment"),
             Some((CommandKind::Highlight, true))

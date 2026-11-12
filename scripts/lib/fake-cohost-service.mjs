@@ -869,7 +869,8 @@ export async function startFakeCohostService({
   tickHighlights = null,
   // Plan 209 S21: `buddy.act` in the capabilities this fake serves (null:
   // no `buddy` block, as an older server).
-  buddyAct = null
+  buddyAct = null,
+  voiceGreetings = false
 }) {
   if (typeof smokeSessionToken !== 'string' || smokeSessionToken.length < 8) {
     throw new Error('startFakeCohostService requires a smoke-only session token.')
@@ -890,7 +891,9 @@ export async function startFakeCohostService({
     buddyActOptIn: buddyAct !== null,
     actRequests: [],
     queuedActAnswers: [],
-    capabilityRequests: 0
+    capabilityRequests: 0,
+    greetRequests: [],
+    greetFailure: false
   }
   const mintId = () => `q_${state.nextQuestionNumber++}`
   const responseHolds = { tick: [], spotlight: [] }
@@ -920,6 +923,27 @@ export async function startFakeCohostService({
   }
 
   const server = createServer(async (req, res) => {
+    if (voiceGreetings && req.method === 'POST' && req.url === '/api/ai/cohost/greet') {
+      if (req.headers.authorization !== `Bearer ${smokeSessionToken}`) {
+        await drain(req)
+        return json(res, 401, { error: { code: 'unauthorized', message: 'Smoke auth failed.' } })
+      }
+      const body = JSON.parse(await readRequestBody(req))
+      state.greetRequests.push(body)
+      if (state.greetFailure) {
+        return json(res, 503, {
+          error: { code: 'ai-service-unavailable', message: 'Local greet failure.' }
+        })
+      }
+      return json(res, 200, {
+        model: 'local-greet-fake',
+        lines: body.items.map((item) => ({
+          id: item.id,
+          text: `Hi ${item.names.join(', ')}! A rock-solid welcome from ${body.persona?.name ?? 'Buddy'}!`,
+          mood: 'amused'
+        }))
+      })
+    }
     if (req.method === 'POST' && req.url === COHOST_SPOTLIGHT_PATH) {
       return serveSpotlight(req, res)
     }
@@ -941,6 +965,7 @@ export async function startFakeCohostService({
       state.capabilityRequests += 1
       const document = capabilitiesDocument({ monthlySecondsLimit: 72_000, remaining: 72_000 })
       if (state.buddyAct !== null) document.buddy = { act: state.buddyAct ? 1 : 0 }
+      if (voiceGreetings) document.cohost = { greet: 1 }
       return json(res, 200, document)
     }
     if (req.method !== 'POST' || req.url !== COHOST_TICK_PATH) {
