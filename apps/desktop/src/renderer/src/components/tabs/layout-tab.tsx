@@ -394,6 +394,7 @@ export function LayoutTab(): ReactElement {
     banners,
     bannersLoaded,
     bannersOffline,
+    htmlOverlayStatuses,
     selectedBannerId,
     selectBanner,
     updateBanner,
@@ -1087,6 +1088,9 @@ export function LayoutTab(): ReactElement {
               banner={selectedBanner}
               blockedReason={overlayBlockedReason}
               inFront={banners[banners.length - 1]?.id === selectedBanner.id}
+              overlayStatus={
+                htmlOverlayStatuses.find((status) => status.id === selectedBanner.id) ?? null
+              }
               placeLabel={verticalView ? 'Place on the vertical stream' : 'Place'}
               showLimitReason={bannerShowLimitReason}
               sizeAdvice={bannerSizeAdvice({

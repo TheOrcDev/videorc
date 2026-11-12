@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { WorkspaceNavContext } from '@/components/workspace-nav'
 import type { Banner } from '@/lib/backend'
-import { BANNER_COUNT_LIMIT_REASON, BANNER_SHOWN_LIMIT_REASON } from '@/lib/banners'
+import {
+  BANNER_COUNT_LIMIT_REASON,
+  BANNER_SHOWN_LIMIT_REASON,
+  HTML_OVERLAY_UNSUPPORTED_REASON
+} from '@/lib/banners'
 import { OFFLINE_REASON } from '@/lib/user-error'
 
 import { BANNERS_DESCRIPTION, BannersSection } from './banners-section'
@@ -57,11 +61,16 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   nav.openStudioPanel.mockClear()
+  // HTML banners draw on macOS only (plan 231 D9); the tests run as a Mac
+  // unless one says otherwise.
+  document.documentElement.dataset.platform = 'darwin'
   mocked.banners = {
     banners: [sponsor, logo],
     bannersLoaded: true,
     bannersOffline: false,
     bannerImportPhase: 'idle',
+    bannerImportKind: 'image',
+    htmlOverlayStatuses: [],
     selectedBannerId: null,
     selectBanner: vi.fn(),
     importBanner: vi.fn(async () => undefined),
@@ -78,6 +87,7 @@ afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
   document.body.innerHTML = ''
+  delete document.documentElement.dataset.platform
   vi.unstubAllGlobals()
 })
 
@@ -203,6 +213,61 @@ describe('BannersSection import', () => {
     expect(button.textContent).toBe('Import image…')
     await act(async () => button.click())
     expect(mocked.banners.importBanner).toHaveBeenCalledTimes(1)
+    expect(mocked.banners.importBanner).toHaveBeenCalledWith('image')
+  })
+
+  it('imports an HTML banner from its own action beside Import image… (plan 231)', async () => {
+    await render()
+    const button = byTestId<HTMLButtonElement>('banner-import-html')!
+    expect(button.disabled).toBe(false)
+    expect(button.textContent).toBe('Import HTML…')
+    await act(async () => button.click())
+    expect(mocked.banners.importBanner).toHaveBeenCalledTimes(1)
+    expect(mocked.banners.importBanner).toHaveBeenCalledWith('html')
+    expect(document.body.textContent).toContain(
+      'An HTML banner is a web page with a transparent background'
+    )
+  })
+
+  it.each([
+    ['choosing', 'Choosing HTML…'],
+    ['importing', 'Importing…']
+  ])(
+    'while an HTML import is %s, only its own button says so and both wait',
+    async (phase, label) => {
+      mocked.banners = { ...mocked.banners, bannerImportPhase: phase, bannerImportKind: 'html' }
+      await render()
+      const html = byTestId<HTMLButtonElement>('banner-import-html')!
+      const image = byTestId<HTMLButtonElement>('banner-import')!
+      expect(html.disabled).toBe(true)
+      expect(html.textContent).toBe(label)
+      expect(html.querySelector('[data-slot="spinner"]')).not.toBeNull()
+      // The other import waits its turn and keeps its own words.
+      expect(image.disabled).toBe(true)
+      expect(image.textContent).toBe('Import image…')
+      expect(image.querySelector('[data-slot="spinner"]')).toBeNull()
+    }
+  )
+
+  it.each(['win32', 'linux'])(
+    'off macOS (%s) Import HTML… stays on screen, off, with the one sentence why',
+    async (platform) => {
+      document.documentElement.dataset.platform = platform
+      await render()
+      const html = byTestId<HTMLButtonElement>('banner-import-html')!
+      expect(html.disabled).toBe(true)
+      expect(html.textContent).toBe('Import HTML…')
+      expect(document.body.textContent).toContain(HTML_OVERLAY_UNSUPPORTED_REASON)
+      // Images are not affected.
+      expect(byTestId<HTMLButtonElement>('banner-import')!.disabled).toBe(false)
+    }
+  )
+
+  it('offers both imports in the empty state too', async () => {
+    mocked.banners = { ...mocked.banners, banners: [] }
+    await render()
+    expect(byTestId('banner-import-empty')?.textContent).toBe('Import image…')
+    expect(byTestId('banner-import-html-empty')?.textContent).toBe('Import HTML…')
   })
 
   it.each([
@@ -225,6 +290,53 @@ describe('BannersSection import', () => {
     await render()
     expect(byTestId<HTMLButtonElement>('banner-import')?.disabled).toBe(true)
     expect(document.body.textContent).toContain(BANNER_COUNT_LIMIT_REASON)
+  })
+})
+
+describe('an HTML banner on its tile (plan 231)', () => {
+  const badge = banner('badge', 2, { kind: 'html', width: 640, height: 360 })
+
+  it('carries an HTML tag, and an image banner carries none', async () => {
+    mocked.banners = { ...mocked.banners, banners: [sponsor, badge] }
+    await render()
+    const tag = tile('badge').querySelector('[data-videorc-banner-kind="html"]')!
+    expect(tag.textContent).toBe('HTML')
+    expect(tag.getAttribute('data-variant')).toBe('outline')
+    expect(tile('sponsor').querySelector('[data-videorc-banner-kind]')).toBeNull()
+  })
+
+  it('shows what it is until its own picture is saved, then the picture', async () => {
+    mocked.banners = { ...mocked.banners, banners: [badge] }
+    await render()
+    const image = tile('badge').querySelector('img')!
+    // The row's time is in the address: a saved picture is asked for again.
+    expect(image.getAttribute('src')).toBe(
+      `videorc-asset://banner/badge.thumb.png?v=${encodeURIComponent(badge.updatedAt)}`
+    )
+    await act(async () => image.dispatchEvent(new Event('error')))
+    expect(
+      tile('badge')
+        .querySelector('[data-banner-thumbnail-fallback]')
+        ?.getAttribute('data-banner-thumbnail-fallback')
+    ).toBe('html')
+    // The backend saved the picture and bumped the row.
+    const saved = { ...badge, updatedAt: '2026-11-12T10:00:01Z' }
+    mocked.banners = { ...mocked.banners, banners: [saved] }
+    await render()
+    expect(tile('badge').querySelector('[data-banner-thumbnail-fallback]')).toBeNull()
+    expect(tile('badge').querySelector('img')?.getAttribute('src')).toContain(
+      encodeURIComponent(saved.updatedAt)
+    )
+  })
+
+  it('says its files go with it when deleted', async () => {
+    mocked.banners = { ...mocked.banners, banners: [badge] }
+    await render()
+    const rows = await openMenu('badge')
+    await act(async () => rows.find((row) => itemLabel(row) === 'Delete…')!.click())
+    expect(document.body.textContent).toContain(
+      "“badge” and its files will be deleted. This can't be undone."
+    )
   })
 })
 

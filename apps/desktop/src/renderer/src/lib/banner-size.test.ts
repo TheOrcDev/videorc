@@ -22,6 +22,42 @@ const banner = (
   vertical: OverlayRect = FULL_WIDTH_VERTICAL
 ) => ({ width, height, horizontal, vertical })
 
+describe('bannerSizeAdvice for an HTML banner (plan 231 D7)', () => {
+  const page = (horizontal: OverlayRect) => ({
+    ...banner(640, 360, horizontal),
+    kind: 'html' as const
+  })
+
+  it('is always sharp: the page is drawn at the size it has on the picture', () => {
+    // A 640 × 360 page across half a 4K recording would be a soft image.
+    expect(
+      bannerSizeAdvice({ banner: page({ x: 0.25, y: 0.25, w: 0.5, h: 0.5 }), output: UHD })
+    ).toStrictEqual({
+      canvas: { noun: 'recording', ...UHD },
+      needed: { width: 1920, height: 1080 },
+      sharp: true,
+      sizeLine: 'Size on your 3840 × 2160 recording: 1920 × 1080 px',
+      verdictLine: 'An HTML banner is drawn at this size, so it stays sharp.'
+    })
+    // The same image banner is told it is too small.
+    expect(
+      bannerSizeAdvice({
+        banner: banner(640, 360, { x: 0.25, y: 0.25, w: 0.5, h: 0.5 }),
+        output: UHD
+      }).sharp
+    ).toBe(false)
+  })
+
+  it('says so when the place needs more than a 1080p frame', () => {
+    const advice = bannerSizeAdvice({ banner: page({ x: 0, y: 0, w: 1, h: 1 }), output: UHD })
+    expect(advice.needed).toStrictEqual({ width: 3840, height: 2160 })
+    expect(advice.sharp).toBe(false)
+    expect(advice.verdictLine).toBe(
+      'An HTML banner is drawn at up to 1920 × 1080 px and scaled up from there: it will look soft at this size.'
+    )
+  })
+})
+
 describe('bannerSizeAdvice', () => {
   it('says a 2400 × 400 strip is sharp on a 1080p recording', () => {
     expect(bannerSizeAdvice({ banner: banner(2400, 400), output: HD })).toStrictEqual({

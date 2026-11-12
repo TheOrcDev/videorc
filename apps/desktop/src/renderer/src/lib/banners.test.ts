@@ -10,8 +10,11 @@ import {
   BANNER_SHOWN_LIMIT_REASON,
   bannerActionContext,
   bannerActionError,
+  bannerDeleteDescription,
+  bannerHtmlImportBlockedReason,
   bannerImportBlockedReason,
   bannerImportLabel,
+  HTML_OVERLAY_UNSUPPORTED_REASON,
   bannerOrderAfterMove,
   bannerRefusal,
   bannerRefusalError,
@@ -99,6 +102,58 @@ describe('banner import button', () => {
     )
     expect(bannerImportBlockedReason({ ...ready, count: 23 })).toBeNull()
     expect(bannerImportBlockedReason({ ...ready, count: 24 })).toBe(BANNER_COUNT_LIMIT_REASON)
+  })
+})
+
+describe('HTML banner import (plan 231)', () => {
+  it('has its own words, and only the running import says it is running', () => {
+    expect(bannerImportLabel('idle', 'html')).toBe('Import HTML…')
+    expect(bannerImportLabel('choosing', 'html')).toBe('Choosing HTML…')
+    expect(bannerImportLabel('importing', 'html')).toBe('Importing…')
+    // An image import is running: the HTML button keeps its own words.
+    expect(bannerImportLabel('choosing', 'html', 'image')).toBe('Import HTML…')
+    expect(bannerImportLabel('importing', 'image', 'html')).toBe('Import image…')
+    expect(bannerImportLabel('importing', 'image', 'image')).toBe('Importing…')
+  })
+
+  it('is off away from macOS with the one sentence, and otherwise as the image import is', () => {
+    const ready = { mac: true, offline: false, phase: 'idle' as const, count: 3 }
+    expect(bannerHtmlImportBlockedReason(ready)).toBeNull()
+    expect(bannerHtmlImportBlockedReason({ ...ready, mac: false })).toBe(
+      HTML_OVERLAY_UNSUPPORTED_REASON
+    )
+    // The platform is the reason even when another one would apply too.
+    expect(bannerHtmlImportBlockedReason({ ...ready, mac: false, offline: true })).toBe(
+      HTML_OVERLAY_UNSUPPORTED_REASON
+    )
+    expect(bannerHtmlImportBlockedReason({ ...ready, offline: true })).toBe(OFFLINE_REASON)
+    expect(bannerHtmlImportBlockedReason({ ...ready, phase: 'importing' })).toBe(
+      'Wait for this import to finish.'
+    )
+    expect(bannerHtmlImportBlockedReason({ ...ready, count: 24 })).toBe(BANNER_COUNT_LIMIT_REASON)
+  })
+
+  it("shows the backend's own sentences as warnings, verbatim", () => {
+    for (const sentence of [
+      'HTML banners work on macOS only for now.',
+      "This isn't an HTML file. Choose an .html file or a folder with index.html.",
+      'This folder has no index.html.',
+      'This HTML banner is too large. Use one under 64 MB and 512 files.',
+      'This HTML banner has a link to a file outside its folder. Copy the file in.',
+      "HTML banners can't join this recording. Hide it, or record at 30 fps."
+    ]) {
+      expect(BANNER_REFUSALS, sentence).toContain(sentence)
+      expect(bannerRefusal(backendError('banner-import-failed', sentence))).toBe(sentence)
+    }
+  })
+
+  it('says what goes with a deleted banner', () => {
+    expect(bannerDeleteDescription({ name: 'Sponsor' })).toBe(
+      "“Sponsor” and its image will be deleted. This can't be undone."
+    )
+    expect(bannerDeleteDescription({ name: 'Badge', kind: 'html' })).toBe(
+      "“Badge” and its files will be deleted. This can't be undone."
+    )
   })
 })
 
