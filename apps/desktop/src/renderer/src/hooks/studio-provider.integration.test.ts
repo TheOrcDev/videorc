@@ -13880,10 +13880,26 @@ describe('real StudioProvider lifecycle', () => {
       await waitForObservation(() => latest()?.recording.recording.state === 'idle')
     }
 
+    // YouTube goes out Unlisted (the saved draft): an agent is refused unless
+    // the call accepts it, as the dialog asks the streamer once more
+    // (owner report, 2026-11-12). Nothing is prepared or started.
+    await pushIntent('go-0', { destinations: ['youtube'], title: 'Building an MCP live' })
+    await waitForObservation(() => ack('go-0') !== undefined)
+    expect(ack('go-0')).toMatchObject({ ok: false })
+    expect(ack('go-0')?.message).toContain(
+      'YouTube is Unlisted. Only people with the link can watch.'
+    )
+    expect(ack('go-0')?.message).toContain('allowNonPublic')
+    expect(starts()).toHaveLength(0)
+
     // Naming YouTube leaves X out of this livestream only, like the dialog's
     // "Go live without X": X is never prepared and stays on. The title is
     // the dialog's Title field, saved before the check.
-    await pushIntent('go-1', { destinations: ['youtube'], title: 'Building an MCP live' })
+    await pushIntent('go-1', {
+      destinations: ['youtube'],
+      title: 'Building an MCP live',
+      allowNonPublic: true
+    })
     await waitForObservation(() => ack('go-1') !== undefined)
     expect(ack('go-1')).toMatchObject({
       ok: true,
@@ -13914,7 +13930,7 @@ describe('real StudioProvider lifecycle', () => {
     // X fails its platform setup: without allowPartial the agent is told the
     // dialog's words and nothing starts...
     backend.xPrepareFailuresRemaining = 1
-    await pushIntent('go-3', {})
+    await pushIntent('go-3', { allowNonPublic: true })
     await waitForObservation(() => ack('go-3') !== undefined)
     expect(ack('go-3')).toMatchObject({ ok: false })
     expect(ack('go-3')?.message).toContain("Some destinations couldn't be set up")
@@ -13929,7 +13945,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.core.startBlockedReason === null)
     backend.xPrepareFailuresRemaining = 1
-    await pushIntent('go-4', { allowPartial: true })
+    await pushIntent('go-4', { allowPartial: true, allowNonPublic: true })
     await waitForObservation(() => ack('go-4') !== undefined)
     expect(ack('go-4')).toMatchObject({
       ok: true,

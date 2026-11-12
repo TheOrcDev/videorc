@@ -442,3 +442,152 @@ describe('Go Live banner notices (plan 186, D13)', () => {
     expect(dialog().querySelector('[data-videorc-go-live-overlay-notices]')).toBeNull()
   })
 })
+
+// Owner report (2026-11-12): live on four platforms with YouTube Unlisted and
+// nothing said so. A YouTube destination that isn't Public asks once more,
+// naming it and its privacy; Public goes live at once.
+describe('Go Live privacy step', () => {
+  const youtubeOn = (): CaptureConfig =>
+    withTargets((target) =>
+      target.id === 'youtube' || target.platform === 'twitch'
+        ? { ...target, enabled: true }
+        : target
+    )
+  const youtubeReady: GoLivePreflight = {
+    valid: true,
+    issues: [],
+    destinations: [
+      destination({ targetId: 'youtube', platform: 'youtube', label: 'YouTube' }),
+      destination()
+    ]
+  }
+  const withPrivacy = (privacy: StreamMetadataDraft['defaultPrivacy']): StreamMetadataDraft => ({
+    ...draft('Friday build'),
+    defaultPrivacy: privacy
+  })
+  const step = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[data-testid=go-live-privacy-dialog]')
+  const stepButton = (suffix: 'cancel' | 'confirm'): HTMLButtonElement =>
+    document.querySelector<HTMLButtonElement>(`[data-testid=go-live-privacy-${suffix}]`)!
+
+  beforeEach(() => {
+    mocked.captureConfig = youtubeOn()
+  })
+
+  it('asks before going live unlisted, and goes live only on its confirm', () => {
+    const props = render({ preflight: youtubeReady, draft: withPrivacy('unlisted') })
+    act(() => primary().click())
+    expect(props.onConfirm).not.toHaveBeenCalled()
+    expect(step()?.textContent).toContain('Go live unlisted?')
+    expect(step()?.textContent).toContain(
+      'YouTube is Unlisted. Only people with the link can watch.'
+    )
+    expect(stepButton('cancel').textContent).toBe('Change privacy')
+    expect(stepButton('confirm').textContent).toBe('Go live unlisted')
+    act(() => stepButton('confirm').click())
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('goes back to the dialog without going live', async () => {
+    const props = render({ preflight: youtubeReady, draft: withPrivacy('private') })
+    act(() => primary().click())
+    expect(step()?.textContent).toContain('YouTube is Private. Only you can watch.')
+    // The safe answer has focus, so Enter goes back rather than live.
+    await vi.waitFor(() => expect(document.activeElement).toBe(stepButton('cancel')))
+    act(() => stepButton('cancel').click())
+    await vi.waitFor(() => expect(step()).toBeNull())
+    expect(props.onConfirm).not.toHaveBeenCalled()
+    expect(dialog()).not.toBeNull()
+  })
+
+  it('never lets ⌘↵ skip the step', () => {
+    const props = render({ preflight: youtubeReady, draft: withPrivacy('unlisted') })
+    pressCommandEnter(dialog().querySelector('#go-live-description')!)
+    expect(props.onConfirm).not.toHaveBeenCalled()
+    expect(step()).not.toBeNull()
+    // Again, from inside the step (it nests in the Go Live dialog's tree).
+    pressCommandEnter(step()!)
+    pressCommandEnter(stepButton('cancel'))
+    expect(props.onConfirm).not.toHaveBeenCalled()
+    expect(step()).not.toBeNull()
+  })
+
+  it('goes live at once when YouTube is Public, and without YouTube', () => {
+    const props = render({ preflight: youtubeReady, draft: withPrivacy('public') })
+    act(() => primary().click())
+    expect(props.onConfirm).toHaveBeenCalledTimes(1)
+    expect(step()).toBeNull()
+
+    mocked.captureConfig = twitchOn()
+    const twitch = render({ draft: withPrivacy('private') })
+    pressCommandEnter()
+    expect(twitch.onConfirm).toHaveBeenCalledTimes(1)
+    expect(step()).toBeNull()
+  })
+
+  it("shows and edits the privacy YouTube actually gets, its override's when customised", () => {
+    const customised: StreamMetadataDraft = {
+      ...withPrivacy('public'),
+      targetOverrides: [
+        {
+          platform: 'youtube',
+          customize: true,
+          title: 'YouTube title',
+          description: '',
+          privacy: 'unlisted',
+          updatedAt: '2026-11-12T00:00:00Z'
+        }
+      ]
+    }
+    const props = render({ preflight: youtubeReady, draft: customised })
+    const checked = dialog().querySelector('#go-live-privacy [aria-checked=true]')
+    expect(checked?.textContent).toBe('Unlisted')
+    const row = dialog().querySelector('[data-target-id=youtube]')!
+    expect(row.textContent).toContain('Unlisted. Only people with the link can watch.')
+    expect(
+      dialog().querySelector('[data-target-id=twitch] [data-slot=go-live-destination-privacy]')
+    ).toBeNull()
+
+    const publicChoice = [
+      ...dialog().querySelectorAll<HTMLElement>('#go-live-privacy [role=radio]')
+    ].find((option) => option.textContent === 'Public')!
+    act(() => publicChoice.click())
+    expect(props.onPatchDraft).toHaveBeenCalledWith({
+      targetOverrides: [{ ...customised.targetOverrides[0], privacy: 'public' }]
+    })
+  })
+
+  it('names a scheduled event that is not public, and goes back rather than to a field', () => {
+    mocked.captureConfig = withTargets((target) =>
+      target.id === 'youtube'
+        ? { ...target, enabled: true, scheduledEventId: 'event-1', scheduledEventTitle: 'Launch' }
+        : target
+    )
+    render({
+      preflight: {
+        valid: true,
+        issues: [],
+        destinations: [
+          destination({
+            targetId: 'youtube',
+            platform: 'youtube',
+            label: 'YouTube',
+            scheduled: {
+              eventId: 'event-1',
+              fingerprint: 'f',
+              title: 'Launch',
+              privacy: 'unlisted',
+              startUtc: '2026-11-12T20:00:00Z'
+            }
+          })
+        ]
+      },
+      draft: withPrivacy('public')
+    })
+    act(() => primary().click())
+    expect(step()?.textContent).toContain(
+      'The scheduled event on YouTube is Unlisted. Only people with the link can watch.'
+    )
+    expect(stepButton('cancel').textContent).toBe('Go back')
+  })
+})

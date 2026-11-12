@@ -61,6 +61,7 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
 | --------------------- | ------------------------------------------------------------------------------- |
 | Studio buttons        | "Record" (with ␣) and "Go Live…"                                                |
 | Go Live dialog        | title "Go live"; primary "Go live" or "Go live on 3 destinations"               |
+| Not public on YouTube | "Go live unlisted?" with "Go live unlisted" and "Change privacy" (or Private)   |
 | Stopping while on air | "End livestream", with "Your recording stops too."                              |
 | The state             | "On air"                                                                        |
 | ⌘K                    | "Start recording", "Go live…"; while running "Stop recording", "End livestream" |

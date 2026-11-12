@@ -10,6 +10,7 @@ import type {
 import { broadcastInfoIssues, type BroadcastInfoIssues } from './broadcast-info'
 import type { GoLiveCaptionsReadiness } from './captions-preflight'
 import type { EntitlementUiGate } from './entitlement-ui'
+import { nonPublicYouTubeDestinations, type NonPublicYouTubeDestination } from './go-live-privacy'
 import { platformLabel } from './platform-copy'
 
 // What the Go Live dialog shows, derived once (plan 174 S3.4): each
@@ -170,6 +171,12 @@ export interface GoLiveConfirmGate {
   entitlementBlocker: GoLiveEntitlementBlocker | null
   /** Something above the primary blocks it. */
   blocked: boolean
+  /**
+   * YouTube destinations this Go Live sends Unlisted or Private. Never a
+   * block: the primary asks once more before it confirms, and an agent's
+   * `go_live` refuses without `allowNonPublic`.
+   */
+  nonPublicYouTube: NonPublicYouTubeDestination[]
 }
 
 export function goLiveConfirmGate({
@@ -224,6 +231,11 @@ export function goLiveConfirmGate({
     titleIssues,
     view,
     entitlementBlocker,
-    blocked
+    blocked,
+    nonPublicYouTube: nonPublicYouTubeDestinations({
+      sentTargets,
+      destinations: preflight?.destinations,
+      draft
+    })
   }
 }

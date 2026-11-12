@@ -206,8 +206,11 @@ that are ready (the dialog's "Go live without …") and `withoutCaptions` to
 skip captions that can't start (captions that can start stay on, as the
 dialog offers "Go live without captions" only when they can't); anything
 only you can fix, such as signing in, a missing stream key or Premium, is
-always refused. While an agent's Go Live runs, the Go Live button and the
-dialog wait for it. It records too only
+always refused. A YouTube destination that would go live Unlisted or
+Private is refused too ("YouTube is Unlisted. Only people with the link can
+watch."), the way the dialog asks you once more before it goes live that
+way; the agent passes `allowNonPublic` only when you asked for it. While an
+agent's Go Live runs, the Go Live button and the dialog wait for it. It records too only
 when Output's recording is on, as the dialog does.
 
 ### Arranging the picture
