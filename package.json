@@ -283,6 +283,7 @@
     "smoke:preview-truth": "env -u ELECTRON_RUN_AS_NODE node scripts/smoke-preview-truth-app.mjs",
     "smoke:preview-check-invisible": "node scripts/with-build-slot.mjs cargo build -p videorc-backend && node scripts/smoke-preview-check-invisible-app.mjs",
     "smoke:banners": "node scripts/smoke-banners-app.mjs",
+    "smoke:html-overlay": "node scripts/smoke-html-overlay-app.mjs",
     "smoke:live-background": "node scripts/smoke-live-background-app.mjs",
     "smoke:live-background-off-ab": "node scripts/smoke-live-background-off-ab.mjs",
     "smoke:multistream": "node scripts/smoke-multistream-app.mjs",
