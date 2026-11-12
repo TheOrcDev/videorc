@@ -9,7 +9,7 @@
     a tap back hands it to the last app used.
   - A hold brings it to the front where it is, or closes it when focused.
   - Titles: Present, Monitor, Hidden, Closed, Away, Pick screens. The key
-    never sets Hide from stream (owner answers Q1–Q15).
+    never sets Hide from stream (owner answers Q1–Q16).
   - New remote intents `streamManagerScreenSwap` and
     `streamManagerFrontOrClose`; `remote.describe` gains `screens`,
     `remote.state` gains `streamManager`.

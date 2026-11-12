@@ -102,6 +102,11 @@ went back to first principles:
   to the Monitor screen). "I may want to quickly hide the stream manager
   to show the thing that's under it (what I was presenting) and bring it
   back to the Presenting screen, so Hold for that works well."
+- **Q16, swap tap and hold?** The owner asked whether a hold, the more
+  deliberate press, should be the move, as a confirm before the chat goes
+  on the Presenting screen. A local spike swapped them; after trying it on
+  the deck, the owner kept a tap for the move and a hold for front or
+  close.
 
 ## Decisions
 
