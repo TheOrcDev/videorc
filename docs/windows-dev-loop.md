@@ -115,6 +115,24 @@ with the code, and the backend's fallback reason says whether a fresh device
 was refused too (then it is the display or the session, not Videorc).
 `-- --probe-capture` stops after the 5 s capture-rate sample.
 
+A performance check never shows in the Preview (#1088, plan 212). It shows
+the DXGI display under four solid banners and runs a real check with Clips
+on, with Clips off, and with Record pressed during rung 2:
+
+```powershell
+pnpm smoke:preview-check-invisible
+```
+
+On Windows the Preview is the Electron proof surface, which main composes
+itself, so the smoke reads it through main's dev-only `preview-surface-sample`
+command (a capture of the surface's `#scene-root`), not the backend's
+`preview.debug.sample`. A test-pattern layer in the surface's own scene fails
+as `test-pattern-scene-source`. While the backend D3D11 presenter owns the
+Preview, which no page capture can see, its pixel checks are a named SKIP and a
+presenter fallback during the check fails as `presenter-fell-back`. On the UHD
+620 laptop the idle Preview is the proof surface. A refused or asleep DXGI
+display is a named SKIP, and the smoke holds an awake display on.
+
 Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):
 
