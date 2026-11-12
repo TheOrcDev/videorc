@@ -17,6 +17,8 @@ export function createFrontAppMonitor(options: {
   send: (event: FrontAppChanged) => void
   now?: () => number
   every?: (callback: () => void, ms: number) => () => void
+  /** Plan 230: a refused or failed activation is logged, never silent. */
+  warn?: (message: string) => void
 }): {
   start(): void
   stop(): void
@@ -118,7 +120,10 @@ export function createFrontAppMonitor(options: {
     activateApp(pid, bundleId) {
       try {
         return binding?.activateApp?.(pid, bundleId) ?? false
-      } catch {
+      } catch (error) {
+        options.warn?.(
+          `[front-app] activate ${bundleId} failed: ${error instanceof Error ? error.message : String(error)}`
+        )
         return false
       }
     }

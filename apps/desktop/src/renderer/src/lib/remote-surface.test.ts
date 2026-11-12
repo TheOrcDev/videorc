@@ -1200,8 +1200,12 @@ it('projects where the Stream Manager is and names the screens it can move to (p
     publisher.syncValues([
       ...base,
       {
+        open: true,
         screenId: '2',
         hiddenFromStream: true,
+        hideFromStreamMethod: 'capture-filter',
+        protected: false,
+        windowId: 7,
         visible: true,
         screens: [
           { id: '1', name: 'DELL U2723QE' },
@@ -1225,6 +1229,25 @@ it('projects where the Stream Manager is and names the screens it can move to (p
       { id: '2', name: 'DELL U2311H' }
     ])
     expect(JSON.stringify(last)).not.toContain('bounds')
+    expect(JSON.stringify(last)).not.toContain('windowId')
+    publisher.syncValues([
+      ...base,
+      {
+        open: true,
+        screenId: '2',
+        hiddenFromStream: true,
+        hideFromStreamMethod: 'unsupported',
+        protected: false,
+        visible: true,
+        screens: []
+      }
+    ] as unknown as RemoteSurfaceValues)
+    await vi.runAllTimersAsync()
+    expect((requests.at(-1) as { state: { streamManager: unknown } }).state.streamManager).toEqual({
+      screenId: '2',
+      visible: true,
+      hiddenFromStream: false
+    })
     publisher.detach()
   } finally {
     vi.useRealTimers()

@@ -88,6 +88,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync
@@ -542,7 +543,7 @@ import {
 } from './comments-window-prefs'
 import {
   FOCUS_ON_ARRIVAL,
-  focusReturnTarget,
+  focusAfterSwap,
   frameOnScreen,
   type FocusReturn,
   planStreamManagerScreenSwap,
@@ -2820,6 +2821,7 @@ function createWindow(): void {
       frontAppMonitor ??= createFrontAppMonitor({
         platform: process.platform,
         binding,
+        warn: (message) => safeConsole.warn(message),
         send: (event) => {
           if (mainWindow && !mainWindow.isDestroyed()) {
             sendElectronEvent(mainWindow.webContents, 'app:front-changed', event)
@@ -3775,10 +3777,13 @@ function saveCommentsWindowPrefs(patch: CommentsWindowPrefs): void {
     return
   }
   try {
-    writeFileSync(
-      commentsWindowPrefsPath(),
-      JSON.stringify({ ...loadCommentsWindowPrefs(), ...patch })
-    )
+    // Plan 230 writes this file on every settled drag: a write cut short by
+    // a crash must never leave a half file that reads as "no prefs" (and
+    // turns Hide from stream off), so it lands whole or not at all.
+    const path = commentsWindowPrefsPath()
+    const next = `${path}.next`
+    writeFileSync(next, JSON.stringify({ ...loadCommentsWindowPrefs(), ...patch }))
+    renameSync(next, path)
   } catch {
     // A failed preference write must never break capture.
   }
@@ -4593,28 +4598,50 @@ async function swapCommentsWindowScreen(
   if (plan.kind === 'refuse') {
     return { ok: false, reason: plan.reason }
   }
-  const giveBack =
-    plan.screen === 'monitor' && commentsWindow?.isFocused()
-      ? focusReturnTarget(
-          process.platform,
-          frontAppMonitor?.lastOtherApp() ?? null,
-          frontAppMonitor?.selfBundleIds() ?? []
-        )
-      : null
+  const focused = Boolean(commentsWindow?.isFocused())
+  const giveBack = focusAfterSwap({
+    to: plan.screen,
+    focused,
+    platform: process.platform,
+    lastOther: frontAppMonitor?.lastOtherApp() ?? null,
+    selfBundleIds: frontAppMonitor?.selfBundleIds() ?? []
+  })
+  if (plan.screen === 'monitor' && focused && !giveBack && process.platform !== 'linux') {
+    safeConsole.warn('[stream-manager] no app to hand the focus to; it stays on the window')
+  }
+  // D3: a minimized window restores where it already is, so it goes to its
+  // screen first; otherwise viewers would see it on the old one.
+  placeMinimizedCommentsWindow(plan.screenId)
   await openCommentsWindow({ focus: FOCUS_ON_ARRIVAL[plan.screen], screenId: plan.screenId })
-  if (!moveCommentsWindowToScreen(plan.screenId)) {
-    return { ok: false, reason: 'not-moved' }
+  const moved = moveCommentsWindowToScreen(plan.screenId)
+  if (moved !== 'moved') {
+    return { ok: false, reason: moved }
   }
   giveFocusBack(giveBack)
   return { ok: true, screen: plan.screen }
 }
 
-// macOS: by pid and bundle id through the addon, never `open -b`, which
-// sends a reopen event (a new Finder or browser window, maybe on stream)
-// and launches an app that quit.
+function placeMinimizedCommentsWindow(screenId: string): void {
+  const window = commentsWindow
+  if (!commentsWindowIsOpen() || !window?.isMinimized()) {
+    return
+  }
+  const current = window.getNormalBounds()
+  if (String(screen.getDisplayMatching(current).id) === screenId) {
+    return
+  }
+  const frame = commentsWindowFrameOnScreen(screenId, current)
+  if (frame) {
+    window.setBounds(frame)
+    commentsWindowPlacedBySystem = false
+  }
+}
+
 function giveFocusBack(target: FocusReturn): void {
   if (target?.kind === 'app') {
-    frontAppMonitor?.activateApp(target.pid, target.bundleId)
+    if (!frontAppMonitor?.activateApp(target.pid, target.bundleId)) {
+      safeConsole.warn(`[stream-manager] could not hand the focus to ${target.bundleId}`)
+    }
   } else if (target?.kind === 'behind' && commentsWindowIsOpen()) {
     commentsWindow?.blur()
   }
@@ -4639,6 +4666,10 @@ async function frontOrCloseCommentsWindow(): Promise<StreamManagerFrontOrCloseRe
     return 'closed'
   }
   await openCommentsWindow()
+  if (commentsWindowIsOpen() && !commentsWindow?.isFocused()) {
+    // macOS and Windows may refuse the focus to a background app.
+    safeConsole.warn('[stream-manager] brought to the front, but the system kept the focus')
+  }
   return 'front'
 }
 
@@ -4657,7 +4688,10 @@ function commentsWindowFrameOnScreen(
 const SCREEN_FRAME_SETTLE_MS = 400
 // A monitor that drops off (or sleeps) makes the OS move the window; that
 // spot is not the streamer's choice. Saves wait for the screens to settle,
-// and none is kept until the streamer or the key places the window again.
+// and none is kept until the streamer places the window by hand
+// (`will-move`/`will-resize`, macOS and Windows) or the key moves it. Linux
+// sends neither event, so there the next settled move counts as the
+// streamer's.
 const SCREEN_FRAME_DISPLAY_CHANGE_HOLD_MS = 2000
 let queuedScreenFrame: ReturnType<typeof setTimeout> | null = null
 let screenFramesHeldUntil = 0
@@ -4677,7 +4711,7 @@ function queueCommentsWindowScreenFrame(frame: Electron.Rectangle): void {
   }
   queuedScreenFrame = setTimeout(() => {
     queuedScreenFrame = null
-    commentsWindowPlacedBySystem = false
+    if (process.platform === 'linux') commentsWindowPlacedBySystem = false
     rememberCommentsWindowScreenFrame(frame)
   }, SCREEN_FRAME_SETTLE_MS)
 }
@@ -4701,25 +4735,26 @@ function rememberCommentsWindowScreenFrame(frame: Electron.Rectangle): void {
   saveCommentsWindowPrefs({ screenFrames: { ...frames, [screenId]: frame } })
 }
 
-// A window already on the target screen stays where the streamer put it.
-// True once the window sits on the target screen.
-function moveCommentsWindowToScreen(screenId: string): boolean {
+// First saves the frame for the screen the window is on. A window already on
+// the target screen stays where it is; otherwise it gets that screen's frame.
+function moveCommentsWindowToScreen(screenId: string): 'moved' | 'not-moved' | 'screen-missing' {
   const window = commentsWindow
   if (!commentsWindowIsOpen() || !window) {
-    return false
+    return 'not-moved'
   }
   const onScreen = (): boolean =>
     String(screen.getDisplayMatching(window.getBounds()).id) === screenId
   rememberCommentsWindowScreenFrame(window.getBounds())
   if (onScreen()) {
-    return true
+    return 'moved'
   }
   const frame = commentsWindowFrameOnScreen(screenId, window.getBounds())
-  if (frame) {
-    window.setBounds(frame)
-    commentsWindowPlacedBySystem = false
+  if (!frame) {
+    return 'screen-missing'
   }
-  return onScreen()
+  window.setBounds(frame)
+  commentsWindowPlacedBySystem = false
+  return onScreen() ? 'moved' : 'not-moved'
 }
 
 async function toggleCommentsWindow(): Promise<CommentsWindowState> {

@@ -391,9 +391,11 @@ try {
 
   // 4e. The Stream Manager Screen key (plan 230): describe names the screens
   // as {id, name} only; the backend refuses one screen alone or the same one
-  // twice; with two screens a press from closed lands on the Monitor screen
-  // (the owner's call), then each press goes to the other screen; a hold
-  // never moves it.
+  // twice; on any host, a screen that is not connected comes back refused
+  // through the renderer, the IPC channel and main. With two screens, the
+  // Stream Manager starts closed in this profile, so a tap lands on the
+  // Monitor screen (the owner's call), then each tap goes to the other
+  // screen; a hold never moves it.
   const screenDescribe = (await remoteRequest(remote, 'remote.describe')).payload?.describe
   const screens = screenDescribe?.screens
   if (
@@ -422,8 +424,33 @@ try {
       )
     }
   }
+  const missing = await (async () => {
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 400))
+    const ackPromise = waitForRemoteEvent(remote, 'remote.ack')
+    const ticket = await remoteRequest(remote, 'remote.intent', {
+      kind: 'streamManagerScreenSwap',
+      presentingScreen: screens[0].id,
+      monitorScreen: '4294967295'
+    })
+    if (!ticket.payload?.accepted) {
+      fail(
+        `streamManagerScreenSwap to a missing screen was not accepted: ${JSON.stringify(ticket)}`
+      )
+    }
+    return ackPromise
+  })()
+  if (
+    missing?.ok !== false ||
+    missing?.message !== "That screen isn't connected. Pick your screens again."
+  ) {
+    fail(`a missing screen was not refused by main: ${JSON.stringify(missing)}`)
+  }
   if (screens.length >= 2) {
     const [presenting, monitor] = screens
+    const before = (await remoteRequest(remote, 'remote.describe')).payload?.state
+    if (before?.windows?.comments) {
+      fail('the Stream Manager is already open, so the first tap cannot be checked against D3')
+    }
     const press = async (screenId) => {
       await new Promise((resolveSleep) => setTimeout(resolveSleep, 400))
       const ackPromise = waitForRemoteEvent(remote, 'remote.ack')
@@ -468,10 +495,12 @@ try {
       fail(`the hold moved the Stream Manager: ${JSON.stringify(afterHold.streamManager)}`)
     }
     console.log(
-      `remote-control smoke: streamManagerScreenSwap ${presenting.name} ↔ ${monitor.name} OK`
+      `remote-control smoke: streamManagerScreenSwap ${presenting.name} ↔ ${monitor.name} OK; hold ${afterHold?.windows?.comments ? 'brought it to the front' : 'closed it'}`
     )
   } else {
-    console.log('remote-control smoke: streamManagerScreenSwap refusals OK (one screen: move SKIP)')
+    console.log(
+      'remote-control smoke: streamManagerScreenSwap refusals and a missing screen OK (one screen: move SKIP)'
+    )
   }
 
   // Plan 210 S6: a saved-scene key uses only the projected id and name.

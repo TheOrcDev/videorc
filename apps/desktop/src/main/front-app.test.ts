@@ -118,6 +118,10 @@ describe('front app monitor', () => {
     expect(f.monitor.lastOtherApp()).toEqual(chrome)
     f.monitor.stop()
     expect(f.monitor.lastOtherApp()).toBeNull()
+    const inFront = fixture()
+    vi.mocked(inFront.binding.frontmostApp).mockReturnValue(keynote)
+    inFront.monitor.start()
+    expect(inFront.monitor.lastOtherApp()).toEqual(keynote)
   })
   it('activates an app by pid and bundle id, and says false when it cannot (plan 230)', () => {
     const f = fixture()
@@ -131,6 +135,15 @@ describe('front app monitor', () => {
       throw new Error('gone')
     })
     expect(withActivate.monitor.activateApp(12, 'com.example')).toBe(false)
+    const warn = vi.fn()
+    const logged = createFrontAppMonitor({
+      platform: 'darwin',
+      binding: { ...withActivate.binding },
+      send: vi.fn(),
+      warn
+    })
+    expect(logged.activateApp(12, 'com.example')).toBe(false)
+    expect(warn).toHaveBeenCalledWith('[front-app] activate com.example failed: gone')
   })
   it('accepts only the current main sender and exposes no auxiliary API', () => {
     expect(frontAppSenderIsMain(2, 2)).toBe(true)

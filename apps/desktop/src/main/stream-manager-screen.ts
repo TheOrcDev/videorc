@@ -1,5 +1,6 @@
-// The Stream Manager Screen key (plan 230): which screen a press sends the
-// Stream Manager to, and the frame it lands in. Pure, so main only applies it.
+// The Stream Manager Screen key (plan 230): the rules main applies on a tap
+// (which screen, which frame, where the focus goes), on a hold (front or
+// close), and for the screen list and the saved frames. Pure, so tested here.
 
 import type {
   StreamManagerScreen,
@@ -21,19 +22,19 @@ export interface StreamManagerPlace {
   screenId: string | null
 }
 
-/** D3, the owner's call: closed, minimized or on a third screen, a press
- * sends the window here. One line to change. */
+/** D3, the owner's call: closed, minimized or on a third screen, a tap
+ * sends the window here. Change it with docs/remote-control.md and plan D3. */
 export const SCREEN_FROM_ELSEWHERE: StreamManagerScreen = 'monitor'
 
-/** The owner's call: on the Presenting screen the streamer answers viewers,
- * so the window takes the focus; on the Monitor screen it only watches, so
- * the focus stays on what the streamer presents. */
+/** Q13, the owner's call: on the Presenting screen the streamer answers
+ * viewers, so the window takes the focus. `false` only means the window
+ * does not take it; `focusAfterSwap` decides whether it is handed on. */
 export const FOCUS_ON_ARRIVAL: Readonly<Record<StreamManagerScreen, boolean>> = {
   presenting: true,
   monitor: false
 }
 
-/** Q14: where the focus goes back when a tap leaves the Presenting screen. */
+/** Q14: where a tap hands the focus on, if anywhere. */
 export type FocusReturn = { kind: 'app'; bundleId: string; pid: number } | { kind: 'behind' } | null
 
 const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$/
@@ -53,6 +54,19 @@ export function focusReturnTarget(
     return null
   }
   return { kind: 'app', bundleId: lastOther.bundleId, pid: lastOther.pid }
+}
+
+/** Q13 and Q14 together: only a tap that sends a focused Stream Manager to
+ * the Monitor screen hands the focus on. */
+export function focusAfterSwap(swap: {
+  to: StreamManagerScreen
+  focused: boolean
+  platform: string
+  lastOther: { bundleId?: string | null; pid: number } | null
+  selfBundleIds: readonly string[]
+}): FocusReturn {
+  if (swap.to !== 'monitor' || !swap.focused) return null
+  return focusReturnTarget(swap.platform, swap.lastOther, swap.selfBundleIds)
 }
 
 export type StreamManagerScreenPlan =
@@ -115,11 +129,12 @@ interface DisplayLike {
 }
 
 export function screenOptions(displays: readonly DisplayLike[]): StreamManagerScreenOption[] {
+  const known = displays.filter((display) => display.id >= 0)
   const sizeOf = ({ size }: DisplayLike) => `${size.width} × ${size.height}`
   const count = (key: string, keys: string[]) => keys.filter((other) => other === key).length
-  const labels = displays.map(({ label }) => label)
-  const looks = displays.map((display) => `${display.label} (${sizeOf(display)})`)
-  return displays.map((display, index) => {
+  const labels = known.map(({ label }) => label)
+  const looks = known.map((display) => `${display.label} (${sizeOf(display)})`)
+  return known.map((display, index) => {
     const id = String(display.id)
     if (!display.label) return { id, name: `Screen ${index + 1}` }
     if (count(display.label, labels) === 1) return { id, name: display.label }
@@ -133,7 +148,7 @@ function isRect(value: unknown): value is Rect {
   if (typeof value !== 'object' || value === null) return false
   const { x, y, width, height } = value as Record<string, unknown>
   return (
-    [x, y, width, height].every((n) => typeof n === 'number' && Number.isFinite(n)) &&
+    [x, y, width, height].every((n) => Number.isInteger(n)) &&
     (width as number) > 0 &&
     (height as number) > 0
   )

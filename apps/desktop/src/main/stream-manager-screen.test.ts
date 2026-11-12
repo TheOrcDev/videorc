@@ -4,6 +4,7 @@ import {
   frameOnScreen,
   planStreamManagerScreenSwap,
   FOCUS_ON_ARRIVAL,
+  focusAfterSwap,
   focusReturnTarget,
   SCREEN_FROM_ELSEWHERE,
   screenFrames,
@@ -112,6 +113,22 @@ describe('focusReturnTarget (Q14)', () => {
   })
 })
 
+describe('focusAfterSwap (Q13, Q14)', () => {
+  const keynote = { name: 'Keynote', pid: 41, bundleId: 'com.apple.iWork.Keynote' }
+  const base = { platform: 'darwin', lastOther: keynote, selfBundleIds: [] }
+
+  it('hands the focus on only when a focused Stream Manager goes to the Monitor screen', () => {
+    expect(focusAfterSwap({ ...base, to: 'monitor', focused: true })).toEqual({
+      kind: 'app',
+      bundleId: 'com.apple.iWork.Keynote',
+      pid: 41
+    })
+    expect(focusAfterSwap({ ...base, to: 'monitor', focused: false })).toBeNull()
+    expect(focusAfterSwap({ ...base, to: 'presenting', focused: true })).toBeNull()
+    expect(focusAfterSwap({ ...base, to: 'presenting', focused: false })).toBeNull()
+  })
+})
+
 describe('streamManagerHoldAction', () => {
   it('closes the window only while it has the focus', () => {
     expect(streamManagerHoldAction({ open: true, visible: true, focused: true })).toBe('close')
@@ -146,6 +163,16 @@ describe('frameOnScreen (D4)', () => {
     })
   })
 
+  it('pulls a frame from an old layout back from the left and the top', () => {
+    const saved = { x: 0, y: -400, width: 600, height: 800 }
+    expect(frameOnScreen({ x: 0, y: 0, width: 600, height: 800 }, saved, portrait)).toEqual({
+      x: 3840,
+      y: 0,
+      width: 600,
+      height: 800
+    })
+  })
+
   it('centres the current size on a screen without a frame', () => {
     expect(frameOnScreen({ x: 100, y: 100, width: 600, height: 800 }, undefined, portrait)).toEqual(
       { x: 4080, y: 560, width: 600, height: 800 }
@@ -174,6 +201,16 @@ describe('screenOptions', () => {
       { id: '1', name: 'DELL U2723QE' },
       { id: '2', name: 'Built-in Retina Display' }
     ])
+  })
+
+  it('leaves out displays whose id the OS does not know yet', () => {
+    expect(
+      screenOptions([
+        { id: -1, label: 'Unknown', size: { width: 1, height: 1 } },
+        { id: -10, label: 'Unified', size: { width: 1, height: 1 } },
+        { id: 3, label: 'DELL U2723QE', size: { width: 2560, height: 1440 } }
+      ])
+    ).toEqual([{ id: '3', name: 'DELL U2723QE' }])
   })
 
   it('tells twin monitors apart by their size, and names a screen without a label', () => {
@@ -211,6 +248,7 @@ describe('screenFrames', () => {
         '1': { ...frame, extra: true },
         '2': { x: 0, y: 0, width: 0, height: 10 },
         '3': { x: '0', y: 0, width: 10, height: 10 },
+        '5': { x: 10.5, y: 0, width: 10, height: 10 },
         '4': null
       })
     ).toEqual({ '1': frame })

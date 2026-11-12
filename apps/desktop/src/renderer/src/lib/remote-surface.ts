@@ -5,6 +5,7 @@ import type {
   StreamManagerScreenOption
 } from '@/lib/backend'
 import { layoutPresetLabel } from '@/lib/layout-labels'
+import { streamManagerHiddenFromViewers } from '@/lib/protected-overlay-windows'
 import { soundboard, type SoundboardSnapshot, type SoundboardStore } from '@/lib/soundboard-store'
 import { bannerSummaries, type BannerSummary } from '../../../shared/banner-commands'
 
@@ -36,8 +37,10 @@ export interface RemoteSurfaceState {
    * settings load. Only a boolean, never the persona or its settings. */
   buddyLive: boolean
   /** The Stream Manager Screen key (plan 230 D5): the screen the window sits
-   * on (null while closed), whether it shows (not minimized), and its Hide
-   * from stream switch for the key's Hidden title. Never its frame. */
+   * on (null while closed), whether it shows (not minimized), and whether
+   * viewers really do not see it (`streamManagerHiddenFromViewers`: the
+   * switch is on and the platform hides it), for the key's Hidden title.
+   * Never its frame. */
   streamManager: { screenId: string | null; visible: boolean; hiddenFromStream: boolean }
 }
 
@@ -123,7 +126,14 @@ export type RemoteSurfaceValues = readonly [
   buddyLive?: boolean,
   commentsWindow?: Pick<
     CommentsWindowState,
-    'screenId' | 'hiddenFromStream' | 'visible' | 'screens'
+    | 'open'
+    | 'screenId'
+    | 'visible'
+    | 'screens'
+    | 'hiddenFromStream'
+    | 'hideFromStreamMethod'
+    | 'protected'
+    | 'windowId'
   >
 ]
 
@@ -150,7 +160,7 @@ function snapshotFromValues(
       streamManager: {
         screenId: values[19]?.screenId ?? null,
         visible: values[19]?.visible ?? false,
-        hiddenFromStream: values[19]?.hiddenFromStream ?? false
+        hiddenFromStream: values[19] ? streamManagerHiddenFromViewers(values[19]) : false
       }
     },
     describe: {

@@ -57,7 +57,8 @@ fn app_metadata(app: &AnyObject) -> FrontApp {
     }
 }
 
-/// Plan 230 Q14: give the focus back to an app the streamer was presenting.
+/// Plan 230 Q14: hand the focus to the last app the streamer used that is
+/// not Videorc.
 /// Only a process that still runs with the same bundle id, so a reused pid
 /// never activates another app; it never launches one, and unlike
 /// `open -b` it sends no reopen event, so no new window appears.
