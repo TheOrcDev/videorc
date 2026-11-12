@@ -30,7 +30,7 @@ import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { parseArgs } from 'node:util'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import {
   BackendEventRecorder,
@@ -66,6 +66,11 @@ import {
 import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
+import {
+  describeWindowsMicrophoneRoute,
+  windowsDevMicrophoneRoute,
+  workerFallbackCount
+} from './lib/windows-microphone-route.mjs'
 
 const { values: args } = parseArgs({
   options: {
@@ -143,6 +148,12 @@ const reportPath = resolve(args.report ?? join(outputDirectory, 'record-latency-
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = siblingFfprobePath(ffmpegPath) ?? 'ffprobe'
 const budgets = readBudgetOverrides(process.env, recordLatencyBudgetsFor(process.platform))
+// Windows: the packaged app's microphone runs through the capture worker; a
+// dev app without one falls back to FFmpeg's DirectShow input, which sits on
+// every start's critical path. Say which one this run measures, and never
+// gate the shipped budgets on the fallback.
+const windowsMicrophoneRoute =
+  process.platform === 'win32' ? windowsDevMicrophoneRoute(repoRoot) : null
 
 function fail(message) {
   throw new Error(`record-latency smoke FAIL: ${message}`)
@@ -413,6 +424,14 @@ let remote = null
 let recorder = null
 try {
   mkdirSync(outputDirectory, { recursive: true })
+  if (windowsMicrophoneRoute) {
+    log(describeWindowsMicrophoneRoute(windowsMicrophoneRoute))
+    if (enforce && windowsMicrophoneRoute.route !== 'capture-worker') {
+      fail(
+        `BLOCKED: --enforce gates the packaged app's start, but this dev app would measure the DirectShow fallback (${windowsMicrophoneRoute.reason})`
+      )
+    }
+  }
   const launch = await launchDevApp({
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
@@ -532,6 +551,13 @@ try {
     ).length
   }
   const warnings = warningEvents(recorder.events)
+  const microphoneRoute = windowsMicrophoneRoute
+    ? {
+        ...windowsMicrophoneRoute,
+        // A present worker can still fail to start and fall back per session.
+        workerFallbacks: workerFallbackCount(recorder.events)
+      }
+    : undefined
   const report = {
     generatedAt: new Date().toISOString(),
     commit: gitHead(),
@@ -548,6 +574,7 @@ try {
       replayBuffer
     },
     systemAudioEvidence: systemAudio ? systemAudioEvidence : undefined,
+    microphoneRoute,
     warnings,
     budgets,
     enforce,
@@ -576,7 +603,17 @@ try {
       ? 'warnings: none'
       : `warnings: ${warnings.length} (${warnings.map((entry) => `${entry.level} ${entry.code}`).join(', ')})`
   )
+  if (microphoneRoute) {
+    log(
+      `${describeWindowsMicrophoneRoute(microphoneRoute)}; ${microphoneRoute.workerFallbacks} worker fallback(s) this run`
+    )
+  }
   log(`report written to ${reportPath}`)
+  if (enforce && microphoneRoute?.workerFallbacks > 0) {
+    fail(
+      `--enforce gates the packaged app's start, but ${microphoneRoute.workerFallbacks} session start(s) fell back from the capture worker to DirectShow`
+    )
+  }
   log(`budgets: ${budgets.calibratedFrom}`)
   if (!verdict.pass) {
     for (const failure of verdict.failures) log(`budget: ${failure}`)
