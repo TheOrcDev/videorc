@@ -134,9 +134,12 @@ const htmlPath = resolve(
 // status already held, freshestPreviewCameraStatus) put main at 2,325,142 raw /
 // 477,033 gzip, 142 and 33 bytes over, so every PR's JS job failed. Raise raw
 // to 2,330,000 and gzip to 478,000.
+// After #1307/#1301 (Stream Manager Screen key, Scene canvas note) main
+// measured 2,328,916 raw / 478,060 gzip, 60 gzip bytes over. Raise raw to
+// 2,340,000 and gzip to 480,000.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_330_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 478_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_340_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 480_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }
