@@ -1110,6 +1110,12 @@ mod runtime {
             let Ok(mut compositor) = self.compositor.try_lock() else {
                 return;
             };
+            if all_legs && compositor.record_windows_media_frame_scene(&snapshot.edit) {
+                let _ = self.events.send(crate::protocol::ServerEvent::new(
+                    "compositor.status",
+                    compositor.status.clone(),
+                ));
+            }
             let Ok(mut coordinator) = self.coordinator.try_lock() else {
                 return;
             };
@@ -3160,7 +3166,13 @@ mod runtime {
                         )
                     },
                 );
-                match client.offer_preview(ticket, configured_preview_generation, source_live) {
+                let scene_revision = committed.as_ref().map(|current| current.edit.revision());
+                match client.offer_preview(
+                    ticket,
+                    configured_preview_generation,
+                    source_live,
+                    scene_revision,
+                ) {
                     Ok(offer) => {
                         update_snapshot(&snapshot, |current| {
                             current.preview_offered_sequence = Some(offer.sequence);

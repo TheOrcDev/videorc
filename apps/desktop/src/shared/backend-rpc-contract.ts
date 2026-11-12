@@ -2124,6 +2124,7 @@ const windowsD3d11PresenterDiagnosticsSchema = objectSchema(
     firstPresentSucceeded: booleanSchema,
     successfulPresents: nonNegativeInteger,
     lastPresentedSequence: optionalSchema(nonNegativeInteger),
+    presentedSceneRevision: optionalSchema(nonNegativeInteger),
     latestWinsDrops: nonNegativeInteger,
     hiddenDrops: nonNegativeInteger,
     busyDrops: nonNegativeInteger,

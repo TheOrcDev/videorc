@@ -2749,6 +2749,8 @@ mod runtime {
         ticket: WindowsD3d11TextureLeaseTicket,
         preview_generation: u64,
         source_live: bool,
+        /// The committed scene revision the frame was composed from.
+        scene_revision: Option<u64>,
         /// Starts the presenter's handoff-to-present latency sample.
         offered_at: Instant,
     }
@@ -3230,6 +3232,7 @@ mod runtime {
             ticket: WindowsD3d11TextureLeaseTicket,
             preview_generation: u64,
             source_live: bool,
+            scene_revision: Option<u64>,
         ) -> Result<WindowsD3d11PreviewOffer, WindowsD3d11Error> {
             let metadata = ticket.metadata();
             if metadata.generation != self.generation
@@ -3256,6 +3259,7 @@ mod runtime {
                     ticket,
                     preview_generation,
                     source_live,
+                    scene_revision,
                     offered_at: Instant::now(),
                 })
             };
@@ -3937,6 +3941,7 @@ mod runtime {
                 adapter_luid: metadata.adapter_luid,
                 sequence: metadata.sequence,
                 source_live: frame.source_live,
+                scene_revision: frame.scene_revision,
             },
             frame.offered_at,
             metadata.width,
