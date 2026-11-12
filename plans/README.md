@@ -1,5 +1,18 @@
 # Implementation Plans
 
+- 2026-11-12: [Plan 231](231-html-overlays.md), the owner's ask: "support
+  for HTML with a transparent background so we can add animated stuff on our
+  live streams or recordings. Same thing as we have now for our images."
+  S1 to S6 BUILT 2026-11-12 (draft PR), macOS:
+  - An HTML overlay is a banner whose picture is a web page: Assets →
+    Banners → Import HTML… takes an `.html` file or a folder with
+    `index.html`. Same place, Show and Hide, switches, fade and z-order.
+  - The page renders in a sandboxed offscreen window in main (no Node, no
+    preload, no network, no permissions, its own folder only). Frames go to
+    the backend over one loopback upload and ride the banner layer on every
+    leg.
+  - Owed: the owner's by-eye pass, the network decision (D5), Windows and
+    Linux (S11).
 - 2026-11-12: [Plan 230](230-stream-manager-screen-key.md), the owner's
   streams on three screens: one Stream Deck key moves the Stream Manager
   between a Presenting screen and a Monitor screen. BUILT 2026-11-12, PR
