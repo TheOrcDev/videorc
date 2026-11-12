@@ -156,7 +156,7 @@
         }
       }
 
-      function renderOptions(options, connected) {
+      function renderOptions(options, connected, notice) {
         const live = Array.isArray(options) && options.length > 0
         // No live options (Videorc closed or Remote Control off): keep the
         // key configurable with a plain text value instead of a dead end.
@@ -177,10 +177,13 @@
           }
         }
         showValues()
+        // A note from the plugin (an older Videorc, a Wayland session) wins.
         hintEl.textContent =
-          live || connected
-            ? action.hint
-            : 'Open Videorc and enable Settings → Remote control to pick from a list.'
+          typeof notice === 'string' && notice
+            ? notice
+            : live || connected
+              ? action.hint
+              : 'Open Videorc and enable Settings → Remote control to pick from a list.'
       }
 
       // Stream Deck calls this global with connection + action context.
@@ -223,7 +226,7 @@
           if (message.event === 'sendToPropertyInspector') {
             const payload = message.payload || {}
             if (payload.event === 'videorc-options') {
-              renderOptions(payload.options, payload.connected === true)
+              renderOptions(payload.options, payload.connected === true, payload.notice)
             }
             return
           }

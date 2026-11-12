@@ -43,6 +43,8 @@ export interface RemoteDescribe {
   windows?: string[]
   /** Plan 230: the screens the Stream Manager Screen key can pick; absent from older apps. */
   screens?: Array<{ id: string; name: string }>
+  /** Plan 230: `wayland` when a tap cannot move the window; absent from older apps. */
+  screenMoves?: 'supported' | 'wayland'
 }
 
 /** Longest banner name a key title shows before it ends in "…". */

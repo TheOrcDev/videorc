@@ -17,7 +17,10 @@ import {
   streamKeyIntent,
   streamKeyLit,
   streamManagerFrontOrCloseIntent,
+  streamManagerScreenKeyAllows,
+  streamManagerScreenKeyBlock,
   streamManagerScreenKeyIntent,
+  streamManagerScreenKeyNotice,
   streamManagerScreenKeyLit,
   streamManagerScreenKeyTitle,
   systemAudioKeyLit,
@@ -108,13 +111,19 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
     void inspector.sendToPropertyInspector({
       event: 'videorc-options',
       connected: client.connected,
-      options: this.inspectorOptions()
+      options: this.inspectorOptions(),
+      notice: this.inspectorNotice()
     })
   }
 
   /** Options the property inspector offers for this action's setting. */
   protected inspectorOptions(): InspectorOption[] {
     return []
+  }
+
+  /** A note the property inspector shows in place of its hint, if any. */
+  protected inspectorNotice(): string | null {
+    return null
   }
 
   override onWillAppear(ev: WillAppearEvent<TSettings>): void {
@@ -392,7 +401,7 @@ class StreamManagerScreen extends VideorcAction<StreamManagerScreenSettings> {
     state,
     connected,
     settings
-  ) => streamManagerScreenKeyTitle(state, connected, settings, client.describe?.screens)
+  ) => streamManagerScreenKeyTitle(state, connected, settings, client.describe)
   protected override renderPressed(
     state: RemoteState | null,
     settings: StreamManagerScreenSettings
@@ -403,13 +412,22 @@ class StreamManagerScreen extends VideorcAction<StreamManagerScreenSettings> {
     return streamManagerScreenKeyIntent(settings)
   }
   private readonly pressed = new Map<string, KeyDownEvent<StreamManagerScreenSettings>>()
+  // An older Videorc (no screen list) or a Wayland session (no tap): the
+  // title says why, so the press stays quiet instead of alerting each time.
+  private allows(gesture: 'tap' | 'hold'): boolean {
+    return streamManagerScreenKeyAllows(streamManagerScreenKeyBlock(client.describe), gesture)
+  }
   private readonly gesture = createHoldGesture({
     onTap: (id) =>
-      this.release(id, (ev) => this.send(ev.action, this.intentFor(ev.payload.settings))),
+      this.release(id, async (ev) => {
+        if (this.allows('tap')) await this.send(ev.action, this.intentFor(ev.payload.settings))
+      }),
     onHold: (id) =>
-      this.release(id, (ev) =>
-        this.send(ev.action, streamManagerFrontOrCloseIntent(), { confirm: true })
-      )
+      this.release(id, async (ev) => {
+        if (this.allows('hold')) {
+          await this.send(ev.action, streamManagerFrontOrCloseIntent(), { confirm: true })
+        }
+      })
   })
   private release(
     id: string,
@@ -444,6 +462,11 @@ class StreamManagerScreen extends VideorcAction<StreamManagerScreenSettings> {
       value: screen.id,
       label: screen.name
     }))
+  }
+  protected override inspectorNotice(): string | null {
+    return client.connected
+      ? streamManagerScreenKeyNotice(streamManagerScreenKeyBlock(client.describe))
+      : null
   }
 }
 

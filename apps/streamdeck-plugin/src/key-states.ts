@@ -99,14 +99,57 @@ export function streamManagerFrontOrCloseIntent(): Record<string, unknown> {
   return { kind: 'streamManagerFrontOrClose' }
 }
 
-/** `screens`: the connected screens from describe, once Videorc sent them. */
+/** What keeps the key from working with this Videorc, read from describe:
+ * `update` for an app older than the key (its describe has no screen list,
+ * and it knows neither intent), `wayland` where a tap cannot move a window
+ * (a hold still works). Null while describe has not arrived yet. */
+export type StreamManagerScreenKeyBlock = 'update' | 'wayland' | null
+
+export function streamManagerScreenKeyBlock(
+  describe: Pick<RemoteDescribe, 'screens' | 'screenMoves'> | null | undefined
+): StreamManagerScreenKeyBlock {
+  if (!describe) return null
+  if (!Array.isArray(describe.screens)) return 'update'
+  return describe.screenMoves === 'wayland' ? 'wayland' : null
+}
+
+/** Whether a tap (`tap`) or a hold (`hold`) may send its intent: blocked
+ * keys stay quiet on press, since the title already says why. */
+export function streamManagerScreenKeyAllows(
+  block: StreamManagerScreenKeyBlock,
+  gesture: 'tap' | 'hold'
+): boolean {
+  if (block === 'update') return false
+  return !(block === 'wayland' && gesture === 'tap')
+}
+
+/** The property inspector's note for a blocked key, else null. */
+export function streamManagerScreenKeyNotice(block: StreamManagerScreenKeyBlock): string | null {
+  if (block === 'update') {
+    return 'This key needs a newer Videorc. Update Videorc, then pick your two screens here.'
+  }
+  if (block === 'wayland') {
+    return (
+      "Wayland doesn't let Videorc move windows, so a tap does nothing in this session. " +
+      'Hold the key to bring the Stream Manager to the front, or to close it.'
+    )
+  }
+  return null
+}
+
+/** `describe`: Videorc's describe, once it arrived; its `screens` are the
+ * connected screens. */
 export function streamManagerScreenKeyTitle(
   state: State,
   connected: boolean,
   settings: StreamManagerScreenKeySettings,
-  screens?: readonly { id: string }[]
+  describe?: Pick<RemoteDescribe, 'screens' | 'screenMoves'> | null
 ): string {
   if (!connected) return 'Videorc\noffline'
+  const block = streamManagerScreenKeyBlock(describe)
+  if (block === 'update') return 'Update\nVideorc'
+  if (block === 'wayland') return 'Not on\nWayland'
+  const screens = describe?.screens
   const picked = [settings.presentingScreen, settings.monitorScreen]
   const isConnected = (id: string | undefined) =>
     Boolean(id) && (!screens || screens.some((screen) => screen.id === id))
