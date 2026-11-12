@@ -1,5 +1,16 @@
 # Implementation Plans
 
+- 2026-11-12: [Plan 230](230-stream-manager-screen-key.md), the owner's
+  streams on three screens: one Stream Deck key moves the Stream Manager
+  between a Presenting screen and a Monitor screen. BUILT 2026-11-12:
+  - Each screen keeps its own frame. The key's title says Present, Monitor,
+    or Hidden (on the Presenting screen with Hide from stream on).
+  - The key never sets Hide from stream, and it is not the Chat on stream
+    box (owner answers Q1–Q8).
+  - New remote intent `streamManagerScreenSwap`; `remote.describe` gains
+    `screens`, `remote.state` gains `streamManager`.
+  - Owed: a move on Windows, and a hold's focus with another app in front
+    on macOS and Windows.
 - 2026-11-11: [Plan 229](229-green-screen-without-snow.md), the owner's
   stream on 0.22.0: "snow" around the subject, specks of green screen one to
   three pixels across in a new place every frame. IMPLEMENTED 2026-11-11:

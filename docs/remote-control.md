@@ -16,25 +16,59 @@ Two integration tiers:
    and live state for key rendering. The official plugin lives in
    `apps/streamdeck-plugin`.
 
+### The Stream Manager Screen key
+
+The **Stream Manager Screen** key (plan 230) moves the Stream Manager
+between two screens you pick in its settings:
+
+- **Presenting screen**: the screen viewers see.
+- **Monitor screen**: the screen where you read chat.
+
+A tap moves the window to the other screen. If the window is closed,
+minimized or on a third screen, a tap puts it on the Monitor screen.
+Each screen keeps the frame the window had there last, so you place it once
+on each screen. The key never changes Hide from stream: that switch stays in
+the Stream Manager and ⌘K. A tap to the Presenting screen gives the
+window the focus, so you can answer viewers at once. A tap to the Monitor
+screen while the Stream Manager has the focus hands it to the app you used
+last before Videorc, if it still runs (macOS brings that app to the front;
+Windows hands the focus to the window behind). Otherwise a tap to the
+Monitor screen leaves the focus where it is (on Windows, restoring a
+minimized window may still take it).
+
+Hold the key for half a second to bring the Stream Manager to the front
+where it is, with the focus: for example when another app covers it on the
+Monitor screen. A hold while you are using it (it has the focus) closes it.
+The key shows its tick when the hold lands.
+
+The title says where the window is: **Present**, **Monitor**, or **Hidden**
+when it sits on the Presenting screen with Hide from stream on (viewers see
+nothing). It reads **Closed** while the window is closed or minimized,
+**Away** while it sits on another screen, and **Pick screens** until both
+screens are picked, connected and different. A tap refuses while either
+screen is not connected ("That screen isn't connected. Pick your screens
+again."), and says so when the window did not reach its screen.
+
 ### Stream Deck key states
 
 Each toggle key of the plugin has two states, and Videorc's confirmed state
 picks one: state 0 when off, state 1 when on. Give each state its own image
 in the Stream Deck app to see what the audience sees at a glance.
 
-| Key          | On (state 1) while                |
-| ------------ | --------------------------------- |
-| Record       | a session runs with recording on  |
-| Go Live      | a session runs with streaming on  |
-| Mic          | the mic is not muted              |
-| System audio | the session mixes system audio    |
-| Buddy        | Buddy Live is on                  |
-| Layout       | its layout is on the picture      |
-| Scene        | its saved scene is the active one |
-| Takeover     | its own takeover shows            |
-| Banner       | its banner shows                  |
-| Play sound   | its sound plays                   |
-| Hide screen  | the screen is hidden              |
+| Key                   | On (state 1) while                                                            |
+| --------------------- | ----------------------------------------------------------------------------- |
+| Record                | a session runs with recording on                                              |
+| Go Live               | a session runs with streaming on                                              |
+| Mic                   | the mic is not muted                                                          |
+| System audio          | the session mixes system audio                                                |
+| Buddy                 | Buddy Live is on                                                              |
+| Layout                | its layout is on the picture                                                  |
+| Scene                 | its saved scene is the active one                                             |
+| Takeover              | its own takeover shows                                                        |
+| Banner                | its banner shows                                                              |
+| Play sound            | its sound plays                                                               |
+| Hide screen           | the screen is hidden                                                          |
+| Stream Manager Screen | the Stream Manager shows on the Presenting screen and Hide from stream is off |
 
 A press follows the state the key shows. An off Record or Go Live key
 starts (Videorc refuses while another session runs, and the key alerts);
@@ -108,7 +142,9 @@ name as the desktop shows it, `{ "screen-camera": "Screen + camera" }`,
 since plan 174 S2.3a; absent from older apps), `takeovers` (`{id, name}`),
 `banners` (`{id, name, shown}` in Assets order, since plan 186; absent from
 older apps), `sounds` (`{id, name, playing}` in board order, since plan 189;
-absent from older apps), and `windows`.
+absent from older apps), `windows`, and `screens` (`{id, name}`: each
+display's id and the monitor's name as the OS shows it, for the Stream
+Manager Screen key, since plan 230; absent from older apps).
 
 `describe` changes too: a banner shown or hidden flips its `shown` there, and
 a sound starting or ending flips its `playing`, not in `remote.state`. Every change the desktop publishes arrives as a
@@ -138,6 +174,8 @@ Intent params (`kind` + fields):
 | `soundPlay`                                              | `soundId`                                | press that sound (plan 189): the sound's own mode decides, like its key in Studio                                                                                                                                                                                        |
 | `soundStop`                                              | `soundId?`                               | stop that sound; without `soundId`, stop every sound                                                                                                                                                                                                                     |
 | `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward (`comments` is the Stream Manager)                                                                                                                                                                                                                  |
+| `streamManagerScreenSwap`                                | `presentingScreen`, `monitorScreen`      | move the Stream Manager to the other of the two screens (display ids); from closed, minimized or a third screen it goes to the Monitor screen. Both ids are required, must differ and are at most 32 bytes. It never sets Hide from stream (plan 230)                    |
+| `streamManagerFrontOrClose`                              | —                                        | the same key held (plan 230): bring the Stream Manager to the front where it is, with the focus, or close it when it already has the focus. Shares the `streamManagerScreenSwap` debounce                                                                                |
 | `commentHighlight`                                       | `messageId`                              | put that live-chat comment on stream (explicit show, idempotent — never a toggle)                                                                                                                                                                                        |
 | `commentHighlightClear`                                  | —                                        | take the on-stream comment down                                                                                                                                                                                                                                          |
 | `clipMark`                                               | `seconds?`: `30`\|`60`                   | save a clip: the last 30 seconds (no `seconds`) or the last minute (`60`) whenever the ring holds frames, and a mark while recording; any other length is refused (plans 068, 181, 199)                                                                                  |
@@ -166,7 +204,7 @@ would refuse. The failed ack carries the reason, so a deck key can say why.
 
 - `remote.state` — the full projection on every change:
   `{ sessionState, sessionActive, recordEnabled, streamEnabled, micMuted,
-layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable, savedScenes, activeSavedSceneId, buddyLive }`.
+layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable, savedScenes, activeSavedSceneId, buddyLive, streamManager }`.
   Render keys from THIS, not from optimistic intent. `systemAudioOn` is what
   the session mixes (the request while idle, or until the session reports
   it) and is always `false` while `systemAudioAvailable` is `false`. An app
@@ -176,7 +214,10 @@ layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable, sa
   while idle, they are the saved Output and Livestream settings. Apps up to
   0.20.2 always send the saved settings. `buddyLive` is `true` while Buddy
   Live is on, and `false` until Buddy's settings load. Apps up to 0.20.2
-  omit it.
+  omit it. `streamManager` is `{ screenId, visible, hiddenFromStream }`:
+  the display the Stream Manager sits on (`null` while closed), whether it
+  shows (open and not minimized), and its Hide from stream switch (plan 230).
+  Apps up to 0.22.1 omit it.
 - `remote.ack` — `{ intentId, ok, message? }` after the renderer executed
   (or refused) an accepted intent.
 
