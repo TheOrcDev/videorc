@@ -57,6 +57,29 @@ fn app_metadata(app: &AnyObject) -> FrontApp {
     }
 }
 
+/// Plan 230 Q14: give the focus back to an app the streamer was presenting.
+/// Only a process that still runs with the same bundle id, so a reused pid
+/// never activates another app; it never launches one, and unlike
+/// `open -b` it sends no reopen event, so no new window appears.
+#[napi]
+pub fn activate_app(pid: i32, bundle_id: String) -> Result<bool> {
+    main_thread()?;
+    unsafe {
+        let app: Option<Retained<AnyObject>> = msg_send![
+            AnyClass::get(c"NSRunningApplication").unwrap(),
+            runningApplicationWithProcessIdentifier: pid
+        ];
+        let Some(app) = app else {
+            return Ok(false);
+        };
+        if app_metadata(&app).bundle_id.as_deref() != Some(bundle_id.as_str()) {
+            return Ok(false);
+        }
+        let activated: bool = msg_send![&*app, activateWithOptions: 0usize];
+        Ok(activated)
+    }
+}
+
 #[napi]
 pub fn self_bundle_id() -> Result<Option<String>> {
     main_thread()?;

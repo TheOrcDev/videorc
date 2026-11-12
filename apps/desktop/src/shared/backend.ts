@@ -5249,6 +5249,34 @@ export interface NotesDocument {
  */
 export type StreamManagerHideMethod = 'capture-filter' | 'content-protection' | 'unsupported'
 
+/** A screen the Stream Manager Screen key can pick (plan 230 D5): the OS's
+ * display id and the monitor's name, never a serial number. */
+export interface StreamManagerScreenOption {
+  id: string
+  name: string
+}
+
+/** The Stream Manager Screen key's two screens, by display id. */
+export interface StreamManagerScreenRequest {
+  presentingScreen: string
+  monitorScreen: string
+}
+
+export type StreamManagerScreen = 'presenting' | 'monitor'
+
+export type StreamManagerScreenRefusal =
+  | 'same-screen'
+  | 'screen-missing'
+  | 'not-moved'
+  | 'unavailable'
+
+/** A hold of the same key: what main did with the Stream Manager. */
+export type StreamManagerFrontOrCloseResult = 'front' | 'closed' | 'unavailable'
+
+export type StreamManagerScreenResult =
+  | { ok: true; screen: StreamManagerScreen }
+  | { ok: false; reason: StreamManagerScreenRefusal }
+
 export interface CommentsWindowState {
   open: boolean
   visible: boolean
@@ -5261,6 +5289,10 @@ export interface CommentsWindowState {
   hiddenFromStream: boolean
   /** How this platform hides the window when the switch is on. */
   hideFromStreamMethod: StreamManagerHideMethod
+  /** The Stream Manager Screen key (plan 230): the screen the open window
+   * sits on, and every screen it can move to. */
+  screenId: string | null
+  screens: StreamManagerScreenOption[]
   /** Where highlighted messages land on the stream. Owned by main so a
    * highlight fired with the window closed (shortcut, deck, co-host) still
    * honours the streamer's pick. */
@@ -5790,6 +5822,13 @@ export interface VideorcApi {
   getCommentsWindowState: () => Promise<CommentsWindowState>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
   setCommentsWindowHiddenFromStream: (hidden: boolean) => Promise<CommentsWindowState>
+  /** The Stream Manager Screen key (plan 230): to the other of its two screens. */
+  swapCommentsWindowScreen: (
+    request: StreamManagerScreenRequest
+  ) => Promise<StreamManagerScreenResult>
+  /** The same key held (plan 230): to the front with the focus, or closed
+   * when it already has the focus. */
+  frontOrCloseCommentsWindow: () => Promise<StreamManagerFrontOrCloseResult>
   setCommentsWindowHighlightAnchor: (anchor: CommentHighlightAnchor) => Promise<CommentsWindowState>
   setCommentsWindowAutoShowActivity: (on: boolean) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void

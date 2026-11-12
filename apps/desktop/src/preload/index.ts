@@ -203,6 +203,8 @@ const api: VideorcApi = {
     invoke('comments-window:set-always-on-top', alwaysOnTop),
   setCommentsWindowHiddenFromStream: (hidden) =>
     invoke('comments-window:set-hidden-from-stream', hidden),
+  swapCommentsWindowScreen: (request) => invoke('comments-window:swap-screen', request),
+  frontOrCloseCommentsWindow: () => invoke('comments-window:front-or-close'),
   setCommentsWindowHighlightAnchor: (anchor) =>
     invoke('comments-window:set-highlight-anchor', anchor),
   setCommentsWindowAutoShowActivity: (on) => invoke('comments-window:set-auto-show-activity', on),

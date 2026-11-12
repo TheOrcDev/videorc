@@ -17,7 +17,10 @@ import type {
   OverlayLayout,
   OverlayOrientation,
   Scene,
-  SourceSelection
+  SourceSelection,
+  StreamManagerFrontOrCloseResult,
+  StreamManagerScreenRequest,
+  StreamManagerScreenResult
 } from '@/lib/backend'
 import type { HeadlessGoLiveOutcome, HeadlessGoLiveRequest } from '@/lib/go-live-headless'
 import type { BannerSummary } from '../../../../shared/banner-commands'
@@ -91,6 +94,13 @@ export interface StudioActionContext {
   activateTakeover: (assetId: string) => Promise<boolean>
   clearTakeover: () => Promise<boolean>
   openWindow: (name: string) => Promise<boolean>
+  /** The Stream Manager Screen key (plan 230): main moves the window to the
+   * other of its two screens. Absent where there is no main process to ask. */
+  swapStreamManagerScreen?: (
+    request: StreamManagerScreenRequest
+  ) => Promise<StreamManagerScreenResult>
+  /** The same key held: to the front with the focus, or closed when focused. */
+  frontOrCloseStreamManager?: () => Promise<StreamManagerFrontOrCloseResult>
   /** Phone remote: EXPLICIT show (never the button's toggle) — a double tap
    * must not flash the card off. Resolves the user-facing refusal reason. */
   showCommentHighlight: (messageId: string) => Promise<StudioActionOutcome>

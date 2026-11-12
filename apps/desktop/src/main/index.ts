@@ -541,6 +541,16 @@ import {
   commentsWindowHiddenFromStreamPreference
 } from './comments-window-prefs'
 import {
+  FOCUS_ON_ARRIVAL,
+  focusReturnTarget,
+  frameOnScreen,
+  type FocusReturn,
+  planStreamManagerScreenSwap,
+  screenFrames,
+  screenOptions,
+  streamManagerHoldAction
+} from './stream-manager-screen'
+import {
   assessProofPresentationWatch,
   assessProofSourceFrame,
   assessFirstFrame,
@@ -693,6 +703,9 @@ import type {
   CommentsViewMode,
   CommentsViewSnapshot,
   CommentHighlightAnchor,
+  StreamManagerFrontOrCloseResult,
+  StreamManagerScreenRequest,
+  StreamManagerScreenResult,
   CommentsWindowState,
   CompositorSceneSourceStatus,
   CompositorStatus,
@@ -3737,6 +3750,9 @@ type CommentsWindowPrefs = {
   /** Hide from stream (plan 215 D6). Default off; counts only with its version. */
   hiddenFromStream?: boolean
   hiddenFromStreamPreferenceVersion?: number
+  /** The Stream Manager Screen key (plan 230 D4): the frame last used on each
+   * screen, by display id. */
+  screenFrames?: Record<string, Electron.Rectangle>
   open?: boolean
   /** 2 once the frame moved off the old Chat default (plan 055, S8). */
   layoutVersion?: number
@@ -3908,6 +3924,8 @@ function commentsWindowState(message?: string): CommentsWindowState {
     alwaysOnTop: commentsWindowAlwaysOnTop,
     hiddenFromStream: commentsHiddenFromStream(),
     hideFromStreamMethod: streamManagerHideMethod(process.platform),
+    screenId: open ? String(screen.getDisplayMatching(window!.getBounds()).id) : null,
+    screens: screenOptions(screen.getAllDisplays()),
     highlightAnchor: commentsHighlightAnchor(),
     autoShowActivity: commentsAutoShowActivity(),
     protected: open ? commentsWindowContentProtected : false,
@@ -4410,7 +4428,26 @@ function emitCommentsWindowState(message?: string): void {
   }
 }
 
-async function openCommentsWindow(): Promise<CommentsWindowState> {
+// The Stream Manager Screen key (plan 230) can open it without the focus,
+// straight on a screen.
+interface CommentsWindowOpenOptions {
+  focus?: boolean
+  screenId?: string
+}
+
+function showCommentsWindow(window: BrowserWindow, focus: boolean): void {
+  if (focus) {
+    window.show()
+    window.focus()
+  } else {
+    window.showInactive()
+  }
+}
+
+async function openCommentsWindow({
+  focus = true,
+  screenId
+}: CommentsWindowOpenOptions = {}): Promise<CommentsWindowState> {
   if (!commentsWindowFeatureEnabled) {
     return commentsWindowState()
   }
@@ -4419,8 +4456,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     if (existingWindow.isMinimized()) {
       existingWindow.restore()
     }
-    existingWindow.show()
-    existingWindow.focus()
+    showCommentsWindow(existingWindow, focus)
     emitCommentsWindowState()
     return commentsWindowState()
   }
@@ -4434,7 +4470,13 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     })
   }
   const rememberedFrame = commentsWindowLastFrame ?? savedFrame.frame ?? null
-  const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const frame =
+    (screenId &&
+      commentsWindowFrameOnScreen(
+        screenId,
+        rememberedFrame ?? { x: 0, y: 0, ...STREAM_MANAGER_DEFAULT_SIZE }
+      )) ||
+    (rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null)
   const chrome = glassWindowChrome('chat')
   const window = new BrowserWindow({
     width: frame?.width ?? STREAM_MANAGER_DEFAULT_SIZE.width,
@@ -4453,6 +4495,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     }
   })
   registerRendererWindow(window, 'comments')
+  commentsWindowPlacedBySystem = false
   finishGlassWindow(window, 'chat', chrome.mode)
   installContextMenu(window.webContents)
   commentsWindowClosing = false
@@ -4473,8 +4516,27 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
       }
     })
   }
+  // D4: each screen keeps the frame the window had there last, however it
+  // got there (the key, a drag, a resize). macOS sends `moved` all through a
+  // drag, so the frame is saved once the window settles.
+  for (const event of ['moved', 'resized'] as const) {
+    window.on(event as 'moved', () => {
+      if (commentsWindow === window && !window.isMinimized()) {
+        queueCommentsWindowScreenFrame(window.getBounds())
+      }
+    })
+  }
+  // `will-move`/`will-resize` fire only for a move or resize by hand (never
+  // for `setBounds` or the OS's own move), so this frame is the streamer's
+  // choice even right after a display change.
+  for (const event of ['will-move', 'will-resize'] as const) {
+    window.on(event as 'will-move', () => {
+      if (commentsWindow === window) streamerPlacesCommentsWindow()
+    })
+  }
   window.on('close', () => {
     if (commentsWindow === window) {
+      if (!window.isMinimized()) rememberCommentsWindowScreenFrame(window.getBounds())
       commentsWindowClosing = true
       commentsWindowLastFrame = window.getBounds()
       saveCommentsWindowPrefs(previewWindowClosePrefs(commentsWindowLastFrame, closingForQuit()))
@@ -4499,8 +4561,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     trustRendererDocument(window, pathToFileURL(commentsPath).toString())
     await window.loadFile(commentsPath)
   }
-  window.show()
-  window.focus()
+  showCommentsWindow(window, focus)
   emitCommentsWindowState()
   return commentsWindowState()
 }
@@ -4511,6 +4572,154 @@ function closeCommentsWindow(message?: string): CommentsWindowState {
     commentsWindow.close()
   }
   return commentsWindowState(message)
+}
+
+// The Stream Manager Screen key (plan 230): the window goes to the other of
+// its two screens. It takes the focus on the Presenting screen only
+// (FOCUS_ON_ARRIVAL). Hide from stream is a separate switch, so the key
+// never sets it.
+async function swapCommentsWindowScreen(
+  request: StreamManagerScreenRequest
+): Promise<StreamManagerScreenResult> {
+  if (!commentsWindowFeatureEnabled) {
+    return { ok: false, reason: 'unavailable' }
+  }
+  const state = commentsWindowState()
+  const plan = planStreamManagerScreenSwap(
+    { open: state.open, visible: state.visible, screenId: state.screenId },
+    request,
+    state.screens.map(({ id }) => id)
+  )
+  if (plan.kind === 'refuse') {
+    return { ok: false, reason: plan.reason }
+  }
+  const giveBack =
+    plan.screen === 'monitor' && commentsWindow?.isFocused()
+      ? focusReturnTarget(
+          process.platform,
+          frontAppMonitor?.lastOtherApp() ?? null,
+          frontAppMonitor?.selfBundleIds() ?? []
+        )
+      : null
+  await openCommentsWindow({ focus: FOCUS_ON_ARRIVAL[plan.screen], screenId: plan.screenId })
+  if (!moveCommentsWindowToScreen(plan.screenId)) {
+    return { ok: false, reason: 'not-moved' }
+  }
+  giveFocusBack(giveBack)
+  return { ok: true, screen: plan.screen }
+}
+
+// macOS: by pid and bundle id through the addon, never `open -b`, which
+// sends a reopen event (a new Finder or browser window, maybe on stream)
+// and launches an app that quit.
+function giveFocusBack(target: FocusReturn): void {
+  if (target?.kind === 'app') {
+    frontAppMonitor?.activateApp(target.pid, target.bundleId)
+  } else if (target?.kind === 'behind' && commentsWindowIsOpen()) {
+    commentsWindow?.blur()
+  }
+}
+
+// The same key held (plan 230): a Stream Deck press itself never moves the
+// focus, so `isFocused` says the streamer is using the window (or a tap to
+// the Presenting screen just gave it the focus).
+async function frontOrCloseCommentsWindow(): Promise<StreamManagerFrontOrCloseResult> {
+  if (!commentsWindowFeatureEnabled) {
+    return 'unavailable'
+  }
+  const window = commentsWindow
+  const open = commentsWindowIsOpen() && Boolean(window)
+  const action = streamManagerHoldAction({
+    open,
+    visible: open && window!.isVisible() && !window!.isMinimized(),
+    focused: open && window!.isFocused()
+  })
+  if (action === 'close') {
+    closeCommentsWindow()
+    return 'closed'
+  }
+  await openCommentsWindow()
+  return 'front'
+}
+
+function commentsWindowFrameOnScreen(
+  screenId: string,
+  current: Electron.Rectangle
+): Electron.Rectangle | null {
+  const display = screen.getAllDisplays().find(({ id }) => String(id) === screenId)
+  if (!display) {
+    return null
+  }
+  const frames = screenFrames(loadCommentsWindowPrefs().screenFrames)
+  return frameOnScreen(current, frames[screenId], display.workArea)
+}
+
+const SCREEN_FRAME_SETTLE_MS = 400
+// A monitor that drops off (or sleeps) makes the OS move the window; that
+// spot is not the streamer's choice. Saves wait for the screens to settle,
+// and none is kept until the streamer or the key places the window again.
+const SCREEN_FRAME_DISPLAY_CHANGE_HOLD_MS = 2000
+let queuedScreenFrame: ReturnType<typeof setTimeout> | null = null
+let screenFramesHeldUntil = 0
+let commentsWindowPlacedBySystem = false
+
+function dropQueuedCommentsWindowScreenFrame(): void {
+  if (queuedScreenFrame) {
+    clearTimeout(queuedScreenFrame)
+    queuedScreenFrame = null
+  }
+}
+
+function queueCommentsWindowScreenFrame(frame: Electron.Rectangle): void {
+  dropQueuedCommentsWindowScreenFrame()
+  if (Date.now() < screenFramesHeldUntil) {
+    return
+  }
+  queuedScreenFrame = setTimeout(() => {
+    queuedScreenFrame = null
+    commentsWindowPlacedBySystem = false
+    rememberCommentsWindowScreenFrame(frame)
+  }, SCREEN_FRAME_SETTLE_MS)
+}
+
+function streamerPlacesCommentsWindow(): void {
+  commentsWindowPlacedBySystem = false
+  screenFramesHeldUntil = 0
+}
+
+function holdCommentsWindowScreenFrames(): void {
+  dropQueuedCommentsWindowScreenFrame()
+  screenFramesHeldUntil = Date.now() + SCREEN_FRAME_DISPLAY_CHANGE_HOLD_MS
+  if (commentsWindowIsOpen()) commentsWindowPlacedBySystem = true
+}
+
+function rememberCommentsWindowScreenFrame(frame: Electron.Rectangle): void {
+  dropQueuedCommentsWindowScreenFrame()
+  if (commentsWindowPlacedBySystem) return
+  const screenId = String(screen.getDisplayMatching(frame).id)
+  const frames = screenFrames(loadCommentsWindowPrefs().screenFrames)
+  saveCommentsWindowPrefs({ screenFrames: { ...frames, [screenId]: frame } })
+}
+
+// A window already on the target screen stays where the streamer put it.
+// True once the window sits on the target screen.
+function moveCommentsWindowToScreen(screenId: string): boolean {
+  const window = commentsWindow
+  if (!commentsWindowIsOpen() || !window) {
+    return false
+  }
+  const onScreen = (): boolean =>
+    String(screen.getDisplayMatching(window.getBounds()).id) === screenId
+  rememberCommentsWindowScreenFrame(window.getBounds())
+  if (onScreen()) {
+    return true
+  }
+  const frame = commentsWindowFrameOnScreen(screenId, window.getBounds())
+  if (frame) {
+    window.setBounds(frame)
+    commentsWindowPlacedBySystem = false
+  }
+  return onScreen()
 }
 
 async function toggleCommentsWindow(): Promise<CommentsWindowState> {
@@ -5089,6 +5298,14 @@ function registerDisplayChangeReconcile(): void {
   screen.on('display-metrics-changed', reconcile)
   screen.on('display-added', reconcile)
   screen.on('display-removed', reconcile)
+  // The Stream Manager Screen key's list of screens (plan 230) follows the
+  // monitors, and the OS's own moves of the window are not saved as frames.
+  for (const event of ['display-metrics-changed', 'display-added', 'display-removed'] as const) {
+    screen.on(event as 'display-added', () => {
+      holdCommentsWindowScreenFrames()
+      emitCommentsWindowState()
+    })
+  }
 }
 
 function pushPreviewWindowPlacement(): void {
@@ -17314,6 +17531,10 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:set-hidden-from-stream', (_event, hidden: unknown) =>
     setCommentsWindowHiddenFromStream(hidden)
   )
+  secureIpcHandle('comments-window:swap-screen', (_event, request: StreamManagerScreenRequest) =>
+    swapCommentsWindowScreen(request)
+  )
+  secureIpcHandle('comments-window:front-or-close', () => frontOrCloseCommentsWindow())
   secureIpcHandle('comments-window:set-highlight-anchor', (_event, anchor: unknown) =>
     setCommentsWindowHighlightAnchor(anchor)
   )

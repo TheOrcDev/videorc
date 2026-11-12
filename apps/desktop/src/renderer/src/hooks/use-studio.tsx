@@ -2368,6 +2368,8 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   alwaysOnTop: false,
   hiddenFromStream: false,
   hideFromStreamMethod: 'unsupported',
+  screenId: null,
+  screens: [],
   highlightAnchor: DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   autoShowActivity: false,
   protected: false,
@@ -18426,7 +18428,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sceneLibrary.scenes,
     activeSavedSceneId,
     privacy.screenPrivacy.hidden,
-    cohostSettings?.enabled === true
+    cohostSettings?.enabled === true,
+    commentsWindow
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on

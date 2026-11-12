@@ -36,6 +36,7 @@ function fixture(platform = 'darwin') {
     cancel,
     app,
     activate: () => activate?.(app),
+    activateWith: (other: { name: string; pid: number; bundleId?: string }) => activate?.(other),
     tick: () => tick?.(),
     setWindow: (id?: string) => {
       windowId = id
@@ -102,6 +103,34 @@ describe('front app monitor', () => {
   })
   it('gets the real self bundle id', () => {
     expect(fixture().monitor.selfBundleIds()).toEqual(['test.self'])
+  })
+  it('remembers the last app in front that is not Videorc, while it runs (plan 230)', () => {
+    const f = fixture()
+    expect(f.monitor.lastOtherApp()).toBeNull()
+    f.monitor.start()
+    const keynote = { name: 'Keynote', pid: 41, bundleId: 'com.apple.iWork.Keynote' }
+    const chrome = { name: 'Chrome', pid: 52, bundleId: 'com.google.Chrome' }
+    f.activateWith(keynote)
+    f.activateWith({ name: 'Videorc', pid: 7, bundleId: 'test.self' })
+    expect(f.monitor.lastOtherApp()).toEqual(keynote)
+    f.activateWith(chrome)
+    f.activateWith({ name: 'No id', pid: 9 })
+    expect(f.monitor.lastOtherApp()).toEqual(chrome)
+    f.monitor.stop()
+    expect(f.monitor.lastOtherApp()).toBeNull()
+  })
+  it('activates an app by pid and bundle id, and says false when it cannot (plan 230)', () => {
+    const f = fixture()
+    expect(f.monitor.activateApp(12, 'com.example')).toBe(false)
+    expect(fixture('win32').monitor.activateApp(12, 'com.example')).toBe(false)
+    const withActivate = fixture()
+    withActivate.binding.activateApp = vi.fn(() => true)
+    expect(withActivate.monitor.activateApp(12, 'com.example')).toBe(true)
+    expect(withActivate.binding.activateApp).toHaveBeenCalledWith(12, 'com.example')
+    withActivate.binding.activateApp = vi.fn(() => {
+      throw new Error('gone')
+    })
+    expect(withActivate.monitor.activateApp(12, 'com.example')).toBe(false)
   })
   it('accepts only the current main sender and exposes no auxiliary API', () => {
     expect(frontAppSenderIsMain(2, 2)).toBe(true)

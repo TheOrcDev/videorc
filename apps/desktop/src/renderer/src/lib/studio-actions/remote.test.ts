@@ -76,6 +76,8 @@ describe('the remote intent entry point', () => {
         'soundPlay',
         'soundStop',
         'windowFront',
+        'streamManagerScreenSwap',
+        'streamManagerFrontOrClose',
         'commentHighlight',
         'commentHighlightClear',
         'clipMark'

@@ -11,6 +11,8 @@
 //      reflects them (backend-confirmed state, not optimistic); clipMark and
 //      systemAudioToggle relay through the renderer
 //      buddyLiveOn refused without consent, buddyLiveOff applied
+//      the Stream Manager Screen key (plan 230) refuses bad screens, and
+//      with two or more screens moves the Stream Manager between two of them
 //   5. token regenerate closes the paired client
 //
 // No recording is started: the intents exercised here are disk-free.
@@ -386,6 +388,91 @@ try {
     fail(`Buddy Live changed after a refused turn-on: ${JSON.stringify(buddyAfter)}`)
   }
   console.log(`remote-control smoke: buddyLiveOn refused (${buddyOn.message}), buddyLiveOff OK`)
+
+  // 4e. The Stream Manager Screen key (plan 230): describe names the screens
+  // as {id, name} only; the backend refuses one screen alone or the same one
+  // twice; with two screens a press from closed lands on the Monitor screen
+  // (the owner's call), then each press goes to the other screen; a hold
+  // never moves it.
+  const screenDescribe = (await remoteRequest(remote, 'remote.describe')).payload?.describe
+  const screens = screenDescribe?.screens
+  if (
+    !Array.isArray(screens) ||
+    screens.length === 0 ||
+    screens.some(
+      (screen) =>
+        Object.keys(screen).sort().join() !== 'id,name' ||
+        typeof screen.id !== 'string' ||
+        typeof screen.name !== 'string'
+    )
+  ) {
+    fail(`remote.describe lacks the key's screens as {id, name}: ${JSON.stringify(screens)}`)
+  }
+  for (const fields of [
+    { presentingScreen: screens[0].id },
+    { presentingScreen: screens[0].id, monitorScreen: screens[0].id }
+  ]) {
+    const refused = await remoteRequest(remote, 'remote.intent', {
+      kind: 'streamManagerScreenSwap',
+      ...fields
+    })
+    if (refused.error?.code !== 'invalid-intent') {
+      fail(
+        `streamManagerScreenSwap ${JSON.stringify(fields)} was not refused: ${JSON.stringify(refused)}`
+      )
+    }
+  }
+  if (screens.length >= 2) {
+    const [presenting, monitor] = screens
+    const press = async (screenId) => {
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 400))
+      const ackPromise = waitForRemoteEvent(remote, 'remote.ack')
+      const statePromise = waitForRemoteEvent(
+        remote,
+        'remote.state',
+        (state) =>
+          state?.streamManager?.screenId === screenId && state.streamManager.visible === true
+      )
+      const ticket = await remoteRequest(remote, 'remote.intent', {
+        kind: 'streamManagerScreenSwap',
+        presentingScreen: presenting.id,
+        monitorScreen: monitor.id
+      })
+      if (!ticket.payload?.accepted) {
+        fail(`streamManagerScreenSwap was not accepted: ${JSON.stringify(ticket)}`)
+      }
+      const ack = await ackPromise
+      if (ack?.intentId !== ticket.payload.intentId || ack?.ok !== true) {
+        fail(`streamManagerScreenSwap was not applied: ${JSON.stringify(ack)}`)
+      }
+      const state = await statePromise
+      if (state?.streamManager?.hiddenFromStream !== false) {
+        fail(`the key changed Hide from stream: ${JSON.stringify(state?.streamManager)}`)
+      }
+    }
+    await press(monitor.id)
+    await press(presenting.id)
+    await press(monitor.id)
+    // The hold: to the front where it is, never to another screen.
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 400))
+    const holdAck = waitForRemoteEvent(remote, 'remote.ack')
+    const hold = await remoteRequest(remote, 'remote.intent', { kind: 'streamManagerFrontOrClose' })
+    if (!hold.payload?.accepted)
+      fail(`streamManagerFrontOrClose was not accepted: ${JSON.stringify(hold)}`)
+    const held = await holdAck
+    if (held?.intentId !== hold.payload.intentId || held?.ok !== true) {
+      fail(`streamManagerFrontOrClose was not applied: ${JSON.stringify(held)}`)
+    }
+    const afterHold = (await remoteRequest(remote, 'remote.describe')).payload?.state
+    if (afterHold?.windows?.comments && afterHold.streamManager?.screenId !== monitor.id) {
+      fail(`the hold moved the Stream Manager: ${JSON.stringify(afterHold.streamManager)}`)
+    }
+    console.log(
+      `remote-control smoke: streamManagerScreenSwap ${presenting.name} ↔ ${monitor.name} OK`
+    )
+  } else {
+    console.log('remote-control smoke: streamManagerScreenSwap refusals OK (one screen: move SKIP)')
+  }
 
   // Plan 210 S6: a saved-scene key uses only the projected id and name.
   const saved = await requestSmokeCommand(
