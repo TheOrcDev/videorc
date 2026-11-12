@@ -41,6 +41,7 @@ import {
 } from '@/components/scene/overlay-stage'
 import { HideScreenSection } from '@/components/scene/hide-screen-section'
 import { SceneList } from '@/components/scene/scene-list'
+import { SceneSwitchPending, SceneSwitchStatus } from '@/components/scene/scene-switch-status'
 import { SceneStage, stageLayoutOnlyNote, type StagePhase } from '@/components/scene/scene-stage'
 import { ScreenSizeField } from '@/components/scene/screen-size-field'
 import { ScreenZoomField } from '@/components/scene/screen-zoom-field'
@@ -813,9 +814,10 @@ export function LayoutTab(): ReactElement {
                     value: preset.id,
                     label: (
                       <>
-                        {presetSwitching(layoutSwitchPending, preset.id)
-                          ? 'Switching…'
-                          : preset.label}
+                        {presetSwitching(layoutSwitchPending, preset.id) ? (
+                          <SceneSwitchPending label={false} />
+                        ) : null}
+                        {preset.label}
                         {!preset.enabled ? <Badge variant="outline">Soon</Badge> : null}
                       </>
                     ),
@@ -848,9 +850,15 @@ export function LayoutTab(): ReactElement {
                 // Every click is an intent, as on the presets.
                 onPressedChange={enterFreeform}
               >
-                {freeformSwitching(layoutSwitchPending) ? 'Switching…' : 'Freeform'}
+                {freeformSwitching(layoutSwitchPending) ? (
+                  <SceneSwitchPending label={false} />
+                ) : null}
+                Freeform
               </Toggle>
             </div>
+            {/* Issue #1275: what a slow switch is waiting for, under the
+                controls that started it. */}
+            <SceneSwitchStatus />
             {/* Devices are chosen on Sources (plan 174, C-21), so the hint
                 sends people there, with the door beside it. */}
             {isSessionActive ? (

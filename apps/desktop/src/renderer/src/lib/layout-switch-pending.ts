@@ -1,6 +1,6 @@
 import type { ArrangementMode, LayoutPreset, LayoutSettings } from '@/lib/backend'
 
-// Plan 216 A4: one "Switching…" label. A switch is pending toward a layout,
+// Plan 216 A4: one pending control. A switch is pending toward a layout,
 // not a preset: entering Freeform keeps the preset id it left, so a label
 // keyed by preset lit the old preset's button too. The target carries both.
 
@@ -16,14 +16,14 @@ export function layoutSwitchTarget(
   return { layoutPreset: layout.layoutPreset, arrangementMode: layout.arrangementMode }
 }
 
-/** "Switching…" on a preset's control only when the switch lands on that preset, in preset mode. */
+/** The pending mark on a preset's control only when the switch lands on that preset, in preset mode. */
 export function presetSwitching(pending: LayoutSwitchTarget | null, preset: LayoutPreset): boolean {
   return (
     pending !== null && pending.arrangementMode !== 'freeform' && pending.layoutPreset === preset
   )
 }
 
-/** "Switching…" on the Freeform toggle only when the switch lands in Freeform. */
+/** The pending mark on the Freeform toggle only when the switch lands in Freeform. */
 export function freeformSwitching(pending: LayoutSwitchTarget | null): boolean {
   return pending?.arrangementMode === 'freeform'
 }

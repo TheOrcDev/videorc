@@ -97,8 +97,9 @@ export function useSceneDialogs(): {
     setBusy(true)
     try {
       const result = await studio.applySavedSceneResult(scene.id, repaired)
-      // A refusal in words ("Figma isn't open") is already a warning toast.
-      if (!result.ok && !result.reason) {
+      // A refusal in words ("Figma isn't open") is already a warning toast,
+      // and a switch a newer click took over didn't fail (issue #1275).
+      if (!result.ok && !result.reason && !result.superseded) {
         setRequest({
           kind: 'repair',
           scene,
