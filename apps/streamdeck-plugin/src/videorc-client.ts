@@ -29,6 +29,8 @@ export interface RemoteState {
   layoutPreset?: string
   activeTakeoverId?: string | null
   windows?: { notes?: boolean; comments?: boolean; preview?: boolean }
+  /** Plan 230: where the Stream Manager is; absent from older apps. */
+  streamManager?: { screenId: string | null; visible: boolean; hiddenFromStream: boolean }
 }
 
 export interface RemoteDescribe {
@@ -39,6 +41,8 @@ export interface RemoteDescribe {
   /** Plan 189; absent from apps that predate the soundboard. */
   sounds?: Array<{ id: string; name: string; playing: boolean }>
   windows?: string[]
+  /** Plan 230: the screens the Stream Manager Screen key can pick; absent from older apps. */
+  screens?: Array<{ id: string; name: string }>
 }
 
 /** Longest banner name a key title shows before it ends in "…". */

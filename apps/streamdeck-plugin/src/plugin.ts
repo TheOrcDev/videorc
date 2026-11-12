@@ -16,20 +16,27 @@ import {
   soundKeyLit,
   streamKeyIntent,
   streamKeyLit,
+  streamManagerFrontOrCloseIntent,
+  streamManagerScreenKeyIntent,
+  streamManagerScreenKeyLit,
+  streamManagerScreenKeyTitle,
   systemAudioKeyLit,
   takeoverKeyIntent,
-  takeoverKeyLit
+  takeoverKeyLit,
+  type StreamManagerScreenKeySettings
 } from './key-states.js'
 import streamDeck, { action, SingletonAction } from '@elgato/streamdeck'
 import type {
   DidReceiveSettingsEvent,
   JsonObject,
   KeyDownEvent,
+  KeyUpEvent,
   WillAppearEvent,
   KeyAction,
   WillDisappearEvent
 } from '@elgato/streamdeck'
 
+import { createHoldGesture } from './hold-gesture.js'
 import {
   VideorcClient,
   sceneKeyIntent,
@@ -137,16 +144,20 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
       await ev.action.showAlert()
       return
     }
-    const intent = this.intentFor(ev.payload.settings, client.state)
-    if (!intent) {
-      await ev.action.showAlert()
-      return
-    }
-    // End-to-end truth: false covers backend rejection (debounce, invalid),
-    // renderer refusal ("Enable streaming first"), disconnects, and timeouts.
-    const ok = await client.sendIntent(intent)
-    if (!ok) {
-      await ev.action.showAlert()
+    await this.send(ev.action, this.intentFor(ev.payload.settings, client.state))
+  }
+
+  /** End-to-end truth: false covers backend rejection (debounce, invalid),
+   * renderer refusal ("Enable streaming first"), disconnects, and timeouts. */
+  protected async send(
+    key: { showAlert(): Promise<void>; showOk(): Promise<void> },
+    intent: Record<string, unknown> | null,
+    { confirm = false } = {}
+  ): Promise<void> {
+    if (!intent || !(await client.sendIntent(intent))) {
+      await key.showAlert()
+    } else if (confirm) {
+      await key.showOk()
     }
   }
 }
@@ -368,6 +379,70 @@ class WindowFront extends VideorcAction<WindowSettings> {
   }
 }
 
+type StreamManagerScreenSettings = StreamManagerScreenKeySettings & JsonObject
+
+// Plan 230: a tap moves the Stream Manager to the other of the key's two
+// screens, the Presenting screen viewers see and the Monitor screen the
+// streamer reads. A hold brings it to the front where it is, or closes it
+// when it already has the focus. The title says where it is; the key is on
+// while viewers see it.
+@action({ UUID: 'com.videorc.streamdeck.stream-manager-screen' })
+class StreamManagerScreen extends VideorcAction<StreamManagerScreenSettings> {
+  protected renderTitle: TitleRenderer<StreamManagerScreenSettings> = (
+    state,
+    connected,
+    settings
+  ) => streamManagerScreenKeyTitle(state, connected, settings, client.describe?.screens)
+  protected override renderPressed(
+    state: RemoteState | null,
+    settings: StreamManagerScreenSettings
+  ): boolean {
+    return streamManagerScreenKeyLit(state, settings)
+  }
+  protected intentFor(settings: StreamManagerScreenSettings): Record<string, unknown> | null {
+    return streamManagerScreenKeyIntent(settings)
+  }
+  private readonly pressed = new Map<string, KeyDownEvent<StreamManagerScreenSettings>>()
+  private readonly gesture = createHoldGesture({
+    onTap: (id) =>
+      this.release(id, (ev) => this.send(ev.action, this.intentFor(ev.payload.settings))),
+    onHold: (id) =>
+      this.release(id, (ev) =>
+        this.send(ev.action, streamManagerFrontOrCloseIntent(), { confirm: true })
+      )
+  })
+  private release(
+    id: string,
+    act: (ev: KeyDownEvent<StreamManagerScreenSettings>) => Promise<void>
+  ): void {
+    const ev = this.pressed.get(id)
+    this.pressed.delete(id)
+    if (ev) void act(ev)
+  }
+  override async onKeyDown(ev: KeyDownEvent<StreamManagerScreenSettings>): Promise<void> {
+    if (!client.connected) {
+      await ev.action.showAlert()
+      return
+    }
+    this.pressed.set(ev.action.id, ev)
+    this.gesture.down(ev.action.id)
+  }
+  override onKeyUp(ev: KeyUpEvent<StreamManagerScreenSettings>): void {
+    this.gesture.up(ev.action.id)
+  }
+  override onWillDisappear(ev: WillDisappearEvent<StreamManagerScreenSettings>): void {
+    this.gesture.cancel(ev.action.id)
+    this.pressed.delete(ev.action.id)
+    super.onWillDisappear(ev)
+  }
+  protected override inspectorOptions(): InspectorOption[] {
+    return (client.describe?.screens ?? []).map((screen) => ({
+      value: screen.id,
+      label: screen.name
+    }))
+  }
+}
+
 streamDeck.actions.registerAction(new RecordToggle())
 streamDeck.actions.registerAction(new StreamToggle())
 streamDeck.actions.registerAction(new MicToggle())
@@ -380,6 +455,7 @@ streamDeck.actions.registerAction(new TakeoverToggle())
 streamDeck.actions.registerAction(new BannerToggle())
 streamDeck.actions.registerAction(new SoundPlay())
 streamDeck.actions.registerAction(new WindowFront())
+streamDeck.actions.registerAction(new StreamManagerScreen())
 
 client.start()
 void streamDeck.connect()

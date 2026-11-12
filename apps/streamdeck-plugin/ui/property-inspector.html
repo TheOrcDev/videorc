@@ -1,7 +1,8 @@
 <!doctype html>
 <!--
-  Shared property inspector for the six setting-backed Videorc actions
-  (saved-scene, scene-apply, takeover-toggle, banner-toggle, sound-play, window-front). No external dependencies:
+  Shared property inspector for the seven setting-backed Videorc actions
+  (saved-scene, scene-apply, takeover-toggle, banner-toggle, sound-play, window-front,
+  stream-manager-screen). No external dependencies:
   it speaks the Stream Deck property-inspector WebSocket protocol directly
   and asks the plugin (sendToPlugin) for live options from Videorc's
   remote.state and remote.describe projections.
@@ -46,61 +47,66 @@
         margin: 8px 0 0;
         color: #969696;
       }
+      .field + .field {
+        margin-top: 10px;
+      }
       .hidden {
         display: none;
       }
     </style>
   </head>
   <body>
-    <label id="field-label" for="value-select"></label>
-    <select id="value-select" class="hidden"></select>
-    <input id="value-input" class="hidden" type="text" autocomplete="off" spellcheck="false" />
+    <div id="fields"></div>
     <p class="hint" id="hint"></p>
 
     <script>
-      // Per-action field wiring: which settings key this inspector edits.
-      const FIELDS = {
+      // Per-action wiring: which settings keys this inspector edits. Every
+      // field of one action picks from the same live options.
+      const ACTIONS = {
         'com.videorc.streamdeck.saved-scene': {
-          key: 'sceneId',
-          label: 'Scene',
+          fields: [{ key: 'sceneId', label: 'Scene' }],
           hint: 'Saved scenes from Videorc, in library order.'
         },
         'com.videorc.streamdeck.scene-apply': {
-          key: 'layoutPreset',
-          label: 'Layout preset',
+          fields: [{ key: 'layoutPreset', label: 'Layout preset' }],
           hint: 'Presets come from Videorc while it is running.'
         },
         'com.videorc.streamdeck.takeover-toggle': {
-          key: 'assetId',
-          label: 'Takeover',
+          fields: [{ key: 'assetId', label: 'Takeover' }],
           hint: 'Your saved takeover screens (BRB, starting soon).'
         },
         'com.videorc.streamdeck.banner-toggle': {
-          key: 'bannerId',
-          label: 'Banner',
+          fields: [{ key: 'bannerId', label: 'Banner' }],
           hint: 'Your banners from Assets → Banners in Videorc.'
         },
         'com.videorc.streamdeck.sound-play': {
-          key: 'soundId',
-          label: 'Sound',
+          fields: [{ key: 'soundId', label: 'Sound' }],
           hint: 'Your sounds from Assets → Sounds in Videorc.'
         },
         'com.videorc.streamdeck.window-front': {
-          key: 'window',
-          label: 'Window',
+          fields: [{ key: 'window', label: 'Window' }],
           hint: 'Which window the key brings to the front.'
+        },
+        'com.videorc.streamdeck.stream-manager-screen': {
+          fields: [
+            { key: 'presentingScreen', label: 'Presenting screen' },
+            { key: 'monitorScreen', label: 'Monitor screen' }
+          ],
+          hint:
+            'The Presenting screen is the one viewers see. The Monitor screen is where ' +
+            'you read chat. A tap moves the Stream Manager to the other screen. Hold the ' +
+            'key to bring it to the front where it is, or to close it when you are using it.'
         }
       }
 
       let websocket = null
       let pluginUUID = null
       let actionUUID = null
-      let field = null
-      let currentValue = ''
+      let action = null
+      let settings = {}
+      const controls = []
 
-      const labelEl = document.getElementById('field-label')
-      const selectEl = document.getElementById('value-select')
-      const inputEl = document.getElementById('value-input')
+      const fieldsEl = document.getElementById('fields')
       const hintEl = document.getElementById('hint')
 
       function send(payload) {
@@ -109,44 +115,73 @@
         }
       }
 
-      function saveValue(value) {
-        currentValue = value
-        const settings = {}
-        settings[field.key] = value
+      function saveValue(key, value) {
+        settings = { ...settings, [key]: value }
         send({ event: 'setSettings', context: pluginUUID, payload: settings })
       }
 
+      function valueOf(key) {
+        return String(settings[key] ?? '')
+      }
+
+      function buildFields() {
+        fieldsEl.innerHTML = ''
+        controls.length = 0
+        action.fields.forEach((field, index) => {
+          const wrapper = document.createElement('div')
+          wrapper.className = 'field'
+          const label = document.createElement('label')
+          label.htmlFor = 'value-select-' + index
+          label.textContent = field.label
+          const select = document.createElement('select')
+          select.id = 'value-select-' + index
+          select.className = 'hidden'
+          const input = document.createElement('input')
+          input.type = 'text'
+          input.autocomplete = 'off'
+          input.spellcheck = false
+          input.className = 'hidden'
+          select.addEventListener('change', () => saveValue(field.key, select.value))
+          input.addEventListener('change', () => saveValue(field.key, input.value.trim()))
+          wrapper.append(label, select, input)
+          fieldsEl.appendChild(wrapper)
+          controls.push({ field, select, input })
+        })
+      }
+
+      function showValues() {
+        for (const { field, select, input } of controls) {
+          select.value = valueOf(field.key)
+          input.value = valueOf(field.key)
+        }
+      }
+
       function renderOptions(options, connected) {
-        if (Array.isArray(options) && options.length > 0) {
-          selectEl.classList.remove('hidden')
-          inputEl.classList.add('hidden')
-          selectEl.innerHTML = ''
+        const live = Array.isArray(options) && options.length > 0
+        for (const { select, input } of controls) {
+          select.classList.toggle('hidden', !live)
+          input.classList.toggle('hidden', live)
+          if (!live) continue
+          select.innerHTML = ''
           const placeholder = document.createElement('option')
           placeholder.value = ''
           placeholder.textContent = 'Choose…'
-          selectEl.appendChild(placeholder)
+          select.appendChild(placeholder)
           for (const option of options) {
             const el = document.createElement('option')
             el.value = option.value
             el.textContent = option.label
-            selectEl.appendChild(el)
+            select.appendChild(el)
           }
-          selectEl.value = currentValue
-          hintEl.textContent = field.hint
-          return
         }
+        showValues()
         // No live options (Videorc closed or Remote Control off): keep the
         // key configurable with a plain text value instead of a dead end.
-        selectEl.classList.add('hidden')
-        inputEl.classList.remove('hidden')
-        inputEl.value = currentValue
-        hintEl.textContent = connected
-          ? field.hint
-          : 'Open Videorc and enable Settings → Remote control to pick from a list.'
+        hintEl.textContent =
+          live || connected
+            ? action.hint
+            : 'Open Videorc and enable Settings → Remote control to pick from a list.'
       }
-
-      selectEl.addEventListener('change', () => saveValue(selectEl.value))
-      inputEl.addEventListener('change', () => saveValue(inputEl.value.trim()))
 
       // Stream Deck calls this global with connection + action context.
       window.connectElgatoStreamDeckSocket = function (
@@ -159,9 +194,9 @@
         pluginUUID = inPropertyInspectorUUID
         const actionInfo = JSON.parse(inActionInfo)
         actionUUID = actionInfo.action
-        field = FIELDS[actionUUID] || { key: 'value', label: 'Value', hint: '' }
-        currentValue = String((actionInfo.payload?.settings ?? {})[field.key] ?? '')
-        labelEl.textContent = field.label
+        action = ACTIONS[actionUUID] || { fields: [{ key: 'value', label: 'Value' }], hint: '' }
+        settings = { ...(actionInfo.payload?.settings ?? {}) }
+        buildFields()
         renderOptions([], false)
 
         websocket = new WebSocket('ws://127.0.0.1:' + inPort)
@@ -193,10 +228,8 @@
             return
           }
           if (message.event === 'didReceiveSettings') {
-            const settings = message.payload?.settings ?? {}
-            currentValue = String(settings[field.key] ?? '')
-            selectEl.value = currentValue
-            inputEl.value = currentValue
+            settings = { ...(message.payload?.settings ?? {}) }
+            showValues()
           }
         }
       }

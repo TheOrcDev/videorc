@@ -40,3 +40,39 @@ export function buddyKeyLit(state) {
 export function buddyKeyIntent() {
     return { kind: 'buddyLiveToggle' };
 }
+function shownOn(state, screenId) {
+    const place = state?.streamManager;
+    return Boolean(screenId && state?.windows?.comments && place?.visible && place.screenId === screenId);
+}
+/** On (state 1) while the window shows on the Presenting screen and Hide
+ * from stream is off: viewers see it. */
+export function streamManagerScreenKeyLit(state, settings) {
+    return shownOn(state, settings.presentingScreen) && !state?.streamManager?.hiddenFromStream;
+}
+/** Null (the key alerts) until both screens are picked. */
+export function streamManagerScreenKeyIntent(settings) {
+    const { presentingScreen, monitorScreen } = settings;
+    if (!presentingScreen || !monitorScreen || presentingScreen === monitorScreen)
+        return null;
+    return { kind: 'streamManagerScreenSwap', presentingScreen, monitorScreen };
+}
+/** A hold: to the front where it is, or closed when it has the focus. */
+export function streamManagerFrontOrCloseIntent() {
+    return { kind: 'streamManagerFrontOrClose' };
+}
+/** `screens`: the connected screens from describe, once Videorc sent them. */
+export function streamManagerScreenKeyTitle(state, connected, settings, screens) {
+    if (!connected)
+        return 'Videorc\noffline';
+    const picked = [settings.presentingScreen, settings.monitorScreen];
+    const isConnected = (id) => Boolean(id) && (!screens || screens.some((screen) => screen.id === id));
+    if (!picked.every(isConnected) || picked[0] === picked[1])
+        return 'Pick\nscreens';
+    if (shownOn(state, settings.presentingScreen)) {
+        return state?.streamManager?.hiddenFromStream ? 'Hidden' : 'Present';
+    }
+    if (shownOn(state, settings.monitorScreen))
+        return 'Monitor';
+    const place = state?.streamManager;
+    return state?.windows?.comments && place?.visible && place.screenId ? 'Away' : 'Closed';
+}
