@@ -3034,11 +3034,14 @@ mod runtime {
                         && let Some(input) = primary_live_background(committed)
                     {
                         let mut input = input.clone();
+                        // The guard takes no reading while a takeover
+                        // screen stands in for the scene.
                         input.tick = crate::live_background::LiveBackgroundTick::new(
                             frame_started_at,
                             frame_interval,
                             live_missed_deadline,
-                        );
+                        )
+                        .under_takeover(committed.takeover_active);
                         sources.push(WindowsD3d11CompositionSource::LiveBackground {
                             source_id,
                             input: Box::new(input),
