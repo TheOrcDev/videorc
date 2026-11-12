@@ -26,7 +26,9 @@
 //! complete long before, since the compose on the same queue already waited)
 //! and the tick's missed-deadline flag from the render loop (it takes no
 //! reading while a takeover screen is up). Full → Half re-renders at half the
-//! internal size; Still shows the poster with reason `gpu-budget`.
+//! internal size; Still shows the poster with reason `gpu-budget`. The guard
+//! climbs back one level after a quiet period; the next `render` then draws
+//! again and `ensure_targets` re-creates what Still dropped.
 
 #![cfg(target_os = "macos")]
 
@@ -2291,7 +2293,8 @@ impl LiveBackgroundMetalRenderer {
     }
 
     /// The live background went away: free every texture and pipeline and
-    /// report 0/0. The guard keeps its level for that background.
+    /// report 0/0. The guard keeps its level and its wait for that
+    /// background.
     pub fn release(&mut self) {
         if self.holds_resources() {
             self.drop_resources();
@@ -3053,7 +3056,8 @@ mod tests {
     }
 
     /// The guard steps Full → Half → Still on slow timings, the frame says
-    /// Half in between, and Still shows the poster with `gpu-budget`.
+    /// Half in between, and Still shows the poster with `gpu-budget`. After
+    /// a quiet minute the renderer draws again at Half.
     #[test]
     fn the_guard_steps_to_half_then_still_on_slow_timings() {
         let Some((mut renderer, board)) = renderer() else {
@@ -3100,7 +3104,29 @@ mod tests {
         assert_eq!(scratch, 0, "a still holds no scratch");
         assert!(programs > 0, "the pipelines stay cached for the run");
         assert_eq!(renderer.guard_level(), GuardLevel::Still);
-        // Half rendered at half the internal size.
+        // A quiet minute later (a tick a second, on time) the guard climbs
+        // one level and the renderer draws again: the targets it dropped at
+        // Still are back and status says Half, with no reason.
+        renderer.inject_gpu_ms(Some(0.5));
+        let quiet_from = start + Duration::from_secs(5);
+        let mut resumed = None;
+        for second in 0..70_u32 {
+            input.tick = LiveBackgroundTick::new(
+                quiet_from + Duration::from_secs(1) * second,
+                interval,
+                false,
+            );
+            resumed = renderer
+                .render(&input, (640, 360), None)
+                .map(|frame| frame.rendering);
+        }
+        assert_eq!(resumed, Some(LiveBackgroundRendering::Half));
+        assert_eq!(renderer.guard_level(), GuardLevel::Half);
+        let (status, _, scratch) = board.snapshot();
+        let status = status.expect("status reported");
+        assert_eq!(status.rendering, LiveBackgroundRendering::Half);
+        assert_eq!(status.reason, None);
+        assert!(scratch > 0, "the scratch released at Still is back");
         renderer.release();
         assert_eq!(renderer.resources(), (0, 0));
         assert_eq!(board.snapshot().1, 0);

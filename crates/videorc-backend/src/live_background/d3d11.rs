@@ -833,7 +833,8 @@ impl LiveBackgroundD3d11Renderer {
     }
 
     /// The live background went away: free every texture, shader and query
-    /// and report 0/0. The guard keeps its level for that background.
+    /// and report 0/0. The guard keeps its level and its wait for that
+    /// background.
     pub fn release(&mut self) {
         self.pixels.clear();
         self.vertices.clear();
@@ -1899,6 +1900,23 @@ mod tests {
             .unwrap();
         let bgra = read_bgra(&renderer, &still);
         assert_eq!(&bgra[..4], &[0, 0, 255, 255], "the poster, not the shader");
+        // A quiet minute later (a tick a second, on time) the guard climbs
+        // one level and the shader draws again into the same live frame.
+        renderer.inject_gpu_ms(Some(0.5));
+        let quiet_from = start + Duration::from_secs(5);
+        for second in 0..70_u32 {
+            input.tick = LiveBackgroundTick::new(
+                quiet_from + Duration::from_secs(1) * second,
+                interval,
+                false,
+            );
+            renderer
+                .render(&input, (320, 180), Some(poster), None)
+                .expect("a live frame every time");
+        }
+        let status = board.snapshot().0.unwrap();
+        assert_eq!(status.rendering, LiveBackgroundRendering::Half);
+        assert_eq!(status.reason, None);
         renderer.release();
         assert_eq!(renderer.resources(), (0, 0));
         assert_eq!(board.snapshot().1, 0);

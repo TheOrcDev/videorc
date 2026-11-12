@@ -157,8 +157,10 @@ pub const LEGACY_GRAPH_NOTICE: &str =
 pub const GPU_BUDGET_NOTICE: &str =
     "Your graphics card is busy, so the live background is showing a still frame.";
 
-/// Whether a status change is the guard's first fall back to the poster (say
-/// it once, not on every status refresh).
+/// Whether a status change is an entry into the guard's poster: say it once
+/// per entry, not on every status refresh. The guard climbs back by itself
+/// (`guard.rs`), so a later fall is a new entry and is said again; its
+/// doubling wait keeps that to six an hour at most.
 pub fn entered_gpu_budget_still(
     previous: Option<&LiveBackgroundStatus>,
     next: Option<&LiveBackgroundStatus>,

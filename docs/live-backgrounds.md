@@ -215,14 +215,23 @@ interval and checks the compositor's missed deadlines:
   drops to half its internal size.
 - Over again: it shows the poster (reason `gpu-budget`, plus one Info health
   event).
-- It never climbs back for the same background (a new look or motion
-  included). A different background starts again at full size, since the ten
-  cost very different amounts (`live_background/guard.rs`).
+- A step down is not for good. After a quiet minute the guard climbs one
+  level (poster to half size, or half size to full) and judges the
+  background again; the next level takes another quiet minute. If it steps
+  down again within ten minutes of a climb, the next wait doubles (1, 2, 4,
+  8, then 10 minutes); once a climb has held for ten minutes the wait is one
+  minute again. Only time the guard is watching counts: a takeover screen,
+  the 2 s after one and time the background is off the screen add nothing.
+  A climb also waits for a 2 s window in which the compositor kept its
+  deadlines. The "graphics card is busy" event is sent once each time the
+  background lands on the poster.
+- A new look or motion keeps the level and the wait. A different background
+  starts again at full size, since the ten cost very different amounts
+  (`live_background/guard.rs`).
 - It takes no reading while a takeover screen is up, nor for 2 s after one
   comes off, and the level it had stays. A takeover uploads its picture on
   every leg and takes the scene's sources out of the frame and back; the late
-  ticks around that are not the background's. Judged on them, a background
-  stayed on its poster after the takeover until another one was picked.
+  ticks around that are not the background's.
 
 ## For developers
 

@@ -1,18 +1,33 @@
 //! The budget guard (plan 190 "Budget guard"): a live background may never
 //! make the compositor miss frames. Each 2 s window it checks the background's
 //! own render time and the compositor's missed deadlines; over budget, it
-//! steps Full → Half → Still. It never climbs back for the same background
-//! (a new look or motion included); a different background starts at Full,
-//! since the five cost very different amounts.
+//! steps Full → Half → Still. A different background starts at Full, since
+//! the ten cost very different amounts.
 //!
-//! Because a step is for good, the guard judges only what the background
-//! costs behind the scene. It takes no reading while a takeover screen is up,
-//! nor for [`GUARD_SETTLE_AFTER_TAKEOVER`] after one comes off. A takeover
-//! going up uploads its picture on every leg and takes the scene's sources
-//! out of the frame; coming off, it brings them back. The late ticks around
-//! that are not the background's, and judged on them a background stayed on
-//! its poster after the takeover until another one was picked (owner report,
-//! 2026-11-12). The level it had before the takeover stays.
+//! A step down is not for good (owner decision, 2026-11-12, reversing plan
+//! 190's "never climbs back"). The owner's health log showed the poster 15
+//! times in three weeks, each after a passing load: an update download, a
+//! session stopping and its camera restarting, a takeover going up. So after
+//! a step the guard watches for a quiet period ([`GUARD_QUIET`]), climbs ONE
+//! level and judges the background again as if it had just been picked. If
+//! it steps down again soon after a climb the load is still there, and the
+//! next wait is twice as long, up to [`GUARD_QUIET_MAX`]; once a climb has
+//! held for [`GUARD_HELD`] the wait is short again.
+//!
+//! "Quiet" is watched time, not wall time. The guard's clock only runs
+//! between consecutive readings: a takeover screen, the settle after one and
+//! a gap in the ticks add nothing. At Still nothing is drawn, so there is no
+//! render time to read and the quiet period is that clock alone. At either
+//! level the climb also waits for a window in which the compositor kept its
+//! deadlines, so it never climbs into a compositor that is already late.
+//!
+//! The guard judges only what the background costs behind the scene. It
+//! takes no reading while a takeover screen is up, nor for
+//! [`GUARD_SETTLE_AFTER_TAKEOVER`] after one comes off. A takeover going up
+//! uploads its picture on every leg and takes the scene's sources out of the
+//! frame; coming off, it brings them back. The late ticks around that are
+//! not the background's (owner report, 2026-11-12). The level it had before
+//! the takeover stays.
 
 use std::time::{Duration, Instant};
 
@@ -30,6 +45,24 @@ pub const GUARD_MIN_SAMPLES: usize = 10;
 /// After a takeover screen comes off, the guard waits this long before it
 /// opens a window again.
 pub const GUARD_SETTLE_AFTER_TAKEOVER: Duration = GUARD_WINDOW;
+/// How long the guard watches a stepped-down background before it climbs one
+/// level. A minute outlasts the loads that stepped it down in the owner's
+/// log (two of them were 35 s apart: a session stopping, then its compositor
+/// and camera coming back), and is short enough that the motion is back
+/// about a minute after the load has gone (two from the poster to full size).
+pub const GUARD_QUIET: Duration = Duration::from_secs(60);
+/// The longest quiet period. Under a load that does not pass, each try costs
+/// one window at the higher level and, from Half, one "graphics card is
+/// busy" notice: at most six an hour.
+pub const GUARD_QUIET_MAX: Duration = Duration::from_secs(600);
+/// A step down this long after the last climb is not a relapse: the climb
+/// was right, the load is new, and the wait starts at [`GUARD_QUIET`] again.
+/// Ten minutes is the longest wait itself, so a climb is always judged over
+/// at least the time it took to earn.
+pub const GUARD_HELD: Duration = Duration::from_secs(600);
+/// Relapses past this many change nothing ([`GUARD_QUIET`] × 2⁴ is already
+/// over [`GUARD_QUIET_MAX`]); the count stops there.
+const GUARD_MAX_DOUBLINGS: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GuardLevel {
@@ -50,6 +83,17 @@ pub struct LiveBackgroundGuard {
     last_p95_ms: Option<f64>,
     /// No reading before this instant: a takeover screen was up.
     settle_until: Option<Instant>,
+    /// How long the guard has watched this background: the time between
+    /// consecutive readings.
+    watched: Duration,
+    /// The last reading, while nothing has interrupted the watch since.
+    last_reading_at: Option<Instant>,
+    /// The watched time at which a stepped-down background may climb.
+    climb_at: Option<Duration>,
+    /// The watched time of the last climb, until a step down has judged it.
+    climbed_at: Option<Duration>,
+    /// Relapses in a row; each doubles the quiet period.
+    relapses: u32,
 }
 
 impl LiveBackgroundGuard {
@@ -62,7 +106,7 @@ impl LiveBackgroundGuard {
     }
 
     /// Judge `id` from now on: a different background than the last one
-    /// starts again at Full with an empty window.
+    /// starts again at Full with an empty window and no wait.
     pub fn follow(&mut self, id: LiveBackgroundId) {
         if self.background != Some(id) {
             *self = Self {
@@ -92,9 +136,11 @@ impl LiveBackgroundGuard {
             self.samples.clear();
             self.missed = 0;
             self.settle_until = Some(tick.at + GUARD_SETTLE_AFTER_TAKEOVER);
+            self.last_reading_at = None;
             return None;
         }
         if self.settle_until.is_some_and(|until| tick.at < until) {
+            self.last_reading_at = None;
             return None;
         }
         self.settle_until = None;
@@ -108,7 +154,8 @@ impl LiveBackgroundGuard {
 
     /// Feed one frame: its render time (`None` when the API can't time it)
     /// and whether the compositor missed this frame's deadline. Returns the
-    /// new level when it changes.
+    /// new level when it changes: a step down at the end of a window over
+    /// budget, or a climb at the end of a quiet one.
     pub fn record(
         &mut self,
         now: Instant,
@@ -116,11 +163,18 @@ impl LiveBackgroundGuard {
         missed_deadline: bool,
         frame_interval: Duration,
     ) -> Option<GuardLevel> {
-        if self.level == GuardLevel::Still {
-            return None;
+        // The watch clock: a gap longer than a window is time nobody watched.
+        if let Some(previous) = self.last_reading_at.replace(now) {
+            let gap = now.saturating_duration_since(previous);
+            if gap <= GUARD_WINDOW {
+                self.watched += gap;
+            }
         }
         let started = *self.window_started.get_or_insert(now);
-        if let Some(ms) = render_ms.filter(|ms| ms.is_finite() && *ms >= 0.0) {
+        // At Still nothing is drawn: a time fed there is no reading.
+        if self.level != GuardLevel::Still
+            && let Some(ms) = render_ms.filter(|ms| ms.is_finite() && *ms >= 0.0)
+        {
             self.samples.push(ms);
         }
         if missed_deadline {
@@ -129,18 +183,57 @@ impl LiveBackgroundGuard {
         if now.saturating_duration_since(started) < GUARD_WINDOW {
             return None;
         }
-        let verdict = self.judge(frame_interval);
+        let over_budget = self.level != GuardLevel::Still && self.judge(frame_interval);
+        let compositor_on_time = self.missed < GUARD_MISSES_PER_WINDOW;
         self.window_started = Some(now);
         self.samples.clear();
         self.missed = 0;
-        if !verdict {
-            return None;
+        if over_budget {
+            return Some(self.step_down());
+        }
+        let quiet_long_enough = self.climb_at.is_some_and(|at| self.watched >= at);
+        (quiet_long_enough && compositor_on_time).then(|| self.climb())
+    }
+
+    /// One level down, and the quiet period before the next climb.
+    fn step_down(&mut self) -> GuardLevel {
+        match self.climbed_at.take() {
+            // Down again soon after a climb: the load is still there.
+            Some(climbed_at) if self.watched.saturating_sub(climbed_at) < GUARD_HELD => {
+                self.relapses = (self.relapses + 1).min(GUARD_MAX_DOUBLINGS);
+            }
+            // The climb held: this is a new load, and the wait is short again.
+            Some(_) => self.relapses = 0,
+            // A second step with no climb between (Full, Half, Still in a
+            // row) is the same load: the wait it has stays.
+            None => {}
         }
         self.level = match self.level {
             GuardLevel::Full => GuardLevel::Half,
             GuardLevel::Half | GuardLevel::Still => GuardLevel::Still,
         };
-        Some(self.level)
+        self.climb_at = Some(self.watched + self.quiet_period());
+        self.level
+    }
+
+    /// One level up. The next level, if there is one, takes another quiet
+    /// period: never two levels in one.
+    fn climb(&mut self) -> GuardLevel {
+        self.level = match self.level {
+            GuardLevel::Still => GuardLevel::Half,
+            GuardLevel::Half | GuardLevel::Full => GuardLevel::Full,
+        };
+        self.climbed_at = Some(self.watched);
+        self.climb_at =
+            (self.level != GuardLevel::Full).then(|| self.watched + self.quiet_period());
+        self.level
+    }
+
+    /// The wait before the next climb: [`GUARD_QUIET`], doubled per relapse.
+    fn quiet_period(&self) -> Duration {
+        GUARD_QUIET
+            .saturating_mul(1 << self.relapses.min(GUARD_MAX_DOUBLINGS))
+            .min(GUARD_QUIET_MAX)
     }
 
     fn judge(&mut self, frame_interval: Duration) -> bool {
@@ -191,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn an_expensive_background_steps_down_and_never_climbs_back() {
+    fn an_expensive_background_steps_down_to_half_then_the_poster() {
         let mut guard = LiveBackgroundGuard::new();
         let start = Instant::now();
         // 20 % of a 60 fps frame is 3.33 ms.
@@ -217,7 +310,7 @@ mod tests {
         run_window(&mut guard, start, 4.0, false);
         run_window(&mut guard, start + Duration::from_secs(3), 4.0, false);
         assert_eq!(guard.level(), GuardLevel::Still);
-        // The same background (any look or motion) stays on its poster.
+        // The same background (any look or motion) keeps the level it has.
         guard.follow(LiveBackgroundId::PlasmaWave);
         assert_eq!(guard.level(), GuardLevel::Still);
         guard.follow(LiveBackgroundId::LiquidChrome);
@@ -344,5 +437,231 @@ mod tests {
             assert_eq!(guard.record(start + SIXTY * frame, None, true, SIXTY), None);
         }
         assert_eq!(guard.level(), GuardLevel::Full);
+    }
+
+    // Recovery (owner decision 2026-11-12): the tests below drive the guard
+    // on a 10 fps loop, where over budget is above 20 ms a frame.
+
+    const TEN_FPS: Duration = Duration::from_millis(100);
+    const SLOW: f64 = 30.0;
+    const CHEAP: f64 = 5.0;
+
+    /// A guard on a 10 fps loop and every level change it made, by the
+    /// second it happened at.
+    struct Loop {
+        guard: LiveBackgroundGuard,
+        start: Instant,
+        ticks: u32,
+        changes: Vec<(f64, GuardLevel)>,
+    }
+
+    impl Loop {
+        fn new() -> Self {
+            Self {
+                guard: LiveBackgroundGuard::new(),
+                start: Instant::now(),
+                ticks: 0,
+                changes: Vec::new(),
+            }
+        }
+
+        fn seconds(&self) -> f64 {
+            f64::from(self.ticks) / 10.0
+        }
+
+        fn tick(&mut self, ms: f64, missed: bool, takeover: bool) {
+            let at = self.start + TEN_FPS * self.ticks;
+            let tick = LiveBackgroundTick::new(at, TEN_FPS, missed).under_takeover(takeover);
+            if let Some(level) = self.guard.observe(&tick, Some(ms)) {
+                self.changes.push((self.seconds(), level));
+            }
+            self.ticks += 1;
+        }
+
+        /// Run until the loop's clock reads `second`.
+        fn run_to(&mut self, second: u32, ms: f64) {
+            while self.ticks <= second * 10 {
+                self.tick(ms, false, false);
+            }
+        }
+
+        /// The same with every deadline missed.
+        fn run_late_to(&mut self, second: u32, ms: f64) {
+            while self.ticks <= second * 10 {
+                self.tick(ms, true, false);
+            }
+        }
+
+        fn takeover_to(&mut self, second: u32) {
+            while self.ticks <= second * 10 {
+                self.tick(SLOW, true, true);
+            }
+        }
+
+        /// Nobody feeds the guard until `second`.
+        fn skip_to(&mut self, second: u32) {
+            self.ticks = second * 10;
+        }
+    }
+
+    #[test]
+    fn a_stepped_down_background_climbs_one_level_after_a_quiet_minute() {
+        let mut run = Loop::new();
+        run.run_to(2, SLOW);
+        assert_eq!(run.changes, [(2.0, GuardLevel::Half)]);
+        // 59.9 s of cheap frames: not yet.
+        run.run_to(61, CHEAP);
+        assert_eq!(run.changes.len(), 1);
+        run.run_to(300, CHEAP);
+        assert_eq!(
+            run.changes,
+            [(2.0, GuardLevel::Half), (62.0, GuardLevel::Full)],
+            "one climb, a minute after the step, and it holds"
+        );
+    }
+
+    /// Still → Half → Full, end to end: one level per quiet period, never
+    /// two, and a time fed at Still (nothing is drawn there) is no reading.
+    #[test]
+    fn the_poster_climbs_to_half_then_to_full_one_level_per_quiet_period() {
+        let mut run = Loop::new();
+        run.run_to(4, SLOW);
+        assert_eq!(
+            run.changes,
+            [(2.0, GuardLevel::Half), (4.0, GuardLevel::Still)]
+        );
+        run.run_to(64, SLOW);
+        assert_eq!(run.changes.last(), Some(&(64.0, GuardLevel::Half)));
+        run.run_to(300, CHEAP);
+        assert_eq!(
+            run.changes[2..],
+            [(64.0, GuardLevel::Half), (124.0, GuardLevel::Full)]
+        );
+    }
+
+    #[test]
+    fn a_relapse_doubles_the_wait_up_to_ten_minutes() {
+        let mut run = Loop::new();
+        // Over budget the whole time: every climb to Half is back on the
+        // poster one window later.
+        run.run_to(2200, SLOW);
+        let posters: Vec<f64> = run
+            .changes
+            .iter()
+            .filter(|(_, level)| *level == GuardLevel::Still)
+            .map(|(at, _)| *at)
+            .collect();
+        let climbs: Vec<f64> = run
+            .changes
+            .iter()
+            .filter(|(_, level)| *level == GuardLevel::Half)
+            .map(|(at, _)| *at)
+            .skip(1) // the first Half is the step down from Full
+            .collect();
+        let waits: Vec<f64> = posters
+            .iter()
+            .zip(&climbs)
+            .map(|(poster, climb)| climb - poster)
+            .collect();
+        assert_eq!(waits, [60.0, 120.0, 240.0, 480.0, 600.0, 600.0]);
+        assert!(
+            run.changes
+                .iter()
+                .all(|(_, level)| *level != GuardLevel::Full),
+            "it never reached Full: {:?}",
+            run.changes
+        );
+    }
+
+    #[test]
+    fn a_climb_that_held_ten_minutes_makes_the_wait_short_again() {
+        let mut run = Loop::new();
+        // Two relapses: the wait is four minutes.
+        run.run_to(188, SLOW);
+        assert_eq!(run.changes.last(), Some(&(188.0, GuardLevel::Still)));
+        run.run_to(1400, CHEAP);
+        assert_eq!(
+            run.changes[6..],
+            [(428.0, GuardLevel::Half), (668.0, GuardLevel::Full)],
+            "four minutes a level"
+        );
+        // Full has held for over ten minutes. A new load steps it down...
+        run.run_to(1402, SLOW);
+        assert_eq!(run.changes.last(), Some(&(1402.0, GuardLevel::Half)));
+        // ...and it is back a minute later, not eight.
+        run.run_to(1500, CHEAP);
+        assert_eq!(run.changes.last(), Some(&(1462.0, GuardLevel::Full)));
+    }
+
+    #[test]
+    fn a_step_down_inside_ten_minutes_of_a_climb_is_a_relapse() {
+        let mut run = Loop::new();
+        run.run_to(2, SLOW);
+        run.run_to(400, CHEAP);
+        assert_eq!(run.changes.last(), Some(&(62.0, GuardLevel::Full)));
+        // 5 min 40 s after the climb: down again, and the wait is two minutes.
+        run.run_to(402, SLOW);
+        assert_eq!(run.changes.last(), Some(&(402.0, GuardLevel::Half)));
+        run.run_to(600, CHEAP);
+        assert_eq!(run.changes.last(), Some(&(522.0, GuardLevel::Full)));
+    }
+
+    #[test]
+    fn a_takeover_stops_the_quiet_clock_and_nothing_climbs_under_it() {
+        let mut run = Loop::new();
+        run.run_to(2, SLOW);
+        run.run_to(30, CHEAP);
+        // 100 s under a takeover: far past the minute, and no climb.
+        run.takeover_to(130);
+        assert_eq!(run.changes, [(2.0, GuardLevel::Half)]);
+        // The 32 s it still owed start after the 2 s settle.
+        run.run_to(163, CHEAP);
+        assert_eq!(run.changes.len(), 1);
+        run.run_to(300, CHEAP);
+        assert_eq!(
+            run.changes,
+            [(2.0, GuardLevel::Half), (164.0, GuardLevel::Full)]
+        );
+    }
+
+    #[test]
+    fn the_poster_waits_for_a_compositor_that_keeps_its_deadlines() {
+        let mut run = Loop::new();
+        run.run_to(4, SLOW);
+        // The minute passes, but every tick is late: no climb into that.
+        run.run_late_to(100, CHEAP);
+        assert_eq!(run.changes.last(), Some(&(4.0, GuardLevel::Still)));
+        // The first window on time, and it climbs.
+        run.run_to(110, CHEAP);
+        assert_eq!(run.changes.last(), Some(&(102.0, GuardLevel::Half)));
+    }
+
+    #[test]
+    fn time_nobody_fed_the_guard_is_not_quiet_time() {
+        let mut run = Loop::new();
+        run.run_to(2, SLOW);
+        run.run_to(10, CHEAP);
+        // The background is off the screen for a quarter of an hour.
+        run.skip_to(1000);
+        run.run_to(1051, CHEAP);
+        assert_eq!(run.changes, [(2.0, GuardLevel::Half)]);
+        run.run_to(1100, CHEAP);
+        assert_eq!(run.changes.last(), Some(&(1052.0, GuardLevel::Full)));
+    }
+
+    #[test]
+    fn another_background_starts_at_full_with_no_wait_left_over() {
+        let mut run = Loop::new();
+        run.guard.follow(LiveBackgroundId::PlasmaWave);
+        run.run_to(188, SLOW);
+        assert_eq!(run.guard.level(), GuardLevel::Still);
+        run.guard.follow(LiveBackgroundId::LiquidChrome);
+        assert_eq!(run.guard.level(), GuardLevel::Full);
+        // Its first step waits one minute, not PlasmaWave's four.
+        run.skip_to(190);
+        run.run_to(192, SLOW);
+        assert_eq!(run.changes.last(), Some(&(192.0, GuardLevel::Half)));
+        run.run_to(300, CHEAP);
+        assert_eq!(run.changes.last(), Some(&(252.0, GuardLevel::Full)));
     }
 }
