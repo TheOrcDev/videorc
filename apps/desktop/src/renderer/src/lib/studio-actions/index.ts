@@ -61,4 +61,4 @@ export {
   type StudioActionSource
 } from './studio-context'
 export { AGENT_TOOL_COPY, STUDIO_AGENT_TOOLS } from './tools'
-export { windowFront } from './windows'
+export { streamManagerFrontOrClose, streamManagerScreenSwap, windowFront } from './windows'

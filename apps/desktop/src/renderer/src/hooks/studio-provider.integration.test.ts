@@ -3585,6 +3585,116 @@ describe('real StudioProvider lifecycle', () => {
     expect(highlightSets()[2]!.params).toMatchObject({ anchor: 'bottom-left' })
   })
 
+  it('publishes where the Stream Manager is and its screens to the remotes (plan 230)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    // The remote surface publishes once the backend says it is ready.
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({ data: JSON.stringify({ event: 'backend.ready', payload: null }) })
+      }
+      await Promise.resolve()
+    })
+    type Published = {
+      state?: {
+        windows?: { comments?: boolean }
+        streamManager?: { screenId: string | null; visible: boolean; hiddenFromStream: boolean }
+      }
+      describe?: { screens?: unknown; screenMoves?: unknown }
+    }
+    const published = (): Published[] =>
+      backend.sentCommands
+        .filter((command) => command.method === 'remote.surface.publish')
+        .map((command) => command.params as Published)
+    const windowState = (overrides: Record<string, unknown>): Record<string, unknown> => ({
+      open: true,
+      visible: true,
+      bounds: { x: 1920, y: 0, width: 600, height: 800 },
+      windowId: 7,
+      alwaysOnTop: false,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'capture-filter',
+      screenId: '2',
+      screens: [
+        { id: '1', name: 'DELL U2723QE' },
+        { id: '2', name: 'DELL U2311H' }
+      ],
+      screenMoves: 'supported',
+      highlightAnchor: 'bottom-left',
+      protected: false,
+      enabled: true,
+      ...overrides
+    })
+
+    // Main says the window sits on the Monitor screen: remotes read it.
+    await act(async () => emitIpc?.('onCommentsWindowState', windowState({})))
+    await waitForObservation(() =>
+      published().some((p) => p.state?.streamManager?.screenId === '2')
+    )
+    expect(published().at(-1)).toMatchObject({
+      state: {
+        windows: { comments: true },
+        streamManager: { screenId: '2', visible: true, hiddenFromStream: false }
+      },
+      describe: {
+        screens: [
+          { id: '1', name: 'DELL U2723QE' },
+          { id: '2', name: 'DELL U2311H' }
+        ],
+        screenMoves: 'supported'
+      }
+    })
+    // Never its frame or the window's id.
+    expect(JSON.stringify(published().at(-1))).not.toContain('1920')
+    expect(JSON.stringify(published().at(-1))).not.toContain('windowId')
+
+    // On the Presenting screen with Hide from stream on: the key reads Hidden.
+    await act(async () =>
+      emitIpc?.('onCommentsWindowState', windowState({ screenId: '1', hiddenFromStream: true }))
+    )
+    await waitForObservation(
+      () => published().at(-1)?.state?.streamManager?.hiddenFromStream === true
+    )
+    expect(published().at(-1)?.state?.streamManager).toEqual({
+      screenId: '1',
+      visible: true,
+      hiddenFromStream: true
+    })
+
+    // A Wayland session: the key says a tap cannot move the window.
+    await act(async () =>
+      emitIpc?.('onCommentsWindowState', windowState({ screenMoves: 'wayland' }))
+    )
+    await waitForObservation(() => published().at(-1)?.describe?.screenMoves === 'wayland')
+
+    // Minimized: on its screen but not shown.
+    await act(async () =>
+      emitIpc?.('onCommentsWindowState', windowState({ visible: false, screenMoves: 'wayland' }))
+    )
+    await waitForObservation(() => published().at(-1)?.state?.streamManager?.visible === false)
+    expect(published().at(-1)?.state?.streamManager?.screenId).toBe('2')
+  })
+
   it('sends a second card for the vertical leg only when the backend reports one', async () => {
     const backend = new StudioBackend()
     backend.liveChatSnapshot = {

@@ -123,6 +123,16 @@ pub enum RemoteIntent {
     WindowFront {
         window: RemoteWindow,
     },
+    /// The Stream Manager Screen key (plan 230): the Stream Manager to the
+    /// other of its two screens (display ids). It never sets Hide from stream.
+    #[serde(rename_all = "camelCase")]
+    StreamManagerScreenSwap {
+        presenting_screen: String,
+        monitor_screen: String,
+    },
+    /// The same key held down (plan 230): the Stream Manager to the front
+    /// where it is, with the focus, or closed when it already has the focus.
+    StreamManagerFrontOrClose,
     /// Put a chat message on stream. EXPLICIT show — idempotent, never a
     /// toggle: a double tap on a phone must not flash the card off again.
     #[serde(rename_all = "camelCase")]
@@ -145,6 +155,9 @@ pub enum RemoteIntent {
 /// Live-chat message ids are `{platform}:{providerMessageId}`; anything far
 /// longer is not an id we minted.
 pub const REMOTE_MESSAGE_ID_MAX_BYTES: usize = 512;
+
+/// Display ids are decimal numbers; anything longer is not one the OS gave.
+pub const REMOTE_SCREEN_ID_MAX_BYTES: usize = 32;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -175,6 +188,11 @@ impl RemoteIntent {
             // Its own bucket and its own, shorter window (plan 189).
             Self::SoundPlay { .. } | Self::SoundStop { .. } => "sound",
             Self::WindowFront { .. } => "window",
+            // Its own bucket: a bounce must not move the window back at once.
+            // A tap and a hold are one key: one bucket.
+            Self::StreamManagerScreenSwap { .. } | Self::StreamManagerFrontOrClose => {
+                "stream-manager-screen"
+            }
             Self::CommentHighlight { .. } | Self::CommentHighlightClear => "highlight",
             Self::ClipMark { .. } => "clip",
         }
@@ -253,6 +271,10 @@ impl RemoteIntent {
             {
                 Err("commentHighlight needs a valid messageId.".to_string())
             }
+            Self::StreamManagerScreenSwap {
+                presenting_screen,
+                monitor_screen,
+            } => validate_stream_manager_screens(presenting_screen, monitor_screen),
             Self::ClipMark {
                 seconds: Some(seconds),
             } if !crate::replay_buffer::CLIP_LENGTHS.contains(seconds) => {
@@ -261,6 +283,17 @@ impl RemoteIntent {
             _ => Ok(()),
         }
     }
+}
+
+fn validate_stream_manager_screens(presenting: &str, monitor: &str) -> Result<(), String> {
+    let bad = |id: &str| id.trim().is_empty() || id.len() > REMOTE_SCREEN_ID_MAX_BYTES;
+    if bad(presenting) || bad(monitor) {
+        return Err("streamManagerScreenSwap needs valid screen ids.".to_string());
+    }
+    if presenting == monitor {
+        return Err("streamManagerScreenSwap needs two different screens.".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -478,6 +511,68 @@ mod tests {
         // Plan 181 (owner redesign R4): one action saves the clip, so the
         // separate replaySave intent is gone from the wire.
         assert!(serde_json::from_str::<RemoteIntent>(r#"{"kind":"replaySave"}"#).is_err());
+    }
+
+    #[test]
+    fn stream_manager_screen_swap_takes_two_different_screens() {
+        let swap = serde_json::from_str::<RemoteIntent>(
+            r#"{"kind":"streamManagerScreenSwap","presentingScreen":"1","monitorScreen":"2"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            swap,
+            RemoteIntent::StreamManagerScreenSwap {
+                presenting_screen: "1".to_string(),
+                monitor_screen: "2".to_string()
+            }
+        );
+        assert!(swap.validate().is_ok());
+        assert_eq!(swap.debounce_kind(), "stream-manager-screen");
+        assert_eq!(
+            serde_json::to_value(&swap).unwrap(),
+            serde_json::json!({
+                "kind": "streamManagerScreenSwap",
+                "presentingScreen": "1",
+                "monitorScreen": "2"
+            })
+        );
+        let hold = serde_json::from_str::<RemoteIntent>(r#"{"kind":"streamManagerFrontOrClose"}"#)
+            .unwrap();
+        assert_eq!(hold, RemoteIntent::StreamManagerFrontOrClose);
+        assert!(hold.validate().is_ok());
+        assert_eq!(hold.debounce_kind(), "stream-manager-screen");
+        assert_eq!(
+            serde_json::to_value(&hold).unwrap(),
+            serde_json::json!({ "kind": "streamManagerFrontOrClose" })
+        );
+        for wire in [
+            r#"{"kind":"streamManagerScreenSwap"}"#,
+            r#"{"kind":"streamManagerScreenSwap","presentingScreen":"1"}"#,
+            r#"{"kind":"streamManagerScreenSwap","presentingScreen":1,"monitorScreen":"2"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<RemoteIntent>(wire).is_err(),
+                "{wire}"
+            );
+        }
+        let swap = |presenting: &str, monitor: &str| {
+            RemoteIntent::StreamManagerScreenSwap {
+                presenting_screen: presenting.to_string(),
+                monitor_screen: monitor.to_string(),
+            }
+            .validate()
+        };
+        assert_eq!(
+            swap("1", "1"),
+            Err("streamManagerScreenSwap needs two different screens.".to_string())
+        );
+        let long = "9".repeat(REMOTE_SCREEN_ID_MAX_BYTES + 1);
+        for (presenting, monitor) in [(" ", "2"), ("1", ""), (long.as_str(), "2")] {
+            assert_eq!(
+                swap(presenting, monitor),
+                Err("streamManagerScreenSwap needs valid screen ids.".to_string())
+            );
+        }
     }
 
     #[test]

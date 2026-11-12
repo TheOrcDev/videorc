@@ -1,5 +1,19 @@
 # Implementation Plans
 
+- 2026-11-12: [Plan 230](230-stream-manager-screen-key.md), the owner's
+  streams on three screens: one Stream Deck key moves the Stream Manager
+  between a Presenting screen and a Monitor screen. BUILT 2026-11-12, PR
+  #1306:
+  - A tap moves it (from anywhere else, to the Monitor screen); each screen
+    keeps its own frame; a tap to the Presenting screen takes the focus and
+    a tap back hands it to the last app used.
+  - A hold brings it to the front where it is, or closes it when focused.
+  - Titles: Present, Monitor, Hidden, Closed, Away, Pick screens. The key
+    never sets Hide from stream (owner answers Q1–Q14).
+  - New remote intents `streamManagerScreenSwap` and
+    `streamManagerFrontOrClose`; `remote.describe` gains `screens`,
+    `remote.state` gains `streamManager`.
+  - Owed: hands-on checks on Windows and for the focus (see the plan).
 - 2026-11-11: [Plan 229](229-green-screen-without-snow.md), the owner's
   stream on 0.22.0: "snow" around the subject, specks of green screen one to
   three pixels across in a new place every frame. IMPLEMENTED 2026-11-11:

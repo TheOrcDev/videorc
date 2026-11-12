@@ -197,6 +197,8 @@ export const electronInvokeApiMethods = {
   'comments-window:get-state': 'getCommentsWindowState',
   'comments-window:set-always-on-top': 'setCommentsWindowAlwaysOnTop',
   'comments-window:set-hidden-from-stream': 'setCommentsWindowHiddenFromStream',
+  'comments-window:swap-screen': 'swapCommentsWindowScreen',
+  'comments-window:front-or-close': 'frontOrCloseCommentsWindow',
   'comments-window:set-highlight-anchor': 'setCommentsWindowHighlightAnchor',
   'comments-window:set-auto-show-activity': 'setCommentsWindowAutoShowActivity',
   'comments-window:push-snapshot': 'pushCommentsSnapshot',
@@ -1803,6 +1805,17 @@ const specificRuntimeInvokeContracts = {
   'comments-window:set-auto-show-activity': invokeContract(tupleSchema([booleanSchema])),
   // Plan 215 D6: Hide from stream is one boolean, nothing else.
   'comments-window:set-hidden-from-stream': invokeContract(tupleSchema([booleanSchema])),
+  // Plan 230: a hold of the same key carries nothing.
+  'comments-window:front-or-close': invokeContract(tupleSchema([])),
+  // Plan 230: the Stream Manager Screen key names two display ids.
+  'comments-window:swap-screen': invokeContract(
+    tupleSchema([
+      objectSchema({
+        presentingScreen: stringSchema({ minLength: 1, maxLength: 32 }),
+        monitorScreen: stringSchema({ minLength: 1, maxLength: 32 })
+      })
+    ])
+  ),
   // Plan 140, S5: the window names a platform and nothing else. Main picks
   // the scopes, so a forged command can never widen what is requested.
   'comments-window:reconnect-scopes': invokeContract(

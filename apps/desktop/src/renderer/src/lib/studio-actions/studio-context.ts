@@ -217,6 +217,13 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
       else return false
       return true
     },
+    swapStreamManagerScreen: async (request) =>
+      (await window.videorc?.swapCommentsWindowScreen(request)) ?? {
+        ok: false,
+        reason: 'unavailable'
+      },
+    frontOrCloseStreamManager: async () =>
+      (await window.videorc?.frontOrCloseCommentsWindow()) ?? 'unavailable',
     showCommentHighlight: async (messageId) => {
       const message = studio.liveChatMessages.find((candidate) => candidate.id === messageId)
       if (!message || message.isDeleted) {

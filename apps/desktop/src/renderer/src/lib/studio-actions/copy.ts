@@ -28,6 +28,11 @@ export const REMOTE_INTENT_COPY = {
   bannersHide: BANNER_ACTION_COPY.hideAll,
   soundMissing: SOUND_ACTION_COPY.missing,
   windowMissing: "That window isn't available.",
+  screensSame: 'Pick two different screens.',
+  screenMissing: "That screen isn't connected. Pick your screens again.",
+  streamManagerNotMoved: "The Stream Manager didn't move. Try again.",
+  streamManagerWayland:
+    "Wayland doesn't let Videorc move windows. Hold the key to bring the Stream Manager up.",
   messageMissing: 'Choose a message to put on stream.',
   clipsOff: "Clips are off, and you're not recording or live.",
   unsupported: "This version of Videorc can't do that. Update Videorc.",

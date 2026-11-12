@@ -12,6 +12,13 @@ import {
   soundKeyLit,
   streamKeyIntent,
   streamKeyLit,
+  streamManagerFrontOrCloseIntent,
+  streamManagerScreenKeyAllows,
+  streamManagerScreenKeyBlock,
+  streamManagerScreenKeyIntent,
+  streamManagerScreenKeyNotice,
+  streamManagerScreenKeyLit,
+  streamManagerScreenKeyTitle,
   systemAudioKeyLit,
   takeoverKeyIntent,
   takeoverKeyLit
@@ -125,4 +132,100 @@ test('the Buddy key lights while Buddy Live is on, and a press toggles it', () =
   assert.equal(buddyKeyLit({}), false)
   assert.equal(buddyKeyLit(null), false)
   assert.deepEqual(buddyKeyIntent(), { kind: 'buddyLiveToggle' })
+})
+
+const SCREENS = { presentingScreen: '1', monitorScreen: '2' }
+const on = (screenId: string | null, extra: Record<string, unknown> = {}) => ({
+  windows: { comments: screenId !== null },
+  streamManager: { screenId, visible: true, hiddenFromStream: false, ...extra }
+})
+
+test('the Stream Manager Screen key is on while viewers see the window (plan 230)', () => {
+  assert.equal(streamManagerScreenKeyLit(on('1'), SCREENS), true)
+  assert.equal(streamManagerScreenKeyLit(on('2'), SCREENS), false)
+  assert.equal(streamManagerScreenKeyLit(on('3'), SCREENS), false)
+  assert.equal(streamManagerScreenKeyLit(on('1', { hiddenFromStream: true }), SCREENS), false)
+  assert.equal(streamManagerScreenKeyLit(on('1', { visible: false }), SCREENS), false)
+  assert.equal(streamManagerScreenKeyLit(on(null), SCREENS), false)
+  assert.equal(streamManagerScreenKeyLit(on('1'), {}), false)
+  assert.equal(streamManagerScreenKeyLit(null, SCREENS), false)
+})
+
+test('the Stream Manager Screen key sends both screens, or alerts', () => {
+  assert.deepEqual(streamManagerScreenKeyIntent(SCREENS), {
+    kind: 'streamManagerScreenSwap',
+    presentingScreen: '1',
+    monitorScreen: '2'
+  })
+  assert.equal(streamManagerScreenKeyIntent({}), null)
+  assert.equal(streamManagerScreenKeyIntent({ presentingScreen: '1' }), null)
+  assert.equal(streamManagerScreenKeyIntent({ presentingScreen: '1', monitorScreen: '' }), null)
+  assert.equal(streamManagerScreenKeyIntent({ presentingScreen: '1', monitorScreen: '1' }), null)
+  assert.deepEqual(streamManagerFrontOrCloseIntent(), { kind: 'streamManagerFrontOrClose' })
+})
+
+test('the Stream Manager Screen key names where the window is', () => {
+  const title = (state: Parameters<typeof streamManagerScreenKeyTitle>[0]) =>
+    streamManagerScreenKeyTitle(state, true, SCREENS)
+  assert.equal(title(on('1')), 'Present')
+  assert.equal(title(on('1', { hiddenFromStream: true })), 'Hidden')
+  assert.equal(title(on('2')), 'Monitor')
+  assert.equal(title(on('2', { hiddenFromStream: true })), 'Monitor')
+  assert.equal(title(on('3')), 'Away')
+  assert.equal(title(on('3', { hiddenFromStream: true })), 'Away')
+  for (const closed of [on(null), on('1', { visible: false }), on('2', { visible: false }), null]) {
+    assert.equal(title(closed), 'Closed')
+  }
+  assert.equal(streamManagerScreenKeyTitle(on('1'), true, {}), 'Pick\nscreens')
+  const connected = {
+    screens: [
+      { id: '1', name: 'A' },
+      { id: '2', name: 'B' }
+    ]
+  }
+  assert.equal(streamManagerScreenKeyTitle(on('1'), true, SCREENS, connected), 'Present')
+  assert.equal(
+    streamManagerScreenKeyTitle(on('1'), true, SCREENS, { screens: [{ id: '1', name: 'A' }] }),
+    'Pick\nscreens'
+  )
+  assert.equal(
+    streamManagerScreenKeyTitle(on('1'), true, { presentingScreen: '1', monitorScreen: '1' }),
+    'Pick\nscreens'
+  )
+  assert.equal(streamManagerScreenKeyTitle(on('1'), false, SCREENS), 'Videorc\noffline')
+})
+
+test('the Stream Manager Screen key asks for an update from an older Videorc (plan 230)', () => {
+  // An older app's describe has no screen list and knows neither intent.
+  const older = { windows: ['notes', 'comments', 'preview'] }
+  assert.equal(streamManagerScreenKeyBlock(older), 'update')
+  assert.equal(streamManagerScreenKeyTitle(on('1'), true, SCREENS, older), 'Update\nVideorc')
+  assert.equal(streamManagerScreenKeyTitle(on('1'), true, {}, older), 'Update\nVideorc')
+  assert.equal(streamManagerScreenKeyTitle(on('1'), false, SCREENS, older), 'Videorc\noffline')
+  assert.equal(streamManagerScreenKeyAllows('update', 'tap'), false)
+  assert.equal(streamManagerScreenKeyAllows('update', 'hold'), false)
+  assert.match(streamManagerScreenKeyNotice('update') ?? '', /Update Videorc/)
+  // Before describe arrives nothing is blocked, and an empty list is a list.
+  assert.equal(streamManagerScreenKeyBlock(null), null)
+  assert.equal(streamManagerScreenKeyBlock({ screens: [] }), null)
+  assert.equal(streamManagerScreenKeyTitle(on('1'), true, SCREENS, null), 'Present')
+  assert.equal(streamManagerScreenKeyNotice(null), null)
+  assert.equal(streamManagerScreenKeyAllows(null, 'tap'), true)
+  assert.equal(streamManagerScreenKeyAllows(null, 'hold'), true)
+})
+
+test('the Stream Manager Screen key says a tap cannot move it on Wayland (plan 230)', () => {
+  const wayland = {
+    screens: [
+      { id: '1', name: 'A' },
+      { id: '2', name: 'B' }
+    ],
+    screenMoves: 'wayland' as const
+  }
+  assert.equal(streamManagerScreenKeyBlock(wayland), 'wayland')
+  assert.equal(streamManagerScreenKeyTitle(on('1'), true, SCREENS, wayland), 'Not on\nWayland')
+  assert.equal(streamManagerScreenKeyAllows('wayland', 'tap'), false)
+  assert.equal(streamManagerScreenKeyAllows('wayland', 'hold'), true)
+  assert.match(streamManagerScreenKeyNotice('wayland') ?? '', /Wayland/)
+  assert.equal(streamManagerScreenKeyBlock({ ...wayland, screenMoves: 'supported' }), null)
 })

@@ -294,6 +294,14 @@ The viewers' messages, in Stream Manager and, while on air with Chat in
 Studio on, in the Studio's Chat section (plan 204).
 _Avoid_: comments
 
+**Presenting screen**, **Monitor screen**:
+The two screens of the Stream Deck's Stream Manager Screen key (plan 230).
+The Presenting screen is the one viewers see; the Monitor screen is where
+the streamer reads chat. A tap moves the Stream Manager from one to the
+other; from anywhere else it goes to the Monitor screen. On the key:
+Present and Monitor.
+_Avoid_: main screen, second screen, shared screen, chat screen
+
 **Chat command**:
 A `!name` a viewer types as the first word in chat (`!go`). Videorc answers
 as you with the reply you saved, starting with `@their name`, only in the

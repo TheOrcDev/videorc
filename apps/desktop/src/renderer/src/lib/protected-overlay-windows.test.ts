@@ -5,6 +5,7 @@ import type { DeviceList } from '@/lib/backend'
 import {
   deviceListWithoutProtectedOverlayWindows,
   protectedOverlayWindowIdsFromOverlayWindows,
+  streamManagerHiddenFromViewers,
   streamManagerProtectedOverlayWindow
 } from './protected-overlay-windows'
 
@@ -86,5 +87,39 @@ describe('protected overlay windows', () => {
     expect(deviceListWithoutProtectedOverlayWindows(current, { open: false, windowId: 11 })).toBe(
       current
     )
+  })
+})
+
+describe('streamManagerHiddenFromViewers (plan 230)', () => {
+  const on = {
+    open: true,
+    hiddenFromStream: true,
+    protected: false,
+    windowId: 7
+  }
+
+  it('is hidden only when the switch is on and the platform really hides it', () => {
+    expect(streamManagerHiddenFromViewers({ ...on, hideFromStreamMethod: 'capture-filter' })).toBe(
+      true
+    )
+    expect(
+      streamManagerHiddenFromViewers({
+        ...on,
+        hideFromStreamMethod: 'content-protection',
+        protected: true
+      })
+    ).toBe(true)
+  })
+
+  it('is not hidden when the method failed, is missing, or the switch is off', () => {
+    for (const state of [
+      { ...on, hideFromStreamMethod: 'capture-filter' as const, windowId: undefined },
+      { ...on, hideFromStreamMethod: 'content-protection' as const, protected: false },
+      { ...on, hideFromStreamMethod: 'unsupported' as const },
+      { ...on, hideFromStreamMethod: 'capture-filter' as const, hiddenFromStream: false },
+      { ...on, hideFromStreamMethod: 'capture-filter' as const, open: false }
+    ]) {
+      expect(streamManagerHiddenFromViewers(state)).toBe(false)
+    }
   })
 })

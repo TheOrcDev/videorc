@@ -136,6 +136,8 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:get-state': MAIN_AND_COMMENTS,
   'comments-window:set-always-on-top': MAIN_AND_COMMENTS,
   'comments-window:set-hidden-from-stream': MAIN_AND_COMMENTS,
+  'comments-window:swap-screen': MAIN_ONLY,
+  'comments-window:front-or-close': MAIN_ONLY,
   'comments-window:set-highlight-anchor': MAIN_AND_COMMENTS,
   'comments-window:set-auto-show-activity': MAIN_AND_COMMENTS,
   'comments-window:push-snapshot': MAIN_ONLY,

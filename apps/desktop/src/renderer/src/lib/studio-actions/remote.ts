@@ -21,7 +21,7 @@ import {
 import { sceneApply, takeoverHide, takeoverShow } from './scene'
 import { recordStart, recordStop, recordToggle, streamStart, streamStop } from './session'
 import { soundPlay, soundStop } from './sounds'
-import { windowFront } from './windows'
+import { streamManagerFrontOrClose, streamManagerScreenSwap, windowFront } from './windows'
 
 /** The Studio's executor for each remote intent kind on the wire. */
 export const REMOTE_INTENT_EXECUTORS: Readonly<Record<string, StudioActionExecutor>> = {
@@ -54,6 +54,8 @@ export const REMOTE_INTENT_EXECUTORS: Readonly<Record<string, StudioActionExecut
   soundPlay,
   soundStop,
   windowFront,
+  streamManagerScreenSwap,
+  streamManagerFrontOrClose,
   commentHighlight,
   commentHighlightClear,
   clipMark

@@ -85,8 +85,11 @@ describe('Electron IPC contract', () => {
     // Videorc" on a chat row; the main window starts the sign-in).
     // 167: plan 226 S4 adds the Stream Manager's chat commands (get, push),
     // its `!go` relay pair, the failed replies (get, push) and ⋯ Chat commands….
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(167)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(167)
+    // 169: plan 230 adds comments-window:swap-screen and
+    // comments-window:front-or-close (the Stream Manager Screen key's tap
+    // and hold).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(169)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(169)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -434,6 +437,30 @@ describe('Electron IPC contract', () => {
       ).toThrow()
     }
     expect(() => validateElectronInvokeArgs('comments-window:set-auto-show-activity', [])).toThrow()
+  })
+
+  it('lets the Stream Manager Screen key name two display ids and nothing else (plan 230)', () => {
+    const request = { presentingScreen: '1', monitorScreen: '2' }
+    expect(validateElectronInvokeArgs('comments-window:swap-screen', [request])).toEqual([request])
+    for (const forged of [
+      null,
+      'screen',
+      {},
+      { presentingScreen: '1' },
+      { presentingScreen: '', monitorScreen: '2' },
+      { presentingScreen: '1', monitorScreen: 2 },
+      { presentingScreen: 'x'.repeat(33), monitorScreen: '2' },
+      { presentingScreen: '1', monitorScreen: '2', frame: { x: 0 } }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:swap-screen', [forged])).toThrow()
+    }
+  })
+
+  it('lets the hold of the same key carry nothing (plan 230)', () => {
+    expect(validateElectronInvokeArgs('comments-window:front-or-close', [])).toEqual([])
+    for (const forged of [[null], [{}], ['close']]) {
+      expect(() => validateElectronInvokeArgs('comments-window:front-or-close', forged)).toThrow()
+    }
   })
 
   it('lets the Stream Manager name a platform to reconnect, never the scopes (plan 140)', () => {
