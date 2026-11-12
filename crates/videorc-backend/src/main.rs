@@ -24780,7 +24780,9 @@ mod agent_role_tests {
     /// (plans/210-scenes-for-your-apps-and-hide-screen.md). Re-pinned for
     /// BuddyLiveOn / BuddyLiveOff / BuddyLiveToggle (the Stream Deck's Buddy
     /// key), with their leak argument in docs/remote-control.md ("Buddy Live
-    /// on the phone").
+    /// on the phone"). Re-pinned for StreamManagerScreenSwap and
+    /// StreamManagerFrontOrClose (the Stream Manager Screen key), with their
+    /// leak argument in plans/230-stream-manager-screen-key.md (D5).
     #[test]
     fn remote_surface_is_pinned_to_dc1309cb() {
         assert_eq!(
@@ -24809,8 +24811,8 @@ mod agent_role_tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            hash, "71bbbc1371a282938695e7414e905a270e2bba45ffc5be450294a3af35f3ddd6",
-            "RemoteIntent is not byte-identical to its Buddy Live pin"
+            hash, "d9b675dbe0e1bc284d5ff648f18e36946066ebe13ec50cb6bdb04a684fdfbbd3",
+            "RemoteIntent is not byte-identical to its Stream Manager Screen pin"
         );
     }
 
