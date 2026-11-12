@@ -115,6 +115,16 @@ export function PreviewStage({
     )
   }
 
+  // Issue #1273: the stage offers both homes for the Preview in one click. A
+  // mode change while the window is closed only records the choice, so open
+  // follows it.
+  const openPreviewIn = async (mode: PreviewWindowState['mode']): Promise<void> => {
+    if (previewWindow.mode !== mode) {
+      await setPreviewWindowMode(mode)
+    }
+    await openPreviewWindow()
+  }
+
   if (docked) {
     return (
       <DockedPreviewFrame
@@ -145,11 +155,14 @@ export function PreviewStage({
       previewLiveStatus={previewLiveStatus}
       previewSupervisor={previewWindow.supervisor}
       previewSurfaceStatus={previewSurfaceStatus}
+      previewWindowMode={previewWindow.mode}
       previewWindowOpen={previewWindow.open}
       permissionAccess={permissionAccess}
       onAlwaysOnTopChange={(alwaysOnTop) => void setPreviewWindowAlwaysOnTop(alwaysOnTop)}
       onClose={() => void closePreviewWindow()}
       onOpen={() => void openPreviewWindow()}
+      onOpenDocked={() => void openPreviewIn('docked')}
+      onOpenFloating={() => void openPreviewIn('floating')}
       onOpenPermissions={onOpenPermissions}
       onRetry={onRetry}
       onStick={() => void setPreviewWindowMode('docked')}
@@ -190,6 +203,19 @@ function TalkShowPreviewCard({
     </div>
   )
 }
+
+/** What the stage says under a floating Preview (issue #1273): where it is,
+ * and the way back in. */
+export const PREVIEW_FLOATING_TITLE = 'Preview is open in its own window'
+export const PREVIEW_FLOATING_DETAIL = 'Show it here to watch it in the Studio.'
+
+/** What the stage says while the Preview window is closed (issue #1273): it
+ * names both places the Preview can open, so an empty stage never reads as a
+ * broken preview. */
+export const PREVIEW_CLOSED_COPY = {
+  title: 'Preview is closed',
+  detail: 'Show it here or in its own window to watch your scene as viewers see it.'
+} as const
 
 export type PreviewDisabledCopy = {
   title: string
@@ -283,13 +309,15 @@ function DockedPreviewFrame({
   const hidden = dockHiddenDisplay(previewWindow.dockHiddenReason)
   const status =
     hidden ??
-    previewSupervisorDisplay(
-      true,
-      supervisor,
-      previewSurfaceStatus,
-      undefined,
-      permissionAccess,
-      platform
+    dockedSupervisorDisplay(
+      previewSupervisorDisplay(
+        true,
+        supervisor,
+        previewSurfaceStatus,
+        undefined,
+        permissionAccess,
+        platform
+      )
     )
   const permissionPane = previewPermissionPane(supervisor)
   const footprintRatio = previewFootprintRatio(aspect)
@@ -366,6 +394,19 @@ function DockedPreviewFrame({
   )
 }
 
+/** The docked slot shows through only while the surface has no picture over
+ * it, so it never says the Preview is in its own window (issue #1273): that
+ * line under a docked Preview reads as a broken one. */
+export function dockedSupervisorDisplay(display: PreviewSupervisorDisplay): {
+  title: string
+  detail: string
+} {
+  if (display.title !== PREVIEW_FLOATING_TITLE) {
+    return display
+  }
+  return { title: 'Waiting for the first frame…', detail: '' }
+}
+
 /** Stated copy for every reason a docked surface is hidden; shared with the
  * Scene canvas (plan 058), which docks the same surface into the stage. */
 export function dockHiddenDisplay(
@@ -398,8 +439,11 @@ export function dockHiddenDisplay(
   }
 }
 
-function DetachedPreviewCard({
+/** The stage while the Preview is not docked: closed, floating in its own
+ * window, or on a path with no native surface. Exported for its render tests. */
+export function DetachedPreviewCard({
   previewWindowOpen,
+  previewWindowMode,
   previewSupervisor,
   previewSurfaceStatus,
   previewLiveStatus,
@@ -408,6 +452,8 @@ function DetachedPreviewCard({
   aspect,
   onAlwaysOnTopChange,
   onOpen,
+  onOpenDocked,
+  onOpenFloating,
   onClose,
   onStick,
   onRetry,
@@ -417,6 +463,8 @@ function DetachedPreviewCard({
   className
 }: {
   previewWindowOpen: boolean
+  /** The remembered mode: the Preview shortcut opens the window in it. */
+  previewWindowMode: PreviewWindowState['mode']
   previewSupervisor: PreviewSupervisorState
   previewSurfaceStatus?: PreviewSurfaceStatus
   previewLiveStatus?: PreviewLiveStatus
@@ -424,8 +472,14 @@ function DetachedPreviewCard({
   alwaysOnTop: boolean
   aspect: { width: number; height: number }
   onAlwaysOnTopChange: (alwaysOnTop: boolean) => void
+  /** Shows the open window, or opens it in the remembered mode. */
   onOpen: () => void
+  /** Opens the closed Preview stuck to the app, in this stage. */
+  onOpenDocked: () => void
+  /** Opens the closed Preview in its own window. */
+  onOpenFloating: () => void
   onClose: () => void
+  /** Moves the open, floating Preview into this stage. */
   onStick: () => void
   onRetry?: () => void
   permissionAccess: PreviewPermissionAccess | null
@@ -493,12 +547,14 @@ function DetachedPreviewCard({
               {detail ? <span className="text-xs text-muted-foreground">{detail}</span> : null}
             </div>
             <div className="flex flex-wrap justify-center gap-2">
-              <Button variant="secondary" onClick={onOpen}>
-                {`Show ${WINDOW_NAMES.preview}`}
-              </Button>
-              <Button data-videorc-preview-stick variant="outline" onClick={onStick}>
+              {/* Issue #1273: bringing the Preview back into the Studio is
+                  the one-click lead action, never a status line alone. */}
+              <Button data-videorc-preview-stick onClick={onStick}>
                 <PinIcon className="size-4" />
-                Stick to app
+                Show here
+              </Button>
+              <Button data-videorc-preview-bring-to-front variant="secondary" onClick={onOpen}>
+                Bring to front
               </Button>
               <Button variant="outline" onClick={onClose}>
                 {`Close ${WINDOW_NAMES.preview}`}
@@ -517,15 +573,33 @@ function DetachedPreviewCard({
         ) : (
           <>
             <div className="flex flex-col gap-1">
-              <span className="text-sm font-medium">Preview lives in its own window</span>
-              <span className="text-xs text-muted-foreground">
-                Open it to watch your scene as viewers see it.
-              </span>
+              <span className="text-sm font-medium">{PREVIEW_CLOSED_COPY.title}</span>
+              <span className="text-xs text-muted-foreground">{PREVIEW_CLOSED_COPY.detail}</span>
             </div>
-            <Button data-videorc-open-preview-window onClick={onOpen}>
-              {`Open ${WINDOW_NAMES.preview}`}
-              <ShortcutKeys accelerator={shortcutAccelerator('preview-window')} className="ml-1" />
-            </Button>
+            {/* Both homes, one click each (issue #1273). The shortcut opens
+                the remembered mode, so its key rides on that button. */}
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button data-videorc-open-preview-window onClick={onOpenDocked}>
+                <PinIcon className="size-4" />
+                Show here
+                {previewWindowMode === 'docked' ? (
+                  <ShortcutKeys
+                    accelerator={shortcutAccelerator('preview-window')}
+                    className="ml-1"
+                  />
+                ) : null}
+              </Button>
+              <Button data-videorc-open-preview-floating variant="outline" onClick={onOpenFloating}>
+                <ExternalLinkIcon className="size-4" />
+                Open in its own window
+                {previewWindowMode === 'floating' ? (
+                  <ShortcutKeys
+                    accelerator={shortcutAccelerator('preview-window')}
+                    className="ml-1"
+                  />
+                ) : null}
+              </Button>
+            </div>
           </>
         )
       ) : (
@@ -579,18 +653,14 @@ export function previewSupervisorDisplay(
   platform?: string
 ): PreviewSupervisorDisplay {
   if (!previewWindowOpen) {
-    return {
-      title: 'Preview lives in its own window',
-      detail: 'Open it to watch your scene as viewers see it.',
-      tone: 'normal'
-    }
+    return { ...PREVIEW_CLOSED_COPY, tone: 'normal' }
   }
 
   switch (supervisor.lifecycleState) {
     case 'surface-live':
       return {
-        title: 'Preview is open in its own window',
-        detail: 'Drag, resize or close it anytime.',
+        title: PREVIEW_FLOATING_TITLE,
+        detail: PREVIEW_FLOATING_DETAIL,
         transportLabel: previewFallbackLabel(
           supervisor.transport,
           supervisor.backing,
@@ -604,8 +674,8 @@ export function previewSupervisorDisplay(
       // fallback (previewFallbackLabel). A broken surface arrives as 'failed'.
       if (platform === 'linux') {
         return {
-          title: 'Preview is open in its own window',
-          detail: 'Drag, resize or close it anytime.',
+          title: PREVIEW_FLOATING_TITLE,
+          detail: PREVIEW_FLOATING_DETAIL,
           tone: 'normal'
         }
       }
@@ -657,7 +727,7 @@ export function previewSupervisorDisplay(
     case 'open-no-surface':
     case 'closed':
       return {
-        title: 'Preview is open in its own window',
+        title: PREVIEW_FLOATING_TITLE,
         detail: 'Waiting for the first frame…',
         tone: 'normal'
       }
