@@ -2789,5 +2789,41 @@
         { "orientation": "horizontal", "width": 1920, "height": 1080, "fps": 60, "videoKbps": 6000 }
       ]
     }
+  },
+  "chatCommand": {
+    "command": {
+      "id": "8f14e45f-ceea-467a-9b1e-4f6c2d1a7b30",
+      "name": "go",
+      "description": "why I'm learning Go",
+      "reply": "Go compiles fast, ships one binary, and makes concurrency simple.",
+      "enabled": true,
+      "createdAt": "2026-11-10T18:00:00Z",
+      "updatedAt": "2026-11-10T18:05:00Z"
+    },
+    "disabled": {
+      "id": "c9f0f895-fb98-4b91-9d2c-6a1b3e5f7c42",
+      "name": "faq",
+      "description": "most asked question",
+      "reply": "Check the pinned message first.",
+      "enabled": false,
+      "createdAt": "2026-11-10T18:00:00Z",
+      "updatedAt": "2026-11-10T18:05:00Z"
+    },
+    "listEnabled": true,
+    "saveParams": {
+      "name": "!Go",
+      "description": "why I'm learning Go",
+      "reply": "Go compiles fast.",
+      "enabled": true
+    },
+    "postParams": { "sessionId": "session-1", "name": "go" },
+    "postResult": { "sent": 2, "failed": 1 },
+    "replyFailed": {
+      "sessionId": "session-1",
+      "destinationId": "youtube:target-1",
+      "platform": "youtube",
+      "command": "go",
+      "reason": "reconnect YouTube to allow chat posts."
+    }
   }
 }

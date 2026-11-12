@@ -152,6 +152,25 @@ mod protocol {
         pub bounds: PreviewSurfaceBounds,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub order_above_window_handle: Option<OpaqueNativeWindowHandle>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub physical_placement: Option<PreviewPresenterPhysicalPlacement>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct PreviewPresenterPhysicalPlacement {
+        pub screen_x: f64,
+        pub screen_y: f64,
+        pub width: f64,
+        pub height: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub clip_x: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub clip_y: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub clip_width: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub clip_height: Option<f64>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

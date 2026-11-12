@@ -82,6 +82,12 @@ import type { LiveDashboardState } from '../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
 import type { SoundRelayAction, SoundboardSummary } from '../../shared/sound-commands'
 import { BUDDY_UNREACHABLE, type CohostActAnswer } from '../../shared/buddy-act'
+import type {
+  ChatCommandPostResult,
+  ChatCommandReplyFailed,
+  ChatCommandsSummary
+} from '../../shared/chat-commands'
+import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -226,6 +232,78 @@ function CommentsWindowApp(): ReactElement {
       )
       return false
     }
+  }, [])
+  // Chat commands (plan 226 S4): the enabled commands Studio pushes through
+  // main, for the composer's `!` completions and `!go`. A push that lands
+  // before the seed answers wins over the seed.
+  const [chatCommands, setChatCommands] = useState<ChatCommandsSummary | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onCommentsChatCommands?.((summary) => {
+      pushed = true
+      setChatCommands(summary)
+    })
+    void window.videorc?.getCommentsChatCommands?.().then((summary) => {
+      if (!disposed && !pushed) setChatCommands(summary)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // The replies that couldn't go out (D12), one per chat and reason; the
+  // window shows the live session's.
+  const [chatCommandFailures, setChatCommandFailures] = useState<ChatCommandReplyFailed[]>([])
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onChatCommandFailures?.((failures) => {
+      pushed = true
+      setChatCommandFailures(failures)
+    })
+    void window.videorc?.getChatCommandFailures?.().then((failures) => {
+      if (!disposed && !pushed) setChatCommandFailures(failures)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // The streamer's `!go` (D9), relayed to Studio, which posts the reply to
+  // every chat that takes posts. The counts are the composer's line; a post
+  // that couldn't run at all rejects with the words to show.
+  const runChatCommand = useCallback(
+    async (sessionId: string, name: string): Promise<ChatCommandPostResult> => {
+      try {
+        if (!window.videorc?.chatCommandFromCommentsWindow)
+          throw new Error('Stream Manager is disconnected.')
+        return await window.videorc.chatCommandFromCommentsWindow({
+          requestId: crypto.randomUUID(),
+          sessionId,
+          name
+        })
+      } catch (error) {
+        // Studio already wrote "Couldn't post the !go reply. …"; anything
+        // else (main refusing, a timeout) gets the same shape.
+        const raw = ipcErrorMessage(error)
+        throw new Error(
+          raw.startsWith(`Couldn't post the !${name} reply.`)
+            ? raw
+            : userErrorMessage(error, { action: 'post', object: `the !${name} reply` }).text,
+          { cause: error }
+        )
+      }
+    },
+    []
+  )
+  // ⋯ Chat commands…: main shows the main window on Livestream → Setup.
+  const openChatCommands = useCallback((): void => {
+    void window.videorc
+      ?.openChatCommandsFromCommentsWindow?.({ requestId: crypto.randomUUID() })
+      .catch((error) =>
+        toastUserError(error, { action: 'open', object: 'chat commands' }, { id: 'chat-commands' })
+      )
   }, [])
   // Hide screen or Show screen (plan 210 S8b), relayed to Studio like `/hide`.
   // Nothing says so when it works: the stats chip and the Preview do.
@@ -441,6 +519,7 @@ function CommentsWindowApp(): ReactElement {
   }, [applySendOperation])
   const { snapshot } = view
   const live = view.mode.kind === 'live' && Boolean(snapshot.sessionId)
+  const liveSessionId = live ? snapshot.sessionId : undefined
 
   // Chat removals (plan 140, S6). Studio relays the live session's operations
   // in the snapshot; replies to this window's own requests fold in on top, so
@@ -944,6 +1023,12 @@ function CommentsWindowApp(): ReactElement {
           onBanner={runBanner}
           sounds={sounds}
           onSound={runSound}
+          chatCommands={chatCommands}
+          chatCommandFailures={chatCommandFailures}
+          onChatCommand={
+            liveSessionId ? (name: string) => runChatCommand(liveSessionId, name) : undefined
+          }
+          onOpenChatCommands={openChatCommands}
           onBuddy={runBuddy}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
           onUseSignIn={openDestination}

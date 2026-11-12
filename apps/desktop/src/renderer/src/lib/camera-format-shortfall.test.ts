@@ -34,6 +34,28 @@ describe('cameraFormatShortfall', () => {
     expect(cameraFormatShortfallMessage(shortfall!)).toContain("can't reach 30 fps")
   })
 
+  it("reads the Windows start's own words for a 720p webcam on a 1440p canvas (issue #1271)", () => {
+    // preview_camera.rs windows_camera_live_startup, verbatim shape.
+    const shortfall = cameraFormatShortfall(
+      stats({
+        previewCameraRequestedWidth: 2560,
+        previewCameraRequestedHeight: 1440,
+        previewCameraSelectedFormatWidth: 800,
+        previewCameraSelectedFormatHeight: 600,
+        previewCameraSelectedFormatMaxFps: 30,
+        previewCameraStatusMessage:
+          'Requested 2560x1440@30 was not available; selected native 800x600 at 8-30 fps. Windows camera preview is using YUYV422 800x600@30, piped at 800x600.',
+        previewCameraCapabilityFormats: undefined
+      })
+    )
+    expect(shortfall).toMatchObject({
+      fpsUnmet: false,
+      resolutionUnmet: true,
+      requestedFps: 30
+    })
+    expect(cameraFormatShortfallMessage(shortfall!)).toContain('upscaled to fill the 2560 × 1440')
+  })
+
   it('returns null when the selected format meets the request', () => {
     expect(
       cameraFormatShortfall(

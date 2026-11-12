@@ -106,9 +106,17 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   // so these cover a click that raced a change).
   'cloud-test-session-active': "Locked while you're recording or live.",
   'cloud-test-show-live': 'A show is live through Videorc Cloud. End it first.',
-  'cloud-test-running': 'A Videorc Cloud test is already running.'
+  'cloud-test-running': 'A Videorc Cloud test is already running.',
+  // A scene whose layout needs a source that is set to None or Off. Trying
+  // again cannot help, so the copy says what to pick instead.
+  'layout-screen-not-selected':
+    'This scene needs a screen or window. Pick one in Sources, or choose a camera-only scene.',
+  'layout-camera-not-selected':
+    'This scene needs a camera. Turn one on in Sources, or choose a scene without a camera.'
 }
 const WARNING_CODES = new Set([
+  'layout-screen-not-selected',
+  'layout-camera-not-selected',
   'command-expired-before-dispatch',
   'command-lane-full',
   'screen-import-busy',

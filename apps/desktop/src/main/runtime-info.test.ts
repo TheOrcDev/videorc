@@ -241,6 +241,18 @@ describe('runtime info helpers', () => {
     ).toEqual([])
   })
 
+  it('carries the updater status and its last lines into the bundle', () => {
+    const updater = {
+      status: { phase: 'error' as const, message: 'signature check timed out' },
+      recentEvents: [
+        { at: '2026-11-11T04:43:30.000Z', level: 'warn' as const, message: 'check failed' }
+      ]
+    }
+    const base = { appVersion: '0.21.0', execPath: 'C:\\Videorc\\Videorc.exe', env: {} }
+    expect(buildRuntimeInfo({ ...base, updater }).updater).toEqual(updater)
+    expect(buildRuntimeInfo(base)).not.toHaveProperty('updater')
+  })
+
   it('surfaces the running app version', () => {
     const info = buildRuntimeInfo({
       appVersion: '1.2.3',

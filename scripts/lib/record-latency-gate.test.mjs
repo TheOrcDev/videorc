@@ -10,8 +10,10 @@ import {
   parseTimelineMessage,
   percentileNearestRank,
   readBudgetOverrides,
+  recordLatencyBudgetsFor,
   summarizeRecordCycles,
-  timelinePhaseDeltas
+  timelinePhaseDeltas,
+  WINDOWS_RECORD_LATENCY_BUDGETS
 } from './record-latency-gate.mjs'
 
 describe('record latency percentiles', () => {
@@ -96,23 +98,41 @@ describe('record latency budget', () => {
     // `--enforce` (smoke:record-latency:gate) is only honest while the named
     // calibration document exists: budgets carry headroom over the observed
     // p95 recorded there, so a missing or renamed note means the numbers are
-    // no longer traceable.
-    assert.equal(typeof RECORD_LATENCY_BUDGETS.calibratedFrom, 'string')
-    const calibrationPath = join(process.cwd(), RECORD_LATENCY_BUDGETS.calibratedFrom)
-    assert.ok(existsSync(calibrationPath), `${RECORD_LATENCY_BUDGETS.calibratedFrom} must exist`)
-    const note = readFileSync(calibrationPath, 'utf8')
-    for (const key of [
-      'warmStartClickToRecordingP95Ms',
-      'coldStartClickToRecordingMs',
-      'stopClickToIdleP95Ms',
-      'finalizationIdleToFinalizedP95Ms'
-    ]) {
-      assert.match(
-        note,
-        new RegExp(key + '[^\\n]*\\b' + RECORD_LATENCY_BUDGETS[key] + '\\b'),
-        `${key} = ${RECORD_LATENCY_BUDGETS[key]} must be recorded in the calibration note`
-      )
+    // no longer traceable. Each platform's set names its own note.
+    for (const budgets of [RECORD_LATENCY_BUDGETS, WINDOWS_RECORD_LATENCY_BUDGETS]) {
+      assert.equal(typeof budgets.calibratedFrom, 'string')
+      const calibrationPath = join(process.cwd(), budgets.calibratedFrom)
+      assert.ok(existsSync(calibrationPath), `${budgets.calibratedFrom} must exist`)
+      const note = readFileSync(calibrationPath, 'utf8')
+      for (const key of [
+        'warmStartClickToRecordingP95Ms',
+        'coldStartClickToRecordingMs',
+        'stopClickToIdleP95Ms',
+        'finalizationIdleToFinalizedP95Ms'
+      ]) {
+        assert.match(
+          note,
+          new RegExp(key + '[^\\n]*\\b' + budgets[key] + '\\b'),
+          `${key} = ${budgets[key]} must be recorded in ${budgets.calibratedFrom}`
+        )
+      }
     }
+  })
+
+  it('enforces the Windows set on Windows and the macOS set elsewhere', () => {
+    // #1068: Windows starts pay the Media Foundation bridge bring-up, so it
+    // has its own calibration; Linux keeps the shared set until it has one.
+    assert.equal(recordLatencyBudgetsFor('win32'), WINDOWS_RECORD_LATENCY_BUDGETS)
+    assert.equal(recordLatencyBudgetsFor('darwin'), RECORD_LATENCY_BUDGETS)
+    assert.equal(recordLatencyBudgetsFor('linux'), RECORD_LATENCY_BUDGETS)
+    // The Windows warm bound still fails the start #1068 was opened against.
+    const issue1068Start = {
+      warm: { clickToRecordingMs: { n: 4, p95: 2165 }, stopClickToIdleMs: { n: 4, p95: 255 } }
+    }
+    assert.equal(
+      evaluateRecordLatencyBudget(issue1068Start, WINDOWS_RECORD_LATENCY_BUDGETS).pass,
+      false
+    )
   })
 })
 

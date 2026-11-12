@@ -277,11 +277,110 @@ pub struct MediaFoundationH264Encoder {
     /// waits feed [`RECORDING_FRAME_ACCOUNTING`].
     accounts_session_frames: bool,
     input_credit_timeouts: u64,
+    /// #1075: once the user pressed Stop, no credit or surface wait may run
+    /// past this instant; a frame that would have to wait longer is skipped.
+    wait_deadline: Option<Instant>,
     /// Consecutive `MF_E_TRANSFORM_STREAM_CHANGE` answers since the last frame.
     stream_changes: StreamChangeBudget,
+    /// Start-step stamps for the bridge's start timeline (#1267), handed out
+    /// by [`Self::take_startup_steps`].
+    startup_steps: MediaFoundationStartupSteps,
     drained: bool,
     mf_started: bool,
     com_started: bool,
+}
+
+/// An unused [`MediaFoundationH264Encoder`] between two threads: built and
+/// configured on one, adopted by another with
+/// [`MediaFoundationThreadHandoff::adopt_on_current_thread`].
+pub struct MediaFoundationThreadHandoff {
+    encoder: MediaFoundationH264Encoder,
+}
+
+// SAFETY: the encoder's `!Send` marker guards its per-thread COM reference,
+// which `into_thread_handoff` already returned. What travels are free-threaded
+// MTA objects (the async MFT, its activation and event generator; the process
+// holds the MTA for its lifetime, see windows_com_lifetime.rs) and D3D11
+// objects, none of them in use: an encoder that took a frame is refused the
+// hand-off, and only one thread holds the wrapper. `RetiredTransform` moves
+// the same objects to the reaper thread on the same argument.
+unsafe impl Send for MediaFoundationThreadHandoff {}
+
+impl MediaFoundationThreadHandoff {
+    /// Joins the MTA on the calling thread and gives it the encoder, whose
+    /// drop then leaves the MTA here. Refused (and the encoder dropped,
+    /// balanced) when its upload device was removed while it waited.
+    pub fn adopt_on_current_thread(self) -> Result<MediaFoundationH264Encoder> {
+        let mut encoder = self.encoder;
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_err() {
+            // The encoder holds no COM reference of this thread; dropping it
+            // here releases its interfaces and its MFStartup reference only.
+            bail!(
+                "standby encoder adoption could not join the MTA: HRESULT=0x{:08X}",
+                hr.0 as u32
+            );
+        }
+        encoder.com_started = true;
+        ensure!(
+            !encoder.input_device_removed(),
+            "standby encoder's D3D11 upload device was removed while it waited"
+        );
+        // Its construction stamps are from the idle period, not this start.
+        encoder.startup_steps.steps.clear();
+        Ok(encoder)
+    }
+}
+
+/// Steps of an encoder's start that the bridge folds into the session's start
+/// timeline (#1267). Telemetry only: stamping never changes behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaFoundationStartupStep {
+    /// COM and `MFStartup` are up on the encoder thread.
+    RuntimeStarted,
+    /// `MFTEnumEx` returned the hardware H.264 activations.
+    Enumerated,
+    /// `ActivateObject` created the MFT that this encoder kept.
+    Activated,
+    /// The D3D11 input device and surfaces exist (absent for system memory).
+    InputSetup,
+    /// Output and input types, codec settings and begin-streaming are done.
+    Configured,
+    /// The first `ProcessInput` was accepted.
+    FirstInput,
+    /// The MFT asked for its output type again before its first frame.
+    OutputRenegotiated,
+    /// `ProcessOutput` returned the first access unit.
+    FirstOutput,
+}
+
+/// Construction steps keep the LAST stamp (a rejected activation is retried
+/// on the next one, so the kept MFT's time is what counts); the per-frame
+/// steps keep the first, and stop once the first access unit is out so the
+/// steady state pays one branch per frame.
+#[derive(Debug, Default)]
+struct MediaFoundationStartupSteps {
+    steps: Vec<(MediaFoundationStartupStep, Instant)>,
+    closed: bool,
+}
+
+impl MediaFoundationStartupSteps {
+    fn restamp(&mut self, step: MediaFoundationStartupStep) {
+        self.steps.retain(|(existing, _)| *existing != step);
+        self.steps.push((step, Instant::now()));
+    }
+
+    fn stamp_once(&mut self, step: MediaFoundationStartupStep) {
+        if self.closed || self.steps.iter().any(|(existing, _)| *existing == step) {
+            return;
+        }
+        self.steps.push((step, Instant::now()));
+        self.closed = step == MediaFoundationStartupStep::FirstOutput;
+    }
+
+    fn take(&mut self) -> Vec<(MediaFoundationStartupStep, Instant)> {
+        std::mem::take(&mut self.steps)
+    }
 }
 
 struct D3D11SurfaceSlot {
@@ -519,14 +618,22 @@ impl MediaFoundationH264Encoder {
                 ));
             }
         }
+        let runtime_started_at = Instant::now();
 
-        let result =
+        let mut result =
             Self::create_after_startup(config.clone(), source_texture, true, true, diagnostic);
-        if result.is_err() {
-            unsafe {
+        match result.as_mut() {
+            Ok(encoder) => encoder.startup_steps.steps.insert(
+                0,
+                (
+                    MediaFoundationStartupStep::RuntimeStarted,
+                    runtime_started_at,
+                ),
+            ),
+            Err(_) => unsafe {
                 let _ = MFShutdown();
                 CoUninitialize();
-            }
+            },
         }
         result
     }
@@ -565,6 +672,8 @@ impl MediaFoundationH264Encoder {
     ) -> Result<Self> {
         let profile = config.profile_label();
         let activations = enumerate_hardware_h264_activations(&profile)?;
+        let mut startup_steps = MediaFoundationStartupSteps::default();
+        startup_steps.restamp(MediaFoundationStartupStep::Enumerated);
         let mut failures = Vec::new();
         for (activation_index, activation) in activations.into_iter().enumerate() {
             if diagnostic.is_some_and(|attempt| {
@@ -596,6 +705,7 @@ impl MediaFoundationH264Encoder {
             }
             match unsafe { activation.ActivateObject::<IMFTransform>() } {
                 Ok(transform) => {
+                    startup_steps.restamp(MediaFoundationStartupStep::Activated);
                     match Self::configure_transform(
                         config.clone(),
                         activation,
@@ -606,6 +716,7 @@ impl MediaFoundationH264Encoder {
                         com_started,
                         mf_started,
                         diagnostic,
+                        &mut startup_steps,
                     ) {
                         Ok(encoder) => return Ok(encoder),
                         Err(error) => failures.push(error.to_string()),
@@ -633,6 +744,7 @@ impl MediaFoundationH264Encoder {
         com_started: bool,
         mf_started: bool,
         diagnostic: Option<&crate::windows_mf_probe::ProbeAttempt>,
+        startup_steps: &mut MediaFoundationStartupSteps,
     ) -> Result<Self> {
         let profile = config.profile_label();
         let attributes = unsafe {
@@ -690,6 +802,9 @@ impl MediaFoundationH264Encoder {
         } else {
             None
         };
+        if d3d11_input.is_some() || d3d11_cpu_upload.is_some() {
+            startup_steps.restamp(MediaFoundationStartupStep::InputSetup);
+        }
         if let Some(attempt) = diagnostic {
             ensure!(
                 d3d11_cpu_upload.is_some() == attempt.case.d3d11_upload,
@@ -807,6 +922,7 @@ impl MediaFoundationH264Encoder {
                 })?;
         }
         let sequence_header = media_type_sequence_header(&output_type).unwrap_or_default();
+        startup_steps.restamp(MediaFoundationStartupStep::Configured);
         Ok(Self {
             config,
             activation: ManuallyDrop::new(activation),
@@ -826,7 +942,9 @@ impl MediaFoundationH264Encoder {
             saw_first_input_credit: false,
             accounts_session_frames: false,
             input_credit_timeouts: 0,
+            wait_deadline: None,
             stream_changes: StreamChangeBudget::default(),
+            startup_steps: std::mem::take(startup_steps),
             drained: false,
             mf_started,
             com_started,
@@ -843,6 +961,19 @@ impl MediaFoundationH264Encoder {
     ) {
         self.input_credit_timeout = input_credit_timeout.min(EVENT_TIMEOUT);
         self.accounts_session_frames = accounts_session_frames;
+    }
+
+    /// #1075: the writer keeps encoding the ticks it owes after the user's
+    /// Stop, but NVIDIA's MFT often stalls right at Stop, and a 3 s credit or
+    /// surface wait then outlasts Stop's TERM fallback. From now on every wait
+    /// ends by `deadline` and a frame that cannot get its credit or surface by
+    /// then is skipped, never failed.
+    pub fn bound_waits_until(&mut self, deadline: Instant) {
+        self.wait_deadline = Some(deadline);
+    }
+
+    fn bounded_wait(&self, timeout: Duration) -> Duration {
+        bounded_wait_timeout(self.wait_deadline, timeout, Instant::now())
     }
 
     pub fn identity(&self) -> &str {
@@ -881,7 +1012,12 @@ impl MediaFoundationH264Encoder {
         let use_d3d11_cpu_upload = self.input_subtype == MediaFoundationInputSubtype::Nv12
             && self.d3d11_cpu_upload.is_some();
         if use_d3d11_cpu_upload {
-            output.extend(self.wait_for_d3d11_cpu_upload_surface(EVENT_TIMEOUT)?);
+            let (surface_output, surface) =
+                self.wait_for_d3d11_cpu_upload_surface(self.bounded_wait(EVENT_TIMEOUT))?;
+            output.extend(surface_output);
+            if !surface {
+                return Ok(output);
+            }
         }
         let pts = scheduled_time_100ns(frame_index, self.config.fps)?;
         let duration = scheduled_duration_100ns(frame_index, self.config.fps)?;
@@ -963,7 +1099,12 @@ impl MediaFoundationH264Encoder {
         if !credit {
             return Ok(output);
         }
-        output.extend(self.wait_for_d3d11_surface(EVENT_TIMEOUT)?);
+        let (surface_output, surface) =
+            self.wait_for_d3d11_surface(self.bounded_wait(EVENT_TIMEOUT))?;
+        output.extend(surface_output);
+        if !surface {
+            return Ok(output);
+        }
         let pts = scheduled_time_100ns(frame_index, self.config.fps)?;
         let duration = scheduled_duration_100ns(frame_index, self.config.fps)?;
         let (sample, surface_slot) = self
@@ -1000,7 +1141,79 @@ impl MediaFoundationH264Encoder {
         Ok(output)
     }
 
-    fn record_submitted_frame(&self) {
+    /// Answers whatever events the MFT has queued without submitting a frame.
+    /// The bridge calls this between ticks until its first access unit is out
+    /// (#1267), so the first output is not held for the next frame tick.
+    pub fn poll_output(&mut self) -> Result<Vec<MediaFoundationEncodedFrame>> {
+        ensure!(
+            !self.drained,
+            "Media Foundation encoder {} was already drained",
+            self.identity
+        );
+        self.collect_available_events()
+    }
+
+    /// Hands the start-step stamps gathered so far to the bridge (#1267):
+    /// construction steps after `new`, the first input/output steps once the
+    /// first access unit is out.
+    pub fn take_startup_steps(&mut self) -> Vec<(MediaFoundationStartupStep, Instant)> {
+        self.startup_steps.take()
+    }
+
+    /// Releases this thread's COM reference and wraps the encoder so another
+    /// thread can adopt it (the standby encoder, see `windows_mf_standby`).
+    ///
+    /// Only an encoder that never took a frame may move: its MFT has begun
+    /// streaming but holds no input, output or surface in flight. The
+    /// encoder's `MFStartup` reference travels with it (Media Foundation
+    /// counts per process), and its COM reference is returned here, on the
+    /// thread that took it; the adopting thread takes its own. Neither can
+    /// tear the apartment down: `windows_com_lifetime` holds the MTA and one
+    /// `MFStartup` reference for the whole process.
+    // The refused encoder comes back by value so the caller keeps using it.
+    #[allow(clippy::result_large_err)]
+    pub fn into_thread_handoff(
+        mut self,
+    ) -> std::result::Result<MediaFoundationThreadHandoff, Self> {
+        if self.drained
+            || !self.submitted_pts.is_empty()
+            || self.last_output_pts.is_some()
+            || self.input_credits > 0
+        {
+            return Err(self);
+        }
+        if self.com_started {
+            unsafe { CoUninitialize() };
+            self.com_started = false;
+        }
+        Ok(MediaFoundationThreadHandoff { encoder: self })
+    }
+
+    /// True when the D3D11 device this encoder uploads through was removed
+    /// (driver reset, TDR, adapter change) since it was built.
+    fn input_device_removed(&self) -> bool {
+        let context = self
+            .d3d11_cpu_upload
+            .as_ref()
+            .map(|input| &input.immediate_context)
+            .or_else(|| {
+                self.d3d11_input
+                    .as_ref()
+                    .map(|input| &input.immediate_context)
+            });
+        let Some(context) = context else {
+            return false;
+        };
+        unsafe {
+            context
+                .GetDevice()
+                .is_ok_and(|device| device.GetDeviceRemovedReason().is_err())
+        }
+    }
+
+    fn record_submitted_frame(&mut self) {
+        self.startup_steps
+            .stamp_once(MediaFoundationStartupStep::FirstInput);
         if self.accounts_session_frames {
             RECORDING_FRAME_ACCOUNTING.record_mf_submitted_frame();
         }
@@ -1014,11 +1227,11 @@ impl MediaFoundationH264Encoder {
     fn acquire_input_credit_for_frame(
         &mut self,
     ) -> Result<(Vec<MediaFoundationEncodedFrame>, bool)> {
-        let timeout = if self.saw_first_input_credit {
+        let timeout = self.bounded_wait(if self.saw_first_input_credit {
             self.input_credit_timeout
         } else {
             EVENT_TIMEOUT
-        };
+        });
         let wait_started_at = Instant::now();
         let (output, credit) = self.poll_input_credit(timeout)?;
         if self.accounts_session_frames {
@@ -1180,13 +1393,13 @@ impl MediaFoundationH264Encoder {
     fn wait_for_d3d11_surface(
         &mut self,
         timeout: Duration,
-    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
+    ) -> Result<(Vec<MediaFoundationEncodedFrame>, bool)> {
         if self
             .d3d11_input
             .as_ref()
             .is_some_and(D3D11SurfaceInput::has_available_surface)
         {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), true));
         }
         let deadline = Instant::now() + timeout;
         let mut output = Vec::new();
@@ -1199,7 +1412,7 @@ impl MediaFoundationH264Encoder {
                         .as_ref()
                         .is_some_and(D3D11SurfaceInput::has_available_surface)
                     {
-                        return Ok(output);
+                        return Ok((output, true));
                     }
                 }
                 Some(event_type) if event_type == METransformNeedInput.0 as u32 => {
@@ -1208,6 +1421,10 @@ impl MediaFoundationH264Encoder {
                 Some(_) => {}
                 None => thread::sleep(EVENT_POLL_INTERVAL),
             }
+        }
+        if self.wait_deadline.is_some() {
+            // #1075: after Stop, skip the frame rather than fail the take.
+            return Ok((output, false));
         }
         bail!(
             "Media Foundation probe stage=d3d11-surface-pool encoder={:?} input=NV12-D3D11 profile={}: no reusable surface within {}ms",
@@ -1220,13 +1437,13 @@ impl MediaFoundationH264Encoder {
     fn wait_for_d3d11_cpu_upload_surface(
         &mut self,
         timeout: Duration,
-    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
+    ) -> Result<(Vec<MediaFoundationEncodedFrame>, bool)> {
         if self
             .d3d11_cpu_upload
             .as_ref()
             .is_some_and(D3D11CpuUploadInput::has_available_surface)
         {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), true));
         }
         let deadline = Instant::now() + timeout;
         let mut output = Vec::new();
@@ -1239,7 +1456,7 @@ impl MediaFoundationH264Encoder {
                         .as_ref()
                         .is_some_and(D3D11CpuUploadInput::has_available_surface)
                     {
-                        return Ok(output);
+                        return Ok((output, true));
                     }
                 }
                 Some(event_type) if event_type == METransformNeedInput.0 as u32 => {
@@ -1248,6 +1465,10 @@ impl MediaFoundationH264Encoder {
                 Some(_) => {}
                 None => thread::sleep(EVENT_POLL_INTERVAL),
             }
+        }
+        if self.wait_deadline.is_some() {
+            // #1075: after Stop, skip the frame rather than fail the take.
+            return Ok((output, false));
         }
         bail!(
             "Media Foundation probe stage=d3d11-cpu-upload-surface-pool encoder={:?} input=NV12-D3D11 profile={}: no reusable surface within {}ms",
@@ -1363,6 +1584,8 @@ impl MediaFoundationH264Encoder {
                     && self.stream_changes.allows_renegotiation() =>
             {
                 let attempt = self.stream_changes.renegotiated();
+                self.startup_steps
+                    .stamp_once(MediaFoundationStartupStep::OutputRenegotiated);
                 tracing::info!(
                     "Media Foundation encoder {:?} requested output-type renegotiation (attempt {}/{}); re-selecting output type and waiting for the next HaveOutput",
                     self.identity,
@@ -1447,6 +1670,8 @@ impl MediaFoundationH264Encoder {
             );
         }
         self.last_output_pts = Some(pts);
+        self.startup_steps
+            .stamp_once(MediaFoundationStartupStep::FirstOutput);
         let duration = unsafe { sample.GetSampleDuration() }
             .unwrap_or_else(|_| scheduled_duration_100ns(0, self.config.fps).unwrap_or(1));
         let buffer = unsafe { sample.ConvertToContiguousBuffer() }?;
@@ -4047,6 +4272,13 @@ fn frame_index_from_100ns(pts: i64, fps: u32) -> Result<u64> {
     u64::try_from(value).context("Media Foundation frame index exceeded u64")
 }
 
+/// A wait of `timeout` that may not run past `deadline` (#1075).
+fn bounded_wait_timeout(deadline: Option<Instant>, timeout: Duration, now: Instant) -> Duration {
+    deadline.map_or(timeout, |deadline| {
+        timeout.min(deadline.saturating_duration_since(now))
+    })
+}
+
 fn i420_to_nv12_strided(
     i420: &[u8],
     width: u32,
@@ -4282,6 +4514,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn startup_steps_keep_the_kept_mft_and_stop_after_the_first_output() {
+        // #1267: a rejected activation is retried on the next one, so the
+        // construction stamps keep the last time; per-frame steps keep the
+        // first, and nothing is stamped once the first access unit is out.
+        use MediaFoundationStartupStep::*;
+        let mut steps = MediaFoundationStartupSteps::default();
+        steps.restamp(Activated);
+        let first_activation = steps.steps[0].1;
+        steps.restamp(Activated);
+        assert_eq!(steps.steps.len(), 1);
+        assert!(steps.steps[0].1 >= first_activation);
+        steps.restamp(Configured);
+        assert_eq!(
+            steps
+                .take()
+                .iter()
+                .map(|(step, _)| *step)
+                .collect::<Vec<_>>(),
+            [Activated, Configured]
+        );
+
+        steps.stamp_once(FirstInput);
+        let first_input = steps.steps[0].1;
+        steps.stamp_once(FirstInput);
+        assert_eq!(steps.steps, [(FirstInput, first_input)]);
+        steps.stamp_once(OutputRenegotiated);
+        steps.stamp_once(FirstOutput);
+        assert_eq!(
+            steps
+                .take()
+                .iter()
+                .map(|(step, _)| *step)
+                .collect::<Vec<_>>(),
+            [FirstInput, OutputRenegotiated, FirstOutput]
+        );
+        // A later renegotiation in steady state is not a start step.
+        steps.stamp_once(OutputRenegotiated);
+        assert!(steps.take().is_empty());
+    }
+
+    #[test]
     fn stream_change_hresult_is_classified_as_renegotiation() {
         assert!(is_mf_stream_change(MF_E_TRANSFORM_STREAM_CHANGE));
         // MF_E_TRANSFORM_NEED_MORE_INPUT (0xC00D6D62) is a different condition.
@@ -4352,6 +4625,33 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(values.windows(2).all(|pair| pair[1] > pair[0]));
         assert_eq!(values[60], 10_000_000);
+    }
+
+    #[test]
+    fn a_wait_after_stop_never_runs_past_the_catch_up_deadline() {
+        // #1075: a stalled MFT at Stop used to hold a 3 s surface wait.
+        let now = Instant::now();
+        assert_eq!(
+            bounded_wait_timeout(None, EVENT_TIMEOUT, now),
+            EVENT_TIMEOUT
+        );
+        let deadline = now + Duration::from_millis(400);
+        assert_eq!(
+            bounded_wait_timeout(Some(deadline), EVENT_TIMEOUT, now),
+            Duration::from_millis(400)
+        );
+        assert_eq!(
+            bounded_wait_timeout(Some(deadline), Duration::from_millis(250), now),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            bounded_wait_timeout(
+                Some(deadline),
+                EVENT_TIMEOUT,
+                deadline + Duration::from_millis(5)
+            ),
+            Duration::ZERO
+        );
     }
 
     #[test]

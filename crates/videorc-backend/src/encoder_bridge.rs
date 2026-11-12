@@ -52,6 +52,7 @@ use crate::protocol::{
 };
 #[cfg(any(test, debug_assertions))]
 use crate::protocol::{EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult};
+use crate::recording_timeline::{BridgeStartupTrace, RecordingStartPhase};
 #[cfg(target_os = "windows")]
 use crate::scene_geometry::{PixelRect, SceneCrop, SceneMask};
 use crate::state::AppState;
@@ -69,7 +70,7 @@ use crate::windows_d3d11_session::{
 #[cfg(target_os = "windows")]
 use crate::windows_media_foundation_encoder::{
     D3D11BgraOverlay, DRAIN_TIMEOUT as MEDIA_FOUNDATION_DRAIN_TIMEOUT, MediaFoundationEncodedFrame,
-    MediaFoundationEncoderConfig, MediaFoundationH264Encoder,
+    MediaFoundationEncoderConfig, MediaFoundationH264Encoder, MediaFoundationStartupStep,
 };
 
 const ENCODER_BRIDGE_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(2);
@@ -242,6 +243,20 @@ impl EncoderBridgeVideoOutput {
     const fn uses_encoded_h264(self) -> bool {
         self.uses_video_toolbox() || self.uses_media_foundation()
     }
+}
+
+/// What a bridge writer does with the standby Media Foundation encoder
+/// (`windows_mf_standby`, #1267 follow-up). Ignored off Windows and by every
+/// output that is not the CPU-fed Media Foundation path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaFoundationStandbyUse {
+    #[default]
+    None,
+    /// The Record's own leg: take the standby when its profile matches.
+    Adopt,
+    /// The replay-only Clips ring, running while the user is idle: once its
+    /// first access unit is out, build a standby for the next Record.
+    Arm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2622,6 +2637,49 @@ const MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR: Duration = Duration::from_mill
 /// `recording::STOP_TERM_DELAY` (pinned by a test there).
 pub(crate) const MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// #1075: how long after the user's Stop the Windows Media Foundation
+/// recording writer may keep encoding the ticks it still owes before the Stop
+/// instant. The CPU compositor can leave the writer 0.4-0.8 s behind its
+/// schedule at 1440p60, 4K30 or noisy 1080p60 (i5-8400, GTX 1650 SUPER), and a
+/// writer that quit at the Stop flag ended the take that much early, taking the
+/// matching audio with it. With the Stop drain it must stay under
+/// `recording::STOP_TERM_DELAY` (pinned by a test there).
+pub(crate) const MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET: Duration = Duration::from_secs(1);
+
+/// What the Media Foundation recording writer does with its next tick once the
+/// user pressed Stop at `stop_at` (#1075).
+#[derive(Debug, PartialEq, Eq)]
+enum MediaFoundationStopCatchUp {
+    /// The tick is due at or before Stop: encode it.
+    Continue,
+    /// Every tick up to Stop is written.
+    Complete,
+    /// The catch-up budget ran out with `owed_ticks` still unwritten; the take
+    /// ends early by that much, as it did before #1075.
+    OutOfTime { owed_ticks: u64 },
+}
+
+fn media_foundation_stop_catch_up(
+    tick_at: Instant,
+    stop_at: Instant,
+    now: Instant,
+    frame_interval: Duration,
+) -> MediaFoundationStopCatchUp {
+    if tick_at > stop_at {
+        return MediaFoundationStopCatchUp::Complete;
+    }
+    if now >= stop_at + MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET {
+        let owed = stop_at.saturating_duration_since(tick_at);
+        let owed_ticks = if frame_interval.is_zero() {
+            1
+        } else {
+            (owed.as_nanos() / frame_interval.as_nanos()) as u64 + 1
+        };
+        return MediaFoundationStopCatchUp::OutOfTime { owed_ticks };
+    }
+    MediaFoundationStopCatchUp::Continue
+}
+
 /// The final drain's bound: short after Stop (the user is waiting and FFmpeg
 /// needs the EOF), the encoder's full timeout otherwise.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -2834,6 +2892,88 @@ impl EncoderBridgeDrainState {
     }
 }
 
+/// #1267: a CPU-fed Media Foundation writer builds its encoder while FFmpeg
+/// is still starting, before it waits for the video FIFO to be opened. The
+/// D3D11 ticket writer gets its encoder from the media thread instead.
+#[cfg(any(test, target_os = "windows"))]
+const fn media_foundation_encoder_precedes_fifo_open(
+    video_output: EncoderBridgeVideoOutput,
+    d3d11_ticket_input: bool,
+) -> bool {
+    video_output.uses_media_foundation() && !d3d11_ticket_input
+}
+
+/// How often the bridge asks the MFT for its first access unit between ticks.
+#[cfg(target_os = "windows")]
+const MEDIA_FOUNDATION_FIRST_OUTPUT_POLL: Duration = Duration::from_millis(2);
+
+/// #1267: polls the MFT until `until` (the next frame tick) for the
+/// session's first access unit and writes whatever it emits to the FIFO.
+/// `Ok(true)` means at least one access unit reached FFmpeg. An error is the
+/// same failure the next submit would have met; the caller hands it to the
+/// tick's write path, which already knows how to end the writer on it.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn poll_media_foundation_first_access_unit(
+    encoder: &mut MediaFoundationH264Encoder,
+    fifo: &mut File,
+    ts_writer: &mut MpegTsH264Writer,
+    stop: &AtomicBool,
+    until: Instant,
+    zero_copy_frames: &mut u64,
+    output_frames: &mut u64,
+    output_bytes: &mut u64,
+    fifo_write_times_ms: &mut Vec<f64>,
+) -> io::Result<bool> {
+    loop {
+        let frames = encoder
+            .poll_output()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if !frames.is_empty() {
+            let written_before = *output_frames;
+            write_media_foundation_frames(
+                frames,
+                fifo,
+                ts_writer,
+                stop,
+                zero_copy_frames,
+                output_frames,
+                output_bytes,
+                fifo_write_times_ms,
+            )?;
+            return Ok(*output_frames > written_before);
+        }
+        let now = Instant::now();
+        if now >= until || stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        thread::sleep((until - now).min(MEDIA_FOUNDATION_FIRST_OUTPUT_POLL));
+    }
+}
+
+/// Folds the encoder's start-step stamps into the bridge's trace (#1267).
+#[cfg(target_os = "windows")]
+fn stamp_media_foundation_startup_steps(
+    trace: &BridgeStartupTrace,
+    encoder: &mut MediaFoundationH264Encoder,
+) {
+    for (step, at) in encoder.take_startup_steps() {
+        let phase = match step {
+            MediaFoundationStartupStep::RuntimeStarted => RecordingStartPhase::BridgeMfStartup,
+            MediaFoundationStartupStep::Enumerated => RecordingStartPhase::BridgeMftEnumerate,
+            MediaFoundationStartupStep::Activated => RecordingStartPhase::BridgeMftActivate,
+            MediaFoundationStartupStep::InputSetup => RecordingStartPhase::BridgeInputSetup,
+            MediaFoundationStartupStep::Configured => RecordingStartPhase::BridgeMftConfigure,
+            MediaFoundationStartupStep::FirstInput => RecordingStartPhase::BridgeFirstInput,
+            MediaFoundationStartupStep::OutputRenegotiated => {
+                RecordingStartPhase::BridgeOutputRenegotiated
+            }
+            MediaFoundationStartupStep::FirstOutput => RecordingStartPhase::BridgeFirstOutput,
+        };
+        trace.stamp_at(phase, at);
+    }
+}
+
 fn signal_encoder_bridge_startup(
     sender: &mut Option<oneshot::Sender<std::result::Result<(), String>>>,
     result: std::result::Result<(), String>,
@@ -2847,9 +2987,15 @@ fn signal_encoder_bridge_startup(
 pub struct EncoderBridgeRecordingSession {
     stop: Arc<AtomicBool>,
     graceful_stop_at: Option<Arc<IsoVideoStopBoundary>>,
+    /// #1075: the user's Stop instant on a Windows Media Foundation recording
+    /// leg, which first writes the ticks it owes up to it. `None` elsewhere.
+    stop_catch_up: Option<Arc<OnceLock<Instant>>>,
     iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready: Option<oneshot::Receiver<std::result::Result<(), String>>>,
+    /// The writer thread's start-step stamps (#1267), folded into the
+    /// session's start timeline once the bridge is ready.
+    startup_trace: Arc<BridgeStartupTrace>,
     bootstrap_reader: StdMutex<Option<std::fs::File>>,
     fifo_path: PathBuf,
     writer: Option<thread::JoinHandle<()>>,
@@ -2869,6 +3015,26 @@ impl EncoderBridgeRecordingSession {
         if let Some(member) = self.iso_member.as_ref() {
             member.retire();
         }
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.stop_signalled();
+        }
+    }
+
+    /// The user's Stop. A Windows Media Foundation recording leg running behind
+    /// its schedule first encodes the ticks it owes up to this instant, within
+    /// [`MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET`], so the take keeps the last
+    /// moments the user saw and heard (#1075). Every other leg stops at once,
+    /// and Abort, Drop and teardown still use [`Self::stop`].
+    pub fn stop_for_user(&self) {
+        let Some(catch_up) = self.stop_catch_up.as_ref() else {
+            self.stop();
+            return;
+        };
+        self.bootstrap_reader
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        let _ = catch_up.set(Instant::now());
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.stop_signalled();
         }
@@ -2995,6 +3161,10 @@ impl EncoderBridgeRecordingSession {
         read_encoder_bridge_terminal_failure(&self.terminal_failure)
     }
 
+    pub fn startup_trace(&self) -> &BridgeStartupTrace {
+        &self.startup_trace
+    }
+
     pub async fn wait_until_ready(&mut self) -> Result<()> {
         let Some(startup_ready) = self.startup_ready.take() else {
             return Ok(());
@@ -3031,9 +3201,11 @@ impl EncoderBridgeRecordingSession {
             Self {
                 stop: stop.clone(),
                 graceful_stop_at: None,
+                stop_catch_up: None,
                 iso_member: None,
                 terminal_failure: Arc::new(StdMutex::new(None)),
                 startup_ready: None,
+                startup_trace: Arc::default(),
                 bootstrap_reader: StdMutex::new(None),
                 fifo_path: PathBuf::from("/nonexistent-test-fifo"),
                 writer: Some(writer),
@@ -3579,6 +3751,7 @@ pub fn start_synthetic_recording_bridge(
     // interleave it with the later audio (`stream_queue_allowance_ms` in
     // recording.rs). Applied only when this writer runs the stream policy.
     stream_queue_allowance_ms: u32,
+    mf_standby: MediaFoundationStandbyUse,
 ) -> Result<EncoderBridgeRecordingSession> {
     let byte_len = raw_yuv420p_len(width, height)?;
     #[cfg(unix)]
@@ -3613,12 +3786,21 @@ pub fn start_synthetic_recording_bridge(
             })
         });
     let writer_graceful_stop_at = graceful_stop_at.clone();
+    let stop_catch_up = (cfg!(target_os = "windows")
+        && video_output.uses_media_foundation()
+        && graceful_stop_at.is_none()
+        && effective_encoder_bridge_output_role(diagnostics_context)
+            == EncoderBridgeOutputRole::Recording)
+        .then(|| Arc::new(OnceLock::new()));
+    let writer_stop_catch_up = stop_catch_up.clone();
     let iso_member = start_barrier
         .as_ref()
         .and_then(|barrier| barrier.member_for(frame_store.as_ref()));
     let writer_iso_member = iso_member.clone();
     let terminal_failure = Arc::new(StdMutex::new(None));
     let (startup_ready_tx, startup_ready_rx) = oneshot::channel();
+    let startup_trace = Arc::new(BridgeStartupTrace::default());
+    let writer_startup_trace = startup_trace.clone();
     let writer_stop = stop.clone();
     let writer_terminal_failure = terminal_failure.clone();
     let writer_fifo_path = fifo_path.clone();
@@ -3668,13 +3850,16 @@ pub fn start_synthetic_recording_bridge(
                 diagnostics_context,
                 stop: writer_stop,
                 graceful_stop_at: writer_graceful_stop_at,
+                stop_catch_up: writer_stop_catch_up,
                 iso_member: writer_iso_member,
                 terminal_failure: writer_terminal_failure,
                 startup_ready_tx: Some(startup_ready_tx),
+                startup_trace: writer_startup_trace,
                 diagnostics_tx,
                 video_epoch,
                 start_barrier,
                 stream_queue_allowance_ms,
+                mf_standby,
                 lifecycle: writer_lifecycle,
             };
             write_synthetic_recording_frames(params);
@@ -3690,10 +3875,12 @@ pub fn start_synthetic_recording_bridge(
     Ok(EncoderBridgeRecordingSession {
         stop,
         graceful_stop_at,
+        stop_catch_up,
         iso_member,
         terminal_failure,
         bootstrap_reader: StdMutex::new(bootstrap_reader),
         startup_ready: Some(startup_ready_rx),
+        startup_trace,
         fifo_path,
         writer: Some(writer),
         diagnostics_task: Some(diagnostics_task),
@@ -3878,9 +4065,11 @@ struct SyntheticRecordingWriterParams {
     byte_len: usize,
     stop: Arc<AtomicBool>,
     graceful_stop_at: Option<Arc<IsoVideoStopBoundary>>,
+    stop_catch_up: Option<Arc<OnceLock<Instant>>>,
     iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    startup_trace: Arc<BridgeStartupTrace>,
     fifo_path: PathBuf,
     frame_store: Option<CompositorFrameStore>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -3903,6 +4092,8 @@ struct SyntheticRecordingWriterParams {
     /// Plan 218 S3b: FFmpeg's deliberate interleave hold on this stream's
     /// frames; zero for a recording.
     stream_queue_allowance_ms: u32,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    mf_standby: MediaFoundationStandbyUse,
     lifecycle: EncoderBridgeWriterLifecycle,
 }
 
@@ -3924,9 +4115,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         byte_len,
         stop,
         graceful_stop_at,
+        stop_catch_up,
         iso_member,
         terminal_failure,
         mut startup_ready_tx,
+        startup_trace,
         fifo_path,
         frame_store,
         #[cfg(target_os = "windows")]
@@ -3955,6 +4148,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         video_epoch,
         start_barrier,
         stream_queue_allowance_ms,
+        #[cfg(target_os = "windows")]
+        mf_standby,
+        #[cfg(not(target_os = "windows"))]
+            mf_standby: _,
         lifecycle,
     } = params;
     let _iso_membership_guard = IsoBatchWriterGuard(iso_member.clone());
@@ -3991,8 +4188,105 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // Only the recording leg (or the shared leg) feeds the session's frame
     // accounting; a dedicated stream writer must not double-count it.
     let accounts_session_frames = output_queue_policy.role != EncoderBridgeOutputRole::Stream;
+    // #1267: build the Media Foundation encoder BEFORE waiting for FFmpeg to
+    // open the video FIFO. FFmpeg opens its audio input first and reaches
+    // this pipe only after its own start and the audio probe (about 0.5 s
+    // warm on a UHD 620 laptop); MFT activation and configuration (0.3-0.5 s
+    // warm, 1 s cold) used to start only after that. The pipe instance
+    // already exists (recording.rs creates it before spawning FFmpeg), so
+    // FFmpeg's open succeeds while the encoder is still being built, and a
+    // failed build leaves only an unopened pipe that session cleanup removes.
+    // The standby the Clips ring arms once its own first unit is out.
+    #[cfg(target_os = "windows")]
+    let mut standby_arm_config = None::<MediaFoundationEncoderConfig>;
+    #[cfg(target_os = "windows")]
+    let prepared_media_foundation_encoder = if media_foundation_encoder_precedes_fifo_open(
+        video_output,
+        d3d11_input.is_some(),
+    ) {
+        let config = MediaFoundationEncoderConfig {
+            width,
+            height,
+            fps: target_fps.max(1),
+            bitrate_kbps: bitrate_kbps.unwrap_or(6_000),
+            low_latency,
+            input_topology: mf_input_topology,
+        };
+        let first_direct_texture = direct_d3d11_source
+            .as_ref()
+            .and_then(PreviewScreenD3D11FrameSource::latest_frame)
+            .and_then(|frame| frame.source_d3d11_texture.clone());
+        let cpu_fed = first_direct_texture.is_none() && direct_d3d11_source.is_none();
+        if cpu_fed && mf_standby == MediaFoundationStandbyUse::Arm {
+            standby_arm_config = Some(config.clone());
+        }
+        let mut adopted_standby = false;
+        let encoder_result = match first_direct_texture.as_ref() {
+            Some(texture) => MediaFoundationH264Encoder::new_with_d3d11_texture(config, texture),
+            None if direct_d3d11_source.is_some() => Err(anyhow::anyhow!(
+                "direct D3D11 recording source had no retained capture texture"
+            )),
+            None if mf_standby == MediaFoundationStandbyUse::Adopt => {
+                match crate::windows_mf_standby::take(&config) {
+                    crate::windows_mf_standby::StandbyTake::Adopted { encoder, waited } => {
+                        tracing::info!(
+                            "[mf-standby] Record adopted standby encoder {} for {} (waited {} ms)",
+                            encoder.identity(),
+                            config.profile_label(),
+                            waited.as_millis()
+                        );
+                        adopted_standby = true;
+                        Ok(encoder)
+                    }
+                    crate::windows_mf_standby::StandbyTake::Missed(reason) => {
+                        tracing::info!(
+                            "[mf-standby] Record builds its own encoder for {}: {reason}",
+                            config.profile_label()
+                        );
+                        MediaFoundationH264Encoder::new(config)
+                    }
+                }
+            }
+            None => MediaFoundationH264Encoder::new(config),
+        };
+        let encoder = match encoder_result {
+            Ok(mut encoder) => {
+                encoder.configure_for_bridge_writer(
+                    media_foundation_writer_input_credit_timeout(target_fps),
+                    accounts_session_frames,
+                );
+                stamp_media_foundation_startup_steps(&startup_trace, &mut encoder);
+                if adopted_standby {
+                    startup_trace.stamp(RecordingStartPhase::BridgeMftStandby);
+                }
+                encoder
+            }
+            Err(error) => {
+                let error = record_encoder_bridge_terminal_failure(
+                    &terminal_failure,
+                    format!("Could not prepare Media Foundation encoder bridge output: {error}"),
+                );
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
+                emit_encoder_bridge_diagnostics_from_thread(
+                    &diagnostics_tx,
+                    session_id.clone(),
+                    target_fps,
+                    EncoderBridgeRuntimeStats::default(),
+                    diagnostics_context,
+                    Some(error),
+                );
+                return;
+            }
+        };
+        Some(encoder)
+    } else {
+        None
+    };
     let fifo = match open_recording_fifo_writer(&fifo_path, &stop, true) {
-        Ok(fifo) => fifo,
+        Ok(fifo) => {
+            startup_trace.stamp(RecordingStartPhase::BridgeFifoOpen);
+            fifo
+        }
         Err(error) => {
             let error = record_encoder_bridge_terminal_failure(
                 &terminal_failure,
@@ -4082,51 +4376,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         mut media_foundation_encoder,
         mut media_foundation_fifo,
         mut media_foundation_ts_writer,
-    ) = if video_output.uses_media_foundation() {
-        let config = MediaFoundationEncoderConfig {
-            width,
-            height,
-            fps: target_fps.max(1),
-            bitrate_kbps: bitrate_kbps.unwrap_or(6_000),
-            low_latency,
-            input_topology: mf_input_topology,
-        };
-        let first_direct_texture = direct_d3d11_source
-            .as_ref()
-            .and_then(PreviewScreenD3D11FrameSource::latest_frame)
-            .and_then(|frame| frame.source_d3d11_texture.clone());
-        let encoder_result = match first_direct_texture.as_ref() {
-            Some(texture) => MediaFoundationH264Encoder::new_with_d3d11_texture(config, texture),
-            None if direct_d3d11_source.is_some() => Err(anyhow::anyhow!(
-                "direct D3D11 recording source had no retained capture texture"
-            )),
-            None => MediaFoundationH264Encoder::new(config),
-        };
-        let encoder = match encoder_result {
-            Ok(mut encoder) => {
-                encoder.configure_for_bridge_writer(
-                    media_foundation_writer_input_credit_timeout(target_fps),
-                    accounts_session_frames,
-                );
-                encoder
-            }
-            Err(error) => {
-                let error = record_encoder_bridge_terminal_failure(
-                    &terminal_failure,
-                    format!("Could not prepare Media Foundation encoder bridge output: {error}"),
-                );
-                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
-                emit_encoder_bridge_diagnostics_from_thread(
-                    &diagnostics_tx,
-                    session_id.clone(),
-                    target_fps,
-                    EncoderBridgeRuntimeStats::default(),
-                    diagnostics_context,
-                    Some(error),
-                );
-                return;
-            }
-        };
+    ) = if let Some(encoder) = prepared_media_foundation_encoder {
         (
             None,
             Some(encoder),
@@ -4239,6 +4489,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let encoded_access_unit_dropped_frames = 0_u64;
     let mut output_pressure_active = false;
     let mut last_output_progress_at = Instant::now();
+    #[cfg(target_os = "windows")]
+    let mut media_foundation_startup_poll_error: Option<io::Error> = None;
     let mut observed_raw_fifo_write_progress_epoch = raw_fifo_writer
         .as_ref()
         .map_or(0, RawVideoFifoWriter::write_progress_epoch);
@@ -4671,7 +4923,46 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // proof the D3D11 writer gives, so its software first frame is paid
     // before `Recording` and FFmpeg's progress report can be a watchdog.
 
+    let mut stop_catch_up_ticks = 0_u64;
     while !stop.load(Ordering::Relaxed) {
+        // #1075: after the user's Stop, write the ticks still owed up to the
+        // Stop instant before closing the pipe, within a bound.
+        if let Some(stop_at) = stop_catch_up.as_ref().and_then(|at| at.get().copied()) {
+            match media_foundation_stop_catch_up(
+                next_frame_at,
+                stop_at,
+                Instant::now(),
+                frame_interval,
+            ) {
+                MediaFoundationStopCatchUp::Continue => {
+                    stop_catch_up_ticks = stop_catch_up_ticks.saturating_add(1);
+                    // An encoder that stalls at Stop must not hold the
+                    // writer past the catch-up budget in a 3 s wait.
+                    #[cfg(target_os = "windows")]
+                    if let Some(encoder) = media_foundation_encoder.as_mut() {
+                        encoder.bound_waits_until(stop_at + MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET);
+                    }
+                }
+                MediaFoundationStopCatchUp::Complete => {
+                    if stop_catch_up_ticks > 1 {
+                        tracing::info!(
+                            ticks = stop_catch_up_ticks,
+                            "Media Foundation recording writer caught up to Stop before closing the take"
+                        );
+                    }
+                    break;
+                }
+                MediaFoundationStopCatchUp::OutOfTime { owed_ticks } => {
+                    tracing::warn!(
+                        ticks = stop_catch_up_ticks,
+                        owed_ticks,
+                        budget_ms = MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET.as_millis() as u64,
+                        "Media Foundation recording writer could not catch up to Stop; the take ends early"
+                    );
+                    break;
+                }
+            }
+        }
         // Plan 200 D1: a shed separate file drains to its own last tick, even
         // while output pressure keeps it from selecting another frame.
         install_iso_shed_boundary(
@@ -4752,8 +5043,51 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             );
         }
         let sleep_started_at = Instant::now();
-        if now < next_frame_at {
-            thread::sleep(next_frame_at - now);
+        // The Clips ring is up (its first unit reached FFmpeg): build the
+        // next Record's encoder now, off the click path.
+        #[cfg(target_os = "windows")]
+        if startup_ready_tx.is_none()
+            && media_foundation_encoder.is_some()
+            && let Some(config) = standby_arm_config.take()
+        {
+            crate::windows_mf_standby::arm(config);
+        }
+        // #1267: until the first access unit is in the FIFO, answer the MFT
+        // between ticks. It asks for its output type again and emits that
+        // unit well inside one frame interval, but read only at each submit
+        // they waited for two ticks (67 ms at 30 fps) on every Record.
+        #[cfg(target_os = "windows")]
+        if startup_ready_tx.is_some()
+            && let (Some(encoder), Some(fifo), Some(ts_writer)) = (
+                media_foundation_encoder.as_mut(),
+                media_foundation_fifo.as_mut(),
+                media_foundation_ts_writer.as_mut(),
+            )
+            && encoder.pending_frame_count() > 0
+        {
+            match poll_media_foundation_first_access_unit(
+                encoder,
+                fifo,
+                ts_writer,
+                &stop,
+                next_frame_at,
+                &mut zero_copy_frames,
+                &mut video_toolbox_output_frames,
+                &mut video_toolbox_output_bytes,
+                &mut video_toolbox_fifo_write_times_ms,
+            ) {
+                Ok(true) => {
+                    last_output_progress_at = Instant::now();
+                    stamp_media_foundation_startup_steps(&startup_trace, encoder);
+                    signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+                }
+                Ok(false) => {}
+                Err(error) => media_foundation_startup_poll_error = Some(error),
+            }
+        }
+        let sleep_from = Instant::now();
+        if sleep_from < next_frame_at {
+            thread::sleep(next_frame_at - sleep_from);
         }
         let active_started_at = Instant::now();
         writer_sleep_times_ms.push(
@@ -4843,7 +5177,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         } else {
             raw_fifo_drain_error
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        let mut pipeline_error =
+            raw_fifo_drain_error.or(media_foundation_startup_poll_error.take());
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
         let mut pipeline_error = raw_fifo_drain_error;
 
         // Plan 218 S3a: a leg that overflowed or a pressured stream queue
@@ -5359,6 +5696,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     .as_ref()
                     .and_then(|frame| frame.frame.metadata.presentation_at())
                     .unwrap_or(fed_at);
+                startup_trace.stamp_at(RecordingStartPhase::BridgeFirstFrame, fed_at);
                 let epoch = recording_epoch(captured_at, presented_at, frame_interval);
                 if video_epoch.set(epoch).is_ok() {
                     tracing::info!(
@@ -5703,6 +6041,12 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             if video_output.uses_media_foundation() {
                 // #1068: the first access unit reached FFmpeg's FIFO. Later
                 // writes find the sender already taken.
+                #[cfg(target_os = "windows")]
+                if startup_ready_tx.is_some()
+                    && let Some(encoder) = media_foundation_encoder.as_mut()
+                {
+                    stamp_media_foundation_startup_steps(&startup_trace, encoder);
+                }
                 signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
             }
         }
@@ -6215,6 +6559,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         // Stop's TERM fallback, or a stuck encoder costs the whole take.
         let stop_requested_now = || {
             stop.load(Ordering::Relaxed)
+                || stop_catch_up.as_ref().is_some_and(|at| at.get().is_some())
                 || graceful_stop_at
                     .as_ref()
                     .and_then(|at| at.boundary())
@@ -7819,6 +8164,85 @@ fn write_all_until_with_timing<W: StdWrite>(
     Ok(())
 }
 
+/// Where the D3D11 writer's schedule slots went in one diagnostics window
+/// (#1042): a frame the compositor published but the latest-wins store
+/// replaced before this writer read it is `overwritten`; a slot that found
+/// no newer frame than the last one submitted, even after waiting, is
+/// `empty_slots`.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Default)]
+struct WindowsD3d11WriterSlotLoss {
+    overwritten: u64,
+    empty_slots: u64,
+    /// Slots that found no new frame at their deadline and got one while
+    /// waiting inside the slot.
+    empty_slots_filled: u64,
+    late_ticks: u64,
+    lag_max_ms: Option<f64>,
+    poll_max_ms: f64,
+    submit_max_ms: f64,
+    submit_total_ms: f64,
+    submits: u64,
+    /// Slots whose frame the encoder refused at first and accepted on a
+    /// retry within the same slot.
+    backpressure_recovered: u64,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsD3d11WriterSlotLoss {
+    fn observe_lag(&mut self, lag_ms: f64) {
+        self.lag_max_ms = Some(
+            self.lag_max_ms
+                .map_or(lag_ms, |current| current.max(lag_ms)),
+        );
+    }
+
+    fn observe_poll(&mut self, elapsed: Duration) {
+        self.poll_max_ms = self.poll_max_ms.max(elapsed.as_secs_f64() * 1000.0);
+    }
+
+    fn observe_submit(&mut self, elapsed: Duration) {
+        let ms = elapsed.as_secs_f64() * 1000.0;
+        self.submit_max_ms = self.submit_max_ms.max(ms);
+        self.submit_total_ms += ms;
+        self.submits = self.submits.saturating_add(1);
+    }
+
+    fn submit_mean_ms(&self) -> f64 {
+        if self.submits == 0 {
+            0.0
+        } else {
+            self.submit_total_ms / self.submits as f64
+        }
+    }
+
+    fn lost_or_rescued_a_slot(&self, pressure_skips: u64) -> bool {
+        pressure_skips > 0
+            || self.backpressure_recovered > 0
+            || self.overwritten > 0
+            || self.empty_slots_filled > 0
+            || self.late_ticks > 0
+    }
+}
+
+/// #1042: how long a D3D11 writer slot that found no new frame at its
+/// deadline waits for one. The compositor and the writer run separate
+/// clocks at the same rate, so on a loaded GPU (Intel UHD 620 at 1080p60)
+/// a frame lands a few milliseconds after the deadline it was meant for.
+/// Giving the slot up left a one-frame hole and pushed that frame into the
+/// next slot, where the following frame then overwrote it. Waiting up to
+/// half an interval gives the late frame its own slot; anything later is
+/// the next slot's, so the wait never costs the schedule a tick.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_empty_slot_wait_until(
+    next_slot_due: Instant,
+    frame_interval: Duration,
+) -> Instant {
+    next_slot_due
+        .checked_sub(frame_interval / 2)
+        .unwrap_or(next_slot_due)
+}
+
 #[cfg(target_os = "windows")]
 struct WindowsD3d11RecordingWriterParams {
     session_id: String,
@@ -7867,6 +8291,10 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
     let mut terminal_error = None;
     let mut current_input = input.current();
     let mut recovery_wait_started_at = None;
+    // #1042: where the frames between the compositor and the encoder go.
+    let mut slot_loss = WindowsD3d11WriterSlotLoss::default();
+    let mut deadline_lag_times_ms = Vec::with_capacity(128);
+    let mut writer_active_times_ms = Vec::with_capacity(128);
     // The frame store is single-slot latest-wins: a publish that lands while
     // this loop sleeps destroys the previous frame before it is read. Track
     // the newest sequence we have seen published so the pacing wait below can
@@ -7939,6 +8367,16 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                 last_seen_published = published;
             }
         }
+        let active_started_at = Instant::now();
+        let tick_lag = active_started_at.saturating_duration_since(next_frame_at);
+        if tick_lag >= ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD {
+            let lag_ms = tick_lag.as_secs_f64() * 1000.0;
+            deadline_lag_times_ms.push(lag_ms);
+            slot_loss.observe_lag(lag_ms);
+            if tick_lag >= frame_interval {
+                slot_loss.late_ticks = slot_loss.late_ticks.saturating_add(1);
+            }
+        }
         next_frame_at += frame_interval;
         schedule_index = schedule_index.saturating_add(1);
 
@@ -7994,9 +8432,34 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
             }
         };
 
-        if let Some((sequence, captured_at, ticket)) = current_input.latest_ticket()
-            && last_submitted_sequence != Some(sequence)
-        {
+        slot_loss.observe_poll(active_started_at.elapsed());
+        let mut slot_frame = current_input
+            .latest_ticket()
+            .filter(|(sequence, _, _)| last_submitted_sequence != Some(*sequence));
+        if slot_frame.is_none() {
+            // #1042: the frame meant for this slot may land a few
+            // milliseconds after its deadline; wait for it inside the slot.
+            let wait_until = windows_d3d11_empty_slot_wait_until(next_frame_at, frame_interval);
+            while slot_frame.is_none()
+                && Instant::now() < wait_until
+                && !stop.load(Ordering::Relaxed)
+            {
+                thread::sleep(WINDOWS_D3D11_ENCODER_DRAIN_POLL_INTERVAL);
+                let published = current_input.latest_published_sequence();
+                if windows_d3d11_primary_sequence_is_newer(published, last_seen_published) {
+                    last_seen_published = published;
+                    slot_frame = current_input
+                        .latest_ticket()
+                        .filter(|(sequence, _, _)| last_submitted_sequence != Some(*sequence));
+                }
+            }
+            if slot_frame.is_some() {
+                slot_loss.empty_slots_filled = slot_loss.empty_slots_filled.saturating_add(1);
+            } else {
+                slot_loss.empty_slots = slot_loss.empty_slots.saturating_add(1);
+            }
+        }
+        if let Some((sequence, captured_at, ticket)) = slot_frame {
             let source_age_ms = captured_at.elapsed().as_millis() as u64;
             max_source_age_ms = Some(
                 max_source_age_ms.map_or(source_age_ms, |current: u64| current.max(source_age_ms)),
@@ -8014,13 +8477,25 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
             let mut refused_since: Option<Instant> = None;
             loop {
                 let (sequence, ticket) = submission;
-                match current_input.client.submit_encoder_texture(
+                let submit_started_at = Instant::now();
+                let submitted = current_input.client.submit_encoder_texture(
                     ticket,
                     pts_100ns,
                     duration_100ns,
                     encoder_started_at.elapsed().as_micros() as u64,
-                ) {
+                );
+                slot_loss.observe_submit(submit_started_at.elapsed());
+                match submitted {
                     Ok(progress) => {
+                        if let Some(previous) = last_submitted_sequence {
+                            slot_loss.overwritten = slot_loss.overwritten.saturating_add(
+                                sequence.saturating_sub(previous).saturating_sub(1),
+                            );
+                        }
+                        if refused_since.is_some() {
+                            slot_loss.backpressure_recovered =
+                                slot_loss.backpressure_recovered.saturating_add(1);
+                        }
                         last_submitted_sequence = Some(sequence);
                         input_frames = input_frames.saturating_add(1);
                         queue_depth = progress.status.pending_frame_count as u64;
@@ -8132,6 +8607,7 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                 }
             }
         }
+        writer_active_times_ms.push(active_started_at.elapsed().as_secs_f64() * 1000.0);
         // A complete poll/submission iteration proves that the current media
         // generation is responsive again; only consecutive failures share a
         // bounded recovery deadline.
@@ -8167,11 +8643,44 @@ fn write_windows_d3d11_recording_frames(params: WindowsD3d11RecordingWriterParam
                     video_toolbox_output_frames: output_frames,
                     video_toolbox_output_bytes: output_bytes,
                     video_toolbox_fifo_write_p95_ms: p95_ms(&fifo_write_times_ms),
+                    writer_active_p95_ms: p95_ms(&writer_active_times_ms),
+                    deadline_lag_p95_ms: p95_ms(&deadline_lag_times_ms),
+                    deadline_lag_max_ms: slot_loss.lag_max_ms,
+                    late_deadline_ticks: slot_loss.late_ticks,
                     ..Default::default()
                 },
                 diagnostics_context,
                 None,
             );
+            // A window that lost or rescued a slot is worth a line in the
+            // log; a clean one stays at debug so long recordings stay quiet.
+            macro_rules! log_writer_window {
+                ($level:ident) => {
+                    tracing::$level!(
+                        role = ?current_input.role,
+                        submitted = input_frames,
+                        overwritten = slot_loss.overwritten,
+                        empty_slots = slot_loss.empty_slots,
+                        empty_slots_filled = slot_loss.empty_slots_filled,
+                        backpressure = pressure_skips,
+                        backpressure_recovered = slot_loss.backpressure_recovered,
+                        late_ticks = slot_loss.late_ticks,
+                        lag_max_ms = slot_loss.lag_max_ms.unwrap_or(0.0),
+                        poll_max_ms = slot_loss.poll_max_ms,
+                        submit_max_ms = slot_loss.submit_max_ms,
+                        submit_mean_ms = slot_loss.submit_mean_ms(),
+                        "D3D11 encoder writer window (#1042)"
+                    )
+                };
+            }
+            if slot_loss.lost_or_rescued_a_slot(pressure_skips) {
+                log_writer_window!(info);
+            } else {
+                log_writer_window!(debug);
+            }
+            slot_loss = WindowsD3d11WriterSlotLoss::default();
+            deadline_lag_times_ms.clear();
+            writer_active_times_ms.clear();
             input_frames = 0;
             output_frames = 0;
             output_bytes = 0;
@@ -10278,6 +10787,60 @@ mod tests {
     }
 
     #[test]
+    fn a_writer_behind_its_schedule_at_stop_writes_the_ticks_it_owes_first() {
+        // #1075: the CPU compositor left the writer 820 ms behind at noisy
+        // 1080p60; quitting at the Stop flag ended the take 0.8 s early.
+        let interval = Duration::from_secs_f64(1.0 / 60.0);
+        let stop_at = Instant::now();
+        let behind = stop_at - Duration::from_millis(820);
+        assert_eq!(
+            media_foundation_stop_catch_up(behind, stop_at, stop_at, interval),
+            MediaFoundationStopCatchUp::Continue
+        );
+        // The tick due exactly at Stop is still written; the next one isn't.
+        assert_eq!(
+            media_foundation_stop_catch_up(stop_at, stop_at, stop_at, interval),
+            MediaFoundationStopCatchUp::Continue
+        );
+        assert_eq!(
+            media_foundation_stop_catch_up(stop_at + interval, stop_at, stop_at, interval),
+            MediaFoundationStopCatchUp::Complete
+        );
+        // A writer on schedule completes at once: Stop costs it nothing.
+        assert_eq!(
+            media_foundation_stop_catch_up(
+                stop_at + Duration::from_millis(5),
+                stop_at,
+                stop_at - Duration::from_millis(3),
+                interval
+            ),
+            MediaFoundationStopCatchUp::Complete
+        );
+    }
+
+    #[test]
+    fn a_writer_that_cannot_catch_up_to_stop_gives_up_within_its_budget() {
+        let interval = Duration::from_secs_f64(1.0 / 30.0);
+        let stop_at = Instant::now();
+        let behind = stop_at - interval * 3;
+        let just_inside =
+            stop_at + MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET - Duration::from_millis(1);
+        assert_eq!(
+            media_foundation_stop_catch_up(behind, stop_at, just_inside, interval),
+            MediaFoundationStopCatchUp::Continue
+        );
+        assert_eq!(
+            media_foundation_stop_catch_up(
+                behind,
+                stop_at,
+                stop_at + MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET,
+                interval
+            ),
+            MediaFoundationStopCatchUp::OutOfTime { owed_ticks: 4 }
+        );
+    }
+
+    #[test]
     fn a_stuck_encoder_after_stop_drops_its_tail_instead_of_failing_the_take() {
         // #1074: NVIDIA's MFT held one frame and never signalled
         // DrainComplete; the take must end with the frame dropped.
@@ -10371,9 +10934,11 @@ mod tests {
         EncoderBridgeRecordingSession {
             stop,
             graceful_stop_at: None,
+            stop_catch_up: None,
             iso_member: None,
             terminal_failure: Arc::new(StdMutex::new(None)),
             startup_ready: None,
+            startup_trace: Arc::default(),
             bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
@@ -10534,9 +11099,11 @@ mod tests {
         let session = EncoderBridgeRecordingSession {
             stop,
             graceful_stop_at: None,
+            stop_catch_up: None,
             iso_member: None,
             terminal_failure,
             startup_ready: None,
+            startup_trace: Arc::default(),
             bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: None,
@@ -10753,9 +11320,11 @@ mod tests {
         let session = EncoderBridgeRecordingSession {
             stop,
             graceful_stop_at: None,
+            stop_catch_up: None,
             iso_member: None,
             terminal_failure,
             startup_ready: None,
+            startup_trace: Arc::default(),
             bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
@@ -10889,6 +11458,28 @@ mod tests {
     }
 
     #[test]
+    fn only_a_cpu_fed_media_foundation_writer_builds_its_encoder_before_the_fifo_opens() {
+        // #1267: the MFT is built while FFmpeg is still reaching the video
+        // FIFO. The D3D11 ticket writer's encoder comes from the media thread,
+        // and every other output has no in-process encoder to build.
+        assert!(media_foundation_encoder_precedes_fifo_open(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            false
+        ));
+        assert!(!media_foundation_encoder_precedes_fifo_open(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            true
+        ));
+        for output in [
+            EncoderBridgeVideoOutput::RawYuv420p,
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        ] {
+            assert!(!media_foundation_encoder_precedes_fifo_open(output, false));
+        }
+    }
+
+    #[test]
     fn bridge_frame_sources_map_onto_session_accounting_kinds() {
         use crate::diagnostics::BridgeInputKind;
         assert_eq!(
@@ -10913,6 +11504,24 @@ mod tests {
         assert!(windows_d3d11_primary_sequence_is_newer(Some(8), Some(7)));
         assert!(!windows_d3d11_primary_sequence_is_newer(Some(7), Some(7)));
         assert!(!windows_d3d11_primary_sequence_is_newer(Some(6), Some(7)));
+    }
+
+    #[test]
+    fn an_empty_d3d11_slot_waits_half_an_interval_for_its_late_frame() {
+        // #1042: a frame that lands just after its deadline keeps its own
+        // slot; the wait ends half an interval before the next slot is due.
+        for fps in [30_u32, 60] {
+            let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+            let slot_due = Instant::now() + Duration::from_secs(1);
+            let next_slot_due = slot_due + interval;
+            let wait_until = windows_d3d11_empty_slot_wait_until(next_slot_due, interval);
+            assert_eq!(wait_until, next_slot_due - interval / 2);
+            // Half an interval either way, to the nanosecond.
+            let waited = wait_until - slot_due;
+            assert!(waited.abs_diff(interval / 2) <= Duration::from_nanos(1));
+            assert!(wait_until > slot_due);
+            assert!(wait_until < next_slot_due);
+        }
     }
 
     #[test]
@@ -12927,9 +13536,11 @@ mod tests {
         let session = EncoderBridgeRecordingSession {
             stop: Arc::new(AtomicBool::new(false)),
             graceful_stop_at: None,
+            stop_catch_up: None,
             iso_member: None,
             terminal_failure: terminal_failure.clone(),
             startup_ready: None,
+            startup_trace: Arc::default(),
             bootstrap_reader: StdMutex::new(None),
             fifo_path: std::env::temp_dir().join(format!(
                 "videorc-missing-terminal-signal-test-{}",

@@ -2,6 +2,7 @@ import type {
   MainOwnedPreviewSurfaceBounds,
   MainOwnedPreviewSurfaceBoundsParams,
   OpaqueNativeWindowHandle,
+  PreviewPresenterPhysicalPlacement,
   PreviewSurfaceBounds,
   PreviewSurfaceStatus
 } from './backend'
@@ -85,6 +86,38 @@ export function normalizePreviewSurfaceBounds(bounds: PreviewSurfaceBounds): Pre
   for (const field of PRIVILEGED_PREVIEW_FIELDS) {
     delete normalized[field]
   }
+  // Main derives the presenter's physical placement from its own window
+  // (#1272); a renderer or backend copy is never trusted.
+  delete normalized.physicalPlacement
+  return normalized
+}
+
+/**
+ * Keep a physical placement only when every number is finite and the clip,
+ * if any, is complete; otherwise the backend falls back to the DIP numbers.
+ */
+export function normalizePreviewPresenterPhysicalPlacement(
+  placement: PreviewPresenterPhysicalPlacement | null | undefined
+): PreviewPresenterPhysicalPlacement | undefined {
+  if (!placement) {
+    return undefined
+  }
+  const { screenX, screenY, width, height } = placement
+  if (
+    ![screenX, screenY, width, height].every((value) => Number.isFinite(value)) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return undefined
+  }
+  const normalized: PreviewPresenterPhysicalPlacement = { screenX, screenY, width, height }
+  const clip = [placement.clipX, placement.clipY, placement.clipWidth, placement.clipHeight]
+  if (clip.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+    normalized.clipX = placement.clipX
+    normalized.clipY = placement.clipY
+    normalized.clipWidth = Math.max(0, placement.clipWidth as number)
+    normalized.clipHeight = Math.max(0, placement.clipHeight as number)
+  }
   return normalized
 }
 
@@ -107,7 +140,8 @@ export function normalizeOpaqueNativeWindowHandle(value: unknown): OpaqueNativeW
 export function mainOwnedPreviewSurfaceBoundsParams(
   bounds: PreviewSurfaceBounds,
   generation: number,
-  orderAboveWindowHandle?: unknown
+  orderAboveWindowHandle?: unknown,
+  physicalPlacement?: PreviewPresenterPhysicalPlacement
 ): MainOwnedPreviewSurfaceBoundsParams {
   if (!Number.isSafeInteger(generation) || generation < 0) {
     throw new Error('Native preview generation must be a non-negative safe integer.')
@@ -115,6 +149,10 @@ export function mainOwnedPreviewSurfaceBoundsParams(
   const trustedBounds: MainOwnedPreviewSurfaceBounds = normalizePreviewSurfaceBounds(bounds)
   if (orderAboveWindowHandle !== undefined) {
     trustedBounds.orderAboveWindowHandle = normalizeOpaqueNativeWindowHandle(orderAboveWindowHandle)
+  }
+  const physical = normalizePreviewPresenterPhysicalPlacement(physicalPlacement)
+  if (physical) {
+    trustedBounds.physicalPlacement = physical
   }
   return { bounds: trustedBounds, generation }
 }

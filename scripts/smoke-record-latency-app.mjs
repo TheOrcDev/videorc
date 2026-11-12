@@ -14,9 +14,10 @@
 // correctness. Cycle 1 is "cold" (first start in the process); later cycles
 // are "warm" and are the ones the OBS-parity budgets apply to.
 //
-// Default mode is report-only. `--enforce` fails the run against
-// RECORD_LATENCY_BUDGETS (scripts/lib/record-latency-gate.mjs); the budgets are
-// only meant to be enforced once `calibratedFrom` names a calibration doc.
+// Default mode is report-only. `--enforce` fails the run against the host's
+// budget set, recordLatencyBudgetsFor(process.platform) in
+// scripts/lib/record-latency-gate.mjs (Windows has its own, #1068); the budgets
+// are only meant to be enforced once `calibratedFrom` names a calibration doc.
 //
 // The isolated profile has no persisted output directory, so the renderer's
 // default output falls back to the smoke-owned VIDEORC_RECORDINGS_DIR derived
@@ -40,12 +41,12 @@ import {
   warningEvents
 } from './lib/record-latency-events.mjs'
 import {
-  RECORD_LATENCY_BUDGETS,
   evaluateRecordLatencyBudget,
   formatMs,
   formatSummaryTable,
   nextCycleDelayMs,
   readBudgetOverrides,
+  recordLatencyBudgetsFor,
   summarizeRecordCycles,
   timelinePhaseDeltas
 } from './lib/record-latency-gate.mjs'
@@ -141,7 +142,7 @@ const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-record-latency-user-data
 const reportPath = resolve(args.report ?? join(outputDirectory, 'record-latency-report.json'))
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = siblingFfprobePath(ffmpegPath) ?? 'ffprobe'
-const budgets = readBudgetOverrides(process.env, RECORD_LATENCY_BUDGETS)
+const budgets = readBudgetOverrides(process.env, recordLatencyBudgetsFor(process.platform))
 
 function fail(message) {
   throw new Error(`record-latency smoke FAIL: ${message}`)
@@ -576,6 +577,7 @@ try {
       : `warnings: ${warnings.length} (${warnings.map((entry) => `${entry.level} ${entry.code}`).join(', ')})`
   )
   log(`report written to ${reportPath}`)
+  log(`budgets: ${budgets.calibratedFrom}`)
   if (!verdict.pass) {
     for (const failure of verdict.failures) log(`budget: ${failure}`)
   }

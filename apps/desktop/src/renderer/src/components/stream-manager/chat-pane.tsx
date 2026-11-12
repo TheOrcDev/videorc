@@ -30,6 +30,13 @@ import {
   type SoundRelayAction,
   type SoundboardSummary
 } from '../../../../shared/sound-commands'
+import {
+  chatCommandCompletions,
+  chatCommandPostNotice,
+  type ChatCommandPostResult,
+  type ChatCommandReplyFailed,
+  type ChatCommandsSummary
+} from '../../../../shared/chat-commands'
 import type { ClipContext, ClipLength, MarkerContext, SessionMarker } from '@/lib/backend'
 import { clipLastWords } from '../../../../shared/clip-lengths'
 
@@ -127,6 +134,7 @@ import {
 } from '@/lib/stream-manager-chat'
 import { liveChatEmptyMessage } from '@/lib/live-chat-view'
 import { ChatSignInRows } from '@/components/stream-manager/chat-sign-in-rows'
+import { ChatCommandFailureRows } from '@/components/stream-manager/chat-command-failures'
 import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
 
 // Chat on stream (plan 215 G): its own chunk.
@@ -177,6 +185,10 @@ export function ChatPane({
   onBanner,
   sounds,
   onSound,
+  chatCommands = null,
+  onChatCommand,
+  chatCommandFailures,
+  onOpenChatCommands,
   onBuddy,
   prefill = null,
   cohostNudge = false,
@@ -239,6 +251,14 @@ export function ChatPane({
   /** Plan 189 S9: the board `/sound` reads, and its press or Stop all. */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /** Plan 226 S4: the commands `!` completes, the streamer's `!go` (live
+   * only), and this session's replies that couldn't go out (D12). */
+  chatCommands?: ChatCommandsSummary | null
+  onChatCommand?: (name: string) => Promise<ChatCommandPostResult>
+  chatCommandFailures?: readonly ChatCommandReplyFailed[]
+  /** Plan 226: a bare `!` offers "Edit chat commands…" last, which opens
+   * the editor in the main window (the door at every width). */
+  onOpenChatCommands?: () => void
   /** Plan 209 S20: `/buddy <words>`; resolves to Buddy's final answer. */
   onBuddy?: (sentence: string) => Promise<CohostActAnswer>
   onSend?: (text: string, options?: ChatSendOptions) => void
@@ -562,6 +582,11 @@ export function ChatPane({
           onUseSignIn={onUseSignIn}
         />
       ) : null}
+      {/* Plan 226 D12: a chat command reply that couldn't go out, once per
+          chat and reason this live session. */}
+      {chatCommandFailures?.length ? (
+        <ChatCommandFailureRows failures={chatCommandFailures} />
+      ) : null}
       <div className="relative flex min-h-0 flex-1 flex-col">
         {/* The follow owns this scroll position, so the browser's own scroll
             anchoring stays out of it. */}
@@ -701,6 +726,9 @@ export function ChatPane({
           onBanner={onBanner}
           sounds={sounds}
           onSound={onSound}
+          chatCommands={chatCommands}
+          onChatCommand={onChatCommand}
+          onOpenChatCommands={onOpenChatCommands}
           onBuddy={onBuddy}
           cohostNudge={cohostNudge}
           failures={sendFailures}
@@ -719,6 +747,10 @@ export function ChatPane({
 }
 
 /** The composer's own commands, in the order the completion list offers them. */
+/** Plan 226: the completion row that opens the chat command editor. Not a
+ * command anyone can type: it has no `/` or `!`. */
+const EDIT_CHAT_COMMANDS = 'edit-chat-commands'
+
 const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
   { value: '/hide', hint: ' · Hide screen' },
   { value: '/show', hint: ' · Show screen' },
@@ -759,6 +791,9 @@ export function Composer({
   onBanner,
   sounds,
   onSound,
+  chatCommands = null,
+  onChatCommand,
+  onOpenChatCommands,
   onBuddy
 }: {
   markerContext?: MarkerContext | null
@@ -779,6 +814,16 @@ export function Composer({
    */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /**
+   * Plan 226 S4 (D9): exactly `!go`, for a command Studio pushed, posts its
+   * reply to every chat that takes posts, without a mention; `!!go` sends the
+   * literal `!go`, and any other `!` text is ordinary chat. `!` completes
+   * the names. Resolves to how many chats took it; rejects with the words.
+   */
+  chatCommands?: ChatCommandsSummary | null
+  onChatCommand?: (name: string) => Promise<ChatCommandPostResult>
+  /** Plan 226: "Edit chat commands…", the last row under a bare `!`. */
+  onOpenChatCommands?: () => void
   /**
    * Plan 209 S20: `/buddy <words>` asks Buddy's planner through Studio.
    * Resolves to the final answer; its sentence is the composer's notice
@@ -835,7 +880,14 @@ export function Composer({
   const maxChars = chatDraftMaxChars(targetPlatforms)
   const bannerList = onBanner ? (banners ?? []) : null
   const soundBoard = onSound ? (sounds ?? NO_SOUNDBOARD) : null
-  const command = classifyComposerDraft(draft, bannerList ?? [], soundBoard?.sounds ?? [])
+  const commandSummary = onChatCommand ? chatCommands : null
+  const command = classifyComposerDraft(
+    draft,
+    bannerList ?? [],
+    soundBoard?.sounds ?? [],
+    commandSummary
+  )
+  // Not chat as typed: a local command, or a chat command's reply (D9).
   const local = command.kind !== 'chat'
   const clipContext = markerContext?.clip
   const canSend = local
@@ -843,12 +895,15 @@ export function Composer({
       (command.kind !== 'marker' ||
         Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker)) &&
       (command.kind !== 'clip' || Boolean(clipContext?.available && onClip)) &&
-      (command.kind !== 'buddy' || Boolean(onBuddy))
+      (command.kind !== 'buddy' || Boolean(onBuddy)) &&
+      (command.kind !== 'chatCommand' || Boolean(onChatCommand))
     : targets.length > 0 && !pending
-  // Under `/banner` and `/sound`, the names (plans 186, 189); otherwise the commands.
-  const completions: readonly ComposerCompletion[] =
+  // Under `/banner` and `/sound`, the names (plans 186, 189); after `!`, the
+  // chat commands (plan 226); otherwise the commands.
+  const listed: readonly ComposerCompletion[] =
     (bannerList && bannerCompletions(draft, bannerList)) ??
     (soundBoard && soundCompletions(draft, soundBoard)) ??
+    chatCommandCompletions(draft, commandSummary) ??
     COMPOSER_COMMANDS.filter(
       (entry) =>
         draft.startsWith('/') &&
@@ -858,9 +913,22 @@ export function Composer({
         (onBuddy || entry.value !== BUDDY_COMMAND) &&
         entry.value.startsWith(draft.toLowerCase())
     )
+  // Plan 226: only a bare `!` offers the editor, so Enter on `!wow` still
+  // sends `!wow`.
+  const completions: readonly ComposerCompletion[] =
+    onOpenChatCommands && draft.trim() === '!'
+      ? [...listed, { value: EDIT_CHAT_COMMANDS, hint: '' }]
+      : listed
   const showCompletions = completions.length > 0 && !completionDismissed
   const selectedCompletion = completions[completionIndex] ?? completions[0]
   const complete = (value: string): void => {
+    if (value === EDIT_CHAT_COMMANDS) {
+      setDraft('')
+      setCompletionDismissed(true)
+      setCompletionIndex(0)
+      onOpenChatCommands?.()
+      return
+    }
     setDraft(value + (COMMANDS_WITH_ARGUMENT.has(value) ? ' ' : ''))
     // `/banner` and `/sound` go straight on to the names (plans 186, 189).
     setCompletionDismissed(!COMMANDS_WITH_NAMES.has(value))
@@ -907,13 +975,40 @@ export function Composer({
 
   const submit = (): void => {
     if (localPendingRef.current) return
+    if (command.kind === 'chatCommand') {
+      // Plan 226 D9: the reply to every chat that takes posts. The counts
+      // are the line; the draft clears once a chat took it.
+      if (!onChatCommand) return
+      const submitted = draft
+      const name = command.name
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice(`Posting the !${name} reply…`)
+      void onChatCommand(name)
+        .then((result) => {
+          setNotice(chatCommandPostNotice(name, result))
+          if (result.sent > 0 && draftRef.current === submitted) setDraft('')
+        })
+        .catch((error) =>
+          setNotice(
+            error instanceof Error && error.message
+              ? error.message
+              : `Couldn't post the !${name} reply.`
+          )
+        )
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
+      return
+    }
     if (command.kind === 'error') {
       setNotice(command.message)
       return
     }
     if (command.kind === 'help') {
       setNotice(
-        `/hide hides your screen and /show shows it again. /marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''}${onBuddy ? ' /buddy [words] asks Buddy to do something, like /buddy switch to BRB.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
+        `/hide hides your screen and /show shows it again. /marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''}${onBuddy ? ' /buddy [words] asks Buddy to do something, like /buddy switch to BRB.' : ''}${commandSummary?.commands.length ? " !name posts that chat command's reply to every chat, and !!name sends it as typed." : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
       return
     }
@@ -1072,7 +1167,9 @@ export function Composer({
                   ? 'Local · current session'
                   : command.kind === 'buddy'
                     ? 'Buddy'
-                    : 'Local'}
+                    : command.kind === 'chatCommand'
+                      ? 'All chats'
+                      : 'Local'}
               </span>
             </InputGroupAddon>
           ) : writable.length > 1 ? (
@@ -1173,7 +1270,7 @@ export function Composer({
             }}
           />
           <InputGroupAddon align="inline-end">
-            {draft.length > 0 ? (
+            {draft.length > 0 && command.kind !== 'chatCommand' ? (
               <span
                 className={cn(
                   'flex items-center gap-1 text-[11px] tabular-nums',
@@ -1196,15 +1293,17 @@ export function Composer({
             <ShortcutKeys accelerator="Enter" />
             <InputGroupButton
               aria-label={
-                local
-                  ? 'Run local command'
-                  : pending
-                    ? 'Sending message'
-                    : targets.length === 0
-                      ? 'Send message: no destination picked'
-                      : picked === null || targets.length === writable.length
-                        ? 'Send message to all writable destinations'
-                        : `Send message to ${pickLabel}`
+                command.kind === 'chatCommand'
+                  ? `Post the !${command.name} reply to every chat`
+                  : local
+                    ? 'Run local command'
+                    : pending
+                      ? 'Sending message'
+                      : targets.length === 0
+                        ? 'Send message: no destination picked'
+                        : picked === null || targets.length === writable.length
+                          ? 'Send message to all writable destinations'
+                          : `Send message to ${pickLabel}`
               }
               disabled={
                 localPending || (!local && (!canSend || !validateChatDraft(command.text, maxChars)))
@@ -1226,7 +1325,7 @@ export function Composer({
             <CommandList>
               {completions.map(({ value, hint }) => (
                 <CommandItem key={value} value={value} onSelect={() => complete(value)}>
-                  {value}
+                  {value === EDIT_CHAT_COMMANDS ? 'Edit chat commands…' : value}
                   {value === '/clip'
                     ? ` · Save the last ${clipSeconds(clipContext)} as a clip`
                     : hint}

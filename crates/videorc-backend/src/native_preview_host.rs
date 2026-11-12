@@ -1,6 +1,7 @@
 use crate::protocol::{
-    MainOwnedPreviewSurfaceBounds, OpaqueNativeWindowHandle, PreviewSurfaceBacking,
-    PreviewSurfaceBounds, PreviewTransport, WindowsD3d11PresenterDiagnostics,
+    MainOwnedPreviewSurfaceBounds, OpaqueNativeWindowHandle, PreviewPresenterPhysicalPlacement,
+    PreviewSurfaceBacking, PreviewSurfaceBounds, PreviewTransport,
+    WindowsD3d11PresenterDiagnostics,
 };
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,10 @@ pub struct NativePreviewHostBounds {
     pub preview_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elevated: Option<bool>,
+    // Windows: the presenter's placement in physical screen pixels (#1272);
+    // see MainOwnedPreviewSurfaceBounds::physical_placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_placement: Option<PreviewPresenterPhysicalPlacement>,
 }
 
 impl NativePreviewHostBounds {
@@ -70,12 +75,14 @@ impl NativePreviewHostBounds {
             order_above_window_handle: None,
             preview_generation: None,
             elevated: bounds.elevated,
+            physical_placement: None,
         }
     }
 
     pub fn from_main_owned(bounds: &MainOwnedPreviewSurfaceBounds, generation: u64) -> Self {
         let mut host_bounds = Self::from_surface_bounds(&bounds.bounds);
         host_bounds.order_above_window_handle = bounds.order_above_window_handle.clone();
+        host_bounds.physical_placement = bounds.physical_placement;
         host_bounds.preview_generation = Some(generation);
         host_bounds
     }
@@ -1197,6 +1204,16 @@ mod tests {
             order_above_window_handle: Some(
                 OpaqueNativeWindowHandle::parse("0x000000001234abcd").unwrap(),
             ),
+            physical_placement: Some(PreviewPresenterPhysicalPlacement {
+                screen_x: 15.0,
+                screen_y: 30.0,
+                width: 960.0,
+                height: 540.0,
+                clip_x: Some(15.0),
+                clip_y: Some(60.0),
+                clip_width: Some(960.0),
+                clip_height: Some(300.0),
+            }),
         };
         let host_bounds = NativePreviewHostBounds::from_main_owned(&trusted, 17);
         assert_eq!(
@@ -1208,6 +1225,9 @@ mod tests {
         );
         assert_eq!(host_bounds.preview_generation, Some(17));
         assert_eq!(host_bounds.elevated, Some(false));
+        // #1272: the physical placement survives untouched beside the DIPs.
+        assert_eq!(host_bounds.physical_placement, trusted.physical_placement);
+        assert_eq!(host_bounds.width, 640.0);
     }
 
     #[test]
@@ -1233,6 +1253,7 @@ mod tests {
             order_above_window_handle: None,
             preview_generation: None,
             elevated: None,
+            physical_placement: None,
         };
 
         assert!(bounds.is_visible());

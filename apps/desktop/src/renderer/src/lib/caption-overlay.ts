@@ -628,15 +628,26 @@ async function decodeHighlightImage(
   })
 }
 
+type RemoteImageDeps = Required<
+  Pick<HighlightCardImageDeps, 'readImage' | 'cacheImage' | 'decode' | 'deadlineMs'>
+>
+
 /** Cache (if needed) and decode one emote for the card (plan 095, S4). The
  * card asks for the sharper Twitch `/3.0`, which the chat row never cached,
  * so this may fetch; the whole fetch + decode shares one deadline. */
-async function decodeHighlightEmote(
+function decodeHighlightEmote(remoteUrl: string, deps: RemoteImageDeps): Promise<HighlightBitmap> {
+  return decodeRemoteImage(highlightEmoteImageUrl(remoteUrl), deps)
+}
+
+/** Cache (if needed) through main's allowlist and decode one remote image:
+ * an emote, or a viewer's avatar for the chat box. The fetch and the decode
+ * share one deadline. */
+async function decodeRemoteImage(
   remoteUrl: string,
-  deps: Required<Pick<HighlightCardImageDeps, 'readImage' | 'cacheImage' | 'decode' | 'deadlineMs'>>
+  deps: RemoteImageDeps
 ): Promise<HighlightBitmap> {
   return withHighlightImageDeadline(deps.deadlineMs, async () => {
-    const localUrl = await deps.cacheImage(highlightEmoteImageUrl(remoteUrl))
+    const localUrl = await deps.cacheImage(remoteUrl)
     if (!localUrl) {
       throw new Error('main did not cache it')
     }
@@ -966,6 +977,34 @@ export async function renderMilestoneCardPng(params: {
   return canvasToBase64Png(canvas)
 }
 
+/** A viewer's avatar: the picture clipped to a circle, or their initials on
+ * a faint disc when there is none. The highlight card's and the chat box's. */
+function paintAvatarCircle(
+  context: OffscreenCanvasRenderingContext2D,
+  avatar: HighlightBitmap | null,
+  initials: string,
+  x: number,
+  y: number,
+  sizePx: number
+): void {
+  context.save()
+  context.beginPath()
+  context.arc(x + sizePx / 2, y + sizePx / 2, sizePx / 2, 0, Math.PI * 2)
+  context.clip()
+  if (avatar) {
+    context.drawImage(avatar, x, y, sizePx, sizePx)
+  } else {
+    context.fillStyle = 'rgba(255, 255, 255, 0.12)'
+    context.fillRect(x, y, sizePx, sizePx)
+    context.font = canvasFont(Math.round(sizePx * 0.42))
+    context.fillStyle = '#A1A1AA'
+    context.textAlign = 'center'
+    context.textBaseline = 'middle'
+    context.fillText(initials, x + sizePx / 2, y + sizePx / 2 + 1)
+  }
+  context.restore()
+}
+
 /** The round brand badge for a platform the card never shows a file mark
  * for (Twitch, Kick, a custom destination): the highlight card's avatar
  * badge and the chat box's row icon (plan 215 G). */
@@ -1105,32 +1144,14 @@ export async function renderCommentHighlightPng(params: {
   // Avatar circle (image when the local cache resolves, monogram otherwise).
   const avatarX = originX + metrics.paddingPx
   const avatarY = originY + metrics.paddingPx
-  context.save()
-  context.beginPath()
-  context.arc(
-    avatarX + metrics.avatarPx / 2,
-    avatarY + metrics.avatarPx / 2,
-    metrics.avatarPx / 2,
-    0,
-    Math.PI * 2
+  paintAvatarCircle(
+    context,
+    params.avatar ?? null,
+    monogramInitials(params.authorName.trim() || 'Viewer'),
+    avatarX,
+    avatarY,
+    metrics.avatarPx
   )
-  context.clip()
-  if (params.avatar) {
-    context.drawImage(params.avatar, avatarX, avatarY, metrics.avatarPx, metrics.avatarPx)
-  } else {
-    context.fillStyle = 'rgba(255, 255, 255, 0.12)'
-    context.fillRect(avatarX, avatarY, metrics.avatarPx, metrics.avatarPx)
-    context.font = canvasFont(Math.round(metrics.avatarPx * 0.42))
-    context.fillStyle = '#A1A1AA'
-    context.textAlign = 'center'
-    context.textBaseline = 'middle'
-    context.fillText(
-      monogramInitials(params.authorName.trim() || 'Viewer'),
-      avatarX + metrics.avatarPx / 2,
-      avatarY + metrics.avatarPx / 2 + 1
-    )
-  }
-  context.restore()
 
   // Platform glyph: compact brand-colored badge over the avatar. The identity
   // line also spells out the platform, preserving meaning in monochrome.
@@ -1262,13 +1283,19 @@ export async function renderCommentHighlightPng(params: {
 /** The file marks a chat box draws, decoded once per box. */
 type ChatOverlayMarks = Partial<Record<StreamPlatform, HighlightBitmap | null>>
 
+/** Avatar URLs already reported as failed: a regular who chats all stream
+ * would otherwise log the same line on every repaint. Each paint still tries
+ * the picture again, so a passing network failure heals. */
+const chatOverlayAvatarWarned = new Set<string>()
+const CHAT_OVERLAY_AVATAR_WARNED_MAX = 500
+
 /**
  * The chat box (`lib/chat-overlay.ts` lays it out) for the stream canvas
  * and, when the session has a vertical simulcast leg, its portrait canvas.
- * Emotes and the platforms' marks are decoded once and shared by both, like
- * the highlight card's; no avatars in this version (D5). A failed emote shows
- * its name and a failed mark the platform's name, both logged once. Null
- * when the stream's box cannot be painted.
+ * Avatars, emotes and the platforms' marks are decoded once and shared by
+ * both, like the highlight card's. A failed avatar shows the viewer's
+ * initials, a failed emote its name and a failed mark the platform's name,
+ * each logged once. Null when the stream's box cannot be painted.
  */
 export async function renderChatOverlayCards(
   messages: readonly LiveChatMessage[],
@@ -1292,6 +1319,7 @@ export async function renderChatOverlayCards(
     platforms.has('x') ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null) : null
   ])
   const marks: ChatOverlayMarks = { youtube, x }
+  const { monogramInitials } = await import('@/lib/chat-avatar')
   const rows: ChatOverlayRowInput[] = messages.map((message) => {
     const badge = commentHighlightPlatformBadge(message.platform)
     const icon = marks[message.platform] ? 'mark' : badge && 'color' in badge ? 'badge' : 'none'
@@ -1305,7 +1333,9 @@ export async function renderChatOverlayCards(
       platform: message.platform,
       text: message.messageText,
       fragments: message.fragments,
-      icon
+      icon,
+      ...(message.authorAvatarUrl ? { avatarUrl: message.authorAvatarUrl } : {}),
+      initials: monogramInitials(message.authorName.trim() || 'Viewer')
     }
   })
   const tokens = rows.flatMap((row) => highlightTokens(row.text, row.fragments))
@@ -1315,23 +1345,47 @@ export async function renderChatOverlayCards(
   }
   const emotes = new Map<string, HighlightBitmap>()
   const emoteFailures: string[] = []
-  await Promise.all(
-    highlightEmoteUrls(tokens).map(async (url) => {
+  // A regular's picture is decoded once per box, however many rows they have.
+  const avatarAuthors = new Map<string, string>()
+  for (const message of messages) {
+    if (message.authorAvatarUrl) avatarAuthors.set(message.authorAvatarUrl, message.authorName)
+  }
+  const avatars = new Map<string, HighlightBitmap>()
+  const avatarFailures: string[] = []
+  await Promise.all([
+    ...highlightEmoteUrls(tokens).map(async (url) => {
       try {
         emotes.set(url, await decodeHighlightEmote(url, deps))
       } catch (error) {
         emoteFailures.push(`${emoteNames.get(url) ?? 'overlay'}: ${describeImageFailure(error)}`)
       }
+    }),
+    ...[...avatarAuthors].map(async ([url, author]) => {
+      try {
+        avatars.set(url, await decodeRemoteImage(url, deps))
+      } catch (error) {
+        if (chatOverlayAvatarWarned.has(url)) return
+        if (chatOverlayAvatarWarned.size >= CHAT_OVERLAY_AVATAR_WARNED_MAX) {
+          chatOverlayAvatarWarned.clear()
+        }
+        chatOverlayAvatarWarned.add(url)
+        avatarFailures.push(`${author}: ${describeImageFailure(error)}`)
+      }
     })
-  )
+  ])
   if (emoteFailures.length > 0) {
     warn(
       `Chat on stream: ${plural(emoteFailures.length, 'emote')} show as text (${emoteFailures.join('; ')}).`
     )
   }
+  if (avatarFailures.length > 0) {
+    warn(
+      `Chat on stream: ${plural(avatarFailures.length, 'avatar')} fell back to initials (${avatarFailures.join('; ')}).`
+    )
+  }
   const [pngBase64, verticalPngBase64] = await Promise.all([
-    renderChatOverlayPng(rows, stream, emotes, marks),
-    vertical ? renderChatOverlayPng(rows, vertical, emotes, marks) : null
+    renderChatOverlayPng(rows, stream, emotes, marks, avatars),
+    vertical ? renderChatOverlayPng(rows, vertical, emotes, marks, avatars) : null
   ])
   if (!pngBase64) return null
   return verticalPngBase64 ? { pngBase64, verticalPngBase64 } : { pngBase64 }
@@ -1341,7 +1395,8 @@ async function renderChatOverlayPng(
   rows: readonly ChatOverlayRowInput[],
   target: ChatOverlayCanvas,
   emotes: ReadonlyMap<string, HighlightBitmap>,
-  marks: ChatOverlayMarks
+  marks: ChatOverlayMarks,
+  avatars: ReadonlyMap<string, HighlightBitmap>
 ): Promise<string | null> {
   const measure = highlightCanvasMeasurer()
   if (!measure) return null
@@ -1420,6 +1475,17 @@ async function renderChatOverlayPng(
         )
       }
     }
+
+    // The viewer's avatar, right before the name: the highlight card's circle,
+    // with the viewer's initials when there is no picture.
+    paintAvatarCircle(
+      context,
+      row.avatarUrl ? (avatars.get(row.avatarUrl) ?? null) : null,
+      row.initials,
+      contentX + row.avatarXPx,
+      Math.round(identityMidY - metrics.avatarPx / 2),
+      metrics.avatarPx
+    )
 
     context.save()
     context.shadowColor = 'rgba(0, 0, 0, 0.45)'

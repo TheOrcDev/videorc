@@ -521,6 +521,42 @@ describe('renderer security policy', () => {
     )
   })
 
+  it('lets only the Chat window post a `!go` or open chat commands, checked by sender (plan 226 S4)', () => {
+    for (const [channel, key] of [
+      ['comments-window:chat-command', 'chatCommandFromCommentsWindow'],
+      ['comments-window:open-chat-commands', 'openChatCommandsFromCommentsWindow']
+    ] as const) {
+      expect(roleCanInvokeChannel('comments', channel)).toBe(true)
+      expect(roleCanInvokeChannel('notes', channel)).toBe(false)
+      expect(roleCanInvokeChannel('captions', channel)).toBe(false)
+      expect(AUXILIARY_API_KEYS.comments).toContain(key)
+      expect(AUXILIARY_API_KEYS.notes).not.toContain(key)
+      expect(AUXILIARY_API_KEYS.captions).not.toContain(key)
+    }
+    // Only the main window hears the post request and the door.
+    for (const keys of Object.values(AUXILIARY_API_KEYS)) {
+      expect(keys).not.toContain('onChatCommandRequest')
+      expect(keys).not.toContain('onOpenChatCommands')
+    }
+    const post =
+      source('./index.ts').split("secureIpcHandle('comments-window:chat-command',")[1] ?? ''
+    expect(post.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
+    expect(post.slice(0, 600)).toContain('assertLiveCommentsCommandSession(command.sessionId)')
+    const open = source('./index.ts').split("'comments-window:open-chat-commands',")[1] ?? ''
+    expect(open.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
+    expect(open.slice(0, 1000)).toContain(
+      "sendElectronEvent(mainWindow.webContents, 'livestream:open-chat-commands'"
+    )
+    for (const channel of [
+      'comments-window:chat-commands-push',
+      'comments-window:chat-command-result-push',
+      'comments-window:chat-command-failures-push'
+    ]) {
+      const handler = source('./index.ts').split(`secureIpcHandle('${channel}',`)[1] ?? ''
+      expect(handler.slice(0, 300)).toContain('event.sender.id !== mainWindow.webContents.id')
+    }
+  })
+
   it('lets only the Chat window ask for the Videorc sign-in, checked by sender (plan 215 A3)', () => {
     expect(roleCanInvokeChannel('comments', 'comments-window:sign-in-videorc')).toBe(true)
     expect(roleCanInvokeChannel('notes', 'comments-window:sign-in-videorc')).toBe(false)

@@ -132,7 +132,9 @@ try {
         'layout-preview-failed',
         // Plan 216 A3: a source that never sent a frame names itself.
         'layout-camera-not-ready',
-        'layout-screen-not-ready'
+        'layout-screen-not-ready',
+        'layout-camera-not-selected',
+        'layout-screen-not-selected'
       ].includes(scene?.error?.code),
     `scene change returned an unexpected domain outcome: ${JSON.stringify(scene)}`
   )

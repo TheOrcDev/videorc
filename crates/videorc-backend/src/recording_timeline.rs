@@ -9,6 +9,7 @@
 //! Telemetry can never be load-bearing: every operation here is infallible,
 //! marks are first-wins, and callers emit with `let _ =`.
 
+use std::sync::Mutex;
 use std::time::Instant;
 
 use chrono::Utc;
@@ -27,6 +28,12 @@ pub const MAX_CLICK_TO_ORIGIN_MS: u64 = 60_000;
 /// running quality check must exit first), the Windows recordable-video
 /// probe (Media Foundation, per canvas rung) and the idle preview stop.
 /// `device-resolve` keeps its name and place; scripts parse it.
+///
+/// The `bridge-*` marks between `ffmpeg-spawn` and `bridge-ready` (#1267)
+/// split the encoder bridge's start: the writer thread stamps each step in a
+/// [`BridgeStartupTrace`] and the session folds the stamps in, in time order,
+/// once the bridge is ready. A step a path never takes (most encoders never
+/// renegotiate their output type) is absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingStartPhase {
     Admission,
@@ -43,6 +50,28 @@ pub enum RecordingStartPhase {
     StartupBarrier,
     StartingPublished,
     FfmpegSpawn,
+    BridgeFifoOpen,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeMfStartup,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeMftEnumerate,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeMftActivate,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeInputSetup,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeMftConfigure,
+    /// The writer adopted the standby encoder built while idle, in place of
+    /// `bridge-mf-startup` … `bridge-mft-configure` (`windows_mf_standby`).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeMftStandby,
+    BridgeFirstFrame,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeFirstInput,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeOutputRenegotiated,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    BridgeFirstOutput,
     BridgeReady,
     MuxerProgress,
     Running,
@@ -65,6 +94,17 @@ impl RecordingStartPhase {
             Self::StartupBarrier => "startup-barrier",
             Self::StartingPublished => "starting-published",
             Self::FfmpegSpawn => "ffmpeg-spawn",
+            Self::BridgeFifoOpen => "bridge-fifo-open",
+            Self::BridgeMfStartup => "bridge-mf-startup",
+            Self::BridgeMftEnumerate => "bridge-mft-enumerate",
+            Self::BridgeMftActivate => "bridge-mft-activate",
+            Self::BridgeInputSetup => "bridge-input-setup",
+            Self::BridgeMftConfigure => "bridge-mft-configure",
+            Self::BridgeMftStandby => "bridge-mft-standby",
+            Self::BridgeFirstFrame => "bridge-first-frame",
+            Self::BridgeFirstInput => "bridge-first-input",
+            Self::BridgeOutputRenegotiated => "bridge-output-renegotiated",
+            Self::BridgeFirstOutput => "bridge-first-output",
             Self::BridgeReady => "bridge-ready",
             Self::MuxerProgress => "muxer-progress",
             Self::Running => "running",
@@ -179,10 +219,16 @@ impl<P: TimelinePhase> RecordingTimeline<P> {
     /// twice keeps its first time, and a mark never reads earlier than the
     /// previous one.
     pub fn mark(&mut self, phase: P) {
+        self.mark_at(phase, Instant::now());
+    }
+
+    /// [`Self::mark`] for a boundary another thread stamped at `at`. The same
+    /// first-wins and monotonic rules apply, so fold stamps in time order.
+    pub fn mark_at(&mut self, phase: P, at: Instant) {
         if self.marks.iter().any(|(existing, _)| *existing == phase) {
             return;
         }
-        let elapsed = self.origin.elapsed().as_millis();
+        let elapsed = at.saturating_duration_since(self.origin).as_millis();
         let at_ms = u64::try_from(elapsed).unwrap_or(u64::MAX);
         let floor = self.marks.last().map(|(_, at)| *at).unwrap_or(0);
         let at_ms = at_ms.max(floor);
@@ -253,6 +299,40 @@ impl<P: TimelinePhase> RecordingTimeline<P> {
             previous = mark.at_ms;
         }
         parts.join(" ")
+    }
+}
+
+/// Start-step stamps taken on an encoder bridge's writer thread (#1267).
+///
+/// First-wins per phase, infallible, and never load-bearing: the session
+/// reads [`Self::ordered`] once the bridge is ready and folds each stamp into
+/// its start timeline with [`RecordingTimeline::mark_at`].
+#[derive(Debug, Default)]
+pub struct BridgeStartupTrace {
+    stamps: Mutex<Vec<(RecordingStartPhase, Instant)>>,
+}
+
+impl BridgeStartupTrace {
+    pub fn stamp(&self, phase: RecordingStartPhase) {
+        self.stamp_at(phase, Instant::now());
+    }
+
+    pub fn stamp_at(&self, phase: RecordingStartPhase, at: Instant) {
+        let mut stamps = self.stamps.lock().unwrap_or_else(|p| p.into_inner());
+        if !stamps.iter().any(|(existing, _)| *existing == phase) {
+            stamps.push((phase, at));
+        }
+    }
+
+    /// The stamps in time order (a stable sort keeps stamping order on ties).
+    pub fn ordered(&self) -> Vec<(RecordingStartPhase, Instant)> {
+        let mut stamps = self
+            .stamps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        stamps.sort_by_key(|(_, at)| *at);
+        stamps
     }
 }
 
@@ -362,6 +442,69 @@ mod tests {
         assert!(line.contains(" admission=+"), "{line}");
         assert!(line.contains(" running=+"), "{line}");
         assert!(!line.contains("clickToOrigin"), "{line}");
+    }
+
+    #[test]
+    fn bridge_trace_folds_into_the_timeline_in_time_order() {
+        // #1267: the writer thread stamps steps out of the session's sight;
+        // the session folds them in before `bridge-ready`.
+        use std::time::Duration;
+        let mut timeline = RecordingStartTimeline::start(None, false);
+        timeline.mark(RecordingStartPhase::FfmpegSpawn);
+        let base = Instant::now();
+        let trace = BridgeStartupTrace::default();
+        trace.stamp_at(
+            RecordingStartPhase::BridgeFirstOutput,
+            base + Duration::from_millis(30),
+        );
+        trace.stamp_at(RecordingStartPhase::BridgeFifoOpen, base);
+        trace.stamp_at(
+            RecordingStartPhase::BridgeFirstInput,
+            base + Duration::from_millis(10),
+        );
+        // First-wins: a later stamp of the same step is ignored.
+        trace.stamp_at(
+            RecordingStartPhase::BridgeFifoOpen,
+            base + Duration::from_millis(50),
+        );
+        for (phase, at) in trace.ordered() {
+            timeline.mark_at(phase, at);
+        }
+        timeline.mark(RecordingStartPhase::BridgeReady);
+        let snapshot = timeline.snapshot("running");
+        let phases: Vec<_> = snapshot
+            .marks
+            .iter()
+            .map(|mark| mark.phase.as_str())
+            .collect();
+        assert_eq!(
+            phases,
+            [
+                "ffmpeg-spawn",
+                "bridge-fifo-open",
+                "bridge-first-input",
+                "bridge-first-output",
+                "bridge-ready",
+            ]
+        );
+        let at = |phase: &str| {
+            snapshot
+                .marks
+                .iter()
+                .find(|mark| mark.phase == phase)
+                .unwrap()
+                .at_ms
+        };
+        assert!(at("bridge-first-output") >= at("bridge-first-input") + 20);
+        assert!(at("bridge-ready") >= at("bridge-first-output"));
+    }
+
+    #[test]
+    fn mark_at_before_the_origin_reads_as_zero() {
+        let early = Instant::now();
+        let mut timeline = RecordingStartTimeline::start(None, false);
+        timeline.mark_at(RecordingStartPhase::Admission, early);
+        assert_eq!(timeline.snapshot("running").marks[0].at_ms, 0);
     }
 
     #[test]

@@ -346,7 +346,70 @@ pub(crate) struct WindowsD3d11ChromaKey {
     pub(crate) angle_threshold_degrees: f32,
     pub(crate) softness_degrees: f32,
     pub(crate) spill_suppression: f32,
-    pub(crate) saturation_floor: f32,
+    /// Plan 227: the luma-scaled saturation floor `(min, per_luma, max,
+    /// ramp_ratio)` in 8-bit CbCr units, the reference keyer's constants.
+    pub(crate) saturation_floor: [f32; 4],
+    /// Plan 227 B, Hide edges: the kept box in source uv `[u_min, v_min,
+    /// u_max, v_max]`.
+    pub(crate) kept_uv: [f32; 4],
+    /// Plan 229: the neighbourhood the key judges, `(tap_offset_texels,
+    /// side_tap_weight)`, the reference keyer's constants.
+    pub(crate) neighbourhood: [f32; 2],
+}
+
+/// A neighbourhood the shader can use: taps at most four texels out and a
+/// side weight that leaves the centre tap a non-negative share.
+fn windows_chroma_key_neighbourhood_is_valid([tap_offset, side_weight]: [f32; 2]) -> bool {
+    (0.0..=4.0).contains(&tap_offset) && (0.0..=0.5).contains(&side_weight)
+}
+
+/// The reference keyer's neighbourhood constants as the D3D11 shader reads
+/// them.
+pub(crate) fn windows_chroma_key_neighbourhood_params() -> [f32; 2] {
+    [
+        crate::scene_geometry::CHROMA_KEY_NEIGHBOURHOOD_TAP_OFFSET as f32,
+        crate::scene_geometry::CHROMA_KEY_NEIGHBOURHOOD_SIDE_TAP_WEIGHT as f32,
+    ]
+}
+
+/// A floor the shader can use: `0 ≤ min ≤ max ≤ 255`, a non-negative luma
+/// factor and a ramp ratio in `(0, 1]`.
+fn windows_chroma_key_floor_is_valid([min, per_luma, max, ramp_ratio]: [f32; 4]) -> bool {
+    (0.0..=255.0).contains(&min)
+        && (min..=255.0).contains(&max)
+        && per_luma >= 0.0
+        && ramp_ratio > 0.0
+        && ramp_ratio <= 1.0
+}
+
+/// A kept box inside the frame with no inverted axis.
+fn windows_chroma_key_kept_uv_is_valid([u_min, v_min, u_max, v_max]: [f32; 4]) -> bool {
+    [u_min, v_min, u_max, v_max]
+        .into_iter()
+        .all(|value| (0.0..=1.0).contains(&value))
+        && u_min <= u_max
+        && v_min <= v_max
+}
+
+/// The reference keyer's floor constants as the D3D11 shader reads them.
+pub(crate) fn windows_chroma_key_floor_params() -> [f32; 4] {
+    crate::scene_geometry::CHROMA_KEY_SATURATION_FLOOR_PARAMS.map(|value| value as f32)
+}
+
+impl WindowsD3d11ChromaKey {
+    /// The D3D11 projection of the shared spec (`camera_chroma_key`), the one
+    /// conversion both session paths use.
+    pub(crate) fn from_spec(spec: &crate::scene_geometry::ChromaKeySpec) -> Self {
+        Self {
+            key_rgb: spec.key_rgb,
+            angle_threshold_degrees: spec.max_angle_deg as f32,
+            softness_degrees: spec.band_deg as f32,
+            spill_suppression: spec.spill as f32,
+            saturation_floor: windows_chroma_key_floor_params(),
+            kept_uv: spec.edges.kept_uv().map(|value| value as f32),
+            neighbourhood: windows_chroma_key_neighbourhood_params(),
+        }
+    }
 }
 
 /// The Buddy sprite's turn (plan 168 S-B4): `SceneVs` applies the 2x2
@@ -797,14 +860,18 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
             key.angle_threshold_degrees,
             key.softness_degrees,
             key.spill_suppression,
-            key.saturation_floor,
         ]
         .into_iter()
+        .chain(key.saturation_floor)
+        .chain(key.kept_uv)
+        .chain(key.neighbourhood)
         .all(f32::is_finite)
             || !(0.0..=180.0).contains(&key.angle_threshold_degrees)
             || !(0.0..=180.0).contains(&key.softness_degrees)
             || !(0.0..=1.0).contains(&key.spill_suppression)
-            || !(0.0..=1.0).contains(&key.saturation_floor))
+            || !windows_chroma_key_floor_is_valid(key.saturation_floor)
+            || !windows_chroma_key_kept_uv_is_valid(key.kept_uv)
+            || !windows_chroma_key_neighbourhood_is_valid(key.neighbourhood))
     {
         return Err(WindowsD3d11CompositorError::invalid(format!(
             "{} layer {} has invalid chroma-key controls",
@@ -1125,6 +1192,7 @@ mod runtime {
         effects: [f32; 4],
         mask: [f32; 4],
         chroma_key_color: [f32; 4],
+        /// angle threshold, softness, spill, reserved (normalized).
         chroma_key_controls: [f32; 4],
         source_info: [f32; 4],
         solid_color: [f32; 4],
@@ -1134,6 +1202,13 @@ mod runtime {
         /// Sprite pivot x, y (normalized output), enabled (1), reserved.
         sprite_pivot: [f32; 4],
         camera_look: [f32; 4],
+        /// Plan 227: the saturation floor (min, per_luma, max, ramp_ratio).
+        chroma_key_floor: [f32; 4],
+        /// Plan 227 B: Hide edges' kept box in source uv.
+        chroma_key_edges: [f32; 4],
+        /// Plan 229: the judged neighbourhood (tap_offset_texels,
+        /// side_tap_weight, reserved, reserved).
+        chroma_key_neighbourhood: [f32; 4],
     }
 
     pub(crate) struct WindowsD3d11Compositor {
@@ -1970,24 +2045,28 @@ mod runtime {
             WindowsD3d11SceneSourceKind::TestPattern => (2.0, [0.0; 4]),
             _ => (0.0, [0.0; 4]),
         };
-        let (key_color, key_controls) = if let Some(key) = layer.effects.chroma_key {
-            (
-                [
-                    key.key_rgb[0] as f32 / 255.0,
-                    key.key_rgb[1] as f32 / 255.0,
-                    key.key_rgb[2] as f32 / 255.0,
-                    1.0,
-                ],
-                [
-                    key.angle_threshold_degrees / 180.0,
-                    key.softness_degrees / 180.0,
-                    key.spill_suppression,
+        let (key_color, key_controls, key_floor, key_edges, key_neighbourhood) =
+            if let Some(key) = layer.effects.chroma_key {
+                (
+                    [
+                        key.key_rgb[0] as f32 / 255.0,
+                        key.key_rgb[1] as f32 / 255.0,
+                        key.key_rgb[2] as f32 / 255.0,
+                        1.0,
+                    ],
+                    [
+                        key.angle_threshold_degrees / 180.0,
+                        key.softness_degrees / 180.0,
+                        key.spill_suppression,
+                        0.0,
+                    ],
                     key.saturation_floor,
-                ],
-            )
-        } else {
-            ([0.0; 4], [0.0; 4])
-        };
+                    key.kept_uv,
+                    [key.neighbourhood[0], key.neighbourhood[1], 0.0, 0.0],
+                )
+            } else {
+                ([0.0; 4], [0.0; 4], [0.0; 4], [0.0, 0.0, 1.0, 1.0], [0.0; 4])
+            };
         DrawConstants {
             destination: layer.destination_normalized,
             source_crop: layer.source_uv,
@@ -2028,6 +2107,9 @@ mod runtime {
                 [sprite.pivot[0], sprite.pivot[1], 1.0, 0.0]
             }),
             camera_look: [layer.effects.brightness, layer.effects.contrast, 0.0, 0.0],
+            chroma_key_floor: key_floor,
+            chroma_key_edges: key_edges,
+            chroma_key_neighbourhood: key_neighbourhood,
         }
     }
 
@@ -2906,8 +2988,9 @@ mod runtime {
 
     /// Plan 168 S-B4, Windows CI only: the shader file compiles (D3DCompile
     /// needs no device), `SceneVs`'s sprite turn included, and the constant
-    /// buffer the Rust side writes has the HLSL layout (eleven float4s, the
-    /// sprite's two last).
+    /// buffer the Rust side writes has the HLSL layout (fourteen float4s:
+    /// the sprite's two, the camera look, then plan 227's key floor and
+    /// Hide edges).
     #[cfg(test)]
     mod sprite_shader_tests {
         #[test]
@@ -2924,7 +3007,7 @@ mod runtime {
                     .unwrap_or_else(|error| panic!("{entry_point}: {}", error.detail));
                 assert!(!bytecode.is_empty(), "{entry_point} has bytecode");
             }
-            assert_eq!(std::mem::size_of::<super::DrawConstants>(), 12 * 16);
+            assert_eq!(std::mem::size_of::<super::DrawConstants>(), 15 * 16);
             assert_eq!(
                 std::mem::offset_of!(super::DrawConstants, sprite_affine),
                 9 * 16
@@ -2932,6 +3015,20 @@ mod runtime {
             assert_eq!(
                 std::mem::offset_of!(super::DrawConstants, sprite_pivot),
                 10 * 16
+            );
+            // Plan 227: the floor and Hide edges follow camera_look.
+            assert_eq!(
+                std::mem::offset_of!(super::DrawConstants, chroma_key_floor),
+                12 * 16
+            );
+            assert_eq!(
+                std::mem::offset_of!(super::DrawConstants, chroma_key_edges),
+                13 * 16
+            );
+            // Plan 229: the judged neighbourhood follows Hide edges.
+            assert_eq!(
+                std::mem::offset_of!(super::DrawConstants, chroma_key_neighbourhood),
+                14 * 16
             );
         }
     }
@@ -3008,6 +3105,79 @@ mod tests {
             canvas_dimensions,
             layers,
             encoded_outputs: vec![],
+        }
+    }
+
+    /// Plan 227: the D3D11 key is the shared spec's projection — the
+    /// reference floor constants and Hide edges' mirror-resolved kept box —
+    /// and the plan refuses a box the shader cannot use.
+    #[test]
+    fn windows_d3d11_chroma_key_carries_the_reference_floor_and_hide_edges() {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_chroma_key_enabled = true;
+        layout.camera_mirror = true;
+        layout.camera_chroma_key_edges = crate::protocol::CameraKeyEdges {
+            left_pct: 4,
+            top_pct: 0,
+            right_pct: 0,
+            bottom_pct: 10,
+        };
+        let spec = crate::scene_geometry::camera_chroma_key(&layout).expect("keying enabled");
+        let key = WindowsD3d11ChromaKey::from_spec(&spec);
+        assert_eq!(key.saturation_floor, [5.0, 0.15, 14.0, 6.0 / 14.0]);
+        // Left as seen through the mirror is the source's right side.
+        assert_eq!(key.kept_uv, [0.0, 0.0, 0.96, 0.9]);
+        assert_eq!(key.angle_threshold_degrees, 24.0);
+        // Plan 229: the reference keyer's 5x5 neighbourhood.
+        assert_eq!(key.neighbourhood, [1.2, 5.0 / 16.0]);
+
+        let keyed_layer = |key: WindowsD3d11ChromaKey| {
+            let mut camera = layer(
+                3,
+                WindowsD3d11SceneSourceKind::CameraUpload,
+                dimensions(1280, 720),
+            );
+            camera.effects.chroma_key = Some(key);
+            request(
+                WindowsD3d11CanvasOrientation::Horizontal,
+                dimensions(1920, 1080),
+                vec![camera],
+            )
+        };
+        build_windows_d3d11_scene_plan(keyed_layer(key)).expect("the keyed camera plans");
+        for bad in [
+            WindowsD3d11ChromaKey {
+                kept_uv: [0.6, 0.0, 0.4, 1.0],
+                ..key
+            },
+            WindowsD3d11ChromaKey {
+                kept_uv: [0.0, 0.0, 1.5, 1.0],
+                ..key
+            },
+            WindowsD3d11ChromaKey {
+                saturation_floor: [14.0, 0.15, 5.0, 0.4],
+                ..key
+            },
+            WindowsD3d11ChromaKey {
+                saturation_floor: [5.0, f32::NAN, 14.0, 0.4],
+                ..key
+            },
+            WindowsD3d11ChromaKey {
+                neighbourhood: [1.2, 0.75],
+                ..key
+            },
+            WindowsD3d11ChromaKey {
+                neighbourhood: [f32::INFINITY, 5.0 / 16.0],
+                ..key
+            },
+        ] {
+            assert_eq!(
+                build_windows_d3d11_scene_plan(keyed_layer(bad))
+                    .expect_err("an unusable key")
+                    .code,
+                WindowsD3d11CompositorErrorCode::InvalidScenePlan,
+                "{bad:?}"
+            );
         }
     }
 

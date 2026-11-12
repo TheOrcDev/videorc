@@ -1,0 +1,391 @@
+{
+  "_comment": "Plan 226: cases chat_commands.rs and shared/chat-commands.ts must agree on. Lengths are Unicode code points. Generated from the reference algorithm in plans/226-chat-commands.md.",
+  "limits": {
+    "nameMaxChars": 24,
+    "descriptionMaxChars": 60,
+    "replyMaxChars": 170,
+    "maxCount": 100,
+    "sendMaxChars": 200,
+    "xPostMaxChars": 140,
+    "listName": "commands"
+  },
+  "names": [
+    {
+      "input": "!Go ",
+      "normalized": "go",
+      "error": null
+    },
+    {
+      "input": "stream",
+      "normalized": "stream",
+      "error": null
+    },
+    {
+      "input": "so-cool_2",
+      "normalized": "so-cool_2",
+      "error": null
+    },
+    {
+      "input": "",
+      "normalized": "",
+      "error": "Name the command."
+    },
+    {
+      "input": "!",
+      "normalized": "",
+      "error": "Name the command."
+    },
+    {
+      "input": "go now",
+      "normalized": "go now",
+      "error": "Use letters, numbers, _ and - only."
+    },
+    {
+      "input": "día",
+      "normalized": "día",
+      "error": "Use letters, numbers, _ and - only."
+    },
+    {
+      "input": "!!go",
+      "normalized": "!go",
+      "error": "Use letters, numbers, _ and - only."
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaa",
+      "normalized": "aaaaaaaaaaaaaaaaaaaaaaaaa",
+      "error": "Keep the name to 24 characters."
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaa",
+      "normalized": "aaaaaaaaaaaaaaaaaaaaaaaa",
+      "error": null
+    },
+    {
+      "input": "Commands",
+      "normalized": "commands",
+      "error": "!commands is built in."
+    },
+    {
+      "input": "GO",
+      "normalized": "go",
+      "id": "b",
+      "existing": [
+        {
+          "id": "a",
+          "name": "go"
+        }
+      ],
+      "error": "!go already exists."
+    },
+    {
+      "input": "go",
+      "normalized": "go",
+      "id": "a",
+      "existing": [
+        {
+          "id": "a",
+          "name": "go"
+        }
+      ],
+      "error": null
+    }
+  ],
+  "descriptions": [
+    {
+      "input": "why I'm learning Go",
+      "error": null
+    },
+    {
+      "input": "   ",
+      "error": "Add a short description."
+    },
+    {
+      "input": "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "error": "Keep the description to 60 characters."
+    },
+    {
+      "input": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀",
+      "error": null
+    },
+    {
+      "input": "line\nbreak",
+      "error": "Keep the description on one line."
+    }
+  ],
+  "replies": [
+    {
+      "input": "Go compiles fast, ships one binary, and its concurrency is simple. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "error": null
+    },
+    {
+      "input": "",
+      "error": "Write the reply."
+    },
+    {
+      "input": "Go compiles fast, ships one binary, and its concurrency is simple. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxy",
+      "error": "Keep the reply to 170 characters."
+    },
+    {
+      "input": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀",
+      "error": null
+    },
+    {
+      "input": "one\ntwo",
+      "error": "Keep the reply on one line."
+    }
+  ],
+  "mentions": [
+    {
+      "authorName": "coder_x",
+      "owner": false,
+      "prefix": "@coder_x "
+    },
+    {
+      "authorName": "@YouTubeHandle",
+      "owner": false,
+      "prefix": "@YouTubeHandle "
+    },
+    {
+      "authorName": "  Some Viewer ",
+      "owner": false,
+      "prefix": "@Some Viewer "
+    },
+    {
+      "authorName": "TheStreamer",
+      "owner": true,
+      "prefix": ""
+    },
+    {
+      "authorName": " @ ",
+      "owner": false,
+      "prefix": ""
+    }
+  ],
+  "replyTexts": [
+    {
+      "prefix": "@coder_x ",
+      "reply": "Because it's fast.",
+      "text": "@coder_x Because it's fast."
+    },
+    {
+      "prefix": "",
+      "reply": "Because it's fast.",
+      "text": "Because it's fast."
+    },
+    {
+      "prefix": "@nnnnnnnnnnnnnnnnnnnnnnnnnnnn ",
+      "reply": "Go compiles fast, ships one binary, and its concurrency is simple. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "text": "@nnnnnnnnnnnnnnnnnnnnnnnnnnnn Go compiles fast, ships one binary, and its concurrency is simple. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "prefix": "@nnnnnnnnnnnnnnnnnnnnnnnnnnnnnn ",
+      "reply": "Go compiles fast, ships one binary, and its concurrency is simple. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "text": "Go compiles fast, ships one binary, and its concurrency is simple. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+  ],
+  "lists": [
+    {
+      "prefix": "@coder_x ",
+      "commands": [
+        {
+          "name": "faq",
+          "description": "most asked question"
+        },
+        {
+          "name": "go",
+          "description": "why I'm learning Go"
+        },
+        {
+          "name": "stream",
+          "description": "what today's stream is about"
+        }
+      ],
+      "text": "@coder_x Commands: !faq (most asked question), !go (why I'm learning Go), !stream (what today's stream is about)"
+    },
+    {
+      "prefix": "",
+      "commands": [
+        {
+          "name": "faq",
+          "description": "most asked question"
+        },
+        {
+          "name": "go",
+          "description": "why I'm learning Go"
+        },
+        {
+          "name": "stream",
+          "description": "what today's stream is about"
+        }
+      ],
+      "text": "Commands: !faq (most asked question), !go (why I'm learning Go), !stream (what today's stream is about)"
+    },
+    {
+      "prefix": "@coder_x ",
+      "commands": [
+        {
+          "name": "cmd00",
+          "description": "a description that is fairly long, number 0"
+        },
+        {
+          "name": "cmd01",
+          "description": "a description that is fairly long, number 1"
+        },
+        {
+          "name": "cmd02",
+          "description": "a description that is fairly long, number 2"
+        },
+        {
+          "name": "cmd03",
+          "description": "a description that is fairly long, number 3"
+        },
+        {
+          "name": "cmd04",
+          "description": "a description that is fairly long, number 4"
+        },
+        {
+          "name": "cmd05",
+          "description": "a description that is fairly long, number 5"
+        },
+        {
+          "name": "cmd06",
+          "description": "a description that is fairly long, number 6"
+        },
+        {
+          "name": "cmd07",
+          "description": "a description that is fairly long, number 7"
+        },
+        {
+          "name": "cmd08",
+          "description": "a description that is fairly long, number 8"
+        },
+        {
+          "name": "cmd09",
+          "description": "a description that is fairly long, number 9"
+        },
+        {
+          "name": "cmd10",
+          "description": "a description that is fairly long, number 10"
+        },
+        {
+          "name": "cmd11",
+          "description": "a description that is fairly long, number 11"
+        }
+      ],
+      "text": "@coder_x Commands: !cmd00 !cmd01 !cmd02 !cmd03 !cmd04 !cmd05 !cmd06 !cmd07 !cmd08 !cmd09 !cmd10 !cmd11"
+    },
+    {
+      "prefix": "@coder_x ",
+      "commands": [
+        {
+          "name": "command_number_00",
+          "description": "d"
+        },
+        {
+          "name": "command_number_01",
+          "description": "d"
+        },
+        {
+          "name": "command_number_02",
+          "description": "d"
+        },
+        {
+          "name": "command_number_03",
+          "description": "d"
+        },
+        {
+          "name": "command_number_04",
+          "description": "d"
+        },
+        {
+          "name": "command_number_05",
+          "description": "d"
+        },
+        {
+          "name": "command_number_06",
+          "description": "d"
+        },
+        {
+          "name": "command_number_07",
+          "description": "d"
+        },
+        {
+          "name": "command_number_08",
+          "description": "d"
+        },
+        {
+          "name": "command_number_09",
+          "description": "d"
+        },
+        {
+          "name": "command_number_10",
+          "description": "d"
+        },
+        {
+          "name": "command_number_11",
+          "description": "d"
+        },
+        {
+          "name": "command_number_12",
+          "description": "d"
+        },
+        {
+          "name": "command_number_13",
+          "description": "d"
+        },
+        {
+          "name": "command_number_14",
+          "description": "d"
+        },
+        {
+          "name": "command_number_15",
+          "description": "d"
+        },
+        {
+          "name": "command_number_16",
+          "description": "d"
+        },
+        {
+          "name": "command_number_17",
+          "description": "d"
+        },
+        {
+          "name": "command_number_18",
+          "description": "d"
+        },
+        {
+          "name": "command_number_19",
+          "description": "d"
+        }
+      ],
+      "text": "@coder_x Commands: !command_number_00 !command_number_01 !command_number_02 !command_number_03 !command_number_04 !command_number_05 !command_number_06 !command_number_07 and 12 more"
+    }
+  ],
+  "xPosts": [
+    {
+      "text": "@coder_x Because it's fast.",
+      "posts": ["@coder_x Because it's fast."]
+    },
+    {
+      "text": "@coder_x Go is great because Go is great because Go is great because Go is great because Go is great because Go is great because Go is great because Go is great because Go is great because",
+      "posts": [
+        "@coder_x Go is great because Go is great because Go is great because Go is great because Go is great because Go is great because Go is great",
+        "because Go is great because Go is great because"
+      ]
+    },
+    {
+      "text": "@coder_x yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "posts": [
+        "@coder_x yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      ]
+    },
+    {
+      "text": "@coder_x Go compiles fast, ships one binary, and its concurrency is simple. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "posts": [
+        "@coder_x Go compiles fast, ships one binary, and its concurrency is simple.",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      ]
+    }
+  ]
+}

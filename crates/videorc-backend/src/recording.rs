@@ -62,8 +62,9 @@ use crate::encoder_bridge::gate_encoder_bridge_lifecycle_persistence;
 use crate::encoder_bridge::{
     EncoderBridgeDiagnosticsContext, EncoderBridgeLifecycleSnapshot, EncoderBridgeOutputProfile,
     EncoderBridgeOutputRole, EncoderBridgeRecordingSession, EncoderBridgeShutdownBatch,
-    EncoderBridgeShutdownBatchReport, EncoderBridgeVideoOutput, begin_encoder_bridge_shutdown,
-    start_synthetic_recording_bridge, wait_for_encoder_bridge_start_admission,
+    EncoderBridgeShutdownBatchReport, EncoderBridgeVideoOutput, MediaFoundationStandbyUse,
+    begin_encoder_bridge_shutdown, start_synthetic_recording_bridge,
+    wait_for_encoder_bridge_start_admission,
 };
 use crate::entitlements;
 use crate::ffmpeg::ffmpeg_file_path;
@@ -7238,6 +7239,14 @@ async fn start_session_with_timeline(
             // Applied only when this writer runs the stream policy (a
             // stream-only session); a recording keeps its own budget.
             stream_queue_allowance_ms,
+            // The idle Clips ring builds the next Record's encoder; every
+            // other session takes it when the profile matches and releases
+            // it otherwise, so no stale encoder session outlives a start.
+            if replay_only {
+                MediaFoundationStandbyUse::Arm
+            } else {
+                MediaFoundationStandbyUse::Adopt
+            },
         ) {
             Ok(bridge) => Some(bridge),
             Err(error) => {
@@ -7304,6 +7313,7 @@ async fn start_session_with_timeline(
                         video_epoch.clone(),
                         source_iso_start_barrier.clone(),
                         stream_queue_allowance_ms,
+                        MediaFoundationStandbyUse::None,
                     )?)
                 }
                 _ => None,
@@ -7327,6 +7337,12 @@ async fn start_session_with_timeline(
         let bridge_startup_failure = uncommitted_capture_process
             .prime_bridges(&ffmpeg_progress, bridge_startup)
             .await;
+        // #1267: split `bridge-ready` into the recording writer's own steps.
+        if let Some(bridge) = recording_bridge.as_ref() {
+            for (phase, at) in bridge.startup_trace().ordered() {
+                timeline.mark_at(phase, at);
+            }
+        }
         timeline.mark(RecordingStartPhase::BridgeReady);
         if let Some((origin, error)) = bridge_startup_failure {
             uncommitted_capture_process.set_failure(origin, &format!("{error:#}"));
@@ -8522,7 +8538,9 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         if let Some(boundary) = iso_stop_at {
             encoder_bridge.stop_at(boundary);
         } else {
-            encoder_bridge.stop();
+            // #1075: a lagging Windows Media Foundation writer first writes
+            // the ticks it owes up to now; every other leg stops at once.
+            encoder_bridge.stop_for_user();
         }
     } else if let Some(stdin) = active.stdin.take() {
         legacy_ffmpeg_stdin = Some(stdin);
@@ -20497,6 +20515,40 @@ fn windows_d3d11_fallback_diagnostics(
     }
 }
 
+/// #1042: the pool's per-stage pressure evidence, in the protocol's units.
+#[cfg(target_os = "windows")]
+fn windows_d3d11_texture_pool_pressure(
+    pool: crate::windows_d3d11_device::WindowsD3d11TexturePoolDiagnostics,
+    render_pressure_skips: u64,
+) -> crate::protocol::WindowsD3d11TexturePoolPressureDiagnostics {
+    let hold = |stats: crate::windows_d3d11_device::WindowsD3d11RoleHoldStats| {
+        crate::protocol::WindowsD3d11TextureRoleHold {
+            releases: stats.releases,
+            mean_ms: stats.mean_micros().map(|micros| micros as f64 / 1_000.0),
+            max_ms: (stats.releases > 0).then(|| stats.max_micros as f64 / 1_000.0),
+        }
+    };
+    crate::protocol::WindowsD3d11TexturePoolPressureDiagnostics {
+        bgra_exhaustions: pool.bgra_exhaustions,
+        nv12_exhaustions: pool.nv12_exhaustions,
+        render_pressure_skips,
+        holders: crate::protocol::WindowsD3d11TexturePoolHolders {
+            writing: pool.holders.writing,
+            compositor: pool.holders.compositor,
+            preview: pool.holders.preview,
+            record: pool.holders.record,
+            stream: pool.holders.stream,
+            awaiting_fence: pool.holders.awaiting_fence,
+        },
+        holds: crate::protocol::WindowsD3d11TexturePoolRoleHolds {
+            compositor: hold(pool.compositor_hold),
+            preview: hold(pool.preview_hold),
+            record: hold(pool.record_hold),
+            stream: hold(pool.stream_hold),
+        },
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn u64_ms_option(micros: u64) -> Option<f64> {
     if micros == 0 {
@@ -20546,6 +20598,7 @@ fn windows_d3d11_live_diagnostics(
             CursorMode::Embedded => crate::protocol::WindowsD3d11CursorMode::Embedded,
             CursorMode::Separate => crate::protocol::WindowsD3d11CursorMode::Separate,
             CursorMode::ExcludedWgc => crate::protocol::WindowsD3d11CursorMode::ExcludedWgc,
+            CursorMode::EmbeddedWgc => crate::protocol::WindowsD3d11CursorMode::EmbeddedWgc,
             CursorMode::DisabledFallback => {
                 crate::protocol::WindowsD3d11CursorMode::DisabledFallback
             }
@@ -20628,10 +20681,18 @@ fn windows_d3d11_live_diagnostics(
         render_tick_overruns: snapshot.pump.render_tick_overruns,
         render_tick_lag_max_ms: u64_ms_option(snapshot.pump.render_tick_lag_max_us),
         render_compose_stage_max_ms: u64_ms_option(snapshot.pump.render_compose_stage_max_us),
+        texture_pool_pressure: Some(windows_d3d11_texture_pool_pressure(
+            snapshot.device.runtime.texture_pool,
+            snapshot.pump.pressure_skips,
+        )),
         fallback_reason: terminal_error.or_else(|| snapshot.pump.capture_source_error.clone())
             .or_else(|| snapshot.pump.capture_cleanup_pending.then(|| "Previous capture is still closing; output continues on the committed source".into()))
             .or_else(|| (snapshot.pump.capture_upload_frames > 0).then(|| "Live capture replacement uses the existing preview BGRA upload route".into()))
             .or(capture_fallback),
+        capture_route_reason: capture
+            .filter(|_| !snapshot.pump.capture_route_bgra)
+            .and_then(|diagnostics| diagnostics.duplication_fallback_reason)
+            .map(|reason| reason.as_str().to_string()),
     }
 }
 
@@ -25110,9 +25171,46 @@ fn camera_chroma_key_filter(layout: &LayoutSettings) -> String {
     } else {
         String::new()
     };
+    let edges = camera_chroma_key_edges_filter(layout);
     format!(
-        "chromakey=color=0x{r:02X}{g:02X}{b:02X}:similarity={similarity:.4}:blend={blend:.4}{despill},"
+        "chromakey=color=0x{r:02X}{g:02X}{b:02X}:similarity={similarity:.4}:blend={blend:.4}{despill}{edges},"
     )
+}
+
+/// Hide edges (plan 227 B) on the FFmpeg leg: one transparent box per hidden
+/// side, right after the key. `drawbox`'s `replace=1` writes the box's alpha
+/// (0) instead of blending, so the edge becomes see-through like the CPU,
+/// Metal and D3D11 paths. This leg mirrors with `hflip` BEFORE keying, so it
+/// takes the edges as the streamer sees them, not the mirror-resolved spec.
+fn camera_chroma_key_edges_filter(layout: &LayoutSettings) -> String {
+    let edges = crate::scene_geometry::camera_chroma_key_edges_as_seen(layout);
+    let clear = "color=black@0:t=fill:replace=1";
+    let mut filters = String::new();
+    if edges.left > 0.0 {
+        filters.push_str(&format!(
+            ",drawbox=x=0:y=0:w=iw*{:.6}:h=ih:{clear}",
+            edges.left
+        ));
+    }
+    if edges.right > 0.0 {
+        filters.push_str(&format!(
+            ",drawbox=x=iw-iw*{0:.6}:y=0:w=iw*{0:.6}:h=ih:{clear}",
+            edges.right
+        ));
+    }
+    if edges.top > 0.0 {
+        filters.push_str(&format!(
+            ",drawbox=x=0:y=0:w=iw:h=ih*{:.6}:{clear}",
+            edges.top
+        ));
+    }
+    if edges.bottom > 0.0 {
+        filters.push_str(&format!(
+            ",drawbox=x=0:y=ih-ih*{0:.6}:w=iw:h=ih*{0:.6}:{clear}",
+            edges.bottom
+        ));
+    }
+    filters
 }
 
 /// Effective key color + similarity radius (CbCr units) for the chromakey
@@ -31009,6 +31107,14 @@ mod tests {
             crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT,
             STOP_TERM_DELAY
         );
+        // #1075: a lagging writer first catches up to Stop, then drains; both
+        // together must still leave FFmpeg a drain's worth of time to finish.
+        let catch_up = crate::encoder_bridge::MEDIA_FOUNDATION_STOP_CATCH_UP_BUDGET;
+        assert!(
+            catch_up + crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT * 2
+                <= STOP_TERM_DELAY,
+            "stop catch-up {catch_up:?} plus the drain must fit inside {STOP_TERM_DELAY:?}"
+        );
     }
 
     #[test]
@@ -35681,6 +35787,7 @@ mod tests {
                 camera_chroma_key_similarity_pct: 40,
                 camera_chroma_key_smoothness_pct: 8,
                 camera_chroma_key_spill_pct: 10,
+                camera_chroma_key_edges: Default::default(),
             },
             scene: None,
             output: OutputSettings {
@@ -44192,11 +44299,110 @@ mod tests {
             ("skin", [200u8, 160, 140]),
             ("dark hair", [40, 30, 25]),
             ("white shirt", [230, 230, 230]),
+            // Plan 227, the owner's recording: near-black subject.
+            ("black t-shirt", [27, 23, 25]),
+            ("mic arm", [6, 9, 6]),
         ] {
             assert!(
                 distance(rgb) > similarity_units + 10.0,
                 "{label} must stay clearly outside the disc ({:.1})",
                 distance(rgb)
+            );
+        }
+        // Plan 227: the owner's shadowed screen. Its mean tones key; the
+        // deepest sit in the blend band (partial), the bounded divergence
+        // from the angle keyer's luma floor, which keys them fully. A wider
+        // disc would start keying the near-black subject above.
+        for (label, rgb) in [
+            ("shadowed corner mean", [1u8, 34, 12]),
+            ("shadowed side mean", [4, 56, 20]),
+        ] {
+            assert!(
+                distance(rgb) <= similarity_units,
+                "{label} must be inside the chromakey disc ({:.1})",
+                distance(rgb)
+            );
+        }
+        let blend_units = spec.band_deg.to_radians() * FFMPEG_CHROMA_KEY_REFERENCE_SATURATION;
+        for (label, rgb) in [("deep shadow", [1u8, 23, 6]), ("shadow", [0, 26, 9])] {
+            let distance = distance(rgb);
+            assert!(
+                distance > similarity_units && distance < similarity_units + blend_units,
+                "{label} sits in the blend band ({distance:.1})"
+            );
+        }
+    }
+
+    /// Plan 227 B: Hide edges on the FFmpeg leg are transparent boxes
+    /// after the key, as the streamer sees the camera (this leg flips first).
+    #[test]
+    fn camera_chroma_key_filter_hides_edges_with_transparent_boxes() {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_chroma_key_edges = crate::protocol::CameraKeyEdges {
+            left_pct: 1,
+            top_pct: 2,
+            right_pct: 3,
+            bottom_pct: 40,
+        };
+        assert_eq!(camera_chroma_key_filter(&layout), "", "no key, no edges");
+        layout.camera_chroma_key_enabled = true;
+        layout.camera_mirror = true;
+        assert_eq!(
+            camera_chroma_key_filter(&layout),
+            "chromakey=color=0x44AB43:similarity=0.1175:blend=0.0128,despill=type=green:mix=0.1000,\
+drawbox=x=0:y=0:w=iw*0.010000:h=ih:color=black@0:t=fill:replace=1,\
+drawbox=x=iw-iw*0.030000:y=0:w=iw*0.030000:h=ih:color=black@0:t=fill:replace=1,\
+drawbox=x=0:y=0:w=iw:h=ih*0.020000:color=black@0:t=fill:replace=1,\
+drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,",
+            "as seen (no mirror swap: hflip runs first), bottom clamped to 25 %"
+        );
+        layout.camera_chroma_key_edges = crate::protocol::CameraKeyEdges {
+            right_pct: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            camera_chroma_key_edges_filter(&layout),
+            ",drawbox=x=iw-iw*0.050000:y=0:w=iw*0.050000:h=ih:color=black@0:t=fill:replace=1"
+        );
+    }
+
+    /// Plan 227: the keyer chain may only name the filters every bundle
+    /// policy requires (`ffmpegFilters` in protocol-fixtures/chroma-key.json,
+    /// mirrored by scripts/lib/chroma-key-ffmpeg-filters.mjs), so a bundle
+    /// that cannot key fails its package gate instead of a session.
+    #[test]
+    fn camera_chroma_key_chain_names_only_bundle_policy_filters() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol-fixtures/chroma-key.json"))
+                .unwrap();
+        let policy: Vec<String> = serde_json::from_value(fixture["ffmpegFilters"].clone()).unwrap();
+        assert_eq!(policy, ["chromakey", "despill", "drawbox"]);
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_chroma_key_enabled = true;
+        layout.camera_chroma_key_edges = crate::protocol::CameraKeyEdges {
+            left_pct: 1,
+            top_pct: 1,
+            right_pct: 1,
+            bottom_pct: 1,
+        };
+        let chain = camera_chroma_key_filter(&layout);
+        let names = ffmpeg_chain_filter_names(&chain);
+        assert_eq!(
+            names,
+            [
+                "chromakey",
+                "despill",
+                "drawbox",
+                "drawbox",
+                "drawbox",
+                "drawbox"
+            ],
+            "{chain}"
+        );
+        for name in &names {
+            assert!(
+                policy.contains(name),
+                "{name} is outside the bundle policy: {chain}"
             );
         }
     }

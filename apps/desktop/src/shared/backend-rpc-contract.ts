@@ -268,6 +268,20 @@ import {
   SOUNDBOARD_VOLUME_DB_MIN
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import {
+  CHAT_COMMAND_DESCRIPTION_MAX_CHARS,
+  CHAT_COMMAND_MAX_COUNT,
+  CHAT_COMMAND_NAME_MAX_CHARS,
+  CHAT_COMMAND_REPLY_MAX_CHARS,
+  type ChatCommand,
+  type ChatCommandIdParams,
+  type ChatCommandPostParams,
+  type ChatCommandPostResult,
+  type ChatCommandReplyFailed,
+  type ChatCommandSaveParams,
+  type ChatCommandsListEnabledParams,
+  type ChatCommandsState
+} from './chat-commands'
 import type { CohostActAnswer, CohostActParams } from './buddy-act'
 import { LIVE_BACKGROUND_IDS, type LiveBackgroundId } from './live-background-ids'
 import { isSoundFileName, isSoundStarterSlug } from './sound-assets'
@@ -666,6 +680,17 @@ export interface BackendRpcMethodMap {
   /** No `id` stops every sound. The voices still playing. */
   'sounds.stop': BackendRpcDefinition<SoundStopParams, SoundsPlayback>
   // --- end soundboard (plan 189) ---
+  // --- Chat commands (plan 226): every mutation answers with the whole state ---
+  'chatCommands.list': BackendRpcDefinition<undefined, ChatCommandsState>
+  'chatCommands.save': BackendRpcDefinition<ChatCommandSaveParams, ChatCommandsState>
+  'chatCommands.delete': BackendRpcDefinition<ChatCommandIdParams, ChatCommandsState>
+  'chatCommands.setListEnabled': BackendRpcDefinition<
+    ChatCommandsListEnabledParams,
+    ChatCommandsState
+  >
+  /** The streamer's `!go` in the Stream Manager: the reply to every chat (D9). */
+  'chatCommands.post': BackendRpcDefinition<ChatCommandPostParams, ChatCommandPostResult>
+  // --- end chat commands (plan 226) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': BackendRpcDefinition<CohostAvatarCreateParams, CohostAvatarAccepted>
   'cohost.avatar.redo': BackendRpcDefinition<CohostAvatarRedoParams, CohostAvatarAccepted>
@@ -836,6 +861,9 @@ export interface BackendEventMap {
   'banners.changed': Banner[]
   // --- Soundboard (plan 189): the whole state and the playing voices, to every window ---
   'sounds.changed': SoundboardState
+  // --- Chat commands (plan 226): the whole state, and replies that couldn't go out ---
+  'chatCommands.changed': ChatCommandsState
+  'chatCommands.replyFailed': ChatCommandReplyFailed
   // --- Hide screen (plan 210 S7): the state, on every hide and show ---
   'remote.state': { screenHidden: boolean; [key: string]: unknown }
   'screen.privacy.changed': ScreenPrivacy
@@ -1843,6 +1871,17 @@ const layoutSchema = objectSchema(
     cameraChromaKeySimilarityPct: numberSchema({ min: 0, max: 100 }),
     cameraChromaKeySmoothnessPct: numberSchema({ min: 0, max: 100 }),
     cameraChromaKeySpillPct: numberSchema({ min: 0, max: 100 }),
+    cameraChromaKeyEdges: optionalSchema(
+      objectSchema(
+        {
+          leftPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          topPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          rightPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          bottomPct: numberSchema({ integer: true, min: 0, max: 25 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraMargin: numberSchema({ min: 0 }),
     cameraFit: enumSchema(['fit', 'fill']),
     cameraMirror: booleanSchema,
@@ -2136,6 +2175,20 @@ const opaqueNativeWindowHandleSchema = runtimeSchema<string>(
   }
 )
 
+const previewPresenterPhysicalPlacementSchema = objectSchema(
+  {
+    screenX: numberSchema(),
+    screenY: numberSchema(),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    clipX: optionalSchema(numberSchema()),
+    clipY: optionalSchema(numberSchema()),
+    clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
+  },
+  { allowUnknown: false }
+)
+
 const mainOwnedPreviewBoundsSchema = objectSchema(
   {
     screenX: numberSchema(),
@@ -2151,6 +2204,7 @@ const mainOwnedPreviewBoundsSchema = objectSchema(
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
     orderAboveWindowHandle: optionalSchema(opaqueNativeWindowHandleSchema),
+    physicalPlacement: optionalSchema(previewPresenterPhysicalPlacementSchema),
     elevated: optionalSchema(booleanSchema),
     cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
     hostX: optionalSchema(numberSchema()),
@@ -2348,6 +2402,44 @@ const previewScreenStatusSchema = boundedSemanticValue(
   )
 ) as RuntimeSchema<PreviewScreenStatus>
 
+const windowsD3d11TextureRoleHoldSchema = objectSchema(
+  {
+    releases: nonNegativeInteger,
+    meanMs: optionalSchema(numberSchema({ min: 0 })),
+    maxMs: optionalSchema(numberSchema({ min: 0 }))
+  },
+  { allowUnknown: false }
+)
+
+const windowsD3d11TexturePoolPressureSchema = objectSchema(
+  {
+    bgraExhaustions: nonNegativeInteger,
+    nv12Exhaustions: nonNegativeInteger,
+    renderPressureSkips: nonNegativeInteger,
+    holders: objectSchema(
+      {
+        writing: nonNegativeInteger,
+        compositor: nonNegativeInteger,
+        preview: nonNegativeInteger,
+        record: nonNegativeInteger,
+        stream: nonNegativeInteger,
+        awaitingFence: nonNegativeInteger
+      },
+      { allowUnknown: false }
+    ),
+    holds: objectSchema(
+      {
+        compositor: windowsD3d11TextureRoleHoldSchema,
+        preview: windowsD3d11TextureRoleHoldSchema,
+        record: windowsD3d11TextureRoleHoldSchema,
+        stream: windowsD3d11TextureRoleHoldSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  { allowUnknown: false }
+)
+
 const windowsD3d11MediaDiagnosticsSchema = objectSchema(
   {
     state: enumSchema(['unavailable', 'probing', 'live', 'draining', 'fallback', 'failed']),
@@ -2368,8 +2460,9 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
       ])
     ),
     cursorMode: optionalSchema(
-      enumSchema(['embedded', 'separate', 'excluded-wgc', 'disabled-fallback'])
+      enumSchema(['embedded', 'separate', 'excluded-wgc', 'embedded-wgc', 'disabled-fallback'])
     ),
+    captureRouteReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
     cursorRequested: booleanSchema,
     cursorPixelsSource: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
     cursorExclusionGuaranteed: booleanSchema,
@@ -2403,6 +2496,7 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
     renderTickOverruns: nonNegativeInteger,
     renderTickLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
     renderComposeStageMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    texturePoolPressure: optionalSchema(windowsD3d11TexturePoolPressureSchema),
     fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
   },
   { allowUnknown: false }
@@ -3889,6 +3983,89 @@ const soundSchema = objectSchema(
 const soundListSchema = arraySchema(soundSchema, {
   maxLength: SOUND_MAX_COUNT
 }) as RuntimeSchema<Sound[]>
+// --- Chat commands (plan 226) ---
+// Exact: the pinned `chatCommand` fixture; no optional fields go out, so a
+// `null` anywhere is refused (the serde null trap). The limits count Unicode
+// code points in both languages; `stringSchema` counts UTF-16 units, so its
+// bounds are twice the code-point limits and the editor holds the real ones.
+const chatCommandIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const chatCommandNameSchema = runtimeSchema<string>('a chat command name', (value, path) => {
+  if (
+    typeof value !== 'string' ||
+    value.length > CHAT_COMMAND_NAME_MAX_CHARS ||
+    !/^[a-z0-9_-]+$/.test(value)
+  ) {
+    throw new RuntimeSchemaError(path, 'a chat command name')
+  }
+  return value
+})
+const chatCommandSchema = objectSchema(
+  {
+    id: chatCommandIdSchema,
+    name: chatCommandNameSchema,
+    description: stringSchema({
+      minLength: 1,
+      maxLength: CHAT_COMMAND_DESCRIPTION_MAX_CHARS * 2
+    }),
+    reply: stringSchema({ minLength: 1, maxLength: CHAT_COMMAND_REPLY_MAX_CHARS * 2 }),
+    enabled: booleanSchema,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatCommand>
+const chatCommandsStateSchema = objectSchema(
+  {
+    commands: arraySchema(chatCommandSchema, { maxLength: CHAT_COMMAND_MAX_COUNT }),
+    listEnabled: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatCommandsState>
+// Params are what the editor sends before the backend normalizes and checks
+// them, so they are bounded, not exact.
+const chatCommandSaveParamsSchema = objectSchema(
+  {
+    id: optionalSchema(chatCommandIdSchema),
+    name: stringSchema({ maxLength: 256 }),
+    description: stringSchema({ maxLength: 1024 }),
+    reply: stringSchema({ maxLength: 2048 }),
+    enabled: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatCommandSaveParams>
+const chatCommandIdParamsSchema = objectSchema(
+  { id: chatCommandIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatCommandIdParams>
+const chatCommandsListEnabledParamsSchema = objectSchema(
+  { enabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatCommandsListEnabledParams>
+const chatCommandPostParamsSchema = objectSchema(
+  {
+    sessionId: stringSchema({ minLength: 1, maxLength: 256 }),
+    name: stringSchema({ minLength: 1, maxLength: 256 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatCommandPostParams>
+const chatCommandPostResultSchema = objectSchema(
+  {
+    sent: numberSchema({ integer: true, min: 0, max: 1_000 }),
+    failed: numberSchema({ integer: true, min: 0, max: 1_000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatCommandPostResult>
+const chatCommandReplyFailedSchema = objectSchema(
+  {
+    sessionId: stringSchema({ minLength: 1, maxLength: 256 }),
+    destinationId: stringSchema({ minLength: 1, maxLength: 512 }),
+    platform: streamPlatformSchema,
+    command: chatCommandNameSchema,
+    reason: stringSchema({ minLength: 1, maxLength: 2000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatCommandReplyFailed>
+// --- end chat commands (plan 226) ---
 // --- Hide screen (plan 210 S7) ---
 const screenPrivacyReasonSchema = enumSchema(['you', 'password-manager'])
 const screenPrivacySchema = objectSchema(
@@ -6576,6 +6753,16 @@ const runtimeContracts = {
   'sounds.press': { params: soundIdParamsSchema, result: soundPressResultSchema },
   'sounds.stop': { params: soundStopParamsSchema, result: soundsPlaybackSchema },
   // --- end soundboard (plan 189) ---
+  // --- Chat commands (plan 226) ---
+  'chatCommands.list': { params: undefinedSchema, result: chatCommandsStateSchema },
+  'chatCommands.save': { params: chatCommandSaveParamsSchema, result: chatCommandsStateSchema },
+  'chatCommands.delete': { params: chatCommandIdParamsSchema, result: chatCommandsStateSchema },
+  'chatCommands.setListEnabled': {
+    params: chatCommandsListEnabledParamsSchema,
+    result: chatCommandsStateSchema
+  },
+  'chatCommands.post': { params: chatCommandPostParamsSchema, result: chatCommandPostResultSchema },
+  // --- end chat commands (plan 226) ---
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.create': {
     params: cohostAvatarCreateParamsSchema,
@@ -6831,6 +7018,8 @@ const runtimeEventSchemas = {
   // --- end overlay layout (plan 164) ---
   'banners.changed': bannerListSchema,
   'sounds.changed': soundboardStateSchema,
+  'chatCommands.changed': chatCommandsStateSchema,
+  'chatCommands.replyFailed': chatCommandReplyFailedSchema,
   'screen.privacy.changed': screenPrivacySchema,
   'virtualCamera.changed': virtualCameraStatusSchema,
   'remote.state': runtimeSchema<BackendEventMap['remote.state']>('remote state', (value, path) => {

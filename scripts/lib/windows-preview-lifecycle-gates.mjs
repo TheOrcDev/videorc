@@ -193,7 +193,11 @@ export function windowsPreviewPresenterFailures(
   if (typeof presenter.fallbackReason === 'string' && presenter.fallbackReason.trim()) {
     failures.push(`presenter fallbackReason=${presenter.fallbackReason}`)
   }
-  const expected = state?.contentBounds
+  // The presenter is a DPI-aware window and reads its own rect back in
+  // physical pixels, so it is judged against the Preview's physical video
+  // rect. Against the DIP rect the two only agree at 100% scaling, which is
+  // how a presenter at 2/3 size on a 150% display passed (#1272).
+  const expected = state?.contentBoundsPhysical ?? state?.contentBounds
   const actual = presenter.actualBounds
   if (!expected || !actual) {
     failures.push('presenter actual/content bounds are missing')

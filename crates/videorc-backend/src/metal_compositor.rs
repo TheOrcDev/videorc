@@ -62,7 +62,7 @@ struct FragParams {
     float radius;
     // Chroma key, mirroring scene_geometry's f64 reference keyer (ANGLE
     // model): chroma_key = (enabled, key_dir_cb, key_dir_cr, max_angle_rad);
-    // chroma_key2 = (band_rad, spill, spill_is_blue, saturation_floor).
+    // chroma_key2 = (band_rad, spill, spill_is_blue, reserved).
     // CbCr uses the SAME -43/-85/128 and 128/-107/-21 coefficient family as
     // color.rs. If these drift, the CPU and GPU keyers disagree.
     float4 chroma_key;
@@ -73,6 +73,16 @@ struct FragParams {
     // crop so a scaled draw never blends in pixels the crop removed.
     float4 layer;
     float4 camera_look; // brightness, contrast, saturation, enabled
+    // Plan 227: the luma-scaled saturation floor (min, per_luma, max,
+    // ramp_ratio), mirroring scene_geometry's CHROMA_KEY_SATURATION_FLOOR_*.
+    float4 chroma_key_floor;
+    // Plan 227 B, Hide edges: the kept box in source uv (u_min, v_min,
+    // u_max, v_max); a sample outside it keys fully out.
+    float4 chroma_key_edges;
+    // Plan 229: the key judges the sample's neighbourhood, mirroring
+    // scene_geometry's CHROMA_KEY_NEIGHBOURHOOD_*: (tap_offset_texels,
+    // side_tap_weight, reserved, reserved). Offset 0 judges the sample alone.
+    float4 chroma_key_neighbourhood;
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
@@ -136,16 +146,40 @@ fragment float4 f_main(VOut in [[stage_in]],
     float4 color = tex.sample(samp, src);
     // Chroma key (scene_geometry::chroma_key_alpha / chroma_key_despill in
     // f32, ANGLE model): the angle between the pixel's CbCr vector and the
-    // key direction ramps alpha 0->1 across the band; a saturation floor
-    // (ramp width 6.0, mirroring CHROMA_KEY_SATURATION_RAMP) pulls greys
-    // back to opaque. Spill pulls the dominant key channel down toward the
-    // other channels' max. The quad must be drawn on the blending pipeline
-    // for the computed alpha to matter.
+    // key direction ramps alpha 0->1 across the band; a saturation floor that
+    // scales with luma (plan 227, chroma_key_floor) pulls greys back to
+    // opaque. Spill pulls the dominant key channel down toward the other
+    // channels' max. Hide edges (chroma_key_edges) key the sample out when
+    // it lies outside the kept box. The quad must be drawn on the blending
+    // pipeline for the computed alpha to matter.
+    //
+    // Plan 229: the alpha comes from the colour smoothed over the sample's
+    // neighbourhood (nine bilinear taps at 0 and +-tap_offset source texels,
+    // weighing 1 - 2 * side and side per axis: [1 4 6 4 1]^2 / 256 on the
+    // texel grid), so a speck of camera noise keys with the screen around
+    // it. The pixel keeps its own colour; despill runs on it.
     if (params.chroma_key.x > 0.5) {
-        float r = color.r * 255.0, g = color.g * 255.0, b = color.b * 255.0;
+        constexpr sampler key_samp(coord::normalized, address::clamp_to_edge, filter::linear);
+        float2 key_step = params.chroma_key_neighbourhood.x
+            / float2(tex.get_width(), tex.get_height());
+        float side = params.chroma_key_neighbourhood.y;
+        float3 key_weights = float3(side, 1.0 - 2.0 * side, side);
+        float3 judged = float3(0.0);
+        for (int j = 0; j < 3; ++j) {
+            for (int i = 0; i < 3; ++i) {
+                float2 at = src + float2(float(i - 1), float(j - 1)) * key_step;
+                judged += key_weights[i] * key_weights[j]
+                    * tex.sample(key_samp, at, level(0.0)).rgb;
+            }
+        }
+        float r = judged.r * 255.0, g = judged.g * 255.0, b = judged.b * 255.0;
         float vcb = (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0;
         float vcr = (128.0 * r - 107.0 * g - 21.0 * b) / 256.0;
         float saturation = sqrt(vcb * vcb + vcr * vcr);
+        float luma = (77.0 * r + 150.0 * g + 29.0 * b) / 256.0;
+        float floor_value = clamp(params.chroma_key_floor.y * luma,
+            params.chroma_key_floor.x, params.chroma_key_floor.z);
+        float ramp = max(floor_value * params.chroma_key_floor.w, 1e-4);
         float angle_alpha = 1.0;
         if (saturation > 1e-4) {
             float cos_theta = clamp(
@@ -157,8 +191,14 @@ fragment float4 f_main(VOut in [[stage_in]],
                 ? clamp((theta - max_angle) / band, 0.0, 1.0)
                 : (theta <= max_angle ? 0.0 : 1.0);
         }
-        float eligibility = clamp((saturation - params.chroma_key2.w) / 6.0, 0.0, 1.0);
+        float eligibility = (saturation <= floor_value)
+            ? 0.0
+            : clamp((saturation - floor_value) / ramp, 0.0, 1.0);
         float alpha = 1.0 - eligibility * (1.0 - angle_alpha);
+        float4 kept = params.chroma_key_edges;
+        if (src.x < kept.x || src.x > kept.z || src.y < kept.y || src.y > kept.w) {
+            alpha = 0.0;
+        }
         float spill = params.chroma_key2.y;
         if (spill > 0.0) {
             if (params.chroma_key2.z > 0.5) {
@@ -202,6 +242,12 @@ struct FragParams {
     /// (opacity, reserved, reserved, reserved); see the MSL comment.
     layer: [f32; 4],
     camera_look: [f32; 4],
+    /// Plan 227: (min, per_luma, max, ramp_ratio) of the saturation floor.
+    chroma_key_floor: [f32; 4],
+    /// Plan 227 B: the kept box in source uv (u_min, v_min, u_max, v_max).
+    chroma_key_edges: [f32; 4],
+    /// Plan 229: (tap_offset_texels, side_tap_weight, reserved, reserved).
+    chroma_key_neighbourhood: [f32; 4],
 }
 
 /// Per-quad chroma key in shader units, converted once from
@@ -216,26 +262,52 @@ pub struct GpuChromaKey {
     pub band_rad: f32,
     pub spill: f32,
     pub spill_is_blue: bool,
+    /// Hide edges (plan 227 B): the kept box in source uv `[u_min, v_min,
+    /// u_max, v_max]`; `[0, 0, 1, 1]` keeps the whole frame.
+    pub kept_uv: [f32; 4],
 }
 
-/// Mirrors scene_geometry::CHROMA_KEY_SATURATION_FLOOR / _RAMP — if these
-/// drift the CPU and GPU keyers disagree about which greys survive.
-const CHROMA_KEY_SATURATION_FLOOR: f32 = 14.0;
-const CHROMA_KEY_SATURATION_RAMP: f32 = 6.0;
+/// Mirrors scene_geometry::CHROMA_KEY_SATURATION_FLOOR_PARAMS (min, per_luma,
+/// max, ramp_ratio) — if these drift the CPU and GPU keyers disagree about
+/// which greys survive. This file also builds into the preview helper, which
+/// has no scene_geometry, so the constants are mirrored and a compositor test
+/// pins them equal.
+pub(crate) const CHROMA_KEY_SATURATION_FLOOR_PARAMS: [f32; 4] = [5.0, 0.15, 14.0, 6.0 / 14.0];
+
+/// The kept box of a key with no Hide edges.
+pub const CHROMA_KEY_KEEP_ALL_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// Mirrors scene_geometry's CHROMA_KEY_NEIGHBOURHOOD_TAP_OFFSET and
+/// CHROMA_KEY_NEIGHBOURHOOD_SIDE_TAP_WEIGHT (plan 229) as
+/// `(tap_offset_texels, side_tap_weight, reserved, reserved)`: mirrored for
+/// the same reason as the floor, and pinned equal by the same compositor
+/// test.
+pub(crate) const CHROMA_KEY_NEIGHBOURHOOD_PARAMS: [f32; 4] = [1.2, 5.0 / 16.0, 0.0, 0.0];
 
 impl GpuChromaKey {
-    fn frag_params(source: Option<&GpuChromaKey>) -> ([f32; 4], [f32; 4]) {
+    /// `(chroma_key, chroma_key2, chroma_key_floor, chroma_key_edges,
+    /// chroma_key_neighbourhood)` for the fragment shader.
+    fn frag_params(source: Option<&GpuChromaKey>) -> [[f32; 4]; 5] {
         match source {
-            Some(key) => (
+            Some(key) => [
                 [1.0, key.key_dir_cb, key.key_dir_cr, key.max_angle_rad],
                 [
                     key.band_rad,
                     key.spill,
                     if key.spill_is_blue { 1.0 } else { 0.0 },
-                    CHROMA_KEY_SATURATION_FLOOR,
+                    0.0,
                 ],
-            ),
-            None => ([0.0; 4], [0.0; 4]),
+                CHROMA_KEY_SATURATION_FLOOR_PARAMS,
+                key.kept_uv,
+                CHROMA_KEY_NEIGHBOURHOOD_PARAMS,
+            ],
+            None => [
+                [0.0; 4],
+                [0.0; 4],
+                [0.0; 4],
+                CHROMA_KEY_KEEP_ALL_UV,
+                [0.0; 4],
+            ],
         }
     }
 }
@@ -1524,7 +1596,13 @@ impl MetalSceneCompositor {
             } else {
                 1.0
             };
-            let (chroma_key, chroma_key2) = GpuChromaKey::frag_params(source.chroma_key.as_ref());
+            let [
+                chroma_key,
+                chroma_key2,
+                chroma_key_floor,
+                chroma_key_edges,
+                chroma_key_neighbourhood,
+            ] = GpuChromaKey::frag_params(source.chroma_key.as_ref());
             let params = FragParams {
                 crop: source.crop,
                 mirror: f32::from(u8::from(source.mirror)),
@@ -1533,6 +1611,9 @@ impl MetalSceneCompositor {
                 radius: source.mask.shader_radius(),
                 chroma_key,
                 chroma_key2,
+                chroma_key_floor,
+                chroma_key_edges,
+                chroma_key_neighbourhood,
                 camera_look: source
                     .camera_look
                     .map_or([0.0, 1.0, 1.0, 0.0], |[b, c, s]| [b, c, s, 1.0]),
@@ -2765,6 +2846,9 @@ fn encode_texture_present(
         chroma_key2: [0.0; 4],
         layer: [1.0, 0.0, 0.0, 0.0],
         camera_look: [0.0, 1.0, 1.0, 0.0],
+        chroma_key_floor: [0.0; 4],
+        chroma_key_edges: CHROMA_KEY_KEEP_ALL_UV,
+        chroma_key_neighbourhood: [0.0; 4],
     };
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -3113,7 +3197,24 @@ mod tests {
             band_rad: band_deg.to_radians(),
             spill,
             spill_is_blue: false,
+            kept_uv: CHROMA_KEY_KEEP_ALL_UV,
         }
+    }
+
+    /// One BGRA tone keyed over a BLUE frame. A 1×1 texture, so the key's
+    /// neighbourhood (plan 229, clamped at the edge) is the tone itself.
+    fn keyed_tone(
+        compositor: &mut MetalSceneCompositor,
+        bgra: [u8; 4],
+        key: GpuChromaKey,
+    ) -> [u8; 4] {
+        let mut source = full_frame(&bgra, 1, 1, false, SourceMask::None, [0.0; 4]);
+        source.blend = true;
+        source.chroma_key = Some(key);
+        let px = compositor
+            .compose_bgra(1, 1, [0.0, 0.0, 1.0, 1.0], &[source])
+            .unwrap();
+        pixel(&px, 1, 0, 0)
     }
 
     #[test]
@@ -3122,36 +3223,29 @@ mod tests {
             eprintln!("skipping: no Metal device available in this environment");
             return;
         };
-        // BGRA texels: a REALISTIC shadowed screen tone (the 0.9.39 model
+        // BGRA tones: a REALISTIC shadowed screen tone (the 0.9.39 model
         // failed exactly here), red (kept), a desaturated screen tone in the
         // saturation-floor ramp (partial), grey (kept). Over a BLUE frame.
-        let camera = [
-            40u8, 100, 30, 255, // shadowed screen green (rgb 30,100,40)
-            0, 0, 255, 255, // red
-            100, 135, 100, 255, // low-saturation screen tone (partial)
-            128, 128, 128, 255, // grey
-        ];
-        let mut source = full_frame(&camera, 4, 1, false, SourceMask::None, [0.0; 4]);
-        source.blend = true;
-        source.chroma_key = Some(green_key(24.0, 4.8, 0.0));
-        let px = compositor
-            .compose_bgra(4, 1, [0.0, 0.0, 1.0, 1.0], &[source])
-            .unwrap();
+        let key = green_key(24.0, 4.8, 0.0);
         assert_eq!(
-            pixel(&px, 4, 0, 0)[..3],
+            keyed_tone(&mut compositor, [40, 100, 30, 255], key)[..3],
             [255, 0, 0],
             "shadowed REAL screen tone keys with defaults (the 0.9.39 bug)"
         );
-        assert_eq!(pixel(&px, 4, 1, 0)[..3], [0, 0, 255], "red survives");
+        assert_eq!(
+            keyed_tone(&mut compositor, [0, 0, 255, 255], key)[..3],
+            [0, 0, 255],
+            "red survives"
+        );
         // Reference alpha for (100,135,100) is ~55/255 (saturation 18.7 in
         // the 14..20 ramp): out ≈ src*0.22 + blue*0.78 → BGRA ≈ (221, 30, 22).
-        let partial = pixel(&px, 4, 2, 0);
+        let partial = keyed_tone(&mut compositor, [100, 135, 100, 255], key);
         assert!(
             partial[0] > 190 && partial[0] < 245 && partial[1] > 15 && partial[1] < 60,
             "saturation-ramp tone blends fractionally over blue, got {partial:?}"
         );
         assert_eq!(
-            pixel(&px, 4, 3, 0)[..3],
+            keyed_tone(&mut compositor, [128, 128, 128, 255], key)[..3],
             [128, 128, 128],
             "grey survives untouched"
         );
@@ -3205,6 +3299,122 @@ mod tests {
             [255, 0, 0],
             "corner masked to the blue frame"
         );
+    }
+
+    /// Plan 227: the owner's deep-shadowed screen keys and the near-black
+    /// subject (t-shirt, mic arm) stays, through the real shader.
+    #[test]
+    fn chroma_key_keys_the_shadowed_screen_and_keeps_near_black_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // BGRA tones over a BLUE frame.
+        let key = green_key(24.0, 4.8, 0.0);
+        for (label, bgra, expected) in [
+            (
+                "deep shadow (rgb 1,23,6) keys",
+                [6u8, 23, 1, 255],
+                [255u8, 0, 0],
+            ),
+            ("shadow (rgb 0,26,9) keys", [9, 26, 0, 255], [255, 0, 0]),
+            (
+                "black t-shirt (rgb 27,23,25) kept",
+                [25, 23, 27, 255],
+                [25, 23, 27],
+            ),
+            ("mic arm (rgb 6,9,6) kept", [6, 9, 6, 255], [6, 9, 6]),
+        ] {
+            assert_eq!(
+                keyed_tone(&mut compositor, bgra, key)[..3],
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// Plan 229, the owner's "snow": a 2×2 speck of real screen texels that
+    /// key only part way alone (rgb 9,107,53 is 25° from the key), in the
+    /// lit screen around it (rgb 21,124,55), keys fully through the real
+    /// shader; the same speck as a whole frame stays part way.
+    #[test]
+    fn chroma_key_keys_a_speck_with_the_screen_around_it_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        let key = green_key(24.0, 4.8, 0.0);
+        let screen = [55u8, 124, 21, 255];
+        let speck = [53u8, 107, 9, 255];
+        // Alone it blends about a quarter of the way over the blue frame
+        // (reference alpha 62/255).
+        let alone = keyed_tone(&mut compositor, speck, key);
+        assert!(
+            alone[0] < 240 && alone[1] > 10,
+            "the speck alone stays part way, got {alone:?}"
+        );
+
+        let size = 9usize;
+        let camera: Vec<u8> = (0..size * size)
+            .flat_map(|index| {
+                let (x, y) = (index % size, index / size);
+                if (4..6).contains(&x) && (4..6).contains(&y) {
+                    speck
+                } else {
+                    screen
+                }
+            })
+            .collect();
+        let mut source = full_frame(&camera, size, size, false, SourceMask::None, [0.0; 4]);
+        source.blend = true;
+        source.chroma_key = Some(key);
+        let px = compositor
+            .compose_bgra(size, size, [0.0, 0.0, 1.0, 1.0], &[source])
+            .unwrap();
+        for (x, y) in [(4, 4), (5, 4), (4, 5), (5, 5), (0, 0), (8, 8)] {
+            assert_eq!(
+                pixel(&px, size, x, y)[..3],
+                [255, 0, 0],
+                "texel ({x}, {y}) keys to the blue frame"
+            );
+        }
+    }
+
+    /// Plan 227 B: Hide edges keys out everything outside the kept box, in
+    /// SOURCE uv, so a mirrored quad hides the source's right column on the
+    /// canvas's left.
+    #[test]
+    fn chroma_key_hide_edges_follow_the_source_through_a_mirror_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        let red = [0u8, 0, 255, 255].repeat(4);
+        let mut source = full_frame(&red, 4, 1, false, SourceMask::None, [0.0; 4]);
+        source.blend = true;
+        let mut key = green_key(24.0, 4.8, 0.0);
+        key.kept_uv = [0.25, 0.0, 1.0, 1.0];
+        source.chroma_key = Some(key);
+        let px = compositor
+            .compose_bgra(4, 1, [0.0, 0.0, 1.0, 1.0], &[source])
+            .unwrap();
+        assert_eq!(
+            pixel(&px, 4, 0, 0)[..3],
+            [255, 0, 0],
+            "source column 0 hidden"
+        );
+        assert_eq!(pixel(&px, 4, 1, 0)[..3], [0, 0, 255], "column 1 kept");
+
+        source.mirror = true;
+        let px = compositor
+            .compose_bgra(4, 1, [0.0, 0.0, 1.0, 1.0], &[source])
+            .unwrap();
+        assert_eq!(
+            pixel(&px, 4, 3, 0)[..3],
+            [255, 0, 0],
+            "mirrored: hidden on the right"
+        );
+        assert_eq!(pixel(&px, 4, 0, 0)[..3], [0, 0, 255], "mirrored: left kept");
     }
 
     #[test]

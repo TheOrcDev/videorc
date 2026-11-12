@@ -3595,7 +3595,12 @@ impl CohostSession {
     /// row pull it out of the delta (deleted messages never reach the model).
     /// `now` is when the engine saw the rows: the automatic-card age rule
     /// counts from it, never from a provider timestamp.
-    fn note_messages(&mut self, messages: &[LiveChatMessage], now: Instant) -> usize {
+    fn note_messages(
+        &mut self,
+        messages: &[LiveChatMessage],
+        now: Instant,
+        is_chat_command: &dyn Fn(&str) -> bool,
+    ) -> usize {
         let mut noted = 0;
         let mut ordered: Vec<&LiveChatMessage> = messages
             .iter()
@@ -3675,10 +3680,14 @@ impl CohostSession {
                         .is_some_and(|kind| kind.starts_with("channel.chat.notification")),
                 },
             );
-            self.pending.push_back(mapped);
-            while self.pending.len() > TICK_DELTA_CAP {
-                self.pending.pop_front();
-                self.dropped = self.dropped.saturating_add(1);
+            // Plan 226: Videorc answers a `!command` itself; the tick never
+            // sees it as a question.
+            if !is_chat_command(&message.message_text) {
+                self.pending.push_back(mapped);
+                while self.pending.len() > TICK_DELTA_CAP {
+                    self.pending.pop_front();
+                    self.dropped = self.dropped.saturating_add(1);
+                }
             }
             noted += 1;
         }
@@ -7294,14 +7303,37 @@ impl CohostEngine {
         Some(session.report(&chrono::Utc::now().to_rfc3339()))
     }
 
+    #[cfg(test)]
     pub(crate) fn note_messages(&mut self, messages: &[LiveChatMessage]) -> usize {
         self.note_messages_at(messages, Instant::now())
     }
 
+    /// Note delivered chat for the tick. A message `is_chat_command` says
+    /// Videorc answers itself (plan 226) never becomes a question for the
+    /// tick; it is still known, so highlights, the spotlight and the ledger
+    /// see it as before.
+    pub(crate) fn note_messages_skipping_chat_commands(
+        &mut self,
+        messages: &[LiveChatMessage],
+        is_chat_command: &dyn Fn(&str) -> bool,
+    ) -> usize {
+        self.note_messages_skipping_at(messages, Instant::now(), is_chat_command)
+    }
+
+    #[cfg(test)]
     fn note_messages_at(&mut self, messages: &[LiveChatMessage], now: Instant) -> usize {
+        self.note_messages_skipping_at(messages, now, &|_| false)
+    }
+
+    fn note_messages_skipping_at(
+        &mut self,
+        messages: &[LiveChatMessage],
+        now: Instant,
+        is_chat_command: &dyn Fn(&str) -> bool,
+    ) -> usize {
         self.session
             .as_mut()
-            .map(|session| session.note_messages(messages, now))
+            .map(|session| session.note_messages(messages, now, is_chat_command))
             .unwrap_or(0)
     }
 
@@ -11448,6 +11480,10 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
         state.buddy_sprite.notify(event);
     }
     apply_auto_chat_pass(state, auto_chat, Some(lifecycle_delivery)).await;
+    // Plan 226: a `!command` Videorc answers itself is never a question for
+    // Buddy, so the bubble never answers the same thing twice. Read from
+    // memory before the engine lock.
+    let chat_commands = state.chat_commands.snapshot();
     let snapshot = {
         let mut engine = state.cohost.lock().await;
         if engine.session.is_none() {
@@ -11456,7 +11492,9 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
         let bucket_before = pending_bucket(engine.pending_len());
         let highlights_before = engine.highlights_len();
         let spotlight_before = engine.has_spotlight();
-        engine.note_messages(messages);
+        engine.note_messages_skipping_chat_commands(messages, &|text| {
+            crate::chat_commands::answers(&chat_commands, text)
+        });
         let bucket_after = pending_bucket(engine.pending_len());
         // A tombstone that pulled a suggested comment (or the spotlight) is
         // also news: the renderer must stop offering it now, not at the
@@ -12153,6 +12191,7 @@ mod tests {
             first_message: false,
             first_in_session: false,
             arrival: None,
+            author_handle: None,
             author_affiliation: None,
             author_verified: None,
         }
@@ -12586,6 +12625,34 @@ mod tests {
             live_message_id: Some(message_id.to_string()),
             remaining,
         }
+    }
+
+    /// Plan 226: Videorc answers a `!command` itself, so the tick never gets
+    /// it as a question; the row is still known and counted, and every other
+    /// row is noted exactly as before.
+    #[test]
+    fn a_chat_command_never_becomes_a_question_for_the_tick() {
+        let start = Instant::now();
+        let mut rows = messages("session-1", 0..3);
+        rows[1].message_text = "!go please".to_string();
+        let mut engine = CohostEngine::new(enabled_settings());
+        engine.start_session("session-1".to_string(), true, None, start);
+        let noted = engine.note_messages_skipping_at(&rows, start, &|text| text.starts_with("!go"));
+        assert_eq!(noted, 3);
+        assert_eq!(engine.pending_len(), 2);
+        let session = engine.session.as_ref().unwrap();
+        assert!(
+            session
+                .pending
+                .iter()
+                .all(|pending| pending.id != rows[1].id)
+        );
+        assert!(session.known_set.contains(&rows[1].id));
+
+        let mut without = CohostEngine::new(enabled_settings());
+        without.start_session("session-1".to_string(), true, None, start);
+        without.note_messages_at(&rows, start);
+        assert_eq!(without.pending_len(), 3);
     }
 
     #[test]
@@ -18854,6 +18921,7 @@ mod tests {
             first_message: false,
             first_in_session: false,
             arrival: None,
+            author_handle: None,
             author_affiliation: None,
             author_verified: None,
         }

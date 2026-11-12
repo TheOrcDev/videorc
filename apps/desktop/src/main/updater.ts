@@ -1,9 +1,9 @@
 import { app, net, Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import electronUpdater from 'electron-updater'
-import type { ProgressInfo, UpdateInfo } from 'electron-updater'
+import type { NsisUpdater, ProgressInfo, UpdateInfo } from 'electron-updater'
 
-import type { UpdateStatus } from '../shared/backend'
+import type { UpdateStatus, UpdaterDiagnostics } from '../shared/backend'
 import type { AcquireBackendInterruption } from './interruption-actions'
 import {
   checkLinuxUpdateNotice,
@@ -14,8 +14,11 @@ import { safeConsole } from './safe-console'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import { createAppUpdateConfigGate } from './updater-config-file'
 import { installUpdateWithInterruptionLease } from './updater-install'
+import { createUpdaterLog } from './updater-log'
+import type { UpdaterLogSink } from './updater-log'
 import { shouldRetryUpdateOnMirror, UPDATE_FEED_URLS } from './updater-mirror'
 import type { UpdateFeedRoute } from './updater-mirror'
+import { createWindowsSignatureVerifier } from './updater-signature'
 import {
   BACKGROUND_RECHECK_INTERVAL_MS,
   isMissingUpdateFeedError,
@@ -72,11 +75,34 @@ let requestAccountPilotGrant: (() => Promise<unknown>) | null = null
 const linuxNoticeSource =
   process.platform === 'linux' ? linuxUpdateNoticeSource(process.env, app.isPackaged) : null
 let linuxNoticeInFlight: Promise<UpdateStatus> | null = null
+// Every updater line (electron-updater's own and ours) is kept for the
+// support bundle and handed to a sink; main points the sink at backend.log
+// (updater-log.ts). Until then it goes to the console.
+const updaterLog = createUpdaterLog({ sink: consoleUpdaterLogSink })
+
+function consoleUpdaterLogSink(level: 'info' | 'warn' | 'error', message: string): void {
+  const line = `[auto-update] ${message}`
+  if (level === 'error') safeConsole.error(line)
+  else if (level === 'warn') safeConsole.warn(line)
+  else safeConsole.log(line)
+}
+
+/** Status and recent lines for runtimeInfo.updater (the support bundle). */
+export function updaterDiagnostics(): UpdaterDiagnostics {
+  return { status: currentStatus, recentEvents: updaterLog.snapshot() }
+}
+
+// Windows feeds live on object storage that answers a multi-range request
+// with the whole file, so every differential attempt failed ("multipart/
+// byteranges is expected") and fell back to the full installer after two
+// extra block-map fetches. Go straight to the full download there.
+const differentialDownloadDisabled = process.platform === 'win32'
+
 // A dev or --dir package has no app-update.yml, so only a pinned feed can be
 // checked there (updater-config-file.ts).
 const allowsUpdateCheck = createAppUpdateConfigGate({
   resourcesPath: process.resourcesPath,
-  log: (message) => safeConsole.log(message)
+  log: (message) => updaterLog.info(message)
 })
 
 function errorMessage(error: unknown): string {
@@ -135,12 +161,12 @@ async function checkForUpdatesWithMirrorFallback(): Promise<void> {
     if (!retriesOnMirror(error)) {
       throw error
     }
-    safeConsole.warn(`[auto-update] primary feed failed (${errorMessage(error)}), retrying mirror`)
+    updaterLog.warn(`primary feed failed (${errorMessage(error)}), retrying mirror`)
     switchFeedRoute('mirror')
     try {
       await autoUpdater.checkForUpdates()
     } catch (mirrorError) {
-      safeConsole.warn(`[auto-update] mirror feed failed: ${errorMessage(mirrorError)}`)
+      updaterLog.warn(`mirror feed failed: ${errorMessage(mirrorError)}`)
       throw error
     }
   }
@@ -152,7 +178,7 @@ function leaveAccountPilotFeed(): void {
   }
   accountPilotActive = false
   autoUpdater.requestHeaders = null
-  autoUpdater.disableDifferentialDownload = false
+  autoUpdater.disableDifferentialDownload = differentialDownloadDisabled
   autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED_URLS.primary })
   feedRoute = 'primary'
 }
@@ -167,7 +193,7 @@ async function accountPilotRequestHeaders(): Promise<Record<string, string> | nu
     const grant = await requestAccountPilotGrant()
     return isWindowsPilotUpdateGrant(grant) ? accountPilotUpdaterConfig(grant).requestHeaders : null
   } catch (error) {
-    safeConsole.warn(`[auto-update] Windows pilot access unavailable: ${errorMessage(error)}`)
+    updaterLog.warn(`Windows pilot access unavailable: ${errorMessage(error)}`)
     return null
   }
 }
@@ -218,7 +244,7 @@ async function checkForUpdatesOnAllFeeds(): Promise<void> {
       await autoUpdater.checkForUpdates()
       return
     } catch (error) {
-      safeConsole.warn(`[auto-update] Windows pilot feed check failed: ${errorMessage(error)}`)
+      updaterLog.warn(`Windows pilot feed check failed: ${errorMessage(error)}`)
       leaveAccountPilotFeed()
       setStatus(publicStatus)
     } finally {
@@ -249,15 +275,13 @@ async function downloadUpdateWithMirrorFallback(): Promise<void> {
     if (!retriesOnMirror(error)) {
       throw error
     }
-    safeConsole.warn(
-      `[auto-update] primary download failed (${errorMessage(error)}), retrying mirror`
-    )
+    updaterLog.warn(`primary download failed (${errorMessage(error)}), retrying mirror`)
     switchFeedRoute('mirror')
     try {
       await autoUpdater.checkForUpdates()
       await autoUpdater.downloadUpdate()
     } catch (mirrorError) {
-      safeConsole.warn(`[auto-update] mirror download failed: ${errorMessage(mirrorError)}`)
+      updaterLog.warn(`mirror download failed: ${errorMessage(mirrorError)}`)
       throw error
     }
   }
@@ -278,7 +302,7 @@ function checkLinuxNotice(): Promise<UpdateStatus> {
       runningVersion,
       fetchImpl: (url, init) => net.fetch(url, init)
     })
-    safeConsole.log(`[auto-update] Linux version check: ${JSON.stringify(check)}`)
+    updaterLog.info(`Linux version check: ${JSON.stringify(check)}`)
     setStatus(linuxUpdateNoticeStatus(check, runningVersion))
     return currentStatus
   })().finally(() => {
@@ -314,6 +338,20 @@ function attachUpdaterListeners(): void {
   }
   listenersAttached = true
 
+  autoUpdater.logger = updaterLog
+  if (process.platform === 'win32') {
+    // electron-updater's own check gives PowerShell 20 s, which a busy machine
+    // misses on a 200 MB installer (updater-signature.ts).
+    const nsisUpdater = autoUpdater as NsisUpdater
+    nsisUpdater.verifyUpdateCodeSignature = createWindowsSignatureVerifier({
+      log: {
+        info: (message) => updaterLog.info(message),
+        warn: (message) => updaterLog.warn(message)
+      }
+    })
+    autoUpdater.disableDifferentialDownload = differentialDownloadDisabled
+  }
+
   // Manual + background both drive download explicitly.
   autoUpdater.autoDownload = false
   // A downloaded update still applies on the next natural quit even if the user
@@ -334,7 +372,7 @@ function attachUpdaterListeners(): void {
   })
   autoUpdater.on('update-downloaded', (info: UpdateInfo) => {
     setStatus(updateStatusFromEvent({ type: 'downloaded', version: info.version }))
-    safeConsole.log(`[auto-update] ${info.version} downloaded; ready to install.`)
+    updaterLog.info(`${info.version} downloaded; ready to install.`)
     // Non-blocking heads-up for the background flow (the user may not be in
     // Settings). Accurate for the manual flow too — they can restart now or it
     // applies on the next quit. Never during a capture (plan 174 I-20).
@@ -346,7 +384,7 @@ function attachUpdaterListeners(): void {
   autoUpdater.on('error', (error) => {
     const message = errorMessage(error)
     // Update failures are non-fatal.
-    safeConsole.warn(`[auto-update] error: ${message}`)
+    updaterLog.warn(`error: ${message}`)
     // A failed pilot probe restores the public outcome; never flash its error.
     if (probingAccountPilot) {
       return
@@ -368,8 +406,15 @@ function attachUpdaterListeners(): void {
 // cut off; the sidebar chip and Settings reflect the same shared status.
 // Escape hatch: VIDEORC_DISABLE_AUTO_UPDATE=1.
 export function initAutoUpdater(
-  options: { requestWindowsPilotUpdateGrant?: () => Promise<unknown> } = {}
+  options: {
+    requestWindowsPilotUpdateGrant?: () => Promise<unknown>
+    /** Where updater lines go besides the bundle ring (main: backend.log). */
+    log?: UpdaterLogSink
+  } = {}
 ): void {
+  if (options.log) {
+    updaterLog.setSink(options.log)
+  }
   if (process.platform === 'linux') {
     delete process.env.VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN
     initLinuxUpdateNotice()
@@ -396,7 +441,7 @@ export function initAutoUpdater(
     }
   } catch (error) {
     updaterConfigurationBlocked = true
-    safeConsole.warn(`[auto-update] pilot configuration blocked: ${errorMessage(error)}`)
+    updaterLog.warn(`pilot configuration blocked: ${errorMessage(error)}`)
     setStatus(updateStatusFromEvent({ type: 'unsupported' }))
     return
   }
@@ -429,7 +474,7 @@ export function initAutoUpdater(
   autoUpdater.on('update-available', () => {
     void downloadUpdateWithMirrorFallback().catch((error) => {
       const message = errorMessage(error)
-      safeConsole.warn(`[auto-update] background download failed: ${message}`)
+      updaterLog.warn(`background download failed: ${message}`)
       setStatusFromUpdaterError(message)
     })
   })
@@ -437,7 +482,7 @@ export function initAutoUpdater(
   const backgroundCheck = (): void => {
     void checkForUpdatesOnAllFeeds().catch((error) => {
       const message = errorMessage(error)
-      safeConsole.warn(`[auto-update] check failed: ${message}`)
+      updaterLog.warn(`check failed: ${message}`)
       setStatusFromUpdaterError(message)
     })
   }
@@ -500,7 +545,7 @@ export function registerUpdaterIpc(
       return currentStatus
     } catch (error) {
       const message = errorMessage(error)
-      safeConsole.warn(`[auto-update] check failed: ${message}`)
+      updaterLog.warn(`check failed: ${message}`)
       setStatusFromUpdaterError(message)
       return currentStatus
     }
@@ -534,13 +579,11 @@ export function registerUpdaterIpc(
         () => autoUpdater.quitAndInstall()
       )
       if (admission !== 'installing') {
-        safeConsole.warn(
-          '[auto-update] install deferred because capture is active, starting, or unconfirmed.'
-        )
+        updaterLog.warn('install deferred because capture is active, starting, or unconfirmed.')
       }
     } catch (error) {
       // Admission transport failures are fail-closed: never quit on a guess.
-      safeConsole.warn(`[auto-update] install admission failed: ${errorMessage(error)}`)
+      updaterLog.warn(`install admission failed: ${errorMessage(error)}`)
     }
   })
 }

@@ -25,6 +25,8 @@ import { PanelSection } from '@/components/panel-section'
 import { dockHiddenDisplay } from '@/components/preview-stage'
 import { BannerInspector, SceneBannersSection } from '@/components/scene/banner-inspector'
 import { CameraResetButton } from '@/components/scene/camera-reset-button'
+import { CameraKeyEdgesFields } from '@/components/scene/camera-key-edges-fields'
+import { cameraKeyEdgesOf } from '@/components/scene/camera-key-edges'
 import {
   BannerEdits,
   OverlayEdits,
@@ -1739,6 +1741,10 @@ function CameraInspector({
               onCommit={(cameraChromaKeySpillPct) =>
                 onApplyLayoutPatch({ cameraChromaKeySpillPct })
               }
+            />
+            <CameraKeyEdgesFields
+              edges={cameraKeyEdgesOf(layout)}
+              onCommit={(cameraChromaKeyEdges) => onApplyLayoutPatch({ cameraChromaKeyEdges })}
             />
           </>
         ) : null}

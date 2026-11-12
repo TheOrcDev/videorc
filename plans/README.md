@@ -1,5 +1,39 @@
 # Implementation Plans
 
+- 2026-11-11: [Plan 229](229-green-screen-without-snow.md), the owner's
+  stream on 0.22.0: "snow" around the subject, specks of green screen one to
+  three pixels across in a new place every frame. IMPLEMENTED 2026-11-11:
+  - Cause: camera chroma noise (one 4:2:0 sample per 2×2 pixels) pushed
+    single samples past the 24° cone, or under the floor in shadow, and the
+    CPU, Metal and D3D11 keyer judged each pixel alone. The screen sits
+    16–20° from `#00FF00`, so the margin is 4–8°.
+  - The key now judges the colour smoothed over a 5×5 binomial around the
+    pixel and draws the pixel's own colour, on the CPU, Metal and D3D11
+    paths. FFmpeg's `chromakey` already judges a 3×3 neighbourhood.
+  - Owed: the owner's own take with the green screen.
+- 2026-11-11: [Plan 227](227-green-screen-keys-its-own-shadows.md), the
+  owner's recording: with Key out background on, the camera's bottom corners
+  kept dark patches that read as the curtain. IMPLEMENTED 2026-11-11 (the
+  owner took D1–D4 as recommended):
+  - Cause 1: the keyer refused any pixel with chroma ≤ 14, and the screen in
+    shadow has the right hue but chroma 9–12. The saturation floor now scales
+    with brightness (min 5, max 14) on the CPU, Metal and D3D11 paths; every
+    existing pin holds and near-black subject stays.
+  - Cause 2: the frame's left edge is the real curtain, which no keyer can
+    remove. "Hide edges" (Left, Top, Right, Bottom, 0–25 %) in the Green
+    screen section makes those edges see-through on every path, the FFmpeg
+    leg with transparent `drawbox`es.
+  - Owed: the owner's own 30 s take with the green screen.
+- 2026-11-10: [Plan 226](226-chat-commands.md), a streamer's request:
+  viewers type `!go` and Videorc answers as the streamer, `@viewer <reply>`,
+  in the chat they asked in; `!commands` lists every command. IMPLEMENTED
+  2026-11-10 (`smoke:chat-commands`):
+  - Owner calls: replies post on their own (only the streamer's text, never
+    AI), one message up to 170 characters (X in 2 parts), edited on Setup →
+    Livestream with a Stream Manager shortcut and `!` completions, free.
+  - Guards: first-word match, a 30 s cooldown per command and chat (YouTube
+    60 s), YouTube replies stop at 80 % of the daily budget, no history or
+    echo replies.
 - 2026-11-08: [Plan 221](221-premium-worth-paying-for.md), Premium worth
   paying for. The owner: "currently our premium is not really giving much
   value to users", then "execute the entire plan and put all to that pr we

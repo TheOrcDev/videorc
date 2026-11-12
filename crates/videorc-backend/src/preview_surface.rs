@@ -2239,6 +2239,7 @@ mod tests {
                 bounds: MainOwnedPreviewSurfaceBounds {
                     bounds: bounds(1280.0, 720.0),
                     order_above_window_handle: None,
+                    physical_placement: None,
                 },
                 generation: 7,
             },
@@ -2260,6 +2261,7 @@ mod tests {
                 bounds: MainOwnedPreviewSurfaceBounds {
                     bounds: bounds(320.0, 180.0),
                     order_above_window_handle: None,
+                    physical_placement: None,
                 },
                 generation: 6,
             },
@@ -3762,6 +3764,7 @@ mod tests {
             bounds: MainOwnedPreviewSurfaceBounds {
                 bounds: bounds(1280.0, 720.0),
                 order_above_window_handle: None,
+                physical_placement: None,
             },
             generation: 42,
         };

@@ -32,8 +32,6 @@ use crate::diagnostics::{
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats, SurfaceBackingTrackerHandle};
 use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
-#[cfg(any(target_os = "windows", test))]
-use crate::protocol::{CameraAspect, CameraShape, CameraSize, CameraTransformMode, LayoutPreset};
 use crate::protocol::{
     CameraCapabilityFormat, LayoutSettings, PreviewCameraDropReasonStats, PreviewCameraStartParams,
     PreviewCameraState, PreviewCameraStatus, SourceSelection, VideoSettings,
@@ -44,10 +42,6 @@ use crate::state::{AppState, CaptureRecoveryExplicitCameraMutationLease};
 
 const PREVIEW_CAMERA_DEFAULT_PNG_WIDTH: u32 = 1280;
 const PREVIEW_CAMERA_MAX_PNG_WIDTH: u32 = 1920;
-#[cfg(any(target_os = "windows", test))]
-const CAMERA_REFERENCE_WIDTH: u32 = 1280;
-#[cfg(any(target_os = "windows", test))]
-const CAMERA_REFERENCE_HEIGHT: u32 = 720;
 #[cfg(target_os = "macos")]
 const CAMERA_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_CAMERA_CAPTURE_CPU_COPY";
 /// Must stay inside the 10 s mutation contract together with the up-to-2 s
@@ -94,6 +88,16 @@ pub(crate) const CAMERA_COMMAND_RESPONSE_BUDGET: Duration = Duration::from_secs(
 const CAMERA_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS: f64 = 0.000_001;
+/// A DirectShow mode listed this close under the target rate still reaches
+/// it (29.97 for 30), the same tolerance the Sources shortfall check uses.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_MODE_FPS_TOLERANCE: f64 = 1.0;
+/// How many of the camera's own modes the start ladder tries before the
+/// exact-rate and negotiated fallbacks. Each failing rung costs about a
+/// quarter second, and the budget reserve skips any that would eat the
+/// fallbacks' time.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_EXPLICIT_MODE_RUNGS: usize = 3;
 
 /// The native thread never answered its start. A thread that outlived the
 /// startup timeout is stopped next, and its stop path keeps the DirectShow
@@ -4469,7 +4473,7 @@ fn downscale_rgba_for_preview(
     (next.into_raw(), next_width, next_height)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn fit_camera_source_in_target_box(
     source_width: u32,
     source_height: u32,
@@ -4493,7 +4497,7 @@ fn fit_camera_source_in_target_box(
     )
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn scale_preserving_aspect(source_dimension: u32, target_dimension: u32, source_basis: u32) -> u32 {
     if source_basis == 0 {
         return target_dimension;
@@ -4562,62 +4566,173 @@ impl SelectedCameraSource {
     }
 }
 
+/// The box a Windows camera fills: the full output canvas for every preset,
+/// the same layout-invariant box `camera_capture_target_dimensions` gives the
+/// restart key (issue #1066). The inset presets used to pipe an overlay-sized
+/// frame, but a preset switch never restarts the camera, so a camera started
+/// under Screen + Camera kept piping ~540x304 after a switch to camera-only
+/// and the compositor stretched it to the canvas (a custom inset enlarged by
+/// hand did the same). Each attempt still pipes its mode's native size fitted
+/// into this box (`windows_camera_attempt_output_dimensions`), and the
+/// compositor fits that frame into whatever box the scene gives it.
 #[cfg(any(target_os = "windows", test))]
 fn windows_camera_preview_output_dimensions(config: &NativeCameraPreviewConfig) -> (u32, u32) {
-    if matches!(
-        config.layout.layout_preset,
-        LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera
-    ) {
-        return camera_overlay_target_dimensions(&config.layout, &config.video);
-    }
     camera_capture_target_dimensions(&config.layout, &config.video)
 }
 
-#[cfg(test)]
-fn windows_camera_preview_ffmpeg_args(
-    config: &NativeCameraPreviewConfig,
-    width: u32,
-    height: u32,
-    fps: u32,
-) -> Vec<String> {
-    windows_camera_preview_ffmpeg_args_opts(config, width, height, fps, Some(fps))
-}
-
-#[cfg(test)]
-fn windows_camera_preview_ffmpeg_args_opts(
-    config: &NativeCameraPreviewConfig,
-    width: u32,
-    height: u32,
-    fps: u32,
-    request_fps: Option<u32>,
-) -> Vec<String> {
-    windows_camera_preview_ffmpeg_args_mode(config, width, height, fps, request_fps, None)
-}
-
+/// The size an attempt pipes its frames at (issue #1271). An explicit mode
+/// keeps the camera's native size and shape, fitted into the target box and
+/// never enlarged, as the macOS path does (`fit_camera_source_in_target_box`):
+/// the compositor fits or covers each frame by its own size, so a 720p
+/// webcam on a 1440p canvas pipes 1280x720 (3.7 MB a frame), not 2560x1440
+/// (14.7 MB). The fallbacks don't know the mode DirectShow will pick, so they
+/// keep the target's shape, shrunk to fit the camera's largest listed size.
 #[cfg(any(target_os = "windows", test))]
-fn windows_camera_preview_ffmpeg_args_mode(
-    config: &NativeCameraPreviewConfig,
-    width: u32,
-    height: u32,
+fn windows_camera_attempt_output_dimensions(
+    attempt: &WindowsCameraCaptureAttempt,
+    (target_width, target_height): (u32, u32),
+    advertised: Option<&DshowAdvertisedVideoModes>,
+) -> (u32, u32) {
+    match attempt {
+        WindowsCameraCaptureAttempt::Mode { mode, .. } => {
+            fit_camera_source_in_target_box(mode.width, mode.height, target_width, target_height)
+        }
+        WindowsCameraCaptureAttempt::ExactRate(_)
+        | WindowsCameraCaptureAttempt::NegotiatedDefault => {
+            match advertised.and_then(DshowAdvertisedVideoModes::largest_size) {
+                Some((largest_width, largest_height)) => fit_camera_source_in_target_box(
+                    target_width,
+                    target_height,
+                    largest_width,
+                    largest_height,
+                ),
+                None => (target_width, target_height),
+            }
+        }
+    }
+}
+
+/// What a Windows start that went live reports (issue #1271): the mode that
+/// actually runs, not the size it is piped at. "Selected format" used to
+/// name the output size when no MJPEG size was used, so a support bundle
+/// read "2560x1440 @30" for a camera running something else at 15 fps.
+///
+/// A mode short of the target, in rate or in size, says so in the words the
+/// macOS start uses (`camera_capture::select_camera_format`), which the
+/// Sources shortfall warning reads. The fallbacks don't know their mode, so
+/// they report the piped size at the requested rate, as before.
+#[cfg(any(target_os = "windows", test))]
+fn windows_camera_live_startup(
+    attempt: &WindowsCameraCaptureAttempt,
+    (target_width, target_height): (u32, u32),
+    (width, height): (u32, u32),
     fps: u32,
-    request_fps: Option<u32>,
-    mjpeg_capture_size: Option<(u32, u32)>,
+) -> NativeCameraStartup {
+    let (selected_format, selected_fps, message) = match attempt {
+        WindowsCameraCaptureAttempt::Mode {
+            mode,
+            fps: request_fps,
+            ..
+        } => {
+            let label = format!(
+                "{} {}x{}@{}",
+                mode.format.label(),
+                mode.width,
+                mode.height,
+                format_dshow_fps(*request_fps)
+            );
+            let short =
+                !mode.sustains(fps) || mode.width < target_width || mode.height < target_height;
+            let message = if short {
+                format!(
+                    "Requested {target_width}x{target_height}@{fps} was not available; selected native {}x{} at {:.0}-{:.0} fps. Windows camera preview is using {label}, piped at {width}x{height}.",
+                    mode.width, mode.height, mode.min_fps, mode.max_fps
+                )
+            } else {
+                format!(
+                    "Windows camera preview is using the camera's native {label}, piped at {width}x{height}."
+                )
+            };
+            (
+                (mode.width, mode.height, mode.min_fps, mode.max_fps),
+                *request_fps,
+                message,
+            )
+        }
+        WindowsCameraCaptureAttempt::ExactRate(_) => (
+            (width, height, f64::from(fps), f64::from(fps)),
+            f64::from(fps),
+            format!(
+                "Windows camera preview is using the driver's default format at {fps} fps, piped at {width}x{height}."
+            ),
+        ),
+        WindowsCameraCaptureAttempt::NegotiatedDefault => (
+            (width, height, f64::from(fps), f64::from(fps)),
+            f64::from(fps),
+            format!(
+                "Windows camera preview is using the driver's negotiated default format, piped at {width}x{height}."
+            ),
+        ),
+    };
+    let (selected_format_width, selected_format_height, min_fps, max_fps) = selected_format;
+    NativeCameraStartup::Live {
+        requested_width: target_width,
+        requested_height: target_height,
+        selected_format_width,
+        selected_format_height,
+        selected_format_min_fps: min_fps,
+        selected_format_max_fps: max_fps,
+        width,
+        height,
+        selected_fps,
+        message: Some(message),
+    }
+}
+
+/// The FFmpeg arguments for one attempt. The scale stays even when the
+/// output is the mode's own size: the raw pipe has no frame header, so a
+/// camera that changes size mid-stream must not misalign the frames.
+#[cfg(any(target_os = "windows", test))]
+fn windows_camera_preview_ffmpeg_args_for(
+    config: &NativeCameraPreviewConfig,
+    attempt: &WindowsCameraCaptureAttempt,
+    (width, height): (u32, u32),
+    fps: u32,
 ) -> Vec<String> {
+    use crate::capture_input::WindowsDshowInputFormat;
+
     let mut args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
         "-nostdin".to_string(),
     ];
-    crate::capture_input::append_windows_dshow_video_input_mode_opts(
+    let (framerate, video_size, format) = match attempt {
+        WindowsCameraCaptureAttempt::Mode { mode, fps, .. } => (
+            Some(format_dshow_fps(*fps)),
+            Some((mode.width, mode.height)),
+            match &mode.format {
+                DshowModeFormat::Mjpeg => Some(WindowsDshowInputFormat::Codec("mjpeg")),
+                DshowModeFormat::Raw(pixel_format) => {
+                    Some(WindowsDshowInputFormat::PixelFormat(pixel_format.as_str()))
+                }
+                DshowModeFormat::OtherCodec(codec) => {
+                    Some(WindowsDshowInputFormat::Codec(codec.as_str()))
+                }
+            },
+        ),
+        WindowsCameraCaptureAttempt::ExactRate(fps) => (Some(fps.to_string()), None, None),
+        WindowsCameraCaptureAttempt::NegotiatedDefault => (None, None, None),
+    };
+    crate::capture_input::append_windows_dshow_video_input_native_mode(
         &mut args,
         &config.unique_id,
-        request_fps,
-        mjpeg_capture_size,
-        mjpeg_capture_size.map(|_| "mjpeg"),
+        framerate.as_deref(),
+        video_size,
+        format,
     );
     let mut filters = Vec::with_capacity(3);
-    if request_fps.is_none() {
+    if *attempt == WindowsCameraCaptureAttempt::NegotiatedDefault {
         // The retry lets dshow negotiate a native cadence. Cap devices whose
         // default exceeds the session target without manufacturing duplicates
         // for 10/15/25fps cameras (the `fps` filter does both).
@@ -4695,65 +4810,340 @@ fn sort_windows_camera_capture_modes(
     modes
 }
 
-/// The capture modes one DirectShow camera advertises (`-list_options true`).
+/// How a DirectShow mode delivers pixels: MJPEG, a raw pixel format by
+/// FFmpeg's name (`yuyv422`, `nv12`, ...), or another codec (H.264 on some
+/// webcams) that the preview does not ask for explicitly.
 #[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DshowModeFormat {
+    Mjpeg,
+    Raw(String),
+    OtherCodec(String),
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl DshowModeFormat {
+    fn label(&self) -> String {
+        match self {
+            Self::Mjpeg => "MJPEG".to_string(),
+            Self::Raw(name) | Self::OtherCodec(name) => name.to_ascii_uppercase(),
+        }
+    }
+}
+
+/// One native capture mode a DirectShow camera advertises: a format at one
+/// size, with the frame-rate range the driver lists for it.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq)]
+struct DshowVideoMode {
+    format: DshowModeFormat,
+    width: u32,
+    height: u32,
+    min_fps: f64,
+    max_fps: f64,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl DshowVideoMode {
+    fn pixels(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+
+    /// Whether the mode's listed rate reaches `fps`. A mode listed at 29.97
+    /// keeps a 30 fps target, as the Sources shortfall check rounds it.
+    fn sustains(&self, fps: u32) -> bool {
+        self.max_fps + WINDOWS_CAMERA_MODE_FPS_TOLERANCE >= f64::from(fps)
+    }
+
+    /// The `-framerate` to ask this mode for: the target, or the mode's own
+    /// top rate when it lists less. DirectShow refuses a rate outside the
+    /// mode's range, so 30 on a 29.97 mode would fail the rung.
+    fn request_fps(&self, fps: u32) -> f64 {
+        let fps = f64::from(fps);
+        if self.max_fps < fps {
+            self.max_fps
+        } else {
+            fps.max(self.min_fps)
+        }
+    }
+
+    /// The area of the largest `target` shaped picture inside this mode,
+    /// capped at the target's own area: what the mode can put on screen
+    /// once it is fitted to a target of that shape. A 1280x960 camera on a
+    /// 16:9 target is worth 1280x720, and a mode bigger than the target is
+    /// worth no more than one that just covers it.
+    fn usable_pixels(&self, target_width: u32, target_height: u32) -> u64 {
+        let (tw, th) = (
+            u64::from(target_width.max(1)),
+            u64::from(target_height.max(1)),
+        );
+        let (w, h) = (u64::from(self.width), u64::from(self.height));
+        let (usable_w, usable_h) = if w * th >= h * tw {
+            (h * tw / th, h)
+        } else {
+            (w, w * th / tw)
+        };
+        (usable_w * usable_h).min(tw * th)
+    }
+}
+
+/// The capture modes one DirectShow camera advertises (`-list_options true`),
+/// in the order it lists them, one per format and size.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct DshowAdvertisedVideoModes {
-    mjpeg_sizes: Vec<(u32, u32)>,
-    other_mode_count: usize,
+    modes: Vec<DshowVideoMode>,
 }
 
 #[cfg(any(target_os = "windows", test))]
 impl DshowAdvertisedVideoModes {
     fn is_empty(&self) -> bool {
-        self.mjpeg_sizes.is_empty() && self.other_mode_count == 0
+        self.modes.is_empty()
+    }
+
+    fn mjpeg_count(&self) -> usize {
+        self.modes
+            .iter()
+            .filter(|mode| mode.format == DshowModeFormat::Mjpeg)
+            .count()
+    }
+
+    /// The largest size the camera lists, in any format.
+    fn largest_size(&self) -> Option<(u32, u32)> {
+        self.modes
+            .iter()
+            .max_by_key(|mode| mode.pixels())
+            .map(|mode| (mode.width, mode.height))
+    }
+
+    /// One line for the log: every mode, as `YUY2 1280x720@5-30`.
+    fn summary(&self) -> String {
+        self.modes
+            .iter()
+            .map(|mode| {
+                format!(
+                    "{} {}x{}@{}",
+                    mode.format.label(),
+                    mode.width,
+                    mode.height,
+                    format_dshow_fps_range(mode.min_fps, mode.max_fps)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn format_dshow_fps(fps: f64) -> String {
+    let rounded = (fps * 1000.0).round() / 1000.0;
+    if rounded.fract() == 0.0 {
+        format!("{rounded:.0}")
+    } else {
+        format!("{rounded}")
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn format_dshow_fps_range(min_fps: f64, max_fps: f64) -> String {
+    if (max_fps - min_fps).abs() < 0.001 {
+        format_dshow_fps(max_fps)
+    } else {
+        format!(
+            "{}-{}",
+            format_dshow_fps(min_fps),
+            format_dshow_fps(max_fps)
+        )
     }
 }
 
 /// Parses the stderr of `ffmpeg -list_options true -f dshow -i video=...`:
-/// one `vcodec=` or `pixel_format=` line per mode, each with `min s=WxH` and
-/// `max s=WxH`.
+/// one `vcodec=` or `pixel_format=` line per mode, each with
+/// `min s=WxH fps=A max s=WxH fps=B`. The two rates are the ends of the
+/// mode's frame-rate range (FFmpeg prints them from the longest and shortest
+/// frame interval), not one per size. A format listed twice at one size (a
+/// fixed-rate line and a range line) keeps the widest range.
 #[cfg(any(target_os = "windows", test))]
 fn parse_dshow_advertised_video_modes(stderr: &str) -> DshowAdvertisedVideoModes {
-    fn size_after(line: &str, key: &str) -> Option<(u32, u32)> {
-        let rest = &line[line.find(key)? + key.len()..];
-        let (width, height) = rest.split_whitespace().next()?.split_once('x')?;
-        Some((width.parse().ok()?, height.parse().ok()?))
+    fn format_of(line: &str) -> Option<DshowModeFormat> {
+        let value_after = |key: &str| {
+            let rest = &line[line.find(key)? + key.len()..];
+            rest.split_whitespace().next().map(str::to_string)
+        };
+        if let Some(codec) = value_after("vcodec=") {
+            return Some(if codec == "mjpeg" {
+                DshowModeFormat::Mjpeg
+            } else {
+                DshowModeFormat::OtherCodec(codec)
+            });
+        }
+        value_after("pixel_format=").map(DshowModeFormat::Raw)
     }
 
-    let mut modes = DshowAdvertisedVideoModes::default();
+    /// `(size, fps)` after `min` or `max`: the `s=WxH` and `fps=F` tokens.
+    fn end_after(line: &str, key: &str) -> Option<((u32, u32), Option<f64>)> {
+        let mut tokens = line[line.find(key)? + key.len()..].split_whitespace();
+        let (width, height) = tokens.next()?.strip_prefix("s=")?.split_once('x')?;
+        let size = (width.parse().ok()?, height.parse().ok()?);
+        let fps = tokens
+            .next()
+            .and_then(|token| token.strip_prefix("fps="))
+            .and_then(|fps| fps.parse::<f64>().ok())
+            .filter(|fps| fps.is_finite() && *fps > 0.0);
+        Some((size, fps))
+    }
+
+    let mut advertised = DshowAdvertisedVideoModes::default();
     for line in stderr.lines() {
-        if !line.contains("vcodec=") && !line.contains("pixel_format=") {
+        let Some(format) = format_of(line) else {
+            continue;
+        };
+        let min = end_after(line, "min ");
+        let max = end_after(line, "max ");
+        if min.is_none() && max.is_none() {
             continue;
         }
-        let sizes = [size_after(line, "min s="), size_after(line, "max s=")];
-        if sizes.iter().all(Option::is_none) {
-            continue;
-        }
-        if line.contains("vcodec=mjpeg") {
-            for size in sizes.into_iter().flatten() {
-                if !modes.mjpeg_sizes.contains(&size) {
-                    modes.mjpeg_sizes.push(size);
-                }
-            }
+        let rates = [min.and_then(|end| end.1), max.and_then(|end| end.1)];
+        let rates = rates.iter().flatten().copied();
+        let (min_fps, max_fps) = rates.fold((f64::INFINITY, 0.0_f64), |(lo, hi), fps| {
+            (lo.min(fps), hi.max(fps))
+        });
+        // A line without a readable rate still names a mode the camera has;
+        // its range is unknown, so it never claims to reach a target.
+        let (min_fps, max_fps) = if max_fps > 0.0 {
+            (min_fps, max_fps)
         } else {
-            modes.other_mode_count += 1;
+            (0.0, 0.0)
+        };
+        for (width, height) in [min.map(|end| end.0), max.map(|end| end.0)]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(known) = advertised
+                .modes
+                .iter_mut()
+                .find(|mode| mode.format == format && mode.width == width && mode.height == height)
+            {
+                known.min_fps = known.min_fps.min(min_fps);
+                known.max_fps = known.max_fps.max(max_fps);
+                continue;
+            }
+            advertised.modes.push(DshowVideoMode {
+                format: format.clone(),
+                width,
+                height,
+                min_fps,
+                max_fps,
+            });
         }
     }
+    advertised
+}
+
+/// The camera's advertised modes, best first, for a `width`x`height` target
+/// at `fps` (issue #1271).
+///
+/// - A mode that reaches the target rate beats one that does not.
+/// - Among modes that reach it: the most usable picture for the target's
+///   shape, then the fewest pixels (a mode that just covers the target beats
+///   a bigger one), then MJPEG before raw (the start ladder's long-standing
+///   order), then the camera's own listing order.
+/// - When no mode reaches the target rate, the fastest wins, then the most
+///   usable picture. A smooth smaller picture the compositor scales up beats
+///   a sharp one at half the rate: a 720p webcam that offers YUY2 1280x720 at
+///   10 fps and 640x480 at 30 runs at 640x480.
+///
+/// Other codecs (H.264 webcams) are never asked for explicitly.
+#[cfg(any(target_os = "windows", test))]
+fn rank_windows_camera_modes(
+    advertised: &DshowAdvertisedVideoModes,
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> Vec<DshowVideoMode> {
+    let mut modes = advertised
+        .modes
+        .iter()
+        .filter(|mode| !matches!(mode.format, DshowModeFormat::OtherCodec(_)))
+        .cloned()
+        .collect::<Vec<_>>();
+    modes.sort_by(|a, b| {
+        let (a_reaches, b_reaches) = (a.sustains(fps), b.sustains(fps));
+        b_reaches.cmp(&a_reaches).then_with(|| {
+            let by_picture = b
+                .usable_pixels(width, height)
+                .cmp(&a.usable_pixels(width, height))
+                .then_with(|| a.pixels().cmp(&b.pixels()));
+            let by_format = || {
+                let raw = |mode: &DshowVideoMode| u8::from(mode.format != DshowModeFormat::Mjpeg);
+                raw(a).cmp(&raw(b))
+            };
+            if a_reaches {
+                by_picture.then_with(by_format)
+            } else {
+                b.max_fps
+                    .total_cmp(&a.max_fps)
+                    .then(by_picture)
+                    .then_with(by_format)
+            }
+        })
+    });
     modes
 }
 
-/// One DirectShow rung: the requested frame rate (None negotiates the device
-/// default) and an explicit MJPEG capture size.
+/// One DirectShow rung: an explicit native mode at a rate, the exact target
+/// rate in the driver's default format, or the driver's negotiated default.
 #[cfg(any(target_os = "windows", test))]
-type WindowsCameraCaptureAttempt = (Option<u32>, Option<(u32, u32)>);
+#[derive(Debug, Clone, PartialEq)]
+enum WindowsCameraCaptureAttempt {
+    Mode {
+        mode: DshowVideoMode,
+        fps: f64,
+        /// The best mode the camera itself listed: not a guess, so it gets
+        /// the exact-rate rung's deadline (see `WindowsCameraAttemptKind`).
+        best_listed: bool,
+    },
+    ExactRate(u32),
+    NegotiatedDefault,
+}
 
-/// The DirectShow attempt ladder: explicit MJPEG modes, then the exact rate,
-/// then the negotiated default. With the camera's advertised modes the MJPEG
-/// rungs cover only the sizes it offers. Each rung it does not offer fails in
-/// about a quarter second, and a camera without MJPEG paid all 17 (4.5 s of a
-/// 7.8 s C920 start). Without them (the probe failed or parsed nothing) the
-/// ladder keeps every common mode.
+#[cfg(any(target_os = "windows", test))]
+impl WindowsCameraCaptureAttempt {
+    fn kind(&self) -> WindowsCameraAttemptKind {
+        match self {
+            Self::Mode {
+                best_listed: true, ..
+            } => WindowsCameraAttemptKind::BestListedMode,
+            Self::Mode { .. } => WindowsCameraAttemptKind::ExplicitMode,
+            Self::ExactRate(_) => WindowsCameraAttemptKind::ExactRate,
+            Self::NegotiatedDefault => WindowsCameraAttemptKind::NegotiatedDefault,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Mode { mode, fps, .. } => format!(
+                "{} {}x{}@{}",
+                mode.format.label(),
+                mode.width,
+                mode.height,
+                format_dshow_fps(*fps)
+            ),
+            Self::ExactRate(fps) => format!("default format @{fps}"),
+            Self::NegotiatedDefault => "negotiated default format".to_string(),
+        }
+    }
+}
+
+/// The DirectShow attempt ladder (issue #1271): the camera's own modes, best
+/// first, then the exact rate, then the negotiated default.
+///
+/// With the camera's advertised modes the explicit rungs are the best
+/// `WINDOWS_CAMERA_EXPLICIT_MODE_RUNGS` of them, raw formats included: a
+/// camera that lists only YUY2 used to fall through to `-framerate 30`, where
+/// DirectShow chose its own mode (a LifeCam HD-3000 ran at 15 fps that way).
+/// Without them (the probe failed or parsed nothing) the ladder keeps every
+/// common MJPEG size.
 #[cfg(any(target_os = "windows", test))]
 fn windows_camera_capture_attempts(
     width: u32,
@@ -4761,21 +5151,45 @@ fn windows_camera_capture_attempts(
     fps: u32,
     advertised: Option<&DshowAdvertisedVideoModes>,
 ) -> Vec<WindowsCameraCaptureAttempt> {
-    let mjpeg_modes = match advertised.filter(|modes| !modes.is_empty()) {
-        Some(modes) => sort_windows_camera_capture_modes(modes.mjpeg_sizes.clone(), width, height),
-        None => windows_camera_mjpeg_capture_modes(width, height),
+    let modes = match advertised.filter(|modes| !modes.is_empty()) {
+        Some(advertised) => rank_windows_camera_modes(advertised, width, height, fps)
+            .into_iter()
+            .take(WINDOWS_CAMERA_EXPLICIT_MODE_RUNGS)
+            .collect::<Vec<_>>(),
+        None => windows_camera_mjpeg_capture_modes(width, height)
+            .into_iter()
+            .map(|(width, height)| DshowVideoMode {
+                format: DshowModeFormat::Mjpeg,
+                width,
+                height,
+                min_fps: f64::from(fps),
+                max_fps: f64::from(fps),
+            })
+            .collect(),
     };
-    let mut attempts = mjpeg_modes
+    let listed = advertised.is_some_and(|modes| !modes.is_empty());
+    let mut attempts = modes
         .into_iter()
-        .map(|capture_size| (Some(fps), Some(capture_size)))
+        .enumerate()
+        .map(|(index, mode)| {
+            let fps = mode.request_fps(fps);
+            WindowsCameraCaptureAttempt::Mode {
+                mode,
+                fps,
+                best_listed: listed && index == 0,
+            }
+        })
         .collect::<Vec<_>>();
-    attempts.extend([(Some(fps), None), (None, None)]);
+    attempts.extend([
+        WindowsCameraCaptureAttempt::ExactRate(fps),
+        WindowsCameraCaptureAttempt::NegotiatedDefault,
+    ]);
     attempts
 }
 
 /// What the DirectShow `-list_options true` probe learned about a camera.
 #[cfg(any(target_os = "windows", test))]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum WindowsDshowModeProbe {
     /// The camera listed its modes, possibly without any MJPEG.
     Modes(DshowAdvertisedVideoModes),
@@ -4866,31 +5280,31 @@ fn windows_dshow_error_is_mode_independent(stderr: &str) -> bool {
         || stderr.contains("could not find video device")
 }
 
-/// The Windows camera start ladder: MJPEG modes, then the exact rate in the
-/// default format, then whatever the driver negotiates.
+/// The Windows camera start ladder: explicit native modes, then the exact
+/// rate in the default format, then whatever the driver negotiates.
+///
+/// The best mode the camera listed is not a guess the way a common MJPEG
+/// size is: it reserves only the negotiated default's share, like the
+/// exact-rate rung it replaces as the first try. The HP HD Camera (YUY2 only)
+/// needs 1.6-2.8 s to its first frame; with the speculative reserve, a cold
+/// 1.9 s mode probe left it 1.6 s and the start failed (issue #1271 field
+/// check).
 #[cfg(any(target_os = "windows", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WindowsCameraAttemptKind {
-    Mjpeg,
+    BestListedMode,
+    ExplicitMode,
     ExactRate,
     NegotiatedDefault,
 }
 
 #[cfg(any(target_os = "windows", test))]
 impl WindowsCameraAttemptKind {
-    fn of(request_fps: Option<u32>, mjpeg_capture_size: Option<(u32, u32)>) -> Self {
-        match (request_fps, mjpeg_capture_size) {
-            (_, Some(_)) => Self::Mjpeg,
-            (Some(_), None) => Self::ExactRate,
-            (None, None) => Self::NegotiatedDefault,
-        }
-    }
-
     /// Start budget this attempt must leave for the attempts after it.
     fn reserve(self) -> Duration {
         match self {
-            Self::Mjpeg => WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE,
-            Self::ExactRate => WINDOWS_CAMERA_NEGOTIATED_DEFAULT_RESERVE,
+            Self::ExplicitMode => WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE,
+            Self::BestListedMode | Self::ExactRate => WINDOWS_CAMERA_NEGOTIATED_DEFAULT_RESERVE,
             Self::NegotiatedDefault => Duration::ZERO,
         }
     }
@@ -4924,73 +5338,8 @@ fn camera_capture_target_dimensions(_layout: &LayoutSettings, video: &VideoSetti
     // scaling down only improves inset quality, and a preset switch can now
     // NEVER invalidate a running camera session. Only genuine output-canvas
     // changes (video preset/orientation) re-derive capture geometry.
-    // The Windows D3D11 overlay path does its own overlay sizing in
-    // windows_camera_preview_output_dimensions.
+    // Windows uses the same box (windows_camera_preview_output_dimensions).
     (video.width, video.height)
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn camera_overlay_target_dimensions(layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
-    if let (CameraTransformMode::Custom, Some(transform)) =
-        (layout.camera_transform_mode, layout.camera_transform)
-    {
-        (
-            scale_camera_dimension(
-                (transform.width.clamp(0.0, 1.0) * f64::from(video.width.max(1))).round(),
-            ),
-            scale_camera_dimension(
-                (transform.height.clamp(0.0, 1.0) * f64::from(video.height.max(1))).round(),
-            ),
-        )
-    } else {
-        scaled_camera_box_size(
-            &layout.camera_size,
-            &layout.camera_shape,
-            &layout.camera_aspect,
-            video,
-        )
-    }
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn scaled_camera_box_size(
-    size: &CameraSize,
-    shape: &CameraShape,
-    aspect: &CameraAspect,
-    video: &VideoSettings,
-) -> (u32, u32) {
-    let scale = camera_output_scale(video);
-    let width = match size {
-        CameraSize::Small => 260,
-        CameraSize::Medium => 360,
-        CameraSize::Large => 480,
-    };
-    // Must mirror scene::camera_box_size — the preview box and the composed
-    // box are the same box or the preview lies.
-    let height = match shape {
-        CameraShape::Circle => width,
-        CameraShape::Rectangle | CameraShape::Rounded => match aspect {
-            CameraAspect::Source => (width * 9 + 8) / 16,
-            CameraAspect::Square => width,
-            CameraAspect::Portrait => (width * 4u32).div_ceil(3),
-        },
-    };
-
-    (
-        scale_camera_dimension(f64::from(width) * scale),
-        scale_camera_dimension(f64::from(height) * scale),
-    )
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn camera_output_scale(video: &VideoSettings) -> f64 {
-    (f64::from(video.width) / f64::from(CAMERA_REFERENCE_WIDTH))
-        .min(f64::from(video.height) / f64::from(CAMERA_REFERENCE_HEIGHT))
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn scale_camera_dimension(value: f64) -> u32 {
-    value.round().max(1.0).min(f64::from(u32::MAX)) as u32
 }
 
 #[derive(Debug)]
@@ -5335,14 +5684,9 @@ mod windows {
         stop_rx: std_mpsc::Receiver<()>,
         startup_tx: std_mpsc::Sender<NativeCameraStartup>,
     ) {
-        let (width, height) = windows_camera_preview_output_dimensions(&config);
+        // The box the camera fills; each attempt pipes at its own size.
+        let target = windows_camera_preview_output_dimensions(&config);
         let fps = config.video.fps.clamp(1, 120);
-        let Some(frame_len) = bgra_frame_len(width, height) else {
-            let _ = startup_tx.send(NativeCameraStartup::Failed(
-                "Windows camera preview dimensions are too large.".to_string(),
-            ));
-            return;
-        };
 
         // One stop signal shared across attempts; a per-attempt killer reacts
         // to it (the read loop unblocks when the ffmpeg child is killed).
@@ -5360,10 +5704,12 @@ mod windows {
         let started_at = Instant::now();
         let start_deadline = started_at + WINDOWS_CAMERA_START_BUDGET;
 
-        // Prefer an explicit MJPEG mode. Consumer webcams commonly reserve
-        // 720p30 for MJPEG while their uncompressed DirectShow mode tops out
-        // at 5-10 fps. Retain the exact-rate and negotiated-default fallbacks
-        // for cameras that do not expose MJPEG.
+        // Ask for one of the camera's own modes (issue #1271): the one that
+        // reaches the target rate with the most picture, MJPEG or raw.
+        // Consumer webcams commonly reserve 720p30 for MJPEG while their
+        // uncompressed mode tops out at 5-10 fps, and a camera left to pick
+        // its own mode can pick a slow one. The exact-rate and
+        // negotiated-default fallbacks stay for cameras no mode works on.
         let (probe, cached) = windows_dshow_mode_cache().probe_through(&config.unique_id, || {
             probe_dshow_advertised_video_modes(&config)
         });
@@ -5395,10 +5741,11 @@ mod windows {
                 return;
             }
         };
-        let attempts = windows_camera_capture_attempts(width, height, fps, advertised.as_ref());
+        let attempts =
+            windows_camera_capture_attempts(target.0, target.1, fps, advertised.as_ref());
         let attempt_count = attempts.len();
         let mut failures = Vec::new();
-        for (attempt_index, (request_fps, mjpeg_capture_size)) in attempts.into_iter().enumerate() {
+        for (attempt_index, attempt) in attempts.into_iter().enumerate() {
             if stop_flag.load(Ordering::Acquire) {
                 return;
             }
@@ -5410,11 +5757,17 @@ mod windows {
                 ));
                 break;
             }
-            let kind = WindowsCameraAttemptKind::of(request_fps, mjpeg_capture_size);
             let Some(first_frame_timeout) =
-                windows_camera_attempt_first_frame_timeout(remaining, kind)
+                windows_camera_attempt_first_frame_timeout(remaining, attempt.kind())
             else {
                 // An early attempt may not eat the time its fallbacks need.
+                continue;
+            };
+            let mode = attempt.label();
+            let output =
+                windows_camera_attempt_output_dimensions(&attempt, target, advertised.as_ref());
+            let Some(frame_len) = bgra_frame_len(output.0, output.1) else {
+                failures.push(format!("{mode}: {}x{} is too large", output.0, output.1));
                 continue;
             };
             let attempt_started_at = Instant::now();
@@ -5423,15 +5776,15 @@ mod windows {
                 &shared,
                 &startup_tx,
                 &stop_flag,
-                width,
-                height,
-                fps,
-                frame_len,
-                request_fps,
-                mjpeg_capture_size,
-                first_frame_timeout,
+                WindowsCameraAttemptPlan {
+                    attempt: &attempt,
+                    target,
+                    output,
+                    fps,
+                    frame_len,
+                    first_frame_timeout,
+                },
             );
-            let mode = windows_camera_attempt_label(request_fps, mjpeg_capture_size);
             let attempt_ms = attempt_started_at.elapsed().as_millis() as u64;
             match outcome {
                 CameraPreviewAttempt::ProducedFrames => {
@@ -5472,18 +5825,6 @@ mod windows {
             failures.len(),
             started_at.elapsed().as_millis()
         )));
-    }
-
-    fn windows_camera_attempt_label(
-        request_fps: Option<u32>,
-        mjpeg_capture_size: Option<(u32, u32)>,
-    ) -> String {
-        match (mjpeg_capture_size, request_fps) {
-            (Some((width, height)), Some(fps)) => format!("MJPEG {width}x{height}@{fps}"),
-            (Some((width, height)), None) => format!("MJPEG {width}x{height}"),
-            (None, Some(fps)) => format!("default format @{fps}"),
-            (None, None) => "negotiated default format".to_string(),
-        }
     }
 
     pub(super) fn windows_dshow_mode_cache() -> &'static DshowModeCache {
@@ -5531,10 +5872,11 @@ mod windows {
         };
         if let WindowsDshowModeProbe::Modes(modes) = &probe {
             tracing::info!(
-                "[camera-modes] DirectShow advertises {} MJPEG size(s) and {} other mode(s) in {}ms",
-                modes.mjpeg_sizes.len(),
-                modes.other_mode_count,
-                started_at.elapsed().as_millis()
+                "[camera-modes] DirectShow advertises {} mode(s), {} MJPEG, in {}ms: {}",
+                modes.modes.len(),
+                modes.mjpeg_count(),
+                started_at.elapsed().as_millis(),
+                modes.summary()
             );
         }
         probe
@@ -5546,32 +5888,33 @@ mod windows {
         FailedBeforeFirstFrame(String),
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// One rung of the start ladder, sized: the box the camera fills, the
+    /// size its frames are piped at, and the session rate.
+    struct WindowsCameraAttemptPlan<'a> {
+        attempt: &'a WindowsCameraCaptureAttempt,
+        target: (u32, u32),
+        output: (u32, u32),
+        fps: u32,
+        frame_len: usize,
+        first_frame_timeout: Duration,
+    }
+
     fn run_windows_camera_preview_attempt(
         config: &NativeCameraPreviewConfig,
         shared: &Arc<StdMutex<PreviewCameraShared>>,
         startup_tx: &std_mpsc::Sender<NativeCameraStartup>,
         stop_flag: &Arc<AtomicBool>,
-        width: u32,
-        height: u32,
-        fps: u32,
-        frame_len: usize,
-        request_fps: Option<u32>,
-        mjpeg_capture_size: Option<(u32, u32)>,
-        first_frame_timeout: Duration,
+        plan: WindowsCameraAttemptPlan<'_>,
     ) -> CameraPreviewAttempt {
+        let (width, height) = plan.output;
+        let frame_len = plan.frame_len;
+        let first_frame_timeout = plan.first_frame_timeout;
         let attempt_started_at = Instant::now();
         // Fixed before the spawn: a slow spawn spends this attempt's budget,
         // never the startup receiver's.
         let first_frame_deadline = attempt_started_at + first_frame_timeout;
-        let args = windows_camera_preview_ffmpeg_args_mode(
-            config,
-            width,
-            height,
-            fps,
-            request_fps,
-            mjpeg_capture_size,
-        );
+        let args =
+            windows_camera_preview_ffmpeg_args_for(config, plan.attempt, plan.output, plan.fps);
         let mut command = Command::new(&config.ffmpeg_path);
         command
             .args(&args)
@@ -5644,39 +5987,19 @@ mod windows {
                     }
                     buffer = publish_bgra_frame(shared, width, height, buffer);
                     if !startup_sent {
-                        let _ = startup_tx.send(NativeCameraStartup::Live {
-                            requested_width: width,
-                            requested_height: height,
-                            selected_format_width: mjpeg_capture_size
-                                .map_or(width, |size| size.0),
-                            selected_format_height: mjpeg_capture_size
-                                .map_or(height, |size| size.1),
-                            selected_format_min_fps: fps as f64,
-                            selected_format_max_fps: fps as f64,
-                            width,
-                            height,
-                            selected_fps: fps as f64,
-                            message: Some(if let Some((capture_width, capture_height)) =
-                                mjpeg_capture_size
-                            {
-                                format!(
-                                    "Windows FFmpeg camera preview is using explicit dshow MJPEG {capture_width}x{capture_height}@{fps}, scaled to {width}x{height}."
-                                )
-                            } else if request_fps.is_some() {
-                                "Windows FFmpeg camera preview is using an explicit dshow frame rate."
-                                    .to_string()
-                            } else {
-                                "Windows FFmpeg camera preview is using the negotiated dshow default."
-                                    .to_string()
-                            }),
-                        });
+                        let _ = startup_tx.send(windows_camera_live_startup(
+                            plan.attempt,
+                            plan.target,
+                            plan.output,
+                            plan.fps,
+                        ));
                         startup_sent = true;
                         outcome = Some(CameraPreviewAttempt::ProducedFrames);
                         tracing::info!(
                             camera = %config.unique_id,
                             first_frame_ms = attempt_started_at.elapsed().as_millis() as u64,
-                            "Windows camera preview went live with {}",
-                            windows_camera_attempt_label(request_fps, mjpeg_capture_size)
+                            "Windows camera preview went live with {}, piped at {width}x{height}",
+                            plan.attempt.label()
                         );
                     }
                 }
@@ -7005,6 +7328,7 @@ mod tests {
             camera_chroma_key_similarity_pct: 40,
             camera_chroma_key_smoothness_pct: 8,
             camera_chroma_key_spill_pct: 10,
+            camera_chroma_key_edges: Default::default(),
         }
     }
 
@@ -9971,9 +10295,19 @@ mod tests {
             layout: test_layout(false),
         };
         let (width, height) = windows_camera_preview_output_dimensions(&config);
-        let args = windows_camera_preview_ffmpeg_args(&config, width, height, config.video.fps);
+        let args = windows_camera_preview_ffmpeg_args_for(
+            &config,
+            &WindowsCameraCaptureAttempt::ExactRate(config.video.fps),
+            (width, height),
+            config.video.fps,
+        );
 
         assert_eq!((width, height), (1920, 1080));
+        let framerate = config.video.fps.to_string();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-framerate" && pair[1] == framerate)
+        );
         assert!(args.windows(2).any(|pair| pair == ["-f", "dshow"]));
         assert!(
             args.windows(2)
@@ -9995,14 +10329,12 @@ mod tests {
             video: test_video(),
             layout: test_layout(false),
         };
-        let args = windows_camera_preview_ffmpeg_args_mode(
-            &config,
-            1280,
-            720,
-            30,
-            Some(30),
-            Some((1280, 720)),
-        );
+        let attempt = WindowsCameraCaptureAttempt::Mode {
+            mode: test_dshow_mode(DshowModeFormat::Mjpeg, 1280, 720, 5.0, 30.0),
+            fps: 30.0,
+            best_listed: true,
+        };
+        let args = windows_camera_preview_ffmpeg_args_for(&config, &attempt, (1280, 720), 30);
 
         let input_index = args
             .iter()
@@ -10023,6 +10355,72 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["-framerate", "30"])
         );
+        assert!(!args.iter().any(|arg| arg == "-pixel_format"));
+    }
+
+    fn test_dshow_mode(
+        format: DshowModeFormat,
+        width: u32,
+        height: u32,
+        min_fps: f64,
+        max_fps: f64,
+    ) -> DshowVideoMode {
+        DshowVideoMode {
+            format,
+            width,
+            height,
+            min_fps,
+            max_fps,
+        }
+    }
+
+    fn yuy2() -> DshowModeFormat {
+        DshowModeFormat::Raw("yuyv422".to_string())
+    }
+
+    fn explicit_modes(attempts: &[WindowsCameraCaptureAttempt]) -> Vec<String> {
+        attempts
+            .iter()
+            .map(WindowsCameraCaptureAttempt::label)
+            .collect()
+    }
+
+    #[test]
+    fn windows_camera_raw_mode_is_asked_for_by_pixel_format_size_and_listed_rate() {
+        let config = NativeCameraPreviewConfig {
+            camera_id: "camera:windows-dshow:5553422043616d657261".to_string(),
+            unique_id: "USB Camera".to_string(),
+            ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
+            video: test_video(),
+            layout: test_layout(false),
+        };
+        // A mode listed at 29.97 is asked for at 29.97: DirectShow refuses
+        // a rate outside the mode's range, so 30 would fail the rung.
+        let mode = test_dshow_mode(yuy2(), 640, 480, 7.5, 29.97);
+        assert_eq!(mode.request_fps(30), 29.97);
+        let attempt = WindowsCameraCaptureAttempt::Mode {
+            fps: mode.request_fps(30),
+            mode,
+            best_listed: true,
+        };
+        let args = windows_camera_preview_ffmpeg_args_for(&config, &attempt, (640, 480), 30);
+        let input_index = args.iter().position(|arg| arg == "-i").unwrap();
+        let input = &args[..input_index];
+        assert!(
+            input
+                .windows(2)
+                .any(|pair| pair == ["-pixel_format", "yuyv422"])
+        );
+        assert!(
+            input
+                .windows(2)
+                .any(|pair| pair == ["-video_size", "640x480"])
+        );
+        assert!(input.windows(2).any(|pair| pair == ["-framerate", "29.97"]));
+        assert!(!input.iter().any(|arg| arg == "-vcodec"));
+        // Piped at the mode's own size, scaled only to pin the frame length.
+        assert!(args.iter().any(|arg| arg.contains("scale=640:480")));
+        assert!(!args.iter().any(|arg| arg.contains("prev_selected_t")));
     }
 
     // `ffmpeg -list_options true -f dshow` on a Logitech C920 behind the
@@ -10040,21 +10438,61 @@ mod tests {
 [in#0 @ 000001]   vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30
 [in#0 @ 000001]   pixel_format=yuyv422  min s=1280x720 fps=10 max s=1280x720 fps=10";
 
+    /// A LifeCam HD-3000 style listing (issue #1271): no MJPEG, eleven raw
+    /// modes, 720p only at 10 fps over USB 2.
+    const LIFECAM_STYLE_OPTIONS: &str =
+        "[in#0 @ 0]   pixel_format=yuyv422  min s=640x480 fps=7.5 max s=640x480 fps=30
+[in#0 @ 0]   pixel_format=yuyv422  min s=1280x720 fps=7.5 max s=1280x720 fps=10
+[in#0 @ 0]   pixel_format=yuyv422  min s=960x544 fps=7.5 max s=960x544 fps=15
+[in#0 @ 0]   pixel_format=yuyv422  min s=800x448 fps=7.5 max s=800x448 fps=30
+[in#0 @ 0]   pixel_format=yuyv422  min s=640x360 fps=7.5 max s=640x360 fps=30
+[in#0 @ 0]   pixel_format=yuyv422  min s=424x240 fps=7.5 max s=424x240 fps=30
+[in#0 @ 0]   pixel_format=yuyv422  min s=352x288 fps=7.5 max s=352x288 fps=30
+[in#0 @ 0]   pixel_format=yuyv422  min s=320x240 fps=7.5 max s=320x240 fps=30
+[in#0 @ 0]   pixel_format=yuyv422  min s=800x600 fps=7.5 max s=800x600 fps=30
+[in#0 @ 0]   pixel_format=yuyv422  min s=176x144 fps=7.5 max s=176x144 fps=30
+[in#0 @ 0]   pixel_format=yuyv422  min s=160x120 fps=7.5 max s=160x120 fps=30";
+
     #[test]
-    fn dshow_mode_probe_reads_mjpeg_sizes_and_other_modes() {
+    fn dshow_mode_probe_reads_every_mode_with_its_format_and_rate_range() {
         assert_eq!(
-            parse_dshow_advertised_video_modes(C920_FRAME_SERVER_OPTIONS),
-            DshowAdvertisedVideoModes {
-                mjpeg_sizes: Vec::new(),
-                other_mode_count: 2,
-            }
+            parse_dshow_advertised_video_modes(C920_FRAME_SERVER_OPTIONS).modes,
+            vec![
+                test_dshow_mode(yuy2(), 1920, 1080, 30.0, 30.0),
+                test_dshow_mode(
+                    DshowModeFormat::Raw("nv12".to_string()),
+                    1920,
+                    1080,
+                    30.0,
+                    30.0
+                ),
+            ]
+        );
+        // The two 1280x720 MJPEG lines merge into the widest range.
+        assert_eq!(
+            parse_dshow_advertised_video_modes(MJPEG_WEBCAM_OPTIONS).modes,
+            vec![
+                test_dshow_mode(DshowModeFormat::Mjpeg, 1280, 720, 5.0, 30.0),
+                test_dshow_mode(DshowModeFormat::Mjpeg, 640, 360, 30.0, 30.0),
+                test_dshow_mode(yuy2(), 1280, 720, 10.0, 10.0),
+            ]
+        );
+        let lifecam = parse_dshow_advertised_video_modes(LIFECAM_STYLE_OPTIONS);
+        assert_eq!(lifecam.modes.len(), 11);
+        assert_eq!(lifecam.mjpeg_count(), 0);
+        assert_eq!(lifecam.largest_size(), Some((1280, 720)));
+        assert!(
+            lifecam
+                .summary()
+                .starts_with("YUYV422 640x480@7.5-30, YUYV422 1280x720@7.5-10")
+        );
+        // A codec the preview never asks for explicitly is still listed.
+        let h264 = parse_dshow_advertised_video_modes(
+            "[in#0 @ 0]   vcodec=h264  min s=1920x1080 fps=30 max s=1920x1080 fps=30",
         );
         assert_eq!(
-            parse_dshow_advertised_video_modes(MJPEG_WEBCAM_OPTIONS),
-            DshowAdvertisedVideoModes {
-                mjpeg_sizes: vec![(1280, 720), (640, 360)],
-                other_mode_count: 1,
-            }
+            h264.modes[0].format,
+            DshowModeFormat::OtherCodec("h264".to_string())
         );
         assert!(
             parse_dshow_advertised_video_modes("Error opening input files: I/O error").is_empty()
@@ -10062,25 +10500,222 @@ mod tests {
     }
 
     #[test]
-    fn windows_camera_ladder_skips_mjpeg_modes_the_camera_does_not_offer() {
-        let c920 = parse_dshow_advertised_video_modes(C920_FRAME_SERVER_OPTIONS);
+    fn windows_camera_720p_webcam_on_a_1440p_canvas_runs_its_largest_30fps_mode() {
+        // Issue #1271: the LifeCam was asked for 2560x1440 and ran at 15 fps.
+        let lifecam = parse_dshow_advertised_video_modes(LIFECAM_STYLE_OPTIONS);
+        let attempts = windows_camera_capture_attempts(2560, 1440, 30, Some(&lifecam));
         assert_eq!(
-            windows_camera_capture_attempts(1920, 1080, 30, Some(&c920)),
-            vec![(Some(30), None), (None, None)],
-            "a camera without MJPEG goes straight to the exact rate"
+            explicit_modes(&attempts),
+            vec![
+                // 800x600 is 4:3 but holds an 800x450 16:9 picture, a
+                // little more than 800x448. 640x360 and 640x480 hold the
+                // same picture; the smaller one wins.
+                "YUYV422 800x600@30",
+                "YUYV422 800x448@30",
+                "YUYV422 640x360@30",
+                "default format @30",
+                "negotiated default format",
+            ]
+        );
+        // The 10 fps 720p mode is never chosen over a 30 fps one.
+        assert!(
+            !explicit_modes(&attempts)
+                .iter()
+                .any(|label| label.contains("1280x720"))
         );
 
-        let webcam = parse_dshow_advertised_video_modes(MJPEG_WEBCAM_OPTIONS);
+        // Piped at the mode's own size, not the canvas.
+        let output =
+            windows_camera_attempt_output_dimensions(&attempts[0], (2560, 1440), Some(&lifecam));
+        assert_eq!(output, (800, 600));
+        // The fallbacks keep the canvas shape, shrunk to the camera's largest size.
         assert_eq!(
-            windows_camera_capture_attempts(360, 203, 30, Some(&webcam)),
-            vec![
-                (Some(30), Some((640, 360))),
-                (Some(30), Some((1280, 720))),
-                (Some(30), None),
-                (None, None),
-            ],
-            "only advertised MJPEG sizes, closest shape first"
+            windows_camera_attempt_output_dimensions(&attempts[3], (2560, 1440), Some(&lifecam)),
+            (1280, 720)
         );
+        assert_eq!(
+            windows_camera_attempt_output_dimensions(&attempts[3], (2560, 1440), None),
+            (2560, 1440),
+            "without a listing the fallbacks keep the target"
+        );
+    }
+
+    #[test]
+    fn windows_camera_mode_choice_prefers_the_target_rate_then_the_picture() {
+        // A camera that reaches 30 only in MJPEG: MJPEG 1080p30 beats the
+        // raw 10 fps 720p mode and the bigger raw mode at 5 fps.
+        let webcam = DshowAdvertisedVideoModes {
+            modes: vec![
+                test_dshow_mode(yuy2(), 1920, 1080, 5.0, 5.0),
+                test_dshow_mode(yuy2(), 1280, 720, 10.0, 10.0),
+                test_dshow_mode(DshowModeFormat::Mjpeg, 1920, 1080, 30.0, 30.0),
+                test_dshow_mode(DshowModeFormat::Mjpeg, 1280, 720, 30.0, 30.0),
+            ],
+        };
+        assert_eq!(
+            explicit_modes(&windows_camera_capture_attempts(
+                1920,
+                1080,
+                30,
+                Some(&webcam)
+            )),
+            vec![
+                "MJPEG 1920x1080@30",
+                "MJPEG 1280x720@30",
+                "YUYV422 1280x720@10",
+                "default format @30",
+                "negotiated default format",
+            ]
+        );
+        // Bigger than the target buys nothing: the mode that just covers a
+        // 360x203 inset wins over 1080p, and MJPEG before raw at one size.
+        let both = DshowAdvertisedVideoModes {
+            modes: vec![
+                test_dshow_mode(yuy2(), 640, 360, 30.0, 30.0),
+                test_dshow_mode(DshowModeFormat::Mjpeg, 1920, 1080, 30.0, 30.0),
+                test_dshow_mode(DshowModeFormat::Mjpeg, 640, 360, 30.0, 30.0),
+            ],
+        };
+        assert_eq!(
+            explicit_modes(&windows_camera_capture_attempts(360, 203, 30, Some(&both)))[..3],
+            [
+                "MJPEG 640x360@30",
+                "YUYV422 640x360@30",
+                "MJPEG 1920x1080@30"
+            ]
+        );
+        // The frame-server C920 lists only raw 1080p30: it is asked for it.
+        let c920 = parse_dshow_advertised_video_modes(C920_FRAME_SERVER_OPTIONS);
+        assert_eq!(
+            explicit_modes(&windows_camera_capture_attempts(
+                1920,
+                1080,
+                30,
+                Some(&c920)
+            )),
+            vec![
+                "YUYV422 1920x1080@30",
+                "NV12 1920x1080@30",
+                "default format @30",
+                "negotiated default format",
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_camera_without_a_mode_at_the_target_rate_takes_the_fastest() {
+        // Nothing reaches 60: the 30 fps mode beats the bigger 15 fps one,
+        // and is asked for at its own top rate.
+        let camera = DshowAdvertisedVideoModes {
+            modes: vec![
+                test_dshow_mode(yuy2(), 1920, 1080, 5.0, 15.0),
+                test_dshow_mode(yuy2(), 1280, 720, 5.0, 30.0),
+                test_dshow_mode(yuy2(), 640, 360, 5.0, 30.0),
+            ],
+        };
+        let attempts = windows_camera_capture_attempts(1920, 1080, 60, Some(&camera));
+        assert_eq!(
+            explicit_modes(&attempts)[..3],
+            [
+                "YUYV422 1280x720@30",
+                "YUYV422 640x360@30",
+                "YUYV422 1920x1080@15"
+            ]
+        );
+        // H.264 modes are never asked for explicitly.
+        let h264_only = DshowAdvertisedVideoModes {
+            modes: vec![test_dshow_mode(
+                DshowModeFormat::OtherCodec("h264".to_string()),
+                1920,
+                1080,
+                30.0,
+                30.0,
+            )],
+        };
+        assert_eq!(
+            explicit_modes(&windows_camera_capture_attempts(
+                1920,
+                1080,
+                30,
+                Some(&h264_only)
+            )),
+            vec!["default format @30", "negotiated default format"]
+        );
+    }
+
+    #[test]
+    fn windows_camera_live_status_names_the_mode_that_runs() {
+        let mode = test_dshow_mode(yuy2(), 800, 600, 7.5, 30.0);
+        let attempt = WindowsCameraCaptureAttempt::Mode {
+            mode,
+            fps: 30.0,
+            best_listed: true,
+        };
+        let NativeCameraStartup::Live {
+            requested_width,
+            requested_height,
+            selected_format_width,
+            selected_format_height,
+            selected_format_min_fps,
+            selected_format_max_fps,
+            width,
+            height,
+            selected_fps,
+            message,
+        } = windows_camera_live_startup(&attempt, (2560, 1440), (800, 600), 30)
+        else {
+            panic!("a live start");
+        };
+        assert_eq!((requested_width, requested_height), (2560, 1440));
+        assert_eq!((selected_format_width, selected_format_height), (800, 600));
+        assert_eq!(
+            (selected_format_min_fps, selected_format_max_fps),
+            (7.5, 30.0)
+        );
+        assert_eq!((width, height, selected_fps), (800, 600, 30.0));
+        // The Sources shortfall warning reads this sentence (plan 024 S5).
+        let message = message.unwrap();
+        assert!(
+            message.starts_with(
+                "Requested 2560x1440@30 was not available; selected native 800x600 at 8-30 fps."
+            ),
+            "{message}"
+        );
+        assert!(message.contains("YUYV422 800x600@30"), "{message}");
+
+        // A mode that covers the target at its rate is no shortfall.
+        let covering = WindowsCameraCaptureAttempt::Mode {
+            mode: test_dshow_mode(DshowModeFormat::Mjpeg, 640, 360, 30.0, 30.0),
+            fps: 30.0,
+            best_listed: true,
+        };
+        let NativeCameraStartup::Live { message, .. } =
+            windows_camera_live_startup(&covering, (360, 203), (360, 203), 30)
+        else {
+            panic!("a live start");
+        };
+        assert!(!message.unwrap().contains("Requested"));
+
+        // A fallback keeps naming the piped size at the requested rate.
+        let NativeCameraStartup::Live {
+            selected_format_width,
+            selected_format_max_fps,
+            message,
+            ..
+        } = windows_camera_live_startup(
+            &WindowsCameraCaptureAttempt::ExactRate(30),
+            (2560, 1440),
+            (1280, 720),
+            30,
+        )
+        else {
+            panic!("a live start");
+        };
+        assert_eq!(
+            (selected_format_width, selected_format_max_fps),
+            (1280, 30.0)
+        );
+        assert!(!message.unwrap().contains("Requested"));
     }
 
     #[test]
@@ -10090,7 +10725,12 @@ mod tests {
             full.len(),
             windows_camera_mjpeg_capture_modes(1920, 1080).len() + 2
         );
-        assert_eq!(full.first(), Some(&(Some(30), Some((1920, 1080)))));
+        assert_eq!(
+            full.first()
+                .map(WindowsCameraCaptureAttempt::label)
+                .as_deref(),
+            Some("MJPEG 1920x1080@30")
+        );
         assert_eq!(
             windows_camera_capture_attempts(
                 1920,
@@ -10126,10 +10766,26 @@ Error opening input file video=HP HD Camera."#;
         else {
             panic!("the HP HD Camera listed its modes");
         };
-        assert_eq!(
-            windows_camera_capture_attempts(1920, 1080, 30, Some(&modes)),
-            vec![(Some(30), None), (None, None)],
+        let attempts = explicit_modes(&windows_camera_capture_attempts(
+            1920,
+            1080,
+            30,
+            Some(&modes),
+        ));
+        assert!(
+            !attempts.iter().any(|label| label.starts_with("MJPEG")),
             "a device that answered without MJPEG must not get a single MJPEG spawn"
+        );
+        // Its own modes instead, largest 30 fps picture first.
+        assert_eq!(
+            attempts,
+            vec![
+                "YUYV422 1280x720@30",
+                "YUYV422 640x480@30",
+                "YUYV422 320x180@30",
+                "default format @30",
+                "negotiated default format",
+            ]
         );
     }
 
@@ -10256,14 +10912,55 @@ Error opening input file video=HP HD Camera."#;
 
     #[test]
     fn windows_camera_early_attempts_leave_time_for_their_fallbacks() {
-        use WindowsCameraAttemptKind::{ExactRate, Mjpeg, NegotiatedDefault};
+        use WindowsCameraAttemptKind::{
+            BestListedMode, ExactRate, ExplicitMode as Mjpeg, NegotiatedDefault,
+        };
         let secs = Duration::from_secs_f64;
+        let mode = |best_listed| WindowsCameraCaptureAttempt::Mode {
+            mode: test_dshow_mode(DshowModeFormat::Mjpeg, 1280, 720, 30.0, 30.0),
+            fps: 30.0,
+            best_listed,
+        };
+        assert_eq!(mode(false).kind(), Mjpeg);
+        assert_eq!(mode(true).kind(), BestListedMode);
+        assert_eq!(WindowsCameraCaptureAttempt::ExactRate(30).kind(), ExactRate);
         assert_eq!(
-            WindowsCameraAttemptKind::of(Some(30), Some((1280, 720))),
-            Mjpeg
+            WindowsCameraCaptureAttempt::NegotiatedDefault.kind(),
+            NegotiatedDefault
         );
-        assert_eq!(WindowsCameraAttemptKind::of(Some(30), None), ExactRate);
-        assert_eq!(WindowsCameraAttemptKind::of(None, None), NegotiatedDefault);
+
+        // Issue #1271 field check: the HP HD Camera's best listed mode
+        // after a cold 1.9 s probe. It must get the exact-rate rung's 2.6 s
+        // (its first frame takes 1.6-2.8 s), not the speculative 1.6 s.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(Duration::from_millis(4100), BestListedMode),
+            windows_camera_attempt_first_frame_timeout(Duration::from_millis(4100), ExactRate),
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(Duration::from_millis(4100), BestListedMode),
+            Some(Duration::from_millis(2600))
+        );
+        // Only the camera's own first mode is the best listed one; the
+        // common-size ladder without a probe stays speculative.
+        let hp = classify_windows_dshow_mode_probe(HP_HD_CAMERA_LIST_OPTIONS);
+        let WindowsDshowModeProbe::Modes(hp) = hp else {
+            panic!("the HP HD Camera listed its modes");
+        };
+        let kinds = |attempts: Vec<WindowsCameraCaptureAttempt>| {
+            attempts
+                .iter()
+                .map(WindowsCameraCaptureAttempt::kind)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(windows_camera_capture_attempts(1920, 1080, 30, Some(&hp))),
+            vec![BestListedMode, Mjpeg, Mjpeg, ExactRate, NegotiatedDefault]
+        );
+        assert!(
+            kinds(windows_camera_capture_attempts(1920, 1080, 30, None))
+                .iter()
+                .all(|kind| *kind != BestListedMode)
+        );
 
         // Fresh budget: MJPEG gets its full deadline.
         assert_eq!(
@@ -10365,7 +11062,12 @@ Error opening input file video=HP HD Camera."#;
             layout: test_layout(false),
         };
 
-        let args = windows_camera_preview_ffmpeg_args_opts(&config, 1920, 1080, 30, None);
+        let args = windows_camera_preview_ffmpeg_args_for(
+            &config,
+            &WindowsCameraCaptureAttempt::NegotiatedDefault,
+            (1920, 1080),
+            30,
+        );
         let filter = args
             .windows(2)
             .find_map(|pair| (pair[0] == "-vf").then_some(pair[1].as_str()))
@@ -10482,22 +11184,64 @@ Error opening input file video=HP HD Camera."#;
     }
 
     #[test]
-    fn windows_screen_camera_preview_uses_overlay_sized_bgra_buffer() {
-        let mut layout = test_layout(false);
-        layout.layout_preset = LayoutPreset::ScreenCamera;
-        layout.camera_size = CameraSize::Medium;
-        layout.camera_shape = CameraShape::Rectangle;
-        let config = NativeCameraPreviewConfig {
+    fn windows_camera_box_is_the_canvas_for_every_preset() {
+        // Issue #1066: a preset switch never restarts the camera (the restart
+        // key is layout-invariant), so the box a Windows camera pipes into
+        // must not depend on the preset or the inset either. An inset-sized
+        // box left a camera started under Screen + Camera at ~540x304 after
+        // a switch to camera-only, stretched to the canvas.
+        let config_for = |layout: LayoutSettings| NativeCameraPreviewConfig {
             camera_id: "camera:windows-dshow:5553422043616d657261".to_string(),
             unique_id: "USB Camera".to_string(),
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout,
         };
+        let camera_only = test_layout(false);
+        let mut inset = test_layout(false);
+        inset.layout_preset = LayoutPreset::ScreenCamera;
+        inset.camera_size = CameraSize::Small;
+        inset.camera_shape = CameraShape::Circle;
+        let mut custom = inset.clone();
+        custom.camera_transform_mode = CameraTransformMode::Custom;
+        custom.camera_transform = Some(crate::protocol::CameraTransform {
+            x: 0.7,
+            y: 0.7,
+            width: 0.2,
+            height: 0.2,
+        });
+        let mut vertical = inset.clone();
+        vertical.layout_preset = LayoutPreset::VerticalScreenCamera;
 
+        let canvas = (test_video().width, test_video().height);
+        for layout in [camera_only, inset, custom, vertical] {
+            let config = config_for(layout);
+            assert_eq!(windows_camera_preview_output_dimensions(&config), canvas);
+            assert_eq!(
+                windows_camera_preview_output_dimensions(&config),
+                camera_capture_target_dimensions(&config.layout, &config.video)
+            );
+        }
+
+        // A 720p mode under the inset pipes its own 1280x720, not the inset.
+        let mode = DshowVideoMode {
+            format: DshowModeFormat::Mjpeg,
+            width: 1280,
+            height: 720,
+            min_fps: 5.0,
+            max_fps: 30.0,
+        };
         assert_eq!(
-            windows_camera_preview_output_dimensions(&config),
-            (540, 305)
+            windows_camera_attempt_output_dimensions(
+                &WindowsCameraCaptureAttempt::Mode {
+                    mode,
+                    fps: 30.0,
+                    best_listed: true,
+                },
+                canvas,
+                None,
+            ),
+            (1280, 720)
         );
     }
 

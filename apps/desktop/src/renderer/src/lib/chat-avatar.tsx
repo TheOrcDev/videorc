@@ -6,7 +6,9 @@ import { cn } from '@/lib/utils'
 // main's allowlisted cache (videorc-asset://avatar/...) — never a hot-linked
 // CDN URL — and fall back to a monogram circle while unresolved or absent.
 
-/** Initials for the monogram fallback: first letters of up to two words. */
+/** Initials for the monogram fallback: first letters of up to two words. A
+ * leading symbol is skipped (`@ramxcodes` is R, not @, YouTube handles start
+ * with one); a word of symbols alone (an emoji) keeps its first glyph. */
 export function monogramInitials(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean)
   if (words.length === 0) {
@@ -14,7 +16,10 @@ export function monogramInitials(name: string): string {
   }
   const initials = words
     .slice(0, 2)
-    .map((word) => [...word][0]!.toUpperCase())
+    .map((word) => {
+      const glyphs = [...word]
+      return (glyphs.find((glyph) => /[\p{L}\p{N}]/u.test(glyph)) ?? glyphs[0]!).toUpperCase()
+    })
     .join('')
   return initials || '?'
 }

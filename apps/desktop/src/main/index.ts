@@ -186,11 +186,13 @@ import { NativePreviewMotionReconciler } from './native-preview-motion-reconcile
 import { drainNativePreviewHostCommands as drainNativePreviewHostCommandsWith } from './native-preview-host-command-drain'
 import {
   NativePreviewMutationQueue,
+  NativePreviewBackendBoundsRefusedError,
   NativePreviewPlacementQueue,
   NativePreviewPumpOwnership,
   handoffNativePreviewPumpOwnership,
   type NativePreviewPumpOwnershipTicket,
-  runPreparedNativePreviewMutation
+  runPreparedNativePreviewMutation,
+  scenePlacementFailureAction
 } from './native-preview-operation-queue'
 import { NativePreviewRunAuthority } from './native-preview-run-authority'
 import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surface-loader'
@@ -271,6 +273,11 @@ import type {
 } from '../shared/sound-commands'
 import { BUDDY_ACT_RESULT_TIMEOUT_MS, type CohostActAnswer } from '../shared/buddy-act'
 import { COMMUNITY_RELAY_TIMEOUT_MS } from '../shared/community-relay'
+import type {
+  ChatCommandPostResult,
+  ChatCommandReplyFailed,
+  ChatCommandsSummary
+} from '../shared/chat-commands'
 import {
   SOUND_IMPORT_EXTENSIONS,
   STARTER_SOUNDS_MANIFEST,
@@ -582,7 +589,7 @@ import {
   mainPumpStatusCompatibilityMayPresent
 } from './native-preview-main-pump-health'
 import { discoverObs, readObsSetup, readObsStreamKey } from './obs-import'
-import { initAutoUpdater, registerUpdaterIpc } from './updater'
+import { initAutoUpdater, registerUpdaterIpc, updaterDiagnostics } from './updater'
 import {
   sanitizedChildProcessEnvironment,
   scrubReleaseAuthorityEnvironment
@@ -668,6 +675,7 @@ import {
   previewDockedInsideMainWindow,
   proofSurfaceHostedInWindowOn,
   proofSurfaceParentWindow,
+  proofSurfaceReshowBounds,
   withTrustedPreviewWindowStacking,
   type NativePreviewRealSurfaceDriverKind
 } from './native-preview-window-stacking'
@@ -913,6 +921,11 @@ let latestCommentsBanners: import('../shared/banner-commands').BannerSummary[] |
 /** The soundboard the Stream Manager shows (plan 189 S9): `{id, name, mode}`
  * and what plays, from the Studio renderer; null until it has read the board. */
 let latestCommentsSounds: SoundboardSummary | null = null
+/** The chat commands the Stream Manager knows (plan 226 S4): the enabled
+ * commands' names and descriptions, null until Studio has read them. */
+let latestCommentsChatCommands: ChatCommandsSummary | null = null
+/** The replies that couldn't go out in the newest live chat session (plan 226 D12). */
+let latestChatCommandFailures: ChatCommandReplyFailed[] = []
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -1009,9 +1022,19 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
       )
     }, 'placement')
   },
-  (error) => {
-    if (previewWindowIsOpenForSurface()) {
-      safeConsole.error('Preview window placement push failed:', error)
+  (error, { attempt, outcome, retryInMs }) => {
+    if (!previewWindowIsOpenForSurface()) {
+      return
+    }
+    // One line when a placement first fails and one if it gives up; the
+    // retries between are counted in the placement metrics instead.
+    if (outcome === 'gave-up') {
+      safeConsole.error(
+        `Preview window placement push failed after ${attempt} attempt(s); the picture stays at its last placement until the window moves:`,
+        error
+      )
+    } else if (outcome === 'retry' && attempt === 1) {
+      safeConsole.warn(`Preview window placement push failed; retrying in ${retryInMs} ms:`, error)
     }
   }
 )
@@ -5638,6 +5661,8 @@ function nativePreviewPlacementStatusFields(): Pick<
   | 'nativePreviewPlacementEventsReceived'
   | 'nativePreviewPlacementsCoalesced'
   | 'nativePreviewPlacementsApplied'
+  | 'nativePreviewPlacementsFailed'
+  | 'nativePreviewPlacementsRetried'
   | 'nativePreviewPlacementRoundTripP95Ms'
   | 'nativePreviewMutationQueueCapacity'
   | 'nativePreviewMutationQueueDepth'
@@ -5653,6 +5678,8 @@ function nativePreviewPlacementStatusFields(): Pick<
     nativePreviewPlacementEventsReceived: metrics.received,
     nativePreviewPlacementsCoalesced: metrics.coalesced,
     nativePreviewPlacementsApplied: metrics.applied,
+    nativePreviewPlacementsFailed: metrics.failed,
+    nativePreviewPlacementsRetried: metrics.retried,
     nativePreviewPlacementRoundTripP95Ms: metrics.roundTripP95Ms,
     nativePreviewMutationQueueCapacity: mutationMetrics.capacity,
     nativePreviewMutationQueueDepth: mutationMetrics.currentDepth,
@@ -7654,7 +7681,10 @@ async function showNativePreviewProofSurfaceIfVisible(): Promise<void> {
   ) {
     return
   }
-  const bounds = nativePreviewSurfaceStatus.bounds
+  const bounds = proofSurfaceReshowBounds(
+    nativePreviewSurfaceStatus.bounds,
+    previewWindowSurfaceBounds()
+  )
   if (!bounds) {
     return
   }
@@ -7697,10 +7727,18 @@ async function applyNativePreviewHostCommands(
     }
     return { ...command, bounds: normalizePreviewSurfaceBounds(command.bounds) }
   })
+  // A refused backend push must not also strand the Electron proof window
+  // (#1272): on a move it follows the popup on its own, and the error is
+  // rethrown once it has moved so the placement queue retries the backend
+  // half. A create still fails first, as before.
+  const backendBoundsFailures: unknown[] = []
   if (process.platform === 'win32') {
     for (const command of commands) {
       if (!command.bounds) {
         continue
+      }
+      if (backendBoundsFailures.length > 0 && command.kind !== 'update-bounds') {
+        throw backendBoundsFailures[0]
       }
       await withTrustedPreviewWindowStacking(
         {
@@ -7710,14 +7748,26 @@ async function applyNativePreviewHostCommands(
           currentGeneration: previewWindowSurfaceGeneration(),
           previewWindowOpen: previewWindowIsOpenForSurface(),
           previewWindow,
-          elevated
+          elevated,
+          // The D3D11 presenter is DPI-aware: it is placed in physical pixels,
+          // converted at the display nearest the Preview window (#1272).
+          dipToScreenRect: (rect) => screen.dipToScreenRect(previewWindow, rect)
         },
         async (request) => {
-          const status = parseMainPreviewSurfaceStatus(
-            await requestBackendAdmin<unknown>('resource.admin.preview_surface_bounds', {
-              ...request
-            })
-          )
+          let status: PreviewSurfaceStatus
+          try {
+            status = parseMainPreviewSurfaceStatus(
+              await requestBackendAdmin<unknown>('resource.admin.preview_surface_bounds', {
+                ...request
+              })
+            )
+          } catch (error) {
+            if (command.kind !== 'update-bounds') {
+              throw error
+            }
+            backendBoundsFailures.push(error)
+            return null
+          }
           if (
             previewWindowSurfaceGenerationIsCurrent(generation) &&
             previewWindowIsOpenForSurface()
@@ -7772,6 +7822,11 @@ async function applyNativePreviewHostCommands(
       command.kind === 'create'
         ? await createNativePreviewSurface(command.bounds, generation)
         : await updateNativePreviewSurfaceBounds(command.bounds, generation)
+  }
+  if (backendBoundsFailures.length > 0) {
+    // Typed so callers can tell this deferred refusal (the proof window has
+    // already moved) from a failed create or setup.
+    throw new NativePreviewBackendBoundsRefusedError(backendBoundsFailures[0])
   }
   return status
 }
@@ -7943,7 +7998,31 @@ async function applyNativePreviewSurfaceScene(
     protectNativePreviewSceneRevision(params.revision)
   }
   nativePreviewSurfaceScene = buildPreviewSurfaceScene(params)
-  await reconcileNativePreviewSurfaceForPreviewWindow()
+  try {
+    await reconcileNativePreviewSurfaceForPreviewWindow()
+  } catch (error) {
+    // #1272, scenePlacementFailureAction: a backend refusal of a bounds
+    // update is deferred (the proof window already followed the popup), so
+    // the scene update and its re-show go on. A failed create still fails the
+    // scene update, but is retried too, so the Preview is not left empty.
+    const action = scenePlacementFailureAction(error, nativePreviewSurfaceWindowExists())
+    const bounds = action.retry ? previewWindowSurfaceBounds() : null
+    if (bounds) {
+      safeConsole.warn(
+        'Preview scene placement failed; retrying it:',
+        error instanceof NativePreviewBackendBoundsRefusedError ? error.refusal : error
+      )
+      // Forced: the queue's last applied rect may be this one, but it has
+      // just failed, so it must not be coalesced away.
+      nativePreviewPlacementQueue.enqueue(
+        { bounds, generation: previewWindowSurfaceGeneration() },
+        { force: true }
+      )
+    }
+    if (action.rethrow) {
+      throw error
+    }
+  }
   if (!nativePreviewPresentationAllowedForGeneration(generation)) {
     return nativePreviewSurfaceStatus
   }
@@ -12758,8 +12837,19 @@ async function runSmokePreviewMotionCommand(
   if (command === 'preview-window-state') {
     const surface = nativePreviewSurfaceWindow
     const mutationQueue = nativePreviewSurfaceMutationQueue.metrics()
+    const windowState = previewWindowState()
     return {
-      ...previewWindowState(),
+      ...windowState,
+      // Windows: the Preview's video rect in physical screen pixels, the
+      // space the DPI-aware D3D11 presenter reports its actual bounds in
+      // (#1272). Comparing those with the DIP rect only agrees at 100%.
+      contentBoundsPhysical:
+        process.platform === 'win32' &&
+        windowState.contentBounds &&
+        previewWindow &&
+        !previewWindow.isDestroyed()
+          ? screen.dipToScreenRect(previewWindow, windowState.contentBounds)
+          : null,
       ...smokeNativeWindowIdentity(previewWindow),
       // macOS: a docked window must cast no shadow (applyDockedPreviewChrome).
       hasShadow: previewWindow && !previewWindow.isDestroyed() ? previewWindow.hasShadow() : null,
@@ -14530,6 +14620,8 @@ function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record
     nativePreviewPlacementEventsReceived: status.nativePreviewPlacementEventsReceived,
     nativePreviewPlacementsCoalesced: status.nativePreviewPlacementsCoalesced,
     nativePreviewPlacementsApplied: status.nativePreviewPlacementsApplied,
+    nativePreviewPlacementsFailed: status.nativePreviewPlacementsFailed,
+    nativePreviewPlacementsRetried: status.nativePreviewPlacementsRetried,
     nativePreviewPlacementRoundTripP95Ms: status.nativePreviewPlacementRoundTripP95Ms,
     nativePreviewPresentRoundTripP95Ms: status.nativePreviewPresentRoundTripP95Ms,
     nativePreviewIosurfaceCacheHits: status.nativePreviewIosurfaceCacheHits,
@@ -15681,6 +15773,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
     },
     backendCrashes: backendCrashRecords,
     firstFrameDecisions: firstFrameDecisions.snapshot(),
+    updater: updaterDiagnostics(),
     windowGlass: mainWindowGlassInfo(),
     globalShortcutsUnavailable,
     env: process.env
@@ -17220,7 +17313,9 @@ app.whenReady().then(async () => {
     // Signed-in Windows installs follow the pilot feed with a short-lived token
     // the backend mints from the account session (null when not entitled).
     requestWindowsPilotUpdateGrant: () =>
-      requestBackendAdmin<unknown>('account.windows_pilot_update_token', {}, 20_000)
+      requestBackendAdmin<unknown>('account.windows_pilot_update_token', {}, 20_000),
+    // A packaged build has no console: updater lines land in backend.log too.
+    log: (level, message) => logBackend(level, `[auto-update] ${message}`)
   })
   registerUpdaterIpc(
     () => mainWindow,
@@ -17857,6 +17952,25 @@ app.whenReady().then(async () => {
       return true
     }
   )
+  // Plan 226 S4: ⋯ Chat commands… in the Stream Manager. Main shows the main
+  // window; the shell opens Livestream → Setup and scrolls to the section.
+  secureIpcHandle(
+    'comments-window:open-chat-commands',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can open chat commands.')
+      }
+      commentsCommandRequestId(value)
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+        return false
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      sendElectronEvent(mainWindow.webContents, 'livestream:open-chat-commands', undefined)
+      return true
+    }
+  )
   // Plan 215 A3: "Sign in to Videorc" on a chat row that waits on it. Main
   // shows the main window and asks it to start the sign-in it owns (the same
   // door as the sidebar's Sign in); the Chat window never sees the authorize
@@ -18157,6 +18271,45 @@ app.whenReady().then(async () => {
     )
   })
   secureIpcHandle('comments-window:community-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
+  // Chat commands (plan 226 S4): the same relay as sounds. Studio pushes the
+  // enabled commands and the replies that couldn't go out, and the Stream
+  // Manager follows them; the streamer's `!go` relays to the MAIN renderer,
+  // which owns the `chatCommands.post` call, for the live session only.
+  secureIpcHandle('comments-window:chat-commands-get', () => latestCommentsChatCommands)
+  secureIpcHandle('comments-window:chat-commands-push', (event, summary) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    latestCommentsChatCommands = summary
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:chat-commands', summary)
+    return true
+  })
+  secureIpcHandle('comments-window:chat-command-failures-get', () => latestChatCommandFailures)
+  secureIpcHandle('comments-window:chat-command-failures-push', (event, failures) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    latestChatCommandFailures = failures
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(
+        commentsWindow.webContents,
+        'comments-window:chat-command-failures',
+        failures
+      )
+    return true
+  })
+  secureIpcHandle('comments-window:chat-command', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can post a chat command reply here.'))
+    }
+    assertLiveCommentsCommandSession(command.sessionId)
+    return commentsCommandBroker.request<ChatCommandPostResult>(command.requestId, () => {
+      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+      sendElectronEvent(mainWindow.webContents, 'comments-window:chat-command-request', command)
+      return true
+    })
+  })
+  secureIpcHandle('comments-window:chat-command-result-push', (event, resolution) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
     return commentsCommandBroker.resolve(resolution)
   })

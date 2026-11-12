@@ -12,6 +12,7 @@ import type {
   StreamTargetRuntime,
   SystemPermissionPane
 } from '@/lib/backend'
+import { cameraLowFrameRateLine, type CameraLowFrameRate } from '@/lib/camera-frame-rate'
 import { NO_VALUE, formatMetric, plural } from '@/lib/format'
 import { cameraNoVideoLine, cameraSendsNoVideo } from '@/lib/source-status'
 import { previewSourceStateLabel, previewStateLabel } from '@/lib/state-labels'
@@ -212,12 +213,36 @@ export function previewSourceCheck(
 /**
  * The camera's check. Plan 216 D2: a camera that is on but sends no video
  * is not "Live"; the verdict's advice names it (`cameraNoVideoAdvice`).
+ * Issue #1271: a live camera held under its rate (the Sources row's watch,
+ * `camera-frame-rate.ts`) says how far under, on every platform. The
+ * Preview speed check's "Camera slow" never runs on Windows, where the
+ * proof-surface preview is a named fallback.
  */
-export function cameraCheck(camera: Pick<PreviewCameraStatus, 'state' | 'noVideo'>): CheckWords {
+export function cameraCheck(
+  camera: Pick<PreviewCameraStatus, 'state' | 'noVideo'>,
+  lowFrameRate?: CameraLowFrameRate | null
+): CheckWords {
   if (cameraSendsNoVideo(camera)) {
     return { value: 'No video', tone: 'warn' }
   }
+  if (camera.state === 'live' && lowFrameRate) {
+    return {
+      value: `${Math.round(lowFrameRate.fps)} of ${Math.round(lowFrameRate.expectedFps)} fps`,
+      tone: 'warn'
+    }
+  }
   return previewSourceCheck(camera.state)
+}
+
+/** What to say about a live camera held under its rate, by name; null otherwise. */
+export function cameraLowFrameRateAdvice(
+  camera: Pick<PreviewCameraStatus, 'state' | 'noVideo'>,
+  lowFrameRate: CameraLowFrameRate | null | undefined,
+  name: string | undefined
+): string | null {
+  return camera.state === 'live' && !cameraSendsNoVideo(camera) && lowFrameRate
+    ? cameraLowFrameRateLine(name, lowFrameRate)
+    : null
 }
 
 /** What to do about a camera that sends no video, by name; null otherwise. */
@@ -455,6 +480,8 @@ export function fileRepairCheck(
 }
 
 export type HealthChecksInput = PreviewSpeedInput & {
+  /** The Sources row's slow-camera watch; absent or null when the camera keeps its rate. */
+  previewCameraLowFrameRate?: CameraLowFrameRate | null
   recentStreamDrops: Pick<RecentStreamDrops, 'capture'>
   streamHealth: { speed?: number; droppedFrames?: number } | null
   streamTargets: readonly StreamTargetRuntime[]
@@ -481,7 +508,7 @@ export function healthChecks(input: HealthChecksInput): HealthCheck[] {
     check('encoder', 'Encoder', encoderCheck(stats, input.streamHealth)),
     check('rendering', 'Rendering', renderingCheck(stats)),
     check('sources', 'Sources', sourcesCheck(stats, input.recentStreamDrops)),
-    check('camera', 'Camera', cameraCheck(previewCameraStatus)),
+    check('camera', 'Camera', cameraCheck(previewCameraStatus, input.previewCameraLowFrameRate)),
     check('screen', 'Screen', previewSourceCheck(previewScreenStatus.state)),
     check(
       'preview',

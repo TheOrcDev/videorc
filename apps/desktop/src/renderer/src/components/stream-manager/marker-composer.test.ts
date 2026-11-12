@@ -461,3 +461,174 @@ describe('/buddy in the composer (plan 209 S20)', () => {
     expect(container.textContent).toContain('Say what Buddy should do')
   })
 })
+
+describe('!name in the composer (plan 226 S4)', () => {
+  const chatCommands = {
+    commands: [
+      { name: 'faq', description: 'most asked question' },
+      { name: 'go', description: "why I'm learning Go" }
+    ],
+    listEnabled: true
+  }
+  const writable = [
+    {
+      id: 'youtube',
+      platform: 'youtube' as const,
+      read: 'ready' as const,
+      write: 'ready' as const,
+      state: 'connected' as const,
+      message: 'Connected'
+    },
+    {
+      id: 'twitch',
+      platform: 'twitch' as const,
+      read: 'ready' as const,
+      write: 'ready' as const,
+      state: 'connected' as const,
+      message: 'Connected'
+    }
+  ]
+  async function mountCommands(
+    onChatCommand: ((name: string) => Promise<{ sent: number; failed: number }>) | null = vi.fn(
+      async () => ({ sent: 2, failed: 0 })
+    )
+  ) {
+    onSend.mockClear()
+    await act(async () =>
+      root.render(
+        createElement(Composer, {
+          providers: writable,
+          pending: false,
+          failures: [],
+          operation: null,
+          prefill: null,
+          cohostNudge: false,
+          markerContext: { sessionId: 's1', available: true },
+          onSend,
+          chatCommands,
+          ...(onChatCommand ? { onChatCommand } : {})
+        })
+      )
+    )
+    return onChatCommand
+  }
+  const completionList = () =>
+    [...container.querySelectorAll('[aria-label="Local commands"] [cmdk-item]')].map(
+      (item) => item.textContent
+    )
+  const input = () => container.querySelector('input')!
+
+  it('posts !go to every chat, says so, clears the draft and never sends it as chat', async () => {
+    const onChatCommand = await mountCommands()
+    await type('!go')
+    expect(container.textContent).toContain('All chats')
+    expect(
+      container.querySelector('[aria-label="Post the !go reply to every chat"]')
+    ).not.toBeNull()
+    await enter()
+    expect(onChatCommand).toHaveBeenCalledExactlyOnceWith('go')
+    expect(container.textContent).toContain('Posted the !go reply.')
+    expect(input().value).toBe('')
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('takes !GO in any case, and says when a chat could not take it', async () => {
+    const onChatCommand = await mountCommands(vi.fn(async () => ({ sent: 2, failed: 1 })))
+    await type('!GO')
+    await enter()
+    expect(onChatCommand).toHaveBeenCalledExactlyOnceWith('go')
+    expect(container.textContent).toContain("Posted the !go reply to 2 chats. 1 couldn't take it.")
+  })
+
+  it('keeps the draft and shows the words when the post could not run', async () => {
+    await mountCommands(
+      vi.fn(async () => {
+        throw new Error(
+          "Couldn't post the !go reply. Videorc is reconnecting. Try again in a moment."
+        )
+      })
+    )
+    await type('!go')
+    await enter()
+    expect(container.textContent).toContain(
+      "Couldn't post the !go reply. Videorc is reconnecting. Try again in a moment."
+    )
+    expect(input().value).toBe('!go')
+  })
+
+  it('sends !!go as the literal !go, and an unknown !word as typed', async () => {
+    const onChatCommand = await mountCommands()
+    await type('!!go')
+    await enter()
+    expect(onSend).toHaveBeenLastCalledWith('!go', {})
+    await type('!nope')
+    await enter()
+    expect(onSend).toHaveBeenLastCalledWith('!nope', {})
+    await type('!go and more words')
+    await enter()
+    expect(onSend).toHaveBeenLastCalledWith('!go and more words', {})
+    expect(onChatCommand).not.toHaveBeenCalled()
+  })
+
+  it('offers the commands after !, then !commands, and completes before it posts', async () => {
+    const onChatCommand = await mountCommands()
+    await type('!')
+    expect(completionList()).toEqual([
+      '!faq · most asked question',
+      "!go · why I'm learning Go",
+      '!commands · List your commands'
+    ])
+    await type('!f')
+    expect(completionList()).toEqual(['!faq · most asked question'])
+    await enter()
+    expect(input().value).toBe('!faq')
+    expect(onChatCommand).not.toHaveBeenCalled()
+    await enter()
+    expect(onChatCommand).toHaveBeenCalledExactlyOnceWith('faq')
+  })
+
+  it('offers Edit chat commands… last under a bare !, and only there', async () => {
+    const onOpenChatCommands = vi.fn()
+    onSend.mockClear()
+    await act(async () =>
+      root.render(
+        createElement(Composer, {
+          providers: writable,
+          pending: false,
+          failures: [],
+          operation: null,
+          prefill: null,
+          cohostNudge: false,
+          markerContext: { sessionId: 's1', available: true },
+          onSend,
+          chatCommands,
+          onChatCommand: vi.fn(async () => ({ sent: 2, failed: 0 })),
+          onOpenChatCommands
+        })
+      )
+    )
+    await type('!')
+    expect(completionList().at(-1)).toBe('Edit chat commands…')
+    await type('!wow')
+    expect(completionList()).toEqual([])
+    await enter()
+    expect(onSend).toHaveBeenLastCalledWith('!wow', {})
+    expect(onOpenChatCommands).not.toHaveBeenCalled()
+    await type('!')
+    const door = [
+      ...container.querySelectorAll<HTMLElement>('[aria-label="Local commands"] [cmdk-item]')
+    ].find((item) => item.textContent === 'Edit chat commands…')!
+    await act(async () => door.click())
+    expect(onOpenChatCommands).toHaveBeenCalledOnce()
+    expect(input().value).toBe('')
+  })
+
+  it('leaves ! as ordinary chat where the window cannot post a reply', async () => {
+    await mountCommands(null)
+    await type('!')
+    expect(completionList()).toEqual([])
+    await type('!go')
+    await enter()
+    expect(onSend).toHaveBeenLastCalledWith('!go', {})
+  })
+})

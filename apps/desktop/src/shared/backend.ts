@@ -778,6 +778,21 @@ export interface CameraLook {
   saturation: number
 }
 
+/**
+ * Hide edges (plan 227 B): how much of each side of the camera, as you see
+ * it, the green-screen key makes see-through. Percent of the camera frame,
+ * 0–25 per side (`CAMERA_KEY_EDGE_MAX_PCT`); only while the key is on.
+ */
+export interface CameraKeyEdges {
+  leftPct: number
+  topPct: number
+  rightPct: number
+  bottomPct: number
+}
+
+/** The largest share of the camera one side of Hide edges may take (%). */
+export const CAMERA_KEY_EDGE_MAX_PCT = 25
+
 export interface LayoutSettings {
   /** Per-camera setting injected at the output boundary; omitted when neutral. */
   cameraLook?: CameraLook
@@ -801,6 +816,8 @@ export interface LayoutSettings {
   cameraChromaKeySmoothnessPct: number
   /** Spill suppression strength (%): kills the green/blue fringe. */
   cameraChromaKeySpillPct: number
+  /** Hide edges for the key (plan 227 B); omitted while every side is 0. */
+  cameraChromaKeyEdges?: CameraKeyEdges
   cameraMargin: number
   cameraFit: CameraFit
   cameraMirror: boolean
@@ -2376,7 +2393,12 @@ export type WindowsD3d11CaptureBackend =
   | 'windows-graphics-capture-monitor'
   | 'legacy-ffmpeg'
 
-export type WindowsD3d11CursorMode = 'embedded' | 'separate' | 'excluded-wgc' | 'disabled-fallback'
+export type WindowsD3d11CursorMode =
+  | 'embedded'
+  | 'separate'
+  | 'excluded-wgc'
+  | 'embedded-wgc'
+  | 'disabled-fallback'
 
 /** Scalar-only diagnostics. No COM pointer, texture/shared handle, or HWND is wire-safe. */
 export interface WindowsD3d11MediaDiagnostics {
@@ -2391,6 +2413,12 @@ export interface WindowsD3d11MediaDiagnostics {
   generation?: number
   captureBackend?: WindowsD3d11CaptureBackend
   cursorMode?: WindowsD3d11CursorMode
+  /**
+   * Why captureBackend is not the Desktop Duplication the session asked for
+   * while the D3D11 path stays live, e.g. a hybrid-graphics laptop capturing
+   * through Windows Graphics Capture. Absent when the requested backend opened.
+   */
+  captureRouteReason?: string
   cursorRequested: boolean
   cursorPixelsSource?: string
   cursorExclusionGuaranteed: boolean
@@ -2425,7 +2453,32 @@ export interface WindowsD3d11MediaDiagnostics {
   renderTickOverruns: number
   renderTickLagMaxMs?: number
   renderComposeStageMaxMs?: number
+  /** Per-stage evidence behind `texturePoolPressureEvents` (#1042). */
+  texturePoolPressure?: WindowsD3d11TexturePoolPressureDiagnostics
   fallbackReason?: string
+}
+
+/** Why the D3D11 texture pool ran short (#1042). `texturePoolPressureEvents` is the
+ * pool's exhaustions plus the render loop's pressure skips, so one exhausted compose
+ * counts in both; these fields split it and name what held the textures. */
+export interface WindowsD3d11TexturePoolPressureDiagnostics {
+  bgraExhaustions: number
+  nv12Exhaustions: number
+  renderPressureSkips: number
+  /** Summed over every exhaustion: the exhausted bucket's slots by holder. */
+  holders: {
+    writing: number
+    compositor: number
+    preview: number
+    record: number
+    stream: number
+    awaitingFence: number
+  }
+  /** Publication-to-release time per consumer role. */
+  holds: Record<
+    'compositor' | 'preview' | 'record' | 'stream',
+    { releases: number; meanMs?: number; maxMs?: number }
+  >
 }
 
 /** Cumulative request counts for the HTTP image-polling preview transports. A native
@@ -2499,6 +2552,23 @@ export type OpaqueNativeWindowHandle = `0x${string}`
  */
 export interface MainOwnedPreviewSurfaceBounds extends PreviewSurfaceBounds {
   orderAboveWindowHandle?: OpaqueNativeWindowHandle
+  /**
+   * Windows: the same geometry in physical screen pixels
+   * (`screen.dipToScreenRect`), for the DPI-aware D3D11 presenter (#1272).
+   */
+  physicalPlacement?: PreviewPresenterPhysicalPlacement
+}
+
+/** A preview rect and its optional visible clip in physical screen pixels. */
+export interface PreviewPresenterPhysicalPlacement {
+  screenX: number
+  screenY: number
+  width: number
+  height: number
+  clipX?: number
+  clipY?: number
+  clipWidth?: number
+  clipHeight?: number
 }
 
 export interface MainOwnedPreviewSurfaceBoundsParams {
@@ -2878,6 +2948,10 @@ export interface PreviewSurfaceStatus {
   nativePreviewPlacementEventsReceived?: number
   nativePreviewPlacementsCoalesced?: number
   nativePreviewPlacementsApplied?: number
+  /** Placement pushes the surface host refused, each failed try counted (#1272). */
+  nativePreviewPlacementsFailed?: number
+  /** Retries run after a refused placement push (#1272). */
+  nativePreviewPlacementsRetried?: number
   nativePreviewPlacementRoundTripP95Ms?: number
   nativePreviewPresentRoundTripP95Ms?: number
   nativePreviewIosurfaceCacheHits?: number
@@ -4715,6 +4789,23 @@ export interface RuntimeInfo {
   /** Plan 216 D3: the Preview's first-frame watchdog's last decisions
    * (oldest first, last 20), so a bundle says why the Preview fell back. */
   firstFrameDecisions?: FirstFrameDecisionRecord[]
+  /** The updater's current status and its last lines (oldest first). The
+   * main process has no console in a packaged build, so without this a bundle
+   * said nothing about an update that kept failing. */
+  updater?: UpdaterDiagnostics
+}
+
+/** One updater log line kept in main for the support bundle. */
+export interface UpdaterLogEntry {
+  /** ISO timestamp. */
+  at: string
+  level: 'info' | 'warn' | 'error'
+  message: string
+}
+
+export interface UpdaterDiagnostics {
+  status: UpdateStatus
+  recentEvents: UpdaterLogEntry[]
 }
 
 /** Flat evidence a watchdog decision saw: numbers, flags and short words. */

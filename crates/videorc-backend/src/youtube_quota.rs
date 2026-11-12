@@ -529,8 +529,8 @@ pub struct YouTubeApiUsageSnapshot {
 /// Pacific day before it sheds its least valuable calls. S7's remote flag
 /// (`youtube.dailyBudgetUnits`) overrides it; 0 switches the budget off.
 pub const DEFAULT_DAILY_BUDGET_UNITS: u64 = 2_500;
-/// At this share of the budget subscribers and thumbnails stop and viewers
-/// slow to every other poll (120 s).
+/// At this share of the budget subscribers, thumbnails and chat command
+/// replies stop and viewers slow to every other poll (120 s).
 pub const BUDGET_SHED_EXTRAS_PERCENT: u64 = 80;
 /// At this share viewers stop too.
 pub const BUDGET_SHED_VIEWERS_PERCENT: u64 = 95;
@@ -542,7 +542,8 @@ pub const BUDGET_SHED_VIEWERS_PERCENT: u64 = 95;
 #[serde(rename_all = "kebab-case")]
 pub enum BudgetStep {
     Normal,
-    /// ≥ 80%: no subscribers, no thumbnails, viewers every 120 s.
+    /// ≥ 80%: no subscribers, no thumbnails, no chat command replies (plan
+    /// 226 D7), viewers every 120 s.
     ShedExtras,
     /// ≥ 95%: no viewers either.
     ShedViewers,
@@ -565,6 +566,12 @@ pub enum BudgetCall {
     /// 100% like a send, so a used-up day keeps only Go Live and chat reads.
     ChatModerate,
     Viewers,
+    /// Plan 226 D7: a chat command's reply to a viewer (`!go`). Shed at 80%
+    /// like the extras, so the streamer's own sends keep the last 20% of the
+    /// day. The post itself still goes through `ChatSend` admission; this is
+    /// asked first. The streamer's own `!go` in the Stream Manager is a
+    /// `ChatSend`, never this.
+    CommandReply,
     Subscribers,
     Thumbnail,
 }
@@ -593,7 +600,9 @@ pub fn budget_allows(step: BudgetStep, call: BudgetCall) -> bool {
         BudgetCall::GoLiveEssential | BudgetCall::ChatRead => true,
         BudgetCall::ChatSend | BudgetCall::ChatModerate => step < BudgetStep::EssentialsOnly,
         BudgetCall::Viewers => step < BudgetStep::ShedViewers,
-        BudgetCall::Subscribers | BudgetCall::Thumbnail => step < BudgetStep::ShedExtras,
+        BudgetCall::CommandReply | BudgetCall::Subscribers | BudgetCall::Thumbnail => {
+            step < BudgetStep::ShedExtras
+        }
     }
 }
 
@@ -629,7 +638,7 @@ fn budget_step_log_line(step: BudgetStep, units: u64, limit: u64) -> String {
     let what = match step {
         BudgetStep::Normal => "every YouTube call is allowed again",
         BudgetStep::ShedExtras => {
-            "YouTube subscribers and thumbnails are paused and viewer counts slow to every 2 minutes"
+            "YouTube subscribers, thumbnails and chat command replies are paused and viewer counts slow to every 2 minutes"
         }
         BudgetStep::ShedViewers => "YouTube viewer counts are paused too",
         BudgetStep::EssentialsOnly => {
@@ -1871,6 +1880,17 @@ mod tests {
         assert!(budget_allows(Normal, Subscribers) && budget_allows(Normal, Thumbnail));
         assert!(!budget_allows(ShedExtras, Subscribers));
         assert!(!budget_allows(ShedExtras, Thumbnail));
+        // Plan 226 D7: command replies stop at 80%; the streamer's own sends
+        // keep the last 20%.
+        assert!(budget_allows(Normal, CommandReply));
+        for step in [ShedExtras, ShedViewers, EssentialsOnly] {
+            assert!(!budget_allows(step, CommandReply), "{step:?}");
+            if step != EssentialsOnly {
+                assert!(budget_allows(step, ChatSend), "{step:?}");
+            }
+        }
+        assert!(!budget_allows(budget_step(2_000, limit), CommandReply));
+        assert!(budget_allows(budget_step(1_999, limit), CommandReply));
         assert!(budget_allows(ShedExtras, Viewers));
         assert_eq!(
             budget_viewer_poll_stride(ShedExtras),

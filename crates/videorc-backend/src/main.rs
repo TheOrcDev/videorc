@@ -38,6 +38,7 @@ mod capture_input;
 mod capture_interruption;
 mod capture_log;
 mod capture_recovery;
+mod chat_commands;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
@@ -212,6 +213,8 @@ mod windows_media_foundation_encoder;
 mod windows_mf_probe;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_mf_rejections;
+#[cfg(target_os = "windows")]
+mod windows_mf_standby;
 mod x_chat;
 mod x_live;
 mod x_oauth1;
@@ -5896,6 +5899,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sounds.play"
         | "sounds.press"
         | "sounds.stop"
+        | "chatCommands.save"
+        | "chatCommands.delete"
+        | "chatCommands.setListEnabled"
+        | "chatCommands.post"
         | "preview.live.start"
         | "preview.live.stop"
         | "screen.hide"
@@ -6119,6 +6126,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screens.list"
         | "banners.list"
         | "sounds.list"
+        | "chatCommands.list"
         | "repair.assess_file"
         | "noiseCleanup.list"
         | "cleanCut.get"
@@ -6183,6 +6191,8 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
             Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance)
         }
         "liveChat.send"
+        // Plan 226: the streamer's `!go` posts to every chat, like a send.
+        | "chatCommands.post"
         | "liveChat.moderation.request"
         | "liveChat.moderation.confirm"
         | "liveChat.moderation.cancel" => Some(WebSocketIsolatedCommandLaneKind::DurableChat),
@@ -14380,6 +14390,78 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 226: chat commands. Every mutation answers with the whole
+        // state and ends in `chat_commands::on_chat_commands_changed`, which
+        // reloads the list chat delivery matches against and publishes it.
+        // Refusals come back in the editor's words.
+        "chatCommands.list" => match chat_commands::list(state) {
+            Ok(list) => ServerResponse::ok(command.id, list),
+            Err(error) => {
+                ServerResponse::error(command.id, "chat-commands-list-failed", error.to_string())
+            }
+        },
+        "chatCommands.save" => {
+            match serde_json::from_value::<chat_commands::ChatCommandSaveParams>(command.params) {
+                Ok(params) => match chat_commands::save(state, &params) {
+                    Ok(list) => ServerResponse::ok(command.id, list),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "chat-command-save-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "chatCommands.delete" => {
+            match serde_json::from_value::<chat_commands::ChatCommandIdParams>(command.params) {
+                Ok(params) => match chat_commands::delete(state, &params.id) {
+                    Ok(list) => ServerResponse::ok(command.id, list),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "chat-command-delete-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "chatCommands.setListEnabled" => {
+            match serde_json::from_value::<chat_commands::ChatCommandsListEnabledParams>(
+                command.params,
+            ) {
+                Ok(params) => match chat_commands::set_list_enabled(state, params.enabled) {
+                    Ok(list) => ServerResponse::ok(command.id, list),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "chat-commands-settings-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "chatCommands.post" => {
+            match serde_json::from_value::<chat_commands::ChatCommandPostParams>(command.params) {
+                Ok(params) => match chat_commands::post(state, &params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "chat-command-post-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "screens.list" => match state.database.list_stream_screens() {
             Ok(screens) => ServerResponse::ok(command.id, screens),
             Err(error) => {
@@ -18307,6 +18389,7 @@ mod tests {
             "screens.list",
             "banners.list",
             "sounds.list",
+            "chatCommands.list",
             "recording.status",
             "capture.recovery.status",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
@@ -18731,6 +18814,7 @@ mod tests {
 
         for method in [
             "liveChat.send",
+            "chatCommands.post",
             "liveChat.moderation.request",
             "liveChat.moderation.confirm",
             "liveChat.moderation.cancel",
@@ -26077,7 +26161,10 @@ mod agent_role_tests {
     /// RemoteIntent enum was re-pinned at `9028bec9` (#935), where plan 210 S6
     /// and S7 added `sceneApply.sceneId` and ScreenHide / ScreenShow /
     /// ScreenHideToggle with their own leak argument
-    /// (plans/210-scenes-for-your-apps-and-hide-screen.md).
+    /// (plans/210-scenes-for-your-apps-and-hide-screen.md). Re-pinned for
+    /// BuddyLiveOn / BuddyLiveOff / BuddyLiveToggle (the Stream Deck's Buddy
+    /// key), with their leak argument in docs/remote-control.md ("Buddy Live
+    /// on the phone").
     #[test]
     fn remote_surface_is_pinned_to_dc1309cb() {
         assert_eq!(
@@ -26106,8 +26193,8 @@ mod agent_role_tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            hash, "b68d8ae70b3a142f2b45be1ed66959360bd9104a78048461c280dfcfca605fa8",
-            "RemoteIntent is not byte-identical to its plan 210 pin (9028bec9)"
+            hash, "71bbbc1371a282938695e7414e905a270e2bba45ffc5be450294a3af35f3ddd6",
+            "RemoteIntent is not byte-identical to its Buddy Live pin"
         );
     }
 

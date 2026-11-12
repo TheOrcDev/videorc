@@ -246,6 +246,41 @@ describe('backend RPC contract', () => {
     }
   })
 
+  // #1272: the DPI-aware D3D11 presenter's placement in physical pixels.
+  it('accepts an exact physical placement beside the DIP bounds', () => {
+    const request = {
+      bounds: {
+        screenX: 10,
+        screenY: 20,
+        width: 1280,
+        height: 720,
+        scaleFactor: 1.5,
+        orderAboveWindowHandle: '0x000000000000abcd',
+        physicalPlacement: {
+          screenX: 15,
+          screenY: 30,
+          width: 1920,
+          height: 1080,
+          clipX: 15,
+          clipY: 60,
+          clipWidth: 1920,
+          clipHeight: 900
+        }
+      },
+      generation: 7
+    }
+    expect(validateMainOwnedPreviewSurfaceBoundsParams(request)).toEqual(request)
+    expect(() =>
+      validateMainOwnedPreviewSurfaceBoundsParams({
+        ...request,
+        bounds: {
+          ...request.bounds,
+          physicalPlacement: { ...request.bounds.physicalPlacement, hwnd: '0x1' }
+        }
+      })
+    ).toThrow()
+  })
+
   it('types role-authoritative encoder bridge process diagnostics', () => {
     expectTypeOf<
       DiagnosticStats['encoderBridgeRecordingRawVideoCopiedFrames']
@@ -966,6 +1001,28 @@ describe('backend RPC contract', () => {
       layout: { ...layoutParams.layout, sourceVisibility: { camera: false, capture: true } }
     }
     expect(validateBackendRpcParams('scene.layout.apply_live', hidden)).toEqual(hidden)
+    // Plan 227 B: Hide edges ride the layout, whole percents 0–25 a side.
+    const edged = {
+      ...layoutParams,
+      layout: {
+        ...layoutParams.layout,
+        cameraChromaKeyEdges: { leftPct: 2, topPct: 0, rightPct: 25, bottomPct: 5 }
+      }
+    }
+    expect(validateBackendRpcParams('scene.layout.apply_live', edged)).toEqual(edged)
+    for (const cameraChromaKeyEdges of [
+      { leftPct: 26, topPct: 0, rightPct: 0, bottomPct: 0 },
+      { leftPct: -1, topPct: 0, rightPct: 0, bottomPct: 0 },
+      { leftPct: 1.5, topPct: 0, rightPct: 0, bottomPct: 0 },
+      { leftPct: 1, topPct: 0, rightPct: 0, bottomPct: 0, centerPct: 0 }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('scene.layout.apply_live', {
+          ...layoutParams,
+          layout: { ...layoutParams.layout, cameraChromaKeyEdges }
+        })
+      ).toThrow()
+    }
     for (const sourceVisibility of [{ camera: 'false' }, { microphone: false }, null]) {
       expect(() =>
         validateBackendRpcParams('scene.layout.apply_live', {
@@ -1925,6 +1982,89 @@ describe('backend RPC contract', () => {
       })
     )
     expect(validateBackendRpcResult('diagnostics.stats', switchedCapture)).toEqual(switchedCapture)
+    // Issue #906: a hybrid-graphics laptop captures the monitor through
+    // Windows Graphics Capture with the cursor drawn by Windows and names why.
+    const hybridRoute = {
+      ...diagnostics,
+      windowsD3d11Media: {
+        ...windowsD3d11Media,
+        captureBackend: 'windows-graphics-capture-monitor',
+        cursorMode: 'embedded-wgc',
+        cursorPixelsSource: 'wgc-surface',
+        captureRouteReason: 'd3d11-capture-desktop-duplication-cross-adapter'
+      }
+    }
+    expect(validateBackendRpcResult('diagnostics.stats', hybridRoute)).toEqual(hybridRoute)
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          captureRouteReason: ''
+        }
+      })
+    ).toThrow('captureRouteReason')
+
+    // #1042: who held the pool when it ran dry, and how long each role held.
+    const unusedRoleHold = { releases: 0 }
+    const withPoolPressure = JSON.parse(
+      JSON.stringify({
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          texturePoolPressureEvents: 2,
+          texturePoolPressure: {
+            bgraExhaustions: 1,
+            nv12Exhaustions: 1,
+            renderPressureSkips: 2,
+            holders: {
+              writing: 1,
+              compositor: 2,
+              preview: 0,
+              record: 3,
+              stream: 0,
+              awaitingFence: 1
+            },
+            holds: {
+              compositor: { releases: 480, meanMs: 18.5, maxMs: 52.25 },
+              preview: unusedRoleHold,
+              record: { releases: 470, meanMs: 30.1, maxMs: 94 },
+              stream: unusedRoleHold
+            }
+          }
+        }
+      })
+    )
+    expect(validateBackendRpcResult('diagnostics.stats', withPoolPressure)).toEqual(
+      withPoolPressure
+    )
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...withPoolPressure,
+        windowsD3d11Media: {
+          ...withPoolPressure.windowsD3d11Media,
+          texturePoolPressure: {
+            ...withPoolPressure.windowsD3d11Media.texturePoolPressure,
+            holds: {
+              ...withPoolPressure.windowsD3d11Media.texturePoolPressure.holds,
+              record: { releases: 470, meanMs: -1 }
+            }
+          }
+        }
+      })
+    ).toThrow('meanMs')
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...withPoolPressure,
+        windowsD3d11Media: {
+          ...withPoolPressure.windowsD3d11Media,
+          texturePoolPressure: {
+            ...withPoolPressure.windowsD3d11Media.texturePoolPressure,
+            sharedTextureHandle: '0x0000000000000001'
+          }
+        }
+      })
+    ).toThrow('sharedTextureHandle')
 
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {

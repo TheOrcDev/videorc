@@ -70,6 +70,28 @@ jobs:
         with:
           components: clippy
 
+      - name: CI-only fast backend build profile
+        # Since 2026-11-10 every Linux gate run died ("The runner has received
+        # a shutdown signal", exit 143) 3-4 minutes into compiling the backend
+        # crate at the workspace dev opt-level 2 with full debuginfo: the
+        # runner VM runs out of memory (the same test build peaks above
+        # 11 GB on a local Linux box). Same CI-only profile as ci.yml's macOS
+        # Rust job: the backend crate at opt-level 0 with line tables only
+        # (dependencies keep opt 2). This is a correctness gate, not a perf
+        # gate. Written to CARGO_HOME, not the repo; release is untouched.
+        run: |
+          mkdir -p "$HOME/.cargo"
+          cat >> "$HOME/.cargo/config.toml" <<'TOML'
+          [profile.dev]
+          debug = "line-tables-only"
+          [profile.dev.package.videorc-backend]
+          opt-level = 0
+          TOML
+          cat "$HOME/.cargo/config.toml"
+          # At opt-level 0 the RPC dispatcher's frame outgrows the 2 MiB
+          # default thread stack (see ci.yml); give test threads 8 MiB.
+          echo "RUST_MIN_STACK=8388608" >> "$GITHUB_ENV"
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 

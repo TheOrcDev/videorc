@@ -31,6 +31,7 @@ import { NO_VALUE, compactTime, formatDroppedFrames, formatMetric, plural } from
 import { formatBitrate, formatFrameRate } from '@/lib/format-video'
 import {
   RECORDING_AT_RISK_ADVICE,
+  cameraLowFrameRateAdvice,
   cameraNoVideoAdvice,
   checkNeedsAttention,
   formatBytes,
@@ -92,7 +93,8 @@ export function DiagnosticsTab(): ReactElement {
     health
   } = useStudioCore()
   const { recording } = useStudioRecording()
-  const { previewLiveStatus, previewCameraStatus, previewScreenStatus } = useStudioPreview()
+  const { previewLiveStatus, previewCameraStatus, previewCameraLowFrameRate, previewScreenStatus } =
+    useStudioPreview()
   const {
     diagnosticStats,
     healthEvents,
@@ -144,6 +146,7 @@ export function DiagnosticsTab(): ReactElement {
         nativePreviewSurfaceEnabled,
         platform: platform ?? 'darwin',
         previewCameraStatus,
+        previewCameraLowFrameRate,
         previewLiveStatus,
         previewScreenStatus,
         previewSurfaceStatus,
@@ -159,6 +162,7 @@ export function DiagnosticsTab(): ReactElement {
       nativePreviewSurfaceEnabled,
       platform,
       previewCameraStatus,
+      previewCameraLowFrameRate,
       previewLiveStatus,
       previewScreenStatus,
       previewSurfaceStatus,
@@ -175,6 +179,11 @@ export function DiagnosticsTab(): ReactElement {
     }),
     advice:
       cameraNoVideoAdvice(previewCameraStatus, captureConfig.sources.cameraName) ??
+      cameraLowFrameRateAdvice(
+        previewCameraStatus,
+        previewCameraLowFrameRate,
+        captureConfig.sources.cameraName
+      ) ??
       slowdownAdvice(diagnosticStats.bottleneck) ??
       (diagnosticStats.recordingAtRisk ? RECORDING_AT_RISK_ADVICE : null)
   })

@@ -189,12 +189,39 @@ impl LayoutSourceNotReady {
     }
 }
 
-/// The response code for a failed layout apply: the typed not-ready refusal
-/// names its source kind, anything else keeps the route's own code.
+/// A preset that needs a source the selection does not have: the screen set
+/// to None, or the camera Off. Unlike a source that is slow to start, trying
+/// again cannot help, so the code names the missing source and the toast can
+/// send the streamer to Sources instead of "try again".
+#[derive(Debug, PartialEq, thiserror::Error)]
+#[error("{message}")]
+pub struct LayoutSourceNotSelected {
+    /// "camera" or "screen".
+    pub kind: &'static str,
+    pub message: String,
+}
+
+pub const LAYOUT_CAMERA_NOT_SELECTED_CODE: &str = "layout-camera-not-selected";
+pub const LAYOUT_SCREEN_NOT_SELECTED_CODE: &str = "layout-screen-not-selected";
+
+impl LayoutSourceNotSelected {
+    pub fn code(&self) -> &'static str {
+        match self.kind {
+            "screen" => LAYOUT_SCREEN_NOT_SELECTED_CODE,
+            _ => LAYOUT_CAMERA_NOT_SELECTED_CODE,
+        }
+    }
+}
+
+/// The response code for a failed layout apply: a typed refusal names its
+/// source kind, anything else keeps the route's own code.
 pub fn layout_failure_code(error: &anyhow::Error, fallback: &'static str) -> &'static str {
+    if let Some(not_ready) = error.downcast_ref::<LayoutSourceNotReady>() {
+        return not_ready.code();
+    }
     error
-        .downcast_ref::<LayoutSourceNotReady>()
-        .map(LayoutSourceNotReady::code)
+        .downcast_ref::<LayoutSourceNotSelected>()
+        .map(LayoutSourceNotSelected::code)
         .unwrap_or(fallback)
 }
 
@@ -405,7 +432,7 @@ fn target_screen_is_live(
 
 /// A preset that composes a device which is not even selected can never swap; report
 /// exactly what is missing instead of degrading silently.
-pub fn preset_selection_blocker(params: &SceneConfigParams) -> Option<String> {
+pub fn preset_selection_blocker(params: &SceneConfigParams) -> Option<LayoutSourceNotSelected> {
     let preset = &params.layout.layout_preset;
     // The inset scenes (ScreenCamera + its vertical twin) tolerate a missing
     // camera — the screen still fills the frame; the banded arrangements
@@ -434,19 +461,27 @@ pub fn preset_selection_blocker(params: &SceneConfigParams) -> Option<String> {
         || screen_source_can_feed_compositor(params.sources.screen_id.as_deref())
         || window_source_can_feed_compositor(params.sources.window_id.as_deref());
     if needs_camera && !camera_selected {
-        return Some(format!(
-            "Layout preset {preset:?} needs a camera, but no camera is selected. Pick a camera, then switch."
-        ));
+        return Some(LayoutSourceNotSelected {
+            kind: "camera",
+            message: format!(
+                "Layout preset {preset:?} needs a camera, but no camera is selected. Pick a camera, then switch."
+            ),
+        });
     }
     if needs_screen && !screen_selected {
-        if params.sources.screen_id.is_some() || params.sources.window_id.is_some() {
-            return Some(format!(
+        let message = if params.sources.screen_id.is_some() || params.sources.window_id.is_some() {
+            format!(
                 "Layout preset {preset:?} needs a native screen or window source, but the selected source cannot feed the native compositor. Pick a screen or window again, then switch."
-            ));
-        }
-        return Some(format!(
-            "Layout preset {preset:?} needs a screen or window, but none is selected. Pick one, then switch."
-        ));
+            )
+        } else {
+            format!(
+                "Layout preset {preset:?} needs a screen or window, but none is selected. Pick one, then switch."
+            )
+        };
+        return Some(LayoutSourceNotSelected {
+            kind: "screen",
+            message,
+        });
     }
     None
 }
@@ -1068,7 +1103,7 @@ async fn apply_scene_transaction(
     requested_intent_id: Option<u64>,
 ) -> Result<LiveLayoutApplyStatus> {
     if let Some(blocker) = preset_selection_blocker(&params) {
-        bail!(blocker);
+        return Err(blocker.into());
     }
 
     let target_sources = target_sources_override.unwrap_or(&params.sources);
@@ -1238,7 +1273,7 @@ async fn apply_simulcast_leg_request(
     requested_intent_id: Option<u64>,
 ) -> Result<LiveLayoutApplyStatus> {
     if let Some(blocker) = preset_selection_blocker(&params) {
-        bail!(blocker);
+        return Err(blocker.into());
     }
     if !params.layout.layout_preset.is_vertical() {
         bail!("The vertical stream only takes vertical scenes.");
@@ -4199,6 +4234,7 @@ mod tests {
             camera_chroma_key_similarity_pct: 40,
             camera_chroma_key_smoothness_pct: 8,
             camera_chroma_key_spill_pct: 10,
+            camera_chroma_key_edges: Default::default(),
         }
     }
 
@@ -4481,7 +4517,66 @@ mod tests {
     }
 
     #[test]
+    fn a_preset_missing_its_source_names_the_source_in_its_code() {
+        // A Windows tester set Screen to None on Side by side; every later
+        // scene and background change then answered `layout-preview-failed`,
+        // which the toast can only turn into "try again".
+        let screen =
+            super::preset_selection_blocker(&config(LayoutPreset::SideBySide, true, false))
+                .expect("Side by side needs a screen");
+        assert_eq!(screen.kind, "screen");
+        assert_eq!(screen.code(), LAYOUT_SCREEN_NOT_SELECTED_CODE);
+        let error = anyhow::Error::from(screen);
+        assert_eq!(
+            layout_failure_code(&error, "layout-preview-failed"),
+            LAYOUT_SCREEN_NOT_SELECTED_CODE
+        );
+        assert_eq!(
+            layout_failure_code(&error, "layout-live-failed"),
+            LAYOUT_SCREEN_NOT_SELECTED_CODE
+        );
+        assert!(error.to_string().contains("needs a screen or window"));
+
+        let mut unfeedable = config(LayoutPreset::ScreenOnly, false, false);
+        unfeedable.sources.screen_id = Some("screen:avfoundation:7".to_string());
+        assert_eq!(
+            super::preset_selection_blocker(&unfeedable).map(|b| b.code()),
+            Some(LAYOUT_SCREEN_NOT_SELECTED_CODE)
+        );
+
+        let camera =
+            super::preset_selection_blocker(&config(LayoutPreset::CameraOnly, false, true))
+                .expect("Camera only needs a camera");
+        assert_eq!(camera.code(), LAYOUT_CAMERA_NOT_SELECTED_CODE);
+        assert_eq!(
+            layout_failure_code(&anyhow::Error::from(camera), "layout-preview-failed"),
+            LAYOUT_CAMERA_NOT_SELECTED_CODE
+        );
+    }
+
+    #[tokio::test]
+    async fn the_preview_route_refuses_a_missing_screen_with_its_own_code() {
+        let state = test_state();
+        let error = apply_layout_preview(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(1),
+                simulcast_leg: false,
+                config: config(LayoutPreset::SideBySide, true, false),
+            },
+        )
+        .await
+        .expect_err("Side by side without a screen must not commit");
+        assert_eq!(
+            layout_failure_code(&error, "layout-preview-failed"),
+            LAYOUT_SCREEN_NOT_SELECTED_CODE
+        );
+    }
+
+    #[test]
     fn preset_selection_blockers_are_exact() {
+        let preset_selection_blocker =
+            |params: &SceneConfigParams| super::preset_selection_blocker(params).map(|b| b.message);
         let blocked = preset_selection_blocker(&config(LayoutPreset::CameraOnly, false, true));
         assert!(blocked.is_some_and(|message| message.contains("needs a camera")));
 

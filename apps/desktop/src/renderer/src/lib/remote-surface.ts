@@ -27,6 +27,9 @@ export interface RemoteSurfaceState {
   /** The device can run: present, supported, and granted. Only a boolean —
    * never the device name or the permission state's detail. */
   systemAudioAvailable: boolean
+  /** Buddy Live is on (the cohost `enabled` setting). False until the
+   * settings load. Only a boolean, never the persona or its settings. */
+  buddyLive: boolean
 }
 
 export interface RemoteSurfaceDescribe {
@@ -105,7 +108,8 @@ export type RemoteSurfaceValues = readonly [
   banners: readonly BannerSummary[],
   savedScenes?: readonly { id: string; name: string }[],
   activeSavedSceneId?: string | null,
-  screenHidden?: boolean
+  screenHidden?: boolean,
+  buddyLive?: boolean
 ]
 
 function snapshotFromValues(
@@ -126,7 +130,8 @@ function snapshotFromValues(
       activeTakeoverId: values[6],
       windows: { notes: values[7], comments: values[8], preview: values[9] },
       systemAudioOn: values[12] === 'available' && values[13],
-      systemAudioAvailable: values[12] === 'available'
+      systemAudioAvailable: values[12] === 'available',
+      buddyLive: values[18] ?? false
     },
     describe: {
       layoutPresets: values[10],

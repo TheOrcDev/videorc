@@ -131,6 +131,19 @@ const api: VideorcApi = {
   communityFromCommentsWindow: (command) => invoke('comments-window:community', command),
   onCommunityRequest: (callback) => subscribe('comments-window:community-request', callback),
   pushCommunityResult: (resolution) => invoke('comments-window:community-result-push', resolution),
+  getCommentsChatCommands: () => invoke('comments-window:chat-commands-get'),
+  pushCommentsChatCommands: (summary) => invoke('comments-window:chat-commands-push', summary),
+  onCommentsChatCommands: (callback) => subscribe('comments-window:chat-commands', callback),
+  chatCommandFromCommentsWindow: (command) => invoke('comments-window:chat-command', command),
+  onChatCommandRequest: (callback) => subscribe('comments-window:chat-command-request', callback),
+  pushChatCommandResult: (resolution) =>
+    invoke('comments-window:chat-command-result-push', resolution),
+  getChatCommandFailures: () => invoke('comments-window:chat-command-failures-get'),
+  pushChatCommandFailures: (failures) =>
+    invoke('comments-window:chat-command-failures-push', failures),
+  onChatCommandFailures: (callback) => subscribe('comments-window:chat-command-failures', callback),
+  openChatCommandsFromCommentsWindow: (command) =>
+    invoke('comments-window:open-chat-commands', command),
   showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
   reconnectScopesFromCommentsWindow: (command) =>
     invoke('comments-window:reconnect-scopes', command),
@@ -273,6 +286,7 @@ const api: VideorcApi = {
   onExitRequest: (callback) => subscribe('app:exit-request', callback),
   onBuddyDeepLink: (callback) => subscribe('buddy:deep-link', callback),
   onOpenDestination: (callback) => subscribe('livestream:open-destination', callback),
+  onOpenChatCommands: (callback) => subscribe('livestream:open-chat-commands', callback),
   onAccountSignInRequest: (callback) => subscribe('account:sign-in-request', callback),
   onShortcutModifier: (callback) => subscribe('shortcut:modifier', callback),
   onWindowVisible: (callback) => subscribe('window:visible', callback),

@@ -294,6 +294,14 @@ The viewers' messages, in Stream Manager and, while on air with Chat in
 Studio on, in the Studio's Chat section (plan 204).
 _Avoid_: comments
 
+**Chat command**:
+A `!name` a viewer types as the first word in chat (`!go`). Videorc answers
+as you with the reply you saved, starting with `@their name`, only in the
+chat they asked in; `!commands` lists them (plan 226). Edited in Setup →
+Livestream → Chat commands. Not the composer's `/` commands (`/marker`,
+`/clip`), which never reach chat.
+_Avoid_: bot command, slash command (for these), auto reply
+
 **Captions reader**:
 The window that shows live captions as text for the streamer.
 _Avoid_: Captions window, caption viewer

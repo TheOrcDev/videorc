@@ -50,6 +50,17 @@ import {
 import type { BannerRelayCommand, BannerSummary } from './banner-commands'
 import type { SoundRelayCommand, SoundboardSummary } from './sound-commands'
 import {
+  CHAT_COMMAND_DESCRIPTION_MAX_CHARS,
+  CHAT_COMMAND_FAILURES_MAX,
+  CHAT_COMMAND_MAX_COUNT,
+  CHAT_COMMAND_NAME_MAX_CHARS,
+  type ChatCommandPostResult,
+  type ChatCommandRelayCommand,
+  type ChatCommandReplyFailed,
+  type ChatCommandsSummary
+} from './chat-commands'
+import { STREAM_PLATFORMS } from './stream-platforms'
+import {
   BUDDY_SENTENCE_MAX_CHARS,
   type BuddyActRelayCommand,
   type CohostActAnswer
@@ -231,6 +242,15 @@ export const electronInvokeApiMethods = {
   // Plan 225 C2: the person card's `cohost.community.*` calls, relayed to Studio.
   'comments-window:community': 'communityFromCommentsWindow',
   'comments-window:community-result-push': 'pushCommunityResult',
+  // Plan 226 S4: chat commands, relayed like sounds: the enabled commands
+  // and the replies that couldn't go out one way, the streamer's `!go` the other.
+  'comments-window:chat-commands-get': 'getCommentsChatCommands',
+  'comments-window:chat-commands-push': 'pushCommentsChatCommands',
+  'comments-window:chat-command': 'chatCommandFromCommentsWindow',
+  'comments-window:chat-command-result-push': 'pushChatCommandResult',
+  'comments-window:chat-command-failures-get': 'getChatCommandFailures',
+  'comments-window:chat-command-failures-push': 'pushChatCommandFailures',
+  'comments-window:open-chat-commands': 'openChatCommandsFromCommentsWindow',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
@@ -351,6 +371,9 @@ export interface ElectronIpcEventMap {
   'comments-window:sound-request': SoundRelayCommand
   'comments-window:buddy-act-request': BuddyActRelayCommand
   'comments-window:community-request': CommunityRelayCommand
+  'comments-window:chat-commands': ChatCommandsSummary | null
+  'comments-window:chat-command-request': ChatCommandRelayCommand
+  'comments-window:chat-command-failures': ChatCommandReplyFailed[]
   'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
@@ -365,6 +388,8 @@ export interface ElectronIpcEventMap {
   'shortcut:navigate': string
   'buddy:deep-link': BuddyDeepLinkNavigation
   'livestream:open-destination': DestinationNavigation
+  /** Plan 226 S4: the Stream Manager's ⋯ Chat commands…; the shell opens the section. */
+  'livestream:open-chat-commands': undefined
   /** Plan 215 A3: the Stream Manager asked for the Videorc sign-in; the shell starts it. */
   'account:sign-in-request': undefined
   'shortcut:modifier': boolean
@@ -409,6 +434,9 @@ export const electronEventChannels = [
   'comments-window:sound-request',
   'comments-window:buddy-act-request',
   'comments-window:community-request',
+  'comments-window:chat-commands',
+  'comments-window:chat-command-request',
+  'comments-window:chat-command-failures',
   'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
@@ -423,6 +451,7 @@ export const electronEventChannels = [
   'shortcut:navigate',
   'buddy:deep-link',
   'livestream:open-destination',
+  'livestream:open-chat-commands',
   'account:sign-in-request',
   'shortcut:modifier',
   'window:visible',
@@ -956,6 +985,17 @@ const layoutSettingsSchema = objectSchema(
     cameraChromaKeySimilarityPct: numberSchema(),
     cameraChromaKeySmoothnessPct: numberSchema(),
     cameraChromaKeySpillPct: numberSchema(),
+    cameraChromaKeyEdges: optionalSchema(
+      objectSchema(
+        {
+          leftPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          topPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          rightPct: numberSchema({ integer: true, min: 0, max: 25 }),
+          bottomPct: numberSchema({ integer: true, min: 0, max: 25 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraMargin: numberSchema(),
     cameraFit: enumSchema(['fit', 'fill']),
     cameraMirror: booleanSchema,
@@ -1647,6 +1687,92 @@ const starterSoundFilesSchema = arraySchema(
   objectSchema({ ...starterSoundFields, selection: inputFileSelectionSchema }, soundStrict),
   { maxLength: SOUND_MAX_COUNT }
 )
+// Chat commands in the Stream Manager (plan 226 S4): the enabled commands'
+// names and descriptions, one `!name` to post and its counts back, and the
+// replies that couldn't go out. Never a reply's text.
+const chatCommandStrict = { allowUnknown: false } as const
+const chatCommandNameSchema = runtimeSchema<string>('a chat command name', (value, path) => {
+  if (
+    typeof value !== 'string' ||
+    value.length > CHAT_COMMAND_NAME_MAX_CHARS ||
+    !/^[a-z0-9_-]+$/.test(value)
+  ) {
+    throw new RuntimeSchemaError(path, 'a chat command name')
+  }
+  return value
+})
+const chatCommandRequestIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const chatCommandSessionIdSchema = stringSchema({ minLength: 1, maxLength: 256 })
+/** Null until Studio has read the commands once. */
+const chatCommandsSummarySchema = nullableSchema(
+  objectSchema(
+    {
+      commands: arraySchema(
+        objectSchema(
+          {
+            name: chatCommandNameSchema,
+            // Code points in the rules, UTF-16 units here: twice the limit.
+            description: stringSchema({
+              minLength: 1,
+              maxLength: CHAT_COMMAND_DESCRIPTION_MAX_CHARS * 2
+            })
+          },
+          chatCommandStrict
+        ),
+        { maxLength: CHAT_COMMAND_MAX_COUNT }
+      ),
+      listEnabled: booleanSchema
+    },
+    chatCommandStrict
+  )
+) as RuntimeSchema<ChatCommandsSummary | null>
+const chatCommandRelayCommandSchema = objectSchema(
+  {
+    requestId: chatCommandRequestIdSchema,
+    sessionId: chatCommandSessionIdSchema,
+    name: chatCommandNameSchema
+  },
+  chatCommandStrict
+) as RuntimeSchema<ChatCommandRelayCommand>
+const chatCommandPostResultSchema = objectSchema(
+  {
+    sent: numberSchema({ integer: true, min: 0, max: 1_000 }),
+    failed: numberSchema({ integer: true, min: 0, max: 1_000 })
+  },
+  chatCommandStrict
+) as RuntimeSchema<ChatCommandPostResult>
+/** Studio's answer: the counts, or the sentence that says why not. */
+const chatCommandRelayResolutionSchema = unionSchema([
+  objectSchema(
+    {
+      requestId: chatCommandRequestIdSchema,
+      ok: literalSchema(true),
+      value: chatCommandPostResultSchema
+    },
+    chatCommandStrict
+  ),
+  objectSchema(
+    {
+      requestId: chatCommandRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    chatCommandStrict
+  )
+])
+const chatCommandFailuresSchema = arraySchema(
+  objectSchema(
+    {
+      sessionId: chatCommandSessionIdSchema,
+      destinationId: stringSchema({ minLength: 1, maxLength: 512 }),
+      platform: enumSchema(STREAM_PLATFORMS),
+      command: chatCommandNameSchema,
+      reason: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    chatCommandStrict
+  ),
+  { maxLength: CHAT_COMMAND_FAILURES_MAX }
+) as RuntimeSchema<ChatCommandReplyFailed[]>
 
 const specificRuntimeInvokeContracts = {
   'app:front-window-watch': invokeContract(
@@ -1729,6 +1855,32 @@ const specificRuntimeInvokeContracts = {
   ),
   'comments-window:community-result-push': invokeContract(
     tupleSchema([communityRelayResolutionSchema]),
+    booleanSchema
+  ),
+  // Chat commands in the Stream Manager (plan 226 S4): the enabled commands
+  // and the failed replies one way, one `!name` the other. Never a reply.
+  'comments-window:chat-commands-get': invokeContract(noArgs, chatCommandsSummarySchema),
+  'comments-window:chat-commands-push': invokeContract(
+    tupleSchema([chatCommandsSummarySchema]),
+    booleanSchema
+  ),
+  'comments-window:chat-command': invokeContract(
+    tupleSchema([chatCommandRelayCommandSchema]),
+    chatCommandPostResultSchema
+  ),
+  'comments-window:chat-command-result-push': invokeContract(
+    tupleSchema([chatCommandRelayResolutionSchema]),
+    booleanSchema
+  ),
+  'comments-window:chat-command-failures-get': invokeContract(noArgs, chatCommandFailuresSchema),
+  'comments-window:chat-command-failures-push': invokeContract(
+    tupleSchema([chatCommandFailuresSchema]),
+    booleanSchema
+  ),
+  // ⋯ Chat commands… carries nothing but its request id; main shows the
+  // main window, which opens the section.
+  'comments-window:open-chat-commands': invokeContract(
+    tupleSchema([objectSchema({ requestId: boundedIdentifier }, { allowUnknown: false })]),
     booleanSchema
   ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
@@ -2175,6 +2327,9 @@ const specificRuntimeEventSchemas = {
   'comments-window:sound-request': soundRelayCommandSchema,
   'comments-window:buddy-act-request': buddyActRelayCommandSchema,
   'comments-window:community-request': communityRelayCommandSchema,
+  'comments-window:chat-commands': chatCommandsSummarySchema,
+  'comments-window:chat-command-request': chatCommandRelayCommandSchema,
+  'comments-window:chat-command-failures': chatCommandFailuresSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'comments-window:moderation-request': commentsModerationCommandSchema,
@@ -2204,6 +2359,8 @@ const specificRuntimeEventSchemas = {
     { targetId: stringSchema({ minLength: 1, maxLength: 128 }) },
     { allowUnknown: false }
   ),
+  // Plan 226 S4: the ask carries nothing; the shell opens the section.
+  'livestream:open-chat-commands': undefinedSchema,
   // Plan 215 A3: the ask carries nothing; the shell owns the sign-in.
   'account:sign-in-request': undefinedSchema,
   // Whether the command modifier is physically down. Main is the only place

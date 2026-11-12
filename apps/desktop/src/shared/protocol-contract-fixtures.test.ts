@@ -2,6 +2,14 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
+import type {
+  ChatCommand,
+  ChatCommandPostParams,
+  ChatCommandPostResult,
+  ChatCommandReplyFailed,
+  ChatCommandSaveParams
+} from './chat-commands'
+
 import { normalizeAudioSettings, normalizeLayoutSettings } from '../renderer/src/lib/capture'
 import type {
   AudioSettings,
@@ -179,6 +187,15 @@ interface HighRiskContractFixtures {
   banner: {
     minimal: Banner
     withTimer: Banner
+  }
+  chatCommand: {
+    command: ChatCommand
+    disabled: ChatCommand
+    listEnabled: boolean
+    saveParams: ChatCommandSaveParams
+    postParams: ChatCommandPostParams
+    postResult: ChatCommandPostResult
+    replyFailed: ChatCommandReplyFailed
   }
   sound: {
     minimal: Sound
@@ -1156,6 +1173,62 @@ describe('shared high-risk protocol fixture', () => {
       ).toThrow(field)
     }
     expect(() => validateBackendRpcResult('banners.show', { ...minimal, extra: true })).toThrow()
+  })
+
+  it('keeps the chat command wire shapes identical across languages (plan 226)', () => {
+    const { command, disabled, listEnabled, saveParams, postParams, postResult, replyFailed } =
+      fixtures.chatCommand
+    const state = { commands: [disabled, command], listEnabled }
+    const empty = { commands: [], listEnabled }
+    for (const method of [
+      'chatCommands.list',
+      'chatCommands.save',
+      'chatCommands.delete',
+      'chatCommands.setListEnabled'
+    ] as const) {
+      expect(validateBackendRpcResult(method, state)).toStrictEqual(state)
+      expect(validateBackendRpcResult(method, empty)).toStrictEqual(empty)
+    }
+    expect(validateBackendEventPayload('chatCommands.changed', state)).toStrictEqual(state)
+    expect(validateBackendRpcResult('chatCommands.post', postResult)).toStrictEqual(postResult)
+    expect(validateBackendEventPayload('chatCommands.replyFailed', replyFailed)).toStrictEqual(
+      replyFailed
+    )
+    expect(validateBackendRpcParams('chatCommands.save', saveParams)).toStrictEqual(saveParams)
+    expect(validateBackendRpcParams('chatCommands.post', postParams)).toStrictEqual(postParams)
+    expect(validateBackendRpcParams('chatCommands.delete', { id: command.id })).toStrictEqual({
+      id: command.id
+    })
+    // Exact: no extra field, no null (the serde null trap), no stored name
+    // with its `!` or in capitals.
+    expect(() =>
+      validateBackendRpcResult('chatCommands.list', {
+        ...state,
+        commands: [{ ...command, extra: true }]
+      })
+    ).toThrow()
+    for (const field of ['description', 'reply', 'enabled', 'createdAt'] as const) {
+      expect(() =>
+        validateBackendEventPayload('chatCommands.changed', {
+          ...state,
+          commands: [{ ...command, [field]: null }]
+        })
+      ).toThrow()
+    }
+    for (const name of ['!go', 'Go', '', 'go now']) {
+      expect(() =>
+        validateBackendRpcResult('chatCommands.list', {
+          ...state,
+          commands: [{ ...command, name }]
+        })
+      ).toThrow()
+    }
+    expect(() =>
+      validateBackendEventPayload('chatCommands.replyFailed', {
+        ...replyFailed,
+        platform: 'myspace'
+      })
+    ).toThrow()
   })
 
   it('keeps the soundboard wire shapes identical across languages (plan 189)', () => {

@@ -1693,8 +1693,13 @@ using System.Runtime.InteropServices;
 public static class VideorcPreviewInput {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 }
 '@
+# The points are physical pixels (screen.dipToScreenPoint). A DPI-unaware
+# PowerShell has SetCursorPos scale them again, which put the click outside
+# Preview on a 150% display (#1272); per-monitor aware v2 takes them as is.
+[VideorcPreviewInput]::SetThreadDpiAwarenessContext([IntPtr]::new(-4)) | Out-Null
 Add-Type -AssemblyName System.Windows.Forms
 function Click-Point([int]$x, [int]$y) {
   [VideorcPreviewInput]::SetCursorPos($x, $y) | Out-Null

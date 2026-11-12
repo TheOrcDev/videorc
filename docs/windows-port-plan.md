@@ -467,7 +467,28 @@ app in exile.
 - **dshow camera format negotiation** is messier than AVFoundation's format
   matrix; expect device-specific quirks.
 - **ddagrab + multi-GPU laptops** (Optimus): adapter selection needs an
-  explicit flag and a fallback.
+  explicit flag and a fallback. **Implemented for the D3D11 media path,
+  awaiting hardware validation (issue #906, 2026-11-08):** on the reporter's
+  ThinkPad (Iris Xe + MX550) DXGI lists the panel under the MX550 and
+  `IDXGIOutput1::DuplicateOutput` on that device answers
+  `DXGI_ERROR_UNSUPPORTED`, most likely because the Iris Xe drives the panel.
+  The HRESULT does not prove the topology: Windows also returns it for
+  desktop modes Desktop Duplication does not support. So the capture worker
+  treats it as a heuristic. With two or more hardware adapters it names the
+  failure `d3d11-capture-desktop-duplication-cross-adapter` (a likely
+  cross-adapter cause, not a confirmed one) and opens the same monitor
+  through Windows Graphics Capture on the same D3D11 device with the cursor
+  drawn by Windows (`cursorMode: embedded-wgc`), so the compositor and the
+  encoder keep their adapter. The diagnostics carry the route in
+  `captureRouteReason`. The session stays on the D3D11 path only when WGC
+  opens and the rest of D3D11 startup succeeds: if WGC cannot open, capture
+  startup returns an error naming both failures, and in the default
+  (non-required) mode `recording.rs` falls back to the legacy FFmpeg bridge
+  as before. Not yet run on a hybrid laptop; the development box has one
+  GPU. The same bundle selected the NVIDIA Media Foundation encoder, but an
+  earlier report from that laptop described a software-encoder fallback,
+  which would keep it off the D3D11 path regardless. The legacy `ddagrab`
+  preview on such a laptop is still the slow path.
 - **Dev loop friction:** one developer on macOS, app behavior on Windows —
   budget for remote-access tooling to the Windows box (SSH + screenshots or
   Parsec) so the judge-by-eye loop stays tight.

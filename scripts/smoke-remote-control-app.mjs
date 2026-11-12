@@ -10,6 +10,7 @@
 //   4. micToggle + sceneApply intents ack ok AND the state projection
 //      reflects them (backend-confirmed state, not optimistic); clipMark and
 //      systemAudioToggle relay through the renderer
+//      buddyLiveOn refused without consent, buddyLiveOff applied
 //   5. token regenerate closes the paired client
 //
 // No recording is started: the intents exercised here are disk-free.
@@ -23,14 +24,8 @@ import {
   remoteRequest as remoteRequestClient,
   waitForRemoteEvent as waitForRemoteEventClient
 } from './lib/remote-control-client.mjs'
-import {
-  defaultRingVerdict,
-  syntheticCompositorReady
-} from './lib/remote-control-smoke-gates.mjs'
-import {
-  CAPTURE_CONFIG_STORAGE_KEY,
-  RELOAD_KEEPING_SEED_JS
-} from './lib/renderer-profile-seed.mjs'
+import { defaultRingVerdict, syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
+import { CAPTURE_CONFIG_STORAGE_KEY, RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
@@ -353,6 +348,44 @@ try {
     }
     console.log('remote-control smoke: systemAudioToggle refused without the device OK')
   }
+
+  // 4d. Buddy Live (the Stream Deck's Buddy key): one boolean in the
+  // projection, and the renderer runs the intents through set_buddy's gates.
+  // This profile has no Cloud AI consent, so turning on is refused with a
+  // reason and changes nothing; turning off always lands once Buddy's
+  // settings have loaded.
+  const buddyState = (await remoteRequest(remote, 'remote.describe')).payload?.state
+  if (buddyState?.buddyLive !== false) {
+    fail(`remote.state lacks buddyLive: false: ${JSON.stringify(buddyState)}`)
+  }
+  const sendBuddyIntent = async (kind) => {
+    const ackPromise = waitForRemoteEvent(remote, 'remote.ack')
+    const ticket = await remoteRequest(remote, 'remote.intent', { kind })
+    if (!ticket.payload?.accepted) fail(`${kind} intent was not accepted`)
+    const ack = await ackPromise
+    if (ack?.intentId !== ticket.payload.intentId)
+      fail(`${kind} ack mismatch: ${JSON.stringify(ack)}`)
+    return ack
+  }
+  const buddyOn = await sendBuddyIntent('buddyLiveOn')
+  if (buddyOn?.ok !== false || typeof buddyOn?.message !== 'string' || !buddyOn.message) {
+    fail(`buddyLiveOn without consent was not refused with a reason: ${JSON.stringify(buddyOn)}`)
+  }
+  const buddyDeadline = Date.now() + timeoutMs
+  for (;;) {
+    // The debounce window keeps one Buddy intent per bucket per window.
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 400))
+    const buddyOff = await sendBuddyIntent('buddyLiveOff')
+    if (buddyOff?.ok === true) break
+    if (Date.now() > buddyDeadline) {
+      fail(`buddyLiveOff was not applied: ${JSON.stringify(buddyOff)}`)
+    }
+  }
+  const buddyAfter = (await remoteRequest(remote, 'remote.describe')).payload?.state
+  if (buddyAfter?.buddyLive !== false) {
+    fail(`Buddy Live changed after a refused turn-on: ${JSON.stringify(buddyAfter)}`)
+  }
+  console.log(`remote-control smoke: buddyLiveOn refused (${buddyOn.message}), buddyLiveOff OK`)
 
   // Plan 210 S6: a saved-scene key uses only the projected id and name.
   const saved = await requestSmokeCommand(

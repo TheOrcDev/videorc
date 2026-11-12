@@ -1,6 +1,10 @@
 import type { BrowserWindow } from 'electron'
 
-import type { MainOwnedPreviewSurfaceBoundsParams, PreviewSurfaceBounds } from '../shared/backend'
+import type {
+  MainOwnedPreviewSurfaceBoundsParams,
+  PreviewPresenterPhysicalPlacement,
+  PreviewSurfaceBounds
+} from '../shared/backend'
 import {
   mainOwnedPreviewSurfaceBoundsParams,
   normalizePreviewSurfaceBounds
@@ -17,6 +21,58 @@ export interface TrustedPreviewWindowStackingInput {
   previewWindow: PreviewWindowHandleAuthority | null
   orderAboveWindowId?: number
   elevated: boolean
+  /**
+   * Windows: Electron's `screen.dipToScreenRect` for the preview window. The
+   * D3D11 presenter is a DPI-aware window placed in physical pixels (#1272).
+   */
+  dipToScreenRect?: (rect: PreviewStackingRect) => PreviewStackingRect
+}
+
+export interface PreviewStackingRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * The bounds and their clip in physical screen pixels, each rect converted on
+ * its own so a clip keeps its place inside the full rect at any scale.
+ */
+export function previewPresenterPhysicalPlacement(
+  bounds: PreviewSurfaceBounds,
+  dipToScreenRect: (rect: PreviewStackingRect) => PreviewStackingRect
+): PreviewPresenterPhysicalPlacement {
+  const full = dipToScreenRect({
+    x: bounds.screenX,
+    y: bounds.screenY,
+    width: bounds.width,
+    height: bounds.height
+  })
+  const placement: PreviewPresenterPhysicalPlacement = {
+    screenX: full.x,
+    screenY: full.y,
+    width: full.width,
+    height: full.height
+  }
+  if (
+    bounds.clipX !== undefined &&
+    bounds.clipY !== undefined &&
+    bounds.clipWidth !== undefined &&
+    bounds.clipHeight !== undefined
+  ) {
+    const clip = dipToScreenRect({
+      x: bounds.clipX,
+      y: bounds.clipY,
+      width: bounds.clipWidth,
+      height: bounds.clipHeight
+    })
+    placement.clipX = clip.x
+    placement.clipY = clip.y
+    placement.clipWidth = clip.width
+    placement.clipHeight = clip.height
+  }
+  return placement
 }
 
 /**
@@ -58,7 +114,32 @@ export function withTrustedPreviewWindowStacking<T>(
     throw new Error('Native preview HWND must be nonzero.')
   }
   const opaqueHandle = `0x${value.toString(16).padStart(16, '0')}`
-  return apply(mainOwnedPreviewSurfaceBoundsParams(bounds, input.generation, opaqueHandle))
+  const physicalPlacement = input.dipToScreenRect
+    ? previewPresenterPhysicalPlacement(bounds, input.dipToScreenRect)
+    : undefined
+  return apply(
+    mainOwnedPreviewSurfaceBoundsParams(bounds, input.generation, opaqueHandle, physicalPlacement)
+  )
+}
+
+/**
+ * Where the proof surface goes when it is shown again after a scene update
+ * (#1272): the Preview window's live rect, since the last saved bounds can
+ * be a placement the backend refused while the popup kept moving. The saved
+ * visibility still counts, so a surface hidden on purpose (app focus policy,
+ * hidden window) is not shown by a scene update.
+ */
+export function proofSurfaceReshowBounds(
+  saved: PreviewSurfaceBounds | null | undefined,
+  live: PreviewSurfaceBounds | null | undefined
+): PreviewSurfaceBounds | null {
+  if (!live) {
+    return saved ?? null
+  }
+  if (!saved) {
+    return live
+  }
+  return { ...live, visible: (saved.visible ?? true) && (live.visible ?? true) }
 }
 
 /**

@@ -308,6 +308,7 @@ import {
   RECORD_INTENT,
   captureConfigForIntent,
   livestreamIntent,
+  remoteOutputIntent,
   sameSessionStartIntent,
   savedModeIntent,
   type SessionStartIntent
@@ -2768,6 +2769,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // imperative change-detection, debounce, and retry behavior.
   const remoteSurfacePublisherRef = useRef<RemoteSurfacePublisher | null>(null)
   const remoteSurfaceValuesRef = useRef<RemoteSurfaceValues | null>(null)
+  const remoteOutputsRef = useRef<SessionStartIntent | null>(null)
   // Plan 209 S6: the agents' link (their projection and tool calls), the
   // same lazy latest-value bridge.
   const agentLinkRef = useRef<AgentStudioLink | null>(null)
@@ -6502,6 +6504,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // the activity a finished session is announced as.
         lastSessionActivityRef.current = sessionActivity(status)
       }
+      const replacedSessionId = recordingRef.current.sessionId
+      if (
+        status.sessionId &&
+        replacedSessionId &&
+        status.sessionId !== replacedSessionId &&
+        sessionStartInFlightRef.current === null &&
+        !sessionStartLifecycleActiveRef.current
+      ) {
+        // A session this renderer did not start replaced the one it did
+        // (its end was missed): the old start intent says nothing about it.
+        setActiveStartIntent(null)
+      }
       recordingRef.current = status
       if (!['recording', 'streaming'].includes(status.state)) {
         toast.dismiss('recording-degraded')
@@ -9116,6 +9130,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Plan 189: the soundboard reads its board on this connection,
         // outside the batch: nothing on startup waits for it.
         soundboard.connect(nextClient)
+        // Plan 226: chat commands follow this connection from their own chunk.
+        void import('@/lib/chat-commands-host').then(
+          ({ attachChatCommands }) => generationIsCurrent() && attachChatCommands(nextClient),
+          () => undefined
+        )
         // Seed the Stream Manager's GIF mode relay outside the bootstrap
         // batch: nothing on startup waits for it, and a failure costs only
         // the default (Animated) until the next liveChat.emotes event.
@@ -16219,7 +16238,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
             applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
           }
-          if (!isActiveRecordingState(recordingRef.current.state)) {
+          if (
+            !isActiveRecordingState(recordingRef.current.state) ||
+            recordingRef.current.sessionId !== platformSessionId
+          ) {
+            // Nothing runs, or the session that runs is not this start's.
             setActiveStartIntent(null)
           }
           return false
@@ -19025,11 +19048,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         remoteSurfaceValuesRef.current?.[4] ??
         captureConfig.audio.microphoneMuted)
     : captureConfig.audio.microphoneMuted
+  const remoteOutputs = remoteOutputIntent({
+    sessionActive: isSessionActive,
+    startIntent: activeStartIntent,
+    status: recording,
+    config: captureConfig,
+    previous: remoteOutputsRef.current
+  })
+  useEffect(() => {
+    remoteOutputsRef.current = isSessionActive ? remoteOutputs : null
+  }, [isSessionActive, remoteOutputs])
   const remoteSurfaceValues: RemoteSurfaceValues = [
     recording.state,
     isSessionActive,
-    captureConfig.recordEnabled,
-    captureConfig.streamEnabled,
+    remoteOutputs.record,
+    remoteOutputs.stream,
     remoteSurfaceMicrophoneMuted,
     captureConfig.layout.layoutPreset,
     activeScreen?.id ?? null,
@@ -19043,7 +19076,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     bannerList ?? NO_BANNERS,
     sceneLibrary.scenes,
     activeSavedSceneId,
-    privacy.screenPrivacy.hidden
+    privacy.screenPrivacy.hidden,
+    cohostSettings?.enabled === true
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on

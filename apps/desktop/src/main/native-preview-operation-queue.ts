@@ -214,22 +214,114 @@ export interface NativePreviewPlacementRequest {
 }
 
 type NativePreviewPlacementApply = (request: NativePreviewPlacementRequest) => Promise<void>
-type NativePreviewPlacementErrorHandler = (error: unknown) => void
+
+/**
+ * The backend refused a bounds update after the Electron proof window had
+ * already followed the Preview window (#1272). Only this refusal is safe to
+ * defer to the retrying placement queue; a failed surface create or setup
+ * is not wrapped and still fails its caller.
+ */
+/**
+ * What a scene update does when its placement reconcile fails (#1272).
+ *
+ * - A deferred backend refusal (the proof window already moved) is retried
+ *   and the scene update carries on.
+ * - A failed create, with no surface left, is retried as well so the Preview
+ *   does not stay empty, but the error still fails the scene update.
+ * - Any other failure fails the scene update, as before, with no retry.
+ *
+ * Every retry is forced: the queue's last applied rect can be the very one
+ * that was just refused, and must not swallow it.
+ */
+export function scenePlacementFailureAction(
+  error: unknown,
+  surfaceExists: boolean
+): { retry: boolean; rethrow: boolean } {
+  if (error instanceof NativePreviewBackendBoundsRefusedError) {
+    return { retry: true, rethrow: false }
+  }
+  return { retry: !surfaceExists, rethrow: true }
+}
+
+export class NativePreviewBackendBoundsRefusedError extends Error {
+  constructor(readonly refusal: unknown) {
+    super(
+      `The preview backend refused the surface bounds: ${
+        refusal instanceof Error ? refusal.message : String(refusal)
+      }`
+    )
+    this.name = 'NativePreviewBackendBoundsRefusedError'
+  }
+}
+
+/** What becomes of a failed placement. */
+export interface NativePreviewPlacementFailure {
+  /** 1 for the first try of this placement, 2 for its first retry, … */
+  attempt: number
+  /**
+   * `retry` after `retryInMs`; `superseded` by a newer queued placement;
+   * `cancelled` by teardown (`cancelPending`) while it was in flight; `gave-up`.
+   */
+  outcome: 'retry' | 'superseded' | 'cancelled' | 'gave-up'
+  retryInMs: number | null
+}
+
+type NativePreviewPlacementErrorHandler = (
+  error: unknown,
+  failure: NativePreviewPlacementFailure
+) => void
 const PLACEMENT_ROUND_TRIP_SAMPLE_LIMIT = 900
+
+/**
+ * Backoff for a placement that failed with nothing newer queued behind it
+ * (#1272). Windows moves the Preview's picture only when a push lands: the
+ * backend refuses one while a scene or camera switch holds the surface
+ * lifecycle (`surface-busy`, up to 3 s) or before the surface is live again,
+ * and the popup emits no further move to try again, so without a retry the
+ * picture stays where the last good push put it. About 10 s in all, longer
+ * than a busy lifecycle wait; a newer placement replaces the retry at once.
+ */
+export const NATIVE_PREVIEW_PLACEMENT_RETRY_DELAYS_MS: readonly number[] = [
+  100, 250, 500, 1_000, 2_000, 2_000, 2_000, 2_000
+]
+
+export interface NativePreviewPlacementRetryClock {
+  schedule: (callback: () => void, delayMs: number) => unknown
+  cancel: (handle: unknown) => void
+}
+
+const DEFAULT_RETRY_CLOCK: NativePreviewPlacementRetryClock = {
+  schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+  cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+}
 
 export interface NativePreviewPlacementMetrics {
   received: number
   coalesced: number
   applied: number
+  /** Placements that failed, counting each failed try of a retried one. */
+  failed: number
+  /** Retries run after a failed placement. */
+  retried: number
   currentRequestDepth: number
   maxRequestDepth: number
   roundTripP95Ms?: number
+}
+
+interface ScheduledPlacementRetry {
+  request: NativePreviewPlacementRequest
+  attempt: number
+  handle: unknown
 }
 
 export class NativePreviewPlacementQueue {
   private active: NativePreviewPlacementRequest | null = null
   private pending: NativePreviewPlacementRequest | null = null
   private lastApplied: NativePreviewPlacementRequest | null = null
+  private retry: ScheduledPlacementRetry | null = null
+  private failedCount = 0
+  private retriedCount = 0
+  private cancelEpoch = 0
   private readonly idleWaiters = new Set<() => void>()
   private receivedCount = 0
   private coalescedCount = 0
@@ -244,7 +336,9 @@ export class NativePreviewPlacementQueue {
     private readonly apply: NativePreviewPlacementApply,
     private readonly onError: NativePreviewPlacementErrorHandler = () => undefined,
     private readonly nowMs: () => number = () => Date.now(),
-    private readonly metricsTtlMs = 250
+    private readonly metricsTtlMs = 250,
+    private readonly retryDelaysMs: readonly number[] = NATIVE_PREVIEW_PLACEMENT_RETRY_DELAYS_MS,
+    private readonly retryClock: NativePreviewPlacementRetryClock = DEFAULT_RETRY_CLOCK
   ) {}
 
   get requestDepth(): number {
@@ -255,9 +349,24 @@ export class NativePreviewPlacementQueue {
     return Number(this.pending !== null)
   }
 
-  enqueue(request: NativePreviewPlacementRequest): boolean {
+  /** A failed placement is waiting to be tried again. */
+  get retryScheduled(): boolean {
+    return this.retry !== null
+  }
+
+  /**
+   * Queue a placement. `force` is for one the caller knows did not land
+   * (a refused reconcile outside this queue): it is not coalesced against
+   * the last placement this queue applied, which may no longer be true of
+   * the backend.
+   */
+  enqueue(request: NativePreviewPlacementRequest, options: { force?: boolean } = {}): boolean {
     this.receivedCount += 1
-    const desired = this.pending ?? this.active ?? this.lastApplied
+    // Every push reads the window's live rect, so the newest one supersedes a
+    // retry: a fresh push of the failed rect runs now instead of waiting out
+    // the backoff, and one back at the last landed rect needs no retry at all.
+    this.cancelRetry()
+    const desired = this.pending ?? this.active ?? (options.force ? null : this.lastApplied)
     if (desired && placementRequestsEqual(desired, request)) {
       this.coalescedCount += 1
       return false
@@ -268,15 +377,20 @@ export class NativePreviewPlacementQueue {
       }
       this.pending = request
     } else {
-      this.start(request)
+      this.start(request, 1)
     }
     this.maxRequestDepth = Math.max(this.maxRequestDepth, this.requestDepth)
     return true
   }
 
   cancelPending(): boolean {
-    const hadPending = this.pending !== null
+    const hadPending = this.pending !== null || this.retry !== null
     this.pending = null
+    this.cancelRetry()
+    // A placement already in flight cannot be stopped, but if it fails it
+    // must not schedule a retry: teardown destroyed the surface, and a late
+    // retry would create it again (#1272 review).
+    this.cancelEpoch += 1
     return hadPending
   }
 
@@ -293,6 +407,8 @@ export class NativePreviewPlacementQueue {
         received: this.receivedCount,
         coalesced: this.coalescedCount,
         applied: this.appliedCount,
+        failed: this.failedCount,
+        retried: this.retriedCount,
         currentRequestDepth: this.requestDepth,
         maxRequestDepth: this.maxRequestDepth,
         roundTripP95Ms: percentile(this.roundTripSamplesMs, 0.95)
@@ -313,16 +429,27 @@ export class NativePreviewPlacementQueue {
     return new Promise((resolve) => this.idleWaiters.add(resolve))
   }
 
-  private start(request: NativePreviewPlacementRequest): void {
+  private start(request: NativePreviewPlacementRequest, attempt: number): void {
     this.active = request
     const startedAtMs = this.nowMs()
+    const epoch = this.cancelEpoch
+    let failure: { error: unknown } | null = null
     void this.apply(request)
       .then(
         () => {
           this.lastApplied = request
           this.appliedCount += 1
         },
-        (error) => this.onError(error)
+        (error: unknown) => {
+          failure = { error }
+          this.failedCount += 1
+          // A forced placement can fail for the very rect recorded as last
+          // applied; that rect is then not known to have landed, and an echo
+          // of it must run instead of being coalesced away.
+          if (this.lastApplied && placementRequestsEqual(this.lastApplied, request)) {
+            this.lastApplied = null
+          }
+        }
       )
       .finally(() => {
         recordLimitedSample(
@@ -333,15 +460,68 @@ export class NativePreviewPlacementQueue {
         this.active = null
         const next = this.pending
         this.pending = null
+        // Only the newest placement is worth retrying: a pending one already
+        // replaces this rect, and one cancelled in flight has no surface left.
+        const cancelled = epoch !== this.cancelEpoch
+        const retryInMs =
+          failure && !next && !cancelled ? (this.retryDelaysMs[attempt - 1] ?? null) : null
+        if (failure) {
+          this.onError(failure.error, {
+            attempt,
+            outcome: next
+              ? 'superseded'
+              : cancelled
+                ? 'cancelled'
+                : retryInMs === null
+                  ? 'gave-up'
+                  : 'retry',
+            retryInMs
+          })
+        }
         if (next) {
-          this.start(next)
+          this.start(next, 1)
           return
+        }
+        if (retryInMs !== null) {
+          this.scheduleRetry(request, attempt + 1, retryInMs)
         }
         for (const resolve of this.idleWaiters) {
           resolve()
         }
         this.idleWaiters.clear()
       })
+  }
+
+  // The retry does not hold the queue busy: `waitForIdle` callers (hiding the
+  // surface, teardown) must not wait out a backoff, and any newer placement
+  // replaces it at once.
+  private scheduleRetry(
+    request: NativePreviewPlacementRequest,
+    attempt: number,
+    delayMs: number
+  ): void {
+    this.cancelRetry()
+    const retry: ScheduledPlacementRetry = { request, attempt, handle: null }
+    retry.handle = this.retryClock.schedule(() => {
+      if (this.retry !== retry) {
+        return
+      }
+      this.retry = null
+      if (this.active || this.pending) {
+        return
+      }
+      this.retriedCount += 1
+      this.start(request, attempt)
+    }, delayMs)
+    this.retry = retry
+  }
+
+  private cancelRetry(): void {
+    if (!this.retry) {
+      return
+    }
+    this.retryClock.cancel(this.retry.handle)
+    this.retry = null
   }
 }
 

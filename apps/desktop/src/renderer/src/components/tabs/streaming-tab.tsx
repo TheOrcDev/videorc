@@ -9,6 +9,12 @@ const ScheduledStreams = lazy(() =>
 )
 // Plan 224 C-G2: the Guests tab loads with its first open.
 const GuestsTab = lazy(() => import('@/components/guests/guests-tab'))
+// Plan 226: Chat commands loads on its own, after the page.
+const ChatCommandsSection = lazy(() =>
+  import('@/components/streaming/chat-commands-section').then((m) => ({
+    default: m.ChatCommandsSection
+  }))
+)
 
 import { GroupedList } from '@/components/list-row'
 import { LockAlert, SessionLockAlert } from '@/components/lock-alert'
@@ -393,6 +399,11 @@ function StreamingSetup({
         {/* Plan 187: tell the streamer's Discord server when they go live. It
             stays editable while live; changes apply to the next stream. */}
         <DiscordSection sessionActive={isSessionActive} targets={streaming.targets} />
+        {/* Plan 226: viewers type !name and Videorc answers as you. Free, and
+            editable while live: a change answers the next !name. */}
+        <Suspense fallback={null}>
+          <ChatCommandsSection />
+        </Suspense>
       </div>
 
       <GoLivePanel onOpenDestination={openDestination} />

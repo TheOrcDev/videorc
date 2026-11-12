@@ -5,6 +5,7 @@ import type { DiagnosticStats, StreamTargetRuntime } from '@/lib/backend'
 import {
   RECORDING_AT_RISK_ADVICE,
   cameraCheck,
+  cameraLowFrameRateAdvice,
   cameraNoVideoAdvice,
   checkNeedsAttention,
   destinationsCheck,
@@ -145,6 +146,30 @@ describe('Health check words', () => {
     })
     expect(verdict.title).toBe('1 thing needs attention: Camera')
     expect(verdict.description).toContain("MacBook Pro Camera isn't sending video.")
+  })
+
+  it('names a live camera held under its rate (issue #1271)', () => {
+    const live = { state: 'live' as const }
+    const low = { fps: 15.08, expectedFps: 30 }
+    expect(cameraCheck(live, low)).toEqual({ value: '15 of 30 fps', tone: 'warn' })
+    expect(cameraCheck(live, null)).toEqual(previewSourceCheck('live'))
+    // No video outranks slow, and a camera that isn't live isn't slow.
+    expect(cameraCheck({ state: 'live', noVideo: true }, low)).toEqual({
+      value: 'No video',
+      tone: 'warn'
+    })
+    expect(cameraCheck({ state: 'starting' }, low)).toEqual(previewSourceCheck('starting'))
+    expect(cameraLowFrameRateAdvice(live, low, 'Microsoft LifeCam HD-3000')).toBe(
+      'Microsoft LifeCam HD-3000 is sending 15 of 30 fps. More light usually helps.'
+    )
+    expect(cameraLowFrameRateAdvice(live, null, 'Microsoft LifeCam HD-3000')).toBeNull()
+    expect(cameraLowFrameRateAdvice({ state: 'live', noVideo: true }, low, 'Cam')).toBeNull()
+    const verdict = healthVerdict({
+      checks: [{ id: 'camera', label: 'Camera', ...cameraCheck(live, low) }],
+      advice: cameraLowFrameRateAdvice(live, low, 'Microsoft LifeCam HD-3000')
+    })
+    expect(verdict.title).toBe('1 thing needs attention: Camera')
+    expect(verdict.description).toContain('is sending 15 of 30 fps.')
   })
 
   it('counts destinations in glossary words', () => {

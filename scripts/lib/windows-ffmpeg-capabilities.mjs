@@ -11,6 +11,7 @@
 // caller's job and only possible on a Windows host.
 
 import { CAMERA_LOOK_FFMPEG_FILTERS } from './camera-look-ffmpeg-filters.mjs'
+import { CHROMA_KEY_FFMPEG_FILTERS } from './chroma-key-ffmpeg-filters.mjs'
 import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
 
 /** Protocols every shipped Windows ffmpeg must expose. rtmps implies a TLS
@@ -24,11 +25,16 @@ export const REQUIRED_WINDOWS_FFMPEG_PROTOCOLS = ['rtmp', 'rtmps', 'tls']
  * reported with the optional set below rather than required. */
 export const REQUIRED_WINDOWS_FFMPEG_ENCODERS = ['h264_mf', 'aac', 'pcm_s16le']
 /** `afftdn` for Noise Cleanup, the trim/concat set Clean cut renders with
- * (plan 119 S13), and the full-range YUV lookup-table chain the legacy
- * recording path grades the camera look with (plan 213 I; never the GPL-only
- * `eq`). */
+ * (plan 119 S13), the full-range YUV lookup-table chain the legacy recording
+ * path grades the camera look with (plan 213 I; never the GPL-only `eq`), and
+ * the camera key chain with Hide edges (plan 227). */
 export const REQUIRED_WINDOWS_FFMPEG_FILTERS = [
-  ...new Set(['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS])
+  ...new Set([
+    'afftdn',
+    ...CLEAN_CUT_FFMPEG_FILTERS,
+    ...CAMERA_LOOK_FFMPEG_FILTERS,
+    ...CHROMA_KEY_FFMPEG_FILTERS
+  ])
 ]
 
 /** Encoders the app uses when present and lives without when absent: Intel

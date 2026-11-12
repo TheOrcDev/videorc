@@ -7,8 +7,8 @@
 // `renderChatOverlayCards` in `caption-overlay.ts`, beside the highlight
 // card's. Both load lazily, only once the box is switched on.
 //
-// Off by default: it shows every viewer's name. No avatars and no fade in
-// this version. A deleted or hidden message leaves the box on its next draw:
+// Off by default: it shows every viewer's name and picture. No fade in this
+// version. A deleted or hidden message leaves the box on its next draw:
 // the box is redrawn from chat as it is now, and a tombstone is never shown.
 
 import type {
@@ -123,19 +123,23 @@ export function chatOverlayMetrics(
   const paddingPx = Math.round(textFontPx * 0.7)
   const identityGapPx = Math.max(6, Math.round(textFontPx * 0.4))
   const iconPx = Math.max(YOUTUBE_MARK_MIN_PX, nameFontPx)
+  const lineHeightPx = Math.round(textFontPx * 1.3)
+  // The viewer's picture: a circle a little taller than the name and never
+  // taller than a text line, so the identity line keeps its height.
+  const avatarPx = Math.min(lineHeightPx, Math.round(nameFontPx * 1.15))
   const boxWidthPx = Math.max(0, Math.floor(Math.min(rectWidthPx, canvasWidth)))
   const maxTextWidthPx = boxWidthPx - paddingPx * 2
   return {
     nameFontPx,
     textFontPx,
-    lineHeightPx: Math.round(textFontPx * 1.3),
+    lineHeightPx,
     paddingPx,
-    avatarPx: 0,
+    avatarPx,
     identityGapPx,
     rowGapPx: Math.round(textFontPx * 0.15),
     radiusPx: Math.round(textFontPx * 0.6),
     maxTextWidthPx,
-    maxNameWidthPx: maxTextWidthPx - iconPx - identityGapPx,
+    maxNameWidthPx: maxTextWidthPx - iconPx - avatarPx - identityGapPx * 2,
     iconPx,
     messageGapPx: Math.round(textFontPx * 0.55),
     boxWidthPx
@@ -168,6 +172,10 @@ export interface ChatOverlayRowInput {
   fragments?: LiveChatMessage['fragments']
   /** What the painter draws before the name; absent is none. */
   icon?: ChatOverlayRowIcon
+  /** The viewer's picture (the platform's URL); absent paints `initials`. */
+  avatarUrl?: string
+  /** The monogram in the avatar circle when there is no picture. */
+  initials?: string
 }
 
 export interface ChatOverlayRowLayout {
@@ -177,6 +185,11 @@ export interface ChatOverlayRowLayout {
   name: string
   nameWidthPx: number
   iconWidthPx: number
+  /** Where the avatar circle starts, from the box's content edge: after the
+   * platform icon, right before the name. */
+  avatarXPx: number
+  avatarUrl?: string
+  initials: string
   /** Where the name starts, from the box's content edge. */
   nameXPx: number
   lines: HighlightLine[]
@@ -214,10 +227,11 @@ function fitName(
 
 /**
  * The box: one row per message, oldest at the top, each an identity line
- * (the platform icon, then the name) over the message's words and emotes (at
- * most three lines, the head kept, like the highlight card). The box is the
- * rect's width. When the rows are taller than the rect, the oldest leave
- * first; the newest always stays. Null when the rect has no room for text.
+ * (the platform icon, the viewer's avatar, then the name) over the message's
+ * words and emotes (at most three lines, the head kept, like the highlight
+ * card). The box is the rect's width. When the rows are taller than the rect,
+ * the oldest leave first; the newest always stays. Null when the rect has no
+ * room for text.
  */
 export function layoutChatOverlay(params: {
   rows: readonly ChatOverlayRowInput[]
@@ -230,11 +244,12 @@ export function layoutChatOverlay(params: {
 }): ChatOverlayLayout | null {
   const metrics = chatOverlayMetrics(params.canvasWidth, params.canvasHeight, params.rectWidthPx)
   if (metrics.maxTextWidthPx <= 0 || params.rows.length === 0) return null
-  const identityHeightPx = Math.max(metrics.lineHeightPx, metrics.iconPx)
+  const identityHeightPx = Math.max(metrics.lineHeightPx, metrics.iconPx, metrics.avatarPx)
   const measured = params.rows.map((row) => {
     const icon = row.icon ?? 'none'
     const iconWidthPx = chatOverlayIconWidthPx(metrics, row.platform, icon)
-    const nameXPx = iconWidthPx > 0 ? iconWidthPx + metrics.identityGapPx : 0
+    const avatarXPx = iconWidthPx > 0 ? iconWidthPx + metrics.identityGapPx : 0
+    const nameXPx = avatarXPx + metrics.avatarPx + metrics.identityGapPx
     const maxNameWidthPx = Math.max(1, metrics.maxTextWidthPx - nameXPx)
     const author = row.authorName.trim() || 'Viewer'
     const name = fitName(author, metrics.nameFontPx, maxNameWidthPx, params.measure)
@@ -257,6 +272,9 @@ export function layoutChatOverlay(params: {
         maxNameWidthPx
       ),
       iconWidthPx,
+      avatarXPx,
+      ...(row.avatarUrl ? { avatarUrl: row.avatarUrl } : {}),
+      initials: row.initials?.trim() || '?',
       nameXPx,
       lines,
       heightPx,

@@ -14,6 +14,50 @@ import {
 } from './backend-rpc-contract'
 import { roleCanInvokeChannel } from './renderer-security-policy'
 
+describe('`!name` in the composer (plan 226 D9)', () => {
+  const summary = {
+    commands: [
+      { name: 'faq', description: 'most asked question' },
+      { name: 'go', description: "why I'm learning Go" }
+    ],
+    listEnabled: true
+  }
+
+  it('posts a known command exactly, in any case, and the built-in list while it answers', () => {
+    for (const draft of ['!go', ' !GO ', '!Go']) {
+      expect(classifyComposerDraft(draft, [], [], summary), draft).toEqual({
+        kind: 'chatCommand',
+        name: 'go'
+      })
+    }
+    expect(classifyComposerDraft('!commands', [], [], summary)).toEqual({
+      kind: 'chatCommand',
+      name: 'commands'
+    })
+    // Off, or with nothing to list, `!commands` is ordinary chat.
+    expect(classifyComposerDraft('!commands', [], [], { ...summary, listEnabled: false })).toEqual({
+      kind: 'chat',
+      text: '!commands'
+    })
+    expect(classifyComposerDraft('!commands', [], [], { commands: [], listEnabled: true })).toEqual(
+      { kind: 'chat', text: '!commands' }
+    )
+  })
+
+  it('sends !!name as the literal !name, and anything else with ! as typed', () => {
+    expect(classifyComposerDraft('!!go', [], [], summary)).toEqual({ kind: 'chat', text: '!go' })
+    expect(classifyComposerDraft('!!GO', [], [], summary)).toEqual({ kind: 'chat', text: '!GO' })
+    for (const draft of ['!nope', '!go and more words', '!!nope', '!golang', '!', 'I love !go']) {
+      expect(classifyComposerDraft(draft, [], [], summary), draft).toEqual({
+        kind: 'chat',
+        text: draft
+      })
+    }
+    // Before Studio has pushed the commands, `!go` is ordinary chat.
+    expect(classifyComposerDraft('!go')).toEqual({ kind: 'chat', text: '!go' })
+  })
+})
+
 describe('the /clip command (plan 199 D6)', () => {
   it('saves 30 s by default, the minute with 60, and names the lengths for anything else', () => {
     for (const draft of ['/clip', ' /CLIP ', '/clip 30', '/Clip   30 ']) {

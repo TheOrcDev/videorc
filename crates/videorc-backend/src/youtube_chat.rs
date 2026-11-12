@@ -914,6 +914,7 @@ fn normalize_item(
         first_message: false,
         first_in_session: false,
         arrival: None,
+        author_handle: None,
         author_affiliation: None,
         author_verified: None,
     })

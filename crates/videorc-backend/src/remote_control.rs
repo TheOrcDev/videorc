@@ -68,6 +68,12 @@ pub enum RemoteIntent {
     SystemAudioOn,
     SystemAudioOff,
     SystemAudioToggle,
+    /// Buddy Live on/off, the Stream Deck's Buddy key. The renderer runs it
+    /// through `set_buddy`'s save and gates (Premium and the Cloud AI
+    /// consent to turn on; off always passes).
+    BuddyLiveOn,
+    BuddyLiveOff,
+    BuddyLiveToggle,
     #[serde(rename_all = "camelCase")]
     SceneApply {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +164,7 @@ impl RemoteIntent {
             Self::StreamStart | Self::StreamStop => "stream",
             Self::MicMute | Self::MicUnmute | Self::MicToggle => "mic",
             Self::SystemAudioOn | Self::SystemAudioOff | Self::SystemAudioToggle => "system-audio",
+            Self::BuddyLiveOn | Self::BuddyLiveOff | Self::BuddyLiveToggle => "buddy",
             Self::SceneApply { .. } => "scene",
             Self::TakeoverShow { .. } | Self::TakeoverHide => "takeover",
             // A banner key and a takeover key are two keys: a "Be right back"
@@ -496,6 +503,45 @@ mod tests {
             RemoteIntent::MicToggle.debounce_kind()
         );
         assert!(serde_json::from_str::<RemoteIntent>(r#"{"kind":"systemAudioMute"}"#).is_err());
+    }
+
+    #[test]
+    fn buddy_live_intents_use_their_wire_tags_and_one_bucket() {
+        for (wire, intent) in [
+            ("buddyLiveOn", RemoteIntent::BuddyLiveOn),
+            ("buddyLiveOff", RemoteIntent::BuddyLiveOff),
+            ("buddyLiveToggle", RemoteIntent::BuddyLiveToggle),
+        ] {
+            let parsed: RemoteIntent =
+                serde_json::from_str(&format!(r#"{{"kind":"{wire}"}}"#)).unwrap();
+            assert_eq!(parsed, intent);
+            assert!(parsed.validate().is_ok());
+            assert_eq!(parsed.debounce_kind(), "buddy");
+            assert_eq!(
+                serde_json::to_value(&parsed).unwrap(),
+                serde_json::json!({ "kind": wire })
+            );
+        }
+        // A bouncing Buddy key cannot interleave the explicit forms with the
+        // toggle, and the mic key beside it still passes.
+        let mut runtime = RemoteControlRuntime::default();
+        let start = Instant::now();
+        assert!(
+            runtime
+                .admit_intent(&RemoteIntent::BuddyLiveToggle, start)
+                .accepted
+        );
+        let soon = start + Duration::from_millis(50);
+        assert!(
+            !runtime
+                .admit_intent(&RemoteIntent::BuddyLiveOn, soon)
+                .accepted
+        );
+        assert!(
+            runtime
+                .admit_intent(&RemoteIntent::MicToggle, soon)
+                .accepted
+        );
     }
 
     #[test]

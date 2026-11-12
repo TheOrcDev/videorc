@@ -1396,6 +1396,7 @@ mod tests {
             first_message: false,
             first_in_session: false,
             arrival: None,
+            author_handle: None,
         }
     }
 

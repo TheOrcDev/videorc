@@ -19,6 +19,7 @@ import {
   highlightEmoteUrls,
   highlightTokens,
   layoutCommentHighlightTokens,
+  truncateHighlightWord,
   wrapHighlightTokens,
   type HighlightEmoteSizer,
   type HighlightLine
@@ -231,6 +232,44 @@ describe('wrapHighlightTokens', () => {
     expect(emoteLines[2]!.widthPx).toBeLessThanOrEqual(metrics.maxTextWidthPx)
   })
 
+  it('cuts a link wider than the line with an ellipsis instead of squeezing it', () => {
+    const link = `https://ramx.in/blog/how-to-be-me-learn-build-and-crush-it?${'ref=stream&'.repeat(20)}`
+    const lines = wrapHighlightTokens(
+      highlightTokens(`read ${link} now`, undefined),
+      metrics,
+      measure,
+      none
+    )
+    expect(lines.map(lineText)[0]).toBe('read')
+    const cut = lines[1]!.items[0]!
+    expect(cut.kind).toBe('word')
+    if (cut.kind !== 'word') return
+    // The head of the link stays, readable at full glyph width, with one ellipsis.
+    expect(cut.text.startsWith('https://ramx.in/blog/')).toBe(true)
+    expect(cut.text.endsWith('…')).toBe(true)
+    expect(cut.text.endsWith('……')).toBe(false)
+    expect(cut.widthPx).toBe(measure(cut.text, metrics.textFontPx))
+    expect(lineText(lines[2]!)).toBe('now')
+    for (const line of lines) expect(line.widthPx).toBeLessThanOrEqual(metrics.maxTextWidthPx)
+  })
+
+  it('cuts a lone over-wide word on the last line to fit with one ellipsis', () => {
+    const link = `https://example.com/${'a'.repeat(400)}`
+    const lines = wrapHighlightTokens(
+      highlightTokens(`${link} ${link} ${link} ${link}`, undefined),
+      metrics,
+      measure,
+      none
+    )
+    expect(lines).toHaveLength(HIGHLIGHT_MAX_TEXT_LINES)
+    for (const line of lines) {
+      expect(line.items).toHaveLength(1)
+      expect(line.widthPx).toBeLessThanOrEqual(metrics.maxTextWidthPx)
+      const item = line.items[0]!
+      expect(item.kind === 'word' && /[^…]…$/.test(item.text)).toBe(true)
+    }
+  })
+
   it('draws an emote whose image failed as its name', () => {
     const lines = wrapHighlightTokens(
       highlightTokens('', [text('gg '), emote('Kappa')]),
@@ -345,5 +384,24 @@ describe('highlightEmoteImageUrl', () => {
     ]) {
       expect(highlightEmoteImageUrl(untouched)).toBe(untouched)
     }
+  })
+})
+
+describe('truncateHighlightWord', () => {
+  const measureText = (value: string): number => Array.from(value).length * 10
+
+  it('leaves a word that fits alone', () => {
+    expect(truncateHighlightWord('hello', 50, measureText)).toEqual({ text: 'hello', widthPx: 50 })
+  })
+
+  it('keeps the longest head that fits with its ellipsis', () => {
+    expect(truncateHighlightWord('abcdefghij', 60, measureText)).toEqual({
+      text: 'abcde…',
+      widthPx: 60
+    })
+    // An ellipsis already there is not doubled.
+    expect(truncateHighlightWord('abcdefghij…', 60, measureText).text).toBe('abcde…')
+    // Never less than one character.
+    expect(truncateHighlightWord('abcdefghij', 5, measureText).text).toBe('a…')
   })
 })
