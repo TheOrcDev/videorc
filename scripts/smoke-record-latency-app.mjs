@@ -609,6 +609,11 @@ try {
     )
   }
   log(`report written to ${reportPath}`)
+  if (enforce && microphoneRoute?.workerFallbacks > 0) {
+    fail(
+      `--enforce gates the packaged app's start, but ${microphoneRoute.workerFallbacks} session start(s) fell back from the capture worker to DirectShow`
+    )
+  }
   log(`budgets: ${budgets.calibratedFrom}`)
   if (!verdict.pass) {
     for (const failure of verdict.failures) log(`budget: ${failure}`)

@@ -60,8 +60,15 @@ export function workerFallbackCount(events) {
   ).length
 }
 
-/** One line for the smoke log, naming what the run measured. */
+/**
+ * One line for the smoke log, naming what the run measured. Pass
+ * `workerFallbacks` once the run is over: a present worker that failed to
+ * start fell back to DirectShow for those sessions.
+ */
 export function describeWindowsMicrophoneRoute(route) {
+  if (route.route === 'capture-worker' && route.workerFallbacks > 0) {
+    return `microphone route: capture worker present (${route.worker}), but ${route.workerFallbacks} session start(s) FELL BACK to FFmpeg DirectShow (${WINDOWS_WORKER_FALLBACK_HEALTH_CODE}), so this run did not measure only the packaged app's path`
+  }
   if (route.route === 'capture-worker') {
     return `microphone route: capture worker (${route.worker}), the packaged app's path`
   }

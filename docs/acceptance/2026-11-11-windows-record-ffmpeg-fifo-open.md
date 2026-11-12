@@ -190,8 +190,9 @@ That is outside this task.
 - `scripts/smoke-record-latency-app.mjs` on Windows prints the route before
   launching, writes `microphoneRoute` (route, paths, per-run worker fallbacks)
   into the report, and with `--enforce` refuses the DirectShow route as
-  BLOCKED rather than gating the shipped budgets on it. Report-only runs still
-  run on either route, with the warning.
+  BLOCKED rather than gating the shipped budgets on it. An enforced run whose
+  present worker still fell back at runtime fails after writing its report.
+  Report-only runs still run on either route, with the warning.
 - `docs/windows-dev-loop.md`, "Record latency on Windows": how to put the worker
   beside the dev app's FFmpeg (build it, or junction the installed app's bundle)
   before measuring.

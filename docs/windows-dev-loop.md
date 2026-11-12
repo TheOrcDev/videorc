@@ -171,11 +171,15 @@ without `vendor/ffmpeg/windows-x64/bin/ffmpeg.exe` runs `ffmpeg` from PATH and
 always takes the fallback.
 
 So before measuring Record latency, put the worker beside the dev app's FFmpeg.
-Either build it (`pnpm ffmpeg:build:capture:windows`, MSYS2 UCRT64) or link the
-installed app's bundle into the worktree:
+Either build it (`pnpm ffmpeg:build:capture:windows`, MSYS2 UCRT64), which
+writes it into the fetched `vendor\ffmpeg\windows-x64\bin`, or link the
+installed app's bundle into the worktree. `mklink /J` fails when that `bin`
+folder already exists (for example after `pnpm ffmpeg:fetch:windows`), so the
+commands below move a fetched one aside first:
 
 ```powershell
 New-Item -ItemType Directory -Force vendor\ffmpeg\windows-x64 | Out-Null
+if (Test-Path vendor\ffmpeg\windows-x64\bin) { Rename-Item vendor\ffmpeg\windows-x64\bin bin.fetched }
 cmd /c mklink /J vendor\ffmpeg\windows-x64\bin "$env:LOCALAPPDATA\Programs\Videorc\resources\ffmpeg\bin"
 $env:VIDEORC_DEV_BACKEND_PROFILE = 'release'
 $env:VIDEORC_SMOKE_FFMPEG_PATH = "$PWD\vendor\ffmpeg\windows-x64\bin\ffmpeg.exe"
@@ -184,7 +188,9 @@ node scripts/smoke-record-latency-app.mjs --cycles 10
 
 The smoke prints the route it measures first (`microphone route: capture
 worker …` or `… DirectShow FALLBACK …`) and records it as `microphoneRoute` in
-its report. `--enforce` refuses the fallback as BLOCKED. Keep the display awake
+its report. `--enforce` refuses the fallback as BLOCKED before launch, and
+fails a run in which a present worker still fell back at runtime
+(`microphoneRoute.workerFallbacks` above 0). Keep the display awake
 for the whole run: with the display off, Desktop Duplication is refused and
 the first Clips session never starts.
 

@@ -54,3 +54,13 @@ test('worker fallbacks are counted from health events only', () => {
   ]
   assert.equal(workerFallbackCount(events), 2)
 })
+
+test('a present worker that fell back at runtime is named as a fallback', () => {
+  const route = windowsDevMicrophoneRoute(ROOT, {
+    exists: existing(`${BIN}\\ffmpeg.exe`, `${BIN}\\ffmpeg-capture.exe`)
+  })
+  assert.doesNotMatch(describeWindowsMicrophoneRoute({ ...route, workerFallbacks: 0 }), /FELL BACK/)
+  const line = describeWindowsMicrophoneRoute({ ...route, workerFallbacks: 2 })
+  assert.match(line, /2 session start\(s\) FELL BACK to FFmpeg DirectShow/)
+  assert.doesNotMatch(line, /, the packaged app's path$/)
+})
