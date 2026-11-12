@@ -6,6 +6,7 @@ import type {
   StreamManagerScreen,
   StreamManagerScreenOption,
   StreamManagerScreenRefusal,
+  StreamManagerScreenMoves,
   StreamManagerScreenRequest
 } from '../shared/backend'
 
@@ -42,7 +43,8 @@ const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$/
 /** Q14: where a tap to the Monitor screen hands the focus while the Stream
  * Manager has it: the last app the streamer used that is not Videorc on
  * macOS (activated by pid and bundle id), the window behind on Windows
- * (`blur`), nothing on Linux. */
+ * (`blur`, past Videorc's own windows: `handFocusPastOwnWindows`), nothing
+ * on Linux. */
 export function focusReturnTarget(
   platform: string,
   lastOther: { bundleId?: string | null; pid: number } | null,
@@ -56,17 +58,174 @@ export function focusReturnTarget(
   return { kind: 'app', bundleId: lastOther.bundleId, pid: lastOther.pid }
 }
 
-/** Q13 and Q14 together: only a tap that sends a focused Stream Manager to
- * the Monitor screen hands the focus on. */
+/** Q13 and Q14 together: only a tap that sends the Stream Manager to the
+ * Monitor screen hands the focus on, and only when the window has the focus
+ * or may take it on the way: a minimized window is restored, and on macOS
+ * `restore()` activates Videorc. */
 export function focusAfterSwap(swap: {
   to: StreamManagerScreen
   focused: boolean
+  minimized?: boolean
   platform: string
   lastOther: { bundleId?: string | null; pid: number } | null
   selfBundleIds: readonly string[]
 }): FocusReturn {
-  if (swap.to !== 'monitor' || !swap.focused) return null
+  if (swap.to !== 'monitor' || !(swap.focused || swap.minimized)) return null
   return focusReturnTarget(swap.platform, swap.lastOther, swap.selfBundleIds)
+}
+
+export interface ShowableWindow {
+  isMinimized(): boolean
+  restore(): void
+  show(): void
+  focus(): void
+  showInactive(): void
+}
+
+/** Shows an open Stream Manager, with or without the focus. Without it, a
+ * minimized window on Windows comes back through `showInactive()`
+ * (`SW_SHOWNOACTIVATE`), since `restore()` activates it there. macOS and
+ * Linux still need `restore()` to bring a window out of the Dock or the
+ * panel; on macOS `runStreamManagerScreenSwap` hands the focus back after. */
+export function showStreamManagerWindow(
+  window: ShowableWindow,
+  focus: boolean,
+  platform: string
+): void {
+  if (window.isMinimized() && (focus || platform !== 'win32')) {
+    window.restore()
+  }
+  if (focus) {
+    window.show()
+    window.focus()
+  } else {
+    window.showInactive()
+  }
+}
+
+export type StreamManagerMoveResult = 'moved' | 'not-moved' | 'screen-missing'
+
+/** A tap's steps in order (plan 230), with main's window calls injected so
+ * the focus rules are tested end to end. */
+export async function runStreamManagerScreenSwap(io: {
+  plan: { screen: StreamManagerScreen; screenId: string }
+  platform: string
+  window: () => { isFocused(): boolean; isMinimized(): boolean } | null
+  /** Videorc's focused window (the Studio, the preview), if any. */
+  focusedOwnWindow: () => { focus(): void } | null
+  lastOther: { bundleId?: string | null; pid: number } | null
+  selfBundleIds: readonly string[]
+  placeMinimized: (screenId: string) => void
+  open: (options: { focus: boolean; screenId: string }) => Promise<unknown>
+  move: (screenId: string) => StreamManagerMoveResult
+  giveFocusBack: (target: Exclude<FocusReturn, null>) => unknown
+  warn: (message: string) => void
+}): Promise<
+  { ok: true; screen: StreamManagerScreen } | { ok: false; reason: 'not-moved' | 'screen-missing' }
+> {
+  const { plan } = io
+  const before = io.window()
+  const focused = Boolean(before?.isFocused())
+  const minimized = Boolean(before?.isMinimized())
+  // The streamer works in another Videorc window: a restore that takes the
+  // focus gives it back to that window, not to the app used before Videorc.
+  const ownBefore = focused || !minimized ? null : io.focusedOwnWindow()
+  // Worked out before anything moves: the restore below may take the focus.
+  const giveBack = focusAfterSwap({
+    to: plan.screen,
+    focused,
+    minimized: minimized && !ownBefore,
+    platform: io.platform,
+    lastOther: io.lastOther,
+    selfBundleIds: io.selfBundleIds
+  })
+  if (plan.screen === 'monitor' && focused && !giveBack && io.platform !== 'linux') {
+    io.warn('[stream-manager] no app to hand the focus to; it stays on the window')
+  }
+  // D3: a minimized window restores where it already is, so it goes to its
+  // screen first; otherwise viewers would see it on the old one.
+  io.placeMinimized(plan.screenId)
+  await io.open({ focus: FOCUS_ON_ARRIVAL[plan.screen], screenId: plan.screenId })
+  const moved = io.move(plan.screenId)
+  if (moved !== 'moved') {
+    return { ok: false, reason: moved }
+  }
+  // A window that never had the focus and did not take it keeps its hands
+  // off: a `blur()` on Windows would push the focus down the z-order. On
+  // macOS the activation after a restore can land late, so a minimized
+  // window always hands it back to the app the streamer used last.
+  if (giveBack && (focused || giveBack.kind === 'app' || io.window()?.isFocused())) {
+    await io.giveFocusBack(giveBack)
+  } else if (ownBefore && plan.screen === 'monitor' && io.window()?.isFocused()) {
+    ownBefore.focus()
+  }
+  return { ok: true, screen: plan.screen }
+}
+
+/** Q14 on Windows: `blur()` activates the next visible window in the
+ * z-order, which can be Videorc's own main or preview window rather than
+ * the app the streamer presents from. Windows lets no app read or pick that
+ * app, so each Videorc window that ends up with the focus is blurred in
+ * turn until the focus leaves Videorc. `maxSteps` bounds it (one per
+ * Videorc window). True when the focus left Videorc. */
+export async function handFocusPastOwnWindows(io: {
+  first: { blur(): void }
+  focusedOwnWindow: () => { blur(): void } | null
+  settle: () => Promise<void>
+  maxSteps: number
+}): Promise<boolean> {
+  io.first.blur()
+  for (let step = 0; step < io.maxSteps; step += 1) {
+    await io.settle()
+    const focused = io.focusedOwnWindow()
+    if (!focused) return true
+    focused.blur()
+  }
+  await io.settle()
+  return io.focusedOwnWindow() === null
+}
+
+/** Windows across displays with different scale factors: one `setBounds`
+ * can land the right spot with the size scaled by the old display's DPI,
+ * so a frame that came out different is set once more on the new display. */
+export function setBoundsExactly(
+  window: { setBounds(frame: Rect): void; getBounds(): Rect },
+  frame: Rect
+): boolean {
+  window.setBounds(frame)
+  if (sameRect(window.getBounds(), frame)) return true
+  window.setBounds(frame)
+  return sameRect(window.getBounds(), frame)
+}
+
+function sameRect(a: Rect, b: Rect): boolean {
+  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
+}
+
+/** Wayland gives no app a say in where its window goes: `setBounds` keeps
+ * the size and drops the position. The key's tap is X11, macOS and Windows
+ * only; a hold still works. `ozonePlatform` is Electron's resolved
+ * `ozone-platform` switch, the same test the global shortcuts use. */
+export function streamManagerScreenMoves(input: {
+  platform: string
+  ozonePlatform: string
+}): StreamManagerScreenMoves {
+  return input.platform === 'linux' && input.ozonePlatform.trim().toLowerCase() === 'wayland'
+    ? 'wayland'
+    : 'supported'
+}
+
+/** D4 after a display change: frames stay held until the streamer places
+ * the window by hand (`will-move`/`will-resize`). Linux sends neither, so
+ * there the hold ends with its time window instead of lasting for good. */
+export function framesHeldBySystem(input: {
+  platform: string
+  placedBySystem: boolean
+  now: number
+  heldUntil: number
+}): boolean {
+  if (!input.placedBySystem) return false
+  return !(input.platform === 'linux' && input.now >= input.heldUntil)
 }
 
 export type StreamManagerScreenPlan =

@@ -2,6 +2,7 @@ import type {
   CommentsWindowState,
   DeviceStatus,
   LayoutPreset,
+  StreamManagerScreenMoves,
   StreamManagerScreenOption
 } from '@/lib/backend'
 import { layoutPresetLabel } from '@/lib/layout-labels'
@@ -72,6 +73,9 @@ export interface RemoteSurfaceDescribe {
   windows: readonly string[]
   /** Plan 230 D5: the screens the Stream Manager Screen key can pick, as `{id, name}`. */
   screens: StreamManagerScreenOption[]
+  /** Plan 230: `wayland` when the key's tap cannot move the window (the key
+   * says "Not on Wayland" instead of failing on every tap). */
+  screenMoves: StreamManagerScreenMoves
 }
 
 /** One sound as the remotes see it (plan 189 S10). */
@@ -130,6 +134,7 @@ export type RemoteSurfaceValues = readonly [
     | 'screenId'
     | 'visible'
     | 'screens'
+    | 'screenMoves'
     | 'hiddenFromStream'
     | 'hideFromStreamMethod'
     | 'protected'
@@ -171,7 +176,8 @@ function snapshotFromValues(
       banners: bannerSummaries(values[14]),
       sounds,
       windows: ['notes', 'comments', 'preview'],
-      screens: (values[19]?.screens ?? []).map(({ id, name }) => ({ id, name }))
+      screens: (values[19]?.screens ?? []).map(({ id, name }) => ({ id, name })),
+      screenMoves: values[19]?.screenMoves === 'wayland' ? 'wayland' : 'supported'
     }
   }
 }

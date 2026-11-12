@@ -18,6 +18,7 @@ const SCREEN_REFUSAL_COPY: Record<StreamManagerScreenRefusal, string> = {
   'same-screen': REMOTE_INTENT_COPY.screensSame,
   'screen-missing': REMOTE_INTENT_COPY.screenMissing,
   'not-moved': REMOTE_INTENT_COPY.streamManagerNotMoved,
+  wayland: REMOTE_INTENT_COPY.streamManagerWayland,
   unavailable: REMOTE_INTENT_COPY.windowMissing
 }
 

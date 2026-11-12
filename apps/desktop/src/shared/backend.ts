@@ -5264,10 +5264,15 @@ export interface StreamManagerScreenRequest {
 
 export type StreamManagerScreen = 'presenting' | 'monitor'
 
+/** Whether the key's tap can move the window: Wayland gives no app a say in
+ * where its window goes, so there only the hold works. */
+export type StreamManagerScreenMoves = 'supported' | 'wayland'
+
 export type StreamManagerScreenRefusal =
   | 'same-screen'
   | 'screen-missing'
   | 'not-moved'
+  | 'wayland'
   | 'unavailable'
 
 /** A hold of the same key: what main did with the Stream Manager. */
@@ -5293,6 +5298,8 @@ export interface CommentsWindowState {
    * sits on, and every screen it can move to. */
   screenId: string | null
   screens: StreamManagerScreenOption[]
+  /** Absent from builds before the Wayland check: moves work. */
+  screenMoves?: StreamManagerScreenMoves
   /** Where highlighted messages land on the stream. Owned by main so a
    * highlight fired with the window closed (shortcut, deck, co-host) still
    * honours the streamer's pick. */

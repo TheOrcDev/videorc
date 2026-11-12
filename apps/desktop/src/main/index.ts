@@ -542,14 +542,18 @@ import {
   commentsWindowHiddenFromStreamPreference
 } from './comments-window-prefs'
 import {
-  FOCUS_ON_ARRIVAL,
-  focusAfterSwap,
   frameOnScreen,
+  framesHeldBySystem,
   type FocusReturn,
+  handFocusPastOwnWindows,
   planStreamManagerScreenSwap,
+  runStreamManagerScreenSwap,
   screenFrames,
   screenOptions,
-  streamManagerHoldAction
+  setBoundsExactly,
+  showStreamManagerWindow,
+  streamManagerHoldAction,
+  streamManagerScreenMoves
 } from './stream-manager-screen'
 import {
   assessProofPresentationWatch,
@@ -815,6 +819,12 @@ let mainWindow: BrowserWindow | null = null
 // every result, like runtime info, says why. Electron resolves the ozone
 // platform before this script runs.
 const globalShortcutsUnavailable = globalShortcutsUnavailableReason({
+  platform: process.platform,
+  ozonePlatform: app.commandLine.getSwitchValue('ozone-platform')
+})
+// The Stream Manager Screen key's tap (plan 230) cannot move a window on
+// Wayland; the key says so instead of failing on every tap.
+const commentsWindowScreenMoves = streamManagerScreenMoves({
   platform: process.platform,
   ozonePlatform: app.commandLine.getSwitchValue('ozone-platform')
 })
@@ -3931,6 +3941,7 @@ function commentsWindowState(message?: string): CommentsWindowState {
     hideFromStreamMethod: streamManagerHideMethod(process.platform),
     screenId: open ? String(screen.getDisplayMatching(window!.getBounds()).id) : null,
     screens: screenOptions(screen.getAllDisplays()),
+    screenMoves: commentsWindowScreenMoves,
     highlightAnchor: commentsHighlightAnchor(),
     autoShowActivity: commentsAutoShowActivity(),
     protected: open ? commentsWindowContentProtected : false,
@@ -4440,15 +4451,6 @@ interface CommentsWindowOpenOptions {
   screenId?: string
 }
 
-function showCommentsWindow(window: BrowserWindow, focus: boolean): void {
-  if (focus) {
-    window.show()
-    window.focus()
-  } else {
-    window.showInactive()
-  }
-}
-
 async function openCommentsWindow({
   focus = true,
   screenId
@@ -4458,10 +4460,9 @@ async function openCommentsWindow({
   }
   const existingWindow = commentsWindow
   if (commentsWindowIsOpen() && existingWindow) {
-    if (existingWindow.isMinimized()) {
-      existingWindow.restore()
-    }
-    showCommentsWindow(existingWindow, focus)
+    // Without the focus, a minimized window must not take it on the way
+    // back (plan 230 Q14).
+    showStreamManagerWindow(existingWindow, focus, process.platform)
     emitCommentsWindowState()
     return commentsWindowState()
   }
@@ -4566,7 +4567,7 @@ async function openCommentsWindow({
     trustRendererDocument(window, pathToFileURL(commentsPath).toString())
     await window.loadFile(commentsPath)
   }
-  showCommentsWindow(window, focus)
+  showStreamManagerWindow(window, focus, process.platform)
   emitCommentsWindowState()
   return commentsWindowState()
 }
@@ -4598,27 +4599,26 @@ async function swapCommentsWindowScreen(
   if (plan.kind === 'refuse') {
     return { ok: false, reason: plan.reason }
   }
-  const focused = Boolean(commentsWindow?.isFocused())
-  const giveBack = focusAfterSwap({
-    to: plan.screen,
-    focused,
+  // Wayland drops the position of every move, so the tap does nothing there
+  // (the key's title already says so); a hold still brings the window up.
+  if (commentsWindowScreenMoves === 'wayland') {
+    return { ok: false, reason: 'wayland' }
+  }
+  const window = (): BrowserWindow | null =>
+    commentsWindowIsOpen() && commentsWindow ? commentsWindow : null
+  return runStreamManagerScreenSwap({
+    plan,
     platform: process.platform,
+    window,
+    focusedOwnWindow: () => BrowserWindow.getFocusedWindow(),
     lastOther: frontAppMonitor?.lastOtherApp() ?? null,
-    selfBundleIds: frontAppMonitor?.selfBundleIds() ?? []
+    selfBundleIds: frontAppMonitor?.selfBundleIds() ?? [],
+    placeMinimized: placeMinimizedCommentsWindow,
+    open: (options) => openCommentsWindow(options),
+    move: moveCommentsWindowToScreen,
+    giveFocusBack,
+    warn: (message) => safeConsole.warn(message)
   })
-  if (plan.screen === 'monitor' && focused && !giveBack && process.platform !== 'linux') {
-    safeConsole.warn('[stream-manager] no app to hand the focus to; it stays on the window')
-  }
-  // D3: a minimized window restores where it already is, so it goes to its
-  // screen first; otherwise viewers would see it on the old one.
-  placeMinimizedCommentsWindow(plan.screenId)
-  await openCommentsWindow({ focus: FOCUS_ON_ARRIVAL[plan.screen], screenId: plan.screenId })
-  const moved = moveCommentsWindowToScreen(plan.screenId)
-  if (moved !== 'moved') {
-    return { ok: false, reason: moved }
-  }
-  giveFocusBack(giveBack)
-  return { ok: true, screen: plan.screen }
 }
 
 function placeMinimizedCommentsWindow(screenId: string): void {
@@ -4637,13 +4637,24 @@ function placeMinimizedCommentsWindow(screenId: string): void {
   }
 }
 
-function giveFocusBack(target: FocusReturn): void {
+const FOCUS_SETTLE_MS = 50
+
+async function giveFocusBack(target: FocusReturn): Promise<void> {
   if (target?.kind === 'app') {
     if (!frontAppMonitor?.activateApp(target.pid, target.bundleId)) {
       safeConsole.warn(`[stream-manager] could not hand the focus to ${target.bundleId}`)
     }
-  } else if (target?.kind === 'behind' && commentsWindowIsOpen()) {
-    commentsWindow?.blur()
+  } else if (target?.kind === 'behind' && commentsWindowIsOpen() && commentsWindow) {
+    // Windows: the window behind may be Videorc's own; blur past those.
+    const left = await handFocusPastOwnWindows({
+      first: commentsWindow,
+      focusedOwnWindow: () => BrowserWindow.getFocusedWindow(),
+      settle: () => new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS)),
+      maxSteps: BrowserWindow.getAllWindows().length
+    })
+    if (!left) {
+      safeConsole.warn('[stream-manager] the focus stayed on a Videorc window')
+    }
   }
 }
 
@@ -4690,8 +4701,8 @@ const SCREEN_FRAME_SETTLE_MS = 400
 // spot is not the streamer's choice. Saves wait for the screens to settle,
 // and none is kept until the streamer places the window by hand
 // (`will-move`/`will-resize`, macOS and Windows) or the key moves it. Linux
-// sends neither event, so there the next settled move counts as the
-// streamer's.
+// sends neither event, so there the hold ends with its time window
+// (`framesHeldBySystem`) and the next settled move counts as the streamer's.
 const SCREEN_FRAME_DISPLAY_CHANGE_HOLD_MS = 2000
 let queuedScreenFrame: ReturnType<typeof setTimeout> | null = null
 let screenFramesHeldUntil = 0
@@ -4729,7 +4740,17 @@ function holdCommentsWindowScreenFrames(): void {
 
 function rememberCommentsWindowScreenFrame(frame: Electron.Rectangle): void {
   dropQueuedCommentsWindowScreenFrame()
-  if (commentsWindowPlacedBySystem) return
+  if (
+    framesHeldBySystem({
+      platform: process.platform,
+      placedBySystem: commentsWindowPlacedBySystem,
+      now: Date.now(),
+      heldUntil: screenFramesHeldUntil
+    })
+  ) {
+    return
+  }
+  commentsWindowPlacedBySystem = false
   const screenId = String(screen.getDisplayMatching(frame).id)
   const frames = screenFrames(loadCommentsWindowPrefs().screenFrames)
   saveCommentsWindowPrefs({ screenFrames: { ...frames, [screenId]: frame } })
@@ -4752,7 +4773,8 @@ function moveCommentsWindowToScreen(screenId: string): 'moved' | 'not-moved' | '
   if (!frame) {
     return 'screen-missing'
   }
-  window.setBounds(frame)
+  // A second set fixes the size Windows scales by the old display's DPI.
+  setBoundsExactly(window, frame)
   commentsWindowPlacedBySystem = false
   return onScreen() ? 'moved' : 'not-moved'
 }

@@ -571,6 +571,10 @@ describe('executeRemoteIntent', () => {
       ['screen-missing', "That screen isn't connected. Pick your screens again."],
       ['same-screen', 'Pick two different screens.'],
       ['not-moved', "The Stream Manager didn't move. Try again."],
+      [
+        'wayland',
+        "Wayland doesn't let Videorc move windows. Hold the key to bring the Stream Manager up."
+      ],
       ['unavailable', "That window isn't available."]
     ] as const
     for (const [reason, message] of cases) {
@@ -1195,7 +1199,7 @@ it('projects where the Stream Manager is and names the screens it can move to (p
     await vi.runAllTimersAsync()
     expect(requests.at(-1)).toMatchObject({
       state: { streamManager: { screenId: null, visible: false, hiddenFromStream: false } },
-      describe: { screens: [] }
+      describe: { screens: [], screenMoves: 'supported' }
     })
     publisher.syncValues([
       ...base,
@@ -1230,6 +1234,7 @@ it('projects where the Stream Manager is and names the screens it can move to (p
     ])
     expect(JSON.stringify(last)).not.toContain('bounds')
     expect(JSON.stringify(last)).not.toContain('windowId')
+    expect((last.describe as { screenMoves?: unknown }).screenMoves).toBe('supported')
     publisher.syncValues([
       ...base,
       {
@@ -1239,10 +1244,15 @@ it('projects where the Stream Manager is and names the screens it can move to (p
         hideFromStreamMethod: 'unsupported',
         protected: false,
         visible: true,
-        screens: []
+        screens: [],
+        screenMoves: 'wayland'
       }
     ] as unknown as RemoteSurfaceValues)
     await vi.runAllTimersAsync()
+    // Wayland: the key says a tap cannot move the window.
+    expect((requests.at(-1) as { describe: { screenMoves: unknown } }).describe.screenMoves).toBe(
+      'wayland'
+    )
     expect((requests.at(-1) as { state: { streamManager: unknown } }).state.streamManager).toEqual({
       screenId: '2',
       visible: true,
