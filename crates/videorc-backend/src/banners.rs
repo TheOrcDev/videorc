@@ -411,7 +411,7 @@ fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>> {
 pub(crate) struct NewBanner {
     pub id: String,
     pub name: String,
-    /// Plan 231: an image, or an HTML overlay (`html_overlay`).
+    /// Plan 232: an image, or an HTML overlay (`html_overlay`).
     pub kind: BannerKind,
     pub width: u32,
     pub height: u32,
@@ -561,7 +561,7 @@ pub(crate) fn delete_banner(database: &Database, id: &str, session_active: bool)
         &banner.thumbnail_file,
         BannerFileKind::Thumbnail,
     )?;
-    // Plan 231: an HTML overlay also owns its page folder.
+    // Plan 232: an HTML overlay also owns its page folder.
     let overlay_dir = match banner.kind {
         BannerKind::Html => crate::html_overlay::managed_html_overlay_dir(&root, &banner.id)?,
         BannerKind::Image => None,
@@ -1121,7 +1121,7 @@ pub(crate) fn show_banner_within_budget(
 ) -> Result<Banner> {
     let candidate = database.banner_by_id(id)?;
     if !candidate.shown {
-        // Plan 231 D9: an HTML overlay draws on the macOS compositor only,
+        // Plan 232 D9: an HTML overlay draws on the macOS compositor only,
         // and never on a session that composes elsewhere.
         let html = candidate.kind == BannerKind::Html;
         if html && !crate::html_overlay::html_overlays_supported() {
@@ -1147,7 +1147,7 @@ pub(crate) fn show_banner_within_budget(
 /// What the running session says to showing banner `id` now, for
 /// `show_banner`: `Some(false)` when it cannot draw it, `None` when nothing
 /// runs. An image follows `active_session_accepts_banners`; an HTML overlay
-/// (plan 231) needs a session the compositor composes.
+/// (plan 232) needs a session the compositor composes.
 pub(crate) async fn session_accepts_showing(state: &AppState, id: &str) -> Option<bool> {
     let html = state
         .database
@@ -1312,7 +1312,7 @@ pub(crate) async fn on_banners_changed(state: &AppState) -> Result<Vec<Banner>> 
     // Plan 186 S10: "Hide after" and "Show every" follow every change,
     // however it was made.
     state.banner_timer_wake.notify_one();
-    // Plan 231: and so do the HTML overlays main renders.
+    // Plan 232: and so do the HTML overlays main renders.
     state.html_overlays.wake();
     Ok(banners)
 }

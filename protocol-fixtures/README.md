@@ -96,7 +96,7 @@ compares them with the JSON field for field.
 
 ## `html-overlay-frame.json`
 
-The header of one HTML overlay frame record (plan 231 "Wire"): what Electron
+The header of one HTML overlay frame record (plan 232 "Wire"): what Electron
 main writes on its upload to the backend (`POST /html-overlays/frames`) before
 each frame's premultiplied BGRA pixels. Edited by hand. Main's encoder and the
 backend's parser must both reproduce every case byte for byte:

@@ -105,7 +105,7 @@ describe('banner import button', () => {
   })
 })
 
-describe('HTML banner import (plan 231)', () => {
+describe('HTML banner import (plan 232)', () => {
   it('has its own words, and only the running import says it is running', () => {
     expect(bannerImportLabel('idle', 'html')).toBe('Import HTML…')
     expect(bannerImportLabel('choosing', 'html')).toBe('Choosing HTML…')

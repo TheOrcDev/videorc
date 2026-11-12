@@ -553,7 +553,7 @@ export interface BackendRpcMethodMap {
   /** No `id` hides every banner. */
   'banners.hide': BackendRpcDefinition<BannerHideParams, Banner[]>
   // --- end banners (plan 186) ---
-  // --- HTML overlays (plan 231): a banner whose picture is a web page ---
+  // --- HTML overlays (plan 232): a banner whose picture is a web page ---
   'banners.importHtml': BackendRpcDefinition<BannerImportHtmlParams, Banner>
   /** What main renders now. Main reads it once on connect, then follows the event. */
   'htmlOverlays.targets.get': BackendRpcDefinition<undefined, HtmlOverlayTargets>
@@ -561,7 +561,7 @@ export interface BackendRpcMethodMap {
   'htmlOverlays.stats': BackendRpcDefinition<undefined, HtmlOverlayStats>
   /** Main only (the admin role): how a page it hosts stands. */
   'htmlOverlays.host.report': BackendRpcDefinition<HtmlOverlayHostReportParams, HtmlOverlayStatuses>
-  // --- end HTML overlays (plan 231) ---
+  // --- end HTML overlays (plan 232) ---
   // --- Soundboard (plan 189) ---
   // --- Hide screen (plan 210 S7) ---
   'screen.hide': BackendRpcDefinition<ScreenHideParams, ScreenPrivacy>
@@ -744,7 +744,7 @@ export interface BackendEventMap {
   // --- end overlay layout (plan 164) ---
   // --- Banners (plan 186): the full list, to every window ---
   'banners.changed': Banner[]
-  // --- HTML overlays (plan 231): what main renders, and where each stands ---
+  // --- HTML overlays (plan 232): what main renders, and where each stands ---
   'htmlOverlays.targets': HtmlOverlayTargets
   'htmlOverlays.status': HtmlOverlayStatuses
   // --- Soundboard (plan 189): the whole state and the playing voices, to every window ---
@@ -3733,7 +3733,7 @@ const bannerSchema = objectSchema(
   {
     id: bannerIdSchema,
     name: bannerNameSchema,
-    // Plan 231: only an HTML overlay carries a kind; an image omits it.
+    // Plan 232: only an HTML overlay carries a kind; an image omits it.
     kind: optionalSchema(literalSchema('html')),
     imageFile: bannerFileNameSchema,
     thumbnailFile: bannerFileNameSchema,
@@ -3790,7 +3790,7 @@ const bannerHideParamsSchema = objectSchema(
 ) as RuntimeSchema<BannerHideParams>
 // --- end banners (plan 186) ---
 
-// --- HTML overlays (plan 231) ---
+// --- HTML overlays (plan 232) ---
 // Exact, like banners: optional fields are omitted when absent, never `null`.
 const bannerImportHtmlParamsSchema = objectSchema(
   { sourceCapability: stringSchema({ minLength: 1, maxLength: 1024 }) },
@@ -3848,7 +3848,7 @@ const htmlOverlayHostReportParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<HtmlOverlayHostReportParams>
-// --- end HTML overlays (plan 231) ---
+// --- end HTML overlays (plan 232) ---
 
 // --- Soundboard (plan 189) ---
 // Exact: the pinned `sound` fixtures. Optional fields (`hotkey`, `starter`,
@@ -5808,7 +5808,7 @@ const runtimeContracts = {
   'banners.delete': { params: bannerIdParamsSchema, result: bannerListSchema },
   'banners.show': { params: bannerIdParamsSchema, result: bannerSchema },
   'banners.hide': { params: bannerHideParamsSchema, result: bannerListSchema },
-  // --- HTML overlays (plan 231) ---
+  // --- HTML overlays (plan 232) ---
   'banners.importHtml': { params: bannerImportHtmlParamsSchema, result: bannerSchema },
   'htmlOverlays.targets.get': { params: undefinedSchema, result: htmlOverlayTargetsSchema },
   'htmlOverlays.status.get': { params: undefinedSchema, result: htmlOverlayStatusesSchema },
@@ -5817,7 +5817,7 @@ const runtimeContracts = {
     params: htmlOverlayHostReportParamsSchema,
     result: htmlOverlayStatusesSchema
   },
-  // --- end HTML overlays (plan 231) ---
+  // --- end HTML overlays (plan 232) ---
   // --- end banners (plan 186) ---
   // --- Soundboard (plan 189) ---
   // --- Hide screen (plan 210 S7) ---

@@ -1,4 +1,4 @@
-// Plan 231 S6: an HTML overlay end to end through the dev app. Imports the
+// Plan 232 S6: an HTML overlay end to end through the dev app. Imports the
 // animated badge fixture as a folder (its page, stylesheet and script), then
 // in one session per mode (recording, streaming to local receivers horizontal
 // + vertical, both at once, which is the aux leg) puts a red takeover under
@@ -35,8 +35,8 @@ import {
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 if (process.platform !== 'darwin') {
-  // Plan 231 D9. Said, never silent.
-  console.log('HTML overlay smoke SKIP: HTML banners work on macOS only for now (plan 231 D9).')
+  // Plan 232 D9. Said, never silent.
+  console.log('HTML overlay smoke SKIP: HTML banners work on macOS only for now (plan 232 D9).')
   process.exit(0)
 }
 

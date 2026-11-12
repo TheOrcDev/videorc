@@ -1,4 +1,4 @@
-// Plan 231 fixture. Loaded from the overlay's own folder: block d only gets
+// Plan 232 fixture. Loaded from the overlay's own folder: block d only gets
 // a colour if this file and badge.css both arrived and the page runs.
 ;(function () {
   var blink = document.getElementById('blink')
@@ -16,7 +16,7 @@
   tick()
   setInterval(tick, 100)
 
-  // The network is off for overlays (plan 231 D5). Each of these must fail:
+  // The network is off for overlays (plan 232 D5). Each of these must fail:
   // if one ever gets an answer, block c stops being a hole and the smoke
   // fails. The port is the smoke's own listener, which must hear nothing.
   var probe = 'http://127.0.0.1:13977/html-overlay-network-probe'

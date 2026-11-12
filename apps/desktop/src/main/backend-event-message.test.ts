@@ -64,7 +64,7 @@ describe('main backend event trust boundary', () => {
   })
 })
 
-describe('the HTML overlay targets on the main socket (plan 231)', () => {
+describe('the HTML overlay targets on the main socket (plan 232)', () => {
   const target = {
     id: '0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6',
     pageWidth: 640,

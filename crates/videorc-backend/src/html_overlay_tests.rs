@@ -1,4 +1,4 @@
-//! Plan 231: the import, the frame wire, the frame store, the targets and
+//! Plan 232: the import, the frame wire, the frame store, the targets and
 //! the status of HTML overlays.
 
 use super::*;

@@ -1,4 +1,4 @@
-// HTML overlays (plan 231 "Transport"): the frames main sends the backend.
+// HTML overlays (plan 232 "Transport"): the frames main sends the backend.
 //
 // One long-lived chunked HTTP upload on loopback
 // (`POST /html-overlays/frames?token=<admin>`). Its body is frame records: a

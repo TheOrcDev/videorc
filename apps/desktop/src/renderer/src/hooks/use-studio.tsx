@@ -1926,9 +1926,9 @@ export type StudioBannersContextValue = {
   /** Videorc is reconnecting: every banner action waits for it. */
   bannersOffline: boolean
   bannerImportPhase: BannerImportPhase
-  /** Which import is running while the phase is not idle (plan 231). */
+  /** Which import is running while the phase is not idle (plan 232). */
   bannerImportKind: BannerImportKind
-  /** Where each showing HTML overlay stands (plan 231): loading, live, or why not. */
+  /** Where each showing HTML overlay stands (plan 232): loading, live, or why not. */
   htmlOverlayStatuses: readonly HtmlOverlayStatus[]
   /** The banner the Scene page selects (Assets → Place on Scene); null when none, or deleted. */
   selectedBannerId: string | null
@@ -1936,7 +1936,7 @@ export type StudioBannersContextValue = {
   /** Assets → Import image…: the picker, then `banners.importImage`, which shows the new banner
    * (plan 205 D3) unless four already show or a running session can't take one: then it
    * arrives hidden (with four showing, the Scene list's limit reason says why).
-   * `'html'` is Import HTML… (plan 231): an `.html` file or a folder with `index.html`. */
+   * `'html'` is Import HTML… (plan 232): an `.html` file or a folder with `index.html`. */
   importBanner: (kind?: BannerImportKind) => Promise<void>
   updateBanner: (id: string, patch: Omit<BannerUpdateParams, 'id'>) => Promise<Banner | null>
   /** Every banner id in the new Assets order (`bannerOrderAfterMove`). */
@@ -1957,7 +1957,7 @@ export type StudioCaptionsContextValue = {
 const NO_SCREENS: StreamScreen[] = []
 /** The banner list before it loads: one stable empty array. */
 const NO_BANNERS: Banner[] = []
-/** No HTML overlay shows (plan 231): one stable empty array. */
+/** No HTML overlay shows (plan 232): one stable empty array. */
 const NO_HTML_OVERLAY_STATUSES: readonly HtmlOverlayStatus[] = []
 /** What a failed takeover Show names, offline or busy (plan 195 S4). */
 const SHOW_TAKEOVER: UserErrorContext = { action: 'show', object: 'the takeover' }
@@ -4347,7 +4347,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const activeScreenEventRevision = useRef(0)
   const [bannerImportPhase, setBannerImportPhase] = useState<BannerImportPhase>('idle')
   const [bannerImportKind, setBannerImportKind] = useState<BannerImportKind>('image')
-  // Plan 231: where each showing HTML overlay stands. Empty until the
+  // Plan 232: where each showing HTML overlay stands. Empty until the
   // backend says otherwise, and empty again when the connection goes.
   const [htmlOverlayStatuses, setHtmlOverlayStatuses] =
     useState<readonly HtmlOverlayStatus[]>(NO_HTML_OVERLAY_STATUSES)
@@ -8487,7 +8487,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bannerListEventRevision.current += 1
         setBanners(payload)
       }),
-      // Plan 231: an HTML overlay that is loading, or cannot be drawn, says so.
+      // Plan 232: an HTML overlay that is loading, or cannot be drawn, says so.
       nextClient.on('htmlOverlays.status', (payload) => setHtmlOverlayStatuses(payload.overlays)),
       // Plan 189: the soundboard lives outside React (lib/soundboard-store).
       nextClient.on('sounds.changed', (payload) => soundboard.acceptBoard(payload)),
@@ -8901,7 +8901,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           },
           (error: unknown) => console.warn('[banners] list read failed:', error)
         )
-        // Plan 231: the same way, and as optional: an event that arrives
+        // Plan 232: the same way, and as optional: an event that arrives
         // first is newer than this read's answer only if it is not empty.
         void bootstrapRequest<HtmlOverlayStatuses>('htmlOverlays.status.get').then(
           (statuses) => {

@@ -28,7 +28,7 @@ const MAX_ACTIVE_RESOURCE_CAPABILITIES: usize = 1024;
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceCapabilityKind {
     InputFile,
-    /// Plan 231: a folder the streamer picked to import (an HTML overlay).
+    /// Plan 232: a folder the streamer picked to import (an HTML overlay).
     InputDirectory,
     OutputDirectory,
     OpenPath,

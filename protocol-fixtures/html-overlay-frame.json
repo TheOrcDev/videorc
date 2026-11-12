@@ -1,5 +1,5 @@
 {
-  "description": "Plan 231: the header of one HTML overlay frame record on Electron main's upload to the backend (POST /html-overlays/frames). Little endian: magic \"VHOF\", version 1, flags 0, reserved 0, the banner's UUID (16 bytes), width, height (u32), sequence (u64, a decimal string here). Width x height x 4 bytes of premultiplied BGRA follow. The Rust parser (html_overlay.rs) and the TypeScript encoder (main/html-overlay-frames.ts) must both reproduce every case.",
+  "description": "Plan 232: the header of one HTML overlay frame record on Electron main's upload to the backend (POST /html-overlays/frames). Little endian: magic \"VHOF\", version 1, flags 0, reserved 0, the banner's UUID (16 bytes), width, height (u32), sequence (u64, a decimal string here). Width x height x 4 bytes of premultiplied BGRA follow. The Rust parser (html_overlay.rs) and the TypeScript encoder (main/html-overlay-frames.ts) must both reproduce every case.",
   "headerBytes": 40,
   "headers": [
     {

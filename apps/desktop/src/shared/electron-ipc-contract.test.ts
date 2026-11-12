@@ -88,7 +88,7 @@ describe('Electron IPC contract', () => {
     // 169: plan 230 adds comments-window:swap-screen and
     // comments-window:front-or-close (the Stream Manager Screen key's tap
     // and hold).
-    // 170: plan 231 adds banners:pick-html (Assets → Banners → Import HTML…).
+    // 170: plan 232 adds banners:pick-html (Assets → Banners → Import HTML…).
     expect(Object.keys(electronInvokeApiMethods)).toHaveLength(170)
     expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(170)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
@@ -1238,7 +1238,7 @@ it('preserves and validates queue-loss revisions through delivery IPC mirrors', 
     ).toThrow()
 })
 
-describe('HTML overlay picker IPC (plan 231)', () => {
+describe('HTML overlay picker IPC (plan 232)', () => {
   it('takes no arguments and returns null, a file capability or a folder capability', () => {
     expect(isElectronInvokeChannel('banners:pick-html')).toBe(true)
     expect(electronInvokeApiMethods['banners:pick-html']).toBe('pickBannerHtml')

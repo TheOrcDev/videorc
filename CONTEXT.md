@@ -161,7 +161,7 @@ name)
 
 **HTML banner**:
 A banner whose picture is a web page with a transparent background, so it
-can move: an animated badge, a ticker, a lower third (plan 231). Assets →
+can move: an animated badge, a ticker, a lower third (plan 232). Assets →
 Banners → "Import HTML…" takes an `.html` file or a folder with
 `index.html`. It is a banner in every other way. Code and wire names say
 `html overlay`; copy never does.

@@ -93,7 +93,7 @@ export function BannersSection(): ReactElement {
   }
   const importReasons: Record<BannerImportKind, string | null> = {
     image: bannerImportBlockedReason(importState),
-    // Plan 231 D9: off macOS the button stays, with the one sentence why.
+    // Plan 232 D9: off macOS the button stays, with the one sentence why.
     html: bannerHtmlImportBlockedReason({
       ...importState,
       mac: isMacPlatform(currentPlatform())
@@ -127,7 +127,7 @@ export function BannersSection(): ReactElement {
       </DisabledReason>
     )
   }
-  // Import image… and Import HTML… (plan 231), side by side wherever the
+  // Import image… and Import HTML… (plan 232), side by side wherever the
   // section offers an import.
   const importButtons = (suffix: string): ReactElement => (
     <div className="flex flex-wrap items-center justify-end gap-2">
@@ -411,7 +411,7 @@ function BannerTile({
             {banner.name}
           </span>
         )}
-        {/* What it is, when it is not an image (plan 231): a tag, like 9:16. */}
+        {/* What it is, when it is not an image (plan 232): a tag, like 9:16. */}
         {banner.kind === 'html' ? (
           <Badge className="shrink-0" data-videorc-banner-kind="html" variant="outline">
             HTML

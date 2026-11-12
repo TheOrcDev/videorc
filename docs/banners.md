@@ -53,7 +53,7 @@ A banner is your own image placed anywhere on the picture: a sponsor strip,
 
 An HTML banner is a banner whose picture is a web page with a transparent
 background, so it can move: an animated badge, a ticker, a lower third (plan
-231). On macOS for now.
+232). On macOS for now.
 
 - **Import** in Assets → Banners: "Import HTML…" takes an `.html` file, or
   a folder with `index.html` beside its images, fonts, styles and scripts.
@@ -158,7 +158,7 @@ hide` and the event `banners.changed`; `importImage` runs on the
 - Voice: `cohost_command.rs`, banner phrases parsed before the highlight
   grammar ([buddy-commands-contract.md](buddy-commands-contract.md)).
 
-### HTML banners (plan 231)
+### HTML banners (plan 232)
 
 Code and wire names say `html overlay`; copy says HTML banner.
 

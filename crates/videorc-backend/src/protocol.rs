@@ -5606,7 +5606,7 @@ pub struct ReorderScreensParams {
 pub struct Banner {
     pub id: String,
     pub name: String,
-    /// Plan 231: what the banner's picture is. Omitted on the wire for an
+    /// Plan 232: what the banner's picture is. Omitted on the wire for an
     /// image, so every older row, fixture and client reads as before.
     #[serde(default, skip_serializing_if = "BannerKind::is_image")]
     pub kind: BannerKind,
@@ -5630,7 +5630,7 @@ pub struct Banner {
     pub updated_at: String,
 }
 
-/// What a banner's picture is (plan 231). An image is drawn from a prepared
+/// What a banner's picture is (plan 232). An image is drawn from a prepared
 /// bitmap; an HTML overlay is a web page main renders offscreen, whose frames
 /// reach the compositor through `html_overlay`. For an HTML overlay `width`
 /// and `height` are the page size in CSS pixels.
@@ -5673,7 +5673,7 @@ pub struct ImportBannerImageParams {
     pub path: String,
 }
 
-/// `banners.importHtml` (plan 231) after main's `sourceCapability` has been
+/// `banners.importHtml` (plan 232) after main's `sourceCapability` has been
 /// resolved: an `.html` file, or a folder with `index.html`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -5681,7 +5681,7 @@ pub struct ImportBannerHtmlParams {
     pub path: String,
 }
 
-/// One HTML overlay main should render now (plan 231 "Targets"): the page
+/// One HTML overlay main should render now (plan 232 "Targets"): the page
 /// size in CSS pixels, the frame size in device pixels and the rate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -5717,7 +5717,7 @@ pub struct HtmlOverlayHostReportParams {
     pub state: HtmlOverlayHostState,
     #[serde(default)]
     pub detail: Option<String>,
-    /// Requests the page made that the network rule cancelled (plan 231 D5).
+    /// Requests the page made that the network rule cancelled (plan 232 D5).
     #[serde(default)]
     pub blocked_requests: Option<u32>,
 }

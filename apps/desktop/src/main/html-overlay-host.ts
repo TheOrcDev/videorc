@@ -1,4 +1,4 @@
-// HTML overlays (plan 231): the offscreen windows that render them.
+// HTML overlays (plan 232): the offscreen windows that render them.
 //
 // The backend says which overlays to render and at what pixel size and rate
 // (`htmlOverlays.targets`); this host keeps exactly one offscreen window per

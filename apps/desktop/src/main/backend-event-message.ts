@@ -34,7 +34,7 @@ import {
  */
 export const MAIN_ISOLATED_BACKEND_EVENTS: ReadonlySet<string> = new Set([
   'banners.changed',
-  // Plan 231: a bad target list stops no overlay and never the socket.
+  // Plan 232: a bad target list stops no overlay and never the socket.
   'htmlOverlays.targets',
   'overlays.layout',
   // Plan 214 B3: the camera switch activates the extension; a bad status
@@ -93,12 +93,12 @@ export function parseMainBannersChangedEvent(payload: unknown): Banner[] {
   return validateBackendEventPayload('banners.changed', payload) as Banner[]
 }
 
-/** `htmlOverlays.targets.get` reply: what main renders now (plan 231). */
+/** `htmlOverlays.targets.get` reply: what main renders now (plan 232). */
 export function parseMainHtmlOverlayTargets(payload: unknown): HtmlOverlayTargets {
   return validateBackendRpcResult('htmlOverlays.targets.get', payload) as HtmlOverlayTargets
 }
 
-/** `htmlOverlays.targets` event, strictly validated (plan 231). */
+/** `htmlOverlays.targets` event, strictly validated (plan 232). */
 export function parseMainHtmlOverlayTargetsEvent(payload: unknown): HtmlOverlayTargets {
   return validateBackendEventPayload('htmlOverlays.targets', payload) as HtmlOverlayTargets
 }

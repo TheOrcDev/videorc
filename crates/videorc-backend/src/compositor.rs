@@ -1122,7 +1122,7 @@ impl CompositorRuntime {
         let canvases = self.banner_canvases();
         let mut requests = Vec::new();
         for layer in &self.banners.layers {
-            // An HTML overlay (plan 231) has no bitmap to prepare.
+            // An HTML overlay (plan 232) has no bitmap to prepare.
             if layer.fade.hides() || layer.banner.kind == crate::protocol::BannerKind::Html {
                 continue;
             }
@@ -1250,7 +1250,7 @@ pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
     // Stat the files before taking the lock.
     let shown = banners_with_files(shown, &state.database.banner_assets_dir());
     for (banner, path, revision) in &shown {
-        // An HTML overlay (plan 231) draws its page's frames, not this file.
+        // An HTML overlay (plan 232) draws its page's frames, not this file.
         if revision.is_none() && banner.kind == crate::protocol::BannerKind::Image {
             // Said, not hidden: the banner stays in the set but draws nothing.
             tracing::warn!(
@@ -1273,7 +1273,7 @@ pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Plan 231: what the HTML overlay targets follow: every HTML banner in the
+/// Plan 232: what the HTML overlay targets follow: every HTML banner in the
 /// set (and whether it is fading out), the run's canvases and its rate.
 pub async fn html_overlay_view(state: &AppState) -> crate::html_overlay::HtmlOverlayView {
     let compositor = state.compositor.lock().await;
@@ -1303,7 +1303,7 @@ pub async fn set_banner_session_shape(state: &AppState, shape: Option<OverlaySes
     for request in requests {
         state.banner_prepare.request(request);
     }
-    // Plan 231: a session start or stop changes which overlays main renders.
+    // Plan 232: a session start or stop changes which overlays main renders.
     state.html_overlays.wake();
 }
 
@@ -11317,7 +11317,7 @@ pub(crate) struct BannerDraw {
     pub image: (u32, u32),
     pub rect: OverlayRect,
     pub opacity: f32,
-    /// Plan 231: the bitmap is a live HTML overlay frame, rasterised for the
+    /// Plan 232: the bitmap is a live HTML overlay frame, rasterised for the
     /// largest canvas that carries it. A leg that draws it at another size
     /// scales it: the Metal sampler always does, the CPU path only for these.
     pub scales_to_rect: bool,
@@ -11377,7 +11377,7 @@ pub(crate) fn banner_draws_for_leg(
             continue;
         }
         if layer.banner.kind == crate::protocol::BannerKind::Html {
-            // Plan 231: the page's latest frame, already straight alpha. No
+            // Plan 232: the page's latest frame, already straight alpha. No
             // frame yet (the page is loading, or this platform or session
             // cannot draw one) draws nothing. The frame carries no opacity,
             // so the banner's rides the layer with the fade.
@@ -11427,7 +11427,7 @@ pub(crate) fn banner_draws_for_leg(
 }
 
 /// Where a leg's banner pixels come from: prepared bitmaps for images, the
-/// latest page frame for HTML overlays (plan 231).
+/// latest page frame for HTML overlays (plan 232).
 #[derive(Clone, Copy)]
 pub(crate) struct BannerPixels<'a> {
     pub prepare: &'a BannerPrepareService,
@@ -11442,7 +11442,7 @@ impl<'a> BannerPixels<'a> {
         }
     }
 
-    /// Prepared bitmaps only: a path that draws no HTML overlay (plan 231
+    /// Prepared bitmaps only: a path that draws no HTML overlay (plan 232
     /// D9: the Windows D3D11 session) and the image tests.
     #[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
     pub(crate) fn images_only(prepare: &'a BannerPrepareService) -> Self {
@@ -11517,7 +11517,7 @@ fn composite_banners(inputs: &CompositorRenderInputs<'_>, dest: &mut [u8]) {
     for draw in inputs.banners {
         let bitmap = &*draw.bitmap;
         let (x, y, rect_width, rect_height) = draw.draw_rect(inputs.width, inputs.height);
-        // Plan 231: an HTML overlay frame made for another canvas is scaled
+        // Plan 232: an HTML overlay frame made for another canvas is scaled
         // to this leg's rect (nearest neighbour: this is the fallback path).
         let scaled = (draw.scales_to_rect
             && (bitmap.width as usize, bitmap.height as usize) != (rect_width, rect_height))
@@ -11559,7 +11559,7 @@ fn composite_banners(inputs: &CompositorRenderInputs<'_>, dest: &mut [u8]) {
 }
 
 /// A straight-alpha BGRA bitmap resampled to `to_width` × `to_height` with
-/// nearest neighbour (plan 231, the CPU path's HTML overlay frames). Empty
+/// nearest neighbour (plan 232, the CPU path's HTML overlay frames). Empty
 /// when either size is zero or the source is short.
 pub(crate) fn scale_bgra_nearest(
     bgra: &[u8],

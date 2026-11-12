@@ -68,7 +68,7 @@ export function bannerSizeAdvice({
   }
   const needed = { width: upToEven(drawn.width), height: upToEven(drawn.height) }
   if (banner.kind === 'html') {
-    // Plan 231 D7: a page is rasterised at the pixels it lands on, up to a
+    // Plan 232 D7: a page is rasterised at the pixels it lands on, up to a
     // 1080p frame's worth; past that the picture is scaled up from there.
     const capped = needed.width * needed.height > HTML_OVERLAY_MAX_FRAME_PIXELS
     return {

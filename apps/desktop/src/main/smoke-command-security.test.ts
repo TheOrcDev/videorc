@@ -111,7 +111,7 @@ describe('smoke command security', () => {
         stateDirectory
       )
     ).toEqual({ kind: 'output-directory', path: realpathSync(stateDirectory) })
-    // Plan 231: a folder to import (an HTML banner), under the same rules.
+    // Plan 232: a folder to import (an HTML banner), under the same rules.
     expect(
       validateSmokeResourceAuthorization(
         { kind: 'input-directory', path: outputDirectory },

@@ -8298,7 +8298,7 @@ async function applyNativePreviewSurfaceScene(
   return nativePreviewSurfaceStatus
 }
 
-// --- HTML overlays (plan 231) ---
+// --- HTML overlays (plan 232) ---
 // The backend says which overlays to render and how large; the host keeps one
 // sandboxed offscreen window per target and sends what each paints. Created
 // on first use: no overlay, no host, no upload.
@@ -8352,7 +8352,7 @@ function stopHtmlOverlays(): void {
     logBackend('warn', `HTML overlays failed to stop: ${errorMessageText(error)}`)
   }
 }
-// --- end HTML overlays (plan 231) ---
+// --- end HTML overlays (plan 232) ---
 
 // --- Banners on the proof surface (plan 186 S4) -------------------------------
 // Main learns the list from its own backend event socket (`banners.list` on
@@ -11454,7 +11454,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       if (process.platform === 'darwin') {
         // Plan 214 B3: the camera switch turning on activates the extension.
         includedEvents.push('virtualCamera.changed')
-        // Plan 231: the HTML overlays main renders.
+        // Plan 232: the HTML overlays main renders.
         includedEvents.push('htmlOverlays.targets')
       }
       if (mainPresentPumpEnabled) {
@@ -11690,7 +11690,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 
 const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.capability.register_thumbnail',
-  // Plan 231: how an HTML overlay's page stands; only main hosts them.
+  // Plan 232: how an HTML overlay's page stands; only main hosts them.
   'htmlOverlays.host.report',
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,
   'health.ping',
@@ -12214,7 +12214,7 @@ function sendToWindows<TChannel extends ElectronEventChannel>(
     if (window === nativePreviewSurfaceWindow) {
       continue
     }
-    // Plan 231: an overlay's page is not the app; nothing is sent to it.
+    // Plan 232: an overlay's page is not the app; nothing is sent to it.
     if (isHtmlOverlayWindow(window)) {
       continue
     }
@@ -16179,7 +16179,7 @@ async function pickBannerImage(): Promise<ResourceSelection | null> {
   return path ? issueResourceCapability(path, 'input-file') : null
 }
 
-// Assets → Banners → Import HTML… (plan 231): an `.html` file, or a folder
+// Assets → Banners → Import HTML… (plan 232): an `.html` file, or a folder
 // with `index.html` beside its images, fonts, styles and scripts. A file is
 // an `input-file` capability and a folder an `input-directory` one; the
 // backend checks and copies it.
@@ -17260,7 +17260,7 @@ protocol.registerSchemesAsPrivileged([
     }
   },
   {
-    // Plan 231: an HTML overlay's own files. The scheme is handled only in
+    // Plan 232: an HTML overlay's own files. The scheme is handled only in
     // each overlay's own session (`html-overlay-host.ts`), never in the
     // app's: `standard` gives the page an origin and relative URLs, `secure`
     // the APIs a page expects of https.
@@ -17322,7 +17322,7 @@ app.on('open-url', (event, url) => {
 // The macOS app outlives its main window, and every other window closes with
 // it. With no main window, a menu pick reopens it, as the Dock does, and
 // opens nothing that would run without the Studio behind it.
-/** The app's own windows. An HTML overlay's offscreen window (plan 231) is
+/** The app's own windows. An HTML overlay's offscreen window (plan 232) is
  * not one: with only those left, the app has no window open. */
 function appWindowCount(): number {
   return BrowserWindow.getAllWindows().filter((window) => !isHtmlOverlayWindow(window)).length

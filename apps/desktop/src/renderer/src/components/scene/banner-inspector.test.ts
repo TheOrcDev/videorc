@@ -199,7 +199,7 @@ describe('BannerInspector', () => {
     expect(sharpVerdict.querySelector('svg')).toBeNull()
   })
 
-  it("says where an HTML banner's page stands, and nothing while it runs (plan 231)", async () => {
+  it("says where an HTML banner's page stands, and nothing while it runs (plan 232)", async () => {
     const badge = banner('badge', { kind: 'html', width: 640, height: 360, shown: true })
     const status = (extra: Partial<HtmlOverlayStatus>): HtmlOverlayStatus => ({
       id: 'badge',

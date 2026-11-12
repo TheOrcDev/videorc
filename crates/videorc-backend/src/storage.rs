@@ -7314,7 +7314,7 @@ impl Database {
         Ok(banner)
     }
 
-    /// Plan 231 D10: an HTML overlay's own picture was saved as its stored
+    /// Plan 232 D10: an HTML overlay's own picture was saved as its stored
     /// image. Records whether it has see-through pixels and bumps
     /// `updated_at` so every thumbnail reloads.
     pub(crate) fn mark_banner_picture_saved(&self, id: &str, has_alpha: bool) -> Result<Banner> {
@@ -8770,7 +8770,7 @@ impl Database {
             "pipeline_reported_audio_loss",
             "pipeline_reported_audio_loss INTEGER NOT NULL DEFAULT 0",
         )?;
-        // Plan 231: what a banner's picture is. Every row an older build
+        // Plan 232: what a banner's picture is. Every row an older build
         // wrote is an image; an older build reading a newer database names
         // its columns and never sees this one (it would draw nothing for an
         // HTML overlay, whose stored image may not exist yet).

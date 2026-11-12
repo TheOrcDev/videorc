@@ -2934,7 +2934,7 @@ fn prepare_legacy_banner_layers(
     let orientation = crate::overlay_layout::OverlayOrientation::for_canvas(width, height);
     shown
         .iter()
-        // Plan 231 D9: an HTML overlay's stored image is a still of a page
+        // Plan 232 D9: an HTML overlay's stored image is a still of a page
         // that moves; this frame never carries it.
         .filter(|(banner, _, _)| banner.kind == crate::protocol::BannerKind::Image)
         .filter_map(|(banner, path, _)| {
@@ -3361,7 +3361,7 @@ pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
     recording.as_ref().map(ActiveRecording::accepts_banners)
 }
 
-/// Plan 231 D9: `Some(accepts)` for the recording or livestream that runs,
+/// Plan 232 D9: `Some(accepts)` for the recording or livestream that runs,
 /// `None` when nothing runs or only the replay-only Clips ring does (the
 /// user is idle then, and the Preview is what they watch). An HTML overlay
 /// is drawn by the compositor from frames that arrive live, so only a

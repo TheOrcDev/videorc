@@ -1,4 +1,4 @@
-//! HTML overlays (plan 231): a banner whose picture is a web page with a
+//! HTML overlays (plan 232): a banner whose picture is a web page with a
 //! transparent background. Electron main renders the page offscreen in a
 //! sandbox and writes each frame down one loopback upload; this module owns
 //! everything on the backend's side of that:
@@ -73,7 +73,7 @@ const SIZE_META_SEARCH_BYTES: usize = 64 * 1024;
 /// banner's stored image and thumbnail (D10).
 const PICTURE_AFTER: Duration = Duration::from_secs(1);
 
-// --- Refusals (verbatim, plan 231 "Refusals") --------------------------------
+// --- Refusals (verbatim, plan 232 "Refusals") --------------------------------
 
 pub(crate) const REFUSAL_UNSUPPORTED: &str = "HTML banners work on macOS only for now.";
 pub(crate) const REFUSAL_NOT_HTML: &str =

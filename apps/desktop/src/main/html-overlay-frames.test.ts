@@ -27,7 +27,7 @@ const fixture = JSON.parse(
   )
 ) as FrameFixture
 
-describe('the frame record header (plan 231 "Wire")', () => {
+describe('the frame record header (plan 232 "Wire")', () => {
   it('matches the fixture the Rust parser reads, byte for byte', () => {
     expect(HTML_OVERLAY_FRAME_HEADER_BYTES).toBe(fixture.headerBytes)
     expect(fixture.headers.length).toBeGreaterThan(0)

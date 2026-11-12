@@ -1206,7 +1206,7 @@ pub struct AppState {
     /// Prepared banner bitmaps and their off-lock worker (plan 186 S3; std
     /// mutexes, read from the render threads).
     pub banner_prepare: crate::banner_prepare::BannerPrepareService,
-    /// Plan 231: the latest frame of every showing HTML overlay, the targets
+    /// Plan 232: the latest frame of every showing HTML overlay, the targets
     /// main renders and what main reports about its pages.
     pub html_overlays: crate::html_overlay::HtmlOverlayService,
     /// Backend-owned acknowledgement/lifetime for the viewer-facing comment

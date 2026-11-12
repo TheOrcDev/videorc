@@ -579,7 +579,7 @@ export interface DirectoryFacts {
 
 export type ResourceCapabilityKind =
   | 'input-file'
-  /** Plan 231: a folder picked to import (an HTML overlay). */
+  /** Plan 232: a folder picked to import (an HTML overlay). */
   | 'input-directory'
   | 'output-directory'
   | 'open-path'
@@ -5643,7 +5643,7 @@ export interface VideorcApi {
   /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
    * `input-file` capability for `banners.importImage`. */
   pickBannerImage: () => Promise<ResourceSelection | null>
-  /** Assets → Banners → Import HTML… (plan 231): an `.html` file or a folder. */
+  /** Assets → Banners → Import HTML… (plan 232): an `.html` file or a folder. */
   pickBannerHtml: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
@@ -6813,7 +6813,7 @@ export const BANNER_OPACITY_MIN = 0.2
 export const BANNER_OPACITY_MAX = 1
 
 /**
- * What a banner's picture is (plan 231). Only `'html'` is ever on the wire:
+ * What a banner's picture is (plan 232). Only `'html'` is ever on the wire:
  * an image banner carries no `kind` at all.
  */
 export type BannerKind = 'html'
@@ -6823,7 +6823,7 @@ export interface Banner {
   id: string
   name: string
   /**
-   * Plan 231: `'html'` for an HTML overlay, a web page with a transparent
+   * Plan 232: `'html'` for an HTML overlay, a web page with a transparent
    * background that main renders offscreen. Omitted for an image, never
    * `null`.
    */
@@ -6866,22 +6866,22 @@ export interface BannerImportImageParams {
 }
 
 /**
- * `banners.importHtml` (plan 231): a main-issued `input-file` capability for
+ * `banners.importHtml` (plan 232): a main-issued `input-file` capability for
  * one `.html` file, or `input-directory` for a folder with `index.html`.
  */
 export interface BannerImportHtmlParams {
   sourceCapability: string
 }
 
-/** The largest frame main sends for one HTML overlay: a 1080p frame (plan 231 D7). */
+/** The largest frame main sends for one HTML overlay: a 1080p frame (plan 232 D7). */
 export const HTML_OVERLAY_MAX_FRAME_PIXELS = 1920 * 1080
-/** The highest rate an HTML overlay renders at (plan 231 D7). */
+/** The highest rate an HTML overlay renders at (plan 232 D7). */
 export const HTML_OVERLAY_MAX_FPS = 30
 /** The most HTML overlays main ever renders at once: the banners showing. */
 export const HTML_OVERLAY_MAX_TARGETS = BANNER_MAX_SHOWN
 
 /**
- * One HTML overlay main renders now (plan 231 "Targets"): the page size in
+ * One HTML overlay main renders now (plan 232 "Targets"): the page size in
  * CSS pixels, the frame size in device pixels, and the rate.
  */
 export interface HtmlOverlayTarget {
@@ -6907,7 +6907,7 @@ export interface HtmlOverlayHostReportParams {
   state: HtmlOverlayHostState
   /** Why the page failed, in words the streamer can read. */
   detail?: string
-  /** Requests the network rule cancelled (plan 231 D5). */
+  /** Requests the network rule cancelled (plan 232 D5). */
   blockedRequests?: number
 }
 

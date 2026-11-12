@@ -36,7 +36,7 @@ import {
 const BADGE = '0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6'
 const OTHER = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
 
-describe('an HTML overlay is addressed by its banner id (plan 231)', () => {
+describe('an HTML overlay is addressed by its banner id (plan 232)', () => {
   it('accepts only a lower-case hyphenated UUID', () => {
     expect(isHtmlOverlayId(BADGE)).toBe(true)
     for (const value of [

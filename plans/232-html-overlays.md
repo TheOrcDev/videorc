@@ -1,4 +1,4 @@
-# Plan 231: HTML overlays (animated banners with a transparent background)
+# Plan 232: HTML overlays (animated banners with a transparent background)
 
 > **Executor instructions**: follow the slices in order. Run every "Done
 > when" check before moving on. S1 to S6 are the first vertical slice and

@@ -29,7 +29,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'app-quit',
   'apply-native-preview-host-commands',
   'authorize-smoke-resource',
-  // Plan 231: the frame counters of the HTML overlay host, for the measured cost.
+  // Plan 232: the frame counters of the HTML overlay host, for the measured cost.
   'html-overlay-stats',
   'import-takeover-image',
   'backend-debug-rpc',
@@ -178,7 +178,7 @@ export type ValidatedSmokeBackendRpcRequest = {
 }
 
 export type SmokeResourceAuthorization = {
-  // `input-directory`: a folder to import (plan 231, an HTML overlay).
+  // `input-directory`: a folder to import (plan 232, an HTML overlay).
   kind: 'input-file' | 'input-directory' | 'output-directory'
   path: string
 }

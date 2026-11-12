@@ -91,11 +91,11 @@ export function bannerStateLine(
   return { state: 'shown', line: BANNER_SHOWING_LINE }
 }
 
-/** An HTML banner's page is on its way (plan 231). */
+/** An HTML banner's page is on its way (plan 232). */
 export const HTML_OVERLAY_LOADING_LINE = 'Loading the page…'
 
 /**
- * What the inspector says about an HTML overlay's page (plan 231), or null
+ * What the inspector says about an HTML overlay's page (plan 232), or null
  * while there is nothing to say: it is hidden, or live with nothing blocked.
  * `warn` is true for a sentence the streamer has to act on. A page that asked
  * for the network keeps running without it (D5), so that line is quiet.
@@ -277,7 +277,7 @@ export function BannerInspector({
   /** "Place", or "Place on the vertical stream" while the stage shows it. */
   placeLabel: string
   sizeAdvice: BannerSizeAdvice
-  /** Where an HTML overlay's page stands (plan 231); null for an image. */
+  /** Where an HTML overlay's page stands (plan 232); null for an image. */
   overlayStatus?: HtmlOverlayStatus | null
   /** Why every control is off (Videorc reconnecting); null while a change can be saved. */
   blockedReason?: string | null

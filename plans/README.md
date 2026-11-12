@@ -1,6 +1,6 @@
 # Implementation Plans
 
-- 2026-11-12: [Plan 231](231-html-overlays.md), the owner's ask: "support
+- 2026-11-12: [Plan 232](232-html-overlays.md), the owner's ask: "support
   for HTML with a transparent background so we can add animated stuff on our
   live streams or recordings. Same thing as we have now for our images."
   S1 to S6 BUILT 2026-11-12 (draft PR #1323), macOS:

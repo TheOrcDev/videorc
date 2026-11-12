@@ -13,7 +13,7 @@ import type { BannerRelayAction, BannerSummary } from '../../../shared/banner-co
 export const BANNER_COUNT_LIMIT_REASON = 'You have 24 banners. Delete one to import another.'
 /** Show refused at the cap (plan 186 D7, `BANNER_MAX_SHOWN`). */
 export const BANNER_SHOWN_LIMIT_REASON = 'Four banners are showing. Hide one first.'
-/** HTML banners draw on the macOS compositor only for now (plan 231 D9). */
+/** HTML banners draw on the macOS compositor only for now (plan 232 D9). */
 export const HTML_OVERLAY_UNSUPPORTED_REASON = 'HTML banners work on macOS only for now.'
 
 /**
@@ -30,7 +30,7 @@ export const BANNER_REFUSALS: readonly string[] = [
   BANNER_SHOWN_LIMIT_REASON,
   "This recording can't add banners after it starts. Show the banner before you press Record.",
   'Hide this banner before you delete it.',
-  // HTML banners (plan 231 "Refusals").
+  // HTML banners (plan 232 "Refusals").
   HTML_OVERLAY_UNSUPPORTED_REASON,
   "This isn't an HTML file. Choose an .html file or a folder with index.html.",
   'This folder has no index.html.',
@@ -56,7 +56,7 @@ export function bannerRefusalError(error: unknown): UserFacingError | null {
 
 /**
  * An Import button's words: what it does, then what it is doing. `kind` is
- * the button (Import image…, or Import HTML… for an HTML banner, plan 231);
+ * the button (Import image…, or Import HTML… for an HTML banner, plan 232);
  * `running` is the import that is running, so only its own button says so.
  */
 export function bannerImportLabel(
@@ -88,7 +88,7 @@ export function bannerImportBlockedReason(state: {
 
 /**
  * Why Import HTML… is off, or null when it can run: off macOS the one
- * sentence that says so (plan 231 D9), otherwise the image import's reasons.
+ * sentence that says so (plan 232 D9), otherwise the image import's reasons.
  */
 export function bannerHtmlImportBlockedReason(state: {
   mac: boolean
@@ -99,7 +99,7 @@ export function bannerHtmlImportBlockedReason(state: {
   return state.mac ? bannerImportBlockedReason(state) : HTML_OVERLAY_UNSUPPORTED_REASON
 }
 
-/** The delete question: an HTML banner (plan 231) keeps files, an image banner one image. */
+/** The delete question: an HTML banner (plan 232) keeps files, an image banner one image. */
 export function bannerDeleteDescription(banner: Pick<Banner, 'name' | 'kind'>): string {
   return `“${banner.name}” and its ${banner.kind === 'html' ? 'files' : 'image'} will be deleted. This can't be undone.`
 }

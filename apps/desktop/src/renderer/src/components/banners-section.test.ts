@@ -61,7 +61,7 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   nav.openStudioPanel.mockClear()
-  // HTML banners draw on macOS only (plan 231 D9); the tests run as a Mac
+  // HTML banners draw on macOS only (plan 232 D9); the tests run as a Mac
   // unless one says otherwise.
   document.documentElement.dataset.platform = 'darwin'
   mocked.banners = {
@@ -216,7 +216,7 @@ describe('BannersSection import', () => {
     expect(mocked.banners.importBanner).toHaveBeenCalledWith('image')
   })
 
-  it('imports an HTML banner from its own action beside Import image… (plan 231)', async () => {
+  it('imports an HTML banner from its own action beside Import image… (plan 232)', async () => {
     await render()
     const button = byTestId<HTMLButtonElement>('banner-import-html')!
     expect(button.disabled).toBe(false)
@@ -293,7 +293,7 @@ describe('BannersSection import', () => {
   })
 })
 
-describe('an HTML banner on its tile (plan 231)', () => {
+describe('an HTML banner on its tile (plan 232)', () => {
   const badge = banner('badge', 2, { kind: 'html', width: 640, height: 360 })
 
   it('carries an HTML tag, and an image banner carries none', async () => {

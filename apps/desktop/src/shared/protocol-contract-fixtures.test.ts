@@ -965,7 +965,7 @@ describe('shared high-risk protocol fixture', () => {
     expect(() => validateBackendRpcResult('banners.show', { ...minimal, extra: true })).toThrow()
   })
 
-  it('keeps the HTML overlay wire shapes identical across languages (plan 231)', () => {
+  it('keeps the HTML overlay wire shapes identical across languages (plan 232)', () => {
     const { banner, targets, statuses, hostReport, stats } = fixtures.htmlOverlay
     // An HTML banner is a banner with `kind`, on every banner surface.
     expect(banner.kind).toBe('html')

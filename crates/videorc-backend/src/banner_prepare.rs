@@ -40,7 +40,7 @@ const BANNER_DECODE_MAX_ALLOC: u64 = 192 * 1024 * 1024;
 static NEXT_BITMAP_REVISION: AtomicU64 = AtomicU64::new(1);
 
 /// A fresh content key for a bitmap: prepared banners here, and each HTML
-/// overlay frame (plan 231).
+/// overlay frame (plan 232).
 pub(crate) fn next_bitmap_revision() -> u64 {
     NEXT_BITMAP_REVISION.fetch_add(1, Ordering::Relaxed)
 }

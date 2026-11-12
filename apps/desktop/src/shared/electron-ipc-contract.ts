@@ -1286,7 +1286,7 @@ const inputFileSelectionSchema = objectSchema(
   },
   { allowUnknown: false }
 )
-/** A picked HTML overlay (plan 231): one `.html` file or a folder. */
+/** A picked HTML overlay (plan 232): one `.html` file or a folder. */
 const htmlOverlaySelectionSchema = objectSchema(
   {
     capabilityId: boundedIdentifier,
@@ -2048,7 +2048,7 @@ const specificRuntimeInvokeContracts = {
   'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema),
   // Plan 186: no arguments; null on cancel, else an input-file capability.
   'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
-  // Plan 231: no arguments; null on cancel, else an input-file capability
+  // Plan 232: no arguments; null on cancel, else an input-file capability
   // (one .html file) or an input-directory one (a folder with index.html).
   'banners:pick-html': invokeContract(noArgs, nullableSchema(htmlOverlaySelectionSchema)),
   // Plan 189: Import sounds… (several files at once, none on cancel), and the

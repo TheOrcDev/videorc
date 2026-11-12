@@ -1,4 +1,4 @@
-// HTML overlays (plan 231): the rules for a page Videorc did not write.
+// HTML overlays (plan 232): the rules for a page Videorc did not write.
 //
 // An overlay is HTML and JavaScript the streamer got from somewhere. It
 // renders in an offscreen window of its own, and everything it may and may

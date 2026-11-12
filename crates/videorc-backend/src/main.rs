@@ -637,7 +637,7 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     }
     // Plan 186 S10: "Hide after" and "Show every" for the whole process.
     tokio::spawn(banner_timers::run_banner_timers(state.clone()));
-    // Plan 231: which HTML overlays main renders, and where each stands.
+    // Plan 232: which HTML overlays main renders, and where each stands.
     tokio::spawn(html_overlay::run_html_overlay_targets(state.clone()));
     // Plan 214 D4: Videorc Camera comes back on when it was on.
     virtual_camera_service::start_from_settings(&state).await;
@@ -674,7 +674,7 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             post(consume_interruption_lease_handler),
         )
         .route("/oauth/callback", get(oauth_callback_handler))
-        // Plan 231: Electron main's HTML overlay frames (admin token only).
+        // Plan 232: Electron main's HTML overlay frames (admin token only).
         .route(
             "/html-overlays/frames",
             post(html_overlay::frames_upload_handler),
@@ -9043,7 +9043,7 @@ fn resolve_banner_import_resource(
     resolve_screen_import_resource(state, params, role)
 }
 
-/// Plan 231: `banners.importHtml` takes a folder (`input-directory`) or one
+/// Plan 232: `banners.importHtml` takes a folder (`input-directory`) or one
 /// `.html` file (`input-file`). A wrong-kind attempt never burns a
 /// capability, so the folder kind is tried first and the file kind second.
 fn resolve_banner_html_import_resource(
@@ -13374,7 +13374,7 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // Plan 231: an HTML overlay is a banner whose picture is a web page.
+        // Plan 232: an HTML overlay is a banner whose picture is a web page.
         // The import copies the page (or its folder) into the managed
         // Banners folder; main renders it and sends the frames.
         "banners.importHtml" => {
@@ -13531,7 +13531,7 @@ async fn handle_text_message_with_role(
                     // canvases the compositor draws right now.
                     &compositor::banner_prepare_canvases(state).await,
                     // A session that cannot draw a banner added after its
-                    // start refuses a new one (plan 186 S4; plan 231 for an
+                    // start refuses a new one (plan 186 S4; plan 232 for an
                     // HTML overlay).
                     banners::session_accepts_showing(state, &params.id).await,
                 ) {

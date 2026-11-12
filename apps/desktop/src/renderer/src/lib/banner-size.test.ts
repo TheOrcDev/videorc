@@ -22,7 +22,7 @@ const banner = (
   vertical: OverlayRect = FULL_WIDTH_VERTICAL
 ) => ({ width, height, horizontal, vertical })
 
-describe('bannerSizeAdvice for an HTML banner (plan 231 D7)', () => {
+describe('bannerSizeAdvice for an HTML banner (plan 232 D7)', () => {
   const page = (horizontal: OverlayRect) => ({
     ...banner(640, 360, horizontal),
     kind: 'html' as const

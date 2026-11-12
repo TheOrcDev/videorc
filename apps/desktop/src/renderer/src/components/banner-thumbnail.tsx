@@ -26,7 +26,7 @@ export function BannerThumbnail({
   banner: Pick<Banner, 'thumbnailFile'> & Partial<Pick<Banner, 'kind' | 'updatedAt'>>
   className?: string
 }): ReactElement {
-  // An HTML overlay's picture (plan 231) is saved a second after it first
+  // An HTML overlay's picture (plan 232) is saved a second after it first
   // shows, under the same file name: the row's `updatedAt` says when to look
   // again, and until then the tile shows what it is instead of a broken image.
   const html = banner.kind === 'html'
