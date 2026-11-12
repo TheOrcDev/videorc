@@ -147,7 +147,7 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
     await this.send(ev.action, this.intentFor(ev.payload.settings, client.state))
   }
 
-  /** End-to-end truth: false covers backend rejection (debounce, invalid),
+  /** End-to-end truth: an alert covers backend rejection (debounce, invalid),
    * renderer refusal ("Enable streaming first"), disconnects, and timeouts. */
   protected async send(
     key: { showAlert(): Promise<void>; showOk(): Promise<void> },
@@ -417,7 +417,11 @@ class StreamManagerScreen extends VideorcAction<StreamManagerScreenSettings> {
   ): void {
     const ev = this.pressed.get(id)
     this.pressed.delete(id)
-    if (ev) void act(ev)
+    if (ev) {
+      act(ev).catch((error: unknown) =>
+        streamDeck.logger.warn(`Stream Manager Screen key failed: ${String(error)}`)
+      )
+    }
   }
   override async onKeyDown(ev: KeyDownEvent<StreamManagerScreenSettings>): Promise<void> {
     if (!client.connected) {

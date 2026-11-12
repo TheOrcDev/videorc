@@ -158,6 +158,8 @@
 
       function renderOptions(options, connected) {
         const live = Array.isArray(options) && options.length > 0
+        // No live options (Videorc closed or Remote Control off): keep the
+        // key configurable with a plain text value instead of a dead end.
         for (const { select, input } of controls) {
           select.classList.toggle('hidden', !live)
           input.classList.toggle('hidden', live)
@@ -175,8 +177,6 @@
           }
         }
         showValues()
-        // No live options (Videorc closed or Remote Control off): keep the
-        // key configurable with a plain text value instead of a dead end.
         hintEl.textContent =
           live || connected
             ? action.hint

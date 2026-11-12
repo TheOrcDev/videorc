@@ -85,7 +85,7 @@ export function streamManagerScreenKeyLit(
   return shownOn(state, settings.presentingScreen) && !state?.streamManager?.hiddenFromStream
 }
 
-/** Null (the key alerts) until both screens are picked. */
+/** Null (the key alerts) until two different screens are picked. */
 export function streamManagerScreenKeyIntent(
   settings: StreamManagerScreenKeySettings
 ): Record<string, unknown> | null {

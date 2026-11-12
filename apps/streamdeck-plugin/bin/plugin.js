@@ -117,7 +117,7 @@ class VideorcAction extends SingletonAction {
         }
         await this.send(ev.action, this.intentFor(ev.payload.settings, client.state));
     }
-    /** End-to-end truth: false covers backend rejection (debounce, invalid),
+    /** End-to-end truth: an alert covers backend rejection (debounce, invalid),
      * renderer refusal ("Enable streaming first"), disconnects, and timeouts. */
     async send(key, intent, { confirm = false } = {}) {
         if (!intent || !(await client.sendIntent(intent))) {
@@ -516,8 +516,9 @@ let StreamManagerScreen = (() => {
         release(id, act) {
             const ev = this.pressed.get(id);
             this.pressed.delete(id);
-            if (ev)
-                void act(ev);
+            if (ev) {
+                act(ev).catch((error) => streamDeck.logger.warn(`Stream Manager Screen key failed: ${String(error)}`));
+            }
         }
         async onKeyDown(ev) {
             if (!client.connected) {
