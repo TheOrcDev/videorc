@@ -55,6 +55,7 @@ const api: VideorcApi = {
   exitApp: (kind) => invoke('app:exit', kind),
   pickScreenImage: () => invoke('screens:pick-image'),
   pickBannerImage: () => invoke('banners:pick-image'),
+  pickBannerHtml: () => invoke('banners:pick-html'),
   pickSoundFiles: () => invoke('sounds:pick-files'),
   getStarterSounds: () => invoke('sounds:starter-list'),
   getStarterSoundFiles: (slugs) => invoke('sounds:starter-files', slugs),

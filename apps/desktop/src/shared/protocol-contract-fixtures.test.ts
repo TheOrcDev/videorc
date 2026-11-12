@@ -45,6 +45,10 @@ import type {
   CohostStartParams,
   CohostState,
   Banner,
+  HtmlOverlayHostReportParams,
+  HtmlOverlayStats,
+  HtmlOverlayStatuses,
+  HtmlOverlayTargets,
   Sound,
   SoundboardState,
   SoundsPlayback,
@@ -168,6 +172,13 @@ interface HighRiskContractFixtures {
   banner: {
     minimal: Banner
     withTimer: Banner
+  }
+  htmlOverlay: {
+    banner: Banner
+    targets: HtmlOverlayTargets
+    statuses: HtmlOverlayStatuses
+    hostReport: HtmlOverlayHostReportParams
+    stats: HtmlOverlayStats
   }
   chatCommand: {
     command: ChatCommand
@@ -952,6 +963,81 @@ describe('shared high-risk protocol fixture', () => {
       ).toThrow(field)
     }
     expect(() => validateBackendRpcResult('banners.show', { ...minimal, extra: true })).toThrow()
+  })
+
+  it('keeps the HTML overlay wire shapes identical across languages (plan 231)', () => {
+    const { banner, targets, statuses, hostReport, stats } = fixtures.htmlOverlay
+    // An HTML banner is a banner with `kind`, on every banner surface.
+    expect(banner.kind).toBe('html')
+    expect(validateBackendRpcResult('banners.importHtml', banner)).toStrictEqual(banner)
+    expect(validateBackendRpcResult('banners.show', banner)).toStrictEqual(banner)
+    expect(validateBackendRpcResult('banners.list', [banner])).toStrictEqual([banner])
+    expect(validateBackendEventPayload('banners.changed', [banner])).toStrictEqual([banner])
+    // An image banner carries no kind at all: never `null`, never "image".
+    expect('kind' in fixtures.banner.minimal).toBe(false)
+    for (const kind of [null, 'image', 'video']) {
+      expect(() => validateBackendRpcResult('banners.show', { ...banner, kind })).toThrow('kind')
+    }
+    expect(
+      validateBackendRpcParams('banners.importHtml', { sourceCapability: 'resource:1' })
+    ).toStrictEqual({ sourceCapability: 'resource:1' })
+    // Never a path from a renderer.
+    expect(() =>
+      validateBackendRpcParams('banners.importHtml', { sourceCapability: 'resource:1', path: '/x' })
+    ).toThrow()
+
+    expect(validateBackendRpcResult('htmlOverlays.targets.get', targets)).toStrictEqual(targets)
+    expect(validateBackendEventPayload('htmlOverlays.targets', targets)).toStrictEqual(targets)
+    expect(validateBackendRpcResult('htmlOverlays.targets.get', { targets: [] })).toStrictEqual({
+      targets: []
+    })
+    const target = targets.targets[0]!
+    for (const bad of [
+      { ...target, fps: 31 },
+      { ...target, fps: 0 },
+      { ...target, frameWidth: 0 },
+      { ...target, frameHeight: 3841 },
+      { ...target, id: '../x' },
+      { ...target, path: '/Users/me/overlay' }
+    ]) {
+      expect(() =>
+        validateBackendEventPayload('htmlOverlays.targets', { targets: [bad] })
+      ).toThrow()
+    }
+    // Never more than the banners that show at once.
+    expect(() =>
+      validateBackendEventPayload('htmlOverlays.targets', {
+        targets: Array.from({ length: 5 }, () => target)
+      })
+    ).toThrow()
+
+    expect(validateBackendRpcResult('htmlOverlays.status.get', statuses)).toStrictEqual(statuses)
+    expect(validateBackendEventPayload('htmlOverlays.status', statuses)).toStrictEqual(statuses)
+    const [live, unavailable, loading] = statuses.overlays
+    expect(loading).toStrictEqual({ id: loading!.id, state: 'loading' })
+    for (const field of ['detail', 'frameWidth', 'frameHeight', 'blockedRequests'] as const) {
+      // Omitted when absent (skip_serializing_if), never null.
+      expect(() =>
+        validateBackendEventPayload('htmlOverlays.status', {
+          overlays: [{ ...live, ...unavailable, [field]: null }]
+        })
+      ).toThrow(field)
+    }
+    expect(() =>
+      validateBackendEventPayload('htmlOverlays.status', { overlays: [{ ...live, state: 'ok' }] })
+    ).toThrow('state')
+
+    expect(validateBackendRpcParams('htmlOverlays.host.report', hostReport)).toStrictEqual(
+      hostReport
+    )
+    expect(
+      validateBackendRpcParams('htmlOverlays.host.report', { id: hostReport.id, state: 'live' })
+    ).toStrictEqual({ id: hostReport.id, state: 'live' })
+    expect(() =>
+      validateBackendRpcParams('htmlOverlays.host.report', { ...hostReport, state: 'unavailable' })
+    ).toThrow('state')
+    expect(validateBackendRpcResult('htmlOverlays.host.report', statuses)).toStrictEqual(statuses)
+    expect(validateBackendRpcResult('htmlOverlays.stats', stats)).toStrictEqual(stats)
   })
 
   it('keeps the chat command wire shapes identical across languages (plan 226)', () => {

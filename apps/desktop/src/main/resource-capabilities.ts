@@ -3,6 +3,7 @@ import { basename, isAbsolute } from 'node:path'
 
 export type ResourceCapabilityKind =
   | 'input-file'
+  | 'input-directory'
   | 'output-directory'
   | 'open-path'
   | 'reveal-path'
@@ -108,7 +109,7 @@ function canonicalResourcePath(rawPath: string, kind: ResourceCapabilityKind): s
   if ((kind === 'input-file' || kind === 'background-asset') && !stats.isFile()) {
     throw new Error('Resource must be a regular file.')
   }
-  if (kind === 'output-directory' && !stats.isDirectory()) {
+  if ((kind === 'output-directory' || kind === 'input-directory') && !stats.isDirectory()) {
     throw new Error('Resource must be a directory.')
   }
   return canonical

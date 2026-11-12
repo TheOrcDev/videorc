@@ -1,6 +1,7 @@
 import type {
   Banner,
   CompositorFrameReady,
+  HtmlOverlayTargets,
   CompositorStatus,
   OverlayLayout,
   PreviewSurfaceStatus,
@@ -33,6 +34,8 @@ import {
  */
 export const MAIN_ISOLATED_BACKEND_EVENTS: ReadonlySet<string> = new Set([
   'banners.changed',
+  // Plan 231: a bad target list stops no overlay and never the socket.
+  'htmlOverlays.targets',
   'overlays.layout',
   // Plan 214 B3: the camera switch activates the extension; a bad status
   // is dropped with a warning, never the socket.
@@ -88,6 +91,16 @@ export function parseMainBannerList(payload: unknown): Banner[] {
 /** `banners.changed` event: the full list, strictly validated (plan 186). */
 export function parseMainBannersChangedEvent(payload: unknown): Banner[] {
   return validateBackendEventPayload('banners.changed', payload) as Banner[]
+}
+
+/** `htmlOverlays.targets.get` reply: what main renders now (plan 231). */
+export function parseMainHtmlOverlayTargets(payload: unknown): HtmlOverlayTargets {
+  return validateBackendRpcResult('htmlOverlays.targets.get', payload) as HtmlOverlayTargets
+}
+
+/** `htmlOverlays.targets` event, strictly validated (plan 231). */
+export function parseMainHtmlOverlayTargetsEvent(payload: unknown): HtmlOverlayTargets {
+  return validateBackendEventPayload('htmlOverlays.targets', payload) as HtmlOverlayTargets
 }
 
 /** `overlays.layout.get` result: the proof surface's Buddy switches (plan 205 S9). */

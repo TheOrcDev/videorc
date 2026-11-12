@@ -29,6 +29,8 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'app-quit',
   'apply-native-preview-host-commands',
   'authorize-smoke-resource',
+  // Plan 231: the frame counters of the HTML overlay host, for the measured cost.
+  'html-overlay-stats',
   'import-takeover-image',
   'backend-debug-rpc',
   'blank-main-window',
@@ -176,7 +178,8 @@ export type ValidatedSmokeBackendRpcRequest = {
 }
 
 export type SmokeResourceAuthorization = {
-  kind: 'input-file' | 'output-directory'
+  // `input-directory`: a folder to import (plan 231, an HTML overlay).
+  kind: 'input-file' | 'input-directory' | 'output-directory'
   path: string
 }
 
@@ -204,7 +207,9 @@ export function validateSmokeResourceAuthorization(
     !validSmokeResourcePath(stateDirectory) ||
     Object.keys(params).length !== 2 ||
     !validSmokeResourcePath(params.path) ||
-    (params.kind !== 'input-file' && params.kind !== 'output-directory')
+    (params.kind !== 'input-file' &&
+      params.kind !== 'input-directory' &&
+      params.kind !== 'output-directory')
   ) {
     throw new Error('Invalid smoke resource authorization request.')
   }
@@ -246,6 +251,9 @@ export function validateSmokeResourceAuthorization(
   }
   if (params.kind === 'output-directory' && !pathStats.isDirectory()) {
     throw new Error('Smoke output resource must be a directory.')
+  }
+  if (params.kind === 'input-directory' && !pathStats.isDirectory()) {
+    throw new Error('Smoke input directory resource must be a directory.')
   }
 
   return { kind: params.kind, path: canonicalPath }

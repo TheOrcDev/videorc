@@ -39,6 +39,7 @@ import type {
   AgentAddApp,
   AgentAddResult,
   Banner,
+  HtmlOverlayTargets,
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
   SessionMediaGrantResult,
@@ -228,6 +229,8 @@ import {
   parseMainBackendWireMessage,
   parseMainBannerList,
   parseMainBannersChangedEvent,
+  parseMainHtmlOverlayTargets,
+  parseMainHtmlOverlayTargetsEvent,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
   parseMainOverlayLayout,
@@ -296,6 +299,8 @@ import {
   type ManagedAssetRoots
 } from './backend-bootstrap'
 import { managedBackendAssetRootCandidates } from './managed-asset-roots'
+import { HtmlOverlayHost, isHtmlOverlayWindow } from './html-overlay-host'
+import { HTML_OVERLAY_SCHEME } from './html-overlay-policy'
 import { smokeTrashDirectory, smokeTrashItem, trashPaths } from './trash-paths'
 import {
   MainResourceCapabilityRegistry,
@@ -8293,6 +8298,62 @@ async function applyNativePreviewSurfaceScene(
   return nativePreviewSurfaceStatus
 }
 
+// --- HTML overlays (plan 231) ---
+// The backend says which overlays to render and how large; the host keeps one
+// sandboxed offscreen window per target and sends what each paints. Created
+// on first use: no overlay, no host, no upload.
+let htmlOverlayHost: HtmlOverlayHost | null = null
+
+function ensureHtmlOverlayHost(): HtmlOverlayHost {
+  htmlOverlayHost ??= new HtmlOverlayHost({
+    bannersRoot: () =>
+      backendManagedAssetRoots?.banners ?? join(app.getPath('userData'), BANNERS_FOLDER),
+    connection: () =>
+      backendAdminConnection
+        ? {
+            host: backendAdminConnection.host,
+            port: backendAdminConnection.port,
+            token: backendAdminConnection.token
+          }
+        : null,
+    report: (report) => {
+      void requestBackendAdmin('htmlOverlays.host.report', { ...report }).catch((error) => {
+        logBackend('warn', `HTML overlay report was not delivered: ${errorMessageText(error)}`)
+      })
+    },
+    log: logBackend
+  })
+  return htmlOverlayHost
+}
+
+function acceptHtmlOverlayTargets(read: () => HtmlOverlayTargets, source: string): void {
+  let targets: HtmlOverlayTargets
+  try {
+    targets = read()
+  } catch (error) {
+    logBackend('warn', `Main dropped an invalid ${source} payload: ${errorMessageText(error)}`)
+    return
+  }
+  if (targets.targets.length === 0 && !htmlOverlayHost) return
+  try {
+    ensureHtmlOverlayHost().setTargets(targets.targets)
+  } catch (error) {
+    logBackend('warn', `HTML overlays failed to update: ${errorMessageText(error)}`)
+  }
+}
+
+/** The backend connection went away: every page stops with it. */
+function stopHtmlOverlays(): void {
+  if (!htmlOverlayHost) return
+  try {
+    htmlOverlayHost.setTargets([])
+    htmlOverlayHost.connectionChanged()
+  } catch (error) {
+    logBackend('warn', `HTML overlays failed to stop: ${errorMessageText(error)}`)
+  }
+}
+// --- end HTML overlays (plan 231) ---
+
 // --- Banners on the proof surface (plan 186 S4) -------------------------------
 // Main learns the list from its own backend event socket (`banners.list` on
 // connect, then `banners.changed`). Both scene builders place the showing
@@ -11302,6 +11363,7 @@ function disconnectBackendEventSocket(): void {
   }
   const socket = backendEventSocket
   backendEventSocket = null
+  stopHtmlOverlays()
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
@@ -11338,6 +11400,7 @@ function retireBackendEventSocket(
     return
   }
   backendEventSocket = null
+  stopHtmlOverlays()
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
@@ -11368,6 +11431,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   const recordingStatusRequestId = `main-recording-status-${Date.now()}`
   const previewSurfaceStatusRequestId = `main-preview-surface-status-${Date.now()}`
   const bannersListRequestId = `main-banners-list-${Date.now()}`
+  const htmlOverlayTargetsRequestId = `main-html-overlay-targets-${Date.now()}`
   const overlayLayoutRequestId = `main-overlay-layout-${Date.now()}`
   const sceneRequestId = `main-scene-${Date.now()}`
   let previewSurfaceStatusRequestGeneration: number | null = null
@@ -11390,6 +11454,8 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       if (process.platform === 'darwin') {
         // Plan 214 B3: the camera switch turning on activates the extension.
         includedEvents.push('virtualCamera.changed')
+        // Plan 231: the HTML overlays main renders.
+        includedEvents.push('htmlOverlays.targets')
       }
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
@@ -11420,6 +11486,14 @@ function connectBackendEventSocket(connection: BackendConnection): void {
               JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
             )
             socket.send(JSON.stringify({ id: bannersListRequestId, method: 'banners.list' }))
+            if (process.platform === 'darwin') {
+              socket.send(
+                JSON.stringify({
+                  id: htmlOverlayTargetsRequestId,
+                  method: 'htmlOverlays.targets.get'
+                })
+              )
+            }
             socket.send(
               JSON.stringify({ id: overlayLayoutRequestId, method: 'overlays.layout.get' })
             )
@@ -11471,6 +11545,22 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             )
           }
         }
+        if (parsed.id === htmlOverlayTargetsRequestId) {
+          // Never fatal: an overlay is a drawing, not capture state.
+          if (parsed.ok === true) {
+            acceptHtmlOverlayTargets(
+              () => parseMainHtmlOverlayTargets(parsed.payload),
+              'htmlOverlays.targets.get'
+            )
+            // This backend may be a new one that holds no frames yet.
+            htmlOverlayHost?.refresh()
+          } else {
+            logBackend(
+              'warn',
+              `Main could not read the HTML overlay targets: ${parsed.error?.message ?? 'unknown error'}`
+            )
+          }
+        }
         if (parsed.id === overlayLayoutRequestId) {
           // Never fatal either: the Buddy layer is a drawing, not capture state.
           if (parsed.ok === true) {
@@ -11508,6 +11598,13 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         acceptPreviewSurfaceBanners(
           () => parseMainBannersChangedEvent(parsed.payload),
           'banners.changed'
+        )
+        return
+      }
+      if (parsed.event === 'htmlOverlays.targets') {
+        acceptHtmlOverlayTargets(
+          () => parseMainHtmlOverlayTargetsEvent(parsed.payload),
+          'htmlOverlays.targets'
         )
         return
       }
@@ -11593,6 +11690,8 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 
 const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.capability.register_thumbnail',
+  // Plan 231: how an HTML overlay's page stands; only main hosts them.
+  'htmlOverlays.host.report',
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,
   'health.ping',
   'account.auth.begin_intent',
@@ -12115,6 +12214,10 @@ function sendToWindows<TChannel extends ElectronEventChannel>(
     if (window === nativePreviewSurfaceWindow) {
       continue
     }
+    // Plan 231: an overlay's page is not the app; nothing is sent to it.
+    if (isHtmlOverlayWindow(window)) {
+      continue
+    }
     if (window.isDestroyed() || window.webContents.isDestroyed()) {
       continue
     }
@@ -12302,6 +12405,13 @@ async function runSmokePreviewMotionCommand(
       process.env.VIDEORC_SMOKE_STATE_DIR
     )
     return issueResourceCapability(authorization.path, authorization.kind)
+  }
+
+  if (command === 'html-overlay-stats') {
+    if (app.isPackaged || !smokeCommandServerEnabled) {
+      throw new Error('HTML overlay stats are unavailable in this app mode.')
+    }
+    return { stats: htmlOverlayHost?.stats() ?? null }
   }
 
   if (command === 'import-takeover-image') {
@@ -16069,6 +16179,43 @@ async function pickBannerImage(): Promise<ResourceSelection | null> {
   return path ? issueResourceCapability(path, 'input-file') : null
 }
 
+// Assets → Banners → Import HTML… (plan 231): an `.html` file, or a folder
+// with `index.html` beside its images, fonts, styles and scripts. A file is
+// an `input-file` capability and a folder an `input-directory` one; the
+// backend checks and copies it.
+async function pickBannerHtml(): Promise<ResourceSelection | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose HTML banner',
+    message: 'Choose an .html file, or a folder with index.html.',
+    properties: ['openFile', 'openDirectory'],
+    filters: [
+      {
+        name: 'HTML',
+        extensions: ['html', 'htm']
+      }
+    ]
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+
+  if (result.canceled) {
+    return null
+  }
+
+  const path = result.filePaths[0]
+  if (!path) {
+    return null
+  }
+  let directory = false
+  try {
+    directory = statSync(path).isDirectory()
+  } catch {
+    // The backend says what is wrong with a path that cannot be read.
+  }
+  return issueResourceCapability(path, directory ? 'input-directory' : 'input-file')
+}
+
 // Assets → Sounds → Import sounds… (plan 189): several files at once, each
 // its own single-use input-file capability; the backend decodes, trims and
 // levels each one. A file whose capability can't be issued is left out.
@@ -17111,6 +17258,19 @@ protocol.registerSchemesAsPrivileged([
       stream: true,
       corsEnabled: true
     }
+  },
+  {
+    // Plan 231: an HTML overlay's own files. The scheme is handled only in
+    // each overlay's own session (`html-overlay-host.ts`), never in the
+    // app's: `standard` gives the page an origin and relative URLs, `secure`
+    // the APIs a page expects of https.
+    scheme: HTML_OVERLAY_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true
+    }
   }
 ])
 
@@ -17162,11 +17322,17 @@ app.on('open-url', (event, url) => {
 // The macOS app outlives its main window, and every other window closes with
 // it. With no main window, a menu pick reopens it, as the Dock does, and
 // opens nothing that would run without the Studio behind it.
+/** The app's own windows. An HTML overlay's offscreen window (plan 231) is
+ * not one: with only those left, the app has no window open. */
+function appWindowCount(): number {
+  return BrowserWindow.getAllWindows().filter((window) => !isHtmlOverlayWindow(window)).length
+}
+
 function appMenuMainWindowOpen(): boolean {
   if (mainWindow && !mainWindow.isDestroyed()) {
     return true
   }
-  if (BrowserWindow.getAllWindows().length === 0) {
+  if (appWindowCount() === 0) {
     createWindow()
   }
   return false
@@ -17466,6 +17632,7 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('screens:pick-image', () => pickScreenImage())
   secureIpcHandle('banners:pick-image', () => pickBannerImage())
+  secureIpcHandle('banners:pick-html', () => pickBannerHtml())
   secureIpcHandle('sounds:pick-files', () => pickSoundFiles())
   secureIpcHandle('sounds:starter-list', () => starterSounds())
   secureIpcHandle('sounds:starter-files', (_event, slugs) => starterSoundFiles(slugs))
@@ -18452,7 +18619,7 @@ app.whenReady().then(async () => {
   startSmokePreviewMotionServer()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+    if (appWindowCount() === 0) {
       createWindow()
     }
   })

@@ -93,3 +93,16 @@ compares them with the JSON field for field.
 
 - Rust: `cargo test -p videorc-backend virtual_camera_fixture`
 - TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
+
+## `html-overlay-frame.json`
+
+The header of one HTML overlay frame record (plan 231 "Wire"): what Electron
+main writes on its upload to the backend (`POST /html-overlays/frames`) before
+each frame's premultiplied BGRA pixels. Edited by hand. Main's encoder and the
+backend's parser must both reproduce every case byte for byte:
+
+- Rust: `cargo test -p videorc-backend html_overlay`
+- TypeScript: `pnpm --filter @videorc/desktop test -- html-overlay-frames.test.ts`
+
+The overlay's RPC and event shapes (`htmlOverlays.*`, a banner with
+`kind: "html"`) ride `high-risk-contracts.json` under `htmlOverlay`.
