@@ -327,6 +327,14 @@ describe('smoke command security', () => {
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-background')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-scheduled-thumbnail')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('set-page-zoom')).toBe(false)
+    // The Windows Preview-check oracle (issue #1088) is dev-only.
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('preview-surface-sample')).toBe(false)
+    expect(
+      validateSmokeCommandPayload({
+        command: 'preview-surface-sample',
+        params: { rects: [{ x: 0, y: 0, w: 1, h: 1 }] }
+      })
+    ).not.toBeNull()
     expect(
       validateSmokeCommandPayload({
         command: 'import-smoke-scheduled-thumbnail',

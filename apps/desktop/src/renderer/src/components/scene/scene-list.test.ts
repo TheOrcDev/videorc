@@ -171,16 +171,39 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     expect(container.querySelector('[data-saved-scene="t3"]')!.textContent).not.toContain('Follows')
   })
 
-  it('says Switching… on the scene going on stream, and holds the others', async () => {
+  it('keeps the name of the scene going on stream, says Applying…, and lets another take over', async () => {
     mocked.core.savedScenePendingId = 'display'
     await render()
-    expect(container.querySelector('[data-saved-scene="display"]')!.textContent).toContain(
-      'Switching…'
-    )
+    const desk = container.querySelector('[data-saved-scene="display"]')!
+    expect(desk.textContent).toContain('Desk')
+    expect(desk.textContent).toContain('Applying…')
     expect(rowButton('Desk').disabled).toBe(true)
     expect(container.querySelector('[data-saved-scene="figma"]')!.textContent).not.toContain(
-      'Switching…'
+      'Applying…'
     )
+    // Issue #1275: a click on another scene takes the pending switch over.
+    expect(rowButton('Figma').disabled).toBe(false)
+    await act(async () => rowButton('Figma').click())
+    expect(mocked.core.applySavedSceneResult).toHaveBeenCalledExactlyOnceWith('figma', undefined)
+  })
+
+  it('opens no repair dialog for a switch a newer click took over', async () => {
+    mocked.core.applySavedSceneResult = vi.fn(async () => ({ ok: false, superseded: true }))
+    await render()
+    await act(async () => rowButton('Desk').click())
+    expect(document.body.textContent).not.toContain("couldn't be put on stream")
+    mocked.core.applySavedSceneResult = vi.fn(async () => ({ ok: false }))
+    await act(async () => rowButton('Desk').click())
+    expect(document.body.textContent).toContain("couldn't be put on stream")
+  })
+
+  it("keeps a layout's name while it applies", async () => {
+    mocked.core.layoutSwitchPending = { layoutPreset: 'screen-only', arrangementMode: 'preset' }
+    await render()
+    const row = container.querySelector('[data-scene-preset="screen-only"]')!
+    expect(row.textContent).toContain('Screen only')
+    expect(row.textContent).toContain('Applying…')
+    expect(rowButton('Screen only').disabled).toBe(false)
   })
 
   it("disables a scene whose app isn't open, saying so on the row", async () => {

@@ -370,6 +370,12 @@ import {
   pendingLayoutEvidence,
   type LayoutSwitchTarget
 } from '@/lib/layout-switch-pending'
+import { layoutPresetLabel } from '@/lib/layout-labels'
+import {
+  advanceSceneSwitchProgress,
+  startSceneSwitchProgress,
+  type SceneSwitchProgress
+} from '@/lib/scene-switch-progress'
 import {
   INITIAL_ACCOUNT_READY_REFRESH_STATE,
   reduceAccountReadyRefresh,
@@ -1584,8 +1590,10 @@ export type StudioContextValue = {
    */
   applySimulcastLeg: (patch: SimulcastLegPatch) => void
   // The layout a switch is applying, if any: its preset and whether it lands
-  // in Freeform (drives the one "Switching…" label; plan slice D2, plan 216 A4).
+  // in Freeform (drives the one pending control; plan slice D2, plan 216 A4).
   layoutSwitchPending: LayoutSwitchTarget | null
+  /** Issue #1275: what the pending switch is called and what it waits for. */
+  sceneSwitchProgress: SceneSwitchProgress | null
   sourceDeviceSwitchPending: LiveSourceDeviceSwitchPending | null
   sourceSelectionState: LiveSourceSelectionState
   sourceSwitchReason: (kind: LiveSourceDeviceSwitchPending) => string | null
@@ -4978,6 +4986,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutSwitchTarget | null>(null)
+  const [sceneSwitchProgress, setSceneSwitchProgress] = useState<SceneSwitchProgress | null>(null)
+  // Issue #1275: a phase only moves the switch that reached it, never a newer one.
+  const noteSceneSwitchPhase = useCallback(
+    (
+      intentId: number,
+      patch: Partial<Pick<SceneSwitchProgress, 'phase' | 'showsCamera' | 'showsScreen'>>
+    ) => setSceneSwitchProgress((current) => advanceSceneSwitchProgress(current, intentId, patch)),
+    []
+  )
   const [sourceSelectionState, setSourceSelectionState] = useState<LiveSourceSelectionState>({
     snapshot: null,
     pending: null,
@@ -10056,6 +10073,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return false
       }
       if (nativePreviewSurfaceEnabled && surfaceCanPresent) {
+        noteSceneSwitchPhase(intentId, { phase: 'presenting' })
         const proofOwner = nativePreviewSceneProofPresentationOwner({
           mainPumpActive: mainPumpActiveRef.current,
           statusReaderAvailable: Boolean(window.videorc?.getNativePreviewSurfaceStatus),
@@ -10102,7 +10120,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       return true
     },
-    [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled, runtimeInfo?.platform]
+    [
+      applyPreviewSurfaceStatus,
+      client,
+      nativePreviewSurfaceEnabled,
+      noteSceneSwitchPhase,
+      runtimeInfo?.platform
+    ]
   )
 
   const applyLayoutTransactionState = useCallback(
@@ -10312,6 +10336,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         savedSceneId?: string | null
         origin?: 'builtin' | 'saved'
         sceneSwitch?: boolean
+        /** The name the streamer clicked (a saved scene's); a layout's label by default. */
+        targetName?: string
       }
     ): Promise<boolean> => {
       const crossesOrientation =
@@ -10358,9 +10384,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setVisualTransactionPending(true)
       setSavedScenePendingId(options?.savedSceneId ?? null)
       // Background-only commits keep the same preset; flashing the layout
-      // controls into "Switching…" for them reads as an unrelated change.
+      // controls into their pending mark for them reads as an unrelated change.
       if (options?.pendingIndicator !== false) {
         setLayoutSwitchPending(layoutSwitchTarget(layout))
+        const target =
+          options?.targetName ??
+          (layout.arrangementMode === 'freeform'
+            ? 'Freeform'
+            : layoutPresetLabel(layout.layoutPreset))
+        setSceneSwitchProgress((previous) =>
+          startSceneSwitchProgress(previous, { intentId, target, nowMs: Date.now() })
+        )
       }
 
       let commitReceiptSettled = false
@@ -10467,6 +10501,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : {})
           }
           requestedSceneEvidence = requestedLayoutTransactionScene(requestedTransaction)
+          const shownSources = requestedSceneEvidence.sources.filter(
+            (source) => source.visible !== false
+          )
+          noteSceneSwitchPhase(intentId, {
+            phase: 'starting',
+            showsCamera: shownSources.some((source) => source.kind === 'camera'),
+            showsScreen: shownSources.some(
+              (source) => source.kind === 'screen' || source.kind === 'window'
+            )
+          })
           sceneRevisionBeforeRequest =
             typeof baselineCompositorStatus?.sceneRevision === 'number'
               ? baselineCompositorStatus.sceneRevision
@@ -10512,6 +10556,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // superseded by B after A commits; remember A before waiting for proof
           // so a failed B can reconcile the renderer to committed backend truth.
           rememberLayoutTransactionSnapshot(committedSnapshot)
+          noteSceneSwitchPhase(intentId, { phase: 'drawing' })
           let proofSucceeded = false
           let proofError: unknown = null
           try {
@@ -10646,6 +10691,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           if (layoutIntentIdRef.current === intentId) {
             setLayoutSwitchPending(null)
+            setSceneSwitchProgress(null)
             setSavedScenePendingId(null)
             setVisualTransactionPending(false)
           }
@@ -10659,6 +10705,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       applyLayoutTransactionState,
       client,
+      noteSceneSwitchPhase,
       readLayoutTransactionBackendTruth,
       recordAutomaticSourceFallbacks,
       rememberLayoutCommit,
@@ -11055,6 +11102,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       let microphone: ReturnType<typeof sceneMicrophone> | null = null
       let live = false
       let applied = false
+      let lastIntent = layoutIntentBefore
       // Plan 210 D5: an app scene's window is answered from the held device
       // list when it can be (no resolver round trip). A refused switch gets
       // one more try, resolved over the backend, while the pick is still
@@ -11083,7 +11131,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             generation !== savedSceneResolveGenerationRef.current ||
             layoutIntentBefore !== layoutIntentIdRef.current
           )
-            return { ok: false }
+            return { ok: false, superseded: true }
           if (resolved.kind === 'blocked') {
             setResolvedAppStates((current) => ({
               ...current,
@@ -11130,6 +11178,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           origin: 'saved',
           sceneSwitch: true,
           strictSources: true,
+          targetName: saved.name,
           ...(coupling
             ? {
                 videoOverride: coupling.video,
@@ -11142,6 +11191,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         // The intent this switch minted, read before anything newer can.
         const intent = layoutIntentIdRef.current
+        lastIntent = intent
         applied = await transaction
         if (applied) break
         if (
@@ -11159,6 +11209,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           break
         layoutIntentBefore = intent
       }
+      // A newer click took the switch over (issue #1275): not a failure of this scene.
+      if (!applied && layoutIntentIdRef.current !== lastIntent)
+        return { ok: false, superseded: true }
       if (applied) {
         if (!repaired) refreshSavedSceneDisplay(id, deviceListRef.current.devices)
         rememberedAppsRef.current = sceneApply.rememberSceneWindowApp(
@@ -19177,6 +19230,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
+      sceneSwitchProgress,
       sourceDeviceSwitchPending,
       sourceSelectionState,
       sourceSwitchReason,
@@ -19426,6 +19480,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
+      sceneSwitchProgress,
       sourceDeviceSwitchPending,
       sourceSelectionState,
       sourceSwitchReason,

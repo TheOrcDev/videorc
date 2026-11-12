@@ -26,7 +26,13 @@ export {
 
 export type SavedSceneApplyResult =
   | { ok: true }
-  | { ok: false; reason?: AppWindowFailure; message?: string }
+  | {
+      ok: false
+      reason?: AppWindowFailure
+      message?: string
+      /** A newer switch took this one over before it landed (issue #1275). */
+      superseded?: true
+    }
 /** How a scene apply was asked for (plan 210 S10). */
 export type SavedSceneApplyOptions = {
   /** The window to prefer over the scene's own, as the follower's swap in place (D1, D10). */

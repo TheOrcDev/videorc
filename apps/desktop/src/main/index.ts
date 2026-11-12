@@ -457,6 +457,11 @@ import {
   type ProofSurfaceHost
 } from './in-window-proof-surface'
 import { executeProofSurfaceScript, settleWithProofSurface } from './proof-surface-call'
+import {
+  meanRectsFromBitmap,
+  parseNormalizedRects,
+  stageCaptureRect
+} from './preview-surface-sample'
 import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_FETCH_TIMEOUT_MS,
@@ -14433,6 +14438,82 @@ async function runSmokePreviewMotionCommand(
         nativePreviewSurfaceWindow.isVisible()
       ),
       surfaceStatus: nativePreviewSurfaceStatus
+    }
+  }
+
+  // Issue #1088 (plan 212): the Windows Preview-check smoke's oracle. The
+  // proof surface composes the Preview in main from compositor.status, so the
+  // backend's preview.debug.sample is not what the user sees there. This
+  // captures the surface's own #scene-root and averages the smoke's
+  // canvas-normalized rects. It never touches the scene or the Preview.
+  if (command === 'preview-surface-sample') {
+    if (app.isPackaged || !smokeCommandServerEnabled) {
+      throw new Error('Preview surface sampling is unavailable in this app mode.')
+    }
+    const rects = parseNormalizedRects(params.rects)
+    const surface = nativePreviewSurfaceWindow
+    const base = {
+      transport: nativePreviewSurfaceStatus.transport,
+      backing: nativePreviewSurfaceStatus.backing,
+      state: nativePreviewSurfaceStatus.state,
+      hostKind: nativePreviewSurfaceStatus.nativePreviewHostKind ?? null,
+      presenter: nativePreviewSurfaceStatus.windowsD3d11Presenter ?? null,
+      sceneRevision: nativePreviewSurfaceScene?.revision ?? null,
+      sceneKinds:
+        nativePreviewSurfaceScene?.sources
+          .filter((source) => source.visible)
+          .map((source) => source.kind) ?? [],
+      proofWindowVisible: Boolean(surface && !surface.isDestroyed() && surface.isVisible())
+    }
+    if (!surface || surface.isDestroyed()) {
+      return { ...base, error: 'no-proof-surface' }
+    }
+    if (!base.proofWindowVisible) {
+      return { ...base, error: 'proof-surface-hidden' }
+    }
+    const stage = await executeProofSurfaceScript<{
+      left: number
+      top: number
+      width: number
+      height: number
+      viewportWidth: number
+      viewportHeight: number
+      liveLayers: string[]
+    } | null>(
+      surface,
+      `(() => {
+        const root = document.getElementById('scene-root');
+        if (!root) return null;
+        const rect = root.getBoundingClientRect();
+        const liveLayers = [...root.querySelectorAll('.scene-layer')]
+          .filter((layer) => layer.querySelector('img[data-live="1"], img[data-loaded="1"], canvas[data-drawn="1"]') || layer.dataset.kind === 'test-pattern')
+          .map((layer) => layer.dataset.kind ?? 'unknown');
+        return { left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+          viewportWidth: window.innerWidth, viewportHeight: window.innerHeight, liveLayers };
+      })()`,
+      false
+    )
+    const captureRect = stageCaptureRect(stage, {
+      width: stage?.viewportWidth ?? 0,
+      height: stage?.viewportHeight ?? 0
+    })
+    if (!captureRect) {
+      return { ...base, error: 'stage-not-on-screen', stage }
+    }
+    const image = await settleWithProofSurface(surface, () =>
+      surface.webContents.capturePage(captureRect)
+    )
+    const size = image.getSize()
+    if (image.isEmpty() || size.width < 1 || size.height < 1) {
+      return { ...base, error: 'empty-capture', stage }
+    }
+    return {
+      ...base,
+      capturedAt: Date.now(),
+      width: size.width,
+      height: size.height,
+      liveLayers: stage?.liveLayers ?? [],
+      samples: meanRectsFromBitmap(image.toBitmap(), size.width, size.height, rects)
     }
   }
 
