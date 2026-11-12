@@ -120,7 +120,7 @@ try {
   await ensureCaptionsOnBothOutputs(backend)
   await seedRendererCaptionsProfile(smoke)
   await waitForCaptionStatus(backend, (status) => {
-    return status.state === 'ready' && status.desiredEnabled === true
+    return status.state === 'idle' && status.desiredEnabled === false
   })
   const health = await request(backend, timeoutMs, 'health.ping', { ffmpegPath })
   if (!health?.ffmpeg?.available) {
@@ -155,9 +155,10 @@ try {
   }
   sessionActive = true
   await hydrateRendererActiveSession(smoke)
+  await enableCaptionsMidSession(smoke)
 
-  // Initial captions are part of the backend session itself. No harness-side
-  // captions.start bootstraps them; a separate API retry is tested below.
+  // Captions were OFF at start. The renderer toggle starts transcription
+  // mid-session; a separate API retry is tested below.
   // No overlay RPC is allowed: renderer events must drive both the live
   // compositor PNG and the post-recording cue-frame round trip.
   try {
@@ -546,6 +547,8 @@ try {
       2
     )
   )
+  await proveStreamOnlyMidSession(smoke, target, outputAuthorization.capabilityId)
+
   console.log(formatCaptionsLiveArtifactSummary(streamArtifact))
   console.log(formatCaptionsLiveArtifactSummary(captionedArtifact))
 
@@ -633,7 +636,63 @@ async function ensureCaptionsOnBothOutputs(ws) {
   }
 }
 
-async function seedRendererCaptionsProfile(smoke) {
+async function enableCaptionsMidSession(smoke) {
+  await smokeCommand(smoke, 'eval-js', {
+    code: `
+      if (!window.__videorcSmokeSetCaptionsEnabled) throw new Error('Caption toggle is unavailable.')
+      window.__videorcSmokeSetCaptionsEnabled(true)
+      return true
+    `
+  })
+}
+
+async function proveStreamOnlyMidSession(smoke, target, outputDirectoryCapability) {
+  // Deliberately keep saved record+stream: actual stream-only status must
+  // choose the primary raster leg, independent of the saved mode.
+  await seedRendererCaptionsProfile(smoke)
+  await waitForCaptionStatus(backend, (status) => status.state === 'idle')
+  const path = join(outputDirectory, 'captions-stream-only-mid-session.flv')
+  listener = spawnRtmpListener(target, path)
+  await sleep(listenerBindMs)
+  assertListenerRunning(listener)
+  const started = await request(
+    backend,
+    timeoutMs,
+    'session.start',
+    sessionParams({ target, outputDirectoryCapability, recordEnabled: false })
+  )
+  if (started.state !== 'streaming')
+    throw new Error(`Expected stream-only: ${JSON.stringify(started)}`)
+  sessionActive = true
+  await smokeCommand(smoke, 'eval-js', {
+    code: 'return await window.__videorcSmokeHydrateRecordingStatus()'
+  })
+  await sleep(baselineMs)
+  await enableCaptionsMidSession(smoke)
+  await waitForCaptionStatus(backend, (status) => status.transport === 'chunked')
+  await request(backend, timeoutMs, 'audio.processing.update', {
+    sessionId: started.sessionId,
+    microphoneGainDb: gainDb,
+    microphoneMuted: false
+  })
+  await injectPreControlsPcm(smoke, started.sessionId)
+  await waitForCaptionStatus(backend, (status) => status.providerReady === true)
+  await sleep(captionCaptureMs)
+  await request(backend, timeoutMs, 'session.stop', {})
+  sessionActive = false
+  await stopRtmpListener(listener)
+  const artifact = await analyzeCaptionsLiveArtifact(path, { ffmpegPath })
+  if (!artifact.pass)
+    throw new Error(
+      `Stream-only mid-session captions missing: ${JSON.stringify(artifact.failures)}`
+    )
+  console.log(
+    `Stream-only captions OFF → ON at 30 fps: ${formatCaptionsLiveArtifactSummary(artifact)}`
+  )
+  return artifact
+}
+
+async function seedRendererCaptionsProfile(smoke, recordEnabled = true) {
   const seeded = await smokeCommand(smoke, 'eval-js', {
     code: `
       let current = {}
@@ -642,12 +701,12 @@ async function seedRendererCaptionsProfile(smoke) {
         ...current,
         // Mirror the direct backend record+stream shape so the renderer owns
         // both the live stream PNG and finalized cue-frame submissions.
-        recordEnabled: true,
+        recordEnabled: ${recordEnabled},
         streamEnabled: true,
         streaming: { ...current.streaming, enabled: false },
         video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
         captions: {
-          enabled: true,
+          enabled: false,
           burnTarget: 'both',
           styleId: 'high-contrast',
           language: 'en',
@@ -672,9 +731,9 @@ async function seedRendererCaptionsProfile(smoke) {
   })
   if (
     seeded?.result?.captions?.styleId !== 'high-contrast' ||
-    seeded?.result?.captions?.enabled !== true ||
+    seeded?.result?.captions?.enabled !== false ||
     seeded?.result?.captions?.burnTarget !== 'both' ||
-    seeded?.result?.recordEnabled !== true ||
+    seeded?.result?.recordEnabled !== recordEnabled ||
     seeded?.result?.streamEnabled !== true ||
     seeded?.result?.hasStreamingDefaults !== true
   ) {
@@ -706,9 +765,9 @@ async function seedRendererCaptionsProfile(smoke) {
       if (
         result?.ready &&
         result.styleId === 'high-contrast' &&
-        result.enabled === true &&
+        result.enabled === false &&
         result.burnTarget === 'both' &&
-        result.recordEnabled === true &&
+        result.recordEnabled === recordEnabled &&
         result.streamEnabled === true &&
         result.hasStreamingDefaults === true &&
         result.width === 640 &&
@@ -751,7 +810,7 @@ async function hydrateRendererActiveSession(smoke) {
   }
 }
 
-function sessionParams({ outputDirectoryCapability, target }) {
+function sessionParams({ outputDirectoryCapability, target, recordEnabled = true }) {
   return {
     sources: { testPattern: true, microphoneId: captionTestMicrophoneId },
     layout: {
@@ -773,14 +832,15 @@ function sessionParams({ outputDirectoryCapability, target }) {
       sideBySideCameraSide: 'right'
     },
     output: {
-      recordEnabled: true,
+      recordEnabled,
       streamEnabled: true,
       outputDirectoryCapability,
       video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
       rtmp: { preset: 'custom', serverUrl: target.serverUrl, streamKey: target.streamKey }
     },
     captions: {
-      enabled: true,
+      enabled: false,
+      suppressedForSession: true,
       burnTarget: 'both',
       styleId: 'high-contrast',
       language: 'en',
@@ -879,7 +939,7 @@ function safeFakeCounters(state) {
   }
 }
 
-function spawnRtmpListener(target) {
+function spawnRtmpListener(target, destination = receivedPath) {
   const stderr = []
   const process = spawn(
     ffmpegPath,
@@ -897,7 +957,7 @@ function spawnRtmpListener(target) {
       'copy',
       '-f',
       'flv',
-      receivedPath
+      destination
     ],
     { stdio: ['ignore', 'ignore', 'pipe'] }
   )

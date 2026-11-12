@@ -2514,6 +2514,7 @@ impl VideorcApiClient {
             .file_name("videorc-caption-chunk.wav")
             .mime_str("audio/wav")
             .map_err(|error| CaptionChunkFailure::Transient {
+                status: None,
                 code: None,
                 message: format!("Could not build the caption upload: {error}"),
             })?;
@@ -2536,6 +2537,7 @@ impl VideorcApiClient {
             .send()
             .await
             .map_err(|error| CaptionChunkFailure::Transient {
+                status: None,
                 code: None,
                 message: format!("Could not reach the caption service: {error}"),
             })?;
@@ -2546,6 +2548,7 @@ impl VideorcApiClient {
                 .json()
                 .await
                 .map_err(|error| CaptionChunkFailure::Transient {
+                    status: None,
                     code: None,
                     message: format!("Could not read the caption response: {error}"),
                 });
@@ -2584,6 +2587,7 @@ impl VideorcApiClient {
             .send()
             .await
             .map_err(|error| CaptionChunkFailure::Transient {
+                status: None,
                 code: None,
                 message: format!("Could not reach the caption service: {error}"),
             })?;
@@ -2594,6 +2598,7 @@ impl VideorcApiClient {
                 .json()
                 .await
                 .map_err(|error| CaptionChunkFailure::Transient {
+                    status: None,
                     code: None,
                     message: format!("Could not read the streaming token: {error}"),
                 });
@@ -3055,6 +3060,7 @@ pub enum CaptionChunkFailure {
     Terminal { code: String, message: String },
     /// Skip this chunk; the session keeps going (network blip, 5xx).
     Transient {
+        status: Option<u16>,
         code: Option<String>,
         message: String,
     },
@@ -3079,6 +3085,7 @@ fn classify_caption_failure(status: u16, code: String, message: String) -> Capti
         CaptionChunkFailure::Terminal { code, message }
     } else {
         CaptionChunkFailure::Transient {
+            status: Some(status),
             code: Some(code),
             message: format!("caption chunk failed ({status}): {message}"),
         }
@@ -3173,6 +3180,20 @@ mod tests {
     use super::*;
 
     type SeenCommands = std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, serde_json::Value)>>>;
+
+    #[test]
+    fn caption_service_unavailable_preserves_http_status_and_stable_code() {
+        for status in [502, 503] {
+            let failure = classify_caption_failure(
+                status,
+                "ai-service-unavailable".into(),
+                "Service paused".into(),
+            );
+            assert!(
+                matches!(failure, CaptionChunkFailure::Transient { status: Some(got), code: Some(code), .. } if got == status && code == "ai-service-unavailable")
+            );
+        }
+    }
 
     #[test]
     fn release_builds_pin_the_production_base_url() {

@@ -89,7 +89,7 @@ export function destinationStateLabel(state: StreamTargetState): string {
   return DESTINATION_STATE_LABELS[state] ?? statusWordFromValue(state)
 }
 
-type CaptionsStatusInput = Pick<CaptionsStatus, 'state' | 'desiredEnabled'>
+type CaptionsStatusInput = Pick<CaptionsStatus, 'state' | 'desiredEnabled' | 'reasonCode'>
 
 export type CaptionsStatusOptions = {
   /** The streamer's Live captions switch; defaults to what the status reports. */
@@ -123,7 +123,7 @@ export function captionsStatusLabel(
     case 'reconnecting':
       return 'Reconnecting…'
     case 'degraded':
-      return 'Higher delay'
+      return status.reasonCode === 'service-unavailable' ? 'Paused' : 'Higher delay'
     case 'blocked':
       return 'Blocked'
     case 'error':

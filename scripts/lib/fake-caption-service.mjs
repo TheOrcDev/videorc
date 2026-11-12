@@ -69,6 +69,7 @@ export async function startFakeCaptionService({
     chunkRequests: 0,
     chunkFinals: [],
     chunkFailureCode: null,
+    chunkFailureStatus: null,
     chunkAudio: [],
     chunkPurposes: [],
     usageReports: 0,
@@ -174,12 +175,16 @@ export async function startFakeCaptionService({
       // Controlled terminal retry after a validated, authenticated upload.
       // Retain the same reduced request evidence as successful chunks.
       if (state.chunkFailureCode) {
-        return json(res, state.chunkFailureCode === 'unauthorized' ? 401 : 503, {
-          error: {
-            code: state.chunkFailureCode,
-            message: 'Chunk transcription is deliberately blocked in the retry scenario.'
+        return json(
+          res,
+          state.chunkFailureStatus ?? (state.chunkFailureCode === 'unauthorized' ? 401 : 503),
+          {
+            error: {
+              code: state.chunkFailureCode,
+              message: 'Chunk transcription is deliberately blocked in the retry scenario.'
+            }
           }
-        })
+        )
       }
       const hasSpeech = !Number.isFinite(minSpeechPeak) || audio.peak >= Math.max(0, minSpeechPeak)
       const scripted = state.chunkFinals.shift()

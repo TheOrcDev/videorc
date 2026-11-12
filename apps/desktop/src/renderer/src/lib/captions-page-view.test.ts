@@ -100,3 +100,16 @@ describe('captionsAllowanceLabel (D-27)', () => {
     expect(captionsAllowanceLabel(undefined)).toBeNull()
   })
 })
+
+it('keeps the service outage visible above stale caption lines', () => {
+  const message = 'Captions paused: Videorc AI is unavailable. They come back on their own.'
+  const paused = {
+    state: 'degraded' as const,
+    desiredEnabled: true,
+    providerReady: false,
+    reasonCode: 'service-unavailable',
+    message
+  }
+  expect(captionsStatusDetail(paused, true)).toBe(message)
+  expect(captionsReaderNotice(paused, 3)).toEqual({ text: message, failed: true })
+})

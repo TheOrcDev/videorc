@@ -5127,6 +5127,13 @@ async fn start_session_with_timeline(
         None
     };
     let session_caption_plan = caption_leg_plan(&params);
+    tracing::info!(
+        session = %session_id,
+        caption_primary = session_caption_plan.primary,
+        caption_aux = session_caption_plan.aux,
+        caption_split = session_caption_plan.force_same_profile_split,
+        "caption leg plan (capacity reserved independently of transcription consent)"
+    );
     // Plan 164: the highlight card and the Buddy follow the streamer's
     // per-output switches in the backend-owned overlay layout; captions keep
     // `burnTarget` (derived from the same switches by the renderer).
@@ -25892,17 +25899,31 @@ fn resolve_split_output_profiles(params: &StartSessionParams) -> Result<SplitOut
 }
 
 fn caption_burn_target(params: &StartSessionParams) -> crate::captions::CaptionBurnTarget {
-    let Some(captions) = params
-        .captions
-        .as_ref()
-        .filter(|captions| !captions.suppressed_for_session)
-    else {
-        return crate::captions::CaptionBurnTarget::Off;
+    use crate::captions::CaptionBurnTarget;
+    let Some(captions) = params.captions.as_ref() else {
+        return CaptionBurnTarget::Off;
     };
     let target = captions.effective_burn_target();
-    let needs_live_stream_leg = target.burns_stream() && params.output.stream_enabled;
-    if !captions.enabled && needs_live_stream_leg && !caption_live_burn_output_eligible(params) {
-        return crate::captions::CaptionBurnTarget::Off;
+    // Transcription consent is independent of output capacity. A skipped or
+    // hidden bar can be enabled mid-stream, but an encoder leg cannot be
+    // allocated then. Reserve the eligible viewer leg without sending audio
+    // or drawing any pixels until the streamer opts in.
+    let prearm =
+        !captions.enabled || captions.suppressed_for_session || target == CaptionBurnTarget::Off;
+    if prearm && params.output.stream_enabled && caption_live_burn_output_eligible(params) {
+        return if target.requests_captioned_copy() {
+            CaptionBurnTarget::Both
+        } else {
+            CaptionBurnTarget::Stream
+        };
+    }
+    if captions.suppressed_for_session
+        || (!captions.enabled
+            && target.burns_stream()
+            && params.output.stream_enabled
+            && !caption_live_burn_output_eligible(params))
+    {
+        return CaptionBurnTarget::Off;
     }
     target
 }
@@ -50406,6 +50427,33 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
         );
         validate_outputs(&params)
             .expect("session suppression must not trigger the live-burn 30fps preflight");
+    }
+
+    #[test]
+    fn captions_mid_stream_prearms_even_when_initially_skipped_or_hidden() {
+        for record in [false, true] {
+            for suppressed in [false, true] {
+                for target in [
+                    crate::captions::CaptionBurnTarget::Off,
+                    crate::captions::CaptionBurnTarget::Stream,
+                ] {
+                    let mut params = base_params(record, true);
+                    params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+                    params.captions = Some(crate::protocol::CaptionsSessionParams {
+                        enabled: false,
+                        suppressed_for_session: suppressed,
+                        burn_target: target,
+                        ..Default::default()
+                    });
+                    let plan = caption_leg_plan(&params);
+                    assert_eq!(
+                        (plan.primary, plan.aux),
+                        (!record, record),
+                        "record={record}, suppressed={suppressed}, target={target:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

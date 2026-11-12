@@ -8584,8 +8584,11 @@ describe('real StudioProvider lifecycle', () => {
     expect(shared).toEqual({
       streamProfile: streamVideo,
       recordingProfile: streamVideo,
-      outputRoles: ['shared']
+      outputRoles: ['recording', 'stream']
     })
+    expect(
+      buildStreamOutputTopologyProbeParams(sharedConfig, sharedConfig.streaming, true).outputRoles
+    ).toEqual(['recording', 'stream'])
 
     const captionSplit = buildStreamOutputTopologyProbeParams({
       ...sharedConfig,

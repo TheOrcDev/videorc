@@ -247,3 +247,20 @@ describe('state labels', () => {
     expect(sessionStatusLabel({ state: 'streaming' }, 'connected')).toBe('On air')
   })
 })
+
+it('names a caption service outage Paused instead of higher delay', () => {
+  expect(
+    captionsStatusLabel({
+      state: 'degraded',
+      desiredEnabled: true,
+      reasonCode: 'service-unavailable'
+    })
+  ).toBe('Paused')
+  expect(
+    captionsStatusTone({
+      state: 'degraded',
+      desiredEnabled: true,
+      reasonCode: 'service-unavailable'
+    })
+  ).toBe('warn')
+})
