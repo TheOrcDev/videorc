@@ -539,7 +539,9 @@ import {
 } from './window-capture-protection'
 import {
   COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION,
-  commentsWindowHiddenFromStreamPreference
+  commentsWindowHiddenFromStreamPreference,
+  readPrefsForMerge,
+  writePrefsWhole
 } from './comments-window-prefs'
 import {
   FOCUS_ON_ARRIVAL,
@@ -3765,27 +3767,35 @@ function commentsWindowPrefsPath(): string {
 }
 
 function loadCommentsWindowPrefs(): CommentsWindowPrefs {
-  try {
-    return JSON.parse(readFileSync(commentsWindowPrefsPath(), 'utf8')) as CommentsWindowPrefs
-  } catch {
-    return {}
+  const path = commentsWindowPrefsPath()
+  const prefs = readPrefsForMerge({ readFileSync, writeFileSync, renameSync }, path)
+  if (!prefs) {
+    safeConsole.warn(`[stream-manager] ${path} cannot be read now; using the defaults`)
   }
+  return (prefs ?? {}) as CommentsWindowPrefs
 }
 
 function saveCommentsWindowPrefs(patch: CommentsWindowPrefs): void {
   if (!commentsWindowFeatureEnabled || process.env.VIDEORC_SMOKE_OUTPUT_DIR) {
     return
   }
+  // Plan 230 writes this file on every settled drag, so a lost or half
+  // write must never turn Hide from stream off: the file lands whole, and a
+  // file that cannot be read right now is left alone.
+  const path = commentsWindowPrefsPath()
+  const fs = { readFileSync, writeFileSync, renameSync }
   try {
-    // Plan 230 writes this file on every settled drag: a write cut short by
-    // a crash must never leave a half file that reads as "no prefs" (and
-    // turns Hide from stream off), so it lands whole or not at all.
-    const path = commentsWindowPrefsPath()
-    const next = `${path}.next`
-    writeFileSync(next, JSON.stringify({ ...loadCommentsWindowPrefs(), ...patch }))
-    renameSync(next, path)
-  } catch {
-    // A failed preference write must never break capture.
+    const current = readPrefsForMerge(fs, path)
+    if (!current) {
+      safeConsole.warn(`[stream-manager] ${path} cannot be read now; the change is not saved`)
+      return
+    }
+    writePrefsWhole(fs, path, JSON.stringify({ ...current, ...patch }))
+  } catch (error) {
+    // A failed preference write must never break capture, but it is said.
+    safeConsole.warn(
+      `[stream-manager] could not save ${path}: ${error instanceof Error ? error.message : String(error)}`
+    )
   }
 }
 
@@ -4666,11 +4676,28 @@ async function frontOrCloseCommentsWindow(): Promise<StreamManagerFrontOrCloseRe
     return 'closed'
   }
   await openCommentsWindow()
-  if (commentsWindowIsOpen() && !commentsWindow?.isFocused()) {
-    // macOS and Windows may refuse the focus to a background app.
-    safeConsole.warn('[stream-manager] brought to the front, but the system kept the focus')
-  }
+  warnIfCommentsWindowGetsNoFocus()
   return 'front'
+}
+
+// macOS and Windows may refuse the focus to a background app. Activation
+// lands a moment after `focus()`, so wait for the window's own focus event
+// before saying so; the hold's answer does not wait.
+const FOCUS_LANDS_WITHIN_MS = 500
+
+function warnIfCommentsWindowGetsNoFocus(): void {
+  const window = commentsWindow
+  if (!commentsWindowIsOpen() || !window || window.isFocused()) {
+    return
+  }
+  const onFocus = (): void => clearTimeout(timer)
+  const timer = setTimeout(() => {
+    window.off('focus', onFocus)
+    if (commentsWindow === window && !window.isDestroyed() && !window.isFocused()) {
+      safeConsole.warn('[stream-manager] brought to the front, but the system kept the focus')
+    }
+  }, FOCUS_LANDS_WITHIN_MS)
+  window.once('focus', onFocus)
 }
 
 function commentsWindowFrameOnScreen(
@@ -5335,12 +5362,20 @@ function registerDisplayChangeReconcile(): void {
   screen.on('display-removed', reconcile)
   // The Stream Manager Screen key's list of screens (plan 230) follows the
   // monitors, and the OS's own moves of the window are not saved as frames.
-  for (const event of ['display-metrics-changed', 'display-added', 'display-removed'] as const) {
-    screen.on(event as 'display-added', () => {
-      holdCommentsWindowScreenFrames()
-      emitCommentsWindowState()
-    })
-  }
+  // Only a screen that comes, goes, moves or resizes can make the OS move
+  // the window; a work-area change (the Dock or taskbar) cannot.
+  screen.on('display-added', () => {
+    holdCommentsWindowScreenFrames()
+    emitCommentsWindowState()
+  })
+  screen.on('display-removed', () => {
+    holdCommentsWindowScreenFrames()
+    emitCommentsWindowState()
+  })
+  screen.on('display-metrics-changed', (_event, _display, changedMetrics) => {
+    if (changedMetrics.includes('bounds')) holdCommentsWindowScreenFrames()
+    emitCommentsWindowState()
+  })
 }
 
 function pushPreviewWindowPlacement(): void {
