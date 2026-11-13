@@ -1198,6 +1198,23 @@ mod runtime {
         /// The shared prepare service: the bitmaps are prepared once per
         /// (banner, canvas, rect, opacity) off this thread and shared here.
         pub(crate) banner_prepare: crate::banner_prepare::BannerPrepareService,
+        /// Plan 232 S11: the latest frame of every showing HTML banner, as
+        /// Electron main uploaded it (straight alpha, converted off this
+        /// thread). Its draw is a banner's: the same layer, keyed upload
+        /// (once per new frame, the texture reused while the size holds)
+        /// and leg plan.
+        pub(crate) html_overlays: crate::html_overlay::HtmlOverlayService,
+    }
+
+    impl WindowsD3d11OverlayInput {
+        /// Where this session's banner pixels come from: prepared bitmaps for
+        /// images, the latest page frame for HTML banners (plan 232 S11).
+        fn banner_pixels(&self) -> crate::compositor::BannerPixels<'_> {
+            crate::compositor::BannerPixels {
+                prepare: &self.banner_prepare,
+                html_overlays: &self.html_overlays,
+            }
+        }
     }
 
     /// One banner on one leg for one tick (plan 186 S4).
@@ -2241,7 +2258,7 @@ mod runtime {
             primary_canvas,
             now,
             None,
-            crate::compositor::BannerPixels::images_only(&input.banner_prepare),
+            input.banner_pixels(),
         );
         let auxiliary_draws = match plan.auxiliary {
             Some(video) => {
@@ -2256,7 +2273,7 @@ mod runtime {
                         canvas,
                         now,
                         None,
-                        crate::compositor::BannerPixels::images_only(&input.banner_prepare),
+                        input.banner_pixels(),
                     ),
                 ))
             }
@@ -2285,7 +2302,7 @@ mod runtime {
                 primary_canvas,
                 now,
                 None,
-                crate::compositor::BannerPixels::images_only(&input.banner_prepare),
+                input.banner_pixels(),
             ),
         };
         let program_index_of = |slot: u64, ring_index: usize| {
@@ -4184,6 +4201,7 @@ mod runtime {
                 aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
             }),
             banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
+            html_overlays: crate::html_overlay::HtmlOverlayService::default(),
         };
         input
             .buddy_sprite
@@ -4293,6 +4311,7 @@ mod runtime {
                 aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
             }),
             banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
+            html_overlays: crate::html_overlay::HtmlOverlayService::default(),
         };
         crate::captions::install_caption_overlays(
             &input.captions,
@@ -4628,6 +4647,7 @@ mod runtime {
                 banner_shape: shape,
                 program_shape,
                 banner_prepare: prepare.clone(),
+                html_overlays: crate::html_overlay::HtmlOverlayService::default(),
             };
             crate::buddy_overlay::install_buddy_overlay(
                 &input.buddy,
@@ -4778,6 +4798,159 @@ mod runtime {
         overlay_ids.sort_unstable();
         overlay_ids.dedup();
         assert_eq!(overlay_ids.len(), 4);
+    }
+
+    /// Plan 232 S11: an HTML banner draws on the D3D11 session as an image
+    /// banner does: its latest page frame on every leg its switches pick,
+    /// nothing before the first frame, and a new upload only when a new
+    /// frame arrives (the revision is the cached texture's content key).
+    #[cfg(test)]
+    #[test]
+    fn windows_html_banner_draws_its_latest_frame_on_each_leg() {
+        use crate::banners::{BannerFade, BannerLayer, BannerSet, banner_default_places};
+        use crate::html_overlay::{FrameHeader, HtmlOverlayService};
+        use crate::overlay_layout::{OverlayAuxLeg, OverlaySessionShape};
+
+        let video = super::WindowsD3d11VideoPlan {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4500,
+        };
+        let plan = WindowsD3d11SessionPlan {
+            screen_id: "screen:dxgi:00000000000003f1:2".into(),
+            source_width: 1920,
+            source_height: 1080,
+            primary: video,
+            auxiliary: Some(video),
+            camera_required: false,
+            preview_required_at_startup: false,
+            primary_role: WindowsD3d11MediaRole::Record,
+            roles: [WindowsD3d11MediaRole::Record, WindowsD3d11MediaRole::Stream]
+                .into_iter()
+                .collect(),
+        };
+        let shape = OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: true,
+            aux_leg: OverlayAuxLeg::Stream,
+        };
+        let id = uuid::Uuid::new_v4();
+        let mut banner = crate::banners::tests::sample_banner(&id.to_string(), 0);
+        banner.kind = crate::protocol::BannerKind::Html;
+        (banner.width, banner.height) = (640, 360);
+        (banner.horizontal, banner.vertical) = banner_default_places(640, 360);
+        let now = Instant::now();
+        let set_of = |banner: &crate::protocol::Banner| BannerSet {
+            layers: vec![BannerLayer {
+                image_path: Arc::from(
+                    std::path::Path::new("/nonexistent").join(&banner.image_file),
+                ),
+                banner: banner.clone(),
+                // An HTML banner has no prepared file: its frames are its picture.
+                file_revision: None,
+                fade: BannerFade {
+                    from: 1.0,
+                    to: 1.0,
+                    started_at: now,
+                },
+            }],
+        };
+        let html_overlays = HtmlOverlayService::default();
+        let input = WindowsD3d11OverlayInput {
+            captions: crate::captions::new_caption_overlay_slots(),
+            highlight: crate::captions::new_caption_overlay_slot(),
+            chat: crate::captions::new_caption_overlay_slot(),
+            buddy: crate::captions::new_caption_overlay_slots(),
+            buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
+                &crate::cohost::CohostPersona::default(),
+                crate::overlay_layout::OverlayLayout::default().buddy,
+                None,
+            ),
+            caption_on_primary: false,
+            caption_on_auxiliary: false,
+            highlight_on_primary: false,
+            highlight_on_auxiliary: false,
+            chat_on_primary: false,
+            chat_on_auxiliary: false,
+            buddy_on_primary: false,
+            buddy_on_auxiliary: false,
+            highlight_in_program: false,
+            chat_in_program: false,
+            buddy_in_program: false,
+            banner_shape: shape,
+            program_shape: Some(shape),
+            banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
+            html_overlays: html_overlays.clone(),
+        };
+        let set = set_of(&banner);
+
+        // The page is loading: no frame, nothing drawn.
+        assert!(
+            current_banner_frames(&plan, &input, &set, now)
+                .unwrap()
+                .is_empty()
+        );
+
+        let header = |sequence| FrameHeader {
+            id,
+            width: 640,
+            height: 360,
+            sequence,
+        };
+        let upload_revision =
+            |frame: &WindowsD3d11BannerFrame| match banner_upload_source(frame).unwrap() {
+                WindowsD3d11CompositionSource::BgraUpload {
+                    content_revision,
+                    dimensions,
+                    ..
+                } => {
+                    assert_eq!((dimensions.width, dimensions.height), (640, 360));
+                    content_revision
+                }
+                _ => panic!("an HTML banner frame is a BGRA upload"),
+            };
+        html_overlays.store(header(1), vec![255; 640 * 360 * 4], now);
+        let first = html_overlays.latest_frame(&id.to_string()).unwrap();
+        let frames = current_banner_frames(&plan, &input, &set, now).unwrap();
+        // The recording leg (with the Preview) and the stream leg.
+        let mut ids = frames
+            .iter()
+            .map(|frame| frame.source_id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec![
+                BANNER_PRIMARY_SOURCE_ID_BASE,
+                BANNER_AUXILIARY_SOURCE_ID_BASE
+            ]
+        );
+        for frame in &frames {
+            assert!(Arc::ptr_eq(&frame.draw.bitmap, &first));
+            assert!(frame.draw.scales_to_rect);
+            assert_eq!(upload_revision(frame), first.revision);
+        }
+
+        // A new frame is a new revision: the texture uploads once more.
+        html_overlays.store(header(2), vec![128; 640 * 360 * 4], now);
+        let second = html_overlays.latest_frame(&id.to_string()).unwrap();
+        assert_ne!(second.revision, first.revision);
+        for frame in &current_banner_frames(&plan, &input, &set, now).unwrap() {
+            assert_eq!(upload_revision(frame), second.revision);
+        }
+
+        // "Appears in: Stream" off: the recording leg alone carries it.
+        let mut recording_only = banner.clone();
+        recording_only.show_on_stream = false;
+        let frames = current_banner_frames(&plan, &input, &set_of(&recording_only), now).unwrap();
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| frame.source_id)
+                .collect::<Vec<_>>(),
+            vec![BANNER_PRIMARY_SOURCE_ID_BASE]
+        );
     }
 
     #[cfg(test)]
