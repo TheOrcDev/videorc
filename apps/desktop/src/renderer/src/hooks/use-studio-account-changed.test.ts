@@ -21,7 +21,7 @@ describe('account.changed', () => {
     toast.warning.mockClear()
   })
 
-  it('applies the backend account and says when the server signed the desktop out', () => {
+  it('applies the backend account and says when the server signed the desktop out', async () => {
     const coordinator = new AccountSnapshotCommitCoordinator()
     const setAccount = vi.fn()
 
@@ -31,6 +31,9 @@ describe('account.changed', () => {
     )
 
     expect(setAccount).toHaveBeenCalledWith({ status: 'signed-out' })
+    // The connection toasts' words load lazily (plan 224 budget room), so
+    // the warning lands a tick after the event.
+    await vi.waitFor(() => expect(toast.warning).toHaveBeenCalled())
     expect(toast.warning).toHaveBeenCalledWith(
       'Your Videorc sign-in expired',
       expect.objectContaining({
