@@ -37,11 +37,11 @@ use objc2_foundation::NSString;
 use objc2_io_surface::IOSurfaceRef;
 use objc2_metal::{
     MTLBlendFactor, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable, MTLLibrary, MTLLoadAction, MTLOrigin,
-    MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor,
-    MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage,
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLDrawable, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion,
+    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
+    MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
+    MTLSamplerState, MTLSize, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -60,29 +60,41 @@ struct FragParams {
     float circle;
     float aspect;
     float radius;
-    // Chroma key, mirroring scene_geometry's f64 reference keyer (ANGLE
-    // model): chroma_key = (enabled, key_dir_cb, key_dir_cr, max_angle_rad);
-    // chroma_key2 = (band_rad, spill, spill_is_blue, reserved).
-    // CbCr uses the SAME -43/-85/128 and 128/-107/-21 coefficient family as
-    // color.rs. If these drift, the CPU and GPU keyers disagree.
-    float4 chroma_key;
-    float4 chroma_key2;
-    // (opacity, crop_clamp, reserved, reserved). opacity multiplies the
+    // (opacity, crop_clamp, premultiplied, reserved). opacity multiplies the
     // quad's alpha (plan 168 S-B2, the Buddy sprite); 1 for every other quad.
     // crop_clamp (plan 200 D3) keeps a linear sample half a texel inside the
     // crop so a scaled draw never blends in pixels the crop removed.
+    // premultiplied (plan 233): the texture is a keyed camera its key pass
+    // premultiplied, so the sample is divided by its alpha for the
+    // straight-alpha blend.
     float4 layer;
     float4 camera_look; // brightness, contrast, saturation, enabled
+};
+// Plan 233: the key pass's parameters, mirroring scene_geometry's f64
+// reference keyer (ANGLE model) in f32. CbCr uses the SAME -43/-85/128 and
+// 128/-107/-21 coefficient family as color.rs. If these drift, the CPU and
+// GPU keyers disagree.
+struct KeyParams {
+    // (enabled, key_dir_cb, key_dir_cr, max_angle_rad)
+    float4 chroma_key;
+    // (band_rad, spill, spill_is_blue, block): block is 2^level, the camera
+    // texels one keyed texel averages on each axis.
+    float4 chroma_key2;
     // Plan 227: the luma-scaled saturation floor (min, per_luma, max,
     // ramp_ratio), mirroring scene_geometry's CHROMA_KEY_SATURATION_FLOOR_*.
     float4 chroma_key_floor;
     // Plan 227 B, Hide edges: the kept box in source uv (u_min, v_min,
-    // u_max, v_max); a sample outside it keys fully out.
+    // u_max, v_max); a texel outside it keys fully out.
     float4 chroma_key_edges;
-    // Plan 229: the key judges the sample's neighbourhood, mirroring
+    // Plan 229: the key judges each texel's neighbourhood, mirroring
     // scene_geometry's CHROMA_KEY_NEIGHBOURHOOD_*: (tap_offset_texels,
-    // side_tap_weight, reserved, reserved). Offset 0 judges the sample alone.
+    // side_tap_weight, reserved, reserved).
     float4 chroma_key_neighbourhood;
+    float4 camera_look; // brightness, contrast, saturation, enabled
+    // Plan 233 D1 a: despill near the edge, mirroring scene_geometry's
+    // CHROMA_KEY_EDGE_DESPILL_*: (fade_rad, proximity_gain, reserved,
+    // reserved).
+    float4 edge_despill;
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
@@ -144,72 +156,13 @@ fragment float4 f_main(VOut in [[stage_in]],
         src = clamp(src, min(lo, hi), max(lo, hi));
     }
     float4 color = tex.sample(samp, src);
-    // Chroma key (scene_geometry::chroma_key_alpha / chroma_key_despill in
-    // f32, ANGLE model): the angle between the pixel's CbCr vector and the
-    // key direction ramps alpha 0->1 across the band; a saturation floor that
-    // scales with luma (plan 227, chroma_key_floor) pulls greys back to
-    // opaque. Spill pulls the dominant key channel down toward the other
-    // channels' max. Hide edges (chroma_key_edges) key the sample out when
-    // it lies outside the kept box. The quad must be drawn on the blending
-    // pipeline for the computed alpha to matter.
-    //
-    // Plan 229: the alpha comes from the colour smoothed over the sample's
-    // neighbourhood (nine bilinear taps at 0 and +-tap_offset source texels,
-    // weighing 1 - 2 * side and side per axis: [1 4 6 4 1]^2 / 256 on the
-    // texel grid), so a speck of camera noise keys with the screen around
-    // it. The pixel keeps its own colour; despill runs on it.
-    if (params.chroma_key.x > 0.5) {
-        constexpr sampler key_samp(coord::normalized, address::clamp_to_edge, filter::linear);
-        float2 key_step = params.chroma_key_neighbourhood.x
-            / float2(tex.get_width(), tex.get_height());
-        float side = params.chroma_key_neighbourhood.y;
-        float3 key_weights = float3(side, 1.0 - 2.0 * side, side);
-        float3 judged = float3(0.0);
-        for (int j = 0; j < 3; ++j) {
-            for (int i = 0; i < 3; ++i) {
-                float2 at = src + float2(float(i - 1), float(j - 1)) * key_step;
-                judged += key_weights[i] * key_weights[j]
-                    * tex.sample(key_samp, at, level(0.0)).rgb;
-            }
-        }
-        float r = judged.r * 255.0, g = judged.g * 255.0, b = judged.b * 255.0;
-        float vcb = (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0;
-        float vcr = (128.0 * r - 107.0 * g - 21.0 * b) / 256.0;
-        float saturation = sqrt(vcb * vcb + vcr * vcr);
-        float luma = (77.0 * r + 150.0 * g + 29.0 * b) / 256.0;
-        float floor_value = clamp(params.chroma_key_floor.y * luma,
-            params.chroma_key_floor.x, params.chroma_key_floor.z);
-        float ramp = max(floor_value * params.chroma_key_floor.w, 1e-4);
-        float angle_alpha = 1.0;
-        if (saturation > 1e-4) {
-            float cos_theta = clamp(
-                (vcb * params.chroma_key.y + vcr * params.chroma_key.z) / saturation, -1.0, 1.0);
-            float theta = acos(cos_theta);
-            float max_angle = params.chroma_key.w;
-            float band = params.chroma_key2.x;
-            angle_alpha = (band > 0.0)
-                ? clamp((theta - max_angle) / band, 0.0, 1.0)
-                : (theta <= max_angle ? 0.0 : 1.0);
-        }
-        float eligibility = (saturation <= floor_value)
-            ? 0.0
-            : clamp((saturation - floor_value) / ramp, 0.0, 1.0);
-        float alpha = 1.0 - eligibility * (1.0 - angle_alpha);
-        float4 kept = params.chroma_key_edges;
-        if (src.x < kept.x || src.x > kept.z || src.y < kept.y || src.y > kept.w) {
-            alpha = 0.0;
-        }
-        float spill = params.chroma_key2.y;
-        if (spill > 0.0) {
-            if (params.chroma_key2.z > 0.5) {
-                float limit = max(color.r, color.g);
-                color.b = (color.b > limit) ? color.b - spill * (color.b - limit) : color.b;
-            } else {
-                float limit = max(color.r, color.b);
-                color.g = (color.g > limit) ? color.g - spill * (color.g - limit) : color.g;
-            }
-        }
-        color.a *= alpha;
+    // Plan 233: a keyed camera draws the texture its key pass built, which is
+    // premultiplied (so one bilinear tap of it is the honest mix of its kept
+    // texels); the blend pipeline wants straight alpha. The key itself, the
+    // despill and the camera look ran in the key pass (k_key_reduce and
+    // f_key_finish below).
+    if (params.layer.z > 0.5) {
+        color.rgb = (color.a > 1e-5) ? color.rgb / color.a : float3(0.0);
     }
     if (params.camera_look.w > 0.5) {
         float y = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
@@ -219,6 +172,193 @@ fragment float4 f_main(VOut in [[stage_in]],
     }
     color.a *= params.layer.x;
     return color;
+}
+// scene_geometry::chroma_key_alpha_rgb in f32 (ANGLE model): the angle
+// between the judged colour's CbCr vector and the key direction ramps alpha
+// 0->1 across the band; a saturation floor that scales with luma (plan 227,
+// chroma_key_floor) pulls greys back to opaque.
+static float key_alpha(float3 judged, constant KeyParams& p) {
+    float r = judged.r * 255.0, g = judged.g * 255.0, b = judged.b * 255.0;
+    float vcb = (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0;
+    float vcr = (128.0 * r - 107.0 * g - 21.0 * b) / 256.0;
+    float saturation = sqrt(vcb * vcb + vcr * vcr);
+    float luma = (77.0 * r + 150.0 * g + 29.0 * b) / 256.0;
+    float floor_value = clamp(p.chroma_key_floor.y * luma,
+        p.chroma_key_floor.x, p.chroma_key_floor.z);
+    float ramp = max(floor_value * p.chroma_key_floor.w, 1e-4);
+    float angle_alpha = 1.0;
+    if (saturation > 1e-4) {
+        float cos_theta = clamp(
+            (vcb * p.chroma_key.y + vcr * p.chroma_key.z) / saturation, -1.0, 1.0);
+        float theta = acos(cos_theta);
+        float max_angle = p.chroma_key.w;
+        float band = p.chroma_key2.x;
+        angle_alpha = (band > 0.0)
+            ? clamp((theta - max_angle) / band, 0.0, 1.0)
+            : (theta <= max_angle ? 0.0 : 1.0);
+    }
+    float eligibility = (saturation <= floor_value)
+        ? 0.0
+        : clamp((saturation - floor_value) / ramp, 0.0, 1.0);
+    return 1.0 - eligibility * (1.0 - angle_alpha);
+}
+// The camera texels a pass 1 threadgroup loads on a side: its tile of keyed
+// texels times the block, plus the two-texel apron the 5x5 judge needs. The
+// host mirrors it (KEY_REDUCE_WINDOW_SIDE) and sizes the tile to fit. Kept
+// small (5 KB of threadgroup memory) so several threadgroups share a GPU core.
+constant int KEY_REDUCE_WINDOW_SIDE = 36;
+// One row of the key's neighbourhood (plan 229) from the window: the row's
+// [1 4 6 4 1] across the column, in 0..255 units over 16.
+static float3 window_row(threadgroup const uchar4* window, int side, int wx, int wy) {
+    int base = wy * side + wx;
+    return (float3(window[base - 2].rgb) + float3(window[base + 2].rgb)) * (1.0 / 16.0)
+        + (float3(window[base - 1].rgb) + float3(window[base + 1].rgb)) * (4.0 / 16.0)
+        + float3(window[base].rgb) * (6.0 / 16.0);
+}
+// Plan 233 pass 1: one thread per keyed texel, which is the premultiplied
+// average of its block of camera texels, each keyed on its own 5x5
+// neighbourhood (plan 229), with Hide edges (plan 227 B) and the capture
+// alpha applied. The threadgroup first loads its window of camera texels
+// (its blocks plus the apron, edges repeated) into threadgroup memory once,
+// so a camera texel is fetched about once instead of once per tap; the
+// neighbourhood's rows then slide down each column of the window in a ring
+// of five. The target is the keyed texture at the reduction level: no
+// full-size keyed picture, no mips.
+kernel void k_key_reduce(texture2d<float, access::read> cam [[texture(0)]],
+                         texture2d<float, access::write> reduced [[texture(1)]],
+                         constant KeyParams& p [[buffer(0)]],
+                         uint2 gid [[thread_position_in_grid]],
+                         uint2 lid [[thread_position_in_threadgroup]],
+                         uint2 tile [[threads_per_threadgroup]],
+                         uint2 group [[threadgroup_position_in_grid]]) {
+    threadgroup uchar4 window[KEY_REDUCE_WINDOW_SIDE * KEY_REDUCE_WINDOW_SIDE];
+    int block = max(int(p.chroma_key2.w + 0.5), 1);
+    int2 cam_size = int2(cam.get_width(), cam.get_height());
+    int side = int(tile.x) * block + 4;
+    int2 window_origin = int2(group) * int2(tile) * block - 2;
+    int threads = int(tile.x * tile.y);
+    for (int i = int(lid.y * tile.x + lid.x); i < side * side; i += threads) {
+        int2 at = clamp(window_origin + int2(i % side, i / side), int2(0), cam_size - 1);
+        window[i] = uchar4(round(cam.read(uint2(at)) * 255.0));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (int(gid.x) >= int(reduced.get_width()) || int(gid.y) >= int(reduced.get_height())) {
+        return;
+    }
+    float2 cam_sizef = float2(cam_size);
+    int2 cam_origin = int2(gid) * block;
+    int2 block_origin = int2(lid) * block + 2;
+    float4 kept = p.chroma_key_edges;
+    float4 sum = float4(0.0);
+    float count = 0.0;
+    for (int i = 0; i < block; ++i) {
+        int x = cam_origin.x + i;
+        if (x >= cam_size.x) {
+            break;
+        }
+        int wx = block_origin.x + i;
+        float u = (float(x) + 0.5) / cam_sizef.x;
+        float3 h0 = window_row(window, side, wx, block_origin.y - 2);
+        float3 h1 = window_row(window, side, wx, block_origin.y - 1);
+        float3 h2 = window_row(window, side, wx, block_origin.y);
+        float3 h3 = window_row(window, side, wx, block_origin.y + 1);
+        float3 h4 = window_row(window, side, wx, block_origin.y + 2);
+        for (int j = 0; j < block; ++j) {
+            int y = cam_origin.y + j;
+            if (y >= cam_size.y) {
+                break;
+            }
+            int wy = block_origin.y + j;
+            if (j > 0) {
+                h0 = h1;
+                h1 = h2;
+                h2 = h3;
+                h3 = h4;
+                h4 = window_row(window, side, wx, wy + 2);
+            }
+            float3 judged = (h0 + h4) * (1.0 / 16.0) + (h1 + h3) * (4.0 / 16.0) + h2 * (6.0 / 16.0);
+            float alpha = key_alpha(judged / 255.0, p);
+            float v = (float(y) + 0.5) / cam_sizef.y;
+            if (u < kept.x || u > kept.z || v < kept.y || v > kept.w) {
+                alpha = 0.0;
+            }
+            float4 texel = float4(window[wy * side + wx]) / 255.0;
+            alpha *= texel.a;
+            sum += float4(texel.rgb * alpha, alpha);
+            count += 1.0;
+        }
+    }
+    reduced.write(sum / max(count, 1.0), gid);
+}
+// scene_geometry::chroma_key_nearness in f32 (plan 233 D1 a): how close a
+// colour is to the key, 1 inside the cone and its band, fading to 0 over
+// edge_despill.x past the band, times the key's saturation eligibility.
+static float key_nearness(float3 color, constant KeyParams& p) {
+    float r = color.r * 255.0, g = color.g * 255.0, b = color.b * 255.0;
+    float vcb = (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0;
+    float vcr = (128.0 * r - 107.0 * g - 21.0 * b) / 256.0;
+    float saturation = sqrt(vcb * vcb + vcr * vcr);
+    float luma = (77.0 * r + 150.0 * g + 29.0 * b) / 256.0;
+    float floor_value = clamp(p.chroma_key_floor.y * luma,
+        p.chroma_key_floor.x, p.chroma_key_floor.z);
+    if (saturation <= floor_value) {
+        return 0.0;
+    }
+    float ramp = max(floor_value * p.chroma_key_floor.w, 1e-4);
+    float cos_theta = clamp(
+        (vcb * p.chroma_key.y + vcr * p.chroma_key.z) / saturation, -1.0, 1.0);
+    float theta = acos(cos_theta);
+    float outer = p.chroma_key.w + p.chroma_key2.x;
+    float fade = max(p.edge_despill.x, 1e-4);
+    float nearness = clamp((outer + fade - theta) / fade, 0.0, 1.0);
+    return nearness * clamp((saturation - floor_value) / ramp, 0.0, 1.0);
+}
+// Plan 233 pass 2: the colour treatment on each keyed texel's average
+// colour, as one bilinear tap of the camera got it before: despill (the key
+// channel comes down toward the other two's max where it dominates them),
+// then the camera look. The despill is Spill removal, or more next to the
+// keyed-out area (D1 a): nearness to the key times how keyed-out the picture
+// around the texel is, the alpha over the 5x5 binomial at the keyed
+// texture's spacing (plan 229's nine taps), gained. Premultiplied in and out.
+fragment float4 f_key_finish(VOut in [[stage_in]],
+                             texture2d<float> keyed [[texture(0)]],
+                             constant KeyParams& p [[buffer(0)]]) {
+    constexpr sampler edge_samp(coord::normalized, address::clamp_to_edge, filter::linear);
+    float4 texel = keyed.read(uint2(in.pos.xy));
+    if (texel.a <= 0.0) {
+        return float4(0.0);
+    }
+    float3 color = texel.rgb / texel.a;
+    float2 size = float2(keyed.get_width(), keyed.get_height());
+    float2 uv = in.pos.xy / size;
+    float2 step = p.chroma_key_neighbourhood.x / size;
+    float side = p.chroma_key_neighbourhood.y;
+    float3 weights = float3(side, 1.0 - 2.0 * side, side);
+    float blurred = 0.0;
+    for (int j = 0; j < 3; ++j) {
+        for (int i = 0; i < 3; ++i) {
+            float2 at = uv + float2(float(i - 1), float(j - 1)) * step;
+            blurred += weights[i] * weights[j] * keyed.sample(edge_samp, at, level(0.0)).a;
+        }
+    }
+    float proximity = clamp((1.0 - blurred) * p.edge_despill.y, 0.0, 1.0);
+    float strength = max(p.chroma_key2.y, key_nearness(color, p) * proximity);
+    if (strength > 0.0) {
+        if (p.chroma_key2.z > 0.5) {
+            float limit = max(color.r, color.g);
+            color.b = (color.b > limit) ? color.b - strength * (color.b - limit) : color.b;
+        } else {
+            float limit = max(color.r, color.b);
+            color.g = (color.g > limit) ? color.g - strength * (color.g - limit) : color.g;
+        }
+    }
+    if (p.camera_look.w > 0.5) {
+        float y = dot(color, float3(0.2126, 0.7152, 0.0722));
+        color = clamp(y + p.camera_look.x
+            + (p.camera_look.y - 1.0) * (y - 0.5)
+            + p.camera_look.z * (color - y), 0.0, 1.0);
+    }
+    return float4(color * texel.a, texel.a);
 }
 "#;
 
@@ -234,20 +374,30 @@ struct FragParams {
     /// Rounded-rect corner radius in shorter-side-half units (2 * pct / 100);
     /// 0 disables the rounded mask.
     radius: f32,
-    /// (enabled, key_cb, key_cr, threshold) — see the MSL FragParams comment.
-    /// The float4 pair keeps the struct layout 16-byte aligned on both sides.
-    chroma_key: [f32; 4],
-    /// (band, spill, spill_is_blue, reserved).
-    chroma_key2: [f32; 4],
-    /// (opacity, reserved, reserved, reserved); see the MSL comment.
+    /// (opacity, crop_clamp, premultiplied, reserved); see the MSL comment.
+    /// The float4 keeps the struct layout 16-byte aligned on both sides.
     layer: [f32; 4],
     camera_look: [f32; 4],
+}
+
+/// Plan 233: the key pass's parameters; see the MSL `KeyParams` comment.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KeyParams {
+    /// (enabled, key_dir_cb, key_dir_cr, max_angle_rad).
+    chroma_key: [f32; 4],
+    /// (band_rad, spill, spill_is_blue, block).
+    chroma_key2: [f32; 4],
     /// Plan 227: (min, per_luma, max, ramp_ratio) of the saturation floor.
     chroma_key_floor: [f32; 4],
     /// Plan 227 B: the kept box in source uv (u_min, v_min, u_max, v_max).
     chroma_key_edges: [f32; 4],
     /// Plan 229: (tap_offset_texels, side_tap_weight, reserved, reserved).
     chroma_key_neighbourhood: [f32; 4],
+    /// Brightness, contrast, saturation, enabled.
+    camera_look: [f32; 4],
+    /// Plan 233 D1 a: (fade_rad, proximity_gain, reserved, reserved).
+    edge_despill: [f32; 4],
 }
 
 /// Per-quad chroma key in shader units, converted once from
@@ -285,31 +435,71 @@ pub const CHROMA_KEY_KEEP_ALL_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 pub(crate) const CHROMA_KEY_NEIGHBOURHOOD_PARAMS: [f32; 4] = [1.2, 5.0 / 16.0, 0.0, 0.0];
 
 impl GpuChromaKey {
-    /// `(chroma_key, chroma_key2, chroma_key_floor, chroma_key_edges,
-    /// chroma_key_neighbourhood)` for the fragment shader.
-    fn frag_params(source: Option<&GpuChromaKey>) -> [[f32; 4]; 5] {
-        match source {
-            Some(key) => [
-                [1.0, key.key_dir_cb, key.key_dir_cr, key.max_angle_rad],
-                [
-                    key.band_rad,
-                    key.spill,
-                    if key.spill_is_blue { 1.0 } else { 0.0 },
-                    0.0,
-                ],
-                CHROMA_KEY_SATURATION_FLOOR_PARAMS,
-                key.kept_uv,
-                CHROMA_KEY_NEIGHBOURHOOD_PARAMS,
+    /// The key pass's parameters for a camera keyed at a `block` × `block`
+    /// reduction (plan 233), with the camera look the pass applies after
+    /// the despill.
+    fn key_params(&self, block: u32, camera_look: Option<[f32; 3]>) -> KeyParams {
+        KeyParams {
+            chroma_key: [1.0, self.key_dir_cb, self.key_dir_cr, self.max_angle_rad],
+            chroma_key2: [
+                self.band_rad,
+                self.spill,
+                if self.spill_is_blue { 1.0 } else { 0.0 },
+                block as f32,
             ],
-            None => [
-                [0.0; 4],
-                [0.0; 4],
-                [0.0; 4],
-                CHROMA_KEY_KEEP_ALL_UV,
-                [0.0; 4],
-            ],
+            chroma_key_floor: CHROMA_KEY_SATURATION_FLOOR_PARAMS,
+            chroma_key_edges: self.kept_uv,
+            chroma_key_neighbourhood: CHROMA_KEY_NEIGHBOURHOOD_PARAMS,
+            camera_look: camera_look_params(camera_look),
+            edge_despill: CHROMA_KEY_EDGE_DESPILL_PARAMS,
         }
     }
+}
+
+/// Mirrors scene_geometry's CHROMA_KEY_EDGE_DESPILL_PARAMS (plan 233 D1 a) as
+/// `(fade_rad, proximity_gain, reserved, reserved)`: mirrored for the same
+/// reason as the floor, and pinned equal by the same compositor test.
+pub(crate) const CHROMA_KEY_EDGE_DESPILL_PARAMS: [f32; 4] =
+    [30.0 * std::f32::consts::PI / 180.0, 6.0, 0.0, 0.0];
+
+/// The shaders' camera look: brightness, contrast, saturation, enabled.
+fn camera_look_params(camera_look: Option<[f32; 3]>) -> [f32; 4] {
+    camera_look.map_or([0.0, 1.0, 1.0, 0.0], |[b, c, s]| [b, c, s, 1.0])
+}
+
+/// Mirrors `scene_geometry::chroma_key_reduction_level` (plan 233): how many
+/// halvings a keyed camera takes before it is drawn, `floor(log2(camera px
+/// per drawn px))` on the axis with the smaller ratio, never below 0. This
+/// file also builds into the preview helper, which has no scene_geometry, so
+/// the rule is mirrored and a compositor test pins the two equal.
+pub(crate) fn gpu_chroma_key_reduction_level(
+    source_width: f64,
+    source_height: f64,
+    drawn_width: f64,
+    drawn_height: f64,
+) -> u32 {
+    if !(source_width > 0.0 && source_height > 0.0 && drawn_width > 0.0 && drawn_height > 0.0) {
+        return 0;
+    }
+    let ratio = (source_width / drawn_width).min(source_height / drawn_height);
+    if ratio.is_nan() || ratio < 2.0 {
+        return 0;
+    }
+    // Mirrors scene_geometry::CHROMA_KEY_REDUCTION_LEVEL_MAX: a 32 × 32 block
+    // plus its apron is what one pass 1 thread's window holds.
+    (ratio.log2().floor() as u32).min(5)
+}
+
+/// The level a keyed quad is keyed at: its crop in texels against its box in
+/// output pixels (the same measure as `gpu_draw_is_scaled`).
+fn keyed_camera_level(source: &GpuSource<'_>, out_width: usize, out_height: usize) -> u32 {
+    let crop_width =
+        source.width as f64 * (1.0 - f64::from(source.crop[0]) - f64::from(source.crop[2]));
+    let crop_height =
+        source.height as f64 * (1.0 - f64::from(source.crop[1]) - f64::from(source.crop[3]));
+    let dest_width = f64::from(source.dest[2]) * out_width as f64;
+    let dest_height = f64::from(source.dest[3]) * out_height as f64;
+    gpu_chroma_key_reduction_level(crop_width, crop_height, dest_width, dest_height)
 }
 
 /// One source layer to composite: BGRA8 pixels at `width`×`height`, drawn into the
@@ -350,7 +540,9 @@ pub struct GpuSource<'a> {
     /// sources keep the default opaque overwrite: their alpha channels are not
     /// trustworthy (screen frames can arrive with alpha 0).
     pub blend: bool,
-    /// Chroma key applied in the fragment shader (camera green screen). The
+    /// Chroma key (camera green screen). The key pass keys the camera per
+    /// texel into a premultiplied texture at the level just above its drawn
+    /// size (plan 233), and the quad draws that with one bilinear tap. The
     /// caller must also set `blend` or the computed alpha is ignored.
     pub chroma_key: Option<GpuChromaKey>,
     /// Brightness, contrast and saturation in gamma-encoded RGB.
@@ -972,6 +1164,12 @@ pub struct MetalSceneCompositor {
     /// Same shader with straight-alpha source-over blending, selected per quad
     /// for `GpuSource::blend` overlays (caption bar, comment highlight).
     blend_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Plan 233: the key pass's two pipelines, into `KEYED_CAMERA_TEXTURE_FORMAT`:
+    /// pass 1 a compute kernel, pass 2 a full-quad render.
+    key_reduce_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    key_finish_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Plan 233: the keyed cameras' textures, per source slot.
+    keyed_cameras: Vec<Option<KeyedCameraTexture>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
     /// Always linear, for quads that ask for it (`GpuSourceSampler::Linear`).
     linear_sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
@@ -1029,6 +1227,43 @@ struct KeyedSourceTexture {
     cached: CachedSourceTexture,
     used_at: u64,
 }
+
+/// Plan 233: a keyed camera's picture at its reduction level, premultiplied,
+/// per source slot. It is keyed again only when the camera frame (its
+/// content key), the key, the look or the level changes: the camera runs at
+/// 25 fps under a 30 fps canvas, so one compose in six draws the kept
+/// texture. The preview and program compositors each key on their own.
+struct KeyedCameraTexture {
+    content_key: Option<GpuSourceContentKey>,
+    source_width: usize,
+    source_height: usize,
+    key: GpuChromaKey,
+    camera_look: Option<[f32; 3]>,
+    level: u32,
+    width: usize,
+    height: usize,
+    /// Pass 1's target: keyed, reduced and premultiplied, before the colour
+    /// treatment.
+    reduced: Retained<MetalTexture>,
+    /// Pass 2's target: what the quad draws.
+    finished: Retained<MetalTexture>,
+}
+
+impl KeyedCameraTexture {
+    fn holds(&self, source: &GpuSource<'_>, key: &GpuChromaKey, level: u32) -> bool {
+        source.content_key.is_some()
+            && self.content_key == source.content_key
+            && self.source_width == source.width
+            && self.source_height == source.height
+            && self.key == *key
+            && self.camera_look == source.camera_look
+            && self.level == level
+    }
+}
+
+/// The keyed camera textures' format: RGBA8 premultiplied loses the colour
+/// of a texel at very low alpha, and the outline is made of those.
+const KEYED_CAMERA_TEXTURE_FORMAT: MTLPixelFormat = MTLPixelFormat::RGBA16Float;
 
 enum CachedSourceBacking {
     ByteUpload,
@@ -1151,6 +1386,14 @@ pub struct MetalComposeTimings {
     pub ensure_target_ms: f64,
     pub source_texture_ms: f64,
     pub source_import_stats: MetalSourceImportStats,
+    /// Plan 233: encoding the keyed cameras' key passes this compose.
+    pub key_pass_ms: f64,
+    /// Plan 233: how many keyed cameras were keyed again this compose (the
+    /// rest drew their kept texture).
+    pub keyed_camera_passes: u64,
+    /// The GPU's own time on this compose's command buffer (its start to
+    /// end timestamps), whatever the CPU was doing meanwhile.
+    pub gpu_ms: f64,
     pub command_encode_ms: f64,
     pub command_wait_ms: f64,
     pub total_ms: f64,
@@ -1375,6 +1618,12 @@ unsafe impl Send for CachedTargetTexture {}
 // render loop. The wrapper is never accessed independently of that owner.
 unsafe impl Send for CachedSourceTexture {}
 
+// SAFETY: A keyed camera's two textures (plan 233) are owned by one
+// compositor instance, rendered and read only from its serial render loop,
+// and every command buffer that touches them completes before the next
+// compose. The wrapper only lets Tokio move the owning task between workers.
+unsafe impl Send for KeyedCameraTexture {}
+
 // SAFETY: CVMetalTextureCache is retained by one compositor and only used from the render loop.
 // The wrapper exposes immutable references for per-frame texture import.
 unsafe impl Send for MetalSourceTextureCache {}
@@ -1396,8 +1645,29 @@ impl MetalSceneCompositor {
     pub fn new_with_smooth_scaling(smooth_scaling: bool) -> Option<Self> {
         let device = MTLCreateSystemDefaultDevice()?;
         let queue = device.newCommandQueue()?;
-        let pipeline = build_pipeline(&device, false)?;
-        let blend_pipeline = build_pipeline(&device, true)?;
+        let library = build_library(&device)?;
+        let pipeline = build_pipeline_from(
+            &device,
+            &library,
+            "f_main",
+            false,
+            MTLPixelFormat::BGRA8Unorm,
+        )?;
+        let blend_pipeline = build_pipeline_from(
+            &device,
+            &library,
+            "f_main",
+            true,
+            MTLPixelFormat::BGRA8Unorm,
+        )?;
+        let key_reduce_pipeline = build_compute_pipeline(&device, &library, "k_key_reduce")?;
+        let key_finish_pipeline = build_pipeline_from(
+            &device,
+            &library,
+            "f_key_finish",
+            false,
+            KEYED_CAMERA_TEXTURE_FORMAT,
+        )?;
         let sampler = if smooth_scaling {
             build_preview_sampler(&device)?
         } else {
@@ -1415,6 +1685,9 @@ impl MetalSceneCompositor {
             queue,
             pipeline,
             blend_pipeline,
+            key_reduce_pipeline,
+            key_finish_pipeline,
+            keyed_cameras: Vec::new(),
             sampler,
             linear_sampler,
             smooth_scaling,
@@ -1529,13 +1802,6 @@ impl MetalSceneCompositor {
         self.ensure_target_texture(out_width, out_height)?;
         let ensure_target_ms = ensure_started_at.elapsed().as_secs_f64() * 1000.0;
         let command_buffer = self.queue.commandBuffer()?;
-        let encoder = {
-            let target = self.latest_target()?;
-            let pass = clear_pass(&target.texture, background);
-            command_buffer.renderCommandEncoderWithDescriptor(&pass)?
-        };
-        encoder.setRenderPipelineState(&self.pipeline);
-        unsafe { encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0) };
         self.source_retention_capacity.set(
             sources
                 .iter()
@@ -1543,14 +1809,74 @@ impl MetalSceneCompositor {
                 .count(),
         );
         self.source_textures.truncate(sources.len());
+        self.keyed_cameras.truncate(sources.len());
         let mut source_texture_ms = 0.0;
         let mut source_import_stats = MetalSourceImportStats::default();
+        let mut encode_result: Result<(), ()> = Ok(());
+        // Plan 233: the key pass. Before the scene's render pass, in the same
+        // command buffer, each keyed camera is keyed per camera texel into
+        // its premultiplied texture at the level just above its drawn size
+        // (or keeps the one from the last compose while its frame, key and
+        // level hold). The quad below draws that texture with one bilinear
+        // tap through the external-texture route, so `f_main` has no key.
+        let key_pass_started_at = Instant::now();
+        let mut keyed_camera_passes = 0u64;
+        let mut keyed_camera_ready = vec![false; sources.len()];
+        for (source_index, source) in sources.iter().enumerate() {
+            let Some(key) = source.chroma_key.as_ref() else {
+                continue;
+            };
+            if source.texture.is_some() {
+                continue;
+            }
+            let source_texture_started_at = Instant::now();
+            let source_texture = self.ensure_source_texture(source_index, source);
+            let source_texture_elapsed_ms =
+                source_texture_started_at.elapsed().as_secs_f64() * 1000.0;
+            source_texture_ms += source_texture_elapsed_ms;
+            match source_texture {
+                Ok(ready) => {
+                    source_import_stats.record_ready(source.kind, ready, source_texture_elapsed_ms);
+                }
+                Err(failures) => {
+                    source_import_stats.record_failed_source(
+                        source.kind,
+                        failures,
+                        source_texture_elapsed_ms,
+                    );
+                    encode_result = Err(());
+                    break;
+                }
+            }
+            let level = keyed_camera_level(source, out_width, out_height);
+            match self.ensure_keyed_camera(source_index, source, key, level, &command_buffer) {
+                Ok(keyed) => {
+                    keyed_camera_passes += u64::from(keyed);
+                    keyed_camera_ready[source_index] = true;
+                }
+                Err(()) => {
+                    encode_result = Err(());
+                    break;
+                }
+            }
+        }
+        let key_pass_ms = key_pass_started_at.elapsed().as_secs_f64() * 1000.0;
+        let encoder = {
+            let target = self.latest_target()?;
+            let pass = clear_pass(&target.texture, background);
+            command_buffer.renderCommandEncoderWithDescriptor(&pass)?
+        };
+        encoder.setRenderPipelineState(&self.pipeline);
+        unsafe { encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0) };
         let mut command_encode_ms = 0.0;
         let mut encode_segment_started_at = Instant::now();
         let mut encoder_blend = false;
         let mut encoder_sampler = GpuSourceSampler::Scene;
-        let mut encode_result: Result<(), ()> = Ok(());
         for (source_index, source) in sources.iter().enumerate() {
+            if encode_result.is_err() {
+                break;
+            }
+            let keyed = keyed_camera_ready[source_index];
             if source.blend != encoder_blend {
                 encoder.setRenderPipelineState(if source.blend {
                     &self.blend_pipeline
@@ -1559,8 +1885,13 @@ impl MetalSceneCompositor {
                 });
                 encoder_blend = source.blend;
             }
-            let quad_sampler =
-                effective_quad_sampler(source, self.smooth_scaling, out_width, out_height);
+            // A keyed camera reads its keyed texture with one bilinear tap
+            // (plan 233 D2 a), whatever compositor draws it.
+            let quad_sampler = if keyed {
+                GpuSourceSampler::Linear
+            } else {
+                effective_quad_sampler(source, self.smooth_scaling, out_width, out_height)
+            };
             if quad_sampler != encoder_sampler {
                 let sampler = match quad_sampler {
                     GpuSourceSampler::Scene => &self.sampler,
@@ -1596,36 +1927,25 @@ impl MetalSceneCompositor {
             } else {
                 1.0
             };
-            let [
-                chroma_key,
-                chroma_key2,
-                chroma_key_floor,
-                chroma_key_edges,
-                chroma_key_neighbourhood,
-            ] = GpuChromaKey::frag_params(source.chroma_key.as_ref());
             let params = FragParams {
                 crop: source.crop,
                 mirror: f32::from(u8::from(source.mirror)),
                 circle: source.mask.circle_flag(),
                 aspect,
                 radius: source.mask.shader_radius(),
-                chroma_key,
-                chroma_key2,
-                chroma_key_floor,
-                chroma_key_edges,
-                chroma_key_neighbourhood,
-                camera_look: source
-                    .camera_look
-                    .map_or([0.0, 1.0, 1.0, 0.0], |[b, c, s]| [b, c, s, 1.0]),
+                // A keyed camera's look ran in its key pass.
+                camera_look: camera_look_params(source.camera_look.filter(|_| !keyed)),
                 layer: [
                     source.opacity.clamp(0.0, 1.0),
                     // Only a draw D3 moved to linear: explicit linear quads
                     // (the Buddy sprite) and preview compositors keep theirs.
+                    // A keyed camera's clamp is its keyed texture's texel.
                     f32::from(u8::from(
-                        quad_sampler == GpuSourceSampler::Linear
-                            && source.sampler == GpuSourceSampler::Scene,
+                        keyed
+                            || (quad_sampler == GpuSourceSampler::Linear
+                                && source.sampler == GpuSourceSampler::Scene),
                     )),
-                    0.0,
+                    f32::from(u8::from(keyed)),
                     0.0,
                 ],
             };
@@ -1634,6 +1954,16 @@ impl MetalSceneCompositor {
                 // Plan 190: a texture this device already rendered (the live
                 // background frame): no import, no upload, no cache slot.
                 external
+            } else if keyed {
+                // Plan 233: the keyed camera's texture from the key pass.
+                let Some(texture) = self.keyed_cameras[source_index]
+                    .as_ref()
+                    .map(|slot| &*slot.finished)
+                else {
+                    encode_result = Err(());
+                    break;
+                };
+                texture
             } else {
                 let source_texture_started_at = Instant::now();
                 let source_texture = self.ensure_source_texture(source_index, source);
@@ -1722,10 +2052,14 @@ impl MetalSceneCompositor {
         let source_import_stats = self
             .pending_source_import_stats
             .complete_successful_compose(source_import_stats);
+        let gpu_ms = (command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1000.0;
         Some(MetalComposeTimings {
             ensure_target_ms,
             source_texture_ms,
             source_import_stats,
+            key_pass_ms,
+            keyed_camera_passes,
+            gpu_ms,
             command_encode_ms,
             command_wait_ms: command_wait_ms.get(),
             total_ms: total_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -1872,6 +2206,113 @@ impl MetalSceneCompositor {
             .iter()
             .find(|slot| slot.id == id)
             .map(|slot| &*slot.cached.texture)
+    }
+
+    /// Plan 233: the keyed camera's texture for source `index`, keyed again
+    /// on `command_buffer` when the frame, the key, the look or the level
+    /// changed. The camera's own texture must be ready (`ensure_source_texture`).
+    /// `Ok(true)` when the key passes ran.
+    fn ensure_keyed_camera(
+        &mut self,
+        index: usize,
+        source: &GpuSource<'_>,
+        key: &GpuChromaKey,
+        level: u32,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    ) -> Result<bool, ()> {
+        if self.keyed_cameras.len() <= index {
+            self.keyed_cameras.resize_with(index + 1, || None);
+        }
+        if self.keyed_cameras[index]
+            .as_ref()
+            .is_some_and(|cached| cached.holds(source, key, level))
+        {
+            return Ok(false);
+        }
+        let block = 1usize << level.min(31);
+        let width = source.width.div_ceil(block).max(1);
+        let height = source.height.div_ceil(block).max(1);
+        // Pass 1 is a compute kernel writing `reduced`; pass 2 renders into
+        // `finished`; the quad samples `finished`.
+        let usage = MTLTextureUsage::RenderTarget
+            | MTLTextureUsage::ShaderRead
+            | MTLTextureUsage::ShaderWrite;
+        let mut slot = match self.keyed_cameras[index]
+            .take()
+            .filter(|cached| cached.width == width && cached.height == height)
+        {
+            Some(slot) => slot,
+            None => KeyedCameraTexture {
+                content_key: None,
+                source_width: 0,
+                source_height: 0,
+                key: *key,
+                camera_look: None,
+                level,
+                width,
+                height,
+                reduced: make_texture_with_format(
+                    &self.device,
+                    width,
+                    height,
+                    KEYED_CAMERA_TEXTURE_FORMAT,
+                    usage,
+                )
+                .ok_or(())?,
+                finished: make_texture_with_format(
+                    &self.device,
+                    width,
+                    height,
+                    KEYED_CAMERA_TEXTURE_FORMAT,
+                    usage,
+                )
+                .ok_or(())?,
+            },
+        };
+        let camera = match keyed_slot_id(source) {
+            Some(id) => self.keyed_texture(id),
+            None => self
+                .source_textures
+                .get(index)
+                .and_then(|cached| cached.as_ref())
+                .map(|cached| &*cached.texture),
+        }
+        .ok_or(())?;
+        let params = key.key_params(block as u32, source.camera_look);
+        encode_key_reduce(
+            command_buffer,
+            &self.key_reduce_pipeline,
+            camera,
+            &slot.reduced,
+            &params,
+            block,
+        )?;
+        encode_key_pass(
+            &self.device,
+            command_buffer,
+            &self.key_finish_pipeline,
+            &slot.reduced,
+            &slot.finished,
+            &params,
+        )?;
+        slot.content_key = source.content_key;
+        slot.source_width = source.width;
+        slot.source_height = source.height;
+        slot.key = *key;
+        slot.camera_look = source.camera_look;
+        slot.level = level;
+        self.keyed_cameras[index] = Some(slot);
+        Ok(true)
+    }
+
+    /// Plan 233: the level and texture size a keyed camera in slot `index`
+    /// was last keyed at.
+    #[cfg(test)]
+    pub(crate) fn keyed_camera_level_and_size(&self, index: usize) -> Option<(u32, usize, usize)> {
+        self.keyed_cameras
+            .get(index)
+            .and_then(|slot| slot.as_ref())
+            .map(|slot| (slot.level, slot.width, slot.height))
     }
 
     /// Plan 168 D8: an immutable source addressed by its content key, not its
@@ -2637,16 +3078,69 @@ fn make_texture(
     height: usize,
     usage: MTLTextureUsage,
 ) -> Option<Retained<MetalTexture>> {
+    make_texture_with_format(device, width, height, MTLPixelFormat::BGRA8Unorm, usage)
+}
+
+fn make_texture_with_format(
+    device: &MetalDevice,
+    width: usize,
+    height: usize,
+    format: MTLPixelFormat,
+    usage: MTLTextureUsage,
+) -> Option<Retained<MetalTexture>> {
     let descriptor = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-            MTLPixelFormat::BGRA8Unorm,
-            width,
-            height,
-            false,
+            format, width, height, false,
         )
     };
     descriptor.setUsage(usage);
     device.newTextureWithDescriptor(&descriptor)
+}
+
+/// Plan 233: one key pass, a full-quad draw of `pipeline` reading `input`
+/// into the whole of `target`.
+fn encode_key_pass(
+    device: &MetalDevice,
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    input: &MetalTexture,
+    target: &MetalTexture,
+    params: &KeyParams,
+) -> Result<(), ()> {
+    let pass = MTLRenderPassDescriptor::new();
+    let attachment = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
+    attachment.setTexture(Some(target));
+    attachment.setLoadAction(MTLLoadAction::DontCare);
+    attachment.setStoreAction(MTLStoreAction::Store);
+    let encoder = command_buffer
+        .renderCommandEncoderWithDescriptor(&pass)
+        .ok_or(())?;
+    encoder.setRenderPipelineState(pipeline);
+    let vertices = quad_vertices([0.0, 0.0, 1.0, 1.0]);
+    let encoded = (|| {
+        let vertices_ptr = NonNull::new(vertices.as_ptr() as *mut c_void)?;
+        let buffer = unsafe {
+            device.newBufferWithBytes_length_options(
+                vertices_ptr,
+                std::mem::size_of_val(&vertices),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }?;
+        let params_ptr = NonNull::new(std::ptr::from_ref(params) as *mut c_void)?;
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
+            encoder.setFragmentTexture_atIndex(Some(input), 0);
+            encoder.setFragmentBytes_length_atIndex(
+                params_ptr,
+                std::mem::size_of::<KeyParams>(),
+                0,
+            );
+            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+        }
+        Some(())
+    })();
+    encoder.endEncoding();
+    encoded.ok_or(())
 }
 
 fn make_target_texture(
@@ -2757,22 +3251,113 @@ fn clear_pass(texture: &MetalTexture, rgba: [f64; 4]) -> Retained<MTLRenderPassD
     pass
 }
 
+/// The compositor's shader library, compiled once per compositor.
+fn build_library(device: &MetalDevice) -> Option<Retained<ProtocolObject<dyn MTLLibrary>>> {
+    let source = NSString::from_str(SHADER_SOURCE);
+    device
+        .newLibraryWithSource_options_error(&source, None)
+        .ok()
+}
+
+/// The scene pipeline on its own library (the preview present and probes).
 fn build_pipeline(
     device: &MetalDevice,
     blending: bool,
 ) -> Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
-    let source = NSString::from_str(SHADER_SOURCE);
-    let library = device
-        .newLibraryWithSource_options_error(&source, None)
-        .ok()?;
+    let library = build_library(device)?;
+    build_pipeline_from(
+        device,
+        &library,
+        "f_main",
+        blending,
+        MTLPixelFormat::BGRA8Unorm,
+    )
+}
+
+/// A compute pipeline of the kernel `kernel` (plan 233's key pass 1).
+fn build_compute_pipeline(
+    device: &MetalDevice,
+    library: &ProtocolObject<dyn MTLLibrary>,
+    kernel: &str,
+) -> Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>> {
+    let function = library.newFunctionWithName(&NSString::from_str(kernel))?;
+    device
+        .newComputePipelineStateWithFunction_error(&function)
+        .ok()
+}
+
+/// Mirrors the shader's KEY_REDUCE_WINDOW_SIDE: the camera texels a pass 1
+/// threadgroup loads on a side (its tile × block + 4), which sizes its
+/// threadgroup memory (5 KB, so several threadgroups share a core). A test
+/// pins the two equal.
+const KEY_REDUCE_WINDOW_SIDE: usize = 36;
+
+/// The threadgroup's side in keyed texels for pass 1, at most 8 (64
+/// threads): the window it loads must fit `KEY_REDUCE_WINDOW_SIDE` and its
+/// threads the pipeline's limit.
+fn key_reduce_tile(block: usize, max_threads: usize) -> usize {
+    let by_window = (KEY_REDUCE_WINDOW_SIDE - 4) / block.max(1);
+    let by_threads = (max_threads.max(1) as f64).sqrt().floor() as usize;
+    by_window.min(by_threads).clamp(1, 8)
+}
+
+/// Plan 233 pass 1: `k_key_reduce` over the whole of `reduced`, reading the
+/// camera.
+fn encode_key_reduce(
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    camera: &MetalTexture,
+    reduced: &MetalTexture,
+    params: &KeyParams,
+    block: usize,
+) -> Result<(), ()> {
+    let encoder = command_buffer.computeCommandEncoder().ok_or(())?;
+    encoder.setComputePipelineState(pipeline);
+    let tile = key_reduce_tile(block, pipeline.maxTotalThreadsPerThreadgroup());
+    let encoded = match NonNull::new(std::ptr::from_ref(params) as *mut c_void) {
+        Some(params_ptr) => {
+            unsafe {
+                encoder.setTexture_atIndex(Some(camera), 0);
+                encoder.setTexture_atIndex(Some(reduced), 1);
+                encoder.setBytes_length_atIndex(params_ptr, std::mem::size_of::<KeyParams>(), 0);
+            }
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                MTLSize {
+                    width: reduced.width().div_ceil(tile),
+                    height: reduced.height().div_ceil(tile),
+                    depth: 1,
+                },
+                MTLSize {
+                    width: tile,
+                    height: tile,
+                    depth: 1,
+                },
+            );
+            Ok(())
+        }
+        None => Err(()),
+    };
+    encoder.endEncoding();
+    encoded
+}
+
+/// A pipeline of `v_main` and the fragment function `fragment` into
+/// `format`, blending straight alpha when `blending`.
+fn build_pipeline_from(
+    device: &MetalDevice,
+    library: &ProtocolObject<dyn MTLLibrary>,
+    fragment: &str,
+    blending: bool,
+    format: MTLPixelFormat,
+) -> Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
     let vertex = library.newFunctionWithName(&NSString::from_str("v_main"))?;
-    let fragment = library.newFunctionWithName(&NSString::from_str("f_main"))?;
+    let fragment = library.newFunctionWithName(&NSString::from_str(fragment))?;
 
     let descriptor = MTLRenderPipelineDescriptor::new();
     descriptor.setVertexFunction(Some(&vertex));
     descriptor.setFragmentFunction(Some(&fragment));
     let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    attachment.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+    attachment.setPixelFormat(format);
     if blending {
         // Straight-alpha source-over: overlay bitmaps are PNG-decoded and NOT
         // premultiplied, so the RGB factors scale by source alpha here.
@@ -2842,13 +3427,8 @@ fn encode_texture_present(
         circle: 0.0,
         aspect: 1.0,
         radius: 0.0,
-        chroma_key: [0.0; 4],
-        chroma_key2: [0.0; 4],
         layer: [1.0, 0.0, 0.0, 0.0],
         camera_look: [0.0, 1.0, 1.0, 0.0],
-        chroma_key_floor: [0.0; 4],
-        chroma_key_edges: CHROMA_KEY_KEEP_ALL_UV,
-        chroma_key_neighbourhood: [0.0; 4],
     };
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -3415,6 +3995,156 @@ mod tests {
             "mirrored: hidden on the right"
         );
         assert_eq!(pixel(&px, 4, 0, 0)[..3], [0, 0, 255], "mirrored: left kept");
+    }
+
+    /// Plan 233: the draw shader has no key branch; the key pass keys.
+    #[test]
+    fn f_main_has_no_key_branch() {
+        let start = SHADER_SOURCE
+            .find("fragment float4 f_main(")
+            .expect("f_main in the shader");
+        let rest = &SHADER_SOURCE[start..];
+        // The function ends at its first closing brace in column 0.
+        let end = rest.find("\n}\n").map_or(rest.len(), |at| at + 3);
+        let f_main = &rest[..end];
+        assert!(
+            !f_main.contains("chroma_key") && !f_main.contains("acos"),
+            "f_main keys:\n{f_main}"
+        );
+        assert!(
+            SHADER_SOURCE.contains(&format!(
+                "constant int KEY_REDUCE_WINDOW_SIDE = {KEY_REDUCE_WINDOW_SIDE};"
+            )),
+            "the host's window side mirrors the shader's"
+        );
+        // The tile fits the window and the thread limit: a 4K camera in the
+        // Large slot (block 4) runs 8×8 threads over a 36-texel window.
+        assert_eq!(key_reduce_tile(4, 1024), 8);
+        assert_eq!(key_reduce_tile(1, 1024), 8);
+        assert_eq!(key_reduce_tile(1, 16), 4);
+        assert_eq!(key_reduce_tile(8, 1024), 4);
+        assert_eq!(key_reduce_tile(32, 1024), 1);
+        for pass in ["kernel void k_key_reduce(", "fragment float4 f_key_finish("] {
+            assert!(SHADER_SOURCE.contains(pass), "{pass} missing");
+        }
+    }
+
+    /// Plan 233: a keyed camera is keyed once per frame, key and level. The
+    /// next compose of the same frame draws the kept texture; a new key or
+    /// a new frame keys again; the picture is the same either way.
+    #[test]
+    fn keyed_camera_texture_is_reused_while_the_frame_and_key_hold_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // A 4×4 camera: green screen on the left half, red on the right.
+        let camera: Vec<u8> = (0..16)
+            .flat_map(|index| {
+                if index % 4 < 2 {
+                    [0u8, 255, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                }
+            })
+            .collect();
+        let mut source = full_frame(&camera, 4, 4, false, SourceMask::None, [0.0; 4]);
+        source.kind = GpuSourceKind::Camera;
+        source.blend = true;
+        source.chroma_key = Some(green_key(24.0, 4.8, 0.1));
+        source.content_key = Some(GpuSourceContentKey {
+            namespace: 4,
+            revision: 1,
+            variant: 0,
+        });
+        let compose = |compositor: &mut MetalSceneCompositor, source: &GpuSource<'_>| {
+            let output = compositor
+                .compose_bgra_with_timings(4, 4, [0.0, 0.0, 1.0, 1.0], &[*source])
+                .expect("metal compose");
+            (output.timings.keyed_camera_passes, output.bgra)
+        };
+        let (passes, first) = compose(&mut compositor, &source);
+        assert_eq!(passes, 1, "the first compose keys");
+        assert_eq!(
+            pixel(&first, 4, 0, 0)[..3],
+            [255, 0, 0],
+            "green keys to blue"
+        );
+        assert_eq!(pixel(&first, 4, 3, 3)[..3], [0, 0, 255], "red stays");
+        let (passes, second) = compose(&mut compositor, &source);
+        assert_eq!(passes, 0, "the same frame and key draw the kept texture");
+        assert_eq!(second, first);
+        let mut respilled = source;
+        respilled.chroma_key = Some(green_key(24.0, 4.8, 0.2));
+        assert_eq!(
+            compose(&mut compositor, &respilled).0,
+            1,
+            "a new key keys again"
+        );
+        let mut next_frame = source;
+        next_frame.content_key = Some(GpuSourceContentKey {
+            namespace: 4,
+            revision: 2,
+            variant: 0,
+        });
+        assert_eq!(
+            compose(&mut compositor, &next_frame).0,
+            1,
+            "a new frame keys again"
+        );
+        let mut unkeyed_frame = source;
+        unkeyed_frame.content_key = None;
+        assert_eq!(
+            compose(&mut compositor, &unkeyed_frame).0,
+            1,
+            "a frame without a content key keys every compose"
+        );
+    }
+
+    /// Plan 233 D2 a: a keyed camera is keyed at the power-of-two level just
+    /// above its slot, into a texture of that size, and drawn with one
+    /// bilinear tap: a 16×16 green-and-red camera in a 4×4 slot is level 2
+    /// and reads as its honest average, with no green on the join.
+    #[test]
+    fn keyed_camera_reduces_to_the_level_above_its_slot_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // 16×16: screen green on the left 8 columns, red on the right 8.
+        let camera: Vec<u8> = (0..256)
+            .flat_map(|index| {
+                if index % 16 < 8 {
+                    [30u8, 150, 40, 255]
+                } else {
+                    [0, 0, 255, 255]
+                }
+            })
+            .collect();
+        let mut source = full_frame(&camera, 16, 16, false, SourceMask::None, [0.0; 4]);
+        source.kind = GpuSourceKind::Camera;
+        source.blend = true;
+        source.chroma_key = Some(green_key(24.0, 4.8, 0.1));
+        let px = compositor
+            .compose_bgra(4, 4, [0.0, 0.0, 1.0, 1.0], &[source])
+            .expect("metal compose");
+        assert_eq!(
+            compositor.keyed_camera_level_and_size(0),
+            Some((2, 4, 4)),
+            "16 texels into 4 pixels is level 2, a 4×4 keyed texture"
+        );
+        for y in 0..4 {
+            assert_eq!(pixel(&px, 4, 0, y)[..3], [255, 0, 0], "screen keys to blue");
+            assert_eq!(pixel(&px, 4, 3, y)[..3], [0, 0, 255], "red stays");
+            for x in 0..4 {
+                let [b, g, r, _] = pixel(&px, 4, x, y);
+                assert!(
+                    i16::from(g) <= i16::from(r.max(b)) + 8,
+                    "no green on the join at ({x}, {y}): {:?}",
+                    [r, g, b]
+                );
+            }
+        }
     }
 
     #[test]

@@ -12,12 +12,63 @@ around the subject is clean now. Source: the Twitch VOD
 
 ## Status and scope
 
-- **Status: EXECUTING 2026-11-13** on branch `plan-233-green-screen-edges`
-  (base `origin/main` `ed0cc2b10`, worktree `~/projects/videorc-wt-233`).
-  The owner said "start" without picking, so the recommended options are
-  taken: D1 a (despill near the edge), D2 a (one tap), D3 a (keyed camera
-  only), D4 a (macOS first: S0–S3 and S5 in this PR, S4 D3D11 in a second
-  PR). The owner can still change any of them; D2 can switch after the take.
+- **Status: IMPLEMENTED on macOS 2026-11-13 (S0–S3, S5)** on branch
+  `plan-233-green-screen-edges` (base `origin/main` `ed0cc2b10`, worktree
+  `~/projects/videorc-wt-233`). The plan commit was squash-merged to main as
+  `56067e19d`; the implementation lands in a second PR from the branch. The
+  owner said "start" without picking, so the recommended options are taken:
+  D1 a (despill near the edge), D2 a (one tap), D3 a (keyed camera only),
+  D4 a (macOS first: S0–S3 and S5 here, S4 D3D11 in a second PR). The owner
+  can still change any of them; D2 can switch after the take.
+- **Changes from the plan while building:**
+  - The colour treatment (despill and the camera look) runs once per keyed
+    level texel on its average colour, not per camera texel: that is what
+    one bilinear tap of the camera got before, and it keeps the key pass to
+    one judge per camera texel. At L = 0 it is per texel, as before.
+  - The edge despill's proximity is the keyed picture's alpha blurred over
+    the 5×5 binomial at the keyed texture's spacing (plan 229's kernel once,
+    at level L), the GPU-friendly form of the simulation's 16 passes at
+    texel spacing. The CPU reference does the same.
+  - The Metal key pass's pass 1 is a compute kernel: one thread per keyed
+    texel, and the threadgroup loads its camera window (its blocks plus a
+    two-texel apron) into threadgroup memory once. A fragment version that
+    sampled per camera texel cost 2.5 ms of GPU time at 4K, over the budget.
+    Pass 2 (despill, look) is a full-quad render. Both into RGBA16F.
+  - The reduction level caps at 5 (a 32 × 32 block), the deepest window one
+    pass 1 thread holds; nothing draws a camera 64 times smaller than it is.
+  - The S0 detail metric is measured on the noisy frames, like the
+    simulation: across a smooth edge every normalised filter keeps the same
+    total variation, so on a clean frame every shrink reads the same, and
+    only the noise tells an aliased shrink from the honest one.
+  - `chroma_key_despill` (the 8-bit form) is test-only; the paths use
+    `chroma_key_despill_rgb` at a strength of its own.
+- **Measured** (S0 oracle, `compositor/edge_snow_oracle.rs`: the synthetic
+  4K frame in the 720×405 Large slot, the owner's Mac, Apple M4):
+
+  | Path  | Green on outline / frame | Alpha flips / frame | Detail vs exact area |
+  | ----- | -----------------------: | ------------------: | -------------------: |
+  | CPU   |               22.0 → 0.0 |          58.0 → 0.0 |                117 % |
+  | Metal |               30.0 → 0.0 |          59.0 → 0.0 |                108 % |
+
+  CPU/Metal parity on the slot: 0 of 291,600 pixels apart (luma by more
+  than 4 levels or alpha by more than 0.1). Edge despill: the green-tinted
+  subject texel next to the screen goes from G 113 to 106, the one 20 texels
+  inside stays at 113, teal stays, on both paths.
+
+- **Cost** (the compose harness in the oracle, a 4K keyed camera in the
+  Large slot of a 1080p canvas, debug build, the host at load average 37–109
+  from other sessions' builds and smokes, so these are upper bounds): the
+  GPU's own time per compose, from the command buffer's timestamps. Keyed
+  every compose p50 1.97 ms / p95 2.79 ms; the kept texture drawn p50
+  0.17 ms / p95 0.51 ms; so the key pass costs about 1.8 ms p50 / 2.3 ms
+  p95 at 4K. That is OVER the 1.5 ms budget as measured; three forms of pass
+  1 (per-texel sampling, a 68-texel threadgroup window, a 36-texel window)
+  all land at 1.8–2.5 ms p50, so the cost is the per-texel key maths, not
+  the fetches. A release build on an idle host is owed for a fair reading
+  (the owner's call, as for the live background budget). The whole compose
+  p95 was 5.6 ms keyed versus 1.8 ms kept, CPU side included, debug build.
+- **Open:** the owner's 2-minute take (S5), then S4 D3D11 as a second PR.
+  The D3D11 shader keeps today's per-pixel key and its constant buffer.
 - **Evidence:** `~/videorc-test-2026-11-13-green-edges/`: VOD frames and
   crops, the edge measurement, the simulation and its outputs
   (`out/edge_snow_shipped_vs_fix.mp4`, `out/final/*.txt`), and the scripts in
