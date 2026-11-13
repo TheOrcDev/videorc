@@ -59,7 +59,8 @@ Five things the bars did not cover:
 - **Frames.** The node path drops none. LiveKit's recorder captures the
   page on its own clock. Recorded at 30 fps, 1 to 5 source frames in 100
   never reach the stream, depending on the page (3.0 and 4.2 with the
-  last version). Recorded at 60 fps, 0.7 in 100 are lost (one run). D4
+  last version). Recorded at 60 fps, 0.6 to 0.7 in 100 are lost (three
+  runs, two clips). D4
   now records at 60 fps.
 - **60 fps feeds** fail their bar: 1.3 and 2.0 frames in 100 dropped or
   repeated. D12's cap stands.
@@ -76,9 +77,8 @@ a product call (Open question 9). The owner took every recommended
 answer: the gaps are accepted for the cohort, and the return bar is now
 7 s.
 
-Still to run, in the note's "Not run" list: a second sample of the 60 fps
-recording, lip sync with a real guest, three or more live destinations,
-and the long runs.
+Still to run, in the note's "Not run" list: lip sync with a real guest,
+three or more live destinations, and the long runs.
 
 ## The owner's ask (2026-11-13)
 
@@ -364,8 +364,8 @@ the plan, or sends it back to the owner with the measured gap.
   48 kHz. Not the preset, which costs 3 to 4 VMAF points (S0.1).
 - **Why 60 fps for a 30 fps feed**: the recorder captures the page on its
   own clock. Recorded at 30 fps, 1 to 5 source frames in 100 never reach
-  the stream. Recorded at 60 fps, 0.7 in 100 are lost and 88 in 100 are
-  shown exactly twice (one run). Quality is the same.
+  the stream. Recorded at 60 fps, 0.6 to 0.7 in 100 are lost and 88 to
+  89 in 100 are shown exactly twice (three runs). Quality is the same.
 - **On air**: the page logs `START_RECORDING` at the feed's first decoded
   frame, so no platform ever sees a card before the show. A platform gets
   its first frame 5 to 7 s after the feed starts, and the stream runs
@@ -864,7 +864,8 @@ key moves.
    path loses none. Go Live takes 5 to 7 s. Quality is 2.7 to 2.8 VMAF
    points under the node path. Good enough for the cohort?
    *Recommended: yes, with the return bar moved to 7 s. They are the
-   price of having no server. A second 60 fps run opens Phase 1, and a
+   price of having no server. A second 60 fps run opens Phase 1 (done:
+   0.57 and 0.66 in 100, beside the first run's 0.71), and a
    real-guest lip-sync test opens Phase 3.*
 
 ## Only the owner can do

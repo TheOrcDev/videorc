@@ -49,7 +49,8 @@ What changes the picture, in order of weight:
    browser and capturing the screen drops and repeats about 1.3 frames in
    100 at 30 fps at best (LiveKit's own template: 1.4). The node path
    drops none. Recording the 30 fps feed at 60 fps cuts the frames that
-   never reach the stream from 3.0 to 0.7 in 100 (one run).
+   never reach the stream from 3.0 to 0.6 to 0.7 in 100 (three runs,
+   two clips).
 3. **The project holds two ingress objects.** One solo show with both
    orientations uses both.
 4. **`roomRecord` is project-wide**, as the plan assumed, and a few URL
@@ -175,16 +176,16 @@ run by the orchestrator after the note was first written.
 
 ### A 30 fps feed recorded at 60 fps
 
-One run: clip B, the final page, the egress's frame rate set to 60. Each
+Three runs: the final page, the egress's frame rate set to 60. Each
 source frame should then fill two output frames. Counted per source frame,
-after the first 6 s, against the 30 fps run beside it in the table.
+after the first 6 s, against the 30 fps run of clip B.
 
-| Per 100 source frames | Recorded at 30 fps | Recorded at 60 fps |
-| --- | ---: | ---: |
-| Never reach the stream | 3.0 | **0.7** |
-| Held on screen for 67 ms or longer | 2.8 | 0.5 |
-| Shown 17 ms short or long | none (a frame is 33 ms) | 10.7 |
-| Shown for exactly their 33 ms | 94.2 | 88.1 |
+| Per 100 source frames | At 30 fps, clip B | At 60 fps, clip B | At 60 fps, clip B again | At 60 fps, clip A |
+| --- | ---: | ---: | ---: | ---: |
+| Never reach the stream | 3.0 | **0.71** | **0.57** | **0.66** |
+| Held on screen for 67 ms or longer | 2.8 | 0.5 | 0.4 | 0.7 |
+| Shown 17 ms short or long | none (a frame is 33 ms) | 10.7 | 10.7 | 9.6 |
+| Shown for exactly their 33 ms | 94.2 | 88.1 | 88.4 | 89.1 |
 
 - At 60 fps the recorder's clock slips by half a source frame at a time,
   so most slips show as 17 ms of unevenness, not as a lost or doubled
@@ -192,7 +193,9 @@ after the first 6 s, against the 30 fps run beside it in the table.
 - VMAF is unchanged: 2.6 under the node path.
 - The output is a 1080p60 stream at 6 Mbps that carries a 30 fps picture.
   How a platform treats that against a 1080p30 stream was not looked at.
-- One run. A second sample is owed.
+- The second and third runs were made after the owner answered gate G0,
+  about three hours after the first. No frame ran backwards in any of
+  them.
 
 ### 1080p60
 
@@ -586,11 +589,6 @@ Still owed:
 # S0.3 with three sinks and 16 live destinations: needs a project that
 # holds four or more ingress objects
 node dest.mjs main extra=14
-
-# a second sample of a 30 fps feed recorded at 60 fps
-node chain.mjs q30b-e60b 30 seconds=78 tail=6 page=v=final egress=advanced \
-  egressKbps=6000 egressFps=60 ingressKbps=12000 segment=2 \
-  feed=/tmp/plan-234/phase0/media/feed-30b.flv
 ```
 
 Owed with no script yet:
