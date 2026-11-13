@@ -1,5 +1,18 @@
 # Implementation Plans
 
+- 2026-11-13: [Plan 233](233-green-screen-without-edge-snow.md), the owner's
+  stream on 0.22.1: green "snow" still crawls along the head, ears, hair and
+  shoulders, in a new place every frame. EXECUTING 2026-11-13 with the
+  recommended D1–D4 (macOS first, D3D11 in a second PR):
+  - Cause: the 4K camera (since 2026-11-11) is shrunk 5.3× into the Large
+    slot, and the Metal, CPU and D3D11 keyers key once per output pixel on a
+    picture they never average: the colour is one bilinear tap and the key a
+    slightly wider one. Edge pixels flip between kept and keyed out, and some
+    keep pure screen green. Plan 229 measured at camera resolution only.
+  - Fix: key every camera texel (plan 229's judge), premultiply, shrink the
+    keyed result by powers of two, then draw. Simulated: edge flips −96 %,
+    new green per frame −97 %. Despill near the edge (D1) removes the green
+    light on the hair. The FFmpeg leg already keys first.
 - 2026-11-12: [Plan 232](232-html-overlays.md), the owner's ask: "support
   for HTML with a transparent background so we can add animated stuff on our
   live streams or recordings. Same thing as we have now for our images."
