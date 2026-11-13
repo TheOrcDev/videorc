@@ -1172,7 +1172,11 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
     // Plan 225 B5: "wave at Ada", "say hi to Ada", "remember that Bo got
     // the job" are read before the comment grammar and the Buddy's own
     // presence; "thanks buddy" is none of them and stays what it was.
-    if let Some(parsed) = parse_community(words, from, span_end) {
+    // Like a greeting, a community phrase needs Buddy addressed: "I told
+    // Buddy to say hello to Jay" is no wave.
+    if addresses_buddy(words, wake)
+        && let Some(parsed) = parse_community(words, from, span_end)
+    {
         if words[parsed.end].final_index != newest {
             return WakeOutcome::Nothing;
         }
@@ -1245,15 +1249,22 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
     }
 }
 
+/// Whether the wake word at `wake` is spoken to Buddy: at the start of a
+/// sentence, before a pause, or after a lead-in ("hey"), and never a
+/// possessive. "I told Buddy to say hello to Jay" mentions Buddy; it gives
+/// Buddy no order.
+fn addresses_buddy(words: &[Word], wake: usize) -> bool {
+    let address = &words[wake];
+    !address.possessive
+        && (address.sentence_start
+            || address.pause_after
+            || (wake > 0 && LEAD_INS.contains(&words[wake - 1].text.as_str())))
+}
+
 /// Deliberately small: free-form "say …" stays with the planner. In these
 /// shapes "in the chat" identifies the viewer, never a posting destination.
 fn parse_greeting(words: &[Word], wake: usize, end: usize) -> Option<Parsed> {
-    let address = &words[wake];
-    if address.possessive
-        || !(address.sentence_start
-            || address.pause_after
-            || (wake > 0 && LEAD_INS.contains(&words[wake - 1].text.as_str())))
-    {
+    if !addresses_buddy(words, wake) {
         return None;
     }
     let mut start = wake + 1;
