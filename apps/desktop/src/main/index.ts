@@ -40,6 +40,7 @@ import type {
   AgentAddApp,
   AgentAddResult,
   Banner,
+  HtmlOverlayTargets,
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
   SessionMediaGrantResult,
@@ -91,6 +92,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync
@@ -230,6 +232,8 @@ import {
   parseMainBackendWireMessage,
   parseMainBannerList,
   parseMainBannersChangedEvent,
+  parseMainHtmlOverlayTargets,
+  parseMainHtmlOverlayTargetsEvent,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
   parseMainOverlayLayout,
@@ -299,6 +303,8 @@ import {
   type ManagedAssetRoots
 } from './backend-bootstrap'
 import { managedBackendAssetRootCandidates } from './managed-asset-roots'
+import { HtmlOverlayHost, isHtmlOverlayWindow } from './html-overlay-host'
+import { HTML_OVERLAY_SCHEME } from './html-overlay-policy'
 import { smokeTrashDirectory, smokeTrashItem, trashPaths } from './trash-paths'
 import {
   MainResourceCapabilityRegistry,
@@ -455,6 +461,11 @@ import {
   type ProofSurfaceHost
 } from './in-window-proof-surface'
 import { executeProofSurfaceScript, settleWithProofSurface } from './proof-surface-call'
+import {
+  meanRectsFromBitmap,
+  parseNormalizedRects,
+  stageCaptureRect
+} from './preview-surface-sample'
 import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_FETCH_TIMEOUT_MS,
@@ -544,6 +555,20 @@ import {
   COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION,
   commentsWindowHiddenFromStreamPreference
 } from './comments-window-prefs'
+import {
+  frameOnScreen,
+  framesHeldBySystem,
+  type FocusReturn,
+  handFocusPastOwnWindows,
+  planStreamManagerScreenSwap,
+  runStreamManagerScreenSwap,
+  screenFrames,
+  screenOptions,
+  setBoundsExactly,
+  showStreamManagerWindow,
+  streamManagerHoldAction,
+  streamManagerScreenMoves
+} from './stream-manager-screen'
 import {
   assessProofPresentationWatch,
   assessProofSourceFrame,
@@ -717,6 +742,9 @@ import type {
   CommentsViewMode,
   CommentsViewSnapshot,
   CommentHighlightAnchor,
+  StreamManagerFrontOrCloseResult,
+  StreamManagerScreenRequest,
+  StreamManagerScreenResult,
   CommentsWindowState,
   CompositorSceneSourceStatus,
   CompositorStatus,
@@ -825,6 +853,12 @@ let mainWindow: BrowserWindow | null = null
 // every result, like runtime info, says why. Electron resolves the ozone
 // platform before this script runs.
 const globalShortcutsUnavailable = globalShortcutsUnavailableReason({
+  platform: process.platform,
+  ozonePlatform: app.commandLine.getSwitchValue('ozone-platform')
+})
+// The Stream Manager Screen key's tap (plan 230) cannot move a window on
+// Wayland; the key says so instead of failing on every tap.
+const commentsWindowScreenMoves = streamManagerScreenMoves({
   platform: process.platform,
   ozonePlatform: app.commandLine.getSwitchValue('ozone-platform')
 })
@@ -2849,6 +2883,7 @@ function createWindow(): void {
       frontAppMonitor ??= createFrontAppMonitor({
         platform: process.platform,
         binding,
+        warn: (message) => safeConsole.warn(message),
         send: (event) => {
           if (mainWindow && !mainWindow.isDestroyed()) {
             sendElectronEvent(mainWindow.webContents, 'app:front-changed', event)
@@ -3779,6 +3814,9 @@ type CommentsWindowPrefs = {
   /** Hide from stream (plan 215 D6). Default off; counts only with its version. */
   hiddenFromStream?: boolean
   hiddenFromStreamPreferenceVersion?: number
+  /** The Stream Manager Screen key (plan 230 D4): the frame last used on each
+   * screen, by display id. */
+  screenFrames?: Record<string, Electron.Rectangle>
   open?: boolean
   /** 2 once the frame moved off the old Chat default (plan 055, S8). */
   layoutVersion?: number
@@ -3801,10 +3839,13 @@ function saveCommentsWindowPrefs(patch: CommentsWindowPrefs): void {
     return
   }
   try {
-    writeFileSync(
-      commentsWindowPrefsPath(),
-      JSON.stringify({ ...loadCommentsWindowPrefs(), ...patch })
-    )
+    // Plan 230 writes this file on every settled drag: a write cut short by
+    // a crash must never leave a half file that reads as "no prefs" (and
+    // turns Hide from stream off), so it lands whole or not at all.
+    const path = commentsWindowPrefsPath()
+    const next = `${path}.next`
+    writeFileSync(next, JSON.stringify({ ...loadCommentsWindowPrefs(), ...patch }))
+    renameSync(next, path)
   } catch {
     // A failed preference write must never break capture.
   }
@@ -3950,6 +3991,9 @@ function commentsWindowState(message?: string): CommentsWindowState {
     alwaysOnTop: commentsWindowAlwaysOnTop,
     hiddenFromStream: commentsHiddenFromStream(),
     hideFromStreamMethod: streamManagerHideMethod(process.platform),
+    screenId: open ? String(screen.getDisplayMatching(window!.getBounds()).id) : null,
+    screens: screenOptions(screen.getAllDisplays()),
+    screenMoves: commentsWindowScreenMoves,
     highlightAnchor: commentsHighlightAnchor(),
     autoShowActivity: commentsAutoShowActivity(),
     protected: open ? commentsWindowContentProtected : false,
@@ -4452,17 +4496,25 @@ function emitCommentsWindowState(message?: string): void {
   }
 }
 
-async function openCommentsWindow(): Promise<CommentsWindowState> {
+// The Stream Manager Screen key (plan 230) can open it without the focus,
+// straight on a screen.
+interface CommentsWindowOpenOptions {
+  focus?: boolean
+  screenId?: string
+}
+
+async function openCommentsWindow({
+  focus = true,
+  screenId
+}: CommentsWindowOpenOptions = {}): Promise<CommentsWindowState> {
   if (!commentsWindowFeatureEnabled) {
     return commentsWindowState()
   }
   const existingWindow = commentsWindow
   if (commentsWindowIsOpen() && existingWindow) {
-    if (existingWindow.isMinimized()) {
-      existingWindow.restore()
-    }
-    existingWindow.show()
-    existingWindow.focus()
+    // Without the focus, a minimized window must not take it on the way
+    // back (plan 230 Q14).
+    showStreamManagerWindow(existingWindow, focus, process.platform)
     emitCommentsWindowState()
     return commentsWindowState()
   }
@@ -4476,7 +4528,13 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     })
   }
   const rememberedFrame = commentsWindowLastFrame ?? savedFrame.frame ?? null
-  const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const frame =
+    (screenId &&
+      commentsWindowFrameOnScreen(
+        screenId,
+        rememberedFrame ?? { x: 0, y: 0, ...STREAM_MANAGER_DEFAULT_SIZE }
+      )) ||
+    (rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null)
   const chrome = glassWindowChrome('chat')
   const window = new BrowserWindow({
     width: frame?.width ?? STREAM_MANAGER_DEFAULT_SIZE.width,
@@ -4495,6 +4553,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     }
   })
   registerRendererWindow(window, 'comments')
+  commentsWindowPlacedBySystem = false
   finishGlassWindow(window, 'chat', chrome.mode)
   installContextMenu(window.webContents)
   commentsWindowClosing = false
@@ -4515,8 +4574,27 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
       }
     })
   }
+  // D4: each screen keeps the frame the window had there last, however it
+  // got there (the key, a drag, a resize). macOS sends `moved` all through a
+  // drag, so the frame is saved once the window settles.
+  for (const event of ['moved', 'resized'] as const) {
+    window.on(event as 'moved', () => {
+      if (commentsWindow === window && !window.isMinimized()) {
+        queueCommentsWindowScreenFrame(window.getBounds())
+      }
+    })
+  }
+  // `will-move`/`will-resize` fire only for a move or resize by hand (never
+  // for `setBounds` or the OS's own move), so this frame is the streamer's
+  // choice even right after a display change.
+  for (const event of ['will-move', 'will-resize'] as const) {
+    window.on(event as 'will-move', () => {
+      if (commentsWindow === window) streamerPlacesCommentsWindow()
+    })
+  }
   window.on('close', () => {
     if (commentsWindow === window) {
+      if (!window.isMinimized()) rememberCommentsWindowScreenFrame(window.getBounds())
       commentsWindowClosing = true
       commentsWindowLastFrame = window.getBounds()
       saveCommentsWindowPrefs(previewWindowClosePrefs(commentsWindowLastFrame, closingForQuit()))
@@ -4541,8 +4619,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     trustRendererDocument(window, pathToFileURL(commentsPath).toString())
     await window.loadFile(commentsPath)
   }
-  window.show()
-  window.focus()
+  showStreamManagerWindow(window, focus, process.platform)
   emitCommentsWindowState()
   return commentsWindowState()
 }
@@ -4553,6 +4630,205 @@ function closeCommentsWindow(message?: string): CommentsWindowState {
     commentsWindow.close()
   }
   return commentsWindowState(message)
+}
+
+// The Stream Manager Screen key (plan 230): the window goes to the other of
+// its two screens. It takes the focus on the Presenting screen only
+// (FOCUS_ON_ARRIVAL). Hide from stream is a separate switch, so the key
+// never sets it.
+async function swapCommentsWindowScreen(
+  request: StreamManagerScreenRequest
+): Promise<StreamManagerScreenResult> {
+  if (!commentsWindowFeatureEnabled) {
+    return { ok: false, reason: 'unavailable' }
+  }
+  const state = commentsWindowState()
+  const plan = planStreamManagerScreenSwap(
+    { open: state.open, visible: state.visible, screenId: state.screenId },
+    request,
+    state.screens.map(({ id }) => id)
+  )
+  if (plan.kind === 'refuse') {
+    return { ok: false, reason: plan.reason }
+  }
+  // Wayland drops the position of every move, so the tap does nothing there
+  // (the key's title already says so); a hold still brings the window up.
+  if (commentsWindowScreenMoves === 'wayland') {
+    return { ok: false, reason: 'wayland' }
+  }
+  const window = (): BrowserWindow | null =>
+    commentsWindowIsOpen() && commentsWindow ? commentsWindow : null
+  return runStreamManagerScreenSwap({
+    plan,
+    platform: process.platform,
+    window,
+    focusedOwnWindow: () => BrowserWindow.getFocusedWindow(),
+    lastOther: frontAppMonitor?.lastOtherApp() ?? null,
+    selfBundleIds: frontAppMonitor?.selfBundleIds() ?? [],
+    placeMinimized: placeMinimizedCommentsWindow,
+    open: (options) => openCommentsWindow(options),
+    move: moveCommentsWindowToScreen,
+    giveFocusBack,
+    warn: (message) => safeConsole.warn(message)
+  })
+}
+
+function placeMinimizedCommentsWindow(screenId: string): void {
+  const window = commentsWindow
+  if (!commentsWindowIsOpen() || !window?.isMinimized()) {
+    return
+  }
+  const current = window.getNormalBounds()
+  if (String(screen.getDisplayMatching(current).id) === screenId) {
+    return
+  }
+  const frame = commentsWindowFrameOnScreen(screenId, current)
+  if (frame) {
+    window.setBounds(frame)
+    commentsWindowPlacedBySystem = false
+  }
+}
+
+const FOCUS_SETTLE_MS = 50
+
+async function giveFocusBack(target: FocusReturn): Promise<void> {
+  if (target?.kind === 'app') {
+    if (!frontAppMonitor?.activateApp(target.pid, target.bundleId)) {
+      safeConsole.warn(`[stream-manager] could not hand the focus to ${target.bundleId}`)
+    }
+  } else if (target?.kind === 'behind' && commentsWindowIsOpen() && commentsWindow) {
+    // Windows: the window behind may be Videorc's own; blur past those.
+    const left = await handFocusPastOwnWindows({
+      first: commentsWindow,
+      focusedOwnWindow: () => BrowserWindow.getFocusedWindow(),
+      settle: () => new Promise((resolve) => setTimeout(resolve, FOCUS_SETTLE_MS)),
+      maxSteps: BrowserWindow.getAllWindows().length
+    })
+    if (!left) {
+      safeConsole.warn('[stream-manager] the focus stayed on a Videorc window')
+    }
+  }
+}
+
+// The same key held (plan 230): a Stream Deck press itself never moves the
+// focus, so `isFocused` says the streamer is using the window (or a tap to
+// the Presenting screen just gave it the focus).
+async function frontOrCloseCommentsWindow(): Promise<StreamManagerFrontOrCloseResult> {
+  if (!commentsWindowFeatureEnabled) {
+    return 'unavailable'
+  }
+  const window = commentsWindow
+  const open = commentsWindowIsOpen() && Boolean(window)
+  const action = streamManagerHoldAction({
+    open,
+    visible: open && window!.isVisible() && !window!.isMinimized(),
+    focused: open && window!.isFocused()
+  })
+  if (action === 'close') {
+    closeCommentsWindow()
+    return 'closed'
+  }
+  await openCommentsWindow()
+  if (commentsWindowIsOpen() && !commentsWindow?.isFocused()) {
+    // macOS and Windows may refuse the focus to a background app.
+    safeConsole.warn('[stream-manager] brought to the front, but the system kept the focus')
+  }
+  return 'front'
+}
+
+function commentsWindowFrameOnScreen(
+  screenId: string,
+  current: Electron.Rectangle
+): Electron.Rectangle | null {
+  const display = screen.getAllDisplays().find(({ id }) => String(id) === screenId)
+  if (!display) {
+    return null
+  }
+  const frames = screenFrames(loadCommentsWindowPrefs().screenFrames)
+  return frameOnScreen(current, frames[screenId], display.workArea)
+}
+
+const SCREEN_FRAME_SETTLE_MS = 400
+// A monitor that drops off (or sleeps) makes the OS move the window; that
+// spot is not the streamer's choice. Saves wait for the screens to settle,
+// and none is kept until the streamer places the window by hand
+// (`will-move`/`will-resize`, macOS and Windows) or the key moves it. Linux
+// sends neither event, so there the hold ends with its time window
+// (`framesHeldBySystem`) and the next settled move counts as the streamer's.
+const SCREEN_FRAME_DISPLAY_CHANGE_HOLD_MS = 2000
+let queuedScreenFrame: ReturnType<typeof setTimeout> | null = null
+let screenFramesHeldUntil = 0
+let commentsWindowPlacedBySystem = false
+
+function dropQueuedCommentsWindowScreenFrame(): void {
+  if (queuedScreenFrame) {
+    clearTimeout(queuedScreenFrame)
+    queuedScreenFrame = null
+  }
+}
+
+function queueCommentsWindowScreenFrame(frame: Electron.Rectangle): void {
+  dropQueuedCommentsWindowScreenFrame()
+  if (Date.now() < screenFramesHeldUntil) {
+    return
+  }
+  queuedScreenFrame = setTimeout(() => {
+    queuedScreenFrame = null
+    if (process.platform === 'linux') commentsWindowPlacedBySystem = false
+    rememberCommentsWindowScreenFrame(frame)
+  }, SCREEN_FRAME_SETTLE_MS)
+}
+
+function streamerPlacesCommentsWindow(): void {
+  commentsWindowPlacedBySystem = false
+  screenFramesHeldUntil = 0
+}
+
+function holdCommentsWindowScreenFrames(): void {
+  dropQueuedCommentsWindowScreenFrame()
+  screenFramesHeldUntil = Date.now() + SCREEN_FRAME_DISPLAY_CHANGE_HOLD_MS
+  if (commentsWindowIsOpen()) commentsWindowPlacedBySystem = true
+}
+
+function rememberCommentsWindowScreenFrame(frame: Electron.Rectangle): void {
+  dropQueuedCommentsWindowScreenFrame()
+  if (
+    framesHeldBySystem({
+      platform: process.platform,
+      placedBySystem: commentsWindowPlacedBySystem,
+      now: Date.now(),
+      heldUntil: screenFramesHeldUntil
+    })
+  ) {
+    return
+  }
+  commentsWindowPlacedBySystem = false
+  const screenId = String(screen.getDisplayMatching(frame).id)
+  const frames = screenFrames(loadCommentsWindowPrefs().screenFrames)
+  saveCommentsWindowPrefs({ screenFrames: { ...frames, [screenId]: frame } })
+}
+
+// First saves the frame for the screen the window is on. A window already on
+// the target screen stays where it is; otherwise it gets that screen's frame.
+function moveCommentsWindowToScreen(screenId: string): 'moved' | 'not-moved' | 'screen-missing' {
+  const window = commentsWindow
+  if (!commentsWindowIsOpen() || !window) {
+    return 'not-moved'
+  }
+  const onScreen = (): boolean =>
+    String(screen.getDisplayMatching(window.getBounds()).id) === screenId
+  rememberCommentsWindowScreenFrame(window.getBounds())
+  if (onScreen()) {
+    return 'moved'
+  }
+  const frame = commentsWindowFrameOnScreen(screenId, window.getBounds())
+  if (!frame) {
+    return 'screen-missing'
+  }
+  // A second set fixes the size Windows scales by the old display's DPI.
+  setBoundsExactly(window, frame)
+  commentsWindowPlacedBySystem = false
+  return onScreen() ? 'moved' : 'not-moved'
 }
 
 async function toggleCommentsWindow(): Promise<CommentsWindowState> {
@@ -5131,6 +5407,14 @@ function registerDisplayChangeReconcile(): void {
   screen.on('display-metrics-changed', reconcile)
   screen.on('display-added', reconcile)
   screen.on('display-removed', reconcile)
+  // The Stream Manager Screen key's list of screens (plan 230) follows the
+  // monitors, and the OS's own moves of the window are not saved as frames.
+  for (const event of ['display-metrics-changed', 'display-added', 'display-removed'] as const) {
+    screen.on(event as 'display-added', () => {
+      holdCommentsWindowScreenFrames()
+      emitCommentsWindowState()
+    })
+  }
 }
 
 function pushPreviewWindowPlacement(): void {
@@ -8060,6 +8344,62 @@ async function applyNativePreviewSurfaceScene(
   }
   return nativePreviewSurfaceStatus
 }
+
+// --- HTML overlays (plan 232) ---
+// The backend says which overlays to render and how large; the host keeps one
+// sandboxed offscreen window per target and sends what each paints. Created
+// on first use: no overlay, no host, no upload.
+let htmlOverlayHost: HtmlOverlayHost | null = null
+
+function ensureHtmlOverlayHost(): HtmlOverlayHost {
+  htmlOverlayHost ??= new HtmlOverlayHost({
+    bannersRoot: () =>
+      backendManagedAssetRoots?.banners ?? join(app.getPath('userData'), BANNERS_FOLDER),
+    connection: () =>
+      backendAdminConnection
+        ? {
+            host: backendAdminConnection.host,
+            port: backendAdminConnection.port,
+            token: backendAdminConnection.token
+          }
+        : null,
+    report: (report) => {
+      void requestBackendAdmin('htmlOverlays.host.report', { ...report }).catch((error) => {
+        logBackend('warn', `HTML overlay report was not delivered: ${errorMessageText(error)}`)
+      })
+    },
+    log: logBackend
+  })
+  return htmlOverlayHost
+}
+
+function acceptHtmlOverlayTargets(read: () => HtmlOverlayTargets, source: string): void {
+  let targets: HtmlOverlayTargets
+  try {
+    targets = read()
+  } catch (error) {
+    logBackend('warn', `Main dropped an invalid ${source} payload: ${errorMessageText(error)}`)
+    return
+  }
+  if (targets.targets.length === 0 && !htmlOverlayHost) return
+  try {
+    ensureHtmlOverlayHost().setTargets(targets.targets)
+  } catch (error) {
+    logBackend('warn', `HTML overlays failed to update: ${errorMessageText(error)}`)
+  }
+}
+
+/** The backend connection went away: every page stops with it. */
+function stopHtmlOverlays(): void {
+  if (!htmlOverlayHost) return
+  try {
+    htmlOverlayHost.setTargets([])
+    htmlOverlayHost.connectionChanged()
+  } catch (error) {
+    logBackend('warn', `HTML overlays failed to stop: ${errorMessageText(error)}`)
+  }
+}
+// --- end HTML overlays (plan 232) ---
 
 // --- Banners on the proof surface (plan 186 S4) -------------------------------
 // Main learns the list from its own backend event socket (`banners.list` on
@@ -11070,6 +11410,7 @@ function disconnectBackendEventSocket(): void {
   }
   const socket = backendEventSocket
   backendEventSocket = null
+  stopHtmlOverlays()
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
@@ -11106,6 +11447,7 @@ function retireBackendEventSocket(
     return
   }
   backendEventSocket = null
+  stopHtmlOverlays()
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
@@ -11136,6 +11478,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   const recordingStatusRequestId = `main-recording-status-${Date.now()}`
   const previewSurfaceStatusRequestId = `main-preview-surface-status-${Date.now()}`
   const bannersListRequestId = `main-banners-list-${Date.now()}`
+  const htmlOverlayTargetsRequestId = `main-html-overlay-targets-${Date.now()}`
   const overlayLayoutRequestId = `main-overlay-layout-${Date.now()}`
   const sceneRequestId = `main-scene-${Date.now()}`
   let previewSurfaceStatusRequestGeneration: number | null = null
@@ -11158,6 +11501,8 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       if (process.platform === 'darwin') {
         // Plan 214 B3: the camera switch turning on activates the extension.
         includedEvents.push('virtualCamera.changed')
+        // Plan 232: the HTML overlays main renders.
+        includedEvents.push('htmlOverlays.targets')
       }
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
@@ -11188,6 +11533,14 @@ function connectBackendEventSocket(connection: BackendConnection): void {
               JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
             )
             socket.send(JSON.stringify({ id: bannersListRequestId, method: 'banners.list' }))
+            if (process.platform === 'darwin') {
+              socket.send(
+                JSON.stringify({
+                  id: htmlOverlayTargetsRequestId,
+                  method: 'htmlOverlays.targets.get'
+                })
+              )
+            }
             socket.send(
               JSON.stringify({ id: overlayLayoutRequestId, method: 'overlays.layout.get' })
             )
@@ -11239,6 +11592,22 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             )
           }
         }
+        if (parsed.id === htmlOverlayTargetsRequestId) {
+          // Never fatal: an overlay is a drawing, not capture state.
+          if (parsed.ok === true) {
+            acceptHtmlOverlayTargets(
+              () => parseMainHtmlOverlayTargets(parsed.payload),
+              'htmlOverlays.targets.get'
+            )
+            // This backend may be a new one that holds no frames yet.
+            htmlOverlayHost?.refresh()
+          } else {
+            logBackend(
+              'warn',
+              `Main could not read the HTML overlay targets: ${parsed.error?.message ?? 'unknown error'}`
+            )
+          }
+        }
         if (parsed.id === overlayLayoutRequestId) {
           // Never fatal either: the Buddy layer is a drawing, not capture state.
           if (parsed.ok === true) {
@@ -11276,6 +11645,13 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         acceptPreviewSurfaceBanners(
           () => parseMainBannersChangedEvent(parsed.payload),
           'banners.changed'
+        )
+        return
+      }
+      if (parsed.event === 'htmlOverlays.targets') {
+        acceptHtmlOverlayTargets(
+          () => parseMainHtmlOverlayTargetsEvent(parsed.payload),
+          'htmlOverlays.targets'
         )
         return
       }
@@ -11361,6 +11737,8 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 
 const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.capability.register_thumbnail',
+  // Plan 232: how an HTML overlay's page stands; only main hosts them.
+  'htmlOverlays.host.report',
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,
   'health.ping',
   'account.auth.begin_intent',
@@ -11883,6 +12261,10 @@ function sendToWindows<TChannel extends ElectronEventChannel>(
     if (window === nativePreviewSurfaceWindow) {
       continue
     }
+    // Plan 232: an overlay's page is not the app; nothing is sent to it.
+    if (isHtmlOverlayWindow(window)) {
+      continue
+    }
     if (window.isDestroyed() || window.webContents.isDestroyed()) {
       continue
     }
@@ -12070,6 +12452,13 @@ async function runSmokePreviewMotionCommand(
       process.env.VIDEORC_SMOKE_STATE_DIR
     )
     return issueResourceCapability(authorization.path, authorization.kind)
+  }
+
+  if (command === 'html-overlay-stats') {
+    if (app.isPackaged || !smokeCommandServerEnabled) {
+      throw new Error('HTML overlay stats are unavailable in this app mode.')
+    }
+    return { stats: htmlOverlayHost?.stats() ?? null }
   }
 
   if (command === 'import-takeover-image') {
@@ -14271,6 +14660,82 @@ async function runSmokePreviewMotionCommand(
     }
   }
 
+  // Issue #1088 (plan 212): the Windows Preview-check smoke's oracle. The
+  // proof surface composes the Preview in main from compositor.status, so the
+  // backend's preview.debug.sample is not what the user sees there. This
+  // captures the surface's own #scene-root and averages the smoke's
+  // canvas-normalized rects. It never touches the scene or the Preview.
+  if (command === 'preview-surface-sample') {
+    if (app.isPackaged || !smokeCommandServerEnabled) {
+      throw new Error('Preview surface sampling is unavailable in this app mode.')
+    }
+    const rects = parseNormalizedRects(params.rects)
+    const surface = nativePreviewSurfaceWindow
+    const base = {
+      transport: nativePreviewSurfaceStatus.transport,
+      backing: nativePreviewSurfaceStatus.backing,
+      state: nativePreviewSurfaceStatus.state,
+      hostKind: nativePreviewSurfaceStatus.nativePreviewHostKind ?? null,
+      presenter: nativePreviewSurfaceStatus.windowsD3d11Presenter ?? null,
+      sceneRevision: nativePreviewSurfaceScene?.revision ?? null,
+      sceneKinds:
+        nativePreviewSurfaceScene?.sources
+          .filter((source) => source.visible)
+          .map((source) => source.kind) ?? [],
+      proofWindowVisible: Boolean(surface && !surface.isDestroyed() && surface.isVisible())
+    }
+    if (!surface || surface.isDestroyed()) {
+      return { ...base, error: 'no-proof-surface' }
+    }
+    if (!base.proofWindowVisible) {
+      return { ...base, error: 'proof-surface-hidden' }
+    }
+    const stage = await executeProofSurfaceScript<{
+      left: number
+      top: number
+      width: number
+      height: number
+      viewportWidth: number
+      viewportHeight: number
+      liveLayers: string[]
+    } | null>(
+      surface,
+      `(() => {
+        const root = document.getElementById('scene-root');
+        if (!root) return null;
+        const rect = root.getBoundingClientRect();
+        const liveLayers = [...root.querySelectorAll('.scene-layer')]
+          .filter((layer) => layer.querySelector('img[data-live="1"], img[data-loaded="1"], canvas[data-drawn="1"]') || layer.dataset.kind === 'test-pattern')
+          .map((layer) => layer.dataset.kind ?? 'unknown');
+        return { left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+          viewportWidth: window.innerWidth, viewportHeight: window.innerHeight, liveLayers };
+      })()`,
+      false
+    )
+    const captureRect = stageCaptureRect(stage, {
+      width: stage?.viewportWidth ?? 0,
+      height: stage?.viewportHeight ?? 0
+    })
+    if (!captureRect) {
+      return { ...base, error: 'stage-not-on-screen', stage }
+    }
+    const image = await settleWithProofSurface(surface, () =>
+      surface.webContents.capturePage(captureRect)
+    )
+    const size = image.getSize()
+    if (image.isEmpty() || size.width < 1 || size.height < 1) {
+      return { ...base, error: 'empty-capture', stage }
+    }
+    return {
+      ...base,
+      capturedAt: Date.now(),
+      width: size.width,
+      height: size.height,
+      liveLayers: stage?.liveLayers ?? [],
+      samples: meanRectsFromBitmap(image.toBitmap(), size.width, size.height, rects)
+    }
+  }
+
   if (command === 'set-page-zoom') {
     if (
       app.isPackaged ||
@@ -16014,6 +16479,43 @@ async function pickBannerImage(): Promise<ResourceSelection | null> {
   return path ? issueResourceCapability(path, 'input-file') : null
 }
 
+// Assets → Banners → Import HTML… (plan 232): an `.html` file, or a folder
+// with `index.html` beside its images, fonts, styles and scripts. A file is
+// an `input-file` capability and a folder an `input-directory` one; the
+// backend checks and copies it.
+async function pickBannerHtml(): Promise<ResourceSelection | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose HTML banner',
+    message: 'Choose an .html file, or a folder with index.html.',
+    properties: ['openFile', 'openDirectory'],
+    filters: [
+      {
+        name: 'HTML',
+        extensions: ['html', 'htm']
+      }
+    ]
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+
+  if (result.canceled) {
+    return null
+  }
+
+  const path = result.filePaths[0]
+  if (!path) {
+    return null
+  }
+  let directory = false
+  try {
+    directory = statSync(path).isDirectory()
+  } catch {
+    // The backend says what is wrong with a path that cannot be read.
+  }
+  return issueResourceCapability(path, directory ? 'input-directory' : 'input-file')
+}
+
 // Assets → Sounds → Import sounds… (plan 189): several files at once, each
 // its own single-use input-file capability; the backend decodes, trims and
 // levels each one. A file whose capability can't be issued is left out.
@@ -17088,6 +17590,19 @@ protocol.registerSchemesAsPrivileged([
       stream: true,
       corsEnabled: true
     }
+  },
+  {
+    // Plan 232: an HTML overlay's own files. The scheme is handled only in
+    // each overlay's own session (`html-overlay-host.ts`), never in the
+    // app's: `standard` gives the page an origin and relative URLs, `secure`
+    // the APIs a page expects of https.
+    scheme: HTML_OVERLAY_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true
+    }
   }
 ])
 
@@ -17139,11 +17654,17 @@ app.on('open-url', (event, url) => {
 // The macOS app outlives its main window, and every other window closes with
 // it. With no main window, a menu pick reopens it, as the Dock does, and
 // opens nothing that would run without the Studio behind it.
+/** The app's own windows. An HTML overlay's offscreen window (plan 232) is
+ * not one: with only those left, the app has no window open. */
+function appWindowCount(): number {
+  return BrowserWindow.getAllWindows().filter((window) => !isHtmlOverlayWindow(window)).length
+}
+
 function appMenuMainWindowOpen(): boolean {
   if (mainWindow && !mainWindow.isDestroyed()) {
     return true
   }
-  if (BrowserWindow.getAllWindows().length === 0) {
+  if (appWindowCount() === 0) {
     createWindow()
   }
   return false
@@ -17447,6 +17968,7 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('screens:pick-image', () => pickScreenImage())
   secureIpcHandle('banners:pick-image', () => pickBannerImage())
+  secureIpcHandle('banners:pick-html', () => pickBannerHtml())
   secureIpcHandle('sounds:pick-files', () => pickSoundFiles())
   secureIpcHandle('community:pick-export-directory', () => pickCommunityExportDirectory())
   secureIpcHandle('community:pick-import-file', () => pickCommunityImportFile())
@@ -17611,6 +18133,10 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:set-hidden-from-stream', (_event, hidden: unknown) =>
     setCommentsWindowHiddenFromStream(hidden)
   )
+  secureIpcHandle('comments-window:swap-screen', (_event, request: StreamManagerScreenRequest) =>
+    swapCommentsWindowScreen(request)
+  )
+  secureIpcHandle('comments-window:front-or-close', () => frontOrCloseCommentsWindow())
   secureIpcHandle('comments-window:set-highlight-anchor', (_event, anchor: unknown) =>
     setCommentsWindowHighlightAnchor(anchor)
   )
@@ -18543,7 +19069,7 @@ app.whenReady().then(async () => {
   startSmokePreviewMotionServer()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+    if (appWindowCount() === 0) {
       createWindow()
     }
   })

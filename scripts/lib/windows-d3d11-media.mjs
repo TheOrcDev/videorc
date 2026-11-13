@@ -168,6 +168,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_preview::tests::windows_d3d11_preview_presenter_claims_the_top_of_previews_owned_group',
     'windows_d3d11_preview::tests::windows_d3d11_preview_rejects_foreign_owner_and_stale_generation',
     'windows_d3d11_preview::tests::windows_d3d11_preview_rejects_missing_target_and_wrong_z_order',
+    'windows_d3d11_preview::tests::windows_d3d11_preview_reports_the_presented_scene_revision',
     'windows_d3d11_preview::tests::windows_d3d11_preview_timing_measures_the_presenters_own_cadence_and_latency',
     'windows_d3d11_preview::tests::windows_d3d11_preview_timing_skips_hidden_gaps_and_resets_on_rearm',
     'windows_d3d11_preview::tests::windows_d3d11_preview_timing_window_is_bounded',

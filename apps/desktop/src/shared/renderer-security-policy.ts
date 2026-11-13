@@ -65,6 +65,8 @@ export const IPC_INVOKE_ROLES = {
   // Plan 225 D12: Community → Settings lives in the main window.
   'community:pick-export-directory': MAIN_ONLY,
   'community:pick-import-file': MAIN_ONLY,
+  // Assets → Banners → Import HTML… (plan 232): the Studio renderer only.
+  'banners:pick-html': MAIN_ONLY,
   // Assets → Sounds and the starter seeding (plan 189): the Studio renderer only.
   'sounds:pick-files': MAIN_ONLY,
   'sounds:starter-list': MAIN_ONLY,
@@ -142,6 +144,8 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:get-state': MAIN_AND_COMMENTS,
   'comments-window:set-always-on-top': MAIN_AND_COMMENTS,
   'comments-window:set-hidden-from-stream': MAIN_AND_COMMENTS,
+  'comments-window:swap-screen': MAIN_ONLY,
+  'comments-window:front-or-close': MAIN_ONLY,
   'comments-window:set-highlight-anchor': MAIN_AND_COMMENTS,
   'comments-window:set-auto-show-activity': MAIN_AND_COMMENTS,
   'comments-window:push-snapshot': MAIN_ONLY,

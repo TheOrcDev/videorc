@@ -2484,7 +2484,7 @@
     {
       "name": "go_live",
       "title": "Go live",
-      "description": "Start the livestream now, without the Go Live dialog, on the destinations that are on or the ones named. Viewers see the stream start. Refused in Videorc's own words when something isn't ready: allowPartial goes live on the ready destinations, withoutCaptions skips captions that can't start. It records too when Output's recording is on.",
+      "description": "Start the livestream now, without the Go Live dialog, on the destinations that are on or the ones named. Viewers see the stream start. Refused in Videorc's own words when something isn't ready: allowPartial goes live on the ready destinations, withoutCaptions skips captions that can't start, allowNonPublic accepts YouTube Unlisted or Private. It records too when Output's recording is on.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2512,6 +2512,10 @@
           "withoutCaptions": {
             "type": "boolean",
             "description": "true goes live without captions when they can't start."
+          },
+          "allowNonPublic": {
+            "type": "boolean",
+            "description": "true goes live when a YouTube destination is Unlisted or Private. Only pass it when the streamer asked for that."
           }
         },
         "additionalProperties": false

@@ -1160,7 +1160,7 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 
 /// An AI line as the lane takes it: one trimmed line, cut to the greeting
 /// cap; a link or a line break (the server refuses both) reads as no line.
-fn ai_greeting_text(text: &str) -> Option<String> {
+pub(crate) fn ai_greeting_text(text: &str) -> Option<String> {
     let text = truncate_utf16(text.trim(), COHOST_GREETING_TEXT_MAX_CHARS);
     let text = text.trim_end().to_string();
     if text.is_empty() || text.contains('\n') || text.contains("://") {

@@ -1166,6 +1166,45 @@ pub async fn resolve_live_chat_id(
         .and_then(|snippet| snippet.live_chat_id))
 }
 
+/// Shown when the broadcast lookup never finds a live chat, after every retry.
+pub const NO_LIVE_CHAT_MESSAGE: &str = "No live chat is available for this YouTube broadcast. \
+     Check that live chat is on for it in YouTube Studio.";
+/// Shown when a destination reaches chat with no broadcast to look up at all.
+pub const NO_BROADCAST_MESSAGE: &str =
+    "This YouTube destination has no broadcast, so its chat can't be read. Go live again.";
+/// Shown while the lookup waits for YouTube to list the broadcast's chat.
+pub const WAITING_FOR_CHAT_MESSAGE: &str = "Waiting for YouTube to open this broadcast's chat…";
+
+/// Seconds to wait before each further chat id lookup. YouTube's broadcast
+/// list trails a broadcast created a moment earlier: the lookup at go-live can
+/// come back with no item, or no `liveChatId`, and seconds later have both.
+/// One unanswered lookup used to fail chat for the whole stream. About 2.5
+/// minutes and 13 lookups (1 unit each) in all, then chat says it has none.
+const CHAT_ID_LOOKUP_RETRY_SECS: [u64; 12] = [1, 2, 3, 5, 8, 10, 15, 15, 20, 20, 30, 30];
+#[cfg(not(test))]
+const CHAT_ID_LOOKUP_UNIT_MS: u64 = 1_000;
+#[cfg(test)]
+const CHAT_ID_LOOKUP_UNIT_MS: u64 = 5;
+
+/// The wait before retry number `retry` (0-based), or `None` once the
+/// lookups are spent (pure, tested).
+fn chat_id_lookup_retry_delay(retry: usize) -> Option<Duration> {
+    CHAT_ID_LOOKUP_RETRY_SECS
+        .get(retry)
+        .map(|secs| Duration::from_millis(secs * CHAT_ID_LOOKUP_UNIT_MS))
+}
+
+/// A lookup that may answer if asked again: the network, an unreadable
+/// response, or YouTube's own 5xx. Refusals (auth, budget, not found) are not.
+fn chat_id_lookup_error_is_transient(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<reqwest::Error>().is_some()
+            || cause
+                .downcast_ref::<crate::youtube_quota::YouTubeApiError>()
+                .is_some_and(|api| api.status >= 500)
+    })
+}
+
 /// The connector task: resolve the chat id, then poll → normalize → deliver, honoring the
 /// server poll interval, with backoff + status transitions on errors. Spawned by session
 /// integration (and `liveChat.start` with a `youtube` config for the live smoke).
@@ -1231,52 +1270,96 @@ pub async fn run_youtube_chat_connector(
         }
     };
 
-    let resolved = match config.live_chat_id.clone() {
-        Some(id) => Some(id),
-        None => match &config.broadcast_id {
-            Some(broadcast_id) => loop {
+    let live_chat_id = match (config.live_chat_id.clone(), &config.broadcast_id) {
+        (Some(id), _) => id,
+        (None, Some(broadcast_id)) => {
+            let mut retry = 0;
+            loop {
                 park_while_off().await;
                 park(crate::youtube_quota::CHAT_PAUSED_MESSAGE).await;
                 let access_token = token.ensure_fresh(&state, &client).await.to_string();
-                match resolve_live_chat_id(&state, &client, &base_url, &access_token, broadcast_id)
-                    .await
+                let failure = match resolve_live_chat_id(
+                    &state,
+                    &client,
+                    &base_url,
+                    &access_token,
+                    broadcast_id,
+                )
+                .await
                 {
-                    Ok(live_chat_id) => break live_chat_id,
+                    Ok(Some(live_chat_id)) => break live_chat_id,
+                    // Not listed yet, or listed without its chat yet.
+                    Ok(None) => NO_LIVE_CHAT_MESSAGE.to_string(),
                     Err(error) => {
                         if crate::youtube_quota::note_error(&state, "chat id lookup", &error)
                             .is_some()
                         {
                             continue;
                         }
-                        set_provider_and_emit(
-                            &state,
-                            &session_id,
-                            session_generation,
-                            StreamPlatform::Youtube,
-                            target_id.as_deref(),
-                            LiveChatProviderConnectionState::Failed,
-                            &format!("Could not resolve YouTube live chat: {error:#}"),
-                        )
-                        .await;
-                        return;
+                        let failure = format!("Could not resolve YouTube live chat: {error:#}");
+                        if !chat_id_lookup_error_is_transient(&error) {
+                            set_provider_and_emit(
+                                &state,
+                                &session_id,
+                                session_generation,
+                                StreamPlatform::Youtube,
+                                target_id.as_deref(),
+                                LiveChatProviderConnectionState::Failed,
+                                &failure,
+                            )
+                            .await;
+                            return;
+                        }
+                        failure
                     }
-                }
-            },
-            None => None,
-        },
-    };
-    let Some(live_chat_id) = resolved else {
-        set_provider_and_emit(
-            &state,
-            &session_id,
-            session_generation,
-            StreamPlatform::Youtube,
-            target_id.as_deref(),
-            LiveChatProviderConnectionState::Failed,
-            "No live chat is available for this YouTube broadcast.",
-        )
-        .await;
-        return;
+                };
+                let Some(delay) = chat_id_lookup_retry_delay(retry) else {
+                    state.emit_log(
+                        "warn",
+                        format!(
+                            "YouTube chat id lookup gave up after {} tries: {failure}",
+                            retry + 1
+                        ),
+                    );
+                    set_provider_and_emit(
+                        &state,
+                        &session_id,
+                        session_generation,
+                        StreamPlatform::Youtube,
+                        target_id.as_deref(),
+                        LiveChatProviderConnectionState::Failed,
+                        &failure,
+                    )
+                    .await;
+                    return;
+                };
+                retry += 1;
+                set_provider_and_emit(
+                    &state,
+                    &session_id,
+                    session_generation,
+                    StreamPlatform::Youtube,
+                    target_id.as_deref(),
+                    LiveChatProviderConnectionState::Connecting,
+                    WAITING_FOR_CHAT_MESSAGE,
+                )
+                .await;
+                sleep(delay).await;
+            }
+        }
+        (None, None) => {
+            set_provider_and_emit(
+                &state,
+                &session_id,
+                session_generation,
+                StreamPlatform::Youtube,
+                target_id.as_deref(),
+                LiveChatProviderConnectionState::Failed,
+                NO_BROADCAST_MESSAGE,
+            )
+            .await;
+            return;
+        }
     };
     // The send path needs the resolved id too (Comments upgrade S4).
     crate::live_chat::set_youtube_send_chat_id(
@@ -2283,6 +2366,24 @@ mod tests {
         base_url: String,
         token_source: crate::session_token::SessionTokenSource,
     ) -> tokio::task::JoinHandle<()> {
+        start_connector(
+            state,
+            YouTubeChatConfig {
+                access_token: "token-1".to_string(),
+                live_chat_id: Some("chat-1".to_string()),
+                broadcast_id: None,
+                target_id: Some("youtube".to_string()),
+                api_base_url: Some(base_url),
+                token_source,
+            },
+        )
+        .await
+    }
+
+    async fn start_connector(
+        state: &AppState,
+        config: YouTubeChatConfig,
+    ) -> tokio::task::JoinHandle<()> {
         let provider = crate::live_chat::LiveChatProviderState {
             id: "youtube".to_string(),
             platform: StreamPlatform::Youtube,
@@ -2308,14 +2409,7 @@ mod tests {
             state.clone(),
             "session-1".to_string(),
             session_generation,
-            YouTubeChatConfig {
-                access_token: "token-1".to_string(),
-                live_chat_id: Some("chat-1".to_string()),
-                broadcast_id: None,
-                target_id: Some("youtube".to_string()),
-                api_base_url: Some(base_url),
-                token_source,
-            },
+            config,
         ))
     }
 
@@ -2409,6 +2503,209 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(resolved.as_deref(), Some("LCID-123"));
+    }
+
+    /// A YouTube whose broadcast lookup answers from a script, one entry per
+    /// lookup (the last entry repeats), and whose chat serves one message.
+    #[derive(Clone)]
+    struct LateChatYouTube {
+        lookups: Arc<std::sync::atomic::AtomicUsize>,
+        script: Arc<Vec<(StatusCode, Value)>>,
+    }
+
+    async fn late_chat_broadcasts(
+        State(server): State<LateChatYouTube>,
+    ) -> (StatusCode, Json<Value>) {
+        let lookup = server
+            .lookups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (status, body) = server
+            .script
+            .get(lookup)
+            .or_else(|| server.script.last())
+            .cloned()
+            .unwrap();
+        (status, Json(body))
+    }
+
+    async fn late_chat_messages() -> Json<Value> {
+        Json(json!({
+            "nextPageToken": "page-1",
+            "pollingIntervalMillis": 60_000,
+            "items": [text_item("m1", "hello")]
+        }))
+    }
+
+    async fn spawn_late_chat_youtube(
+        script: Vec<(StatusCode, Value)>,
+    ) -> (String, LateChatYouTube) {
+        let server = LateChatYouTube {
+            lookups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            script: Arc::new(script),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(LIVE_BROADCASTS_PATH, get(late_chat_broadcasts))
+            .route(LIVE_CHAT_MESSAGES_STREAM_PATH, get(late_chat_messages))
+            .route(LIVE_CHAT_MESSAGES_PATH, get(late_chat_messages))
+            .with_state(server.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn broadcast_chat_config(base_url: String, broadcast_id: Option<&str>) -> YouTubeChatConfig {
+        YouTubeChatConfig {
+            access_token: "token-1".to_string(),
+            live_chat_id: None,
+            broadcast_id: broadcast_id.map(str::to_string),
+            target_id: Some("youtube".to_string()),
+            api_base_url: Some(base_url),
+            token_source: Default::default(),
+        }
+    }
+
+    fn no_broadcast_yet() -> (StatusCode, Value) {
+        (StatusCode::OK, json!({ "items": [] }))
+    }
+
+    fn broadcast_without_chat_yet() -> (StatusCode, Value) {
+        (StatusCode::OK, json!({ "items": [{ "snippet": {} }] }))
+    }
+
+    fn broadcast_with_chat() -> (StatusCode, Value) {
+        (
+            StatusCode::OK,
+            json!({ "items": [{ "snippet": { "liveChatId": "chat-1" } }] }),
+        )
+    }
+
+    #[test]
+    fn chat_id_lookups_retry_for_a_bounded_window() {
+        assert!(chat_id_lookup_retry_delay(0).is_some());
+        assert!(chat_id_lookup_retry_delay(CHAT_ID_LOOKUP_RETRY_SECS.len() - 1).is_some());
+        assert_eq!(
+            chat_id_lookup_retry_delay(CHAT_ID_LOOKUP_RETRY_SECS.len()),
+            None
+        );
+        let window: u64 = CHAT_ID_LOOKUP_RETRY_SECS.iter().sum();
+        assert!(
+            (60..=300).contains(&window),
+            "a broadcast gets one to five minutes to list its chat, not {window} s"
+        );
+    }
+
+    /// The owner's report (2026-11-12): at go-live the lookup ran before
+    /// YouTube listed the just-created broadcast, and chat said "No live
+    /// chat is available" for the whole stream; a restart fixed it.
+    #[tokio::test]
+    async fn a_just_created_broadcast_connects_once_youtube_lists_its_chat() {
+        let (base_url, server) = spawn_late_chat_youtube(vec![
+            no_broadcast_yet(),
+            broadcast_without_chat_yet(),
+            broadcast_with_chat(),
+        ])
+        .await;
+        let state = expiry_state();
+        let connector =
+            start_connector(&state, broadcast_chat_config(base_url, Some("bcast-1"))).await;
+        let snapshot = wait_for_provider(&state, |snapshot| {
+            snapshot.providers[0].state == LiveChatProviderConnectionState::Connected
+                || snapshot.providers[0].state == LiveChatProviderConnectionState::Failed
+        })
+        .await;
+        connector.abort();
+        assert_eq!(
+            snapshot.providers[0].state,
+            LiveChatProviderConnectionState::Connected,
+            "{snapshot:?}"
+        );
+        assert_eq!(server.lookups.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_youtube_server_error_on_the_lookup_is_retried() {
+        let (base_url, server) = spawn_late_chat_youtube(vec![
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": { "errors": [{ "reason": "backendError" }] } }),
+            ),
+            broadcast_with_chat(),
+        ])
+        .await;
+        let state = expiry_state();
+        let connector =
+            start_connector(&state, broadcast_chat_config(base_url, Some("bcast-1"))).await;
+        let snapshot = wait_for_provider(&state, |snapshot| {
+            snapshot.providers[0].state == LiveChatProviderConnectionState::Connected
+                || snapshot.providers[0].state == LiveChatProviderConnectionState::Failed
+        })
+        .await;
+        connector.abort();
+        assert_eq!(
+            snapshot.providers[0].state,
+            LiveChatProviderConnectionState::Connected,
+            "{snapshot:?}"
+        );
+        assert_eq!(server.lookups.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_that_never_lists_a_chat_fails_after_the_retries() {
+        let (base_url, server) = spawn_late_chat_youtube(vec![broadcast_without_chat_yet()]).await;
+        let state = expiry_state();
+        let connector =
+            start_connector(&state, broadcast_chat_config(base_url, Some("bcast-1"))).await;
+        let snapshot = wait_for_provider(&state, |snapshot| {
+            snapshot.providers[0].state == LiveChatProviderConnectionState::Failed
+        })
+        .await;
+        connector.abort();
+        assert_eq!(snapshot.providers[0].message, NO_LIVE_CHAT_MESSAGE);
+        assert_eq!(
+            server.lookups.load(std::sync::atomic::Ordering::SeqCst),
+            CHAT_ID_LOOKUP_RETRY_SECS.len() + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_lookup_fails_at_once() {
+        let (base_url, server) = spawn_late_chat_youtube(vec![(
+            StatusCode::NOT_FOUND,
+            json!({ "error": { "errors": [{ "reason": "liveBroadcastNotFound" }] } }),
+        )])
+        .await;
+        let state = expiry_state();
+        let connector =
+            start_connector(&state, broadcast_chat_config(base_url, Some("bcast-1"))).await;
+        let snapshot = wait_for_provider(&state, |snapshot| {
+            snapshot.providers[0].state == LiveChatProviderConnectionState::Failed
+        })
+        .await;
+        connector.abort();
+        assert!(
+            snapshot.providers[0]
+                .message
+                .starts_with("Could not resolve YouTube live chat"),
+            "{snapshot:?}"
+        );
+        assert_eq!(server.lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_destination_without_a_broadcast_says_so_without_a_lookup() {
+        let (base_url, server) = spawn_late_chat_youtube(vec![broadcast_with_chat()]).await;
+        let state = expiry_state();
+        let connector = start_connector(&state, broadcast_chat_config(base_url, None)).await;
+        let snapshot = wait_for_provider(&state, |snapshot| {
+            snapshot.providers[0].state == LiveChatProviderConnectionState::Failed
+        })
+        .await;
+        connector.abort();
+        assert_eq!(snapshot.providers[0].message, NO_BROADCAST_MESSAGE);
+        assert_eq!(server.lookups.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

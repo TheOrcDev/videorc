@@ -21,12 +21,16 @@ use crate::protocol::{EffectiveSceneBackground, LiveBackgroundSpec, LiveBackgrou
 /// leg of the tick shares (so every leg reads the same phase), the loop's
 /// frame interval and whether this tick missed its deadline (the loop's own
 /// late-tick signal: a tick gap that skipped an interval, or a previous
-/// publish that ran past the interval). The guard reads the last two.
+/// publish that ran past the interval). The guard reads the last two, and
+/// `takeover`: whether a takeover screen stands in for the scene this tick.
 #[derive(Debug, Clone, Copy)]
 pub struct LiveBackgroundTick {
     pub at: Instant,
     pub frame_interval: Duration,
     pub missed_deadline: bool,
+    /// A takeover screen is drawn in place of the scene's sources this tick.
+    /// The guard takes no reading on such a tick (`guard.rs`).
+    pub takeover: bool,
 }
 
 impl LiveBackgroundTick {
@@ -35,7 +39,13 @@ impl LiveBackgroundTick {
             at,
             frame_interval,
             missed_deadline,
+            takeover: false,
         }
+    }
+
+    /// The same tick with a takeover screen up (`true`) or not.
+    pub fn under_takeover(self, takeover: bool) -> Self {
+        Self { takeover, ..self }
     }
 
     /// A tick whose deadline nobody measured (tests, the cache refresh before
@@ -147,8 +157,10 @@ pub const LEGACY_GRAPH_NOTICE: &str =
 pub const GPU_BUDGET_NOTICE: &str =
     "Your graphics card is busy, so the live background is showing a still frame.";
 
-/// Whether a status change is the guard's first fall back to the poster (say
-/// it once, not on every status refresh).
+/// Whether a status change is an entry into the guard's poster: say it once
+/// per entry, not on every status refresh. The guard climbs back by itself
+/// (`guard.rs`), so a later fall is a new entry and is said again; its
+/// doubling wait keeps that to six an hour at most.
 pub fn entered_gpu_budget_still(
     previous: Option<&LiveBackgroundStatus>,
     next: Option<&LiveBackgroundStatus>,

@@ -195,6 +195,15 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:banners']
       },
       {
+        // Plan 232: an HTML overlay (a banner whose picture is a web page)
+        // alive, blended and see-through in the recording, the stream and
+        // both at once, with the network closed to its page. It SKIPs off
+        // macOS, naming plan 232 D9.
+        label: 'HTML overlay recording and stream smoke',
+        command: 'pnpm',
+        args: ['smoke:html-overlay']
+      },
+      {
         // Plan 190: a live background moves in the recording, never freezes,
         // never draws over the stage, uploads nothing per frame, and releases
         // everything when it comes off.

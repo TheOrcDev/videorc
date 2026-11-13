@@ -2439,6 +2439,72 @@
       "updatedAt": "2026-10-20T18:05:00Z"
     }
   },
+  "htmlOverlay": {
+    "banner": {
+      "id": "0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6",
+      "name": "Animated badge",
+      "kind": "html",
+      "imageFile": "0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6.png",
+      "thumbnailFile": "0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6.thumb.png",
+      "width": 640,
+      "height": 360,
+      "hasAlpha": true,
+      "sortOrder": 1,
+      "shown": true,
+      "horizontal": { "x": 0.7775, "y": 0.04, "w": 0.2, "h": 0.2 },
+      "vertical": { "x": 0.628889, "y": 0.08, "w": 0.3, "h": 0.094922 },
+      "showOnStream": true,
+      "showInRecording": true,
+      "opacity": 0.9,
+      "createdAt": "2026-11-12T18:00:00Z",
+      "updatedAt": "2026-11-12T18:00:01Z"
+    },
+    "targets": {
+      "targets": [
+        {
+          "id": "0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6",
+          "pageWidth": 640,
+          "pageHeight": 360,
+          "frameWidth": 384,
+          "frameHeight": 216,
+          "fps": 30
+        }
+      ]
+    },
+    "statuses": {
+      "overlays": [
+        {
+          "id": "0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6",
+          "state": "live",
+          "frameWidth": 384,
+          "frameHeight": 216,
+          "blockedRequests": 3
+        },
+        {
+          "id": "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+          "state": "unavailable",
+          "detail": "HTML banners can't join this recording. Hide it, or record at 30 fps."
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000001",
+          "state": "loading"
+        }
+      ]
+    },
+    "hostReport": {
+      "id": "0f9d1c2e-5b7a-4c3d-9e8f-a1b2c3d4e5f6",
+      "state": "failed",
+      "detail": "the page closed unexpectedly (crashed)",
+      "blockedRequests": 3
+    },
+    "stats": {
+      "framesReceived": 120,
+      "framesDropped": 2,
+      "bytesReceived": 39813120,
+      "convertMicros": 41000,
+      "uploadsOpened": 1
+    }
+  },
   "sound": {
     "minimal": {
       "id": "0b7f3c2e-91d4-4a6b-8e25-6c1d9a0f4b37",

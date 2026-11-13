@@ -26,7 +26,8 @@
 //! - [`glsl::PassKind`]: full-screen, or instanced quads (Ghost Fibers' dots
 //!   and dust, plan 194 N2).
 //! - [`clock`]: the phase clock (re-based on every change, never jumps).
-//! - [`guard`]: the budget guard (full → half → poster, never climbs back).
+//! - [`guard`]: the budget guard (full → half → poster, and back one level
+//!   at a time after a quiet period).
 //! - [`glsl`]: the GLSL ES 3.00 sources (the source of truth; the Linux
 //!   renderer and the Electron previews run them as they are, Metal and D3D11
 //!   run hand ports checked against golden frames rendered from them).

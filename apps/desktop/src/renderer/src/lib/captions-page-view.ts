@@ -47,7 +47,7 @@ export function captionsReaderNotice(
   status: CaptionsStatus,
   lineCount: number
 ): { text: string; failed: boolean } | null {
-  if (status.state === 'blocked') {
+  if (status.reasonCode === 'service-unavailable' || status.state === 'blocked') {
     return {
       text: status.message ?? 'Captions need attention before they can start. Open Captions.',
       failed: true

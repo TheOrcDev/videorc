@@ -1110,6 +1110,12 @@ mod runtime {
             let Ok(mut compositor) = self.compositor.try_lock() else {
                 return;
             };
+            if all_legs && compositor.record_windows_media_frame_scene(&snapshot.edit) {
+                let _ = self.events.send(crate::protocol::ServerEvent::new(
+                    "compositor.status",
+                    compositor.status.clone(),
+                ));
+            }
             let Ok(mut coordinator) = self.coordinator.try_lock() else {
                 return;
             };
@@ -2235,7 +2241,7 @@ mod runtime {
             primary_canvas,
             now,
             None,
-            &input.banner_prepare,
+            crate::compositor::BannerPixels::images_only(&input.banner_prepare),
         );
         let auxiliary_draws = match plan.auxiliary {
             Some(video) => {
@@ -2250,7 +2256,7 @@ mod runtime {
                         canvas,
                         now,
                         None,
-                        &input.banner_prepare,
+                        crate::compositor::BannerPixels::images_only(&input.banner_prepare),
                     ),
                 ))
             }
@@ -2279,7 +2285,7 @@ mod runtime {
                 primary_canvas,
                 now,
                 None,
-                &input.banner_prepare,
+                crate::compositor::BannerPixels::images_only(&input.banner_prepare),
             ),
         };
         let program_index_of = |slot: u64, ring_index: usize| {
@@ -3028,11 +3034,14 @@ mod runtime {
                         && let Some(input) = primary_live_background(committed)
                     {
                         let mut input = input.clone();
+                        // The guard takes no reading while a takeover
+                        // screen stands in for the scene.
                         input.tick = crate::live_background::LiveBackgroundTick::new(
                             frame_started_at,
                             frame_interval,
                             live_missed_deadline,
-                        );
+                        )
+                        .under_takeover(committed.takeover_active);
                         sources.push(WindowsD3d11CompositionSource::LiveBackground {
                             source_id,
                             input: Box::new(input),
@@ -3160,7 +3169,13 @@ mod runtime {
                         )
                     },
                 );
-                match client.offer_preview(ticket, configured_preview_generation, source_live) {
+                let scene_revision = committed.as_ref().map(|current| current.edit.revision());
+                match client.offer_preview(
+                    ticket,
+                    configured_preview_generation,
+                    source_live,
+                    scene_revision,
+                ) {
                     Ok(offer) => {
                         update_snapshot(&snapshot, |current| {
                             current.preview_offered_sequence = Some(offer.sequence);

@@ -138,6 +138,7 @@ export const electronInvokeApiMethods = {
   'app:exit': 'exitApp',
   'screens:pick-image': 'pickScreenImage',
   'banners:pick-image': 'pickBannerImage',
+  'banners:pick-html': 'pickBannerHtml',
   'sounds:pick-files': 'pickSoundFiles',
   'sounds:starter-list': 'getStarterSounds',
   'sounds:starter-files': 'getStarterSoundFiles',
@@ -205,6 +206,8 @@ export const electronInvokeApiMethods = {
   'comments-window:get-state': 'getCommentsWindowState',
   'comments-window:set-always-on-top': 'setCommentsWindowAlwaysOnTop',
   'comments-window:set-hidden-from-stream': 'setCommentsWindowHiddenFromStream',
+  'comments-window:swap-screen': 'swapCommentsWindowScreen',
+  'comments-window:front-or-close': 'frontOrCloseCommentsWindow',
   'comments-window:set-highlight-anchor': 'setCommentsWindowHighlightAnchor',
   'comments-window:set-auto-show-activity': 'setCommentsWindowAutoShowActivity',
   'comments-window:push-snapshot': 'pushCommentsSnapshot',
@@ -1345,6 +1348,15 @@ const outputDirectorySelectionSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+/** A picked HTML overlay (plan 232): one `.html` file or a folder. */
+const htmlOverlaySelectionSchema = objectSchema(
+  {
+    capabilityId: boundedIdentifier,
+    kind: enumSchema(['input-file', 'input-directory']),
+    displayName: stringSchema({ maxLength: 32_768 })
+  },
+  { allowUnknown: false }
+)
 const videorcAccountSnapshotSchema = objectSchema(
   {
     status: enumSchema(['signed-out', 'signed-in']),
@@ -1917,6 +1929,17 @@ const specificRuntimeInvokeContracts = {
   'comments-window:set-auto-show-activity': invokeContract(tupleSchema([booleanSchema])),
   // Plan 215 D6: Hide from stream is one boolean, nothing else.
   'comments-window:set-hidden-from-stream': invokeContract(tupleSchema([booleanSchema])),
+  // Plan 230: a hold of the same key carries nothing.
+  'comments-window:front-or-close': invokeContract(tupleSchema([])),
+  // Plan 230: the Stream Manager Screen key names two display ids.
+  'comments-window:swap-screen': invokeContract(
+    tupleSchema([
+      objectSchema({
+        presentingScreen: stringSchema({ minLength: 1, maxLength: 32 }),
+        monitorScreen: stringSchema({ minLength: 1, maxLength: 32 })
+      })
+    ])
+  ),
   // Plan 140, S5: the window names a platform and nothing else. Main picks
   // the scopes, so a forged command can never widen what is requested.
   'comments-window:reconnect-scopes': invokeContract(
@@ -2146,6 +2169,9 @@ const specificRuntimeInvokeContracts = {
     nullableSchema(outputDirectorySelectionSchema)
   ),
   'community:pick-import-file': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
+  // Plan 232: no arguments; null on cancel, else an input-file capability
+  // (one .html file) or an input-directory one (a folder with index.html).
+  'banners:pick-html': invokeContract(noArgs, nullableSchema(htmlOverlaySelectionSchema)),
   // Plan 189: Import sounds… (several files at once, none on cancel), and the
   // starter sounds the main window seeds and restores.
   // Release test 147, plan 0006: the files main couldn't open come back by

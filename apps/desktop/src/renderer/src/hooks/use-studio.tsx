@@ -23,7 +23,11 @@ import {
   type SystemAccessContext
 } from '@/lib/system-access'
 import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover-import'
-import { createBannerImporter, type BannerImportPhase } from '@/lib/banner-import'
+import {
+  createBannerImporter,
+  type BannerImportKind,
+  type BannerImportPhase
+} from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
@@ -377,6 +381,12 @@ import {
   pendingLayoutEvidence,
   type LayoutSwitchTarget
 } from '@/lib/layout-switch-pending'
+import { layoutPresetLabel } from '@/lib/layout-labels'
+import {
+  advanceSceneSwitchProgress,
+  startSceneSwitchProgress,
+  type SceneSwitchProgress
+} from '@/lib/scene-switch-progress'
 import {
   INITIAL_ACCOUNT_READY_REFRESH_STATE,
   reduceAccountReadyRefresh,
@@ -455,6 +465,8 @@ import type {
   BackendConnection,
   Banner,
   BannerUpdateParams,
+  HtmlOverlayStatus,
+  HtmlOverlayStatuses,
   BackendHealth,
   BackendLifecycleEvent,
   BackendLogEvent,
@@ -980,7 +992,7 @@ export function buildStreamOutputTopologyProbeParams(
   const streamProfile = providerPlan.streamVideo
   const streamProfiles = providerPlan.targets.map(({ video }) => video)
   const captionOutputReadiness = captionSessionOutputReadiness({
-    burnTarget: captureConfig.captions.burnTarget,
+    burnTarget: 'stream',
     recordEnabled: captureConfig.recordEnabled,
     streamEnabled: true,
     recordingVideo: recordingProfile,
@@ -988,11 +1000,12 @@ export function buildStreamOutputTopologyProbeParams(
   })
   const burnsStream =
     captureConfig.captions.burnTarget === 'stream' || captureConfig.captions.burnTarget === 'both'
+  const prearmCaptions =
+    !captureConfig.captions.enabled ||
+    suppressCaptionsForSession ||
+    captureConfig.captions.burnTarget === 'off'
   const forceSameProfileSplit =
-    captureConfig.recordEnabled &&
-    !suppressCaptionsForSession &&
-    burnsStream &&
-    (captureConfig.captions.enabled || captionOutputReadiness.ready)
+    captureConfig.recordEnabled && (prearmCaptions ? captionOutputReadiness.ready : burnsStream)
   const split =
     captureConfig.recordEnabled &&
     (forceSameProfileSplit || !sameTopologyVideoProfile(recordingProfile, streamProfile))
@@ -1603,8 +1616,10 @@ export type StudioContextValue = {
    */
   applySimulcastLeg: (patch: SimulcastLegPatch) => void
   // The layout a switch is applying, if any: its preset and whether it lands
-  // in Freeform (drives the one "Switching…" label; plan slice D2, plan 216 A4).
+  // in Freeform (drives the one pending control; plan slice D2, plan 216 A4).
   layoutSwitchPending: LayoutSwitchTarget | null
+  /** Issue #1275: what the pending switch is called and what it waits for. */
+  sceneSwitchProgress: SceneSwitchProgress | null
   sourceDeviceSwitchPending: LiveSourceDeviceSwitchPending | null
   sourceSelectionState: LiveSourceSelectionState
   sourceSwitchReason: (kind: LiveSourceDeviceSwitchPending) => string | null
@@ -1956,13 +1971,18 @@ export type StudioBannersContextValue = {
   /** Videorc is reconnecting: every banner action waits for it. */
   bannersOffline: boolean
   bannerImportPhase: BannerImportPhase
+  /** Which import is running while the phase is not idle (plan 232). */
+  bannerImportKind: BannerImportKind
+  /** Where each showing HTML overlay stands (plan 232): loading, live, or why not. */
+  htmlOverlayStatuses: readonly HtmlOverlayStatus[]
   /** The banner the Scene page selects (Assets → Place on Scene); null when none, or deleted. */
   selectedBannerId: string | null
   selectBanner: (id: string | null) => void
   /** Assets → Import image…: the picker, then `banners.importImage`, which shows the new banner
    * (plan 205 D3) unless four already show or a running session can't take one: then it
-   * arrives hidden (with four showing, the Scene list's limit reason says why). */
-  importBanner: () => Promise<void>
+   * arrives hidden (with four showing, the Scene list's limit reason says why).
+   * `'html'` is Import HTML… (plan 232): an `.html` file or a folder with `index.html`. */
+  importBanner: (kind?: BannerImportKind) => Promise<void>
   updateBanner: (id: string, patch: Omit<BannerUpdateParams, 'id'>) => Promise<Banner | null>
   /** Every banner id in the new Assets order (`bannerOrderAfterMove`). */
   reorderBanners: (ids: string[]) => Promise<boolean>
@@ -1982,6 +2002,8 @@ export type StudioCaptionsContextValue = {
 const NO_SCREENS: StreamScreen[] = []
 /** The banner list before it loads: one stable empty array. */
 const NO_BANNERS: Banner[] = []
+/** No HTML overlay shows (plan 232): one stable empty array. */
+const NO_HTML_OVERLAY_STATUSES: readonly HtmlOverlayStatus[] = []
 /** What a failed takeover Show names, offline or busy (plan 195 S4). */
 const SHOW_TAKEOVER: UserErrorContext = { action: 'show', object: 'the takeover' }
 /** What a failed takeover Take off names, offline or busy (plan 195 S4). */
@@ -2453,6 +2475,8 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   alwaysOnTop: false,
   hiddenFromStream: false,
   hideFromStreamMethod: 'unsupported',
+  screenId: null,
+  screens: [],
   highlightAnchor: DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   autoShowActivity: false,
   protected: false,
@@ -2619,7 +2643,7 @@ export function handleAccountChangedEvent(
     deps.setAccount(event.account)
   }
   if (event.reason === 'session-expired') {
-    showVideorcSignInExpired()
+    void showVideorcSignInExpired()
   }
 }
 
@@ -3287,7 +3311,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         continue
       }
       chatSetupWarnedRef.current.warned.add(key)
-      showChatNeedsVideorcSignIn(CHAT_PLATFORM_LABELS[warning.platform])
+      void showChatNeedsVideorcSignIn(CHAT_PLATFORM_LABELS[warning.platform])
     }
   }, [liveChatSnapshot, captureConfig.streamEnabled])
   // Live captions: status + transcript driven by captions.* events; the mic
@@ -4256,8 +4280,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [captureConfig]
   )
   const captionOutputReadiness = useMemo(
-    () => captionReadinessForIntent(activeStartIntent ?? savedModeIntent(captureConfig)),
-    [activeStartIntent, captionReadinessForIntent, captureConfig]
+    () =>
+      captionReadinessForIntent(
+        remoteOutputIntent({
+          sessionActive: isActiveRecordingState(recording.state),
+          startIntent: activeStartIntent,
+          status: recording,
+          config: captureConfig,
+          previous: null
+        })
+      ),
+    [activeStartIntent, captionReadinessForIntent, captureConfig, recording]
   )
   // The Go Live dialog asks about a Go Live, whatever the saved mode is.
   const goLiveCaptionOutputReadiness = useMemo(
@@ -4492,6 +4525,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const screenListEventRevision = useRef(0)
   const activeScreenEventRevision = useRef(0)
   const [bannerImportPhase, setBannerImportPhase] = useState<BannerImportPhase>('idle')
+  const [bannerImportKind, setBannerImportKind] = useState<BannerImportKind>('image')
+  // Plan 232: where each showing HTML overlay stands. Empty until the
+  // backend says otherwise, and empty again when the connection goes.
+  const [htmlOverlayStatuses, setHtmlOverlayStatuses] =
+    useState<readonly HtmlOverlayStatus[]>(NO_HTML_OVERLAY_STATUSES)
   const bannerImporter = useRef(createBannerImporter())
   // Bumped by every `banners.changed`: the reliable full list wins over a
   // late reply, the way the takeover list does.
@@ -4501,6 +4539,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setScreenImportPhase('idle')
     bannerImporter.current.reset()
     setBannerImportPhase('idle')
+    if (wsStatus !== 'connected') setHtmlOverlayStatuses(NO_HTML_OVERLAY_STATUSES)
     const importer = screenImporter.current
     const bannerImport = bannerImporter.current
     return () => {
@@ -5127,6 +5166,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutSwitchTarget | null>(null)
+  const [sceneSwitchProgress, setSceneSwitchProgress] = useState<SceneSwitchProgress | null>(null)
+  // Issue #1275: a phase only moves the switch that reached it, never a newer one.
+  const noteSceneSwitchPhase = useCallback(
+    (
+      intentId: number,
+      patch: Partial<Pick<SceneSwitchProgress, 'phase' | 'showsCamera' | 'showsScreen'>>
+    ) => setSceneSwitchProgress((current) => advanceSceneSwitchProgress(current, intentId, patch)),
+    []
+  )
   const [sourceSelectionState, setSourceSelectionState] = useState<LiveSourceSelectionState>({
     snapshot: null,
     pending: null,
@@ -7509,7 +7557,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         {}
       )
       await window.videorc.openOAuthUrl(result.authUrl)
-      showBrowserApproval('Approve X Live in your browser', result.authUrl)
+      await showBrowserApproval('Approve X Live in your browser', result.authUrl)
     } catch (error) {
       reportError(error, { action: 'start', object: 'X Live approval' })
     }
@@ -8815,6 +8863,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bannerListEventRevision.current += 1
         setBanners(payload)
       }),
+      // Plan 232: an HTML overlay that is loading, or cannot be drawn, says so.
+      nextClient.on('htmlOverlays.status', (payload) => setHtmlOverlayStatuses(payload.overlays)),
       // Plan 189: the soundboard lives outside React (lib/soundboard-store).
       nextClient.on('sounds.changed', (payload) => soundboard.acceptBoard(payload)),
       nextClient.on('sounds.playback', (payload) => soundboard.acceptPlayback(payload)),
@@ -9230,6 +9280,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               setBanners(nextBanners)
           },
           (error: unknown) => console.warn('[banners] list read failed:', error)
+        )
+        // Plan 232: the same way, and as optional: an event that arrives
+        // first is newer than this read's answer only if it is not empty.
+        void bootstrapRequest<HtmlOverlayStatuses>('htmlOverlays.status.get').then(
+          (statuses) => {
+            if (generationIsCurrent())
+              setHtmlOverlayStatuses((current) =>
+                current.length > 0 ? current : statuses.overlays
+              )
+          },
+          (error: unknown) => console.warn('[banners] overlay status read failed:', error)
         )
         const [
           nextHealth,
@@ -10377,6 +10438,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return false
       }
       if (nativePreviewSurfaceEnabled && surfaceCanPresent) {
+        noteSceneSwitchPhase(intentId, { phase: 'presenting' })
         const proofOwner = nativePreviewSceneProofPresentationOwner({
           mainPumpActive: mainPumpActiveRef.current,
           statusReaderAvailable: Boolean(window.videorc?.getNativePreviewSurfaceStatus),
@@ -10423,7 +10485,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       return true
     },
-    [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled, runtimeInfo?.platform]
+    [
+      applyPreviewSurfaceStatus,
+      client,
+      nativePreviewSurfaceEnabled,
+      noteSceneSwitchPhase,
+      runtimeInfo?.platform
+    ]
   )
 
   const applyLayoutTransactionState = useCallback(
@@ -10633,6 +10701,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         savedSceneId?: string | null
         origin?: 'builtin' | 'saved'
         sceneSwitch?: boolean
+        /** The name the streamer clicked (a saved scene's); a layout's label by default. */
+        targetName?: string
       }
     ): Promise<boolean> => {
       const crossesOrientation =
@@ -10679,9 +10749,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setVisualTransactionPending(true)
       setSavedScenePendingId(options?.savedSceneId ?? null)
       // Background-only commits keep the same preset; flashing the layout
-      // controls into "Switching…" for them reads as an unrelated change.
+      // controls into their pending mark for them reads as an unrelated change.
       if (options?.pendingIndicator !== false) {
         setLayoutSwitchPending(layoutSwitchTarget(layout))
+        const target =
+          options?.targetName ??
+          (layout.arrangementMode === 'freeform'
+            ? 'Freeform'
+            : layoutPresetLabel(layout.layoutPreset))
+        setSceneSwitchProgress((previous) =>
+          startSceneSwitchProgress(previous, { intentId, target, nowMs: Date.now() })
+        )
       }
 
       let commitReceiptSettled = false
@@ -10788,6 +10866,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : {})
           }
           requestedSceneEvidence = requestedLayoutTransactionScene(requestedTransaction)
+          const shownSources = requestedSceneEvidence.sources.filter(
+            (source) => source.visible !== false
+          )
+          noteSceneSwitchPhase(intentId, {
+            phase: 'starting',
+            showsCamera: shownSources.some((source) => source.kind === 'camera'),
+            showsScreen: shownSources.some(
+              (source) => source.kind === 'screen' || source.kind === 'window'
+            )
+          })
           sceneRevisionBeforeRequest =
             typeof baselineCompositorStatus?.sceneRevision === 'number'
               ? baselineCompositorStatus.sceneRevision
@@ -10833,6 +10921,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // superseded by B after A commits; remember A before waiting for proof
           // so a failed B can reconcile the renderer to committed backend truth.
           rememberLayoutTransactionSnapshot(committedSnapshot)
+          noteSceneSwitchPhase(intentId, { phase: 'drawing' })
           let proofSucceeded = false
           let proofError: unknown = null
           try {
@@ -10967,6 +11056,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           if (layoutIntentIdRef.current === intentId) {
             setLayoutSwitchPending(null)
+            setSceneSwitchProgress(null)
             setSavedScenePendingId(null)
             setVisualTransactionPending(false)
           }
@@ -10980,6 +11070,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       applyLayoutTransactionState,
       client,
+      noteSceneSwitchPhase,
       readLayoutTransactionBackendTruth,
       recordAutomaticSourceFallbacks,
       rememberLayoutCommit,
@@ -11376,6 +11467,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       let microphone: ReturnType<typeof sceneMicrophone> | null = null
       let live = false
       let applied = false
+      let lastIntent = layoutIntentBefore
       // Plan 210 D5: an app scene's window is answered from the held device
       // list when it can be (no resolver round trip). A refused switch gets
       // one more try, resolved over the backend, while the pick is still
@@ -11404,7 +11496,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             generation !== savedSceneResolveGenerationRef.current ||
             layoutIntentBefore !== layoutIntentIdRef.current
           )
-            return { ok: false }
+            return { ok: false, superseded: true }
           if (resolved.kind === 'blocked') {
             setResolvedAppStates((current) => ({
               ...current,
@@ -11451,6 +11543,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           origin: 'saved',
           sceneSwitch: true,
           strictSources: true,
+          targetName: saved.name,
           ...(coupling
             ? {
                 videoOverride: coupling.video,
@@ -11463,6 +11556,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         // The intent this switch minted, read before anything newer can.
         const intent = layoutIntentIdRef.current
+        lastIntent = intent
         applied = await transaction
         if (applied) break
         if (
@@ -11480,6 +11574,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           break
         layoutIntentBefore = intent
       }
+      // A newer click took the switch over (issue #1275): not a failure of this scene.
+      if (!applied && layoutIntentIdRef.current !== lastIntent)
+        return { ok: false, superseded: true }
       if (applied) {
         if (!repaired) refreshSavedSceneDisplay(id, deviceListRef.current.devices)
         rememberedAppsRef.current = sceneApply.rememberSceneWindowApp(
@@ -12935,35 +13032,44 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     []
   )
 
-  const importBanner = useCallback(async () => {
-    const context = { action: 'import', object: 'the image' }
-    if (!client || wsStatus !== 'connected') {
-      toastOffline(context)
-      return
-    }
-    if (!window.videorc?.pickBannerImage) {
-      console.warn('[banners] no image picker in this renderer')
-      return
-    }
-    const revision = bannerListEventRevision.current
-    await bannerImporter.current.run({
-      pick: () => window.videorc.pickBannerImage(),
-      importImage: (selection) => {
-        setLastError(null)
-        return client.requestTyped('banners.importImage', {
-          sourceCapability: selection.capabilityId
-        })
-      },
-      isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
-      onPhase: setBannerImportPhase,
-      // The new tile is the confirmation. The backend shows the new banner
-      // unless it can't (plan 205 D3); the answer says which, as `shown`.
-      onImported: (banner) => {
-        if (bannerListEventRevision.current === revision) commitBanner(banner)
-      },
-      onError: (error) => reportBannerError(error, context)
-    })
-  }, [client, commitBanner, reportBannerError, wsStatus])
+  const importBanner = useCallback(
+    async (kind: BannerImportKind = 'image') => {
+      const html = kind === 'html'
+      const context = { action: 'import', object: html ? 'the HTML banner' : 'the image' }
+      if (!client || wsStatus !== 'connected') {
+        toastOffline(context)
+        return
+      }
+      const pick = html ? window.videorc?.pickBannerHtml : window.videorc?.pickBannerImage
+      if (!pick) {
+        console.warn('[banners] no picker for this import in this renderer')
+        return
+      }
+      const revision = bannerListEventRevision.current
+      await bannerImporter.current.run({
+        pick: () => pick(),
+        importImage: (selection) => {
+          setLastError(null)
+          return client.requestTyped(html ? 'banners.importHtml' : 'banners.importImage', {
+            sourceCapability: selection.capabilityId
+          })
+        },
+        isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
+        onPhase: (phase) => {
+          // The kind is the import that got to run, never one that was refused.
+          if (phase === 'choosing') setBannerImportKind(kind)
+          setBannerImportPhase(phase)
+        },
+        // The new tile is the confirmation. The backend shows the new banner
+        // unless it can't (plan 205 D3); the answer says which, as `shown`.
+        onImported: (banner) => {
+          if (bannerListEventRevision.current === revision) commitBanner(banner)
+        },
+        onError: (error) => reportBannerError(error, context)
+      })
+    },
+    [client, commitBanner, reportBannerError, wsStatus]
+  )
 
   const updateBanner = useCallback(
     (id: string, patch: Omit<BannerUpdateParams, 'id'>) =>
@@ -13828,6 +13934,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     wsStatus
   ])
 
+  // Isolated dev-app smoke: change the same persisted intent as the switch.
+  // It never manufactures transcript pixels or calls an overlay RPC.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    const smokeWindow = window as Window & {
+      __videorcSmokeSetCaptionsEnabled?: (enabled: boolean) => void
+    }
+    smokeWindow.__videorcSmokeSetCaptionsEnabled = (enabled) => {
+      setCaptureConfig((current) => ({ ...current, captions: { ...current.captions, enabled } }))
+    }
+    return () => {
+      delete smokeWindow.__videorcSmokeSetCaptionsEnabled
+    }
+  }, [])
+
+  const captionsWereEnabledRef = useRef(captureConfig.captions.enabled)
+  useEffect(() => {
+    if (captionsWereEnabledRef.current && !captureConfig.captions.enabled) {
+      setSuppressCaptionsForSession(false)
+    }
+    captionsWereEnabledRef.current = captureConfig.captions.enabled
+  }, [captureConfig.captions.enabled])
+
   // Persisted consent is intent; the backend snapshot remains runtime truth.
   // One attempt per capture/toggle/client edge prevents blocked/error states
   // from spinning, while explicit retry edges deliberately try once again.
@@ -13869,7 +13998,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           outputReadiness: captionOutputReadiness
         })
       ) {
-        setSuppressCaptionsForSession(true)
+        captionsStartAttemptedRef.current = true
+        commitCaptionsStatus({
+          state: 'blocked',
+          desiredEnabled: true,
+          reasonCode: 'captions-output-unsupported',
+          message: captionOutputReadiness.description
+        })
         toast.warning("Live captions can't start in this session", {
           id: 'captions-output-unsupported',
           description:
@@ -13905,6 +14040,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.captions.enabled,
     captureConfig.captions.language,
     client,
+    commitCaptionsStatus,
     startCaptions,
     stopCaptions,
     suppressCaptionsForSession,
@@ -14061,18 +14197,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!client) {
       return
     }
+    const sessionConfig = captureConfigForIntent(
+      captureConfig,
+      remoteOutputIntent({
+        sessionActive: isSessionActive,
+        startIntent: activeStartIntent,
+        status: recording,
+        config: captureConfig,
+        previous: null
+      })
+    )
     const latest = captionLines.at(-1)
     const streamVideo = auxiliaryStreamOutputVideoSettings(
-      captureConfig.video,
-      captureConfig.streamEnabled ? captureConfig.streaming : undefined
+      sessionConfig.video,
+      sessionConfig.streamEnabled ? sessionConfig.streaming : undefined
     )
     const outputs = captionOverlayTargetPlan({
       burnTarget: captureConfig.captions.burnTarget,
-      recordEnabled: captureConfig.recordEnabled,
-      streamEnabled: captureConfig.streamEnabled,
-      recordingVideo: captureConfig.video,
+      recordEnabled: sessionConfig.recordEnabled,
+      streamEnabled: sessionConfig.streamEnabled,
+      recordingVideo: sessionConfig.video,
       streamVideo,
-      verticalLeg: simulcastLegLiveRequest(captureConfig)?.video,
+      verticalLeg: simulcastLegLiveRequest(sessionConfig)?.video,
       captionsLayout: overlayLayout.captions
     })
     const candidateKey = latest
@@ -14145,6 +14291,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captionLines,
     captionsStatus,
     isSessionActive,
+    activeStartIntent,
+    recording.state,
+    recording.streamUrl,
+    recording.outputPath,
     captureConfig.captions,
     captureConfig.recordEnabled,
     captureConfig.video,
@@ -14414,7 +14564,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // are developer-portal instructions, not something an end user can act
         // on, so the toast stays quiet.
         if (!flow?.showsBrowserStep) {
-          showBrowserApproval('Approve the connection in your browser', result.authUrl)
+          await showBrowserApproval('Approve the connection in your browser', result.authUrl)
         }
         return result.authUrl
       } catch (error) {
@@ -15240,7 +15390,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               }
               await client.request<LiveChatSnapshot>('liveChat.x.start', params)
             } catch (chatError) {
-              showXBroadcastProblem('chat', target, chatError)
+              await showXBroadcastProblem('chat', target, chatError)
             }
           }
         } catch (error) {
@@ -15265,7 +15415,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          showXBroadcastProblem('start', target, error)
+          await showXBroadcastProblem('start', target, error)
         }
       }
       return nextStreaming
@@ -15421,7 +15571,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          showXBroadcastProblem('end', target, error)
+          await showXBroadcastProblem('end', target, error)
         }
       }
       return nextStreaming
@@ -19077,7 +19227,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sceneLibrary.scenes,
     activeSavedSceneId,
     privacy.screenPrivacy.hidden,
-    cohostSettings?.enabled === true
+    cohostSettings?.enabled === true,
+    commentsWindow
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on
@@ -19451,6 +19602,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       bannersLoaded: bannerList !== null,
       bannersOffline: wsStatus !== 'connected',
       bannerImportPhase,
+      bannerImportKind,
+      htmlOverlayStatuses,
       // A deleted banner is never the selected one.
       selectedBannerId: banners.some((banner) => banner.id === selectedBannerId)
         ? selectedBannerId
@@ -19465,10 +19618,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       toggleBanner
     }
   }, [
+    bannerImportKind,
     bannerImportPhase,
     bannerList,
     deleteBanner,
     hideBanner,
+    htmlOverlayStatuses,
     importBanner,
     reorderBanners,
     selectedBannerId,
@@ -19800,6 +19955,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
+      sceneSwitchProgress,
       sourceDeviceSwitchPending,
       sourceSelectionState,
       sourceSwitchReason,
@@ -20049,6 +20205,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
+      sceneSwitchProgress,
       sourceDeviceSwitchPending,
       sourceSelectionState,
       sourceSwitchReason,

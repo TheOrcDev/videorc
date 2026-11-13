@@ -2934,6 +2934,9 @@ fn prepare_legacy_banner_layers(
     let orientation = crate::overlay_layout::OverlayOrientation::for_canvas(width, height);
     shown
         .iter()
+        // Plan 232 D9: an HTML overlay's stored image is a still of a page
+        // that moves; this frame never carries it.
+        .filter(|(banner, _, _)| banner.kind == crate::protocol::BannerKind::Image)
         .filter_map(|(banner, path, _)| {
             let image = match crate::banner_prepare::decode_banner_file(path) {
                 Ok(image) => image,
@@ -3382,6 +3385,21 @@ fn session_accepts_banners(
 pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
     let recording = state.recording.lock().await;
     recording.as_ref().map(ActiveRecording::accepts_banners)
+}
+
+/// Plan 232 D9: `Some(accepts)` for the recording or livestream that runs,
+/// `None` when nothing runs or only the replay-only Clips ring does (the
+/// user is idle then, and the Preview is what they watch). An HTML overlay
+/// is drawn by the compositor from frames that arrive live, so only a
+/// session the compositor composes carries one: the same sessions that take
+/// a live scene edit. The legacy FFmpeg graph and the direct D3D11 recording
+/// cannot.
+pub async fn active_session_accepts_html_overlays(state: &AppState) -> Option<bool> {
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()
+        .filter(|active| !active.replay_only)
+        .map(ActiveRecording::accepts_live_scene_edits)
 }
 
 /// Plan 215 D1: whether a session takes a scene edit (a source's position,
@@ -5176,6 +5194,13 @@ async fn start_session_with_timeline(
         None
     };
     let session_caption_plan = caption_leg_plan(&params);
+    tracing::info!(
+        session = %session_id,
+        caption_primary = session_caption_plan.primary,
+        caption_aux = session_caption_plan.aux,
+        caption_split = session_caption_plan.force_same_profile_split,
+        "caption leg plan (capacity reserved independently of transcription consent)"
+    );
     // Plan 164: the highlight card and the Buddy follow the streamer's
     // per-output switches in the backend-owned overlay layout; captions keep
     // `burnTarget` (derived from the same switches by the renderer).
@@ -5201,7 +5226,11 @@ async fn start_session_with_timeline(
     // split-leg plan, an auxiliary render. Outside those shapes the captions
     // stay UI-only — say so instead of silently skipping pixels.
     {
-        let burn_requested = session_caption_plan.primary || session_caption_plan.aux;
+        // Only a bar the streamer's own setting puts on the stream is worth a
+        // warning. A leg pre-armed for a possible mid-stream opt-in (captions
+        // Off or skipped at start) draws nothing unless they turn it on.
+        let burn_requested = (session_caption_plan.primary || session_caption_plan.aux)
+            && caption_burn_wanted_at_start(&params);
         let split_needed_but_missing = session_caption_plan.force_same_profile_split
             && params.output.record_enabled
             && params.output.stream_enabled
@@ -26077,18 +26106,41 @@ fn resolve_split_output_profiles(params: &StartSessionParams) -> Result<SplitOut
     Ok(SplitOutputProfiles { recording, stream })
 }
 
+/// The streamer's own saved setting burns captions into the stream for this
+/// session (not skipped with "Go live without captions"). A pre-armed leg
+/// (`caption_burn_target`) alone does not count.
+fn caption_burn_wanted_at_start(params: &StartSessionParams) -> bool {
+    params.captions.as_ref().is_some_and(|captions| {
+        !captions.suppressed_for_session && captions.effective_burn_target().burns_stream()
+    })
+}
+
 fn caption_burn_target(params: &StartSessionParams) -> crate::captions::CaptionBurnTarget {
-    let Some(captions) = params
-        .captions
-        .as_ref()
-        .filter(|captions| !captions.suppressed_for_session)
-    else {
-        return crate::captions::CaptionBurnTarget::Off;
+    use crate::captions::CaptionBurnTarget;
+    let Some(captions) = params.captions.as_ref() else {
+        return CaptionBurnTarget::Off;
     };
     let target = captions.effective_burn_target();
-    let needs_live_stream_leg = target.burns_stream() && params.output.stream_enabled;
-    if !captions.enabled && needs_live_stream_leg && !caption_live_burn_output_eligible(params) {
-        return crate::captions::CaptionBurnTarget::Off;
+    // Transcription consent is independent of output capacity. A skipped or
+    // hidden bar can be enabled mid-stream, but an encoder leg cannot be
+    // allocated then. Reserve the eligible viewer leg without sending audio
+    // or drawing any pixels until the streamer opts in.
+    let prearm =
+        !captions.enabled || captions.suppressed_for_session || target == CaptionBurnTarget::Off;
+    if prearm && params.output.stream_enabled && caption_live_burn_output_eligible(params) {
+        return if target.requests_captioned_copy() {
+            CaptionBurnTarget::Both
+        } else {
+            CaptionBurnTarget::Stream
+        };
+    }
+    if captions.suppressed_for_session
+        || (!captions.enabled
+            && target.burns_stream()
+            && params.output.stream_enabled
+            && !caption_live_burn_output_eligible(params))
+    {
+        return CaptionBurnTarget::Off;
     }
     target
 }
@@ -32202,6 +32254,7 @@ mod tests {
             .save(&takeover_path)
             .unwrap();
         let banner = crate::protocol::Banner {
+            kind: crate::protocol::BannerKind::Image,
             id: "b1".to_string(),
             name: "b1".to_string(),
             image_file: "banner.png".to_string(),
@@ -52296,6 +52349,79 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
         );
         validate_outputs(&params)
             .expect("session suppression must not trigger the live-burn 30fps preflight");
+    }
+
+    #[test]
+    fn captions_mid_stream_prearms_even_when_initially_skipped_or_hidden() {
+        for record in [false, true] {
+            for suppressed in [false, true] {
+                for target in [
+                    crate::captions::CaptionBurnTarget::Off,
+                    crate::captions::CaptionBurnTarget::Stream,
+                ] {
+                    let mut params = base_params(record, true);
+                    params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+                    params.captions = Some(crate::protocol::CaptionsSessionParams {
+                        enabled: false,
+                        suppressed_for_session: suppressed,
+                        burn_target: target,
+                        ..Default::default()
+                    });
+                    let plan = caption_leg_plan(&params);
+                    assert_eq!(
+                        (plan.primary, plan.aux),
+                        (!record, record),
+                        "record={record}, suppressed={suppressed}, target={target:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn burn_in_warning_follows_the_saved_setting_not_the_prearmed_leg() {
+        use crate::captions::CaptionBurnTarget;
+        let captions = |enabled, suppressed, target| {
+            let mut params = base_params(false, true);
+            params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+            params.captions = Some(crate::protocol::CaptionsSessionParams {
+                enabled,
+                suppressed_for_session: suppressed,
+                burn_target: target,
+                ..Default::default()
+            });
+            params
+        };
+        // Pre-armed for a mid-stream opt-in, yet nobody asked for a bar.
+        let off = captions(false, false, CaptionBurnTarget::Off);
+        assert!(caption_leg_plan(&off).primary);
+        assert!(!caption_burn_wanted_at_start(&off));
+        assert!(!caption_burn_wanted_at_start(&captions(
+            true,
+            true,
+            CaptionBurnTarget::Stream
+        )));
+        assert!(!caption_burn_wanted_at_start(&captions(
+            true,
+            false,
+            CaptionBurnTarget::Recording
+        )));
+        // The saved setting burns the stream: the warning applies, on or off.
+        for enabled in [false, true] {
+            assert!(caption_burn_wanted_at_start(&captions(
+                enabled,
+                false,
+                CaptionBurnTarget::Stream
+            )));
+        }
+        assert!(caption_burn_wanted_at_start(&captions(
+            true,
+            false,
+            CaptionBurnTarget::Both
+        )));
+        let mut no_captions = base_params(false, true);
+        no_captions.captions = None;
+        assert!(!caption_burn_wanted_at_start(&no_captions));
     }
 
     #[test]

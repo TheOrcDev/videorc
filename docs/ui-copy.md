@@ -48,7 +48,13 @@ app. Two checks hold them (see [Guards](#guards)).
   window: "Delete", "Open Output", "Open Stream Manager", "Open Livestream".
   "Set level for me" changes Gain at once, so it has no ellipsis either.
 - On every pending label: "Saving…", "Importing…", "Exporting…",
-  "Switching…", "Opening preview…".
+  "Applying…", "Opening preview…".
+- A pending label never replaces the name of what was clicked. A scene or
+  layout being applied keeps its name with a spinner and "Applying…"
+  (issue #1275); a switch still running after a moment adds one status line
+  under the list naming what it waits for ("Side by side · Waiting for the
+  camera's first frame…"), and a click that takes a switch over says so
+  ("Replaces the switch to Screen + camera.").
 - Search placeholders say what they search: "Search recordings…".
 
 ## Going live (D3)
@@ -61,6 +67,7 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
 | --------------------- | ------------------------------------------------------------------------------- |
 | Studio buttons        | "Record" (with ␣) and "Go Live…"                                                |
 | Go Live dialog        | title "Go live"; primary "Go live" or "Go live on 3 destinations"               |
+| Not public on YouTube | "Go live unlisted?" with "Go live unlisted" and "Change privacy" (or Private)   |
 | Stopping while on air | "End livestream", with "Your recording stops too."                              |
 | The state             | "On air"                                                                        |
 | ⌘K                    | "Start recording", "Go live…"; while running "Stop recording", "End livestream" |

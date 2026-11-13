@@ -49,6 +49,38 @@ A banner is your own image placed anywhere on the picture: a sponsor strip,
   Buddy and the highlight card. Everything can be changed while recording or
   live except deleting a banner that is showing.
 
+### HTML banners
+
+An HTML banner is a banner whose picture is a web page with a transparent
+background, so it can move: an animated badge, a ticker, a lower third (plan
+232). On macOS for now.
+
+- **Import** in Assets → Banners: "Import HTML…" takes an `.html` file, or
+  a folder with `index.html` beside its images, fonts, styles and scripts.
+  Videorc keeps its own copy (up to 64 MB, 512 files, 8 folders deep, no
+  links to files outside the folder). A single `.html` file is copied
+  alone, so a page that needs other files is imported as its folder.
+- **The page's size** is 1920 × 1080 unless the page says otherwise with
+  `<meta name="videorc-overlay-size" content="640x360">`. The banner keeps
+  that shape wherever you put it, and the page is drawn at exactly the size
+  it has on your picture (up to a 1080p frame), so text stays sharp.
+- **Everything a banner does, it does**: Show and Hide from every surface,
+  a place per orientation, opacity, **Appears in**, the fade, Timing, the
+  order. It counts among the four banners that show at once.
+- **The network is off.** The page loads only the files in its own folder:
+  a font or a script it expects from the internet does not arrive, and the
+  Scene inspector says how many requests were blocked. Put those files in
+  the folder.
+- **What it cannot do**: use the camera, the microphone, the screen or any
+  other permission; open a window or a link; download; reach the app or
+  another banner's files. Its sound is muted.
+- **Where it does not draw yet**: on Windows and Linux (Import HTML… is
+  off there and says so), and in a recording Videorc makes without its own
+  compositor, such as 4K60: Show is refused there with "HTML banners can't
+  join this recording. Hide it, or record at 30 fps.", and one that was
+  already showing stays out of that recording and says so in its inspector.
+- Its tile shows the page's own picture a second after it first runs.
+
 The Preview shows the program: a showing banner appears whenever a running
 output carries it, or either switch is on while nothing runs. That holds
 in every row, Clips at idle and split record + stream included, where the
@@ -126,6 +158,50 @@ hide` and the event `banners.changed`; `importImage` runs on the
 - Voice: `cohost_command.rs`, banner phrases parsed before the highlight
   grammar ([buddy-commands-contract.md](buddy-commands-contract.md)).
 
+### HTML banners (plan 232)
+
+Code and wire names say `html overlay`; copy says HTML banner.
+
+- **Store**: a `banners` row with `kind = 'html'` (the wire omits `kind`
+  for an image). `width` and `height` are the page size. The page lives in
+  `Banners/<id>.overlay/`; `<id>.png` and `<id>.thumb.png` are its own
+  picture, saved by the backend a second after its first frame. Import:
+  `html_overlay::import_html_overlay` on the AssetImport lane, from an
+  `input-file` or `input-directory` capability.
+- **Rendering**: Electron main, `main/html-overlay-host.ts`: one offscreen
+  window per showing banner, in its own in-memory session. Every rule is a
+  pure function in `main/html-overlay-policy.ts`: sandbox, context
+  isolation, no Node, **no preload**; requests only to its own
+  `videorc-overlay://<id>/` scheme (handled only in that session), `data:`
+  and `blob:`; no navigation away, no windows, no downloads, every
+  permission refused; the session's only proxy is a closed port and WebRTC
+  may not use UDP. Never give that window a preload or a way to message
+  the app.
+- **Targets**: the backend decides what main renders. `htmlOverlays.targets`
+  carries, per banner, the page size, the frame size (its contained draw
+  size on the largest canvas that carries it, at most 2,073,600 px) and the
+  rate (the compositor's, at most 30). Main sizes the window as
+  `frame ÷ display scale` DIP with a zoom of `frame ÷ (scale × page)`, so
+  the page lays out at its own size and paints the frame's pixels.
+- **Frames**: `POST /html-overlays/frames?token=<admin>`, one long-lived
+  chunked upload of records (a 40-byte header pinned by
+  `protocol-fixtures/html-overlay-frame.json`, then premultiplied BGRA).
+  Latest wins on both sides: main drops a frame while the socket still
+  holds the last one, and the backend keeps one frame per banner. The
+  backend converts to straight alpha on the upload task
+  (`html_overlay::append_straight_alpha`), never on the render thread.
+- **Drawing**: `banner_draws_for_leg` returns the latest frame for an HTML
+  banner, so it rides the banner layer on the primary leg, the auxiliary
+  leg and the Preview's program leg under the same leg plan. On Metal the
+  keyed slot reuses its texture and uploads once per new frame. The CPU
+  path blits 1:1 and scales a frame made for another canvas nearest
+  neighbour. The legacy FFmpeg frame, the Windows D3D11 session and the
+  Electron proof surface never draw one.
+- **Status**: main reports `loading`, `live` or `failed` for each page
+  (`htmlOverlays.host.report`, admin role only); the backend publishes
+  `htmlOverlays.status` (also `unavailable`, for a session that cannot
+  draw one). `htmlOverlays.stats` counts frames, bytes and conversion time.
+
 ### Tests and smokes
 
 - `cargo test -p videorc-backend banner` (store, import, geometry, leg
@@ -136,3 +212,9 @@ hide` and the event `banners.changed`; `importImage` runs on the
 - `pnpm smoke:banners` drives the dev app through recordings and a local
   stream with banners shown, moved and hidden, and checks the pixels in the
   artifacts; it is part of `pnpm smoke:recording-studio`.
+- HTML banners: `cargo test -p videorc-backend html_overlay`,
+  `main/html-overlay-policy.test.ts`, `main/html-overlay-frames.test.ts`,
+  and `pnpm smoke:html-overlay` (the fixture in
+  `scripts/fixtures/html-overlay/animated-badge/`, recorded, streamed and
+  both at once, read back from every artifact); also part of
+  `pnpm smoke:recording-studio`.

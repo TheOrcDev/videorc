@@ -39,7 +39,9 @@ const BANNER_DECODE_MAX_ALLOC: u64 = 192 * 1024 * 1024;
 
 static NEXT_BITMAP_REVISION: AtomicU64 = AtomicU64::new(1);
 
-fn next_bitmap_revision() -> u64 {
+/// A fresh content key for a bitmap: prepared banners here, and each HTML
+/// overlay frame (plan 232).
+pub(crate) fn next_bitmap_revision() -> u64 {
     NEXT_BITMAP_REVISION.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -622,6 +624,7 @@ mod tests {
 
     fn banner(width: u32, height: u32, horizontal: OverlayRect, vertical: OverlayRect) -> Banner {
         Banner {
+            kind: crate::protocol::BannerKind::Image,
             id: format!("b-{width}x{height}-{}", horizontal.w),
             name: "b".to_string(),
             image_file: "b.png".to_string(),

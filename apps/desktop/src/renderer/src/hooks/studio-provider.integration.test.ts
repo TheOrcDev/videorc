@@ -3632,6 +3632,116 @@ describe('real StudioProvider lifecycle', () => {
     expect(highlightSets()[2]!.params).toMatchObject({ anchor: 'bottom-left' })
   })
 
+  it('publishes where the Stream Manager is and its screens to the remotes (plan 230)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    // The remote surface publishes once the backend says it is ready.
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({ data: JSON.stringify({ event: 'backend.ready', payload: null }) })
+      }
+      await Promise.resolve()
+    })
+    type Published = {
+      state?: {
+        windows?: { comments?: boolean }
+        streamManager?: { screenId: string | null; visible: boolean; hiddenFromStream: boolean }
+      }
+      describe?: { screens?: unknown; screenMoves?: unknown }
+    }
+    const published = (): Published[] =>
+      backend.sentCommands
+        .filter((command) => command.method === 'remote.surface.publish')
+        .map((command) => command.params as Published)
+    const windowState = (overrides: Record<string, unknown>): Record<string, unknown> => ({
+      open: true,
+      visible: true,
+      bounds: { x: 1920, y: 0, width: 600, height: 800 },
+      windowId: 7,
+      alwaysOnTop: false,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'capture-filter',
+      screenId: '2',
+      screens: [
+        { id: '1', name: 'DELL U2723QE' },
+        { id: '2', name: 'DELL U2311H' }
+      ],
+      screenMoves: 'supported',
+      highlightAnchor: 'bottom-left',
+      protected: false,
+      enabled: true,
+      ...overrides
+    })
+
+    // Main says the window sits on the Monitor screen: remotes read it.
+    await act(async () => emitIpc?.('onCommentsWindowState', windowState({})))
+    await waitForObservation(() =>
+      published().some((p) => p.state?.streamManager?.screenId === '2')
+    )
+    expect(published().at(-1)).toMatchObject({
+      state: {
+        windows: { comments: true },
+        streamManager: { screenId: '2', visible: true, hiddenFromStream: false }
+      },
+      describe: {
+        screens: [
+          { id: '1', name: 'DELL U2723QE' },
+          { id: '2', name: 'DELL U2311H' }
+        ],
+        screenMoves: 'supported'
+      }
+    })
+    // Never its frame or the window's id.
+    expect(JSON.stringify(published().at(-1))).not.toContain('1920')
+    expect(JSON.stringify(published().at(-1))).not.toContain('windowId')
+
+    // On the Presenting screen with Hide from stream on: the key reads Hidden.
+    await act(async () =>
+      emitIpc?.('onCommentsWindowState', windowState({ screenId: '1', hiddenFromStream: true }))
+    )
+    await waitForObservation(
+      () => published().at(-1)?.state?.streamManager?.hiddenFromStream === true
+    )
+    expect(published().at(-1)?.state?.streamManager).toEqual({
+      screenId: '1',
+      visible: true,
+      hiddenFromStream: true
+    })
+
+    // A Wayland session: the key says a tap cannot move the window.
+    await act(async () =>
+      emitIpc?.('onCommentsWindowState', windowState({ screenMoves: 'wayland' }))
+    )
+    await waitForObservation(() => published().at(-1)?.describe?.screenMoves === 'wayland')
+
+    // Minimized: on its screen but not shown.
+    await act(async () =>
+      emitIpc?.('onCommentsWindowState', windowState({ visible: false, screenMoves: 'wayland' }))
+    )
+    await waitForObservation(() => published().at(-1)?.state?.streamManager?.visible === false)
+    expect(published().at(-1)?.state?.streamManager?.screenId).toBe('2')
+  })
+
   it('sends a second card for the vertical leg only when the backend reports one', async () => {
     const backend = new StudioBackend()
     backend.liveChatSnapshot = {
@@ -7410,12 +7520,24 @@ describe('real StudioProvider lifecycle', () => {
       stale = latest().applySavedScene(first.id)
     })
     await waitForObservation(() => latest().savedScenePendingId === first.id)
+    // Issue #1275: the pending switch keeps the scene's name and says what it waits for.
+    await waitForObservation(() => latest().sceneSwitchProgress?.phase === 'starting')
+    expect(latest().sceneSwitchProgress).toMatchObject({ target: 'A', replaced: null })
     expect(latest().canSaveScene).toBe(false)
     await act(async () => {
       expect(latest().saveScene('Uncommitted')).toBe(false)
     })
+    // B takes the pending switch to A over, and says so while it runs.
+    const releaseSecond = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
+    let switchToSecond: Promise<boolean> | undefined
     await act(async () => {
-      expect(await latest().applySavedScene(second.id)).toBe(true)
+      switchToSecond = latest().applySavedScene(second.id)
+    })
+    await waitForObservation(() => latest().sceneSwitchProgress?.target === 'B')
+    expect(latest().sceneSwitchProgress?.replaced).toBe('A')
+    await act(async () => {
+      releaseSecond()
+      expect(await switchToSecond).toBe(true)
     })
     await waitForObservation(() => latest().canSaveScene)
     await act(async () => {
@@ -7429,6 +7551,7 @@ describe('real StudioProvider lifecycle', () => {
       await stale
     })
     expect(latest().activeSavedSceneId).toBe(first.id)
+    expect(latest().sceneSwitchProgress).toBeNull()
     expect(latest().captureConfig.layout.cameraZoom).toBe(first.visual.layout.cameraZoom)
     expect(latest().savedScenes).toHaveLength(2)
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
@@ -8633,8 +8756,11 @@ describe('real StudioProvider lifecycle', () => {
     expect(shared).toEqual({
       streamProfile: streamVideo,
       recordingProfile: streamVideo,
-      outputRoles: ['shared']
+      outputRoles: ['recording', 'stream']
     })
+    expect(
+      buildStreamOutputTopologyProbeParams(sharedConfig, sharedConfig.streaming, true).outputRoles
+    ).toEqual(['recording', 'stream'])
 
     const captionSplit = buildStreamOutputTopologyProbeParams({
       ...sharedConfig,
@@ -13929,10 +14055,26 @@ describe('real StudioProvider lifecycle', () => {
       await waitForObservation(() => latest()?.recording.recording.state === 'idle')
     }
 
+    // YouTube goes out Unlisted (the saved draft): an agent is refused unless
+    // the call accepts it, as the dialog asks the streamer once more
+    // (owner report, 2026-11-12). Nothing is prepared or started.
+    await pushIntent('go-0', { destinations: ['youtube'], title: 'Building an MCP live' })
+    await waitForObservation(() => ack('go-0') !== undefined)
+    expect(ack('go-0')).toMatchObject({ ok: false })
+    expect(ack('go-0')?.message).toContain(
+      'YouTube is Unlisted. Only people with the link can watch.'
+    )
+    expect(ack('go-0')?.message).toContain('allowNonPublic')
+    expect(starts()).toHaveLength(0)
+
     // Naming YouTube leaves X out of this livestream only, like the dialog's
     // "Go live without X": X is never prepared and stays on. The title is
     // the dialog's Title field, saved before the check.
-    await pushIntent('go-1', { destinations: ['youtube'], title: 'Building an MCP live' })
+    await pushIntent('go-1', {
+      destinations: ['youtube'],
+      title: 'Building an MCP live',
+      allowNonPublic: true
+    })
     await waitForObservation(() => ack('go-1') !== undefined)
     expect(ack('go-1')).toMatchObject({
       ok: true,
@@ -13963,7 +14105,7 @@ describe('real StudioProvider lifecycle', () => {
     // X fails its platform setup: without allowPartial the agent is told the
     // dialog's words and nothing starts...
     backend.xPrepareFailuresRemaining = 1
-    await pushIntent('go-3', {})
+    await pushIntent('go-3', { allowNonPublic: true })
     await waitForObservation(() => ack('go-3') !== undefined)
     expect(ack('go-3')).toMatchObject({ ok: false })
     expect(ack('go-3')?.message).toContain("Some destinations couldn't be set up")
@@ -13978,7 +14120,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.core.startBlockedReason === null)
     backend.xPrepareFailuresRemaining = 1
-    await pushIntent('go-4', { allowPartial: true })
+    await pushIntent('go-4', { allowPartial: true, allowNonPublic: true })
     await waitForObservation(() => ack('go-4') !== undefined)
     expect(ack('go-4')).toMatchObject({
       ok: true,

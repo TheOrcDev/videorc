@@ -104,7 +104,14 @@ import type {
   SoundStopParams,
   SoundUpdateParams,
   BannerIdParams,
+  BannerImportHtmlParams,
   BannerImportImageParams,
+  HtmlOverlayHostReportParams,
+  HtmlOverlayStats,
+  HtmlOverlayStatus,
+  HtmlOverlayStatuses,
+  HtmlOverlayTarget,
+  HtmlOverlayTargets,
   BannerReorderParams,
   BannerUpdateParams,
   BuddyOverlaySnapshot,
@@ -253,6 +260,8 @@ import {
   BANNER_MAX_COUNT,
   BANNER_OPACITY_MAX,
   BANNER_OPACITY_MIN,
+  HTML_OVERLAY_MAX_FPS,
+  HTML_OVERLAY_MAX_TARGETS,
   LAYOUT_PRESET_VALUES,
   SOUND_HOTKEYS,
   SOUND_LEVEL_DB_MAX,
@@ -646,6 +655,15 @@ export interface BackendRpcMethodMap {
   /** No `id` hides every banner. */
   'banners.hide': BackendRpcDefinition<BannerHideParams, Banner[]>
   // --- end banners (plan 186) ---
+  // --- HTML overlays (plan 232): a banner whose picture is a web page ---
+  'banners.importHtml': BackendRpcDefinition<BannerImportHtmlParams, Banner>
+  /** What main renders now. Main reads it once on connect, then follows the event. */
+  'htmlOverlays.targets.get': BackendRpcDefinition<undefined, HtmlOverlayTargets>
+  'htmlOverlays.status.get': BackendRpcDefinition<undefined, HtmlOverlayStatuses>
+  'htmlOverlays.stats': BackendRpcDefinition<undefined, HtmlOverlayStats>
+  /** Main only (the admin role): how a page it hosts stands. */
+  'htmlOverlays.host.report': BackendRpcDefinition<HtmlOverlayHostReportParams, HtmlOverlayStatuses>
+  // --- end HTML overlays (plan 232) ---
   // --- Soundboard (plan 189) ---
   // --- Hide screen (plan 210 S7) ---
   'screen.hide': BackendRpcDefinition<ScreenHideParams, ScreenPrivacy>
@@ -793,6 +811,7 @@ export interface BackendRpcMethodMap {
     { sessionId: string },
     ModerationOperation[]
   >
+  'captions.status.get': BackendRpcDefinition<undefined, import('./backend').CaptionsStatus>
   'session.marker.voice.configure': BackendRpcDefinition<
     { sessionId: string; consent: boolean },
     import('./backend').CohostListening
@@ -859,6 +878,9 @@ export interface BackendEventMap {
   // --- end overlay layout (plan 164) ---
   // --- Banners (plan 186): the full list, to every window ---
   'banners.changed': Banner[]
+  // --- HTML overlays (plan 232): what main renders, and where each stands ---
+  'htmlOverlays.targets': HtmlOverlayTargets
+  'htmlOverlays.status': HtmlOverlayStatuses
   // --- Soundboard (plan 189): the whole state and the playing voices, to every window ---
   'sounds.changed': SoundboardState
   // --- Chat commands (plan 226): the whole state, and replies that couldn't go out ---
@@ -885,6 +907,7 @@ export interface BackendEventMap {
   'cohost.pet.sheet.generated': BuddyPetSheetGeneratedEvent
   'cohost.pet.build.progress': BuddyPetBuildProgressEvent
   // --- end Buddy pets (plan 168, Phase F) ---
+  'captions.status': import('./backend').CaptionsStatus
   'session.marker.voice.status': {
     sessionId: string
     listening: import('./backend').CohostListening
@@ -2259,6 +2282,7 @@ const windowsD3d11PresenterDiagnosticsSchema = objectSchema(
     firstPresentSucceeded: booleanSchema,
     successfulPresents: nonNegativeInteger,
     lastPresentedSequence: optionalSchema(nonNegativeInteger),
+    presentedSceneRevision: optionalSchema(nonNegativeInteger),
     latestWinsDrops: nonNegativeInteger,
     hiddenDrops: nonNegativeInteger,
     busyDrops: nonNegativeInteger,
@@ -3875,6 +3899,8 @@ const bannerSchema = objectSchema(
   {
     id: bannerIdSchema,
     name: bannerNameSchema,
+    // Plan 232: only an HTML overlay carries a kind; an image omits it.
+    kind: optionalSchema(literalSchema('html')),
     imageFile: bannerFileNameSchema,
     thumbnailFile: bannerFileNameSchema,
     width: bannerPixelSizeSchema,
@@ -3929,6 +3955,66 @@ const bannerHideParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<BannerHideParams>
 // --- end banners (plan 186) ---
+
+// --- HTML overlays (plan 232) ---
+// Exact, like banners: optional fields are omitted when absent, never `null`.
+const bannerImportHtmlParamsSchema = objectSchema(
+  { sourceCapability: stringSchema({ minLength: 1, maxLength: 1024 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<BannerImportHtmlParams>
+const htmlOverlayFrameSideSchema = numberSchema({ integer: true, min: 1, max: 3840 })
+const htmlOverlayTargetSchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    pageWidth: htmlOverlayFrameSideSchema,
+    pageHeight: htmlOverlayFrameSideSchema,
+    frameWidth: htmlOverlayFrameSideSchema,
+    frameHeight: htmlOverlayFrameSideSchema,
+    fps: numberSchema({ integer: true, min: 1, max: HTML_OVERLAY_MAX_FPS })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<HtmlOverlayTarget>
+const htmlOverlayTargetsSchema = objectSchema(
+  { targets: arraySchema(htmlOverlayTargetSchema, { maxLength: HTML_OVERLAY_MAX_TARGETS }) },
+  { allowUnknown: false }
+) as RuntimeSchema<HtmlOverlayTargets>
+const htmlOverlayCountSchema = numberSchema({ integer: true, min: 0 })
+const htmlOverlayDetailSchema = stringSchema({ minLength: 1, maxLength: 1024 })
+const htmlOverlayStatusSchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    state: enumSchema(['loading', 'live', 'failed', 'unavailable']),
+    detail: optionalSchema(htmlOverlayDetailSchema),
+    frameWidth: optionalSchema(htmlOverlayFrameSideSchema),
+    frameHeight: optionalSchema(htmlOverlayFrameSideSchema),
+    blockedRequests: optionalSchema(numberSchema({ integer: true, min: 1 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<HtmlOverlayStatus>
+const htmlOverlayStatusesSchema = objectSchema(
+  { overlays: arraySchema(htmlOverlayStatusSchema, { maxLength: BANNER_MAX_COUNT }) },
+  { allowUnknown: false }
+) as RuntimeSchema<HtmlOverlayStatuses>
+const htmlOverlayStatsSchema = objectSchema(
+  {
+    framesReceived: htmlOverlayCountSchema,
+    framesDropped: htmlOverlayCountSchema,
+    bytesReceived: htmlOverlayCountSchema,
+    convertMicros: htmlOverlayCountSchema,
+    uploadsOpened: htmlOverlayCountSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<HtmlOverlayStats>
+const htmlOverlayHostReportParamsSchema = objectSchema(
+  {
+    id: bannerIdSchema,
+    state: enumSchema(['loading', 'live', 'failed']),
+    detail: optionalSchema(htmlOverlayDetailSchema),
+    blockedRequests: optionalSchema(htmlOverlayCountSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<HtmlOverlayHostReportParams>
+// --- end HTML overlays (plan 232) ---
 
 // --- Soundboard (plan 189) ---
 // Exact: the pinned `sound` fixtures. Optional fields (`hotkey`, `starter`,
@@ -4716,6 +4802,38 @@ const clipMarkedEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMarkedEvent>
 
+// Caption outage presentation uses the existing degraded state and the shared
+// service-unavailable reason. Keep every wire field explicit: main rejects
+// unknown keys on registered events, including during an outage.
+export const captionsStatusSchema = objectSchema(
+  {
+    state: enumSchema([
+      'idle',
+      'ready',
+      'starting',
+      'listening',
+      'reconnecting',
+      'degraded',
+      'blocked',
+      'error',
+      'live'
+    ]),
+    desiredEnabled: optionalSchema(booleanSchema),
+    transport: optionalSchema(enumSchema(['realtime', 'chunked'])),
+    audioSource: optionalSchema(enumSchema(['microphone'])),
+    audioFramesSeen: optionalSchema(nonNegativeInteger),
+    droppedAudioFrames: optionalSchema(nonNegativeInteger),
+    droppedAudioSeconds: optionalSchema(numberSchema({ min: 0 })),
+    providerReady: optionalSchema(booleanSchema),
+    // Includes service-unavailable; older servers may supply other safe codes.
+    reasonCode: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    message: optionalSchema(stringSchema({ maxLength: 16_384 })),
+    remainingSeconds: optionalSchema(nonNegativeInteger),
+    sessionClientId: optionalSchema(boundedString)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<import('./backend').CaptionsStatus>
+
 // Plan 068: whether Buddy hears the streamer. Every optional field is omitted
 // by the backend when absent (never null).
 const cohostListeningSchema = objectSchema(
@@ -4754,6 +4872,7 @@ const cohostCommandSchema = objectSchema(
       'hide-banners',
       'show-buddy',
       'hide-buddy',
+      'greet',
       'act',
       'wave',
       'remember'
@@ -6723,6 +6842,16 @@ const runtimeContracts = {
   'banners.delete': { params: bannerIdParamsSchema, result: bannerListSchema },
   'banners.show': { params: bannerIdParamsSchema, result: bannerSchema },
   'banners.hide': { params: bannerHideParamsSchema, result: bannerListSchema },
+  // --- HTML overlays (plan 232) ---
+  'banners.importHtml': { params: bannerImportHtmlParamsSchema, result: bannerSchema },
+  'htmlOverlays.targets.get': { params: undefinedSchema, result: htmlOverlayTargetsSchema },
+  'htmlOverlays.status.get': { params: undefinedSchema, result: htmlOverlayStatusesSchema },
+  'htmlOverlays.stats': { params: undefinedSchema, result: htmlOverlayStatsSchema },
+  'htmlOverlays.host.report': {
+    params: htmlOverlayHostReportParamsSchema,
+    result: htmlOverlayStatusesSchema
+  },
+  // --- end HTML overlays (plan 232) ---
   // --- end banners (plan 186) ---
   // --- Soundboard (plan 189) ---
   // --- Hide screen (plan 210 S7) ---
@@ -6866,6 +6995,7 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(moderationOperationSchema, { maxLength: 200 })
   },
+  'captions.status.get': { params: undefinedSchema, result: captionsStatusSchema },
   'session.marker.voice.configure': {
     params: objectSchema(
       { sessionId: boundedString, consent: booleanSchema },
@@ -7017,6 +7147,8 @@ const runtimeEventSchemas = {
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
   'banners.changed': bannerListSchema,
+  'htmlOverlays.targets': htmlOverlayTargetsSchema,
+  'htmlOverlays.status': htmlOverlayStatusesSchema,
   'sounds.changed': soundboardStateSchema,
   'chatCommands.changed': chatCommandsStateSchema,
   'chatCommands.replyFailed': chatCommandReplyFailedSchema,
@@ -7042,6 +7174,7 @@ const runtimeEventSchemas = {
   'cohost.pet.sheet.generated': buddyPetSheetGeneratedEventSchema,
   'cohost.pet.build.progress': buddyPetBuildProgressEventSchema,
   // --- end Buddy pets (plan 168, Phase F) ---
+  'captions.status': captionsStatusSchema,
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },
     { allowUnknown: false }

@@ -14,12 +14,11 @@ seconds"). Code keeps the older names (`replay.*` RPCs, `replay_buffer.rs`,
 - **Nothing in the Studio.** The ring is not a session the streamer starts;
   it runs by default whenever Videorc is open (R2). Record and Go Live…
   stand alone under the status pill.
-- **Status bar**: "Clip · 1:00" with a neutral dot while the ring holds
-  frames (how much it holds right now, up to the minute), "Clips starting…"
-  while it fills.
-  This is the one place that shows the ring is on. A buffer-only session
-  never reads "Recording" or "On air": the session words stay at Ready, and
-  Record and Go Live stay available.
+- **Status bar**: nothing. The "Clip · 1:00" chip was removed (2026-11-13,
+  the owner: a timer counting up while nothing records read as a recording).
+  A buffer-only session never reads "Recording" or "On air": the session
+  words stay at Ready, and Record and Go Live stay available. The ring's
+  state lives on Output → Clips.
 - **Output → Clips**: the settings and the one switch. **Keep the last
   seconds** (on by default; off, a clip can only be marked while recording),
   the disk use at the current recording quality (the ring always keeps the

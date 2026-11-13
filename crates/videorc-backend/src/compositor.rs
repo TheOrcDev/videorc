@@ -1122,7 +1122,8 @@ impl CompositorRuntime {
         let canvases = self.banner_canvases();
         let mut requests = Vec::new();
         for layer in &self.banners.layers {
-            if layer.fade.hides() {
+            // An HTML overlay (plan 232) has no bitmap to prepare.
+            if layer.fade.hides() || layer.banner.kind == crate::protocol::BannerKind::Html {
                 continue;
             }
             let Some(file_revision) = layer.file_revision else {
@@ -1249,7 +1250,8 @@ pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
     // Stat the files before taking the lock.
     let shown = banners_with_files(shown, &state.database.banner_assets_dir());
     for (banner, path, revision) in &shown {
-        if revision.is_none() {
+        // An HTML overlay (plan 232) draws its page's frames, not this file.
+        if revision.is_none() && banner.kind == crate::protocol::BannerKind::Image {
             // Said, not hidden: the banner stays in the set but draws nothing.
             tracing::warn!(
                 banner = %banner.id,
@@ -1271,6 +1273,23 @@ pub async fn install_banner_set(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Plan 232: what the HTML overlay targets follow: every HTML banner in the
+/// set (and whether it is fading out), the run's canvases and its rate.
+pub async fn html_overlay_view(state: &AppState) -> crate::html_overlay::HtmlOverlayView {
+    let compositor = state.compositor.lock().await;
+    crate::html_overlay::HtmlOverlayView {
+        layers: compositor
+            .banners
+            .layers
+            .iter()
+            .filter(|layer| layer.banner.kind == crate::protocol::BannerKind::Html)
+            .map(|layer| (layer.banner.clone(), layer.fade.hides()))
+            .collect(),
+        canvases: compositor.banner_canvases(),
+        fps: compositor.status.target_fps,
+    }
+}
+
 /// The session shape banner leg plans follow from now on (`Some` from a
 /// session's compositor start, `None` back on the idle preview). The stop
 /// and lease-release paths clear it themselves; this is for the session
@@ -1284,6 +1303,8 @@ pub async fn set_banner_session_shape(state: &AppState, shape: Option<OverlaySes
     for request in requests {
         state.banner_prepare.request(request);
     }
+    // Plan 232: a session start or stop changes which overlays main renders.
+    state.html_overlays.wake();
 }
 
 /// The canvases a Show is budgeted against (`banners.show`): the live run's
@@ -5876,6 +5897,12 @@ pub(crate) struct CompositorSourceEdit {
     auxiliary: Option<CompositorSceneSnapshot>,
 }
 impl CompositorSourceEdit {
+    /// The committed scene revision this edit composes.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn revision(&self) -> u64 {
+        self.primary.revision
+    }
+
     #[cfg(all(target_os = "windows", test))]
     pub(crate) fn test_from_scenes(
         primary: Scene,
@@ -6088,6 +6115,26 @@ impl CompositorRuntime {
     ) -> NativeSourceOutputLease {
         self.native_source_output_authority
             .claim(session_id, generation)
+    }
+
+    /// The Windows D3D11 media session draws the program while this
+    /// compositor is stopped, so no CPU frame evidence ever reports a drawn
+    /// scene. The session reports the scene revision of the frame it just
+    /// published to every leg, and the Studio's scene-change proof
+    /// (`frameSceneRevision`) sees a switch reach the recording and Clips.
+    /// A running CPU compositor reports its own frames instead. Returns
+    /// whether the status changed, for one `compositor.status` event.
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn record_windows_media_frame_scene(&mut self, edit: &CompositorSourceEdit) -> bool {
+        if self.run_id.is_some() || !self.source_edit_is_current(edit) {
+            return false;
+        }
+        let drawn = Some(edit.primary.revision);
+        if self.status.frame_scene_revision == drawn {
+            return false;
+        }
+        self.status.frame_scene_revision = drawn;
+        true
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -10296,10 +10343,13 @@ async fn publish_compositor_frame(
     #[cfg(not(test))]
     let live_at = published_at;
     if let Some(input) = render_cache.live_background.as_mut() {
+        // The guard takes no reading while a takeover screen stands in for
+        // the scene (the compose below draws it in place of the sources).
         input.tick = crate::live_background::LiveBackgroundTick {
             at: live_at,
             ..live.tick
-        };
+        }
+        .under_takeover(active_image_source.is_some());
     }
     let captured_at = compositor_frame_content_captured_at(
         primary_camera_frame,
@@ -10412,7 +10462,7 @@ async fn publish_compositor_frame(
         (width, height),
         published_at,
         banner_draft_of(editor_draft),
-        &state.banner_prepare,
+        BannerPixels::of(state),
     );
     let mut bytes;
     let mut retain_previous_native_frame = false;
@@ -10653,7 +10703,7 @@ async fn publish_compositor_frame(
             (stream_output.width.max(1), stream_output.height.max(1)),
             published_at,
             None,
-            &state.banner_prepare,
+            BannerPixels::of(state),
         );
         // Plan 193 (D1): the stream leg draws the live frame the primary leg
         // rendered at `live_at`, never one of its own; the vertical simulcast
@@ -10951,7 +11001,7 @@ async fn publish_compositor_frame(
             (width, height),
             published_at,
             banner_draft_of(editor_draft),
-            &state.banner_prepare,
+            BannerPixels::of(state),
         );
         // Plan 193: the live frame the primary leg rendered at `live_at`,
         // complete by now (its command buffer was waited for).
@@ -11291,6 +11341,10 @@ pub(crate) struct BannerDraw {
     pub image: (u32, u32),
     pub rect: OverlayRect,
     pub opacity: f32,
+    /// Plan 232: the bitmap is a live HTML overlay frame, rasterised for the
+    /// largest canvas that carries it. A leg that draws it at another size
+    /// scales it: the Metal sampler always does, the CPU path only for these.
+    pub scales_to_rect: bool,
 }
 
 impl BannerDraw {
@@ -11333,13 +11387,35 @@ pub(crate) fn banner_draws_for_leg(
     canvas: (u32, u32),
     now: Instant,
     draft: Option<(&str, OverlayRect)>,
-    prepare: &BannerPrepareService,
+    pixels: BannerPixels<'_>,
 ) -> Vec<BannerDraw> {
+    let BannerPixels {
+        prepare,
+        html_overlays,
+    } = pixels;
     let orientation = OverlayOrientation::for_canvas(canvas.0, canvas.1);
     let mut draws = Vec::new();
     for layer in &set.layers {
         let fade = layer.fade.value_at(now);
         if fade <= 0.0 || !banner_leg_carries(shape, leg, &layer.banner) {
+            continue;
+        }
+        if layer.banner.kind == crate::protocol::BannerKind::Html {
+            // Plan 232: the page's latest frame, already straight alpha. No
+            // frame yet (the page is loading, or this platform or session
+            // cannot draw one) draws nothing. The frame carries no opacity,
+            // so the banner's rides the layer with the fade.
+            let Some(bitmap) = html_overlays.latest_frame(&layer.banner.id) else {
+                continue;
+            };
+            draws.push(BannerDraw {
+                bitmap,
+                slot: layer.metal_slot(),
+                image: (layer.banner.width, layer.banner.height),
+                rect: banner_rect_for(&layer.banner, orientation, draft),
+                opacity: fade * layer.banner.opacity as f32,
+                scales_to_rect: true,
+            });
             continue;
         }
         let Some(file_revision) = layer.file_revision else {
@@ -11368,9 +11444,39 @@ pub(crate) fn banner_draws_for_leg(
             image: (layer.banner.width, layer.banner.height),
             rect,
             opacity: fade,
+            scales_to_rect: false,
         });
     }
     draws
+}
+
+/// Where a leg's banner pixels come from: prepared bitmaps for images, the
+/// latest page frame for HTML overlays (plan 232).
+#[derive(Clone, Copy)]
+pub(crate) struct BannerPixels<'a> {
+    pub prepare: &'a BannerPrepareService,
+    pub html_overlays: &'a crate::html_overlay::HtmlOverlayService,
+}
+
+impl<'a> BannerPixels<'a> {
+    pub(crate) fn of(state: &'a AppState) -> Self {
+        Self {
+            prepare: &state.banner_prepare,
+            html_overlays: &state.html_overlays,
+        }
+    }
+
+    /// Prepared bitmaps only: a path that draws no HTML overlay (plan 232
+    /// D9: the Windows D3D11 session) and the image tests.
+    #[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+    pub(crate) fn images_only(prepare: &'a BannerPrepareService) -> Self {
+        static NO_HTML_OVERLAYS: std::sync::LazyLock<crate::html_overlay::HtmlOverlayService> =
+            std::sync::LazyLock::new(crate::html_overlay::HtmlOverlayService::default);
+        Self {
+            prepare,
+            html_overlays: &NO_HTML_OVERLAYS,
+        }
+    }
 }
 
 /// The `(stage id, rect)` of a live draft with a transform, for
@@ -11434,17 +11540,38 @@ fn composite_banners(inputs: &CompositorRenderInputs<'_>, dest: &mut [u8]) {
     let canvas_width = inputs.width.max(1) as usize;
     for draw in inputs.banners {
         let bitmap = &*draw.bitmap;
-        let (x, y, _, _) = draw.draw_rect(inputs.width, inputs.height);
-        let draw_width = (bitmap.width as usize).min(canvas_width.saturating_sub(x));
-        if draw_width == 0 {
+        let (x, y, rect_width, rect_height) = draw.draw_rect(inputs.width, inputs.height);
+        // Plan 232: an HTML overlay frame made for another canvas is scaled
+        // to this leg's rect (nearest neighbour: this is the fallback path).
+        let scaled = (draw.scales_to_rect
+            && (bitmap.width as usize, bitmap.height as usize) != (rect_width, rect_height))
+            .then(|| {
+                scale_bgra_nearest(
+                    &bitmap.bgra,
+                    bitmap.width as usize,
+                    bitmap.height as usize,
+                    rect_width,
+                    rect_height,
+                )
+            });
+        let (bytes, width, height) = match scaled.as_deref() {
+            Some(bytes) => (bytes, rect_width, rect_height),
+            None => (
+                bitmap.bgra.as_slice(),
+                bitmap.width as usize,
+                bitmap.height as usize,
+            ),
+        };
+        let draw_width = width.min(canvas_width.saturating_sub(x));
+        if draw_width == 0 || height == 0 {
             continue;
         }
         composite_straight_alpha_at(
             StraightAlphaBitmap {
-                bytes: &bitmap.bgra,
+                bytes,
                 order: OverlayPixelOrder::Bgra,
-                width: bitmap.width as usize,
-                height: bitmap.height as usize,
+                width,
+                height,
             },
             inputs.width,
             inputs.height,
@@ -11453,6 +11580,38 @@ fn composite_banners(inputs: &CompositorRenderInputs<'_>, dest: &mut [u8]) {
             draw.opacity,
         );
     }
+}
+
+/// A straight-alpha BGRA bitmap resampled to `to_width` × `to_height` with
+/// nearest neighbour (plan 232, the CPU path's HTML overlay frames). Empty
+/// when either size is zero or the source is short.
+pub(crate) fn scale_bgra_nearest(
+    bgra: &[u8],
+    width: usize,
+    height: usize,
+    to_width: usize,
+    to_height: usize,
+) -> Vec<u8> {
+    if width == 0
+        || height == 0
+        || to_width == 0
+        || to_height == 0
+        || bgra.len() < width * height * 4
+    {
+        return Vec::new();
+    }
+    let mut scaled = vec![0_u8; to_width * to_height * 4];
+    let columns: Vec<usize> = (0..to_width)
+        .map(|x| ((x * 2 + 1) * width / (to_width * 2)).min(width - 1) * 4)
+        .collect();
+    for (y, row) in scaled.chunks_exact_mut(to_width * 4).enumerate() {
+        let source_row = ((y * 2 + 1) * height / (to_height * 2)).min(height - 1) * width * 4;
+        for (pixel, column) in row.chunks_exact_mut(4).zip(&columns) {
+            let at = source_row + column;
+            pixel.copy_from_slice(&bgra[at..at + 4]);
+        }
+    }
+    scaled
 }
 
 /// Where the Buddy's bubble lands: above the pet's head on a leg that has a
@@ -21487,6 +21646,51 @@ mod tests {
         );
     }
 
+    /// "Couldn't confirm the scene change" on Windows: with Clips or a
+    /// recording on, the D3D11 media session draws the program and this
+    /// compositor is stopped, so only the session can report the drawn scene.
+    #[tokio::test]
+    async fn windows_media_session_reports_the_scene_it_drew() {
+        let state = test_state();
+        let scene_update = |revision| CompositorSceneUpdateParams {
+            transition_ms: None,
+            revision,
+            scene: Some(crate::scene::default_scene()),
+            layout: crate::protocol::default_layout_settings(),
+            active_screen: None,
+        };
+        update_compositor_scene(&state, scene_update(10)).await;
+        let mut compositor = state.compositor.lock().await;
+        assert_eq!(compositor.run_id, None, "the CPU compositor is stopped");
+        assert_eq!(compositor.status.frame_scene_revision, None);
+        let drawn = compositor.source_edit_snapshot().expect("committed scene");
+
+        assert!(compositor.record_windows_media_frame_scene(&drawn));
+        assert_eq!(compositor.status.scene_revision, Some(10));
+        assert_eq!(compositor.status.frame_scene_revision, Some(10));
+        assert!(
+            !compositor.record_windows_media_frame_scene(&drawn),
+            "an unchanged revision sends no second status"
+        );
+        drop(compositor);
+
+        // A switch committed after the session took its snapshot: the frame
+        // in hand is the old scene and does not prove the new one.
+        update_compositor_scene(&state, scene_update(11)).await;
+        let mut compositor = state.compositor.lock().await;
+        assert!(!compositor.record_windows_media_frame_scene(&drawn));
+        assert_eq!(compositor.status.frame_scene_revision, Some(10));
+        let next = compositor.source_edit_snapshot().expect("committed scene");
+        assert!(compositor.record_windows_media_frame_scene(&next));
+        assert_eq!(compositor.status.frame_scene_revision, Some(11));
+
+        // A running CPU compositor reports its own frames.
+        compositor.run_id = Some("cpu-run".into());
+        compositor.status.frame_scene_revision = None;
+        assert!(!compositor.record_windows_media_frame_scene(&next));
+        assert_eq!(compositor.status.frame_scene_revision, None);
+    }
+
     #[tokio::test]
     async fn compositor_scene_update_keeps_latest_revision() {
         let state = test_state();
@@ -25223,6 +25427,7 @@ mod banner_tests {
 
     fn banner_row(id: &str, width: u32, height: u32) -> Banner {
         Banner {
+            kind: crate::protocol::BannerKind::Image,
             id: id.to_string(),
             name: id.to_string(),
             image_file: format!("{id}.png"),
@@ -25265,6 +25470,7 @@ mod banner_tests {
             image: (banner.width, banner.height),
             rect,
             opacity: fade,
+            scales_to_rect: false,
         }
     }
 
@@ -25679,7 +25885,7 @@ mod banner_tests {
             primary_canvas,
             now,
             None,
-            &service,
+            BannerPixels::images_only(&service),
         );
         let aux = banner_draws_for_leg(
             &set,
@@ -25688,7 +25894,7 @@ mod banner_tests {
             vertical_canvas,
             now,
             None,
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(primary.len(), 1);
         assert_eq!(aux.len(), 1);
@@ -25724,7 +25930,7 @@ mod banner_tests {
                 primary_canvas,
                 now,
                 None,
-                &service
+                BannerPixels::images_only(&service)
             )
             .is_empty()
         );
@@ -25736,7 +25942,7 @@ mod banner_tests {
                 primary_canvas,
                 now,
                 None,
-                &service
+                BannerPixels::images_only(&service)
             )
             .len(),
             1
@@ -25770,7 +25976,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             None,
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws.len(), 1);
         assert!(
@@ -25977,7 +26183,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             banner_draft_of(Some(&draft)),
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws.len(), 1);
         assert_eq!(draws[0].rect, dragged);
@@ -26002,7 +26208,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             banner_draft_of(Some(&draft)),
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws[0].draw_rect(WIDTH, HEIGHT), (0, 0, 800, 400));
         assert!(!draws[0].is_exact_on(WIDTH, HEIGHT));
@@ -26016,7 +26222,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             banner_draft_of(Some(&draft)),
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws[0].rect, banner.horizontal);
         // A source drag leaves banners alone.
@@ -26034,7 +26240,7 @@ mod banner_tests {
             (WIDTH, HEIGHT),
             now,
             banner_draft_of(Some(&draft)),
-            &service,
+            BannerPixels::images_only(&service),
         );
         assert_eq!(draws[0].rect, banner.horizontal);
         // Faded out: nothing draws, even with a draft.
@@ -26056,7 +26262,7 @@ mod banner_tests {
                 (WIDTH, HEIGHT),
                 now,
                 None,
-                &service
+                BannerPixels::images_only(&service)
             )
             .is_empty()
         );
@@ -27380,6 +27586,8 @@ mod live_background_metal_tests {
         slot: Option<Box<LiveBackgroundGpuRenderer>>,
         primary: (u32, u32),
         stream: CompositorAuxiliaryOutput,
+        /// Every tick tells the guard the compositor missed its deadline.
+        late: bool,
     }
 
     impl RecordAndStream {
@@ -27434,6 +27642,7 @@ mod live_background_metal_tests {
                     frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                     composes_simulcast_scene,
                 },
+                late: false,
             })
         }
 
@@ -27444,6 +27653,8 @@ mod live_background_metal_tests {
             sequence: u64,
             at: Instant,
         ) -> (Vec<u8>, Vec<u8>, CompositorPublishResult) {
+            let mut leg = LiveBackgroundLeg::pinned_at(&mut self.slot, at);
+            leg.tick.missed_deadline = self.late;
             let result = publish_compositor_frame(
                 &self.state,
                 "plan-193",
@@ -27466,7 +27677,7 @@ mod live_background_metal_tests {
                 false,
                 false,
                 ChatOverlayLegs::OFF,
-                LiveBackgroundLeg::pinned_at(&mut self.slot, at),
+                leg,
                 ProgramLeg::off(&mut None),
             )
             .await;
@@ -27495,6 +27706,63 @@ mod live_background_metal_tests {
         /// The frame the recording leg's renderer shares at `at`.
         fn shared_frame(&self, at: Instant) -> Option<SharedLiveFrame> {
             self.slot.as_ref()?.frame_at(at)
+        }
+
+        /// Take the takeover screen off, as `update_compositor_active_screen`
+        /// commits it: the same scene at the next revision.
+        async fn take_off_the_takeover(&self) {
+            let mut compositor = self.state.compositor.lock().await;
+            let snapshot = compositor.scene.as_mut().expect("a committed scene");
+            snapshot.active_screen = None;
+            snapshot.revision += 1;
+        }
+
+        /// `ticks` loop ticks 100 ms apart from `from`, every live frame
+        /// read as `gpu_ms` (61 ticks span three of the guard's 2 s windows).
+        async fn run_timed(&mut self, sequence: &mut u64, from: Instant, ticks: u32, gpu_ms: f64) {
+            self.run_spaced(sequence, from, ticks, Duration::from_millis(100), gpu_ms)
+                .await;
+        }
+
+        /// `ticks` loop ticks `every` apart from `from`, every live frame
+        /// read as `gpu_ms`.
+        async fn run_spaced(
+            &mut self,
+            sequence: &mut u64,
+            from: Instant,
+            ticks: u32,
+            every: Duration,
+            gpu_ms: f64,
+        ) {
+            for tick in 0..ticks {
+                if let Some(renderer) = self.slot.as_mut() {
+                    renderer.inject_gpu_ms(Some(gpu_ms));
+                }
+                *sequence += 1;
+                self.tick(*sequence, from + every * tick).await;
+            }
+        }
+
+        fn guard_level(&self) -> Option<crate::live_background::GuardLevel> {
+            self.slot.as_ref().map(|renderer| renderer.guard_level())
+        }
+
+        /// How the renderer says it draws, and the scratch bytes it holds.
+        fn live_drawing(
+            &self,
+        ) -> Option<(
+            LiveBackgroundRendering,
+            Option<LiveBackgroundStillReason>,
+            u64,
+        )> {
+            let input = self.render_cache.live_background.as_ref()?;
+            let (status, _, scratch) = input.board.snapshot();
+            status.map(|status| (status.rendering, status.reason, scratch))
+        }
+
+        fn live_status(&self) -> Option<crate::protocol::LiveBackgroundStatus> {
+            let input = self.render_cache.live_background.as_ref()?;
+            input.board.snapshot().0
         }
     }
 
@@ -27901,6 +28169,187 @@ mod live_background_metal_tests {
                 &recording_stage,
             ),
             "recording",
+        );
+    }
+
+    /// Owner report 2026-11-12: an animated background stayed still after a
+    /// takeover screen came off, until another background was picked. The
+    /// guard was fed through the takeover and put the background on its
+    /// poster for good. Here every reading is 60 % of a frame for three guard
+    /// windows under the takeover and for 1.9 s after it comes off; the same
+    /// background still moves on the recording and the stream.
+    #[tokio::test]
+    async fn the_background_moves_again_after_a_takeover_comes_off() {
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let half = (WIDTH / 2, HEIGHT / 2);
+        // The run starts with its takeover screen up.
+        let Some(mut run) =
+            RecordAndStream::start((WIDTH, HEIGHT), half, Some(spec.clone()), None).await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let start = Instant::now();
+        let mut sequence = 0;
+        // Ticks at 0 to 6.0 s under the takeover.
+        run.run_timed(&mut sequence, start, 61, 10.0).await;
+        assert_eq!(
+            run.guard_level(),
+            Some(crate::live_background::GuardLevel::Full),
+            "readings under a takeover never step the guard"
+        );
+        run.take_off_the_takeover().await;
+        // Ticks at 6.1 to 7.9 s: the scene's sources come back.
+        let off = start + Duration::from_millis(6100);
+        run.run_timed(&mut sequence, off, 19, 10.0).await;
+        assert_eq!(
+            run.guard_level(),
+            Some(crate::live_background::GuardLevel::Full),
+            "nor do the readings just after it comes off"
+        );
+        if let Some(renderer) = run.slot.as_mut() {
+            renderer.inject_gpu_ms(None);
+        }
+        let after = start + Duration::from_secs(9);
+        let (recording_first, stream_first, _) = run.tick(sequence + 1, after).await;
+        let (recording_later, stream_later, _) =
+            run.tick(sequence + 2, after + Duration::from_secs(1)).await;
+        for (first, later, canvas, what) in [
+            (
+                recording_first,
+                recording_later,
+                (WIDTH, HEIGHT),
+                "recording",
+            ),
+            (stream_first, stream_later, half, "stream"),
+        ] {
+            let stage = stage_of(&background(Some(spec.clone())), canvas);
+            assert_ring_moves(&ring(&first, &later, canvas, &stage), what);
+        }
+        assert_eq!(
+            run.live_status()
+                .map(|status| (status.rendering, status.reason)),
+            Some((LiveBackgroundRendering::Shader, None))
+        );
+    }
+
+    /// The guard's protection stays: the same slow readings with no takeover
+    /// up put the background on its poster on both legs, as before.
+    #[tokio::test]
+    async fn an_overload_with_no_takeover_up_still_falls_to_the_poster() {
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let half = (WIDTH / 2, HEIGHT / 2);
+        let Some(mut run) =
+            RecordAndStream::start((WIDTH, HEIGHT), half, Some(spec.clone()), None).await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        run.take_off_the_takeover().await;
+        let start = Instant::now();
+        let mut sequence = 0;
+        run.run_timed(&mut sequence, start, 61, 10.0).await;
+        assert_eq!(
+            run.slot.as_ref().map(|renderer| renderer.guard_level()),
+            Some(crate::live_background::GuardLevel::Still)
+        );
+        let later = start + Duration::from_secs(7);
+        let (recording_first, stream_first, _) = run.tick(sequence + 1, later).await;
+        let (recording_later, stream_later, _) =
+            run.tick(sequence + 2, later + Duration::from_secs(1)).await;
+        let (blue, _, _) = rgb_to_yuv(0, 0, 255);
+        for (first, later, canvas, what) in [
+            (
+                recording_first,
+                recording_later,
+                (WIDTH, HEIGHT),
+                "recording",
+            ),
+            (stream_first, stream_later, half, "stream"),
+        ] {
+            let stage = stage_of(&background(Some(spec.clone())), canvas);
+            assert_ring_is_poster(&ring(&first, &later, canvas, &stage), blue, what);
+        }
+        assert_eq!(
+            run.live_status()
+                .map(|status| (status.rendering, status.reason)),
+            Some((
+                LiveBackgroundRendering::Still,
+                Some(LiveBackgroundStillReason::GpuBudget)
+            ))
+        );
+    }
+
+    /// Owner decision 2026-11-12: the poster is not for good. With no
+    /// takeover anywhere, 6 s of late ticks while the background costs 12 %
+    /// of a frame put it on its poster. After a quiet minute the same
+    /// background moves again at half size on the recording and the stream,
+    /// with the scratch it released back; a minute later it is at full size.
+    #[tokio::test]
+    async fn a_background_on_its_poster_moves_again_after_a_quiet_minute() {
+        use crate::live_background::GuardLevel;
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let half = (WIDTH / 2, HEIGHT / 2);
+        let Some(mut run) =
+            RecordAndStream::start((WIDTH, HEIGHT), half, Some(spec.clone()), None).await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        run.take_off_the_takeover().await;
+        let start = Instant::now();
+        let mut sequence = 0;
+        // Ticks at 0 to 6.0 s, every one late.
+        run.late = true;
+        run.run_timed(&mut sequence, start, 61, 2.0).await;
+        assert_eq!(run.guard_level(), Some(GuardLevel::Still));
+        assert_eq!(
+            run.live_drawing(),
+            Some((
+                LiveBackgroundRendering::Still,
+                Some(LiveBackgroundStillReason::GpuBudget),
+                0
+            )),
+            "the poster, holding no scratch"
+        );
+        // A tick a second, on time, at 7 to 68 s: the minute ends at 64 s.
+        run.late = false;
+        let second = Duration::from_secs(1);
+        run.run_spaced(&mut sequence, start + second * 7, 62, second, 0.5)
+            .await;
+        assert_eq!(run.guard_level(), Some(GuardLevel::Half));
+        let (recording_first, stream_first, _) = run.tick(sequence + 1, start + second * 69).await;
+        let (recording_later, stream_later, _) = run.tick(sequence + 2, start + second * 70).await;
+        sequence += 2;
+        for (first, later, canvas, what) in [
+            (
+                recording_first,
+                recording_later,
+                (WIDTH, HEIGHT),
+                "recording",
+            ),
+            (stream_first, stream_later, half, "stream"),
+        ] {
+            let stage = stage_of(&background(Some(spec.clone())), canvas);
+            assert_ring_moves(&ring(&first, &later, canvas, &stage), what);
+        }
+        let drawing = run.live_drawing().expect("the renderer reported");
+        assert_eq!(
+            (drawing.0, drawing.1),
+            (LiveBackgroundRendering::Half, None)
+        );
+        assert!(drawing.2 > 0, "the scratch released at Still is back");
+        // One level per quiet period: full size at 124 s, not before.
+        run.run_spaced(&mut sequence, start + second * 71, 52, second, 0.5)
+            .await;
+        assert_eq!(run.guard_level(), Some(GuardLevel::Half), "at 122 s");
+        run.run_spaced(&mut sequence, start + second * 123, 4, second, 0.5)
+            .await;
+        assert_eq!(run.guard_level(), Some(GuardLevel::Full));
+        let drawing = run.live_drawing().expect("the renderer reported");
+        assert_eq!(
+            (drawing.0, drawing.1),
+            (LiveBackgroundRendering::Shader, None)
         );
     }
 

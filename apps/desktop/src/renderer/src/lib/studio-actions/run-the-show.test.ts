@@ -66,7 +66,8 @@ describe('go_live (plan 209 S10, D13)', () => {
         call('go_live', {
           destinations: ['youtube', 'twitch'],
           title: 'Building an MCP live',
-          allowPartial: true
+          allowPartial: true,
+          allowNonPublic: true
         }),
         context
       )
@@ -86,7 +87,8 @@ describe('go_live (plan 209 S10, D13)', () => {
       destinations: ['youtube', 'twitch'],
       title: 'Building an MCP live',
       allowPartial: true,
-      withoutCaptions: false
+      withoutCaptions: false,
+      allowNonPublic: true
     })
     // Never the deck's start, which opens the dialog (D2).
     expect(context.startLivestream).not.toHaveBeenCalled()

@@ -82,6 +82,45 @@ describe('fake memory pass (plan 225 D10)', () => {
 
 const sessionToken = 'fake-cohost-session-token'
 
+it('serves opt-in voice greeting text and an AI outage without calling the planner', async () => {
+  const fake = await startFakeCohostService({
+    smokeSessionToken: sessionToken,
+    buddyAct: true,
+    voiceGreetings: true
+  })
+  try {
+    const headers = { authorization: `Bearer ${sessionToken}`, 'content-type': 'application/json' }
+    const capabilities = await fetch(`${fake.httpOrigin}/api/ai/capabilities`, { headers }).then(
+      (r) => r.json()
+    )
+    assert.equal(capabilities.cohost.greet, 1)
+    fake.setCapabilities({ tick: 5, memory: 1 })
+    const combined = await fetch(`${fake.httpOrigin}/api/ai/capabilities`, { headers }).then((r) =>
+      r.json()
+    )
+    assert.deepEqual(combined.cohost, { greet: 1, tick: 5, memory: 1 })
+    const greet = () =>
+      fetch(`${fake.httpOrigin}/api/ai/cohost/greet`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          persona: { name: 'Golmar' },
+          items: [{ id: 'voice-greeting', names: ['Jay_99'] }]
+        })
+      })
+    assert.equal(
+      (await (await greet()).json()).lines[0].text,
+      'Hi Jay_99! A rock-solid welcome from Golmar!'
+    )
+    fake.state.greetFailure = true
+    assert.equal((await greet()).status, 503)
+    assert.equal(fake.state.greetRequests.length, 2)
+    assert.equal(fake.state.actRequests.length, 0)
+  } finally {
+    await fake.close()
+  }
+})
+
 function message(target, seq, { platform = 'twitch', author = `Test Viewer ${seq % 3}` } = {}) {
   return {
     id: `smoke-session:${platform}:${target}:fake-${seq}`,

@@ -38,8 +38,9 @@ var __runInitializers = (this && this.__runInitializers) || function (thisArg, i
     return useValue ? value : void 0;
 };
 import { privacyKeyTitle, privacyKeyIntent } from './privacy-key.js';
-import { bannerKeyLit, buddyKeyIntent, buddyKeyLit, layoutKeyLit, micKeyLit, recordKeyIntent, recordKeyLit, soundKeyLit, streamKeyIntent, streamKeyLit, systemAudioKeyLit, takeoverKeyIntent, takeoverKeyLit } from './key-states.js';
+import { bannerKeyLit, buddyKeyIntent, buddyKeyLit, layoutKeyLit, micKeyLit, recordKeyIntent, recordKeyLit, soundKeyLit, streamKeyIntent, streamKeyLit, streamManagerFrontOrCloseIntent, streamManagerScreenKeyAllows, streamManagerScreenKeyBlock, streamManagerScreenKeyIntent, streamManagerScreenKeyNotice, streamManagerScreenKeyLit, streamManagerScreenKeyTitle, systemAudioKeyLit, takeoverKeyIntent, takeoverKeyLit } from './key-states.js';
 import streamDeck, { action, SingletonAction } from '@elgato/streamdeck';
+import { createHoldGesture } from './hold-gesture.js';
 import { VideorcClient, sceneKeyIntent, sceneKeyTitle, bannerKeyIntent, bannerKeyTitle, soundKeyIntent, soundKeyTitle } from './videorc-client.js';
 const client = new VideorcClient();
 class VideorcAction extends SingletonAction {
@@ -82,12 +83,17 @@ class VideorcAction extends SingletonAction {
         void inspector.sendToPropertyInspector({
             event: 'videorc-options',
             connected: client.connected,
-            options: this.inspectorOptions()
+            options: this.inspectorOptions(),
+            notice: this.inspectorNotice()
         });
     };
     /** Options the property inspector offers for this action's setting. */
     inspectorOptions() {
         return [];
+    }
+    /** A note the property inspector shows in place of its hint, if any. */
+    inspectorNotice() {
+        return null;
     }
     onWillAppear(ev) {
         this.settingsById.set(ev.action.id, ev.payload.settings);
@@ -114,16 +120,16 @@ class VideorcAction extends SingletonAction {
             await ev.action.showAlert();
             return;
         }
-        const intent = this.intentFor(ev.payload.settings, client.state);
-        if (!intent) {
-            await ev.action.showAlert();
-            return;
+        await this.send(ev.action, this.intentFor(ev.payload.settings, client.state));
+    }
+    /** End-to-end truth: an alert covers backend rejection (debounce, invalid),
+     * renderer refusal ("Enable streaming first"), disconnects, and timeouts. */
+    async send(key, intent, { confirm = false } = {}) {
+        if (!intent || !(await client.sendIntent(intent))) {
+            await key.showAlert();
         }
-        // End-to-end truth: false covers backend rejection (debounce, invalid),
-        // renderer refusal ("Enable streaming first"), disconnects, and timeouts.
-        const ok = await client.sendIntent(intent);
-        if (!ok) {
-            await ev.action.showAlert();
+        else if (confirm) {
+            await key.showOk();
         }
     }
 }
@@ -480,6 +486,87 @@ let WindowFront = (() => {
     };
     return WindowFront = _classThis;
 })();
+// Plan 230: a tap moves the Stream Manager to the other of the key's two
+// screens, the Presenting screen viewers see and the Monitor screen the
+// streamer reads. A hold brings it to the front where it is, or closes it
+// when it already has the focus. The title says where it is; the key is on
+// while viewers see it.
+let StreamManagerScreen = (() => {
+    let _classDecorators = [action({ UUID: 'com.videorc.streamdeck.stream-manager-screen' })];
+    let _classDescriptor;
+    let _classExtraInitializers = [];
+    let _classThis;
+    let _classSuper = VideorcAction;
+    var StreamManagerScreen = class extends _classSuper {
+        static { _classThis = this; }
+        static {
+            const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
+            __esDecorate(null, _classDescriptor = { value: _classThis }, _classDecorators, { kind: "class", name: _classThis.name, metadata: _metadata }, null, _classExtraInitializers);
+            StreamManagerScreen = _classThis = _classDescriptor.value;
+            if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
+            __runInitializers(_classThis, _classExtraInitializers);
+        }
+        renderTitle = (state, connected, settings) => streamManagerScreenKeyTitle(state, connected, settings, client.describe);
+        renderPressed(state, settings) {
+            return streamManagerScreenKeyLit(state, settings);
+        }
+        intentFor(settings) {
+            return streamManagerScreenKeyIntent(settings);
+        }
+        pressed = new Map();
+        // An older Videorc (no screen list) or a Wayland session (no tap): the
+        // title says why, so the press stays quiet instead of alerting each time.
+        allows(gesture) {
+            return streamManagerScreenKeyAllows(streamManagerScreenKeyBlock(client.describe), gesture);
+        }
+        gesture = createHoldGesture({
+            onTap: (id) => this.release(id, async (ev) => {
+                if (this.allows('tap'))
+                    await this.send(ev.action, this.intentFor(ev.payload.settings));
+            }),
+            onHold: (id) => this.release(id, async (ev) => {
+                if (this.allows('hold')) {
+                    await this.send(ev.action, streamManagerFrontOrCloseIntent(), { confirm: true });
+                }
+            })
+        });
+        release(id, act) {
+            const ev = this.pressed.get(id);
+            this.pressed.delete(id);
+            if (ev) {
+                act(ev).catch((error) => streamDeck.logger.warn(`Stream Manager Screen key failed: ${String(error)}`));
+            }
+        }
+        async onKeyDown(ev) {
+            if (!client.connected) {
+                await ev.action.showAlert();
+                return;
+            }
+            this.pressed.set(ev.action.id, ev);
+            this.gesture.down(ev.action.id);
+        }
+        onKeyUp(ev) {
+            this.gesture.up(ev.action.id);
+        }
+        onWillDisappear(ev) {
+            this.gesture.cancel(ev.action.id);
+            this.pressed.delete(ev.action.id);
+            super.onWillDisappear(ev);
+        }
+        inspectorOptions() {
+            return (client.describe?.screens ?? []).map((screen) => ({
+                value: screen.id,
+                label: screen.name
+            }));
+        }
+        inspectorNotice() {
+            return client.connected
+                ? streamManagerScreenKeyNotice(streamManagerScreenKeyBlock(client.describe))
+                : null;
+        }
+    };
+    return StreamManagerScreen = _classThis;
+})();
 streamDeck.actions.registerAction(new RecordToggle());
 streamDeck.actions.registerAction(new StreamToggle());
 streamDeck.actions.registerAction(new MicToggle());
@@ -492,5 +579,6 @@ streamDeck.actions.registerAction(new TakeoverToggle());
 streamDeck.actions.registerAction(new BannerToggle());
 streamDeck.actions.registerAction(new SoundPlay());
 streamDeck.actions.registerAction(new WindowFront());
+streamDeck.actions.registerAction(new StreamManagerScreen());
 client.start();
 void streamDeck.connect();

@@ -544,7 +544,10 @@ deadlines:
 2. If it is still over budget, it **switches to the poster** with reason
    `gpu-budget` and one Info health event: "Your graphics card is busy, so
    the live background is showing a still frame."
-3. It never climbs back by itself during a session. The next session tries
+3. (Reversed 2026-11-12, owner decision: it climbs back one level after a
+   quiet minute, with a doubling wait on relapse; see
+   `docs/live-backgrounds.md`, "The budget guard".) As planned: It never
+   climbs back by itself during a session. The next session tries
    again.
 
 The guard's state and reason are in status and diagnostics, never silent.
@@ -674,7 +677,8 @@ other result is a STOP.
     identical.
   - Forced still reports `forced`.
   - A look or motion change moves the phase by less than one tick's worth.
-  - The guard steps down when fed slow timings, and never climbs back.
+  - The guard steps down when fed slow timings, and never climbs back
+    (reversed 2026-11-12: it climbs one level after a quiet minute).
   - With no live background: no pipeline compiled and no scratch allocated
     (counters in status are 0).
 - By eye: a 12-hour phase offset shows no stepping. A side-by-side of every
@@ -1224,7 +1228,9 @@ times below are host-contaminated; quiet-host numbers are owed.
   user whose machine dropped Plasma Wave to its poster, then picked a cheaper
   background, got a still for the rest of the run. Now
   `LiveBackgroundGuard::follow` starts a different background again at
-  Full. A new look or motion never climbs back. Tested.
+  Full. A new look or motion never climbs back. Tested. (Reversed
+  2026-11-12: a new look or motion keeps the level and the wait, and the
+  guard climbs back by itself.)
 - **The smoke applied its scene straight to the backend.** Main's first-frame
   watchdog (`resync-scene`) put the app's own scene back over it. The smoke
   now re-applies when the compositor loses the live background, and names

@@ -1,0 +1,122 @@
+/* Plan 232 fixture. The background is never set: the page is transparent. */
+html,
+body {
+  margin: 0;
+  width: 640px;
+  height: 360px;
+  overflow: hidden;
+  background: transparent;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+}
+
+.blocks {
+  display: flex;
+  width: 640px;
+  height: 180px;
+}
+
+.block {
+  width: 160px;
+  height: 180px;
+}
+
+.block-a {
+  background: #ff00ff;
+}
+
+.block-b {
+  background: rgba(0, 255, 255, 0.5);
+}
+
+/* .block-c stays empty. The script paints it only if the network answers. */
+.block-c.network-reached {
+  background: #00ff00;
+}
+
+/* .block-d has no colour until badge.js gives it one of these classes. */
+.block-d.blink-yellow {
+  background: #ffff00;
+}
+
+.block-d.blink-blue {
+  background: #0000ff;
+}
+
+.badge {
+  position: absolute;
+  left: 24px;
+  top: 216px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 96px;
+  padding: 0 32px 0 24px;
+  border-radius: 48px;
+  background: rgba(12, 12, 14, 0.78);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.18);
+  color: #fff;
+  animation: float 3s ease-in-out infinite;
+}
+
+.dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #ff3b30;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.label {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.ticker {
+  width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 26px;
+  opacity: 0.86;
+}
+
+.ticker-text {
+  display: inline-block;
+  padding-left: 100%;
+  animation: ticker 6s linear infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes ticker {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}

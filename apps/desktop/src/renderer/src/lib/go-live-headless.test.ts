@@ -14,6 +14,7 @@ import { DEFAULT_BASIC_ENTITLEMENTS } from './entitlements'
 import { goLiveConfirmGate } from './go-live-dialog-view'
 import { streamingWithoutTargets } from './go-live-exclusions'
 import { LIVESTREAM_STILL_SETTLING } from './go-live-flow'
+import { ALLOW_NON_PUBLIC_HINT } from './go-live-privacy'
 import {
   HEADLESS_GO_LIVE_COPY,
   decideHeadlessGoLive,
@@ -86,10 +87,12 @@ function destination(
   }
 }
 
+// Public, so YouTube goes live without the privacy step; the Unlisted and
+// Private cases below say so (owner report, 2026-11-12).
 const draft: StreamMetadataDraft = {
   title: 'Building an MCP live',
   description: '',
-  defaultPrivacy: 'private',
+  defaultPrivacy: 'public',
   targetOverrides: [],
   updatedAt: NOW
 }
@@ -133,6 +136,54 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
     expect(decideHeadlessGoLive(input)).toEqual({ kind: 'confirm' })
     // The very gate the dialog disables its primary on.
     expect(goLiveConfirmGate(input).blocked).toBe(false)
+  })
+
+  // Owner report (2026-11-12): live on four platforms with YouTube Unlisted.
+  // The dialog asks once more; an agent is refused unless the call accepts it.
+  it('refuses a YouTube destination going live Unlisted or Private unless allowNonPublic', () => {
+    const preflight: GoLivePreflight = {
+      valid: true,
+      destinations: [destination('youtube-1'), destination('twitch-1')],
+      issues: []
+    }
+    const base = {
+      preflight,
+      sentStreaming: twoOn,
+      captionsReadiness: ready,
+      entitlementGate: allowed,
+      allowPartial: false
+    }
+    const unlisted = { ...draft, defaultPrivacy: 'unlisted' as const }
+    expect(decideHeadlessGoLive({ ...base, draft: unlisted })).toEqual({
+      kind: 'refuse',
+      message: `YouTube is Unlisted. Only people with the link can watch. ${ALLOW_NON_PUBLIC_HINT}`
+    })
+    expect(decideHeadlessGoLive({ ...base, draft: unlisted, allowNonPublic: true })).toEqual({
+      kind: 'confirm'
+    })
+    // The dialog's primary stays enabled: it asks, it never blocks.
+    expect(goLiveConfirmGate({ ...base, draft: unlisted }).blocked).toBe(false)
+    // Leaving YouTube out (the `destinations` list) needs no answer.
+    expect(
+      decideHeadlessGoLive({
+        ...base,
+        draft: unlisted,
+        sentStreaming: streamingWithoutTargets(twoOn, ['youtube-1'])
+      })
+    ).toEqual({ kind: 'confirm' })
+  })
+
+  it('names a blocker before the privacy, so the agent fixes what it can first', () => {
+    const decision = decideHeadlessGoLive({
+      preflight: { valid: true, destinations: [destination('youtube-1')], issues: [] },
+      draft: { ...draft, title: '', defaultPrivacy: 'private' },
+      sentStreaming: streaming(target('youtube-1', 'youtube')),
+      captionsReadiness: ready,
+      entitlementGate: allowed,
+      allowPartial: false
+    })
+    expect(decision.kind).toBe('refuse')
+    expect(decision.kind === 'refuse' && decision.message).not.toContain('Private')
   })
 
   it('refuses a partial setup with the blockers, and leaves them out with allowPartial', () => {
@@ -463,6 +514,33 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
       ok: false,
       message: LIVESTREAM_STILL_SETTLING
     })
+  })
+
+  it('never confirms a Private YouTube Go Live without allowNonPublic', async () => {
+    const privateDraft = { ...draft, defaultPrivacy: 'private' as const }
+    const preflight: GoLivePreflight = {
+      valid: true,
+      destinations: [destination('youtube-1'), destination('twitch-1')],
+      issues: []
+    }
+    const fake = studio({
+      streamMetadataDraft: privateDraft,
+      runGoLivePreflight: vi.fn(async () => ({
+        kind: 'ready' as const,
+        preflight,
+        draft: privateDraft,
+        capabilities: null
+      }))
+    })
+    expect(await goLiveWithoutDialog({}, fake)).toEqual({
+      ok: false,
+      message: `YouTube is Private. Only you can watch. ${ALLOW_NON_PUBLIC_HINT}`
+    })
+    expect(fake.runGoLiveConfirmation).not.toHaveBeenCalled()
+    expect(fake.openGoLiveConfirmationInFlightRef.current).toBeNull()
+
+    expect(await goLiveWithoutDialog({ allowNonPublic: true }, fake)).toMatchObject({ ok: true })
+    expect(fake.runGoLiveConfirmation).toHaveBeenCalledTimes(1)
   })
 
   it("confirms through the dialog's own confirm and reports where it went live", async () => {

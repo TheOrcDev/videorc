@@ -1,5 +1,34 @@
 # Implementation Plans
 
+- 2026-11-12: [Plan 232](232-html-overlays.md), the owner's ask: "support
+  for HTML with a transparent background so we can add animated stuff on our
+  live streams or recordings. Same thing as we have now for our images."
+  S1 to S6 BUILT 2026-11-12 (draft PR #1323), macOS:
+  - An HTML banner is a banner whose picture is a web page: Assets →
+    Banners → Import HTML… takes an `.html` file or a folder with
+    `index.html`. Same place, Show and Hide, switches, fade and z-order.
+  - The page renders in a sandboxed offscreen window in main (no Node, no
+    preload, no network, no permissions, its own folder only). Frames go to
+    the backend over one loopback upload and ride the banner layer on every
+    leg.
+  - Measured: nothing at half the canvas; a full-canvas overlay at the
+    1080p cap held 30 fps but moved the compositor's p95 (S10).
+  - Owed: the owner's by-eye pass, the answers to D3, D5 (network) and D9,
+    Windows and Linux (S11).
+- 2026-11-12: [Plan 230](230-stream-manager-screen-key.md), the owner's
+  streams on three screens: one Stream Deck key moves the Stream Manager
+  between a Presenting screen and a Monitor screen. BUILT 2026-11-12, PR
+  #1306:
+  - A tap moves it (from anywhere else, to the Monitor screen); each screen
+    keeps its own frame; a tap to the Presenting screen takes the focus and
+    a tap back hands it to the last app used.
+  - A hold brings it to the front where it is, or closes it when focused.
+  - Titles: Present, Monitor, Hidden, Closed, Away, Pick screens. The key
+    never sets Hide from stream (owner answers Q1–Q14).
+  - New remote intents `streamManagerScreenSwap` and
+    `streamManagerFrontOrClose`; `remote.describe` gains `screens`,
+    `remote.state` gains `streamManager`.
+  - Owed: hands-on checks on Windows and for the focus (see the plan).
 - 2026-11-11: [Plan 229](229-green-screen-without-snow.md), the owner's
   stream on 0.22.0: "snow" around the subject, specks of green screen one to
   three pixels across in a new place every frame. IMPLEMENTED 2026-11-11:

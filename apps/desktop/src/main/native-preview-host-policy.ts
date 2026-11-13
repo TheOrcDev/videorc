@@ -270,6 +270,10 @@ export function reconcileWindowsD3d11PresenterStatus(
       windowsD3d11Presenter: presenter,
       presentedFrameId,
       framesRendered: Math.max(current.framesRendered, presentedFrameId),
+      // The scene the presenter last put on screen: the Studio's proof that
+      // the Preview shows a scene switch. Only the backend presenter knows
+      // it; a stale proof-surface value must not carry over.
+      nativePreviewPresentedSceneRevision: presenter.presentedSceneRevision,
       // `current` still carries the hidden proof surface's last measurements;
       // the presenter's cadence and latency come from the backend only.
       presentFps: backend.presentFps,

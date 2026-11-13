@@ -1,6 +1,7 @@
 import { CaptionsIcon, LivestreamIcon } from '@/components/icons'
 import { useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { ListRow, GroupedList } from '@/components/list-row'
 import { LockAlert } from '@/components/lock-alert'
 import { PlatformGlyph } from '@/components/platform-glyph'
@@ -43,6 +44,13 @@ import {
   type GoLivePhase
 } from '@/lib/go-live-dialog-view'
 import { streamingWithoutTargets } from '@/lib/go-live-exclusions'
+import {
+  effectiveInstantYouTubePrivacy,
+  goLivePrivacyConfirmCopy,
+  instantYouTubePrivacyPatch,
+  nonPublicPrivacyLine,
+  type NonPublicYouTubeDestination
+} from '@/lib/go-live-privacy'
 import {
   goLiveStepDownDescription,
   streamPerformanceAdvice as adviseStreamPerformance,
@@ -135,10 +143,16 @@ export function GoLiveConfirmationDialog({
   // Destinations the streamer sent to sign in again: their row offers "Check
   // again" once they are back. Cleared when the dialog closes.
   const [reconnected, setReconnected] = useState<readonly string[]>([])
+  // The privacy step is up: a YouTube destination goes live Unlisted or
+  // Private, and the streamer has pressed Go live once.
+  const [privacyConfirmOpen, setPrivacyConfirmOpen] = useState(false)
   const [wasOpen, setWasOpen] = useState(open)
   if (open !== wasOpen) {
     setWasOpen(open)
-    if (!open) setReconnected([])
+    if (!open) {
+      setReconnected([])
+      setPrivacyConfirmOpen(false)
+    }
   }
 
   // The livestream this Go Live sends: the saved destinations minus the ones
@@ -200,7 +214,8 @@ export function GoLiveConfirmationDialog({
     instantYouTube,
     view,
     entitlementBlocker,
-    blocked
+    blocked,
+    nonPublicYouTube
   } = goLiveConfirmGate({
     preflight,
     draft,
@@ -213,16 +228,27 @@ export function GoLiveConfirmationDialog({
   const canContinuePartial =
     !pending && !entitlementBlocker && !captionsReadiness.blocksStart && Boolean(partialSetup)
   const confirmAccelerator = shortcutAccelerator('go-live-confirm')
+  // A YouTube destination going live Unlisted or Private asks once more
+  // (owner report, 2026-11-12), naming it and its privacy. Public goes live.
+  const privacyCopy = nonPublicYouTube.length ? goLivePrivacyConfirmCopy(nonPublicYouTube) : null
+  const confirm = (): void => {
+    if (!canConfirm) return
+    if (privacyCopy) setPrivacyConfirmOpen(true)
+    else onConfirm()
+  }
 
-  // ⌘↵ is the primary, wherever focus is in the dialog (B-14).
+  // ⌘↵ is the primary, wherever focus is in the dialog (B-14). While the
+  // privacy step is up its keys are its own: ⌘↵ never answers it, and its
+  // focused "Change privacy" takes a plain Enter.
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.key !== 'Enter' || !isCommandKey(event, platform)) return
+    if (privacyConfirmOpen) return
     event.preventDefault()
     if (event.repeat) return
     if (partialSetup) {
       if (canContinuePartial) onContinuePartial()
-    } else if (canConfirm) {
-      onConfirm()
+    } else {
+      confirm()
     }
   }
 
@@ -280,7 +306,9 @@ export function GoLiveConfirmationDialog({
                   value={{
                     title: draft?.title ?? '',
                     description: draft?.description ?? '',
-                    privacy: instantYouTube ? (draft?.defaultPrivacy ?? 'private') : undefined
+                    // What YouTube gets: its customised override, else the
+                    // draft's privacy, else Private (the backend's default).
+                    privacy: instantYouTube ? effectiveInstantYouTubePrivacy(draft) : undefined
                   }}
                   onChange={(patch) =>
                     onPatchDraft({
@@ -288,7 +316,9 @@ export function GoLiveConfirmationDialog({
                       ...(patch.description !== undefined
                         ? { description: patch.description }
                         : {}),
-                      ...(patch.privacy !== undefined ? { defaultPrivacy: patch.privacy } : {})
+                      ...(patch.privacy !== undefined
+                        ? instantYouTubePrivacyPatch(draft, patch.privacy)
+                        : {})
                     })
                   }
                 />
@@ -320,6 +350,9 @@ export function GoLiveConfirmationDialog({
                   {view.destinations.map((row) => (
                     <GoLiveDestinationRow
                       key={row.destination.targetId}
+                      nonPublic={nonPublicYouTube.find(
+                        (entry) => entry.targetId === row.destination.targetId
+                      )}
                       pending={pending}
                       reconnected={reconnected.includes(row.destination.targetId)}
                       scheduledFallback={sentTargets.find(
@@ -502,7 +535,7 @@ export function GoLiveConfirmationDialog({
                 aria-keyshortcuts={shortcutAriaKeys(confirmAccelerator, platform)}
                 data-testid="go-live-confirm"
                 disabled={!canConfirm}
-                onClick={onConfirm}
+                onClick={confirm}
               >
                 <LivestreamIcon data-icon="inline-start" weight="fill" />
                 {pending
@@ -519,6 +552,25 @@ export function GoLiveConfirmationDialog({
             </DisabledReason>
           )}
         </DialogFooter>
+
+        {privacyCopy ? (
+          // Nested in the Go Live dialog, so Escape and "Change privacy" come
+          // back to it. Its safe answer has focus, so Enter never skips it.
+          <ConfirmDialog
+            cancelLabel={privacyCopy.cancelLabel}
+            confirmLabel={privacyCopy.confirmLabel}
+            confirmVariant="default"
+            description={privacyCopy.description}
+            open={privacyConfirmOpen && canConfirm}
+            testId="go-live-privacy"
+            title={privacyCopy.title}
+            onCancel={() => setPrivacyConfirmOpen(false)}
+            onConfirm={() => {
+              setPrivacyConfirmOpen(false)
+              onConfirm()
+            }}
+          />
+        ) : null}
       </DialogContent>
     </Dialog>
   )
@@ -673,6 +725,7 @@ function openExternalUrl(url: string): void {
 export function GoLiveDestinationRow({
   view,
   pending,
+  nonPublic,
   reconnected = false,
   scheduledFallback,
   onResolveBlocker,
@@ -681,6 +734,8 @@ export function GoLiveDestinationRow({
 }: {
   view: GoLiveDestinationView
   pending: boolean
+  /** This YouTube destination goes live Unlisted or Private. */
+  nonPublic?: NonPublicYouTubeDestination
   /** The streamer was sent to sign in again: offer "Check again". */
   reconnected?: boolean
   /** The saved target, for a scheduled event the preflight didn't echo. */
@@ -735,6 +790,12 @@ export function GoLiveDestinationRow({
         data-slot="go-live-destination-body"
       >
         {scheduled ? <p className="text-xs text-muted-foreground">{scheduled}</p> : null}
+        {/* A scheduled row already names its event's privacy above. */}
+        {nonPublic && !nonPublic.scheduled ? (
+          <p className="text-xs text-muted-foreground" data-slot="go-live-destination-privacy">
+            {nonPublicPrivacyLine(nonPublic.privacy)}
+          </p>
+        ) : null}
         {!ready && problem ? <p className="text-xs text-foreground">{problem}</p> : null}
         <GoLiveCommentsStatus
           message={destination.chatMessage}

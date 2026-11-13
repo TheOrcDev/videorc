@@ -1,5 +1,12 @@
-import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
+import type {
+  CommentsWindowState,
+  DeviceStatus,
+  LayoutPreset,
+  StreamManagerScreenMoves,
+  StreamManagerScreenOption
+} from '@/lib/backend'
 import { layoutPresetLabel } from '@/lib/layout-labels'
+import { streamManagerHiddenFromViewers } from '@/lib/protected-overlay-windows'
 import { soundboard, type SoundboardSnapshot, type SoundboardStore } from '@/lib/soundboard-store'
 import { bannerSummaries, type BannerSummary } from '../../../shared/banner-commands'
 
@@ -30,6 +37,12 @@ export interface RemoteSurfaceState {
   /** Buddy Live is on (the cohost `enabled` setting). False until the
    * settings load. Only a boolean, never the persona or its settings. */
   buddyLive: boolean
+  /** The Stream Manager Screen key (plan 230 D5): the screen the window sits
+   * on (null while closed), whether it shows (not minimized), and whether
+   * viewers really do not see it (`streamManagerHiddenFromViewers`: the
+   * switch is on and the platform hides it), for the key's Hidden title.
+   * Never its frame. */
+  streamManager: { screenId: string | null; visible: boolean; hiddenFromStream: boolean }
 }
 
 export interface RemoteSurfaceDescribe {
@@ -58,6 +71,11 @@ export interface RemoteSurfaceDescribe {
    */
   sounds: RemoteSoundSummary[]
   windows: readonly string[]
+  /** Plan 230 D5: the screens the Stream Manager Screen key can pick, as `{id, name}`. */
+  screens: StreamManagerScreenOption[]
+  /** Plan 230: `wayland` when the key's tap cannot move the window (the key
+   * says "Not on Wayland" instead of failing on every tap). */
+  screenMoves: StreamManagerScreenMoves
 }
 
 /** One sound as the remotes see it (plan 189 S10). */
@@ -109,7 +127,19 @@ export type RemoteSurfaceValues = readonly [
   savedScenes?: readonly { id: string; name: string }[],
   activeSavedSceneId?: string | null,
   screenHidden?: boolean,
-  buddyLive?: boolean
+  buddyLive?: boolean,
+  commentsWindow?: Pick<
+    CommentsWindowState,
+    | 'open'
+    | 'screenId'
+    | 'visible'
+    | 'screens'
+    | 'screenMoves'
+    | 'hiddenFromStream'
+    | 'hideFromStreamMethod'
+    | 'protected'
+    | 'windowId'
+  >
 ]
 
 function snapshotFromValues(
@@ -131,7 +161,12 @@ function snapshotFromValues(
       windows: { notes: values[7], comments: values[8], preview: values[9] },
       systemAudioOn: values[12] === 'available' && values[13],
       systemAudioAvailable: values[12] === 'available',
-      buddyLive: values[18] ?? false
+      buddyLive: values[18] ?? false,
+      streamManager: {
+        screenId: values[19]?.screenId ?? null,
+        visible: values[19]?.visible ?? false,
+        hiddenFromStream: values[19] ? streamManagerHiddenFromViewers(values[19]) : false
+      }
     },
     describe: {
       layoutPresets: values[10],
@@ -140,7 +175,9 @@ function snapshotFromValues(
       // Whitelisted here: Studio hands over its whole banner list.
       banners: bannerSummaries(values[14]),
       sounds,
-      windows: ['notes', 'comments', 'preview']
+      windows: ['notes', 'comments', 'preview'],
+      screens: (values[19]?.screens ?? []).map(({ id, name }) => ({ id, name })),
+      screenMoves: values[19]?.screenMoves === 'wayland' ? 'wayland' : 'supported'
     }
   }
 }

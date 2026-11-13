@@ -1,4 +1,4 @@
-import type { Banner } from '@/lib/backend'
+import { HTML_OVERLAY_MAX_FRAME_PIXELS, type Banner } from '@/lib/backend'
 import { formatResolution, type VideoSize } from '@/lib/format-video'
 import { bannerDrawRect, bannerRectForCanvas } from '../../../shared/banner-geometry'
 
@@ -42,7 +42,8 @@ export function bannerSizeAdvice({
   output,
   verticalStream = null
 }: {
-  banner: Pick<Banner, 'width' | 'height' | 'horizontal' | 'vertical'>
+  banner: Pick<Banner, 'width' | 'height' | 'horizontal' | 'vertical'> &
+    Partial<Pick<Banner, 'kind'>>
   /** The Output resolution: the recording and every horizontal stream. */
   output: VideoSize
   /** The vertical stream's canvas, when a vertical destination is armed. */
@@ -66,6 +67,20 @@ export function bannerSizeAdvice({
     }
   }
   const needed = { width: upToEven(drawn.width), height: upToEven(drawn.height) }
+  if (banner.kind === 'html') {
+    // Plan 232 D7: a page is rasterised at the pixels it lands on, up to a
+    // 1080p frame's worth; past that the picture is scaled up from there.
+    const capped = needed.width * needed.height > HTML_OVERLAY_MAX_FRAME_PIXELS
+    return {
+      canvas,
+      needed,
+      sharp: !capped,
+      sizeLine: `Size on your ${formatResolution(canvas)} ${canvas.noun}: ${formatResolution(needed)} px`,
+      verdictLine: capped
+        ? 'An HTML banner is drawn at up to 1920 × 1080 px and scaled up from there: it will look soft at this size.'
+        : 'An HTML banner is drawn at this size, so it stays sharp.'
+    }
+  }
   const sharp = banner.width >= BANNER_SHARP_FRACTION * needed.width
   const image = formatResolution(banner)
   return {

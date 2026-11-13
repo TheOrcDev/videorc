@@ -41,7 +41,7 @@ export function SceneCard({
   thumb: ReactNode
   /** The app's icon before the name (a scene made for an app). */
   icon?: ReactNode
-  /** The scene's name, or "Switching…" while it applies. */
+  /** The scene's name, kept while it applies (the pending mark goes in `meta`, issue #1275). */
   label: string
   /** The scene in use: the card's selected look and the check. */
   selected?: boolean

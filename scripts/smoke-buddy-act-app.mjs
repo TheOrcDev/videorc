@@ -20,7 +20,9 @@
 //      209 S11b): Buddy's rect lands top left and the composer says so.
 //      SKIPPED with a message while the catalog has no `move_on_scene` (the
 //      orchestrator re-runs it after PR B merges).
-//   4. By voice, while recording: "Buddy, stop the recording." The planner
+//   4. By voice, while recording: a named greeting reaches Buddy's bubble
+//      within 2.5 s, with persona text and an AI-down fallback, without a
+//      planner call or chat post. Then "Buddy, stop the recording." The planner
 //      answers `stop`; Buddy asks 'Stop the recording? Say "Buddy, yes".'
 //      and the recording runs on through a bare "Yes." (review fix 17: a yes
 //      to going live or stopping must name Buddy) until "Buddy, yes.", then
@@ -151,7 +153,11 @@ writeFileSync(
 )
 chmodSync(secretsPath, 0o600)
 
-const fakeCohost = await startFakeCohostService({ smokeSessionToken, buddyAct: true })
+const fakeCohost = await startFakeCohostService({
+  smokeSessionToken,
+  buddyAct: true,
+  voiceGreetings: true
+})
 const captionFake = await startFakeCaptionService({
   smokeSessionToken,
   smokeRealtimeToken: `buddy-act-realtime-${randomUUID()}`,
@@ -430,10 +436,15 @@ try {
       log(captionsSkipLine('step 4', 'the spoken stop and spoken yes', captionsUnavailable))
     } else {
       // Buddy listens: a fake chat session, captions, Buddy with consent.
+      const settings = await request(renderer, timeoutMs, 'cohost.settings.get')
       await request(renderer, timeoutMs, 'cohost.settings.set', {
         enabled: true,
         listen: true,
-        wakeWordRequired: false
+        wakeWordRequired: false,
+        // Only the spoken request may create the greeting bubble; an
+        // automatic welcome must not accidentally satisfy the assertion.
+        autoChat: { ...settings.autoChat, talk: 'off' },
+        persona: { ...settings.persona, name: 'Golmar', personality: 'A cheerful stone golem' }
       })
       await request(renderer, timeoutMs, 'liveChat.start', {
         sessionId: chatSessionId,
@@ -444,10 +455,10 @@ try {
           {
             platform: 'twitch',
             targetId: 'buddy-act',
-            count: 2,
+            count: 20,
             intervalMs: 250,
             send: 'sent',
-            authors: ['ana_dev']
+            authors: ['Jay_99', 'Mira']
           }
         ]
       })
@@ -478,6 +489,70 @@ try {
             return { done: count > 0, value: count }
           })
           if (!reached) fail(`no caption client heard "${text}"`)
+        }
+        // The owner's request, through the real caption hook and detector:
+        // an addressed viewer gets a bubble, including when AI is down. No
+        // planner or chat send may run, even with "in the chat" in speech.
+        {
+          await request(renderer, timeoutMs, 'cohost.settings.set', { wakeWordRequired: true })
+          const layout = await request(renderer, timeoutMs, 'overlays.layout.get')
+          await request(renderer, timeoutMs, 'overlays.layout.set', {
+            ...layout,
+            buddy: { ...layout.buddy, showOnStream: true }
+          })
+          await waitUntil('the named viewers in recent chat', async () => {
+            const heard = ['Jay_99', 'Mira'].every((name) =>
+              events.events.some(
+                (event) => event.event === 'liveChat.message' && event.payload?.authorName === name
+              )
+            )
+            return { done: heard, value: heard }
+          })
+          const plannerBefore = fakeCohost.state.actRequests.length
+          await waitUntil('audio reaching the local caption service', async () => ({
+            done: captionFake.state.audioAppends > 0,
+            value: captionFake.state.audioAppends
+          }))
+          for (const [sentence, viewer, fallback] of [
+            ['Buddy, say hello to Jay in the chat.', 'Jay_99', false],
+            ['Golmar, tell Mira welcome.', 'Mira', true]
+          ]) {
+            fakeCohost.state.greetFailure = fallback
+            const bubble = events.createWait(
+              'a spoken greeting in the bubble',
+              (event) =>
+                event.event === 'cohost.buddy.state' &&
+                event.payload?.bubble?.text ===
+                  (fallback
+                    ? `Hi ${viewer}, welcome to the stream!`
+                    : `Hi ${viewer}! A rock-solid welcome from Golmar!`),
+              10_000
+            )
+            const at = Date.now()
+            await say(sentence)
+            await bubble.promise
+            if (Date.now() - at > 2500) fail('the spoken greeting took longer than 2.5 s')
+          }
+          if (fakeCohost.state.actRequests.length !== plannerBefore) {
+            fail('a named voice greeting reached the planner')
+          }
+          const buddy = await request(renderer, timeoutMs, 'cohost.status')
+          if (events.events.some((event) => event.event === 'liveChat.sendOperation')) {
+            fail('a voice greeting created a chat send operation')
+          }
+          if (
+            buddy.utterances.some(
+              (line) => line.status !== 'bubble-only' || line.destinationIds.length
+            )
+          ) {
+            fail(`voice greeting entered the posting lane: ${JSON.stringify(buddy.utterances)}`)
+          }
+          fakeCohost.state.greetFailure = false
+          await request(renderer, timeoutMs, 'cohost.settings.set', { wakeWordRequired: false })
+          results.push(
+            '4 voice greetings: Buddy/persona address → Jay_99 bubble within 2.5 s; AI-down fallback; no planner or chat post'
+          )
+          log('step 4: spoken greetings reached the bubble, including with greeting AI unavailable')
         }
         const before = fakeCohost.state.actRequests.length
         fakeCohost.queueActAnswer({

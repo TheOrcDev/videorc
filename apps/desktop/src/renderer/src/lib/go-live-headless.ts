@@ -17,6 +17,7 @@ import {
 import { goLiveEntitlementGate, type EntitlementUiGate } from './entitlement-ui'
 import { goLiveConfirmGate } from './go-live-dialog-view'
 import { streamingWithoutTargets } from './go-live-exclusions'
+import { headlessNonPublicRefusal } from './go-live-privacy'
 import {
   LIVESTREAM_STILL_SETTLING,
   shouldIgnoreGoLiveAction,
@@ -36,8 +37,11 @@ import { connectionBlockedReason, START_BLOCKED_COPY } from './start-blocked-cop
 // destination that isn't ready (`allowPartial`) and "Go live without
 // captions" (`withoutCaptions`). A blocker only the streamer can fix (sign
 // in, a missing key, Premium) is always a refusal: agents never connect
-// accounts. Loaded with the first agent Go Live, never in the eager bundle:
-// the Studio hands `goLiveWithoutDialog` its handlers and latest state.
+// accounts. A YouTube destination going live Unlisted or Private is refused
+// too unless the call says `allowNonPublic`, as the dialog asks the streamer
+// once more (owner report, 2026-11-12). Loaded with the first agent Go Live,
+// never in the eager bundle: the Studio hands `goLiveWithoutDialog` its
+// handlers and latest state.
 
 /** What an agent's `go_live` asks for, beside the saved setup. */
 export interface HeadlessGoLiveRequest {
@@ -50,6 +54,9 @@ export interface HeadlessGoLiveRequest {
   allowPartial?: boolean
   /** Go live without captions when they can't start. */
   withoutCaptions?: boolean
+  /** Go live when a YouTube destination is Unlisted or Private (the
+   * dialog's privacy step); without it, that is a refusal. */
+  allowNonPublic?: boolean
   /** Stop agents, Off or Remove cancelled the call (plan 209 review fix 1):
    * checked right before it confirms and before it starts. */
   cancelled?: () => boolean
@@ -147,7 +154,9 @@ export type HeadlessGoLiveDecision =
  * primary would be enabled, else its blockers in its own words, or, with
  * `allowPartial`, the destinations to leave out first. Captions arrive with
  * the call's `withoutCaptions` already folded into their readiness, as the
- * dialog's "Go live without captions" folds it in.
+ * dialog's "Go live without captions" folds it in. A YouTube destination
+ * that is Unlisted or Private confirms only with `allowNonPublic`, the
+ * dialog's privacy step; otherwise the agent reads the step's own sentence.
  */
 export function decideHeadlessGoLive(input: {
   preflight: GoLivePreflight
@@ -156,9 +165,15 @@ export function decideHeadlessGoLive(input: {
   captionsReadiness: GoLiveCaptionsReadiness
   entitlementGate: EntitlementUiGate
   allowPartial: boolean
+  allowNonPublic?: boolean
 }): HeadlessGoLiveDecision {
   const gate = goLiveConfirmGate(input)
-  if (!gate.blocked) return { kind: 'confirm' }
+  if (!gate.blocked) {
+    if (gate.nonPublicYouTube.length && input.allowNonPublic !== true) {
+      return { kind: 'refuse', message: headlessNonPublicRefusal(gate.nonPublicYouTube) }
+    }
+    return { kind: 'confirm' }
+  }
   // What only the streamer can fix comes first, each in the dialog's words.
   if (gate.entitlementBlocker) return { kind: 'refuse', message: gate.entitlementBlocker.reason }
   if (input.captionsReadiness.blocksStart) {
@@ -453,7 +468,8 @@ async function goLiveOwningTheTransport(
       sentStreaming: streamingWithoutTargets(config.streaming, excludedTargetIds),
       captionsReadiness,
       entitlementGate,
-      allowPartial: partial
+      allowPartial: partial,
+      allowNonPublic: request.allowNonPublic === true
     })
   let decision = decide(allowPartial)
   if (decision.kind === 'exclude') {

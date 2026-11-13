@@ -13,8 +13,8 @@ import type { CohostState } from '@/lib/backend'
 import {
   cohostStatusDetail,
   cohostStatusToast,
-  showChatNeedsVideorcSignIn,
   showStreamTargetNotice,
+  showChatNeedsVideorcSignIn,
   showVideorcSignInExpired,
   showXBroadcastProblem,
   sourceSwitchFailedDescription,
@@ -135,14 +135,14 @@ describe('showXBroadcastProblem', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
   })
 
-  it('warns in the YouTube toast words, never with the raw text', () => {
+  it('warns in the YouTube toast words, never with the raw text', async () => {
     const target = { id: 'x-1', label: 'X' }
-    showXBroadcastProblem('start', target, new Error('HTTP 503 {"errors":[]}'))
+    await showXBroadcastProblem('start', target, new Error('HTTP 503 {"errors":[]}'))
     expect(toast.warning).toHaveBeenLastCalledWith("Couldn't start the X broadcast", {
       id: 'x-broadcast-start:x-1',
       description: 'Try again. If it keeps happening, export a support bundle from Health.'
     })
-    showXBroadcastProblem('end', target, new Error('HTTP 500'))
+    await showXBroadcastProblem('end', target, new Error('HTTP 500'))
     expect(toast.warning).toHaveBeenLastCalledWith(
       "Couldn't end the X broadcast",
       expect.objectContaining({
@@ -150,7 +150,7 @@ describe('showXBroadcastProblem', () => {
         action: expect.objectContaining({ label: 'Open Media Studio' })
       })
     )
-    showXBroadcastProblem('chat', target, new Error('chat 401'))
+    await showXBroadcastProblem('chat', target, new Error('chat 401'))
     expect(toast.warning).toHaveBeenLastCalledWith(
       "X chat isn't connected for X",
       expect.objectContaining({ action: expect.objectContaining({ label: 'Open Livestream' }) })
@@ -162,8 +162,8 @@ describe('showXBroadcastProblem', () => {
 // in to your Videorc account" as an X failure and was sent to Livestream,
 // where X looked fine; Sign in is the fix, so it is the action.
 describe('the Videorc sign-in toasts', () => {
-  it('names the account with Sign in as the fix, never Open Livestream', () => {
-    showChatNeedsVideorcSignIn('X')
+  it('names the account with Sign in as the fix, never Open Livestream', async () => {
+    await showChatNeedsVideorcSignIn('X')
     expect(toast.warning).toHaveBeenLastCalledWith(
       'X chat needs your Videorc sign-in',
       expect.objectContaining({
@@ -172,15 +172,15 @@ describe('the Videorc sign-in toasts', () => {
         action: expect.objectContaining({ label: 'Sign in' })
       })
     )
-    showChatNeedsVideorcSignIn('Kick')
+    await showChatNeedsVideorcSignIn('Kick')
     expect(toast.warning).toHaveBeenLastCalledWith(
       'Kick chat needs your Videorc sign-in',
       expect.objectContaining({ id: 'chat-videorc-sign-in:Kick' })
     )
   })
 
-  it('says when the server signed the desktop out', () => {
-    showVideorcSignInExpired()
+  it('says when the server signed the desktop out', async () => {
+    await showVideorcSignInExpired()
     expect(toast.warning).toHaveBeenLastCalledWith(
       'Your Videorc sign-in expired',
       expect.objectContaining({

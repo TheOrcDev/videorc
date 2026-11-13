@@ -1,4 +1,4 @@
-import type { DeviceList } from '@/lib/backend'
+import type { DeviceList, StreamManagerHideMethod } from '@/lib/backend'
 
 export type ProtectedOverlayWindow = {
   open: boolean
@@ -20,6 +20,22 @@ export function streamManagerProtectedOverlayWindow(state: {
     open: state.open && state.hiddenFromStream,
     ...(typeof state.windowId === 'number' ? { windowId: state.windowId } : {})
   }
+}
+
+/** Plan 230: viewers really do not see the Stream Manager. The switch alone
+ * is not enough: the capture filter needs the window id, content protection
+ * must have taken, and Linux cannot hide it at all. */
+export function streamManagerHiddenFromViewers(state: {
+  open: boolean
+  hiddenFromStream: boolean
+  hideFromStreamMethod: StreamManagerHideMethod
+  protected: boolean
+  windowId?: number
+}): boolean {
+  if (!state.open || !state.hiddenFromStream) return false
+  if (state.hideFromStreamMethod === 'capture-filter') return typeof state.windowId === 'number'
+  if (state.hideFromStreamMethod === 'content-protection') return state.protected
+  return false
 }
 
 export function protectedOverlayWindowIdsFromOverlayWindows(

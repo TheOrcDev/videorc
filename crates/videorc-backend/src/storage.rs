@@ -7295,6 +7295,7 @@ impl Database {
             thumbnail_file: banner_thumbnail_file_name(&new.id),
             id: new.id,
             name: new.name,
+            kind: new.kind,
             width: new.width,
             height: new.height,
             has_alpha: new.has_alpha,
@@ -7314,8 +7315,8 @@ impl Database {
             "INSERT INTO banners (
                 id, name, image_file, thumbnail_file, width, height, has_alpha, sort_order,
                 shown, horizontal_json, vertical_json, show_on_stream, show_in_recording,
-                opacity, hide_after_sec, repeat_every_min, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                opacity, hide_after_sec, repeat_every_min, created_at, updated_at, kind
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 banner.id,
                 banner.name,
@@ -7335,9 +7336,25 @@ impl Database {
                 banner.repeat_every_min,
                 banner.created_at,
                 banner.updated_at,
+                banner.kind.column(),
             ],
         )?;
         transaction.commit()?;
+        Ok(banner)
+    }
+
+    /// Plan 232 D10: an HTML overlay's own picture was saved as its stored
+    /// image. Records whether it has see-through pixels and bumps
+    /// `updated_at` so every thumbnail reloads.
+    pub(crate) fn mark_banner_picture_saved(&self, id: &str, has_alpha: bool) -> Result<Banner> {
+        let conn = self.lock()?;
+        let mut banner = banner_by_id_locked(&conn, id)?;
+        banner.has_alpha = has_alpha;
+        banner.updated_at = Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE banners SET has_alpha = ?2, updated_at = ?3 WHERE id = ?1",
+            params![banner.id, banner.has_alpha, banner.updated_at],
+        )?;
         Ok(banner)
     }
 
@@ -8791,6 +8808,16 @@ impl Database {
             "pipeline_reported_audio_loss",
             "pipeline_reported_audio_loss INTEGER NOT NULL DEFAULT 0",
         )?;
+        // Plan 232: what a banner's picture is. Every row an older build
+        // wrote is an image; an older build reading a newer database names
+        // its columns and never sees this one (it would draw nothing for an
+        // HTML overlay, whose stored image may not exist yet).
+        ensure_column(
+            &conn,
+            "banners",
+            "kind",
+            "kind TEXT NOT NULL DEFAULT 'image'",
+        )?;
         // Plan 209 S2: every agent action, who made it and how it ended.
         // Capped at AGENT_ACTIVITY_MAX_ROWS rows or AGENT_ACTIVITY_MAX_DAYS
         // days by `prune_agent_activity`. A new table only; older backends
@@ -9087,7 +9114,7 @@ fn stream_screen_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StreamScr
 /// The `banners` columns in `banner_from_row` order.
 const BANNER_COLUMNS: &str = "id, name, image_file, thumbnail_file, width, height, has_alpha, \
      sort_order, shown, horizontal_json, vertical_json, show_on_stream, show_in_recording, \
-     opacity, hide_after_sec, repeat_every_min, created_at, updated_at";
+     opacity, hide_after_sec, repeat_every_min, created_at, updated_at, kind";
 
 /// The `sounds` columns in `sound_from_row` order (plan 189).
 const SOUND_COLUMNS: &str = "id, name, file, duration_ms, loudness_lufs, level_db, volume_db, \
@@ -9234,6 +9261,7 @@ fn banner_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Banner> {
         repeat_every_min: row.get(15)?,
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
+        kind: crate::protocol::BannerKind::from_column(&row.get::<_, String>(18)?),
     })
 }
 
@@ -9339,19 +9367,20 @@ fn resolve_managed_screen_image_path(root: &Path, screen_id: &str, path: &Path) 
 }
 
 pub(crate) fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        false
-    }
+    metadata.file_type().is_symlink() || metadata_is_reparse_point(metadata)
+}
+
+#[cfg(target_os = "windows")]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Only Windows has reparse points beyond symlinks.
+#[cfg(not(target_os = "windows"))]
+fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn chat_fact(value: u64) -> Result<i64> {

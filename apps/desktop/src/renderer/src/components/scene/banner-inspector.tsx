@@ -39,7 +39,8 @@ import {
   BANNER_OPACITY_MAX,
   BANNER_OPACITY_MIN,
   type Banner,
-  type BannerUpdateParams
+  type BannerUpdateParams,
+  type HtmlOverlayStatus
 } from '@/lib/backend'
 import { BANNER_SNAPS, BANNER_SNAP_LABELS, type BannerSnap } from '@/lib/banner-place'
 import type { BannerSizeAdvice } from '@/lib/banner-size'
@@ -88,6 +89,39 @@ export function bannerStateLine(
   if (!banner.showOnStream && !banner.showInRecording)
     return { state: 'off', line: BANNER_OFF_LINE }
   return { state: 'shown', line: BANNER_SHOWING_LINE }
+}
+
+/** An HTML banner's page is on its way (plan 232). */
+export const HTML_OVERLAY_LOADING_LINE = 'Loading the page…'
+
+/**
+ * What the inspector says about an HTML overlay's page (plan 232), or null
+ * while there is nothing to say: it is hidden, or live with nothing blocked.
+ * `warn` is true for a sentence the streamer has to act on. A page that asked
+ * for the network keeps running without it (D5), so that line is quiet.
+ */
+export function htmlOverlayStatusLine(
+  banner: Pick<Banner, 'kind' | 'shown'>,
+  status: HtmlOverlayStatus | null | undefined
+): { state: HtmlOverlayStatus['state']; line: string; warn: boolean } | null {
+  if (banner.kind !== 'html' || !banner.shown || !status) return null
+  if (status.state === 'loading') {
+    return { state: status.state, line: HTML_OVERLAY_LOADING_LINE, warn: false }
+  }
+  if (status.state === 'failed' || status.state === 'unavailable') {
+    return {
+      state: status.state,
+      line: status.detail ?? 'This banner stopped.',
+      warn: true
+    }
+  }
+  const blocked = status.blockedRequests ?? 0
+  if (blocked === 0) return null
+  return {
+    state: status.state,
+    line: `The network is off for HTML banners: ${blocked === 1 ? '1 request was' : `${blocked} requests were`} blocked. Put fonts, images and scripts in the banner's folder.`,
+    warn: false
+  }
 }
 
 /** The banner's two switches, its opacity and its timer: what the inspector changes in place. */
@@ -227,6 +261,7 @@ export function BannerInspector({
   banner,
   placeLabel,
   sizeAdvice,
+  overlayStatus = null,
   blockedReason = null,
   showLimitReason = null,
   inFront,
@@ -242,6 +277,8 @@ export function BannerInspector({
   /** "Place", or "Place on the vertical stream" while the stage shows it. */
   placeLabel: string
   sizeAdvice: BannerSizeAdvice
+  /** Where an HTML overlay's page stands (plan 232); null for an image. */
+  overlayStatus?: HtmlOverlayStatus | null
   /** Why every control is off (Videorc reconnecting); null while a change can be saved. */
   blockedReason?: string | null
   /** Why a hidden banner can't show now (four are showing), or null. */
@@ -261,6 +298,7 @@ export function BannerInspector({
   const blocked = blockedReason !== null
   const showReason = blocked ? null : banner.shown ? null : showLimitReason
   const stateLine = bannerStateLine(banner)
+  const overlayLine = htmlOverlayStatusLine(banner, overlayStatus)
   const committedOpacity = Math.round(banner.opacity * 100)
   // The slider's value while a drag runs and its one update lands. A newer
   // drag supersedes an older update, which then leaves the value alone.
@@ -331,6 +369,20 @@ export function BannerInspector({
             )}
             <span>{sizeAdvice.verdictLine}</span>
           </p>
+          {overlayLine ? (
+            <p
+              className={cn(
+                'flex items-start gap-1.5',
+                overlayLine.warn ? 'text-foreground' : 'text-muted-foreground'
+              )}
+              data-videorc-html-overlay-status={overlayLine.state}
+            >
+              {overlayLine.warn ? (
+                <WarningIcon aria-hidden className="mt-px size-3.5 shrink-0 text-warning" />
+              ) : null}
+              <span>{overlayLine.line}</span>
+            </p>
+          ) : null}
         </div>
         <ParameterSlider
           className={PARAMETER_THUMB}

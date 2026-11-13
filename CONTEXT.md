@@ -66,8 +66,8 @@ Clips keeps what a recording would (each item's Show in recording).
 The Output section and its one switch, "Keep the last seconds" (plan 181,
 the owner's redesign): whenever Videorc is open it keeps the last minute
 ready (plan 199), using each item's Show in recording switch and writing
-nothing permanent. The status bar
-reads "Clip · 1:00"; the ring is never "Recording" or "On air".
+nothing permanent. The status bar shows nothing for it (the "Clip · 1:00"
+chip was removed 2026-11-13); the ring is never "Recording" or "On air".
 _Avoid_: Replay buffer, instant replay, replay cache, buffer (alone)
 
 **Clip** (the action):
@@ -158,6 +158,14 @@ Scene page places them and shows or hides them ("Show", "Hide"). A banner
 stays over a takeover and under captions, Buddy and the highlight card.
 _Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
 name)
+
+**HTML banner**:
+A banner whose picture is a web page with a transparent background, so it
+can move: an animated badge, a ticker, a lower third (plan 232). Assets →
+Banners → "Import HTML…" takes an `.html` file or a folder with
+`index.html`. It is a banner in every other way. Code and wire names say
+`html overlay`; copy never does.
+_Avoid_: HTML overlay (in copy), browser source, web source, widget
 
 **Live background**:
 An animated background behind the screen and camera: Silk, Side Rays, Plasma
@@ -293,6 +301,14 @@ _Avoid_: Chat window, Comments window, comments (for chat)
 The viewers' messages, in Stream Manager and, while on air with Chat in
 Studio on, in the Studio's Chat section (plan 204).
 _Avoid_: comments
+
+**Presenting screen**, **Monitor screen**:
+The two screens of the Stream Deck's Stream Manager Screen key (plan 230).
+The Presenting screen is the one viewers see; the Monitor screen is where
+the streamer reads chat. A tap moves the Stream Manager from one to the
+other; from anywhere else it goes to the Monitor screen. On the key:
+Present and Monitor.
+_Avoid_: main screen, second screen, shared screen, chat screen
 
 **Chat command**:
 A `!name` a viewer types as the first word in chat (`!go`). Videorc answers

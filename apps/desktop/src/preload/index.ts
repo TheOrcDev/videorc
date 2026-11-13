@@ -57,6 +57,7 @@ const api: VideorcApi = {
   pickBannerImage: () => invoke('banners:pick-image'),
   pickCommunityExportDirectory: () => invoke('community:pick-export-directory'),
   pickCommunityImportFile: () => invoke('community:pick-import-file'),
+  pickBannerHtml: () => invoke('banners:pick-html'),
   pickSoundFiles: () => invoke('sounds:pick-files'),
   getStarterSounds: () => invoke('sounds:starter-list'),
   getStarterSoundFiles: (slugs) => invoke('sounds:starter-files', slugs),
@@ -211,6 +212,8 @@ const api: VideorcApi = {
     invoke('comments-window:set-always-on-top', alwaysOnTop),
   setCommentsWindowHiddenFromStream: (hidden) =>
     invoke('comments-window:set-hidden-from-stream', hidden),
+  swapCommentsWindowScreen: (request) => invoke('comments-window:swap-screen', request),
+  frontOrCloseCommentsWindow: () => invoke('comments-window:front-or-close'),
   setCommentsWindowHighlightAnchor: (anchor) =>
     invoke('comments-window:set-highlight-anchor', anchor),
   setCommentsWindowAutoShowActivity: (on) => invoke('comments-window:set-auto-show-activity', on),

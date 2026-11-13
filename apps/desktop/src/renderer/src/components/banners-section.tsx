@@ -3,6 +3,7 @@ import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
+  CodeIcon,
   DeleteIcon,
   EditIcon,
   ImageIcon,
@@ -21,19 +22,23 @@ import { Gallery } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { IN_USE_RING, InUseChip } from '@/components/takeover-screens-section'
 import { useWorkspaceNav } from '@/components/workspace-nav'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyContent, EmptyTitle } from '@/components/ui/empty'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useStudioBanners } from '@/hooks/use-studio'
 import { BANNER_MAX_SHOWN, type Banner } from '@/lib/backend'
+import type { BannerImportKind } from '@/lib/banner-import'
 import {
   BANNER_SHOWN_LIMIT_REASON,
+  bannerDeleteDescription,
+  bannerHtmlImportBlockedReason,
   bannerImportBlockedReason,
   bannerImportLabel,
   bannerOrderAfterMove
 } from '@/lib/banners'
-import { shortcutLabel } from '@/lib/platform'
+import { currentPlatform, isMacPlatform, shortcutLabel } from '@/lib/platform'
 import {
   MOVE_EARLIER_ACCELERATOR,
   MOVE_LATER_ACCELERATOR,
@@ -44,7 +49,7 @@ import { cn } from '@/lib/utils'
 
 /** The section's rules: what a banner is for, and the sizes that stay sharp (plan 186 D8). */
 export const BANNERS_DESCRIPTION =
-  'Images you place on your picture: a sponsor, your socials, a logo. PNG with transparency works best. Sharp sizes: wide banner 2400 × 400, logo 512 × 512, full frame 3840 × 2160.'
+  'Images you place on your picture: a sponsor, your socials, a logo. PNG with transparency works best. Sharp sizes: wide banner 2400 × 400, logo 512 × 512, full frame 3840 × 2160. An HTML banner is a web page with a transparent background, so it can move: import an .html file, or a folder with index.html.'
 
 /** A banner's name is the file stem, trimmed to this many characters (plan 186). */
 const BANNER_NAME_MAX_CHARS = 40
@@ -64,6 +69,7 @@ export function BannersSection(): ReactElement {
     bannersLoaded,
     bannersOffline,
     bannerImportPhase,
+    bannerImportKind,
     importBanner,
     updateBanner,
     reorderBanners,
@@ -80,11 +86,19 @@ export function BannersSection(): ReactElement {
   const [deleteTarget, setDeleteTarget] = useState<Banner | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deletePending, setDeletePending] = useState(false)
-  const importReason = bannerImportBlockedReason({
+  const importState = {
     offline: bannersOffline,
     phase: bannerImportPhase,
     count: banners.length
-  })
+  }
+  const importReasons: Record<BannerImportKind, string | null> = {
+    image: bannerImportBlockedReason(importState),
+    // Plan 232 D9: off macOS the button stays, with the one sentence why.
+    html: bannerHtmlImportBlockedReason({
+      ...importState,
+      mac: isMacPlatform(currentPlatform())
+    })
+  }
   const shownCount = banners.filter((banner) => banner.shown).length
 
   const moveTo = (banner: Banner, targetIndex: number): void => {
@@ -92,28 +106,40 @@ export function BannersSection(): ReactElement {
     if (ids) void reorderBanners(ids)
   }
 
-  const importButton = (testId: string): ReactElement => (
-    <DisabledReason reason={importReason}>
-      <Button
-        data-testid={testId}
-        disabled={importReason !== null}
-        variant="outline"
-        onClick={() => void importBanner()}
-      >
-        {bannerImportPhase !== 'idle' ? (
-          <Spinner aria-hidden data-icon="inline-start" />
-        ) : (
-          <ImageIcon data-icon="inline-start" />
-        )}
-        {bannerImportLabel(bannerImportPhase)}
-      </Button>
-    </DisabledReason>
+  const importButton = (testId: string, kind: BannerImportKind): ReactElement => {
+    const Icon = kind === 'html' ? CodeIcon : ImageIcon
+    const running = bannerImportPhase !== 'idle' && bannerImportKind === kind
+    return (
+      <DisabledReason reason={importReasons[kind]}>
+        <Button
+          data-testid={testId}
+          disabled={importReasons[kind] !== null}
+          variant="outline"
+          onClick={() => void importBanner(kind)}
+        >
+          {running ? (
+            <Spinner aria-hidden data-icon="inline-start" />
+          ) : (
+            <Icon data-icon="inline-start" />
+          )}
+          {bannerImportLabel(bannerImportPhase, kind, bannerImportKind)}
+        </Button>
+      </DisabledReason>
+    )
+  }
+  // Import image… and Import HTML… (plan 232), side by side wherever the
+  // section offers an import.
+  const importButtons = (suffix: string): ReactElement => (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      {importButton(`banner-import${suffix}`, 'image')}
+      {importButton(`banner-import-html${suffix}`, 'html')}
+    </div>
   )
 
   return (
     <>
       <PanelSection
-        action={importButton('banner-import')}
+        action={importButtons('')}
         description={BANNERS_DESCRIPTION}
         icon={ImageIcon}
         title="Banners"
@@ -185,7 +211,7 @@ export function BannersSection(): ReactElement {
         ) : (
           <Empty className="py-12" data-videorc-banners-empty="">
             <EmptyTitle>No banners yet</EmptyTitle>
-            <EmptyContent>{importButton('banner-import-empty')}</EmptyContent>
+            <EmptyContent>{importButtons('-empty')}</EmptyContent>
           </Empty>
         )}
       </PanelSection>
@@ -193,7 +219,7 @@ export function BannersSection(): ReactElement {
         confirmDisabled={deletePending}
         confirmLabel={deletePending ? 'Deleting…' : 'Delete banner'}
         cancelDisabled={deletePending}
-        description={`“${deleteTarget?.name ?? ''}” and its image will be deleted. This can't be undone.`}
+        description={bannerDeleteDescription(deleteTarget ?? { name: '' })}
         open={deleteOpen}
         testId="banner-delete"
         title="Delete banner?"
@@ -385,6 +411,12 @@ function BannerTile({
             {banner.name}
           </span>
         )}
+        {/* What it is, when it is not an image (plan 232): a tag, like 9:16. */}
+        {banner.kind === 'html' ? (
+          <Badge className="shrink-0" data-videorc-banner-kind="html" variant="outline">
+            HTML
+          </Badge>
+        ) : null}
         {banner.shown ? <InUseChip className="shrink-0" label="Showing" /> : null}
         {/* Out while renaming: the closing menu would hand focus back to
             its ⋯ and blur the name field the moment it opens. */}

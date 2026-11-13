@@ -587,6 +587,8 @@ export interface DirectoryFacts {
 
 export type ResourceCapabilityKind =
   | 'input-file'
+  /** Plan 232: a folder picked to import (an HTML overlay). */
+  | 'input-directory'
   | 'output-directory'
   | 'open-path'
   | 'reveal-path'
@@ -3014,6 +3016,8 @@ export interface WindowsD3d11PresenterDiagnostics {
   firstPresentSucceeded: boolean
   successfulPresents: number
   lastPresentedSequence?: number
+  /** The committed scene revision of the last presented frame. */
+  presentedSceneRevision?: number
   latestWinsDrops: number
   hiddenDrops: number
   busyDrops: number
@@ -5286,6 +5290,39 @@ export interface NotesDocument {
  */
 export type StreamManagerHideMethod = 'capture-filter' | 'content-protection' | 'unsupported'
 
+/** A screen the Stream Manager Screen key can pick (plan 230 D5): the OS's
+ * display id and the monitor's name, never a serial number. */
+export interface StreamManagerScreenOption {
+  id: string
+  name: string
+}
+
+/** The Stream Manager Screen key's two screens, by display id. */
+export interface StreamManagerScreenRequest {
+  presentingScreen: string
+  monitorScreen: string
+}
+
+export type StreamManagerScreen = 'presenting' | 'monitor'
+
+/** Whether the key's tap can move the window: Wayland gives no app a say in
+ * where its window goes, so there only the hold works. */
+export type StreamManagerScreenMoves = 'supported' | 'wayland'
+
+export type StreamManagerScreenRefusal =
+  | 'same-screen'
+  | 'screen-missing'
+  | 'not-moved'
+  | 'wayland'
+  | 'unavailable'
+
+/** A hold of the same key: what main did with the Stream Manager. */
+export type StreamManagerFrontOrCloseResult = 'front' | 'closed' | 'unavailable'
+
+export type StreamManagerScreenResult =
+  | { ok: true; screen: StreamManagerScreen }
+  | { ok: false; reason: StreamManagerScreenRefusal }
+
 export interface CommentsWindowState {
   open: boolean
   visible: boolean
@@ -5298,6 +5335,12 @@ export interface CommentsWindowState {
   hiddenFromStream: boolean
   /** How this platform hides the window when the switch is on. */
   hideFromStreamMethod: StreamManagerHideMethod
+  /** The Stream Manager Screen key (plan 230): the screen the open window
+   * sits on, and every screen it can move to. */
+  screenId: string | null
+  screens: StreamManagerScreenOption[]
+  /** Absent from builds before the Wayland check: moves work. */
+  screenMoves?: StreamManagerScreenMoves
   /** Where highlighted messages land on the stream. Owned by main so a
    * highlight fired with the window closed (shortcut, deck, co-host) still
    * honours the streamer's pick. */
@@ -6146,6 +6189,8 @@ export interface VideorcApi {
   /** Community → Settings → Import… (plan 225 D12): one export file, as an
    * `input-file` capability; null on cancel. */
   pickCommunityImportFile: () => Promise<ResourceSelection | null>
+  /** Assets → Banners → Import HTML… (plan 232): an `.html` file or a folder. */
+  pickBannerHtml: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
   checkDirectory: (directoryHandleId: string) => Promise<DirectoryFacts>
@@ -6345,6 +6390,13 @@ export interface VideorcApi {
   getCommentsWindowState: () => Promise<CommentsWindowState>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
   setCommentsWindowHiddenFromStream: (hidden: boolean) => Promise<CommentsWindowState>
+  /** The Stream Manager Screen key (plan 230): to the other of its two screens. */
+  swapCommentsWindowScreen: (
+    request: StreamManagerScreenRequest
+  ) => Promise<StreamManagerScreenResult>
+  /** The same key held (plan 230): to the front with the focus, or closed
+   * when it already has the focus. */
+  frontOrCloseCommentsWindow: () => Promise<StreamManagerFrontOrCloseResult>
   setCommentsWindowHighlightAnchor: (anchor: CommentHighlightAnchor) => Promise<CommentsWindowState>
   setCommentsWindowAutoShowActivity: (on: boolean) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void
@@ -7352,15 +7404,31 @@ export const BANNER_MAX_SHOWN = 4
 export const BANNER_OPACITY_MIN = 0.2
 export const BANNER_OPACITY_MAX = 1
 
+/**
+ * What a banner's picture is (plan 232). Only `'html'` is ever on the wire:
+ * an image banner carries no `kind` at all.
+ */
+export type BannerKind = 'html'
+
 export interface Banner {
   /** Stable UUID, used by remotes, the Stream Deck and `/banner`. */
   id: string
   name: string
-  /** Basename in the managed Banners dir, `<id>.png`. Never a path. */
+  /**
+   * Plan 232: `'html'` for an HTML overlay, a web page with a transparent
+   * background that main renders offscreen. Omitted for an image, never
+   * `null`.
+   */
+  kind?: BannerKind
+  /**
+   * Basename in the managed Banners dir, `<id>.png`. Never a path. For an
+   * HTML overlay it is the page's own picture, which exists a second after
+   * the overlay first shows.
+   */
   imageFile: string
   /** Basename of the ~480 px thumbnail, `<id>.thumb.png`. */
   thumbnailFile: string
-  /** Pixel size of the stored image. */
+  /** Pixel size of the stored image; for an HTML overlay, the page size in CSS pixels. */
   width: number
   height: number
   hasAlpha: boolean
@@ -7387,6 +7455,84 @@ export interface Banner {
 /** `banners.importImage`: a main-issued `input-file` capability. */
 export interface BannerImportImageParams {
   sourceCapability: string
+}
+
+/**
+ * `banners.importHtml` (plan 232): a main-issued `input-file` capability for
+ * one `.html` file, or `input-directory` for a folder with `index.html`.
+ */
+export interface BannerImportHtmlParams {
+  sourceCapability: string
+}
+
+/** The largest frame main sends for one HTML overlay: a 1080p frame (plan 232 D7). */
+export const HTML_OVERLAY_MAX_FRAME_PIXELS = 1920 * 1080
+/** The highest rate an HTML overlay renders at (plan 232 D7). */
+export const HTML_OVERLAY_MAX_FPS = 30
+/** The most HTML overlays main ever renders at once: the banners showing. */
+export const HTML_OVERLAY_MAX_TARGETS = BANNER_MAX_SHOWN
+
+/**
+ * One HTML overlay main renders now (plan 232 "Targets"): the page size in
+ * CSS pixels, the frame size in device pixels, and the rate.
+ */
+export interface HtmlOverlayTarget {
+  id: string
+  pageWidth: number
+  pageHeight: number
+  frameWidth: number
+  frameHeight: number
+  fps: number
+}
+
+/** `htmlOverlays.targets` (event) and `htmlOverlays.targets.get`. */
+export interface HtmlOverlayTargets {
+  targets: HtmlOverlayTarget[]
+}
+
+/** What main says about a page it hosts. */
+export type HtmlOverlayHostState = 'loading' | 'live' | 'failed'
+
+/** `htmlOverlays.host.report`, main only (the admin role). */
+export interface HtmlOverlayHostReportParams {
+  id: string
+  state: HtmlOverlayHostState
+  /** Why the page failed, in words the streamer can read. */
+  detail?: string
+  /** Requests the network rule cancelled (plan 232 D5). */
+  blockedRequests?: number
+}
+
+/**
+ * Where a showing HTML overlay stands. `unavailable`: it cannot be drawn
+ * here (the running session); `detail` is the sentence to show.
+ */
+export type HtmlOverlayState = 'loading' | 'live' | 'failed' | 'unavailable'
+
+export interface HtmlOverlayStatus {
+  id: string
+  state: HtmlOverlayState
+  /** The one sentence to show when the overlay is not live. Omitted otherwise. */
+  detail?: string
+  /** The size of the last frame, while live. */
+  frameWidth?: number
+  frameHeight?: number
+  /** Requests the network rule cancelled; omitted when none. */
+  blockedRequests?: number
+}
+
+/** `htmlOverlays.status` (event) and `htmlOverlays.status.get`. */
+export interface HtmlOverlayStatuses {
+  overlays: HtmlOverlayStatus[]
+}
+
+/** `htmlOverlays.stats`: the backend's side of the frame transport, for the smoke and the measured cost. */
+export interface HtmlOverlayStats {
+  framesReceived: number
+  framesDropped: number
+  bytesReceived: number
+  convertMicros: number
+  uploadsOpened: number
 }
 
 /** `banners.update`: only the fields to change. A timer of `0` turns it off. */
@@ -8175,6 +8321,7 @@ export interface CohostErrorDetail {
  * at once: `done`, `not-found` or `refused`, with the sentence in `message`.
  */
 export type CohostCommandKind =
+  | 'greet'
   | 'highlight'
   | 'clear'
   | 'remove'

@@ -95,8 +95,9 @@ describe('Electron IPC contract', () => {
     // grant (talk-show:display-sources, talk-show:media-grant).
     // 176: plan 226 S4 adds the Stream Manager's chat commands (get, push),
     // its `!go` relay pair, the failed replies (get, push) and ⋯ Chat commands….
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(176)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(176)
+    // The merged API includes community, Stream Manager screen actions and HTML banners.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(179)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(179)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -444,6 +445,30 @@ describe('Electron IPC contract', () => {
       ).toThrow()
     }
     expect(() => validateElectronInvokeArgs('comments-window:set-auto-show-activity', [])).toThrow()
+  })
+
+  it('lets the Stream Manager Screen key name two display ids and nothing else (plan 230)', () => {
+    const request = { presentingScreen: '1', monitorScreen: '2' }
+    expect(validateElectronInvokeArgs('comments-window:swap-screen', [request])).toEqual([request])
+    for (const forged of [
+      null,
+      'screen',
+      {},
+      { presentingScreen: '1' },
+      { presentingScreen: '', monitorScreen: '2' },
+      { presentingScreen: '1', monitorScreen: 2 },
+      { presentingScreen: 'x'.repeat(33), monitorScreen: '2' },
+      { presentingScreen: '1', monitorScreen: '2', frame: { x: 0 } }
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:swap-screen', [forged])).toThrow()
+    }
+  })
+
+  it('lets the hold of the same key carry nothing (plan 230)', () => {
+    expect(validateElectronInvokeArgs('comments-window:front-or-close', [])).toEqual([])
+    for (const forged of [[null], [{}], ['close']]) {
+      expect(() => validateElectronInvokeArgs('comments-window:front-or-close', forged)).toThrow()
+    }
   })
 
   it('lets the Stream Manager name a platform to reconnect, never the scopes (plan 140)', () => {
@@ -1265,6 +1290,33 @@ describe('community file pickers IPC (plan 225 D12)', () => {
         ...file,
         path: '/tmp/community.json'
       })
+    ).toThrow()
+  })
+})
+
+describe('HTML overlay picker IPC (plan 232)', () => {
+  it('takes no arguments and returns null, a file capability or a folder capability', () => {
+    expect(isElectronInvokeChannel('banners:pick-html')).toBe(true)
+    expect(electronInvokeApiMethods['banners:pick-html']).toBe('pickBannerHtml')
+    expect(boundedPassthroughElectronInvokeChannels).not.toContain('banners:pick-html')
+    expectTypeOf<ElectronInvokeResult<'banners:pick-html'>>().toEqualTypeOf<
+      Awaited<ReturnType<VideorcApi['pickBannerHtml']>>
+    >()
+    expect(validateElectronInvokeArgs('banners:pick-html', [])).toEqual([])
+    // The renderer never names a path: main's own dialog does.
+    expect(() => validateElectronInvokeArgs('banners:pick-html', ['/tmp/overlay'])).toThrow()
+
+    const file = { capabilityId: 'cap-1', kind: 'input-file', displayName: 'badge.html' }
+    const folder = { capabilityId: 'cap-2', kind: 'input-directory', displayName: 'Badge' }
+    expect(validateElectronInvokeResult('banners:pick-html', null)).toBeNull()
+    expect(validateElectronInvokeResult('banners:pick-html', file)).toStrictEqual(file)
+    expect(validateElectronInvokeResult('banners:pick-html', folder)).toStrictEqual(folder)
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-html', { ...folder, kind: 'output-directory' })
+    ).toThrow()
+    // Never a path beside the capability.
+    expect(() =>
+      validateElectronInvokeResult('banners:pick-html', { ...folder, path: '/tmp/overlay' })
     ).toThrow()
   })
 })

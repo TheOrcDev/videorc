@@ -3,7 +3,7 @@ import { act, createElement, type ComponentProps } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { Banner } from '@/lib/backend'
+import type { Banner, HtmlOverlayStatus } from '@/lib/backend'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { BANNER_SHOWN_LIMIT_REASON } from '@/lib/banners'
 import { OFFLINE_LOCK_REASON } from '@/lib/lock-reason'
@@ -15,7 +15,9 @@ import {
   BANNER_IN_FRONT_REASON,
   BANNER_SHOWING_LINE,
   BannerInspector,
-  SceneBannersSection
+  HTML_OVERLAY_LOADING_LINE,
+  SceneBannersSection,
+  htmlOverlayStatusLine
 } from './banner-inspector'
 
 // Plan 186 S6: the Scene page's Banners list and the selected banner's
@@ -195,6 +197,65 @@ describe('BannerInspector', () => {
     expect(sharpVerdict.getAttribute('data-videorc-banner-size-verdict')).toBe('sharp')
     expect(sharpVerdict.textContent).toBe('Your image is 2400 × 400 px: sharp at this size.')
     expect(sharpVerdict.querySelector('svg')).toBeNull()
+  })
+
+  it("says where an HTML banner's page stands, and nothing while it runs (plan 232)", async () => {
+    const badge = banner('badge', { kind: 'html', width: 640, height: 360, shown: true })
+    const status = (extra: Partial<HtmlOverlayStatus>): HtmlOverlayStatus => ({
+      id: 'badge',
+      state: 'live',
+      ...extra
+    })
+    const line = (): Element | null => document.querySelector('[data-videorc-html-overlay-status]')
+
+    // It is drawn at the size of its place, so it is never called soft.
+    await renderInspector(inspectorProps({ banner: badge, overlayStatus: status({}) }))
+    const verdict = document.querySelector('[data-videorc-banner-size-verdict]')!
+    expect(verdict.getAttribute('data-videorc-banner-size-verdict')).toBe('sharp')
+    expect(verdict.textContent).toBe('An HTML banner is drawn at this size, so it stays sharp.')
+    expect(line()).toBeNull()
+
+    await renderInspector(
+      inspectorProps({ banner: badge, overlayStatus: status({ state: 'loading' }) })
+    )
+    expect(line()?.getAttribute('data-videorc-html-overlay-status')).toBe('loading')
+    expect(line()?.textContent).toBe(HTML_OVERLAY_LOADING_LINE)
+    expect(line()?.querySelector('svg')).toBeNull()
+
+    // A page that stopped, or a recording that cannot draw it: the backend's
+    // sentence, with the warning icon, in plain text.
+    for (const [state, detail] of [
+      ['failed', 'This banner stopped: the page closed unexpectedly (crashed)'],
+      ['unavailable', "HTML banners can't join this recording. Hide it, or record at 30 fps."]
+    ] as const) {
+      await renderInspector(
+        inspectorProps({ banner: badge, overlayStatus: status({ state, detail }) })
+      )
+      expect(line()?.getAttribute('data-videorc-html-overlay-status')).toBe(state)
+      expect(line()?.textContent).toBe(detail)
+      expect(line()?.querySelector('svg')).not.toBeNull()
+      expect(line()?.className).not.toContain('text-subtle')
+    }
+
+    // The network is off: it keeps running, and the inspector says what was blocked.
+    await renderInspector(
+      inspectorProps({ banner: badge, overlayStatus: status({ blockedRequests: 3 }) })
+    )
+    expect(line()?.textContent).toBe(
+      "The network is off for HTML banners: 3 requests were blocked. Put fonts, images and scripts in the banner's folder."
+    )
+    expect(htmlOverlayStatusLine(badge, status({ blockedRequests: 1 }))?.line).toContain(
+      '1 request was blocked'
+    )
+
+    // Hidden, an image, or no status yet: nothing to say.
+    expect(
+      htmlOverlayStatusLine({ ...badge, shown: false }, status({ state: 'loading' }))
+    ).toBeNull()
+    expect(
+      htmlOverlayStatusLine(banner('sponsor', { shown: true }), status({ state: 'failed' }))
+    ).toBeNull()
+    expect(htmlOverlayStatusLine(badge, null)).toBeNull()
   })
 
   it('commits opacity once per change, from 20 to 100 %', async () => {

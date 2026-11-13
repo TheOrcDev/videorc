@@ -115,6 +115,24 @@ with the code, and the backend's fallback reason says whether a fresh device
 was refused too (then it is the display or the session, not Videorc).
 `-- --probe-capture` stops after the 5 s capture-rate sample.
 
+A performance check never shows in the Preview (#1088, plan 212). It shows
+the DXGI display under four solid banners and runs a real check with Clips
+on, with Clips off, and with Record pressed during rung 2:
+
+```powershell
+pnpm smoke:preview-check-invisible
+```
+
+On Windows the Preview is the Electron proof surface, which main composes
+itself, so the smoke reads it through main's dev-only `preview-surface-sample`
+command (a capture of the surface's `#scene-root`), not the backend's
+`preview.debug.sample`. A test-pattern layer in the surface's own scene fails
+as `test-pattern-scene-source`. While the backend D3D11 presenter owns the
+Preview, which no page capture can see, its pixel checks are a named SKIP and a
+presenter fallback during the check fails as `presenter-fell-back`. On the UHD
+620 laptop the idle Preview is the proof surface. A refused or asleep DXGI
+display is a named SKIP, and the smoke holds an awake display on.
+
 Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):
 
@@ -155,6 +173,44 @@ pnpm smoke:recording-native-preview -- --expect-fallback natural
 ```
 
 Never use forced failure injection as natural-fallback acceptance evidence.
+
+## Record latency on Windows
+
+The packaged app records its microphone through `ffmpeg-capture.exe`, the
+capture worker beside the bundled FFmpeg. The Clips session then hands the open
+microphone to Record, and Record's FFmpeg reads one PCM pipe. `pnpm
+ffmpeg:fetch:windows` does not provide that worker. Without it, the dev backend
+falls back to FFmpeg's own DirectShow input, which FFmpeg opens before it
+reaches the encoder bridge's video pipe on every start. On an Intel UHD 620
+laptop that adds about 0.55 s to each Record (warm click → `recording` p50 905
+ms on the fallback, 346 ms with the worker, both with the standby encoder; see
+`docs/acceptance/2026-11-11-windows-record-ffmpeg-fifo-open.md`). A worktree
+without `vendor/ffmpeg/windows-x64/bin/ffmpeg.exe` runs `ffmpeg` from PATH and
+always takes the fallback.
+
+So before measuring Record latency, put the worker beside the dev app's FFmpeg.
+Either build it (`pnpm ffmpeg:build:capture:windows`, MSYS2 UCRT64), which
+writes it into the fetched `vendor\ffmpeg\windows-x64\bin`, or link the
+installed app's bundle into the worktree. `mklink /J` fails when that `bin`
+folder already exists (for example after `pnpm ffmpeg:fetch:windows`), so the
+commands below move a fetched one aside first:
+
+```powershell
+New-Item -ItemType Directory -Force vendor\ffmpeg\windows-x64 | Out-Null
+if (Test-Path vendor\ffmpeg\windows-x64\bin) { Rename-Item vendor\ffmpeg\windows-x64\bin bin.fetched }
+cmd /c mklink /J vendor\ffmpeg\windows-x64\bin "$env:LOCALAPPDATA\Programs\Videorc\resources\ffmpeg\bin"
+$env:VIDEORC_DEV_BACKEND_PROFILE = 'release'
+$env:VIDEORC_SMOKE_FFMPEG_PATH = "$PWD\vendor\ffmpeg\windows-x64\bin\ffmpeg.exe"
+node scripts/smoke-record-latency-app.mjs --cycles 10
+```
+
+The smoke prints the route it measures first (`microphone route: capture
+worker …` or `… DirectShow FALLBACK …`) and records it as `microphoneRoute` in
+its report. `--enforce` refuses the fallback as BLOCKED before launch, and
+fails a run in which a present worker still fell back at runtime
+(`microphoneRoute.workerFallbacks` above 0). Keep the display awake
+for the whole run: with the display off, Desktop Duplication is refused and
+the first Clips session never starts.
 
 ## D3D11 source and physical gates
 

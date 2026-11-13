@@ -519,6 +519,89 @@ describe('executeRemoteIntent', () => {
       params: { intentId: 'intent-h4', ok: true }
     })
   })
+  it("asks main to move the Stream Manager to the key's other screen (plan 230)", async () => {
+    const swapStreamManagerScreen = vi.fn(async () => ({
+      ok: true as const,
+      screen: 'presenting' as const
+    }))
+    const { context, requests } = remoteIntentContext({ swapStreamManagerScreen })
+
+    await executeRemoteIntent(
+      {
+        intentId: 'sm-1',
+        intent: { kind: 'streamManagerScreenSwap', presentingScreen: '1', monitorScreen: '2' }
+      },
+      context
+    )
+
+    expect(swapStreamManagerScreen.mock.calls).toEqual([
+      [{ presentingScreen: '1', monitorScreen: '2' }]
+    ])
+    expect(requests.at(-1)).toEqual({
+      method: 'remote.intent.ack',
+      params: { intentId: 'sm-1', ok: true }
+    })
+  })
+
+  it('brings the Stream Manager up or closes it on a hold, and says when it cannot (plan 230)', async () => {
+    for (const [result, ok] of [
+      ['front', true],
+      ['closed', true],
+      ['unavailable', false]
+    ] as const) {
+      const { context, requests } = remoteIntentContext({
+        frontOrCloseStreamManager: async () => result
+      })
+      await executeRemoteIntent(
+        { intentId: `hold-${result}`, intent: { kind: 'streamManagerFrontOrClose' } },
+        context
+      )
+      expect(requests.at(-1)).toEqual({
+        method: 'remote.intent.ack',
+        params: ok
+          ? { intentId: `hold-${result}`, ok: true }
+          : { intentId: `hold-${result}`, ok: false, message: "That window isn't available." }
+      })
+    }
+  })
+
+  it('says why the Stream Manager did not move, in plain words (plan 230)', async () => {
+    const intent = { kind: 'streamManagerScreenSwap', presentingScreen: '1', monitorScreen: '2' }
+    const cases = [
+      ['screen-missing', "That screen isn't connected. Pick your screens again."],
+      ['same-screen', 'Pick two different screens.'],
+      ['not-moved', "The Stream Manager didn't move. Try again."],
+      [
+        'wayland',
+        "Wayland doesn't let Videorc move windows. Hold the key to bring the Stream Manager up."
+      ],
+      ['unavailable', "That window isn't available."]
+    ] as const
+    for (const [reason, message] of cases) {
+      const { context, requests } = remoteIntentContext({
+        swapStreamManagerScreen: async () => ({ ok: false, reason })
+      })
+      await executeRemoteIntent({ intentId: `sm-${reason}`, intent }, context)
+      expect(requests.at(-1)).toEqual({
+        method: 'remote.intent.ack',
+        params: { intentId: `sm-${reason}`, ok: false, message }
+      })
+    }
+    const swap = vi.fn()
+    const missing = remoteIntentContext({ swapStreamManagerScreen: swap })
+    await executeRemoteIntent(
+      { intentId: 'sm-x', intent: { kind: 'streamManagerScreenSwap', presentingScreen: '1' } },
+      missing.context
+    )
+    expect(swap).not.toHaveBeenCalled()
+    const noMain = remoteIntentContext()
+    await executeRemoteIntent({ intentId: 'sm-y', intent }, noMain.context)
+    for (const { requests } of [missing, noMain]) {
+      expect(requests.at(-1)).toMatchObject({
+        params: { ok: false, message: "That window isn't available." }
+      })
+    }
+  })
 })
 
 describe('RemoteSurfacePublisher', () => {
@@ -1073,6 +1156,108 @@ it('projects Buddy Live as one boolean, off until the Studio says', async () => 
     publisher.syncValues([...base.slice(0, 18), true] as unknown as RemoteSurfaceValues)
     await vi.runAllTimersAsync()
     expect(requests.at(-1)).toMatchObject({ state: { buddyLive: true } })
+    publisher.detach()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('projects where the Stream Manager is and names the screens it can move to (plan 230 D5)', async () => {
+  vi.useFakeTimers()
+  try {
+    const requests: unknown[] = []
+    const publisher = new RemoteSurfacePublisher()
+    publisher.attach({
+      request: async (_method, params) => {
+        requests.push(params)
+        return undefined as never
+      }
+    })
+    publisher.markConnected()
+    const base: RemoteSurfaceValues = [
+      'idle',
+      false,
+      true,
+      false,
+      false,
+      'screen-only',
+      null,
+      false,
+      true,
+      false,
+      [],
+      [],
+      undefined,
+      false,
+      [],
+      [],
+      null,
+      false,
+      false
+    ]
+    publisher.syncValues(base)
+    await vi.runAllTimersAsync()
+    expect(requests.at(-1)).toMatchObject({
+      state: { streamManager: { screenId: null, visible: false, hiddenFromStream: false } },
+      describe: { screens: [], screenMoves: 'supported' }
+    })
+    publisher.syncValues([
+      ...base,
+      {
+        open: true,
+        screenId: '2',
+        hiddenFromStream: true,
+        hideFromStreamMethod: 'capture-filter',
+        protected: false,
+        windowId: 7,
+        visible: true,
+        screens: [
+          { id: '1', name: 'DELL U2723QE' },
+          { id: '2', name: 'DELL U2311H' }
+        ],
+        bounds: { x: 0, y: 0, width: 10, height: 10 }
+      }
+    ] as unknown as RemoteSurfaceValues)
+    await vi.runAllTimersAsync()
+    const last = requests.at(-1) as {
+      state: { streamManager: unknown }
+      describe: { screens: unknown }
+    }
+    expect(last.state.streamManager).toEqual({
+      screenId: '2',
+      visible: true,
+      hiddenFromStream: true
+    })
+    expect(last.describe.screens).toEqual([
+      { id: '1', name: 'DELL U2723QE' },
+      { id: '2', name: 'DELL U2311H' }
+    ])
+    expect(JSON.stringify(last)).not.toContain('bounds')
+    expect(JSON.stringify(last)).not.toContain('windowId')
+    expect((last.describe as { screenMoves?: unknown }).screenMoves).toBe('supported')
+    publisher.syncValues([
+      ...base,
+      {
+        open: true,
+        screenId: '2',
+        hiddenFromStream: true,
+        hideFromStreamMethod: 'unsupported',
+        protected: false,
+        visible: true,
+        screens: [],
+        screenMoves: 'wayland'
+      }
+    ] as unknown as RemoteSurfaceValues)
+    await vi.runAllTimersAsync()
+    // Wayland: the key says a tap cannot move the window.
+    expect((requests.at(-1) as { describe: { screenMoves: unknown } }).describe.screenMoves).toBe(
+      'wayland'
+    )
+    expect((requests.at(-1) as { state: { streamManager: unknown } }).state.streamManager).toEqual({
+      screenId: '2',
+      visible: true,
+      hiddenFromStream: false
+    })
     publisher.detach()
   } finally {
     vi.useRealTimers()
