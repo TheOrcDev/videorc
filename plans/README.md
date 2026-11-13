@@ -1,5 +1,19 @@
 # Implementation Plans
 
+- 2026-11-13: [Plan 234](234-cloud-on-neon-and-livekit.md), the owner's
+  ask: "plan out Neon + LiveKit managed media". PLANNED, not started:
+  - Videorc Cloud is merged and released with its switches off, and it has
+    no media server. This plan runs it with none of our own: Neon for data
+    and storage, LiveKit Cloud's managed Ingress and Egress for media.
+  - A web page of ours, opened by LiveKit's egress, draws what viewers
+    see: the feed, Be right back when it stops, and the talk-show stage.
+    The desktop's control socket becomes HTTPS calls to videorc.com; the
+    feed, `CloudStatus` and every UI surface stay.
+  - Phase 0 decides: picture quality after one more encode, the hold,
+    what LiveKit keeps of a stream key, uploads to Neon, and the meter.
+  - Open, for the owner: stream keys pass through videorc.com and LiveKit
+    (D7), the cost per hour against the plans' allowances (D19, private),
+    and 1080p60 (D12). The node path stays in the code (D2).
 - 2026-11-13: [Plan 233](233-green-screen-without-edge-snow.md), the owner's
   stream on 0.22.1: green "snow" still crawls along the head, ears, hair and
   shoulders, in a new place every frame. EXECUTING 2026-11-13 with the
