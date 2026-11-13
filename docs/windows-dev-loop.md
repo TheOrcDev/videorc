@@ -212,6 +212,15 @@ fails a run in which a present worker still fell back at runtime
 for the whole run: with the display off, Desktop Duplication is refused and
 the first Clips session never starts.
 
+The smoke's test pattern keeps every Record on the CPU compositor. To measure
+the D3D11 media path a real screen takes, add `--real-screen`: it picks the
+first DXGI display (Camera Off, full-bleed) and covers it with the animated
+fixture window from `smoke:hide-screen:windows` for the whole run. Each cycle
+and the report name the path it ran on (`media d3d11` or `media
+cpu-compositor`). `--real-screen` is report-only; the budgets in
+`docs/acceptance/2026-11-12-windows-record-latency-calibration.md` gate the
+test-pattern path.
+
 ## D3D11 source and physical gates
 
 Plan 040 is currently an implementation branch, not a qualified Windows
