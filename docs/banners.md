@@ -74,11 +74,22 @@ background, so it can move: an animated badge, a ticker, a lower third (plan
 - **What it cannot do**: use the camera, the microphone, the screen or any
   other permission; open a window or a link; download; reach the app or
   another banner's files. Its sound is muted.
-- **Where it does not draw yet**: on Windows and Linux (Import HTML… is
-  off there and says so), and in a recording Videorc makes without its own
-  compositor, such as 4K60: Show is refused there with "HTML banners can't
-  join this recording. Hide it, or record at 30 fps.", and one that was
-  already showing stays out of that recording and says so in its inspector.
+- **Where it draws**: on macOS, Windows and Linux, in the Preview, the
+  recording and every stream leg. On Windows and Linux, Import HTML… first
+  asks whether you import a folder or a single file (their file pickers
+  can't take either in one go, as the Mac's does).
+- **Where it does not draw yet**: in a recording Videorc makes without its
+  own compositor, such as 4K60: Show is refused there with "HTML banners
+  can't join this recording. Hide it, or record at 30 fps.", and one that
+  was already showing stays out of that recording and says so in its
+  inspector. The same holds for a Windows screen-only recording that
+  started with no banner showing (it goes straight from the screen to the
+  file).
+- **A page that never draws** (it loaded, but nothing reached Videorc in
+  10 seconds) is said to have stopped, in the Scene inspector. On Linux in
+  a Wayland session the sentence also says to start Videorc with
+  `--ozone-platform=x11` if that keeps happening: offscreen drawing is the
+  one part of an HTML banner that leans on the desktop session.
 - Its tile shows the page's own picture a second after it first runs.
 
 The Preview shows the program: a showing banner appears whenever a running

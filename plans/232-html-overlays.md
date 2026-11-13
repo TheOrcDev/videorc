@@ -7,8 +7,9 @@
 
 ## Status
 
-- **Status**: S1 to S6 BUILT 2026-11-12 on `feat/html-overlays` (draft PR #1323).
-  S7 onward are follow-ups. See "As built".
+- **Status**: S1 to S6 MERGED 2026-11-13 (#1323, macOS). S11 (Windows and
+  Linux) BUILT 2026-11-13 on `html-banners-windows-linux` (draft PR). S7 and
+  S8 to S10, S12 to S14 are follow-ups. See "As built" and "As built: S11".
 - **Priority**: P1 (owner request, 2026-11-12).
 - **Effort**: L. A new banner kind in the store, an import, a sandboxed
   page host in the main process, a frame transport into the backend, one
@@ -92,7 +93,7 @@ owner should look at.
 | D6 | Engine and transport? | Electron offscreen rendering in the main process, software `paint` path. Main writes each frame (premultiplied BGRA) down one long-lived loopback HTTP upload to the backend, authenticated with the admin token. The backend turns it into straight alpha off the render thread and keeps the latest frame per overlay. See "Transport". |
 | D7 | Frame size and rate? | The backend names the size: the overlay's contained draw size on the largest canvas that carries it, so the page is rasterised by Chromium at the pixels it lands on. Capped at **2,073,600 px** (a 1080p frame). Rate: the compositor's rate, at most **30 fps**. A still page sends nothing after its first frame. |
 | D8 | Which legs? | The banner legs, unchanged: the primary leg, the auxiliary leg (the stream leg of a record-and-stream session, the vertical stream) and the Preview's program leg. Hide screen is done at the capture source (plan 210 D8) and is not touched. |
-| D9 ⚑ | Platforms? | **macOS only in this slice.** On Windows and Linux the import is refused with one sentence and the button is disabled with it. On macOS, a session on the legacy FFmpeg graph (4K60, bridge off) cannot draw one: Show is refused there, and one that already shows is left out and says so. |
+| D9 ⚑ | Platforms? | S1 to S6: **macOS only**. **S11 (2026-11-13): macOS, Windows and Linux**, the same in Studio, the Preview, the recording and every stream leg. On every platform a session the compositor does not compose (the legacy FFmpeg graph at 4K60 with the bridge off; on Windows also the direct D3D11 screen recording, chosen only when no banner shows at start) cannot draw one: Show is refused there, and one that already shows is left out and says so. |
 | D10 | Thumbnail? | The backend saves the overlay's own picture one second after its first frame, as the banner's stored image and thumbnail. Until then the tile shows the HTML glyph. |
 
 ## Design
@@ -166,7 +167,9 @@ latest frame, not a prepared bitmap. The rest is the banner path.
 | **Metal** (macOS Preview, recording, stream, both legs) | The same keyed slot. The texture is reused while the frame size holds and is uploaded when the revision changes, so once per new frame per compositor that draws it. Opacity × fade is the layer opacity. |
 | **CPU** (macOS fallback) | A straight-alpha blit: 1:1 when the frame is the draw size, nearest-neighbour otherwise. |
 | **Legacy FFmpeg graph** (4K60, bridge off) | Not drawn. Show is refused; one already showing is left out and says so. |
-| **Windows D3D11, Linux, the Electron proof surface** | Not drawn; the import is refused (D9). |
+| **Windows D3D11 session** (Windows Preview during a session, recording, stream, both legs) | S11: the banner's image layer, its upload keyed by the frame's revision, so the cached texture is reused while the size holds and updated once per new frame. |
+| **CPU compositor on Linux** | S11: the CPU path above (it already drew frames; only the platform gate stood in the way). |
+| **The Electron proof surface** (the Windows idle Preview, the Linux Preview) | S11: the layer polls `/preview/html-overlay/latest.bmp` (the latest frame as a straight-alpha BMP, encoded once per frame) with the Buddy layer's poller. On macOS, where it is only the native Preview's fallback, it keeps the stored picture. |
 
 ### Import
 
@@ -175,7 +178,7 @@ latest frame, not a prepared bitmap. The rest is the banner path.
    `input-directory`).
 2. **Backend**: `banners.importHtml {sourceCapability}` on the AssetImport
    lane.
-   1. Refuse on Windows and Linux.
+   1. (S1 to S6 only: refuse on Windows and Linux. Gone in S11.)
    2. A file must end in `.html` or `.htm`; a folder must hold `index.html`.
    3. Walk the folder: refuse a symbolic link, more than 512 files, more
       than 8 levels, more than 64 MB, an entry page over 5 MB.
@@ -188,7 +191,7 @@ latest frame, not a prepared bitmap. The rest is the banner path.
 
 **Refusals** (verbatim; warnings, never errors):
 
-- "HTML banners work on macOS only for now."
+- ~~"HTML banners work on macOS only for now."~~ (removed in S11)
 - "This isn't an HTML file. Choose an .html file or a folder with index.html."
 - "This folder has no index.html."
 - "This HTML banner is too large. Use one under 64 MB and 512 files."
@@ -216,7 +219,8 @@ All of it is in `shared/backend-rpc-contract.ts` with strict schemas.
 Load `.claude/skills/videorc-design/SKILL.md` first; both themes.
 
 - **Assets → Banners**: the header gets a second action, **Import HTML…**
-  (disabled off macOS, with the D9 sentence as its reason). The description
+  (S1 to S6: disabled off macOS, with the D9 sentence as its reason; S11:
+  on everywhere, and off macOS it asks folder or file first). The description
   gains "An HTML banner is a web page with a transparent background, so it
   can move: import an .html file, or a folder with index.html."
 - **Tile**: an **HTML** tag beside the name. Before D10's picture exists
@@ -311,7 +315,7 @@ Done when `pnpm smoke:html-overlay` and `pnpm smoke:banners` pass.
 - **S9** ⚑: per-overlay "Allow network" (owner decision, D5).
 - **S10**: dirty-rect uploads, then the shared-texture path if the measured
   cost on a 4K session asks for it.
-- **S11**: Windows (D3D11 image layer per frame) and Linux (CPU path).
+- **S11**: Windows (D3D11 image layer per frame) and Linux (CPU path). BUILT 2026-11-13, see "As built: S11".
 - **S12**: the agent tool (`edit_banner` learns the kind; an import tool)
   and a Stream Deck key state for an overlay that stopped.
 - **S13**: data in: chat, follows and the session clock reach the page
@@ -474,3 +478,61 @@ S1 to S6 are built, on macOS.
 - The owner's answers to D3 (default page size), D5 (network) and D9
   (platforms).
 - A packaged-app take.
+
+## As built: S11, Windows and Linux (2026-11-13, branch `html-banners-windows-linux`)
+
+The owner's ask: the same HTML banners on all three platforms, in Studio,
+the Preview, the recording and the stream. macOS is unchanged.
+
+**What was macOS-only, and what replaced it**
+
+| Where | macOS-only in S1 to S6 | S11 |
+| ----- | ---------------------- | --- |
+| Backend import (`html_overlay.rs`) | `html_overlays_supported()` = `cfg!(target_os = "macos")`; refusal "HTML banners work on macOS only for now." | Gone: every platform imports. `import_html_overlay_unchecked` folded into `import_html_overlay`. |
+| Backend Show (`banners.rs`) | Show refused off macOS. | Gone; the session gate (a session the compositor composes) is unchanged. |
+| Windows D3D11 session (`windows_d3d11_session.rs`) | `BannerPixels::images_only`: never drew an HTML banner. | `WindowsD3d11OverlayInput.html_overlays` (the shared `HtmlOverlayService`); `banner_draws_for_leg` returns the latest frame on the recording leg, the stream leg and the Preview as for any banner. `images_only` is test-only now. |
+| Linux | The CPU compositor already drew frames; only the gate above. | Nothing else needed in the backend. |
+| Proof surface (Windows idle Preview, Linux Preview), `preview-surface-banners.ts` | An HTML banner's layer was its stored picture: a still. | New route `GET /preview/html-overlay/latest.bmp?token=&id=` (renderer or admin token; cursor via `afterGeneration` = the banner id and `afterSequence` = the frame's revision; `204` + `x-videorc-layer-empty` when there is no frame), polled by the proof page's overlay poller. macOS keeps the stored picture (`previewSurfaceDrawsHtmlBannerFrames`). |
+| Main's targets feed (`main/index.ts`) | `htmlOverlays.targets` subscribed and `htmlOverlays.targets.get` sent on macOS only: no page ever rendered elsewhere. | Every platform. |
+| Main's picker | `openFile` + `openDirectory` in one dialog: on Windows and Linux Electron shows a folder picker, so a single `.html` could never be chosen. | Off macOS a question first ("Choose a Folder…", "Choose a File…", "Cancel"), then the matching dialog (`htmlOverlayPickNeedsChoice`, `htmlOverlayPickDialog`). |
+| Paint size (`htmlOverlayBitmapSize`) | Integer display scales only: a 125 % or 150 % Windows display (or a fractional Wayland output) gives a bitmap whose sides Chromium rounds on their own, and the frame was dropped. | Each side tried within a pixel of the estimate; the size that holds the bytes with the page's shape wins. |
+| Renderer (`banners-section.tsx`, `lib/banners.ts`) | Import HTML… disabled off macOS with the sentence. | Enabled everywhere under the image import's own reasons; the sentence is gone from `BANNER_REFUSALS`. Eager bundle: 2,335,235 raw / 479,652 gzip after this branch's subtractive renderer change; ceilings (2,340,000 / 480,000) not raised. |
+| Smoke | `smoke:html-overlay` SKIPped off macOS. | Runs on all three; Linux streams the horizontal leg only, as `smoke:banners` does (`scripts/lib/html-overlay-smoke-plan.mjs`). |
+
+**Wayland and X11.** Electron's offscreen rendering paints in software into
+a bitmap and needs no visible window, so the host is the same on X11 and
+Wayland. What the desktop session can still break is the paint itself; so
+on every platform a page that loaded and has not painted in 10 s is called
+stopped ("This banner stopped: the page loaded but drew no picture"), and
+on a Linux Wayland session the sentence adds "Offscreen drawing may not
+work in this Wayland session: start Videorc with --ozone-platform=x11 and
+show it again" (`htmlOverlayNoPictureDetail`). A late first paint puts it
+back to live. Not yet observed on a real Wayland box: see "Owed".
+
+**Tests added**
+
+- Rust: `every_platform_imports_an_html_overlay` (replaces the platform
+  refusal test), `the_proof_surface_polls_the_latest_frame_as_a_bmp`,
+  `the_proof_surface_route_answers_in_the_buddy_layers_dialect`, and the
+  Windows-only `windows_html_banner_draws_its_latest_frame_on_each_leg`
+  (registered in `scripts/lib/windows-d3d11-media.mjs`; compiled and run by
+  the Windows CI job): nothing before the first frame, the frame on the
+  recording and stream legs, a new upload per new frame, "Appears in"
+  followed.
+- TS: the fractional-scale paint sizes and the geometry round trip at 1.25,
+  1.5 and 1.75; the picker per platform; the no-picture sentence on X11,
+  Wayland and elsewhere; the proof surface's HTML layer (polled on Windows
+  and Linux, the stored picture on macOS, image banners untouched, the
+  route); Import HTML… enabled and importing on `win32` and `linux`.
+- Node: `html-overlay-smoke-plan.test.mjs`.
+
+**Gates (local, macOS, 2026-11-13)**: see the PR body for the exact run.
+
+**Owed**
+
+- `pnpm smoke:html-overlay` on a Windows box and on a Linux box, X11 and
+  Wayland (Hyprland), with the by-eye pass of the Preview there. ogre was
+  busy with another lane's builds (disk at 97 %, swap near full), so it was
+  not used.
+- The Windows D3D11 test and the Windows/Linux clippy run in CI; the macOS
+  host type-checked the Windows build with `cargo xwin` (see the PR).
