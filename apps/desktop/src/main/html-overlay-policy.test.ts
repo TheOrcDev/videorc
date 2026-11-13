@@ -28,6 +28,10 @@ import {
   htmlOverlayRequestVerdict,
   htmlOverlayWebPreferences,
   htmlOverlayWindowGeometry,
+  HTML_OVERLAY_PICK_CHOICES,
+  htmlOverlayNoPictureDetail,
+  htmlOverlayPickDialog,
+  htmlOverlayPickNeedsChoice,
   isHtmlOverlayId,
   resolveHtmlOverlayFile,
   type HtmlOverlayFileSystem
@@ -379,6 +383,44 @@ describe('the window for a target', () => {
     )
   })
 
+  it('reads a paint on a fractional display scale (Windows 125 %, 150 %; Wayland 1.25)', () => {
+    // Plan 232 S11: Chromium rounds each side on its own, up or down.
+    // 341 x 191 DIP at 1.25 is 426.25 x 238.75: a 427 x 239 bitmap.
+    expect(htmlOverlayBitmapSize({ width: 341, height: 191 }, 427 * 239 * 4)).toEqual({
+      width: 427,
+      height: 239
+    })
+    // ... or a 426 x 238 one.
+    expect(htmlOverlayBitmapSize({ width: 341, height: 191 }, 426 * 238 * 4)).toEqual({
+      width: 426,
+      height: 238
+    })
+    // One side rounded up and the other down.
+    expect(htmlOverlayBitmapSize({ width: 341, height: 191 }, 427 * 238 * 4)).toEqual({
+      width: 427,
+      height: 238
+    })
+    // 150 %: 333 x 187 DIP is 499.5 x 280.5.
+    expect(htmlOverlayBitmapSize({ width: 333, height: 187 }, 500 * 281 * 4)).toEqual({
+      width: 500,
+      height: 281
+    })
+    // The window geometry at those scales asks for frames those paints match.
+    for (const scale of [1.25, 1.5, 1.75]) {
+      const geometry = htmlOverlayWindowGeometry(
+        { pageWidth: 640, pageHeight: 360, frameWidth: 960, frameHeight: 540 },
+        scale
+      )
+      expect(
+        htmlOverlayBitmapSize(
+          { width: geometry.contentWidth, height: geometry.contentHeight },
+          geometry.frameWidth * geometry.frameHeight * 4
+        ),
+        String(scale)
+      ).toEqual({ width: geometry.frameWidth, height: geometry.frameHeight })
+    }
+  })
+
   it('treats a display scale it cannot use as 1', () => {
     for (const scale of [0, -2, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(htmlOverlayWindowGeometry(badge, scale), String(scale)).toEqual(
@@ -400,6 +442,7 @@ describe('the window for a target', () => {
     })
     // Not the same picture.
     expect(htmlOverlayBitmapSize({ width: 240, height: 135 }, 12345)).toBeNull()
+    expect(htmlOverlayBitmapSize({ width: 240, height: 135 }, 480 * 271 * 4 + 1)).toBeNull()
     expect(htmlOverlayBitmapSize({ width: 0, height: 135 }, 0)).toBeNull()
   })
 })
@@ -451,5 +494,50 @@ describe('when a painted frame is sent (D7)', () => {
     expect(
       htmlOverlayFrameDecision({ ...frame, width: 3840, height: 2160, uploadBusy: true })
     ).toBe('drop-oversize')
+  })
+})
+
+describe('Import HTML… on every platform (plan 232 S11)', () => {
+  it('asks file or folder first off macOS, where one dialog cannot take both', () => {
+    expect(htmlOverlayPickNeedsChoice('darwin')).toBe(false)
+    expect(htmlOverlayPickNeedsChoice('win32')).toBe(true)
+    expect(htmlOverlayPickNeedsChoice('linux')).toBe(true)
+  })
+
+  it('opens the dialog each choice needs', () => {
+    expect(htmlOverlayPickDialog('file-or-folder').properties).toEqual([
+      'openFile',
+      'openDirectory'
+    ])
+    const file = htmlOverlayPickDialog('file')
+    expect(file.properties).toEqual(['openFile'])
+    expect(file.filters).toEqual([{ name: 'HTML', extensions: ['html', 'htm'] }])
+    const folder = htmlOverlayPickDialog('folder')
+    expect(folder.properties).toEqual(['openDirectory'])
+    expect(folder.filters).toBeUndefined()
+  })
+
+  it('offers a folder first, then a file, and cancels last', () => {
+    expect(HTML_OVERLAY_PICK_CHOICES.map((choice) => choice.kind)).toEqual(['folder', 'file', null])
+    expect(HTML_OVERLAY_PICK_CHOICES.at(-1)?.label).toBe('Cancel')
+  })
+})
+
+describe('a page that never paints (plan 232 S11)', () => {
+  it('says so plainly, and on Wayland names the way out', () => {
+    for (const input of [
+      { platform: 'darwin' as const, ozonePlatform: '' },
+      { platform: 'win32' as const, ozonePlatform: '' },
+      { platform: 'linux' as const, ozonePlatform: 'x11' },
+      { platform: 'linux' as const, ozonePlatform: '' }
+    ]) {
+      expect(htmlOverlayNoPictureDetail(input), JSON.stringify(input)).toBe(
+        'the page loaded but drew no picture'
+      )
+    }
+    const wayland = htmlOverlayNoPictureDetail({ platform: 'linux', ozonePlatform: ' Wayland ' })
+    expect(wayland).toContain('the page loaded but drew no picture')
+    expect(wayland).toContain('Wayland session')
+    expect(wayland).toContain('--ozone-platform=x11')
   })
 })

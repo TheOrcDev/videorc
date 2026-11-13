@@ -275,7 +275,7 @@ fn a_link_out_of_the_folder_is_refused() {
 fn an_import_copies_the_folder_and_inserts_an_html_banner() {
     let dir = temp_dir("import");
     let database = test_database(&dir);
-    let banner = import_html_overlay_unchecked(&database, &badge_folder(&dir)).unwrap();
+    let banner = import_html_overlay(&database, &badge_folder(&dir)).unwrap();
 
     assert_eq!(banner.kind, BannerKind::Html);
     assert_eq!((banner.width, banner.height), (640, 360));
@@ -316,7 +316,7 @@ fn a_refused_import_publishes_nothing() {
     let empty = dir.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
     assert_eq!(
-        refusal(import_html_overlay_unchecked(&database, &empty)),
+        refusal(import_html_overlay(&database, &empty)),
         REFUSAL_NO_INDEX
     );
     assert!(database.list_banners().unwrap().is_empty());
@@ -328,16 +328,14 @@ fn a_refused_import_publishes_nothing() {
 }
 
 #[test]
-fn the_platform_refusal_is_one_sentence() {
+fn every_platform_imports_an_html_overlay() {
+    // Plan 232 S11: macOS, Windows and Linux all draw one, so none refuses
+    // the import (this test runs on all three in CI).
     let dir = temp_dir("platform");
     let database = test_database(&dir);
-    let result = import_html_overlay(&database, &badge_folder(&dir));
-    if html_overlays_supported() {
-        assert_eq!(result.unwrap().kind, BannerKind::Html);
-    } else {
-        assert_eq!(refusal(result), REFUSAL_UNSUPPORTED);
-        assert!(database.list_banners().unwrap().is_empty());
-    }
+    let banner = import_html_overlay(&database, &badge_folder(&dir)).unwrap();
+    assert_eq!(banner.kind, BannerKind::Html);
+    assert_eq!(database.list_banners().unwrap().len(), 1);
 }
 
 #[test]
@@ -368,7 +366,7 @@ fn the_kind_is_on_the_wire_only_for_an_html_overlay() {
 fn deleting_an_html_banner_removes_its_folder() {
     let dir = temp_dir("delete");
     let database = test_database(&dir);
-    let banner = import_html_overlay_unchecked(&database, &badge_folder(&dir)).unwrap();
+    let banner = import_html_overlay(&database, &badge_folder(&dir)).unwrap();
     let root = database.banner_assets_dir();
     let folder = root.join(html_overlay_dir_name(&banner.id));
     assert!(folder.is_dir());
@@ -871,4 +869,106 @@ fn the_wire_shapes_match_the_shared_fixture() {
     let mut extra = fixture["hostReport"].clone();
     extra["path"] = serde_json::json!("/Users/me");
     assert!(serde_json::from_value::<crate::protocol::HtmlOverlayHostReportParams>(extra).is_err());
+}
+
+#[test]
+fn the_proof_surface_polls_the_latest_frame_as_a_bmp() {
+    // Plan 232 S11: the Windows idle Preview and the Linux Preview draw an
+    // HTML banner from this route, so they move as the outputs do.
+    let service = HtmlOverlayService::default();
+    let header = badge_header(4, 2, 1);
+    let id = header.id.to_string();
+    // No frame: nothing to draw (hidden, loading, or no page runs).
+    assert_eq!(
+        service.preview_poll(&id, None),
+        HtmlOverlayPreviewPoll::Empty
+    );
+
+    // Straight alpha, as the store keeps it: one half-transparent pixel.
+    let mut bgra = vec![0_u8; 4 * 2 * 4];
+    bgra[..4].copy_from_slice(&[10, 20, 30, 128]);
+    service.store(header, bgra.clone(), Instant::now());
+    let revision = service.latest_frame(&id).unwrap().revision;
+    let HtmlOverlayPreviewPoll::Frame {
+        generation,
+        sequence,
+        width,
+        height,
+        bmp,
+    } = service.preview_poll(&id, None)
+    else {
+        panic!("a stored frame is served");
+    };
+    assert_eq!((generation.as_str(), sequence), (id.as_str(), revision));
+    assert_eq!((width, height), (4, 2));
+    assert_eq!(&bmp[..2], b"BM");
+    // The pixels ride at the end as they are, alpha kept.
+    assert_eq!(&bmp[bmp.len() - bgra.len()..], bgra.as_slice());
+
+    // The caller has it: unchanged, nothing re-sent.
+    assert_eq!(
+        service.preview_poll(&id, Some((&id, revision))),
+        HtmlOverlayPreviewPoll::Unchanged {
+            generation: id.clone(),
+            sequence: revision,
+        }
+    );
+    // A cursor for another banner is not this one's.
+    assert!(matches!(
+        service.preview_poll(&id, Some(("another", revision))),
+        HtmlOverlayPreviewPoll::Frame { .. }
+    ));
+
+    // A new frame is a new revision: served again.
+    service.store(badge_header(4, 2, 2), vec![255; 4 * 2 * 4], Instant::now());
+    let HtmlOverlayPreviewPoll::Frame { sequence, bmp, .. } =
+        service.preview_poll(&id, Some((&id, revision)))
+    else {
+        panic!("a new frame is served");
+    };
+    assert_ne!(sequence, revision);
+    assert!(bmp.ends_with(&[255; 4 * 2 * 4]));
+
+    // Hidden: its frame is dropped, and so is its BMP.
+    service.retain(&HashSet::new());
+    assert_eq!(
+        service.preview_poll(&id, None),
+        HtmlOverlayPreviewPoll::Empty
+    );
+}
+
+#[test]
+fn the_proof_surface_route_answers_in_the_buddy_layers_dialect() {
+    let frame = html_overlay_preview_response(HtmlOverlayPreviewPoll::Frame {
+        generation: "g".to_string(),
+        sequence: 7,
+        width: 4,
+        height: 2,
+        bmp: axum::body::Bytes::from_static(b"BM"),
+    });
+    assert_eq!(frame.status(), StatusCode::OK);
+    let headers = frame.headers();
+    assert_eq!(headers["content-type"], "image/bmp");
+    assert_eq!(headers["x-videorc-frame-generation"], "g");
+    assert_eq!(headers["x-videorc-frame-sequence"], "7");
+    assert_eq!(headers["x-videorc-frame-stride"], "16");
+    assert_eq!(headers["access-control-allow-origin"], "*");
+    assert!(
+        headers["access-control-expose-headers"]
+            .to_str()
+            .unwrap()
+            .contains("x-videorc-layer-empty")
+    );
+
+    let unchanged = html_overlay_preview_response(HtmlOverlayPreviewPoll::Unchanged {
+        generation: "g".to_string(),
+        sequence: 7,
+    });
+    assert_eq!(unchanged.status(), StatusCode::NO_CONTENT);
+    assert_eq!(unchanged.headers()["x-videorc-frame-sequence"], "7");
+    assert!(unchanged.headers().get("x-videorc-layer-empty").is_none());
+
+    let empty = html_overlay_preview_response(HtmlOverlayPreviewPoll::Empty);
+    assert_eq!(empty.status(), StatusCode::NO_CONTENT);
+    assert_eq!(empty.headers()["x-videorc-layer-empty"], "1");
 }

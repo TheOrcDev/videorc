@@ -370,8 +370,12 @@ export function htmlOverlayWindowGeometry(
 /**
  * The pixel size of a painted bitmap. `size` is what the image reports and
  * `byteLength` what `toBitmap()` returned: on some displays the image
- * reports DIP and carries a denser bitmap, so the bytes decide. `null` when
- * the two cannot be the same picture.
+ * reports DIP and carries a denser bitmap, so the bytes decide. A fractional
+ * display scale (Windows at 125 % or 150 %, a Wayland output at 1.25) makes
+ * Chromium round each side of the bitmap on its own, up or down, so each
+ * side is tried within a pixel of its estimate and the size that holds the
+ * bytes with the page's shape wins (plan 232 S11). `null` when the two cannot
+ * be the same picture.
  */
 export function htmlOverlayBitmapSize(
   size: { width: number; height: number },
@@ -382,9 +386,32 @@ export function htmlOverlayBitmapSize(
     return null
   }
   if (byteLength === width * height * 4) return { width, height }
+  if (!Number.isInteger(byteLength) || byteLength <= 0 || byteLength % 4 !== 0) return null
   const density = Math.sqrt(byteLength / (width * height * 4))
-  const dense = { width: Math.round(width * density), height: Math.round(height * density) }
-  return dense.width * dense.height * 4 === byteLength ? dense : null
+  // One side rounded up and the other down skews the density the bytes give,
+  // so each side is tried a pixel either way of its estimate.
+  const sides = (side: number): number[] => {
+    const exact = side * density
+    const values: number[] = []
+    for (let value = Math.floor(exact) - 1; value <= Math.ceil(exact) + 1; value += 1) {
+      if (value > 0) values.push(value)
+    }
+    return values
+  }
+  let best: { width: number; height: number } | null = null
+  let bestError = Number.POSITIVE_INFINITY
+  for (const denseWidth of sides(width)) {
+    for (const denseHeight of sides(height)) {
+      if (denseWidth * denseHeight * 4 !== byteLength) continue
+      // Of the sizes that hold these bytes, the one closest to the shape.
+      const error = Math.abs(denseWidth / denseHeight - width / height)
+      if (error < bestError) {
+        best = { width: denseWidth, height: denseHeight }
+        bestError = error
+      }
+    }
+  }
+  return best
 }
 
 // --- Pacing (D7) -------------------------------------------------------------
@@ -426,4 +453,71 @@ export function htmlOverlayFrameDecision(frame: {
     if (frame.nowMs - frame.lastSentMs < interval * 0.75) return 'drop-early'
   }
   return 'send'
+}
+
+// --- Import picker (plan 232 S11) ---------------------------------------------
+
+/** What Import HTML… opens. */
+export type HtmlOverlayPickKind = 'file-or-folder' | 'file' | 'folder'
+
+/**
+ * Whether the streamer says first if they import a file or a folder. Only
+ * the macOS open panel takes either in one go: on Windows and Linux
+ * Electron's dialog asked for both is a folder picker, and the single
+ * `.html` file could never be chosen.
+ */
+export function htmlOverlayPickNeedsChoice(platform: NodeJS.Platform): boolean {
+  return platform !== 'darwin'
+}
+
+/** The open dialog's properties and filters for one kind of pick. */
+export function htmlOverlayPickDialog(kind: HtmlOverlayPickKind): {
+  properties: ('openFile' | 'openDirectory')[]
+  filters?: { name: string; extensions: string[] }[]
+} {
+  const filters = [{ name: 'HTML', extensions: ['html', 'htm'] }]
+  switch (kind) {
+    case 'file-or-folder':
+      return { properties: ['openFile', 'openDirectory'], filters }
+    case 'file':
+      return { properties: ['openFile'], filters }
+    case 'folder':
+      // A filter on a folder picker hides nothing useful and, on some Linux
+      // portals, every folder.
+      return { properties: ['openDirectory'] }
+  }
+}
+
+/** The buttons of the question asked before the picker off macOS, in order;
+ * the last one cancels. */
+export const HTML_OVERLAY_PICK_CHOICES: readonly {
+  label: string
+  kind: HtmlOverlayPickKind | null
+}[] = [
+  { label: 'Choose a Folder…', kind: 'folder' },
+  { label: 'Choose a File…', kind: 'file' },
+  { label: 'Cancel', kind: null }
+]
+
+// --- A page that draws nothing (plan 232 S11) ---------------------------------
+
+/** How long a loaded page may go without a single paint before it is called
+ * stopped. A page that stands still still paints once. */
+export const HTML_OVERLAY_FIRST_PAINT_TIMEOUT_MS = 10_000
+
+/**
+ * What the Scene inspector says ("This banner stopped: …") when a page
+ * loaded and never painted. Offscreen drawing is the one part of an HTML
+ * banner that leans on the desktop session, so on a Linux Wayland session
+ * the sentence names the way out: the X11 backend (XWayland).
+ */
+export function htmlOverlayNoPictureDetail(input: {
+  platform: NodeJS.Platform
+  ozonePlatform: string
+}): string {
+  const base = 'the page loaded but drew no picture'
+  if (input.platform === 'linux' && input.ozonePlatform.trim().toLowerCase() === 'wayland') {
+    return `${base}. Offscreen drawing may not work in this Wayland session: start Videorc with --ozone-platform=x11 and show it again`
+  }
+  return base
 }

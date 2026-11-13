@@ -5,11 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { WorkspaceNavContext } from '@/components/workspace-nav'
 import type { Banner } from '@/lib/backend'
-import {
-  BANNER_COUNT_LIMIT_REASON,
-  BANNER_SHOWN_LIMIT_REASON,
-  HTML_OVERLAY_UNSUPPORTED_REASON
-} from '@/lib/banners'
+import { BANNER_COUNT_LIMIT_REASON, BANNER_SHOWN_LIMIT_REASON } from '@/lib/banners'
 import { OFFLINE_REASON } from '@/lib/user-error'
 
 import { BANNERS_DESCRIPTION, BannersSection } from './banners-section'
@@ -61,8 +57,8 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   nav.openStudioPanel.mockClear()
-  // HTML banners draw on macOS only (plan 232 D9); the tests run as a Mac
-  // unless one says otherwise.
+  // The tests run as a Mac unless one says otherwise (plan 232 S11: HTML
+  // banners import on every platform).
   document.documentElement.dataset.platform = 'darwin'
   mocked.banners = {
     banners: [sponsor, logo],
@@ -250,16 +246,16 @@ describe('BannersSection import', () => {
   )
 
   it.each(['win32', 'linux'])(
-    'off macOS (%s) Import HTML… stays on screen, off, with the one sentence why',
+    'on %s Import HTML… imports as it does on macOS (plan 232 S11)',
     async (platform) => {
       document.documentElement.dataset.platform = platform
       await render()
       const html = byTestId<HTMLButtonElement>('banner-import-html')!
-      expect(html.disabled).toBe(true)
+      expect(html.disabled).toBe(false)
       expect(html.textContent).toBe('Import HTML…')
-      expect(document.body.textContent).toContain(HTML_OVERLAY_UNSUPPORTED_REASON)
-      // Images are not affected.
-      expect(byTestId<HTMLButtonElement>('banner-import')!.disabled).toBe(false)
+      expect(document.body.textContent).not.toContain('macOS only')
+      await act(async () => html.click())
+      expect(mocked.banners.importBanner).toHaveBeenCalledWith('html')
     }
   )
 

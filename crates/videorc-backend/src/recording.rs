@@ -5455,6 +5455,8 @@ async fn start_session_with_timeline(
                     banner_shape: d3d11_overlay_shape,
                     program_shape: d3d11_program_shape,
                     banner_prepare: state.banner_prepare.clone(),
+                    // Plan 232 S11: HTML banners draw here too.
+                    html_overlays: state.html_overlays.clone(),
                 };
                 // The pet's atlases for the legs that draw it, including the
                 // primary canvas when only the Preview does (plan 205 S8):

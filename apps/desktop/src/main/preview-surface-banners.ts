@@ -41,12 +41,42 @@ export function previewSurfaceVisibleBanners(
     .sort((a, b) => a.sortOrder - b.sortOrder)
 }
 
+/**
+ * The URL an HTML banner's live picture is polled from on the proof surface
+ * (`/preview/html-overlay/latest.bmp`, plan 232 S11), or undefined when this
+ * surface does not poll it.
+ */
+export type PreviewSurfaceHtmlBannerFrameUrl = (bannerId: string) => string | undefined
+
+/**
+ * Whether the proof surface polls an HTML banner's live picture on this
+ * platform (plan 232 S11). On macOS the Preview is the native CAMetalLayer,
+ * where the compositor's program leg draws the frame, and the proof surface
+ * is only its fallback: it keeps the stored picture there, as before.
+ */
+export function previewSurfaceDrawsHtmlBannerFrames(platform: NodeJS.Platform): boolean {
+  return platform !== 'darwin'
+}
+
+/** The route an HTML banner's live picture is polled from, for one banner. */
+export function previewSurfaceHtmlBannerFrameUrl(
+  backend: { host: string; port: number; token: string },
+  bannerId: string
+): string {
+  const params = new URLSearchParams({ token: backend.token, id: bannerId })
+  return `http://${backend.host}:${backend.port}/preview/html-overlay/latest.bmp?${params.toString()}`
+}
+
 /** One image layer per visible banner, placed against `canvas` in pixels and
- * handed to the proof page as canvas fractions. */
+ * handed to the proof page as canvas fractions. An HTML banner's layer polls
+ * its page's latest frame when `htmlFrameUrl` gives a URL (Windows and Linux,
+ * plan 232 S11), so this Preview moves as the outputs do; otherwise it is the
+ * banner's stored picture, like an image banner. */
 export function previewSurfaceBannerLayers(
   banners: readonly Banner[],
   canvas: PreviewSurfaceCanvas,
-  shape: OverlaySessionShape | null = null
+  shape: OverlaySessionShape | null = null,
+  htmlFrameUrl?: PreviewSurfaceHtmlBannerFrameUrl
 ): PreviewSurfaceSceneLayer[] {
   const width = Math.max(1, Math.round(canvas.width))
   const height = Math.max(1, Math.round(canvas.height))
@@ -58,6 +88,7 @@ export function previewSurfaceBannerLayers(
       height,
       bannerRectForCanvas(banner, width, height)
     )
+    const frameUrl = banner.kind === 'html' ? htmlFrameUrl?.(banner.id) : undefined
     return {
       id: `${PREVIEW_SURFACE_BANNER_LAYER_KIND}:${banner.id}`,
       name: banner.name,
@@ -73,7 +104,7 @@ export function previewSurfaceBannerLayers(
         cropBottom: 0
       },
       visible: true,
-      imageUrl: bannerAssetUrl(banner.imageFile),
+      ...(frameUrl ? { frameUrl } : { imageUrl: bannerAssetUrl(banner.imageFile) }),
       // The transform already is the contained rect, rounded like the
       // compositors round it, so the image fills it exactly.
       fit: 'fill',
@@ -133,7 +164,8 @@ export function fallbackPreviewSurfaceCanvas(
 export function withPreviewSurfaceBanners(
   scene: PreviewSurfaceSceneState,
   banners: readonly Banner[],
-  shape: OverlaySessionShape | null = null
+  shape: OverlaySessionShape | null = null,
+  htmlFrameUrl?: PreviewSurfaceHtmlBannerFrameUrl
 ): PreviewSurfaceSceneState {
   const canvas = scene.bannerCanvas ?? fallbackPreviewSurfaceCanvas(scene.layout)
   return {
@@ -141,7 +173,7 @@ export function withPreviewSurfaceBanners(
     bannerCanvas: canvas,
     sources: [
       ...scene.sources.filter((layer) => layer.kind !== PREVIEW_SURFACE_BANNER_LAYER_KIND),
-      ...previewSurfaceBannerLayers(banners, canvas, shape)
+      ...previewSurfaceBannerLayers(banners, canvas, shape, htmlFrameUrl)
     ]
   }
 }

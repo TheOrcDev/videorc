@@ -251,7 +251,10 @@ import {
   previewSurfaceBannerLayers,
   previewSurfaceCanvasFromCompositor,
   previewSurfaceCanvasFromOutputs,
-  type PreviewSurfaceCanvas
+  previewSurfaceDrawsHtmlBannerFrames,
+  previewSurfaceHtmlBannerFrameUrl,
+  type PreviewSurfaceCanvas,
+  type PreviewSurfaceHtmlBannerFrameUrl
 } from './preview-surface-banners'
 import {
   previewSurfaceBuddyLayer,
@@ -304,7 +307,14 @@ import {
 } from './backend-bootstrap'
 import { managedBackendAssetRootCandidates } from './managed-asset-roots'
 import { HtmlOverlayHost, isHtmlOverlayWindow } from './html-overlay-host'
-import { HTML_OVERLAY_SCHEME } from './html-overlay-policy'
+import {
+  HTML_OVERLAY_PICK_CHOICES,
+  HTML_OVERLAY_SCHEME,
+  htmlOverlayNoPictureDetail,
+  htmlOverlayPickDialog,
+  htmlOverlayPickNeedsChoice,
+  type HtmlOverlayPickKind
+} from './html-overlay-policy'
 import { smokeTrashDirectory, smokeTrashItem, trashPaths } from './trash-paths'
 import {
   MainResourceCapabilityRegistry,
@@ -6027,6 +6037,26 @@ function previewBuddyFrameUrl(canvas: PreviewSurfaceCanvas): string | undefined 
   return `http://${backendConnection.host}:${backendConnection.port}/preview/buddy/latest.bmp?${params.toString()}`
 }
 
+// Plan 232 S11: an HTML banner's live picture on the proof surface (the
+// Windows idle Preview, the Linux Preview), polled like the Buddy's layer by
+// the page's overlay poller. Undefined: the layer keeps the stored picture.
+function previewHtmlBannerFrameUrlFor(
+  suppressFramePolling: boolean
+): PreviewSurfaceHtmlBannerFrameUrl | undefined {
+  const connection = backendConnection
+  if (
+    suppressFramePolling ||
+    !previewSurfaceDrawsHtmlBannerFrames(process.platform) ||
+    !nativePreviewFramePollingEnabled ||
+    nativePreviewSurfaceFramePollingSuppressed ||
+    !connection ||
+    process.env.VIDEORC_SMOKE_PREVIEW_FRAME_POLLING === '1'
+  ) {
+    return undefined
+  }
+  return (bannerId) => previewSurfaceHtmlBannerFrameUrl(connection, bannerId)
+}
+
 function previewSurfaceBuddyLayerFor(
   canvas: PreviewSurfaceCanvas,
   suppressFramePolling: boolean
@@ -6250,7 +6280,12 @@ function buildPreviewSurfaceScene(
     nativePreviewSurfaceScene?.bannerCanvas ??
     fallbackPreviewSurfaceCanvas(params.layout)
   layers.push(
-    ...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas, mainPreviewProgramShape)
+    ...previewSurfaceBannerLayers(
+      previewSurfaceBanners,
+      bannerCanvas,
+      mainPreviewProgramShape,
+      previewHtmlBannerFrameUrlFor(nativePreviewSurfaceFramePollingSuppressed)
+    )
   )
   // Plan 205 S9: the Buddy's layer above the banners, while the program
   // carries it.
@@ -6329,7 +6364,12 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
     nativePreviewSurfaceScene?.bannerCanvas ??
     fallbackPreviewSurfaceCanvas(status.sceneLayout)
   layers.push(
-    ...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas, mainPreviewProgramShape)
+    ...previewSurfaceBannerLayers(
+      previewSurfaceBanners,
+      bannerCanvas,
+      mainPreviewProgramShape,
+      previewHtmlBannerFrameUrlFor(suppressFramePolling)
+    )
   )
   // Plan 205 S9: the Buddy's layer above the banners, while the program
   // carries it and the surface polls frames.
@@ -7209,6 +7249,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (layer.kind === 'banner') {
             // An overlay, not a source: shown once decoded, never marked live.
             stopLayerPoller(id);
+            if (layer.frameUrl) {
+              // Plan 232 S11: an HTML banner's live picture, polled like the
+              // Buddy's layer. Its transform is its place; frames name no rect.
+              startOverlayPolling(id, element, image, layer.frameUrl);
+              return;
+            }
+            stopOverlayPoller(id);
             if (!layer.imageUrl) {
               image.dataset.loaded = '0';
               image.removeAttribute('src');
@@ -8368,7 +8415,13 @@ function ensureHtmlOverlayHost(): HtmlOverlayHost {
         logBackend('warn', `HTML overlay report was not delivered: ${errorMessageText(error)}`)
       })
     },
-    log: logBackend
+    log: logBackend,
+    // Plan 232 S11: what a page that never paints says (Wayland names its
+    // way out).
+    noPictureDetail: htmlOverlayNoPictureDetail({
+      platform: process.platform,
+      ozonePlatform: app.commandLine.getSwitchValue('ozone-platform')
+    })
   })
   return htmlOverlayHost
 }
@@ -8481,7 +8534,8 @@ async function applyNativePreviewSurfaceBanners(generation: number): Promise<Pre
     previewSurfaceBanners,
     previewSurfaceOverlayLayout?.buddy ?? null,
     mainPreviewProgramShape,
-    previewBuddyFrameUrl
+    previewBuddyFrameUrl,
+    previewHtmlBannerFrameUrlFor(false)
   )
   if (JSON.stringify(next.sources) === JSON.stringify(current.sources)) {
     return nativePreviewSurfaceStatus
@@ -11501,9 +11555,9 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       if (process.platform === 'darwin') {
         // Plan 214 B3: the camera switch turning on activates the extension.
         includedEvents.push('virtualCamera.changed')
-        // Plan 232: the HTML overlays main renders.
-        includedEvents.push('htmlOverlays.targets')
       }
+      // Plan 232 (S11: every platform): the HTML overlays main renders.
+      includedEvents.push('htmlOverlays.targets')
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
       }
@@ -11533,14 +11587,12 @@ function connectBackendEventSocket(connection: BackendConnection): void {
               JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
             )
             socket.send(JSON.stringify({ id: bannersListRequestId, method: 'banners.list' }))
-            if (process.platform === 'darwin') {
-              socket.send(
-                JSON.stringify({
-                  id: htmlOverlayTargetsRequestId,
-                  method: 'htmlOverlays.targets.get'
-                })
-              )
-            }
+            socket.send(
+              JSON.stringify({
+                id: htmlOverlayTargetsRequestId,
+                method: 'htmlOverlays.targets.get'
+              })
+            )
             socket.send(
               JSON.stringify({ id: overlayLayoutRequestId, method: 'overlays.layout.get' })
             )
@@ -16482,18 +16534,41 @@ async function pickBannerImage(): Promise<ResourceSelection | null> {
 // Assets → Banners → Import HTML… (plan 232): an `.html` file, or a folder
 // with `index.html` beside its images, fonts, styles and scripts. A file is
 // an `input-file` capability and a folder an `input-directory` one; the
-// backend checks and copies it.
+// backend checks and copies it. Only the macOS panel takes a file or a
+// folder in one go; on Windows and Linux the streamer says which first
+// (plan 232 S11), or the single file could never be picked.
 async function pickBannerHtml(): Promise<ResourceSelection | null> {
+  let kind: HtmlOverlayPickKind = 'file-or-folder'
+  if (htmlOverlayPickNeedsChoice(process.platform)) {
+    const question: Electron.MessageBoxOptions = {
+      type: 'question',
+      title: 'Import HTML banner',
+      message: 'Import an HTML banner',
+      detail:
+        'Choose a folder with index.html beside its images, fonts, styles and scripts, or a single .html file.',
+      buttons: HTML_OVERLAY_PICK_CHOICES.map((choice) => choice.label),
+      defaultId: 0,
+      cancelId: HTML_OVERLAY_PICK_CHOICES.length - 1,
+      noLink: true
+    }
+    const answer = mainWindow
+      ? await dialog.showMessageBox(mainWindow, question)
+      : await dialog.showMessageBox(question)
+    const picked = HTML_OVERLAY_PICK_CHOICES[answer.response]?.kind
+    if (!picked) {
+      return null
+    }
+    kind = picked
+  }
   const options: Electron.OpenDialogOptions = {
-    title: 'Choose HTML banner',
-    message: 'Choose an .html file, or a folder with index.html.',
-    properties: ['openFile', 'openDirectory'],
-    filters: [
-      {
-        name: 'HTML',
-        extensions: ['html', 'htm']
-      }
-    ]
+    title: kind === 'folder' ? 'Choose HTML banner folder' : 'Choose HTML banner',
+    message:
+      kind === 'folder'
+        ? 'Choose a folder with index.html.'
+        : kind === 'file'
+          ? 'Choose an .html file.'
+          : 'Choose an .html file, or a folder with index.html.',
+    ...htmlOverlayPickDialog(kind)
   }
   const result = mainWindow
     ? await dialog.showOpenDialog(mainWindow, options)

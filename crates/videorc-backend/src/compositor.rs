@@ -11402,8 +11402,10 @@ pub(crate) fn banner_draws_for_leg(
         }
         if layer.banner.kind == crate::protocol::BannerKind::Html {
             // Plan 232: the page's latest frame, already straight alpha. No
-            // frame yet (the page is loading, or this platform or session
-            // cannot draw one) draws nothing. The frame carries no opacity,
+            // frame yet (the page is loading, or this session cannot draw
+            // one) draws nothing. Every render path takes this branch: Metal,
+            // the CPU compositor (Linux, the macOS fallback) and the Windows
+            // D3D11 session (S11). The frame carries no opacity,
             // so the banner's rides the layer with the fade.
             let Some(bitmap) = html_overlays.latest_frame(&layer.banner.id) else {
                 continue;
@@ -11466,9 +11468,9 @@ impl<'a> BannerPixels<'a> {
         }
     }
 
-    /// Prepared bitmaps only: a path that draws no HTML overlay (plan 232
-    /// D9: the Windows D3D11 session) and the image tests.
-    #[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+    /// Prepared bitmaps only, for the image tests. Every render path draws
+    /// HTML overlays too (plan 232 S11), so none uses this.
+    #[cfg(test)]
     pub(crate) fn images_only(prepare: &'a BannerPrepareService) -> Self {
         static NO_HTML_OVERLAYS: std::sync::LazyLock<crate::html_overlay::HtmlOverlayService> =
             std::sync::LazyLock::new(crate::html_overlay::HtmlOverlayService::default);

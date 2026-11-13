@@ -19,7 +19,8 @@ import {
   PREVIEW_SURFACE_BANNER_LAYER_KIND,
   fallbackPreviewSurfaceCanvas,
   previewSurfaceBannerLayers,
-  type PreviewSurfaceCanvas
+  type PreviewSurfaceCanvas,
+  type PreviewSurfaceHtmlBannerFrameUrl
 } from './preview-surface-banners'
 
 export const PREVIEW_SURFACE_BUDDY_LAYER_KIND = 'buddy'
@@ -96,14 +97,16 @@ export function previewSurfaceLayerIsOverlay(layer: PreviewSurfaceSceneLayer): b
  * The scene with its program overlays re-placed for the current banners,
  * Buddy layout and program shape, against the canvas the scene was built on:
  * the banners in Assets order, then the Buddy above them. `frameUrl` builds
- * the Buddy route's URL for that canvas (undefined: no Buddy layer).
+ * the Buddy route's URL for that canvas (undefined: no Buddy layer);
+ * `htmlFrameUrl` an HTML banner's live picture (plan 232 S11).
  */
 export function withPreviewSurfaceOverlays(
   scene: PreviewSurfaceSceneState,
   banners: readonly Banner[],
   buddy: OverlayItemLayout | null,
   shape: OverlaySessionShape | null,
-  frameUrl: (canvas: PreviewSurfaceCanvas) => string | undefined
+  frameUrl: (canvas: PreviewSurfaceCanvas) => string | undefined,
+  htmlFrameUrl?: PreviewSurfaceHtmlBannerFrameUrl
 ): PreviewSurfaceSceneState {
   const canvas = scene.bannerCanvas ?? fallbackPreviewSurfaceCanvas(scene.layout)
   const buddyLayer = previewSurfaceBuddyLayer(buddy, shape, canvas, frameUrl(canvas))
@@ -112,7 +115,7 @@ export function withPreviewSurfaceOverlays(
     bannerCanvas: canvas,
     sources: [
       ...scene.sources.filter((layer) => !previewSurfaceLayerIsOverlay(layer)),
-      ...previewSurfaceBannerLayers(banners, canvas, shape),
+      ...previewSurfaceBannerLayers(banners, canvas, shape, htmlFrameUrl),
       ...(buddyLayer ? [buddyLayer] : [])
     ]
   }

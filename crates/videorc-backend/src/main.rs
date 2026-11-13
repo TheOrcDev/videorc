@@ -660,6 +660,11 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             "/preview/buddy/latest.bmp",
             get(preview_buddy_layer::latest_bmp_handler),
         )
+        // Plan 232 S11: an HTML banner's live picture for the proof surface.
+        .route(
+            html_overlay::HTML_OVERLAY_PREVIEW_ROUTE,
+            get(html_overlay::preview_bmp_handler),
+        )
         .route("/preview/{id}", get(preview_handler))
         .route("/sessions/{id}/poster", get(session_poster_handler))
         .route("/compositor/status", get(compositor_status_handler))

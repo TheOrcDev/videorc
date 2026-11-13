@@ -1121,12 +1121,11 @@ pub(crate) fn show_banner_within_budget(
 ) -> Result<Banner> {
     let candidate = database.banner_by_id(id)?;
     if !candidate.shown {
-        // Plan 232 D9: an HTML overlay draws on the macOS compositor only,
-        // and never on a session that composes elsewhere.
+        // Plan 232 D9: an HTML overlay draws on every compositor path (Metal,
+        // CPU, the Windows D3D11 session, S11), never on a session that
+        // composes elsewhere (the legacy FFmpeg graph, the direct D3D11
+        // recording).
         let html = candidate.kind == BannerKind::Html;
-        if html && !crate::html_overlay::html_overlays_supported() {
-            bail!(crate::html_overlay::REFUSAL_UNSUPPORTED);
-        }
         if session_accepts_banners == Some(false) {
             bail!(if html {
                 crate::html_overlay::REFUSAL_SESSION_CANNOT_DRAW

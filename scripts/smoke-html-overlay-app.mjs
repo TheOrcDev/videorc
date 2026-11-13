@@ -16,6 +16,10 @@
 // records and streams 1080p with the overlay across the whole canvas, the
 // largest frame an overlay sends (1920 x 1080), under the same checks: its
 // numbers are the measured worst case. Nothing goes live anywhere.
+//
+// It runs on macOS, Windows and Linux (plan 232 S11). Linux streams the
+// horizontal leg only, as smoke:banners does: the platform has no vertical
+// simulcast leg (`htmlOverlaySmokeStreamOrientations`).
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
@@ -32,13 +36,13 @@ import {
   requestSmokeCommand,
   requestSmokeCommandWithRetry
 } from './lib/smoke-command-client.mjs'
+import { htmlOverlaySmokeStreamOrientations } from './lib/html-overlay-smoke-plan.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-if (process.platform !== 'darwin') {
-  // Plan 232 D9. Said, never silent.
-  console.log('HTML overlay smoke SKIP: HTML banners work on macOS only for now (plan 232 D9).')
-  process.exit(0)
-}
+const streamOrientations = htmlOverlaySmokeStreamOrientations(process.platform)
+console.log(
+  `HTML overlay smoke on ${process.platform}: streams ${streamOrientations.join(' + ')} (plan 232 S11).`
+)
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const fixtureDirectory = join(repoRoot, 'scripts', 'fixtures', 'html-overlay', 'animated-badge')
@@ -221,7 +225,8 @@ try {
       const targets =
         mode === 'recording'
           ? []
-          : [false, true].map((vertical, i) => {
+          : streamOrientations.map((orientation, i) => {
+              const vertical = orientation === 'vertical'
               const port = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 13945) + i
               return {
                 id: `html-overlay-${i}`,
@@ -276,13 +281,15 @@ try {
           defaultOutputPreset: 'tutorial-1080p30',
           defaultBitrateKbps: 6000
         }
-        params.simulcast = {
-          layout: {
-            ...params.layout,
-            layoutPreset: 'vertical-camera-bottom',
-            verticalScreenFraming: 'fit'
-          },
-          video: { preset: 'custom', width: 360, height: 640, fps: 30, bitrateKbps: 2000 }
+        if (targets.some((target) => target.outputOrientation === 'vertical')) {
+          params.simulcast = {
+            layout: {
+              ...params.layout,
+              layoutPreset: 'vertical-camera-bottom',
+              verticalScreenFraming: 'fit'
+            },
+            video: { preset: 'custom', width: 360, height: 640, fps: 30, bitrateKbps: 2000 }
+          }
         }
       }
       const started = await request(ws, timeoutMs, 'session.start', params)

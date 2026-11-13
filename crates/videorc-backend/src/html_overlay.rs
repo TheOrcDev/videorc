@@ -75,7 +75,6 @@ const PICTURE_AFTER: Duration = Duration::from_secs(1);
 
 // --- Refusals (verbatim, plan 232 "Refusals") --------------------------------
 
-pub(crate) const REFUSAL_UNSUPPORTED: &str = "HTML banners work on macOS only for now.";
 pub(crate) const REFUSAL_NOT_HTML: &str =
     "This isn't an HTML file. Choose an .html file or a folder with index.html.";
 pub(crate) const REFUSAL_NO_INDEX: &str = "This folder has no index.html.";
@@ -85,11 +84,6 @@ pub(crate) const REFUSAL_LINK: &str =
     "This HTML banner has a link to a file outside its folder. Copy the file in.";
 pub(crate) const REFUSAL_SESSION_CANNOT_DRAW: &str =
     "HTML banners can't join this recording. Hide it, or record at 30 fps.";
-
-/// D9: the platforms whose compositor draws an HTML overlay in this slice.
-pub(crate) fn html_overlays_supported() -> bool {
-    cfg!(target_os = "macos")
-}
 
 // --- Import ------------------------------------------------------------------
 
@@ -346,17 +340,9 @@ fn copy_overlay_files(files: &[OverlayFile], destination: &Path) -> Result<()> {
 /// The whole import, blocking: run it on the AssetImport lane through
 /// `spawn_blocking`. Nothing is published half done: the files land in a
 /// staging folder, the folder is renamed, the row is inserted last, and
-/// everything is removed if any step fails.
+/// everything is removed if any step fails. Every platform imports one
+/// (plan 232 S11): macOS, Windows and Linux all draw it.
 pub(crate) fn import_html_overlay(database: &Database, source: &Path) -> Result<Banner> {
-    if !html_overlays_supported() {
-        bail!(REFUSAL_UNSUPPORTED);
-    }
-    import_html_overlay_unchecked(database, source)
-}
-
-/// `import_html_overlay` without the platform refusal (the store tests run
-/// everywhere).
-pub(crate) fn import_html_overlay_unchecked(database: &Database, source: &Path) -> Result<Banner> {
     let inspected = inspect_html_overlay_source(source)?;
     if database.count_banners()? >= BANNER_MAX_COUNT {
         bail!(REFUSAL_TOO_MANY);
@@ -692,6 +678,9 @@ struct ServiceInner {
     targets: Mutex<Vec<HtmlOverlayTarget>>,
     statuses: Mutex<Vec<HtmlOverlayStatus>>,
     host: Mutex<HashMap<String, HostReport>>,
+    /// The proof surface's BMP of each banner's latest frame (S11), keyed by
+    /// the frame's revision so it is encoded once.
+    preview_bmps: Mutex<HashMap<String, (u64, axum::body::Bytes)>>,
     wake: tokio::sync::Notify,
     frames_received: AtomicU64,
     frames_dropped: AtomicU64,
@@ -1160,6 +1149,179 @@ fn save_overlay_picture(state: &AppState, banner_id: String, bitmap: Arc<BannerB
             }
         }
     });
+}
+
+// --- The Preview on the Electron proof surface (S11) -------------------------
+
+/// The route the Windows idle Preview and the Linux Preview poll for an HTML
+/// banner's live picture. Main composes those Previews from layers in its
+/// proof page (`preview-surface-banners.ts`), where an image banner is its
+/// stored image; an HTML banner's layer polls this instead, so the Preview
+/// moves as the recording and the stream do. Registered in `main.rs`.
+pub(crate) const HTML_OVERLAY_PREVIEW_ROUTE: &str = "/preview/html-overlay/latest.bmp";
+
+/// The headers the proof page reads across origins (the cursor, the size,
+/// the empty marker), as the Buddy's layer route exposes them.
+const HTML_OVERLAY_PREVIEW_EXPOSED_HEADERS: &str = "x-videorc-frame-transport, x-videorc-frame-generation, x-videorc-frame-sequence, x-videorc-frame-width, x-videorc-frame-height, x-videorc-frame-stride, x-videorc-pixel-format, x-videorc-layer-empty";
+
+/// `?token=&id=&afterGeneration=&afterSequence=`: the banner, and the frame
+/// the caller already has.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HtmlOverlayPreviewQuery {
+    token: String,
+    id: String,
+    #[serde(default)]
+    after_generation: Option<String>,
+    #[serde(default)]
+    after_sequence: Option<u64>,
+}
+
+/// What one poll answers. The cursor is the banner's id (generation) and the
+/// frame's revision (sequence): a new frame is always a new revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HtmlOverlayPreviewPoll {
+    /// The latest frame, as a straight-alpha BMP.
+    Frame {
+        generation: String,
+        sequence: u64,
+        width: u32,
+        height: u32,
+        bmp: axum::body::Bytes,
+    },
+    /// The caller already has the latest frame.
+    Unchanged { generation: String, sequence: u64 },
+    /// No frame: the banner is hidden, its page is loading, or no page runs.
+    Empty,
+}
+
+impl HtmlOverlayService {
+    /// The proof surface's poll for banner `id` (S11). Pure but for the frame
+    /// store; the BMP of a frame is encoded once, however many polls read it.
+    pub(crate) fn preview_poll(
+        &self,
+        id: &str,
+        after: Option<(&str, u64)>,
+    ) -> HtmlOverlayPreviewPoll {
+        let Some(bitmap) = self.latest_frame(id) else {
+            return HtmlOverlayPreviewPoll::Empty;
+        };
+        if after == Some((id, bitmap.revision)) {
+            return HtmlOverlayPreviewPoll::Unchanged {
+                generation: id.to_string(),
+                sequence: bitmap.revision,
+            };
+        }
+        let mut encoded = locked(&self.inner.preview_bmps);
+        let bmp = match encoded.get(id) {
+            Some((revision, bmp)) if *revision == bitmap.revision => bmp.clone(),
+            _ => {
+                let Some(bmp) = crate::preview_buddy_layer::encode_bgra_bmp_with_alpha(
+                    bitmap.width,
+                    bitmap.height,
+                    &bitmap.bgra,
+                ) else {
+                    return HtmlOverlayPreviewPoll::Empty;
+                };
+                let bmp = axum::body::Bytes::from(bmp);
+                encoded.insert(id.to_string(), (bitmap.revision, bmp.clone()));
+                bmp
+            }
+        };
+        // Only the banners that still have a frame keep their BMP.
+        let frames = locked(&self.inner.frames);
+        encoded.retain(|kept, _| frames.contains_key(kept));
+        HtmlOverlayPreviewPoll::Frame {
+            generation: id.to_string(),
+            sequence: bitmap.revision,
+            width: bitmap.width,
+            height: bitmap.height,
+            bmp,
+        }
+    }
+}
+
+/// `GET /preview/html-overlay/latest.bmp` (S11). Token-gated like the other
+/// preview frame routes (the renderer's or main's token).
+pub(crate) async fn preview_bmp_handler(
+    State(state): State<AppState>,
+    Query(query): Query<HtmlOverlayPreviewQuery>,
+) -> Response {
+    if crate::backend_authority::authenticate_backend_token(
+        &query.token,
+        &state.token,
+        &state.admin_token,
+    )
+    .is_none()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let HtmlOverlayPreviewQuery {
+        id,
+        after_generation,
+        after_sequence,
+        ..
+    } = query;
+    let after = after_generation.zip(after_sequence);
+    let service = state.html_overlays.clone();
+    // The first poll of a new frame encodes up to a 1080p BMP: off the
+    // runtime's worker threads.
+    match tokio::task::spawn_blocking(move || {
+        let after = after
+            .as_ref()
+            .map(|(generation, sequence)| (generation.as_str(), *sequence));
+        service.preview_poll(&id, after)
+    })
+    .await
+    {
+        Ok(poll) => html_overlay_preview_response(poll),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// The HTTP answer, in the Buddy layer route's dialect: `200 image/bmp` with
+/// the cursor and the size; `204` with the cursor when unchanged; `204` with
+/// `x-videorc-layer-empty: 1` when there is nothing to draw.
+pub(crate) fn html_overlay_preview_response(poll: HtmlOverlayPreviewPoll) -> Response {
+    let builder = |status: StatusCode| {
+        Response::builder()
+            .status(status)
+            .header(axum::http::header::CACHE_CONTROL, "no-store")
+            .header("access-control-allow-origin", "*")
+            .header(
+                "access-control-expose-headers",
+                HTML_OVERLAY_PREVIEW_EXPOSED_HEADERS,
+            )
+            .header("x-videorc-frame-transport", "latest-bgra-bmp")
+    };
+    let response = match poll {
+        HtmlOverlayPreviewPoll::Frame {
+            generation,
+            sequence,
+            width,
+            height,
+            bmp,
+        } => builder(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "image/bmp")
+            .header("x-videorc-frame-generation", generation)
+            .header("x-videorc-frame-sequence", sequence.to_string())
+            .header("x-videorc-frame-width", width.to_string())
+            .header("x-videorc-frame-height", height.to_string())
+            .header("x-videorc-frame-stride", (u64::from(width) * 4).to_string())
+            .header("x-videorc-pixel-format", "bgra8")
+            .body(axum::body::Body::from(bmp)),
+        HtmlOverlayPreviewPoll::Unchanged {
+            generation,
+            sequence,
+        } => builder(StatusCode::NO_CONTENT)
+            .header("x-videorc-frame-generation", generation)
+            .header("x-videorc-frame-sequence", sequence.to_string())
+            .body(axum::body::Body::empty()),
+        HtmlOverlayPreviewPoll::Empty => builder(StatusCode::NO_CONTENT)
+            .header("x-videorc-layer-empty", "1")
+            .body(axum::body::Body::empty()),
+    };
+    response.unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 #[cfg(test)]

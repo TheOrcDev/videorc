@@ -33,12 +33,11 @@ import type { BannerImportKind } from '@/lib/banner-import'
 import {
   BANNER_SHOWN_LIMIT_REASON,
   bannerDeleteDescription,
-  bannerHtmlImportBlockedReason,
   bannerImportBlockedReason,
   bannerImportLabel,
   bannerOrderAfterMove
 } from '@/lib/banners'
-import { currentPlatform, isMacPlatform, shortcutLabel } from '@/lib/platform'
+import { shortcutLabel } from '@/lib/platform'
 import {
   MOVE_EARLIER_ACCELERATOR,
   MOVE_LATER_ACCELERATOR,
@@ -92,12 +91,10 @@ export function BannersSection(): ReactElement {
     count: banners.length
   }
   const importReasons: Record<BannerImportKind, string | null> = {
+    // Plan 232 S11: HTML banners import and draw on every platform, under
+    // the image import's own reasons.
     image: bannerImportBlockedReason(importState),
-    // Plan 232 D9: off macOS the button stays, with the one sentence why.
-    html: bannerHtmlImportBlockedReason({
-      ...importState,
-      mac: isMacPlatform(currentPlatform())
-    })
+    html: bannerImportBlockedReason(importState)
   }
   const shownCount = banners.filter((banner) => banner.shown).length
 
