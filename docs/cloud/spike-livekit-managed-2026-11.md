@@ -392,6 +392,12 @@ sink.
    shown in full or in part (examples above). Is that intended?
 7. For the EU data region: are egress records and logs held in the EU?
 8. Is an egress that never leaves `STARTING`, and is aborted, billed?
+9. An egress with one RTMP stream output whose destination goes away stays
+   `ACTIVE`, and the stream reads `ACTIVE` with `retries: 1`, for at least
+   90 s. A destination that is not the last is marked `FAILED` after 31 s.
+   Is that intended, and when does the first case fail?
+10. Does a template egress allow for the recorder's audio output latency
+    when it lines up sound and picture?
 
 ## S0.5 Segments on Neon
 
