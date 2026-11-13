@@ -28,6 +28,19 @@
     1080p cap held 30 fps but moved the compositor's p95 (S10).
   - Owed: the owner's by-eye pass, the answers to D3, D5 (network) and D9,
     Windows and Linux (S11).
+- 2026-11-12: [Plan 231](231-every-scene-shows-its-own-screen.md), a
+  streamer's second ask (after plan 210): "one monitor, a scene for Figma,
+  one for T3 Code, one for the browser, switched with hotkeys; still hard to
+  understand the relation between Screen in Sources and the scene."
+  PLANNED 2026-11-12 (owner answered Q1–Q6, took the rest as recommended):
+  - Every scene owns its screen; the four layouts become default scenes and
+    a Layout choice inside each scene; every Screen picker changes the
+    scene on stream, so "Unsaved scene" goes away.
+  - One scene works in both orientations (a 16:9 and a 9:16 layout).
+  - Keys by position: ⌃⌥1–9 (Ctrl+Alt+Shift+1–9 on Windows and Linux).
+  - One Add scene… picker; picture cards; Studio's Scenes section becomes
+    the home of scenes.
+  - Owner checks: D8 (home moves to Studio) and D20 (an off-stream key HUD).
 - 2026-11-12: [Plan 230](230-stream-manager-screen-key.md), the owner's
   streams on three screens: one Stream Deck key moves the Stream Manager
   between a Presenting screen and a Monitor screen. BUILT 2026-11-12, PR
