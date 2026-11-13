@@ -68,8 +68,9 @@ Five things the bars did not cover:
   the egress stays active and the stream still reads active. D9 changes.
 - **Talk-show lip sync** measured 100 to 113 ms against the 80 ms bar,
   with a synthetic guest. Not settled (D6).
-- **The LiveKit project takes two ingress objects**, which is one solo
-  show with both orientations and matches LiveKit's entry plan (D13).
+- **The LiveKit project is on the entry plan**: two ingress objects,
+  which is one solo show with both orientations, and a monthly egress
+  allowance that the spikes have used up (D13).
 
 **Gate G0 was answered on 2026-11-13.** No kill question failed outright,
 but two sat on their bars, and the lost frames and the slower return were
@@ -277,7 +278,7 @@ marked ◇.
 - Whether RTMP output counts as metered data transfer is not stated ◇.
 - Plans cap concurrent imports and exports. The entry plan allows two of
   each, and its monthly transcode allowance is a hard cap: requests fail
-  once it is used.
+  once it is used (seen 2026-11-13: HTTP 429 `resource_exhausted`).
 
 ### Neon Object Storage
 
@@ -542,12 +543,15 @@ the plan, or sends it back to the owner with the measured gap.
 - `VIDEORC_CLOUD_MAX_SHOWS` caps open managed shows below the plan's
   concurrent import and export quota. Over it: 503 `cloud-full`.
 - The node registry, heartbeats and drain don't apply to managed shows.
-- **The production project takes two ingress objects** (Phase 0 hit that
-  limit), which is LiveKit's entry plan. That is one solo show with both
-  orientations. The entry plan's monthly transcode allowance is published
-  as a hard cap, yet Phase 0 ran past the published figure with no
-  refusal. So the owner reads the tier and the usage from the dashboard.
-  A paid plan comes before any cohort (Only the owner 2).
+- **The production project is on LiveKit's entry plan** (confirmed
+  2026-11-13). It takes two ingress objects, which is one solo show with
+  both orientations. Its monthly egress allowance is a hard cap, and the
+  spikes used it up: `StartEgress` now answers HTTP 429
+  `resource_exhausted`, "egress minutes exceeded". No egress starts on
+  this project until the month resets or the plan changes, so no run on
+  LiveKit Cloud is possible until then. The web answers that refusal
+  with `cloud-full`. A paid plan comes before any real test and before
+  any cohort (Only the owner 2).
 
 ### D14. Region and privacy ⚑ OWNER
 
@@ -871,9 +875,9 @@ key moves.
 ## Only the owner can do
 
 1. Answer gate G0 (Open questions 1 to 5 and 9).
-2. Read the LiveKit project's plan and usage from its dashboard, and move
-   it to a paid plan (or make a dev project on one). Today it carries one
-   show, and Phase 0's long runs need more.
+2. Move the LiveKit project to a paid plan (or make a dev project on
+   one). It is on the entry plan, and its egress allowance for the month
+   is used up: nothing can be tested on LiveKit Cloud until this is done.
 3. Start Docker Desktop on this Mac for the managed smokes.
 4. Send LiveKit's support the retention questions (agents draft them), or
    say agents may.

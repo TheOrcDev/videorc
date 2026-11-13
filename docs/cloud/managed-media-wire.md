@@ -73,7 +73,7 @@ Create errors added for a managed show:
 | Status | `error.code` | When | Desktop |
 | --- | --- | --- | --- |
 | 422 | `cloud-quality` ◇ | An output is above 1920×1080 pixels or above 30 fps (D12) | **new** mapping to `CloudFallbackReason::CloudQuality` (D `cloud_show.rs:291`): direct, with the existing notice |
-| 503 | `cloud-full` | Open managed shows are at the cap (section 11), or LiveKit answers `resource_exhausted` | Existing (D `cloud_show.rs:825`) |
+| 503 | `cloud-full` | Open managed shows are at the cap (section 11), or LiveKit answers `resource_exhausted` (an object limit, or HTTP 429 "egress minutes exceeded" once a plan's allowance is used) | Existing (D `cloud_show.rs:825`) |
 | 503 | `cloud-node-unreachable` | LiveKit did not answer, or a call failed | Existing (D `cloud_show.rs:826`) |
 | 503 | `cloud-disabled` | A managed secret of section 10 is missing | Existing |
 
@@ -239,8 +239,8 @@ The answer is `{ "rev", "state" }` ◇. `state` deserializes as `RunnerState` wi
 | `liveSeconds` | D `cloud_show.rs:1063-1064` | Seconds since the first on-air beacon, hold included (R:13-18). Worked out at answer time |
 | `feeds[]` | `CloudFeedStatus`, D `cloud_show.rs:344-351` | One per ingress. `connected` from `ingress_started` and `ingress_ended`. `kbps` from `ListIngress`, cached 2 s, omitted when LiveKit reports 0 ⚠ |
 | `legs[]` | `RunnerLeg`, D `cloud_show.rs:1121-1137` | Section 8.3. `legs[].resend` is **new** and optional (section 8.4) |
-| `destinationsSet` | D `cloud_show.rs:1071-1072`, read at `:2111-2114` | `true` while a streaming egress is `STARTING` or `ACTIVE`, or after `legs/end`. `false` when every streaming egress is gone without the host asking |
-| `restarts` | D `cloud_show.rs:1075-1076`, read at `:2115-2117` | Times a streaming egress ended by itself while the show was open. Not the count of egresses started ◇ |
+| `destinationsSet` | D `cloud_show.rs:1071-1072`, read at `:2111-2114` | `true` while a streaming egress is `STARTING` or `ACTIVE`, or after `legs/end`. `false` when every streaming egress is gone without the host asking. It is already `true` in the `rev` a `PUT …/destinations` answer names, not first at `egress_started`: otherwise the desktop reads a dead egress and sends the list again |
+| `restarts` | D `cloud_show.rs:1075-1076`, read at `:2115-2117` | Times a streaming egress ended by itself while the show was open. Not the count of egresses started ◇. An egress the web stopped itself (`replace`, `legs/end`, End) never counts |
 | `holdImageSet` | D `cloud_show.rs:1079-1080` | A hold image is stored |
 | `desktopConnected` | Not read by the desktop (R:316-322) | A state poll in the last 15 s |
 | `program` | `CloudProgram`, D `cloud_show.rs:1096-1115` | The primary page's beacons (section 5.3). `avSkewMs` is never sent (D15) |
@@ -275,7 +275,7 @@ The answer is `{ "rev", "state" }` ◇. `state` deserializes as `RunnerState` wi
 - ◇ **Why a 200 at the timeout, and why the short waits.** Clocks and counters are right only at the moment of an answer. The runner sends a state at least every 2 s, and the watchdog reads counters that must pass 3, 10 and 20 s (D `watchdog/checks.rs:29`, `:59-60`). The short wait gives the desktop that cadence while something is wrong and stays quiet otherwise. A 200 is also what the desktop's reader takes (D `videorc_api.rs:1996`) and what the guests list does (W `talk-route.ts:346-386`).
 - `desktopConnected`: every poll stamps the show, at most once every 5 s. The flag is true while the stamp is under 15 s old.
 
-**The desktop's poll loop.** The request timeout is 35 s, as the guests poll (D `videorc_api.rs:28-29`). After a 200 the next poll starts 250 ms later with `since` set to the answer's `rev`. After a failure it waits 1, 2, 4, 8, then 15 s (D `cloud_show.rs:92`), reset by a 200. `CloudStatus.connected` is true after a 200 and false after the first failed poll. There is no `hello`, `ack` or `ping`: a route's own answer is its ack.
+**The desktop's poll loop.** The request timeout is 35 s, as the guests poll (D `videorc_api.rs:28-29`). After a 200 the next poll starts 250 ms later with `since` set to the answer's `rev`. After a failure it waits 1, 2, 4, 8, then 15 s (D `cloud_show.rs:92`), reset by a 200. The first poll after a failure carries no `since`, so the answer comes at once and the status can read connected again. A state whose `rev` is below the `rev` of a route answer the desktop already holds is dropped once. `CloudStatus.connected` is true after a 200 and false after the first failed poll. There is no `hello`, `ack` or `ping`: a route's own answer is its ack.
 
 | Answer | The desktop |
 | --- | --- |
@@ -336,6 +336,7 @@ A show with both orientations has two pages. ◇ `phase`, `hold`, `program` and 
 - `customBaseUrl` is `…/cloud/program/v1?show=<id>&k=<kind>&pt=<token>`. Phase 0 proved a base URL keeps its own query (P0, S0.5).
 - ⚠ The names LiveKit appends were taken from what the Phase 0 pages read (`url`, `token`, `layout`), not from LiveKit's template documentation. The page reads them with `URLSearchParams`, in any order, and ignores any other name.
 - LiveKit stores this URL in the egress record, so nothing in it may be a secret that matters elsewhere.
+- The page's content security policy lets it connect to `*.livekit.cloud` and to the one origin its own `url` parameter names, when that is a well-formed `wss:` URL. Which host LiveKit Cloud's recorder is handed is not measured ⚠, and the page holds nothing a hostile `url` could reach.
 
 ### 5.2 The page token
 
@@ -733,6 +734,7 @@ Names only. A missing key is logged by name; a value is never logged.
 | `VIDEORC_CLOUD_LEG_REF_KEY` | 32 bytes, base64 or base64url | Managed creates answer 503 `cloud-disabled` |
 | `VIDEORC_CLOUD_PROGRAM_TOKEN_KEY` | 32 bytes, base64 or base64url | The same |
 | `VIDEORC_CLOUD_PROGRAM_BASE_URL` | `https://host`, no path or query | `https://www.videorc.com` |
+| `VIDEORC_CLOUD_RECONCILE_UNKNOWN` | `1` | Objects of shows this database does not know are left alone outside production (section 15) |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_WEBHOOK_KEY`, `LIVEKIT_WEBHOOK_SECRET` | As today (W `livekit.ts:22-28`) | Managed creates answer 503 `cloud-disabled`; talk shows `cloud-rooms-unavailable`, as today |
 | `VIDEORC_CLOUD_RECORDINGS_*` | As today (W `recordings.ts:43-54`) | No recording target |
 | `VIDEORC_CLOUD_DISABLED`, `VIDEORC_CLOUD_USERS`, `VIDEORC_CLOUD_PUBLIC`, `VIDEORC_CLOUD_TALK_SHOWS_DISABLED` | As today (W `switches.ts`) | As today |
@@ -867,7 +869,9 @@ Rows go to `cloud_show_usage`, counted once on `(show_id, seq)` as today (W `met
 | No room, and no active egress | Ends it `media-lost`. The answer is the ended show |
 | Nothing, twice, 4 s each ◇ | Ends it `media-lost`. The reconcile pass stops any egress that turns up later |
 
-**The reconcile pass** (the reaper's tick) reads `ListRooms`, `ListIngress` and `ListEgress` and, by the names of section 7: ends an open managed show whose room is gone; stops an egress, and deletes an ingress and a room, whose show is ended or unknown; rebuilds the legs, feeds and meter of a show from what LiveKit lists.
+**The reconcile pass** (the reaper's tick) reads `ListRooms`, `ListIngress` and `ListEgress` and, by the names of section 7: ends an open managed show whose room is gone; stops an egress, and deletes an ingress and a room, whose show is ended; rebuilds the legs, feeds and meter of a show from what LiveKit lists.
+
+Objects named by a show id this database has **no row for** may be another environment's live show. They are touched only when `VERCEL_ENV` is `production` or `VIDEORC_CLOUD_RECONCILE_UNKNOWN` is `1`, and only once the show's objects are 10 minutes old. Otherwise they are left alone and counted. One LiveKit project per database is still the rule; this guard only lowers the cost of breaking it.
 
 ## 16. File ownership
 
