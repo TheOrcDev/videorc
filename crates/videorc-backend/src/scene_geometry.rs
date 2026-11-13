@@ -908,6 +908,72 @@ pub fn chroma_key_despill(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> (u8, u8,
     (r, g, b)
 }
 
+/// Plan 233 D1 a: despill near the edge.
+///
+/// Once the snow is gone, the green light the screen throws on the hair and
+/// the ears survives the key as a thin, steady green rim, and Spill removal
+/// 10 takes only a tenth of it off. So the despill is stronger next to the
+/// keyed-out area: its strength is the larger of Spill removal and
+/// `nearness × proximity`. Nearness ([`chroma_key_nearness`]) is how close
+/// the colour is to the key: 1 up to the cone's outer edge (max angle plus
+/// band), fading to 0 over [`CHROMA_KEY_EDGE_DESPILL_FADE_DEG`] past it,
+/// times the saturation eligibility the key uses. Proximity
+/// ([`chroma_key_edge_proximity`]) is how much of the keyed picture around
+/// the texel is keyed out, `clamp((1 − blurred alpha) × GAIN, 0, 1)`, with
+/// the alpha smoothed over the 5×5 binomial at the keyed texture's spacing
+/// (plan 229's kernel), so the reach is about two keyed texels: about two
+/// output pixels. Spill removal stays the floor everywhere, so a green or
+/// teal thing on the subject (a shirt logo, a mic's light ring) keeps its
+/// colour away from the edge. The Metal shader mirrors both constants.
+pub const CHROMA_KEY_EDGE_DESPILL_FADE_DEG: f64 = 30.0;
+pub const CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN: f64 = 6.0;
+
+/// The edge despill constants in shader order: `(fade_rad, proximity_gain)`.
+pub const CHROMA_KEY_EDGE_DESPILL_PARAMS: [f64; 2] = [
+    CHROMA_KEY_EDGE_DESPILL_FADE_DEG * std::f64::consts::PI / 180.0,
+    CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN,
+];
+
+/// How close a colour (0..=255 units, maybe fractional) is to the key, 0..=1
+/// (plan 233 D1 a): 1 inside the cone and its band, fading to 0 over
+/// [`CHROMA_KEY_EDGE_DESPILL_FADE_DEG`] past the band, times the saturation
+/// eligibility the key uses, so a grey is never near.
+pub fn chroma_key_nearness(spec: &ChromaKeySpec, rgb: [f64; 3]) -> f64 {
+    let Some((dir_cb, dir_cr)) = spec.key_direction() else {
+        return 0.0;
+    };
+    let (cb, cr, luma) = key_chroma_and_luma(rgb);
+    let saturation = (cb * cb + cr * cr).sqrt();
+    let (floor, ramp) = chroma_key_saturation_floor(luma);
+    if saturation <= floor {
+        return 0.0;
+    }
+    let cos_theta = ((cb * dir_cb + cr * dir_cr) / saturation).clamp(-1.0, 1.0);
+    let theta_deg = cos_theta.acos().to_degrees();
+    let outer_deg = spec.max_angle_deg + spec.band_deg;
+    let nearness = ((outer_deg + CHROMA_KEY_EDGE_DESPILL_FADE_DEG - theta_deg)
+        / CHROMA_KEY_EDGE_DESPILL_FADE_DEG)
+        .clamp(0.0, 1.0);
+    nearness * ((saturation - floor) / ramp).clamp(0.0, 1.0)
+}
+
+/// How close to the keyed-out area a keyed texel is, 0..=1, from the alpha
+/// around it (plan 233 D1 a): 0 where the picture around it is fully kept,
+/// 1 once a sixth of it is keyed out.
+pub fn chroma_key_edge_proximity(blurred_alpha: f64) -> f64 {
+    ((1.0 - blurred_alpha) * CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN).clamp(0.0, 1.0)
+}
+
+/// The despill strength of a kept colour (plan 233 D1 a): Spill removal as
+/// the floor, and nearness to the key times proximity to the keyed-out area.
+pub fn chroma_key_edge_despill_strength(
+    spec: &ChromaKeySpec,
+    rgb: [f64; 3],
+    proximity: f64,
+) -> f64 {
+    spec.spill.max(chroma_key_nearness(spec, rgb) * proximity)
+}
+
 /// [`chroma_key_despill`] for a colour in 0..=255 units that may be
 /// fractional (a level texel's average, plan 233) at `strength` in 0..=1:
 /// the key channel comes down toward the other two's max by that share,
@@ -1843,6 +1909,53 @@ mod tests {
         assert_eq!(
             chroma_key_reduction_level(f64::NAN, 2160.0, 720.0, 405.0),
             0
+        );
+    }
+
+    /// Plan 233 D1 a: nearness is 1 inside the cone and its band, fades out
+    /// over 30° past it and is 0 for a grey; proximity is 0 where the
+    /// picture around a texel is kept and 1 once a sixth is keyed out; the
+    /// strength never drops under Spill removal and reaches the nearness
+    /// only next to keyed-out texels.
+    #[test]
+    fn chroma_key_edge_despill_is_spill_removal_inside_and_nearness_at_the_edge() {
+        let spec = default_green_spec();
+        let screen = [30.0, 150.0, 40.0];
+        assert!(
+            (chroma_key_nearness(&spec, screen) - 1.0).abs() < 1e-9,
+            "the screen"
+        );
+        // The green-tinted subject tone of the compositor tests, 41° from
+        // the key: 12° past the cone's outer edge, about 0.6.
+        let tinted = [100.0, 115.0, 70.0];
+        let near = chroma_key_nearness(&spec, tinted);
+        assert!((0.5..0.7).contains(&near), "tinted subject: {near}");
+        // The teal logo, 57° from the key, has nearly faded out; a grey is
+        // never near.
+        assert!(
+            chroma_key_nearness(&spec, [0.0, 150.0, 150.0]) < 0.1,
+            "teal"
+        );
+        assert_eq!(
+            chroma_key_nearness(&spec, [128.0, 128.0, 128.0]),
+            0.0,
+            "grey"
+        );
+        assert_eq!(chroma_key_edge_proximity(1.0), 0.0);
+        assert!((chroma_key_edge_proximity(11.0 / 16.0) - 1.0).abs() < 1e-9);
+        assert!((chroma_key_edge_proximity(15.0 / 16.0) - 0.375).abs() < 1e-9);
+        assert_eq!(
+            chroma_key_edge_despill_strength(&spec, tinted, 0.0),
+            spec.spill,
+            "inside: Spill removal"
+        );
+        assert!(
+            (chroma_key_edge_despill_strength(&spec, tinted, 1.0) - near).abs() < 1e-9,
+            "at the edge: the nearness"
+        );
+        assert_eq!(
+            CHROMA_KEY_EDGE_DESPILL_PARAMS,
+            [CHROMA_KEY_EDGE_DESPILL_FADE_DEG.to_radians(), 6.0]
         );
     }
 

@@ -71,8 +71,9 @@ use crate::scene_geometry::{
     CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS, ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask,
     SceneMaskTester, SignedPixelRect, background_stage_margin, background_zoom_crop,
     camera_chroma_key, camera_mask, chroma_key_alpha_rgb, chroma_key_despill_rgb,
-    chroma_key_reduction_level, contain_rect_pixels, scene_crop_from_transform, scene_source_fit,
-    scene_source_rect_pixels, scene_source_render_transform,
+    chroma_key_edge_despill_strength, chroma_key_edge_proximity, chroma_key_reduction_level,
+    contain_rect_pixels, scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
+    scene_source_render_transform,
 };
 #[cfg(target_os = "macos")]
 pub use crate::source_mask::SourceMask;
@@ -13502,24 +13503,77 @@ impl KeyedLevelPlane {
                     *out = sum.map(|channel| channel / count.max(1.0));
                 }
             });
-        // Pass 2: the colour treatment on each level texel's average colour.
+        // Plan 233 D1 a: how keyed-out the picture is around each level
+        // texel, its alpha over the 5×5 binomial at the level's spacing
+        // (plan 229's kernel, separable; texels past the edge repeat the
+        // edge). The despill is stronger where that is low.
+        let clamped = |centre: usize, offset: usize, len: usize| {
+            (centre + offset).saturating_sub(2).min(len.max(1) - 1)
+        };
+        let mut across = vec![0.0f32; level_width * level_height];
+        across
+            .par_chunks_mut(level_width.max(1))
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    *out = CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, &weight)| {
+                            weight as f32
+                                * texels[y * level_width + clamped(x, offset, level_width)][3]
+                        })
+                        .sum::<f32>()
+                        / 16.0;
+                }
+            });
+        let mut blurred = vec![0.0f32; level_width * level_height];
+        blurred
+            .par_chunks_mut(level_width.max(1))
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    *out = CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, &weight)| {
+                            weight as f32
+                                * across[clamped(y, offset, level_height) * level_width + x]
+                        })
+                        .sum::<f32>()
+                        / 16.0;
+                }
+            });
+        drop(across);
+        // Pass 2: the colour treatment on each level texel's average colour:
+        // despill (Spill removal, or more next to the keyed-out area), then
+        // the camera look.
         let spill_is_blue = spec.spill_is_blue();
-        texels.par_iter_mut().for_each(|texel| {
-            let alpha = texel[3];
-            if alpha <= 0.0 {
-                *texel = [0.0; 4];
-                return;
-            }
-            let colour = [texel[0], texel[1], texel[2]].map(|channel| f64::from(channel / alpha));
-            let colour = chroma_key_despill_rgb(spill_is_blue, spec.spill, colour);
-            let colour = camera_look_rgb_f64(colour, look);
-            *texel = [
-                colour[0] as f32 * alpha,
-                colour[1] as f32 * alpha,
-                colour[2] as f32 * alpha,
-                alpha,
-            ];
-        });
+        texels
+            .par_iter_mut()
+            .zip(blurred.par_iter())
+            .for_each(|(texel, &blurred_alpha)| {
+                let alpha = texel[3];
+                if alpha <= 0.0 {
+                    *texel = [0.0; 4];
+                    return;
+                }
+                let colour =
+                    [texel[0], texel[1], texel[2]].map(|channel| f64::from(channel / alpha));
+                let strength = chroma_key_edge_despill_strength(
+                    spec,
+                    colour,
+                    chroma_key_edge_proximity(f64::from(blurred_alpha)),
+                );
+                let colour = chroma_key_despill_rgb(spill_is_blue, strength, colour);
+                let colour = camera_look_rgb_f64(colour, look);
+                *texel = [
+                    colour[0] as f32 * alpha,
+                    colour[1] as f32 * alpha,
+                    colour[2] as f32 * alpha,
+                    alpha,
+                ];
+            });
         Self {
             width: level_width,
             height: level_height,
@@ -16341,6 +16395,154 @@ mod tests {
         }
     }
 
+    /// Plan 233 D1 a, on both paths: a green-tinted subject texel next to
+    /// keyed-out texels loses its green, the same colour 20 texels inside
+    /// keeps it (only Spill removal applies), and the teal logo's colour is
+    /// unchanged anywhere. A 64×8 camera drawn 1:1 over a blue canvas: the
+    /// screen in columns 0..=22, the subject from column 23 (the key's
+    /// neighbourhood keys that column with the screen, so column 24 is the
+    /// first kept one, next to the keyed-out area).
+    #[test]
+    fn edge_despill_takes_the_green_off_the_subject_next_to_the_screen_only() {
+        let spec = chroma_key_test_spec();
+        let (width, height) = (64u32, 8u32);
+        let frame = |subject: [u8; 3]| -> Vec<u8> {
+            (0..width * height)
+                .flat_map(|index| {
+                    if index % width <= 22 {
+                        [30u8, 150, 40, 255]
+                    } else {
+                        [subject[0], subject[1], subject[2], 255]
+                    }
+                })
+                .collect()
+        };
+        let tinted = [100u8, 115, 70];
+        let teal = [0u8, 150, 150];
+        // The green channel of canvas pixel (x, 0) on the CPU, read back
+        // through the chroma sample its 2×2 block wrote (x even).
+        let cpu_green = |frame: &[u8], x: u32| -> u8 {
+            let mut bytes = blue_yuv_canvas(width, height);
+            assert!(blit_rgba_to_yuv420p(
+                &RgbaSource {
+                    bytes: frame,
+                    width,
+                    height,
+                    format: SourcePixelFormat::Rgba,
+                },
+                &mut bytes,
+                width,
+                height,
+                PixelRect {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                },
+                SourceRenderOptions {
+                    crop: SceneCrop::none(),
+                    pan: (0.0, 0.0),
+                    contain: false,
+                    mirror_x: false,
+                    mask: SceneMask::None,
+                    chroma_key: Some(spec),
+                    camera_look: crate::protocol::CameraLook::default(),
+                    linear: true,
+                },
+            ));
+            let (w, h) = (width as usize, height as usize);
+            let uv = w * h + (x as usize) / 2;
+            let (_, g, _) = crate::color::ycbcr_bt709_video_to_bgr(
+                bytes[x as usize],
+                bytes[uv],
+                bytes[uv + w.div_ceil(2) * h.div_ceil(2)],
+            );
+            g
+        };
+        let tinted_frame = frame(tinted);
+        let teal_frame = frame(teal);
+        let (edge, inside) = (cpu_green(&tinted_frame, 24), cpu_green(&tinted_frame, 44));
+        // Nearness 0.6 at the edge: 115 − 0.6 × 15 ≈ 106; inside only Spill
+        // removal: 115 − 0.1 × 15 ≈ 113.5. The chroma round trip costs ±2.
+        assert!(edge <= 109, "CPU: the edge texel keeps its green ({edge})");
+        assert!(inside >= 111, "CPU: the inside texel lost green ({inside})");
+        for x in [24, 44] {
+            let g = cpu_green(&teal_frame, x);
+            assert!((148..=152).contains(&g), "CPU: teal at {x} moved to {g}");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use crate::metal_compositor::{
+                GpuSource, GpuSourceKind, MetalSceneCompositor, SourceMask,
+            };
+            let Some(mut gpu) = MetalSceneCompositor::new() else {
+                eprintln!("skipping the Metal half: no Metal device available");
+                return;
+            };
+            let mut gpu_green = |frame: &[u8], x: usize| -> u8 {
+                let bgra: Vec<u8> = frame
+                    .chunks_exact(4)
+                    .flat_map(|p| [p[2], p[1], p[0], p[3]])
+                    .collect();
+                let px = gpu
+                    .compose_bgra(
+                        width as usize,
+                        height as usize,
+                        [0.0, 0.0, 1.0, 1.0],
+                        &[GpuSource {
+                            kind: GpuSourceKind::Camera,
+                            bgra: &bgra,
+                            content_key: None,
+                            iosurface: None,
+                            pixel_buffer: None,
+                            texture: None,
+                            width: width as usize,
+                            height: height as usize,
+                            dest: [0.0, 0.0, 1.0, 1.0],
+                            crop: [0.0; 4],
+                            mirror: false,
+                            mask: SourceMask::None,
+                            blend: true,
+                            chroma_key: scene_chroma_key_into_metal(&spec),
+                            camera_look: None,
+                            corners: None,
+                            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                            opacity: 1.0,
+                        }],
+                    )
+                    .expect("metal compose");
+                px[x * 4 + 1]
+            };
+            let (gpu_edge, gpu_inside) =
+                (gpu_green(&tinted_frame, 24), gpu_green(&tinted_frame, 44));
+            assert!(
+                gpu_edge <= 109,
+                "Metal: the edge texel keeps its green ({gpu_edge})"
+            );
+            assert!(
+                gpu_inside >= 111,
+                "Metal: the inside texel lost green ({gpu_inside})"
+            );
+            assert!(
+                (i16::from(gpu_edge) - i16::from(edge)).abs() <= 4
+                    && (i16::from(gpu_inside) - i16::from(inside)).abs() <= 4,
+                "CPU {edge}/{inside} vs Metal {gpu_edge}/{gpu_inside}"
+            );
+            for x in [24, 44] {
+                let g = gpu_green(&teal_frame, x);
+                assert!((148..=152).contains(&g), "Metal: teal at {x} moved to {g}");
+            }
+        }
+    }
+
+    /// A `width`×`height` blue YUV canvas the keyer tests composite onto.
+    fn blue_yuv_canvas(width: u32, height: u32) -> Vec<u8> {
+        let (y, u, v) = rgb_to_yuv(0, 0, 255);
+        let mut bytes = vec![0; raw_yuv420p_len(width, height)];
+        fill_yuv420p(&mut bytes, width, height, y, u, v);
+        bytes
+    }
+
     /// Plan 227 B: Hide edges cut the same source column on both paths.
     #[cfg(target_os = "macos")]
     #[test]
@@ -16403,6 +16605,14 @@ mod tests {
             crate::windows_d3d11_compositor::windows_chroma_key_neighbourhood_params(),
             neighbourhood
         );
+        // Plan 233 D1 a: the edge despill's fade and gain.
+        #[cfg(target_os = "macos")]
+        {
+            let [fade, gain] = crate::scene_geometry::CHROMA_KEY_EDGE_DESPILL_PARAMS;
+            let mirrored = crate::metal_compositor::CHROMA_KEY_EDGE_DESPILL_PARAMS;
+            assert!((f64::from(mirrored[0]) - fade).abs() < 1e-6, "fade");
+            assert_eq!(mirrored[1..], [gain as f32, 0.0, 0.0], "gain");
+        }
         // Plan 233: the reduction level, mirrored the same way.
         #[cfg(target_os = "macos")]
         for (source, drawn) in [

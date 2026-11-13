@@ -91,6 +91,10 @@ struct KeyParams {
     // side_tap_weight, reserved, reserved).
     float4 chroma_key_neighbourhood;
     float4 camera_look; // brightness, contrast, saturation, enabled
+    // Plan 233 D1 a: despill near the edge, mirroring scene_geometry's
+    // CHROMA_KEY_EDGE_DESPILL_*: (fade_rad, proximity_gain, reserved,
+    // reserved).
+    float4 edge_despill;
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
@@ -266,19 +270,59 @@ fragment float4 f_key_reduce(VOut in [[stage_in]],
     }
     return sum / max(count, 1.0);
 }
+// scene_geometry::chroma_key_nearness in f32 (plan 233 D1 a): how close a
+// colour is to the key, 1 inside the cone and its band, fading to 0 over
+// edge_despill.x past the band, times the key's saturation eligibility.
+static float key_nearness(float3 color, constant KeyParams& p) {
+    float r = color.r * 255.0, g = color.g * 255.0, b = color.b * 255.0;
+    float vcb = (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0;
+    float vcr = (128.0 * r - 107.0 * g - 21.0 * b) / 256.0;
+    float saturation = sqrt(vcb * vcb + vcr * vcr);
+    float luma = (77.0 * r + 150.0 * g + 29.0 * b) / 256.0;
+    float floor_value = clamp(p.chroma_key_floor.y * luma,
+        p.chroma_key_floor.x, p.chroma_key_floor.z);
+    if (saturation <= floor_value) {
+        return 0.0;
+    }
+    float ramp = max(floor_value * p.chroma_key_floor.w, 1e-4);
+    float cos_theta = clamp(
+        (vcb * p.chroma_key.y + vcr * p.chroma_key.z) / saturation, -1.0, 1.0);
+    float theta = acos(cos_theta);
+    float outer = p.chroma_key.w + p.chroma_key2.x;
+    float fade = max(p.edge_despill.x, 1e-4);
+    float nearness = clamp((outer + fade - theta) / fade, 0.0, 1.0);
+    return nearness * clamp((saturation - floor_value) / ramp, 0.0, 1.0);
+}
 // Plan 233 pass 2: the colour treatment on each keyed texel's average
 // colour, as one bilinear tap of the camera got it before: despill (the key
 // channel comes down toward the other two's max where it dominates them),
-// then the camera look. Premultiplied in and out.
+// then the camera look. The despill is Spill removal, or more next to the
+// keyed-out area (D1 a): nearness to the key times how keyed-out the picture
+// around the texel is, the alpha over the 5x5 binomial at the keyed
+// texture's spacing (plan 229's nine taps), gained. Premultiplied in and out.
 fragment float4 f_key_finish(VOut in [[stage_in]],
                              texture2d<float> keyed [[texture(0)]],
                              constant KeyParams& p [[buffer(0)]]) {
+    constexpr sampler edge_samp(coord::normalized, address::clamp_to_edge, filter::linear);
     float4 texel = keyed.read(uint2(in.pos.xy));
     if (texel.a <= 0.0) {
         return float4(0.0);
     }
     float3 color = texel.rgb / texel.a;
-    float strength = p.chroma_key2.y;
+    float2 size = float2(keyed.get_width(), keyed.get_height());
+    float2 uv = in.pos.xy / size;
+    float2 step = p.chroma_key_neighbourhood.x / size;
+    float side = p.chroma_key_neighbourhood.y;
+    float3 weights = float3(side, 1.0 - 2.0 * side, side);
+    float blurred = 0.0;
+    for (int j = 0; j < 3; ++j) {
+        for (int i = 0; i < 3; ++i) {
+            float2 at = uv + float2(float(i - 1), float(j - 1)) * step;
+            blurred += weights[i] * weights[j] * keyed.sample(edge_samp, at, level(0.0)).a;
+        }
+    }
+    float proximity = clamp((1.0 - blurred) * p.edge_despill.y, 0.0, 1.0);
+    float strength = max(p.chroma_key2.y, key_nearness(color, p) * proximity);
     if (strength > 0.0) {
         if (p.chroma_key2.z > 0.5) {
             float limit = max(color.r, color.g);
@@ -332,6 +376,8 @@ struct KeyParams {
     chroma_key_neighbourhood: [f32; 4],
     /// Brightness, contrast, saturation, enabled.
     camera_look: [f32; 4],
+    /// Plan 233 D1 a: (fade_rad, proximity_gain, reserved, reserved).
+    edge_despill: [f32; 4],
 }
 
 /// Per-quad chroma key in shader units, converted once from
@@ -385,9 +431,16 @@ impl GpuChromaKey {
             chroma_key_edges: self.kept_uv,
             chroma_key_neighbourhood: CHROMA_KEY_NEIGHBOURHOOD_PARAMS,
             camera_look: camera_look_params(camera_look),
+            edge_despill: CHROMA_KEY_EDGE_DESPILL_PARAMS,
         }
     }
 }
+
+/// Mirrors scene_geometry's CHROMA_KEY_EDGE_DESPILL_PARAMS (plan 233 D1 a) as
+/// `(fade_rad, proximity_gain, reserved, reserved)`: mirrored for the same
+/// reason as the floor, and pinned equal by the same compositor test.
+pub(crate) const CHROMA_KEY_EDGE_DESPILL_PARAMS: [f32; 4] =
+    [30.0 * std::f32::consts::PI / 180.0, 6.0, 0.0, 0.0];
 
 /// The shaders' camera look: brightness, contrast, saturation, enabled.
 fn camera_look_params(camera_look: Option<[f32; 3]>) -> [f32; 4] {
@@ -1315,6 +1368,9 @@ pub struct MetalComposeTimings {
     /// Plan 233: how many keyed cameras were keyed again this compose (the
     /// rest drew their kept texture).
     pub keyed_camera_passes: u64,
+    /// The GPU's own time on this compose's command buffer (its start to
+    /// end timestamps), whatever the CPU was doing meanwhile.
+    pub gpu_ms: f64,
     pub command_encode_ms: f64,
     pub command_wait_ms: f64,
     pub total_ms: f64,
@@ -1979,12 +2035,14 @@ impl MetalSceneCompositor {
         let source_import_stats = self
             .pending_source_import_stats
             .complete_successful_compose(source_import_stats);
+        let gpu_ms = (command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1000.0;
         Some(MetalComposeTimings {
             ensure_target_ms,
             source_texture_ms,
             source_import_stats,
             key_pass_ms,
             keyed_camera_passes,
+            gpu_ms,
             command_encode_ms,
             command_wait_ms: command_wait_ms.get(),
             total_ms: total_started_at.elapsed().as_secs_f64() * 1000.0,
