@@ -37,8 +37,9 @@ use serde_json::{Value, json};
 
 use crate::cloud_show::{
     ACK_TIMEOUT, ActiveShow, CloudApiError, CloudShowContext, CloudShowRuntime, CloudStatus,
-    CloudWebApi, ControlConnector, ControlHandle, CreateShowRequest, HandoverDestination,
-    HelloFailure, ShowOutputSpec, client_info, install_control_loop, lock, new_intent_id,
+    CloudWebApi, ControlConnector, ControlHandle, ControlKind, CreateShowRequest,
+    HandoverDestination, HelloFailure, ShowOutputSpec, client_info, install_control_loop, lock,
+    new_intent_id,
 };
 
 /// `cloud.room.requests`: one event per new "wants to join" (plan 224).
@@ -1195,6 +1196,22 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             bail!("Videorc Cloud created the show without a room.");
         };
+        // Plan 234: a talk show on anything but the node socket is not built
+        // in this version (the stage, the overlays and the recording have no
+        // route here yet, T3). Fail closed, before anything joins the room:
+        // end the show and give the camera back, rather than open a room
+        // whose stage this desktop cannot set. The host reads the existing
+        // "rooms aren't available" line (`cloud-rooms-unavailable`).
+        if created.control.transport_kind() != ControlKind::Node {
+            tracing::warn!(
+                show = %show_id,
+                kind = ?created.control.kind,
+                "Videorc Cloud opened the talk show on a control transport this version has no talk show for; the show is ended and the room stays closed"
+            );
+            let _ = self.web.end_show(&bearer, &show_id).await;
+            let _ = (self.hooks.camera)(CameraHandover::Return).await;
+            return Err(anyhow::Error::new(CloudApiError::RoomsUnavailable));
+        }
         if let Some(problem) =
             crate::cloud_show::control_url_problem(&created.control.url, cfg!(debug_assertions))
         {
@@ -1556,6 +1573,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
 
     /// `return.set`: the Program monitor's feed on or off.
     pub async fn set_return(&self, enabled: bool) -> Result<CloudStatus> {
+        // Plan 234 (wire section 6.4): a show on web control has no return
+        // picture. Nothing goes on the wire, and the RPC answers
+        // `cloud-return-failed` with this line.
+        if self.show_control_kind() == Some(ControlKind::Web) {
+            bail!("{}", crate::cloud_control_web::RETURN_UNAVAILABLE_MESSAGE);
+        }
         self.open_room_show_id()?;
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
         let id = new_intent_id();
@@ -1737,6 +1760,16 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             if runtime.talk.is_some() {
                 return Ok(runtime.status());
             }
+            // Plan 234: fail closed, as Open the room does. The show stays
+            // held, so End still closes it.
+            if show.control.transport_kind() != ControlKind::Node {
+                tracing::warn!(
+                    show = %show.record.id,
+                    kind = ?show.control.kind,
+                    "This version has no talk show on the control transport Videorc Cloud names; the room is not resumed"
+                );
+                return Err(anyhow::Error::new(CloudApiError::RoomsUnavailable));
+            }
             show.record.id.clone()
         };
         if let Err(message) = (self.hooks.camera)(CameraHandover::Lend).await {
@@ -1871,6 +1904,14 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             .await
             .map_err(|problem| anyhow::anyhow!("{failure}: {problem}"))?;
         Ok(lock(&self.slot).status())
+    }
+
+    /// The control transport of the show this desktop holds, if any.
+    fn show_control_kind(&self) -> Option<ControlKind> {
+        lock(&self.slot)
+            .show
+            .as_ref()
+            .map(|show| show.control.transport_kind())
     }
 
     fn control_tx(&self) -> std::result::Result<ControlHandle, String> {

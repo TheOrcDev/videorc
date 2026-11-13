@@ -27,6 +27,12 @@ pub(crate) const CLOUD_LOST_TIMEOUT: std::time::Duration = std::time::Duration::
 /// Plan 224: the guests list long-polls 25 s on the web; allow it and a margin.
 pub(crate) const CLOUD_GUESTS_POLL_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(35);
+/// Plan 234 (web control): the state route long-polls up to 25 s; the same
+/// room as the guests poll (`docs/cloud/managed-media-wire.md`, section 3).
+pub(crate) const CLOUD_STATE_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
+/// Plan 234 (web control): a route that acts on the show's media may wait on
+/// more than one LiveKit call, each given 8 s by the web. The create's room.
+pub(crate) const CLOUD_CONTROL_TIMEOUT: std::time::Duration = CLOUD_CREATE_TIMEOUT;
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Co-host ticks are synchronous and small, but the server fans one tick out
 /// across a model ladder: a slow-but-alive gateway needs headroom beyond the
@@ -1986,18 +1992,38 @@ impl VideorcApiClient {
         path: &str,
         timeout: std::time::Duration,
     ) -> std::result::Result<T, crate::cloud_show::CloudApiError> {
-        use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
-        let response = request
-            .timeout(timeout)
-            .send()
+        self.cloud_json_or_body(request, path, timeout)
             .await
-            .map_err(|error| CloudApiError::Transport(format!("{path}: {error}")))?;
+            .map_err(|(error, _)| error)
+    }
+
+    /// `cloud_json`, with a failure's parsed body beside its error (`Null`
+    /// when there was none): one route's refusal carries a list (plan 234,
+    /// `PUT …/destinations`).
+    async fn cloud_json_or_body<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<T, (crate::cloud_show::CloudApiError, serde_json::Value)> {
+        use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
+        let response = request.timeout(timeout).send().await.map_err(|error| {
+            (
+                CloudApiError::Transport(format!("{path}: {error}")),
+                serde_json::Value::Null,
+            )
+        })?;
         let status = response.status();
         if status.is_success() {
-            return response.json().await.map_err(|error| CloudApiError::Other {
-                status: status.as_u16(),
-                code: "malformed-response".to_string(),
-                message: format!("Could not read {path}: {error}"),
+            return response.json().await.map_err(|error| {
+                (
+                    CloudApiError::Other {
+                        status: status.as_u16(),
+                        code: "malformed-response".to_string(),
+                        message: format!("Could not read {path}: {error}"),
+                    },
+                    serde_json::Value::Null,
+                )
             });
         }
         let text = response.text().await.unwrap_or_default();
@@ -2014,12 +2040,9 @@ impl VideorcApiClient {
             .or_else(|| body.pointer("/error/resetAt"))
             .and_then(|value| value.as_str())
             .map(str::to_string);
-        Err(classify_cloud_failure(
-            status.as_u16(),
-            &code,
-            message,
-            live_show,
-            reset_at,
+        Err((
+            classify_cloud_failure(status.as_u16(), &code, message, live_show, reset_at),
+            body,
         ))
     }
 
@@ -3703,6 +3726,72 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
             CLOUD_REQUEST_TIMEOUT,
         )
         .await
+    }
+
+    // --- Plan 234: web control (`docs/cloud/managed-media-wire.md`, section 2) ---
+
+    async fn control_state(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        since: Option<u64>,
+    ) -> std::result::Result<
+        crate::cloud_control_web::ControlStateAnswer,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::state_path(show_id);
+        let mut request = self.http.get(self.endpoint(&path)).bearer_auth(bearer);
+        if let Some(since) = since {
+            request = request.query(&[(crate::cloud_control_web::STATE_SINCE_QUERY, since)]);
+        }
+        // The web long-polls up to 25 s: wait that out.
+        self.cloud_json(request, &path, CLOUD_STATE_POLL_TIMEOUT)
+            .await
+    }
+
+    async fn set_destinations(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &crate::cloud_control_web::DestinationsBody,
+    ) -> std::result::Result<
+        crate::cloud_control_web::DestinationsAnswer,
+        crate::cloud_control_web::DestinationsFailure,
+    > {
+        let path = crate::cloud_control_web::destinations_path(show_id);
+        // The one request that carries the stream keys: in its body, over
+        // TLS to the configured base URL, and in nothing this client logs.
+        self.cloud_json_or_body(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body.as_json()),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+        .map_err(|(error, failure_body)| {
+            crate::cloud_control_web::DestinationsFailure::from_body(error, &failure_body)
+        })
+    }
+
+    async fn set_hold_image(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        png_base64: &str,
+    ) -> std::result::Result<(), crate::cloud_show::CloudApiError> {
+        let path = crate::cloud_control_web::hold_image_path(show_id);
+        self.cloud_json::<serde_json::Value>(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({ "pngBase64": png_base64 })),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
     }
 }
 

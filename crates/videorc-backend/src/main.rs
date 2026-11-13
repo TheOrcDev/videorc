@@ -42,6 +42,7 @@ mod chat_commands;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
+mod cloud_control_web;
 mod cloud_show;
 mod cloud_talk;
 mod cohost;
