@@ -3,9 +3,9 @@
 public enum SinkAccess: Equatable {
     /// The identifier is one of Videorc's.
     case allowed
-    /// CMIO reported no identifier at all. Refusing would leave the camera
-    /// black whenever CMIO cannot read the producer's identity, so the push is
-    /// accepted and logged; F2 on the lab Mac records what CMIO reports.
+    /// CMIO could not read the producer's identity (nil, empty, or the literal
+    /// "unknown"). Refusing would leave the camera showing its not-running
+    /// still, so the push is accepted and logged as unverified.
     case allowedUnverified
     /// A signed process that is not Videorc.
     case denied
@@ -16,7 +16,9 @@ public enum SinkAccessPolicy {
         signingID: String?,
         allowlist: [String] = VideorcCameraIdentifiers.producerSigningIDs
     ) -> SinkAccess {
-        guard let signingID, !signingID.isEmpty else {
+        // CMIO can return "unknown" even for our Developer ID signed backend.
+        // Treat only that exact sentinel as missing identity information.
+        guard let signingID, !signingID.isEmpty, signingID != "unknown" else {
             return .allowedUnverified
         }
         return allowlist.contains(signingID) ? .allowed : .denied

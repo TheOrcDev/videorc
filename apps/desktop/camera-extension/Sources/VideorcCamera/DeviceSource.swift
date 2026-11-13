@@ -178,7 +178,7 @@ final class VideorcCameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
             cameraLog.error("refused a sink client signed as \(signingID ?? "nil", privacy: .public)")
             return false
         case .allowedUnverified:
-            cameraLog.notice("sink client has no signing id; accepted unverified")
+            cameraLog.notice("sink client signing id unavailable (reported \(signingID ?? "nil", privacy: .public)); accepted unverified")
         case .allowed:
             break
         }
