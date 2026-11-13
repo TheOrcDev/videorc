@@ -66,8 +66,8 @@ Clips keeps what a recording would (each item's Show in recording).
 The Output section and its one switch, "Keep the last seconds" (plan 181,
 the owner's redesign): whenever Videorc is open it keeps the last minute
 ready (plan 199), using each item's Show in recording switch and writing
-nothing permanent. The status bar
-reads "Clip · 1:00"; the ring is never "Recording" or "On air".
+nothing permanent. The status bar shows nothing for it (the "Clip · 1:00"
+chip was removed 2026-11-13); the ring is never "Recording" or "On air".
 _Avoid_: Replay buffer, instant replay, replay cache, buffer (alone)
 
 **Clip** (the action):
