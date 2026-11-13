@@ -1,7 +1,8 @@
 # Implementation Plans
 
 - 2026-11-13: [Plan 234](234-cloud-on-neon-and-livekit.md), the owner's
-  ask: "plan out Neon + LiveKit managed media". PLANNED, not started:
+  ask: "plan out Neon + LiveKit managed media". PHASE 0 RUN 2026-11-13,
+  stopped at gate G0, no product code:
   - Videorc Cloud is merged and released with its switches off, and it has
     no media server. This plan runs it with none of our own: Neon for data
     and storage, LiveKit Cloud's managed Ingress and Egress for media.
@@ -9,8 +10,14 @@
     see: the feed, Be right back when it stops, and the talk-show stage.
     The desktop's control socket becomes HTTPS calls to videorc.com; the
     feed, `CloudStatus` and every UI surface stay.
-  - Phase 0 decides: picture quality after one more encode, the hold,
-    what LiveKit keeps of a stream key, uploads to Neon, and the meter.
+  - Phase 0 measured it (`docs/cloud/spike-livekit-managed-2026-11.md`).
+    Quality passes narrowly, 2.7 to 2.8 VMAF points under the node path,
+    with the encoding in D4. Keys pass with a stricter guard. Uploads to
+    Neon pass. The picture is back 6.2 s after a reconnect against a 5 s
+    bar, and about 0.7 frames in 100 are lost where the node path loses
+    none. The plan waits on the owner for those two (Open question 9).
+  - The LiveKit project is on the entry plan: one show, and a capped
+    month of transcoding. A paid plan comes before any cohort (D13).
   - Open, for the owner: stream keys pass through videorc.com and LiveKit
     (D7), the cost per hour against the plans' allowances (D19, private),
     and 1080p60 (D12). The node path stays in the code (D2).

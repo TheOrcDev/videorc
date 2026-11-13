@@ -19,8 +19,9 @@
 
 ## Status
 
-- **Status**: PLANNED 2026-11-13. Not started. Nothing below is decided
-  until Phase 0 has run and the owner has answered gate G0.
+- **Status**: PHASE 0 RUN 2026-11-13; stopped at gate G0. No product code
+  exists. The next section has Phase 0's results. The owner's answer to
+  Open question 9 decides whether Phase 1 starts.
 - **Priority**: P1. Videorc Cloud is merged and released (0.25.0) with every
   switch off, and it can't be switched on: there is no media server and no
   account to rent one on.
@@ -37,6 +38,38 @@
 - **Route**: Orchestrator (fit 10, `fable-5.1`) owns Phase 0, the seam
   design, every merge and the review passes. Each phase names its own
   route and lane.
+
+## Phase 0 results (2026-11-13)
+
+The note is `docs/cloud/spike-livekit-managed-2026-11.md`. Phase 0 ran on
+the production LiveKit project, which is empty. Nothing went to a real
+platform, and every stream key was made up.
+
+| Kill question | Bar | Measured | Verdict |
+| --- | --- | --- | --- |
+| S0.1 quality, 1080p30 | Within 3 VMAF points of the node path | 8.6 and 8.9 under with the settings this plan first named. 2.7 and 2.8 under with D4 as it now stands, keyframes matched, two clips | Pass, narrowly |
+| S0.2 hold | Card within 3 s; picture back within 5 s | Card at 2.8 s. Back 6.2 s after a re-push (one sample) | **The return misses by 1.2 s** |
+| S0.4 keys | Only the redacted key anywhere we can see | True for the six platform shapes. Four custom shapes leak | Pass with D7's guard; LiveKit's written answer is owed |
+| S0.5 recording | Every segment lands; the MP4 plays | 23 recordings, no segment missing | Pass; the 3 h 10 min run is not run |
+
+Three things the bars did not cover:
+
+- **Frames.** The node path drops none. LiveKit's recorder captures the
+  page on its own clock. Recorded at 30 fps, 1 to 5 source frames in 100
+  never reach the stream, depending on the page (3.0 and 4.2 with the
+  last version). Recorded at 60 fps, 0.7 in 100 are lost (one run). D4
+  now records at 60 fps.
+- **60 fps feeds** fail their bar: 1.3 and 2.0 frames in 100 dropped or
+  repeated. D12's cap stands.
+- **The LiveKit project is on the entry plan**: two ingress objects,
+  which is one solo show with both orientations, and a monthly transcode
+  allowance that is a hard cap (D13).
+
+**The plan stops here for the owner** (STOP conditions). The return bar
+failed, and the lost frames are a product call: Open question 9.
+
+Still to run, in the note's "Not run" list: destinations (S0.3), the
+talk-show page on LiveKit (S0.6), and the long runs.
 
 ## The owner's ask (2026-11-13)
 
@@ -170,7 +203,12 @@ marked ◇.
 - RTMP input is always transcoded. WHIP is forwarded untouched by default.
 - An RTMP ingress is reusable: after a disconnect it stays valid and takes
   the same stream key again. `ListIngress` returns its URL, key and state.
+  Phase 0: a re-push reaches the room about 4.8 s after it starts.
+- Phase 0: a closed connection is seen in about 1 s. A network that goes
+  silent keeps the feed's participant in the room for at least 59 s.
 - Encoding is a preset or custom layers (size, frame rate, bitrate).
+  Phase 0: `H264_HIGH` as a layer's codec is refused, and a 16 Mbps layer
+  is accepted and then never starts.
 - Webhooks: `ingress_started`, `ingress_ended`.
 
 ### Egress
@@ -185,25 +223,30 @@ marked ◇.
 - `UpdateStream` adds and removes URLs on a running egress, if it was
   started with a stream output (the URL list may start empty).
 - Presets: 720p and 1080p, 30 and 60 fps, landscape and portrait.
+  Phase 0: the 1080p30 preset encodes H.264 Main at about 4.4 Mbps with
+  44.1 kHz audio. Advanced options take High, a bitrate and 48 kHz.
 - **Limits**: a file output ends after 3 hours; segments and RTMP after 12
   hours. A hit limit ends the egress with `LIMIT_REACHED`.
 - **A failing destination** (open-source code ◇): the egress retries a
   stalled stream for 30 s, then marks it `FAILED` and removes it. Other
   outputs carry on. If it was the last output, the whole egress fails.
+  Phase 0: a destination that cannot resolve fails at once, with no
+  retry, and the others carry on.
 - **Stream keys** (open-source code ◇): every stored or returned
   `EgressInfo` has its stream URLs redacted to `{abc...xyz}`, the first and
-  last three characters of the key. S3 credentials are replaced whole. A
-  URL the pattern doesn't match (`rtmp(s)://host/app/key`, or a key in a
-  query value) is not redacted.
+  last three characters of the key. S3 credentials are replaced whole.
+  Phase 0: true for the six platform shapes. A URL with one path segment,
+  or with the key in a query value, is refused, and the error repeats
+  the URL. Four shapes are accepted and leak the key (D7).
 - Webhooks: `egress_started`, `egress_updated`, `egress_ended`.
-- Egress API calls need a `roomRecord` token. We believe that grant is
-  project-wide, not per room ◇, so it must never reach a desktop.
+- Egress API calls need a `roomRecord` token. That grant is project-wide,
+  not per room (Phase 0), so it must never reach a desktop.
 
 ### Rooms
 
 - `empty_timeout` (default 300 s) closes a room nobody joined.
   `departure_timeout` (default 20 s) closes it after the last participant
-  leaves. Egress participants don't keep a room open ◇.
+  leaves. Egress participants don't keep a room open (Phase 0).
 - Room metadata is shared with every participant, including late joiners.
 
 ### Regions and data
@@ -219,21 +262,24 @@ marked ◇.
   per orientation (in and out); a talk show uses one per orientation.
 - An import that isn't transcoded (WHIP) is free.
 - Whether RTMP output counts as metered data transfer is not stated ◇.
-- Plans cap concurrent imports and exports.
+- Plans cap concurrent imports and exports. The entry plan allows two of
+  each, and its monthly transcode allowance is a hard cap: requests fail
+  once it is used.
 
 ### Neon Object Storage
 
 - S3-compatible: SigV4, path-style, multipart. LiveKit's S3 fields match
   (`endpoint`, `bucket`, `access_key`, `secret`, `region`,
-  `force_path_style`). **LiveKit uploading to Neon has never been run** ◇.
+  `force_path_style`). Phase 0: LiveKit uploads to a Neon branch with a
+  write-only credential.
 - 10 GiB per object. Bucket lifecycle rules are accepted and not enforced,
   so our own clean-up stays.
 
 ### FFmpeg
 
-- The macOS build (8.1.1, OpenSSL) should carry the WHIP muxer; plan 184
-  judged it experimental and H.264 baseline only. The Windows and Linux
-  prebuilts are unchecked.
+- The macOS build (8.1.1, OpenSSL) carries the WHIP muxer, and LiveKit
+  takes H.264 High from it (Phase 0). The build has no libopus, which a
+  WHIP feed needs. The Windows and Linux prebuilts are unchecked.
 
 ## What gets simpler, and what we give up
 
@@ -250,7 +296,10 @@ marked ◇.
 
 | What | Why | Answer |
 | --- | --- | --- |
-| One more encode | Feed → ingress → page → egress | S0.1 measures it; D12 |
+| One more encode | Feed → ingress → page → egress | 2.7 to 2.8 VMAF points (S0.1); D4 |
+| Every frame | The recorder captures the page on its own clock | D4 records at 60 fps; about 0.7 in 100 are still lost |
+| A fast return | LiveKit takes about 5 s to restart the ingress | D5 |
+| Go Live in 5 s | The chain takes 5 to 7 s and runs 2.3 s behind the feed | S0.8 |
 | "The key never reaches videorc.com" | Only our server may call the Egress API | D7, owner |
 | "A Videorc media server in the EU" | LiveKit is the processor; media isn't pinned | D14, owner |
 | The real return picture | The egress publishes nothing | D6 |
@@ -290,13 +339,23 @@ the plan, or sends it back to the owner with the measured gap.
 
 - **Create**: the web makes room `<showId>` (`empty_timeout` 120 s,
   `departure_timeout` = the hold limit), and one RTMPS ingress per
-  orientation, identity `feed-h` or `feed-v`, transcoded to a single layer
-  at the output's size and frame rate.
+  orientation, identity `feed-h` or `feed-v`, transcoded to a single
+  1080p layer at 12 Mbps and the feed's frame rate, codec left to LiveKit.
+  At 8 Mbps the picture loses 2 VMAF points (S0.1).
 - **Hand-over**: the desktop sends its destinations. The web starts one
   egress per orientation: a `TemplateSource` on the program page with
-  `layout` `h` or `v`, the matching preset, and the destination URLs.
+  `layout` `h` or `v`, advanced encoding options, and the destination
+  URLs.
+- **Encoding**: H.264 High, 6 Mbps, 60 fps, a keyframe every 2 s, AAC at
+  48 kHz. Not the preset, which costs 3 to 4 VMAF points (S0.1).
+- **Why 60 fps for a 30 fps feed**: the recorder captures the page on its
+  own clock. Recorded at 30 fps, 1 to 5 source frames in 100 never reach
+  the stream. Recorded at 60 fps, 0.7 in 100 are lost and 88 in 100 are
+  shown exactly twice (one run). Quality is the same.
 - **On air**: the page logs `START_RECORDING` at the feed's first decoded
-  frame, so no platform ever sees a card before the show.
+  frame, so no platform ever sees a card before the show. A platform gets
+  its first frame 5 to 7 s after the feed starts, and the stream runs
+  about 2.3 s behind the feed (S0.8).
 - The desktop's feed is the leg it already has: RTMPS, FLV, certificate
   checked. Only the address and key change.
 
@@ -305,11 +364,19 @@ the plan, or sends it back to the owner with the measured gap.
 - The page copies the switcher's timings: no new frame for 1.5 s, freeze
   for 1 s, fade 300 ms to the card, silence. Back after 1 s of steady
   frames, with a 300 ms fade.
+- **Measured**: the card is up 2.8 s after the last frame. The picture is
+  back 6.2 s after a re-push, against about 2 s on the node path. LiveKit
+  takes 4.8 s to restart the ingress; the page's wait and fade are the
+  other 1.3 s (one sample; Open question 9).
 - The card is HTML: "Be right back" in Noto Sans 500 on `#0D0D0F`, per
   plan 184's card. A custom image replaces it (W6).
 - **The hold limit is the room's `departure_timeout`.** When the feed's
   participant has been gone that long, LiveKit closes the room and the
-  egress ends cleanly. No timer of ours has to fire.
+  egress ends cleanly (measured: 124 s at a 120 s timeout).
+- The timeout only starts when the participant has left. A closed
+  connection is seen in about 1 s, but a network that goes silent keeps
+  the participant for at least 59 s. So the reaper also ends a show whose
+  feed is present and silent past the hold limit.
 - The reaper still ends a show that never got a feed (60 s) and one past
   its limit.
 
@@ -319,7 +386,10 @@ the plan, or sends it back to the owner with the measured gap.
 - The page draws the four layouts (`solo`, `side-by-side`,
   `screen-people`, `spotlight`) from `protocol-fixtures/talk-show-layout.json`,
   with name plates, the host's circle, the away plate, and the 300 ms
-  crossfade. Audio goes through a Web Audio limiter at −1 dBFS.
+  crossfade. Audio goes through a limiter at −1 dBFS: an AudioWorklet
+  with a 5 ms look-ahead, because a compressor node lets peaks through
+  (S0.6). Its path adds about 37 ms to every voice, out of the 80 ms
+  lip-sync budget.
 - **Stage state is room metadata**, set by the web when the desktop calls
   `PUT …/stage`. It survives the host leaving and a page reload, and no
   guest can forge it. Guests read the same metadata.
@@ -340,6 +410,11 @@ the plan, or sends it back to the owner with the measured gap.
 - **A URL LiveKit wouldn't redact is refused** before it is sent. The web
   carries the same pattern LiveKit uses, with a test per platform
   (YouTube, Twitch, Kick, X, Facebook, custom).
+- **The guard is stricter than LiveKit's pattern** (S0.4). It also refuses
+  a trailing slash (LiveKit shows the whole key), user info (the
+  password), a key so short that the six characters LiveKit shows are
+  most of it, any scheme but `rtmp` and `rtmps`, and any URL LiveKit
+  itself would refuse, because its error repeats the URL.
 - To match LiveKit's results to our destinations, the web stores an HMAC
   of each redacted URL, keyed with a server secret. It stores no part of a
   key.
@@ -361,7 +436,7 @@ the plan, or sends it back to the owner with the measured gap.
 | --- | --- |
 | `phase`, `hold` | The page's beacons; `ingress_ended` as the fallback after 5 s |
 | `feeds[]` | `ingress_started` / `ingress_ended`; `kbps` from `ListIngress`, cached 2 s |
-| `legs[]` | `stream_results` in `egress_updated` and `egress_ended`, matched by the HMAC |
+| `legs[]` | `stream_results` in `egress_updated` and `egress_ended`, matched by the HMAC. `ListEgress` fills only the older `stream.info` and `result.segments`, so the reconcile reads both |
 | `liveSeconds` | Since the first on-air beacon |
 | `desktopConnected` | A state poll in the last 15 s |
 | `destinationsSet`, `restarts` | Whether an egress is active; how many were started |
@@ -369,12 +444,16 @@ the plan, or sends it back to the owner with the measured gap.
 | `room`, `recording` | Webhooks, room metadata, egress segment results |
 
 - `show.nodeId` is sent as `"livekit"`.
+- A stream that reads `FAILED` because its room closed is not a dead
+  destination (S0.3).
 
 ### D9. Failures: who recovers what
 
-- **A destination drops**: LiveKit retries for 30 s, then reports it
-  failed. The watchdog's Reconnect re-sends that URL, and the web adds it
-  back with `UpdateStream`.
+- **A destination drops**: LiveKit reports it failed. That is at once if
+  the address cannot resolve, and after LiveKit's own retries if a live
+  connection dies (30 s in the open-source code; S0.3 measures it). The
+  watchdog's Reconnect re-sends that URL, and the web adds it back with
+  `UpdateStream`.
 - **The last destination fails, or the egress dies**: the egress is gone.
   `state` shows no legs and `destinationsSet: false`, and the desktop
   re-sends its destinations, as it does today after a runner restart. The
@@ -397,8 +476,12 @@ the plan, or sends it back to the owner with the measured gap.
 - Record before or at Go Live: one egress carries stream and segments.
   Record pressed after Go Live: a second, segments-only egress starts,
   because a running egress can't gain an output.
-- The credential handed to LiveKit is the show branch's, write-only if
-  S0.5 allows, expiring with the show.
+- The credential handed to LiveKit is the show branch's, write-only
+  (S0.5: Neon's `storage:write` scope alone can't read or list), expiring
+  with the show.
+- Segments are 2 s long when the egress also streams. The egress puts a
+  keyframe at every segment boundary, so 4 s segments give the platforms
+  4 s keyframes.
 - Download: the desktop fetches the playlist and segments with presigned
   URLs and remuxes to MP4 with its own FFmpeg (`-c copy`). The account
   page lists recordings and points to the desktop for the file.
@@ -417,9 +500,10 @@ the plan, or sends it back to the owner with the measured gap.
 
 - **Show length**: the reaper ends a show at 11 h 55 min, before LiveKit's
   12-hour stop. The hold no longer adds to it.
-- **Quality**: 1080p30 per orientation. 1080p60 only if S0.1 passes it; a
-  60 fps stream otherwise goes direct with the existing `cloud-quality`
-  notice ⚑.
+- **Quality**: a 1080p30 feed per orientation. S0.1 failed 60 fps feeds
+  (1.3 and 2.0 frames in 100 dropped or repeated), so a 60 fps stream
+  goes direct with the existing `cloud-quality` notice ⚑. The platforms
+  get a 1080p60 stream that carries the 30 fps picture (D4).
 - **Destinations**: 16, as today, if S0.3 finds no lower limit.
 
 ### D13. Capacity is a number, not a placement
@@ -427,6 +511,10 @@ the plan, or sends it back to the owner with the measured gap.
 - `VIDEORC_CLOUD_MAX_SHOWS` caps open managed shows below the plan's
   concurrent import and export quota. Over it: 503 `cloud-full`.
 - The node registry, heartbeats and drain don't apply to managed shows.
+- **The production project is on LiveKit's entry plan** (Phase 0 hit its
+  limit of two ingress objects). That is one solo show with both
+  orientations, and the plan's monthly transcode allowance is a hard cap.
+  A paid plan comes before any cohort (Only the owner 2).
 
 ### D14. Region and privacy ⚑ OWNER
 
@@ -465,9 +553,11 @@ the plan, or sends it back to the owner with the measured gap.
   `livekit/egress` in Docker. The fake web calls them with the real
   server SDK and serves the program page.
 - The node smokes stay as they are.
-- Phase 0's measurements run on a separate LiveKit Cloud dev project,
-  because the open-source services may behave differently (Only the
-  owner 2).
+- Phase 0's measurements ran on the production LiveKit project, which is
+  empty, because no dev project exists.
+- This Mac has no Docker. Until it does, the pages are tested against
+  `livekit-server --dev` and headless Chrome, which covers the page and
+  none of the egress (Only the owner 3).
 
 ### D19. The cost gate ⚑ OWNER
 
@@ -486,6 +576,10 @@ the plan, or sends it back to the owner with the measured gap.
   running show; a breaking change is `v2`.
 - `custom_base_url` carries a per-show token that authorises only that
   show's beacons and its hold image.
+- The page follows the rules Phase 0 found (the note's "What the program
+  page must do"): own the video element's stream, never stretch the
+  video, keep a rarely refreshed copy of the picture beneath it, never
+  pipe frames through script, and time the hold on a clock.
 
 ## Wire shape
 
@@ -555,7 +649,10 @@ figures in plan 185.
 
 - **S0.10, a 12-hour soak**, runs once, alone, after S0.2.
 - **Gate G0**: the owner reads the note and plan 185's figures and answers
-  Open questions 1 to 5. Nothing in Phase 1 starts before it.
+  Open questions 1 to 5 and 9. Nothing in Phase 1 starts before it.
+- **Run 2026-11-13**: see "Phase 0 results". S0.10 and the 3 h 10 min,
+  30 minute and 60 minute runs are not run: they need a paid LiveKit plan
+  and the owner's word.
 
 ### Phase 1: web (`videorc-web`)
 
@@ -720,13 +817,22 @@ Stop and ask the owner when:
    *Recommended: yes.*
 7. **Recording downloads** come from the desktop. *Recommended: yes for
    v1.*
-8. **The LiveKit plan**: stay on Ship; move to Scale when region pinning
-   or volume asks for it. *Recommended: yes.*
+8. **The LiveKit plan**: the project is on the entry plan, which carries
+   one show. Move to Ship before the cohort; move to Scale when region
+   pinning or volume asks for it. *Recommended: yes.*
+9. **The measured gaps** (Phase 0 results). After a reconnect the picture
+   is back in about 6 s, not 2. About 0.7 frames in 100 are lost; the
+   node path loses none. Go Live takes 5 to 7 s. Quality is 2.7 to 2.8
+   VMAF points under the node path. Good enough for the cohort?
+   *Recommended: yes, with the return bar moved to 7 s, once a second
+   60 fps run confirms the frame figure. They are the price of having no
+   server.*
 
 ## Only the owner can do
 
-1. Answer gate G0 (Open questions 1 to 5).
-2. A LiveKit Cloud dev project for Phase 0, and a spend cap for it.
+1. Answer gate G0 (Open questions 1 to 5 and 9).
+2. Move the LiveKit project to a paid plan, or make a dev project on one.
+   The entry plan carries one show and can't run Phase 0's long runs.
 3. Start Docker Desktop on this Mac for the managed smokes.
 4. Send LiveKit's support the retention questions (agents draft them), or
    say agents may.
@@ -739,11 +845,13 @@ Stop and ask the owner when:
 
 - **Goal**: Videorc Cloud running with no server of ours: Neon for data
   and storage, LiveKit Cloud for media.
-- **Current state**: this plan only. No code. The node path is merged and
-  off. Production has Neon storage and a LiveKit project, and no VM.
+- **Current state**: Phase 0 has run; its note is
+  `docs/cloud/spike-livekit-managed-2026-11.md`. No product code. Gate G0
+  is open on Open question 9. The node path is merged and off. Production
+  has Neon storage and a LiveKit project on the entry plan, and no VM.
 - **Route**: Orchestrator, fit 10, `fable-5.1`.
-- **Start with** Phase 0, S0.4 first (it can end the plan cheaply), then
-  S0.1 and S0.2.
+- **Start with** the owner's answer to Open question 9. Then the runs the
+  note lists as not run, then Phase 1.
 - **Where things are**:
   - the runner: `TheOrcDev/videorc-cloud`, `docs/wire-notes.md`;
   - the web control plane: `TheOrcDev/videorc-web`, `lib/cloud/`,

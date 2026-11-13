@@ -23,7 +23,7 @@ Four kill questions first.
 
 | Slice | Question | Result | Verdict |
 | --- | --- | --- | --- |
-| S0.1 | Picture quality at 1080p30, within 3 VMAF points of the node path | As the plan wrote it (the matching egress preset): 8.6 and 8.9 under. With two settings changed (below): 2.2 to 3.0 under, four runs | **Fails as planned. Passes at the bar with both levers** |
+| S0.1 | Picture quality at 1080p30, within 3 VMAF points of the node path | As the plan wrote it (the matching egress preset): 8.6 and 8.9 under. With two settings changed (below): 2.2 to 3.0 under, four runs; 2.7 and 2.8 under with keyframes matched to the node path's | **Fails as planned. Passes narrowly with both levers** |
 | S0.1 | 1080p60, at most 1 frame in 100 dropped or repeated | 1.3 and 2.0 per 100 over a whole run; 0.6 and 1.0 once the first seconds are past | **Fails. D12's 1080p30 cap stands** |
 | S0.2 | Card within 3 s of the picture stopping | 2.80 to 2.87 s, four holds on Cloud | Pass |
 | S0.2 | Picture back within 5 s of a re-push | 6.2 s, one sample; 4.8 s of it is the ingress restarting | **Fails by 1.2 s** |
@@ -46,7 +46,8 @@ What changes the picture, in order of weight:
 2. **The program page costs frames however it is written.** Rendering in a
    browser and capturing the screen drops and repeats about 1.3 frames in
    100 at 30 fps at best (LiveKit's own template: 1.4). The node path
-   drops none.
+   drops none. Recording the 30 fps feed at 60 fps cuts the frames that
+   never reach the stream from 3.0 to 0.7 in 100 (one run).
 3. **The project holds two ingress objects.** One solo show with both
    orientations uses both.
 4. **`roomRecord` is project-wide**, as the plan assumed, and a few URL
@@ -118,10 +119,14 @@ per 100, after the first 5 s.
 | A | 1080p, 12 Mbps | High 6 Mbps | High 5.9 Mbps | | 70.1 | 67.1 | **−3.0** | 4.8 / 4.8 ² |
 | A | 1080p, 12 Mbps | High 6 Mbps | High 5.8 Mbps | | 70.1 | 67.5 | **−2.6** | 4.3 / 4.3 ² |
 | B | WHIP, no transcode | High 6 Mbps | High 5.7 Mbps | | 73.9 | 71.6 | −2.3 | 13.6 / 12.2 ² |
+| B | 1080p, 12 Mbps | High 6 Mbps, 2 s keyframes | High 5.6 Mbps | | 73.7 | 71.0 | **−2.7** | 3.0 / 3.0 ³ |
+| A | 1080p, 12 Mbps | High 6 Mbps, 2 s keyframes | High 5.8 Mbps | | 69.8 | 67.0 | **−2.8** | 4.2 / 4.2 ³ |
+| B | 1080p, 12 Mbps | High 6 Mbps, 2 s keyframes, recorded at 60 fps | High 5.8 Mbps | | 73.5 | 70.9 | **−2.6** | 0.7 never shown ³ |
 
 ¹ The page piped frames through a processor and a generator. ² The page
 copied the picture to a canvas every 100 ms. Both cost frames; see "What
-the program page must do".
+the program page must do". ³ The final page, 2 s segments, load 5 to 10;
+run by the orchestrator after the note was first written.
 
 - **The egress preset is the larger loss.** `H264_1080P_30` encodes Main
   profile at 4.4 Mbps with 44.1 kHz audio. Advanced options at the node
@@ -132,10 +137,12 @@ the program page must do".
   a WHIP feed with no transcode at all scores the same.
 - What is left, about 2.4 points, is the browser-and-egress generation.
   No setting found here removes it.
-- **A caveat on the narrow pass.** Every recorded run has a keyframe every
-  4 s, the segment length, though 2 s was asked. The node path has 2 s.
-  That favours the managed encode a little. A stream-only egress, which is
-  what a solo show uses, was not inspected.
+- **Keyframes.** The first runs have a keyframe every 4 s, the segment
+  length, though 2 s was asked; the node path has 2 s. That favoured the
+  managed encode. With 2 s segments the output has 2 s keyframes, and the
+  difference is 2.7 (B) and 2.8 (A): about 0.3 worse than at 4 s, and
+  still inside the bar. A stream-only egress, which is what a solo show
+  uses, was not inspected.
 - Limits met while looking for levers: `H264_HIGH` as the ingress layer's
   codec is refused ("invalid video parameters: video codec unsupported").
   A 16 Mbps layer is accepted by `CreateIngress`, then the ingress never
@@ -157,6 +164,27 @@ the program page must do".
 - Every run also loses about four frames a second for its first 5 to 10 s.
 - The upload from this Mac never paused for more than 180 ms in any run, so
   the pushes were not starved.
+
+### A 30 fps feed recorded at 60 fps
+
+One run: clip B, the final page, the egress's frame rate set to 60. Each
+source frame should then fill two output frames. Counted per source frame,
+after the first 6 s, against the 30 fps run beside it in the table.
+
+| Per 100 source frames | Recorded at 30 fps | Recorded at 60 fps |
+| --- | ---: | ---: |
+| Never reach the stream | 3.0 | **0.7** |
+| Held on screen for 67 ms or longer | 2.8 | 0.5 |
+| Shown 17 ms short or long | none (a frame is 33 ms) | 10.7 |
+| Shown for exactly their 33 ms | 94.2 | 88.1 |
+
+- At 60 fps the recorder's clock slips by half a source frame at a time,
+  so most slips show as 17 ms of unevenness, not as a lost or doubled
+  frame.
+- VMAF is unchanged: 2.6 under the node path.
+- The output is a 1080p60 stream at 6 Mbps that carries a 30 fps picture.
+  How a platform treats that against a 1080p30 stream was not looked at.
+- One run. A second sample is owed.
 
 ### 1080p60
 
@@ -470,9 +498,6 @@ node talk-cloud.mjs                 # S0.6 on Cloud: no ingress, about 70 s
 node stall.mjs                      # how long a silent feed is kept
 node hold.mjs d300 300 timeout      # departure_timeout at 300 s
 node dest.mjs main extra=14         # S0.3; needs four ingress objects
-node chain.mjs q30b-2s 30 seconds=78 tail=6 page=v=final egress=advanced \
-  egressKbps=6000 ingressKbps=12000 segment=2 \
-  feed=/tmp/plan-234/phase0/media/feed-30b.flv   # quality again at 2 s keyframes
 ```
 
 Never meant to run in Phase 0 without the owner's word:
@@ -500,7 +525,8 @@ receiver.
 ## What the plan should change
 
 1. **D4, the egress encoding.** Not "the matching preset". Advanced
-   options: H.264 High, 6 Mbps, 48 kHz audio.
+   options: H.264 High, 6 Mbps, 48 kHz audio, and 60 fps for a 30 fps
+   feed.
 2. **D4, the ingress.** One 1080p layer at 12 Mbps, codec left to LiveKit.
    High is refused; 16 Mbps never starts.
 3. **D12, 60 fps.** Stays capped at 1080p30.
