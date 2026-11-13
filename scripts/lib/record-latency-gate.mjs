@@ -25,22 +25,24 @@ export const RECORD_LATENCY_BUDGETS = Object.freeze({
 })
 
 /**
- * Windows budgets (#1068 step 6), calibrated on the finished #1068 slices with
- * the release dev backend: 3 fresh-process runs × 10 cycles on an i5-8400 with
- * a GTX 1650 SUPER. The macOS budgets above stay as they are. On Windows the
- * Media Foundation bridge's bring-up (`bridge-ready`, p50 ≈ 1.19 s) is most of
- * the start, so Windows has its own numbers instead of a loosened shared set.
+ * Windows budgets (#1068 step 6, recalibrated for #1267) with the release dev
+ * backend and the capture-worker microphone route the packaged app uses:
+ * 3 fresh-process runs × 10 cycles on an i5-8400 with a GTX 1650 SUPER. The
+ * macOS budgets above stay as they are. Each value also holds on the Intel
+ * UHD 620 laptop of #1293/#1298/#1303 (warm p95 390 ms, cold 1.2-2.0 s).
  */
 export const WINDOWS_RECORD_LATENCY_BUDGETS = Object.freeze({
-  // Calibrated warm p95 ≈ 1476 ms (max 1483 ms). #1068 opened at 2013–2165 ms.
-  warmStartClickToRecordingP95Ms: 2000,
-  // Calibrated cold max ≈ 1748 ms.
+  // Calibrated warm p95 ≈ 304 ms (max 307 ms); the UHD 620 laptop 390 ms.
+  // #1267 opened at p95 1476 ms (DirectShow microphone fallback).
+  warmStartClickToRecordingP95Ms: 800,
+  // Calibrated cold max ≈ 614 ms; the laptop's first Clips session warms the
+  // microphone and a cold MFT (1.2-2.0 s), so the bound stays.
   coldStartClickToRecordingMs: 2500,
-  // Calibrated p95 ≈ 181 ms (max 194 ms); the macOS bound holds.
+  // Calibrated p95 ≈ 163 ms (max 273 ms); the macOS bound holds.
   stopClickToIdleP95Ms: 300,
-  // Calibrated p95 ≈ 332 ms (cold max 1250 ms via sessions.list).
+  // Calibrated p95 ≈ 374 ms (max 1583 ms).
   finalizationIdleToFinalizedP95Ms: 5000,
-  calibratedFrom: 'docs/acceptance/2026-11-09-windows-record-latency-calibration.md'
+  calibratedFrom: 'docs/acceptance/2026-11-12-windows-record-latency-calibration.md'
 })
 
 /** The budget set the gate enforces on `platform` (a `process.platform` value). */

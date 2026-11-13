@@ -71,6 +71,16 @@ import {
   windowsDevMicrophoneRoute,
   workerFallbackCount
 } from './lib/windows-microphone-route.mjs'
+import {
+  summarizeWindowsMediaPaths,
+  windowsMediaPathFrom
+} from './lib/record-latency-media-path.mjs'
+import { selectWindowsHideScreen } from './lib/hide-screen-windows-gates.mjs'
+import { scenePresetStateReadCode } from './lib/scene-presets-smoke-state.mjs'
+import {
+  launchWindowsFixtureWindow,
+  stopWindowsFixtureWindow
+} from './lib/windows-fixture-window-process.mjs'
 
 const { values: args } = parseArgs({
   options: {
@@ -96,6 +106,11 @@ const { values: args } = parseArgs({
     // Stop the renderer re-arms it. --no-replay-buffer turns the switch off
     // first for the bare baseline. Both are reported against the same budgets.
     'no-replay-buffer': { type: 'boolean', default: false },
+    // Windows (#1267): record the real primary display instead of the
+    // renderer's test pattern. The test pattern keeps every Record on the CPU
+    // compositor (`windows-d3d11-media-scene-features-unsupported`); a real
+    // screen takes the D3D11 media path, which builds its encoder on its own.
+    'real-screen': { type: 'boolean', default: false },
     debug: { type: 'boolean', default: false }
   },
   strict: true
@@ -134,6 +149,10 @@ const expectedHeight =
 const enforce = args.enforce
 const systemAudio = args['system-audio']
 const replayBuffer = !args['no-replay-buffer']
+const realScreen = args['real-screen']
+if (realScreen && process.platform !== 'win32') fail('--real-screen is Windows only')
+// The Windows budgets are calibrated on the test pattern (CPU compositor).
+if (realScreen && enforce) fail('--real-screen is report-only; drop --enforce')
 const REPLAY_BUFFER_SECONDS = 30
 const debug = args.debug || process.env.VIDEORC_RECORD_LATENCY_DEBUG === '1'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
@@ -212,6 +231,66 @@ async function seedRendererVideoProfile(smoke) {
   // The reload tears the renderer down; give it a moment before the smoke
   // command server is asked for anything else.
   await sleep(2500)
+}
+
+/**
+ * --real-screen: the Studio's own Screen picker path for the first available
+ * DXGI display, Camera Off, full-bleed. Picked explicitly (as
+ * smoke:hide-screen:windows does) so every cycle records the same scene.
+ */
+async function selectRealScreen(smoke) {
+  const devices = await request(renderer, timeoutMs, 'devices.list', { ffmpegPath })
+  const picked = selectWindowsHideScreen(devices?.devices ?? [])
+  if (picked.skip) fail(`BLOCKED: --real-screen needs a DXGI display: ${picked.skip.reason}`)
+  const screen = picked.screen
+  const evaluate = async (code) => {
+    const response = await requestSmokeCommand(smoke, 'eval-js', { code }, { timeoutMs })
+    return response && typeof response === 'object' && 'result' in response
+      ? response.result
+      : response
+  }
+  await requestSmokeCommand(
+    smoke,
+    'open-tab',
+    { tab: 'studio', waitFor: '[data-videorc-preview-card]' },
+    { timeoutMs }
+  )
+  await evaluate(`
+    const current = window.__videorcSmokeScenePresets.state();
+    window.__videorcSmokeScenePresets.configure({sources: {
+      ...current.visual.sources, cameraId: undefined, cameraName: undefined, cameraOff: true
+    }});
+    return true;
+  `)
+  await requestSmokeCommand(
+    smoke,
+    'select-screen-device',
+    { sourceId: screen.id, settleMs: 0 },
+    { timeoutMs }
+  )
+  await evaluate(
+    `window.__videorcSmokeScenePresets.layout(${JSON.stringify({ layoutPreset: 'screen-only' })}); return true`
+  )
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    try {
+      last = await evaluate(scenePresetStateReadCode)
+    } catch (error) {
+      if (!/not ready|destroyed|navigation|context/i.test(String(error))) throw error
+    }
+    const sources = last?.visual?.sources
+    if (
+      sources?.screenId === screen.id &&
+      !sources.windowId &&
+      sources.cameraOff === true &&
+      last.visual.layout?.layoutPreset === 'screen-only'
+    ) {
+      return screen
+    }
+    await sleep(100)
+  }
+  fail(`timed out selecting ${screen.id}; last renderer sources: ${JSON.stringify(last?.visual)}`)
 }
 
 /** Best-effort: the renderer's visible start-failure copy, for diagnostics. */
@@ -326,6 +405,12 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
   const startTimeline = timelineSnapshotFor(recorder, 'recordingStartTimeline', sessionId)
 
   await sleep(recordingMs)
+  // The latest diagnostics snapshot is from inside this take (they publish
+  // about once a second): name the Windows media path it ran on.
+  const windowsMediaPath =
+    process.platform === 'win32'
+      ? windowsMediaPathFrom(recorder.latestDiagnostics?.payload)
+      : undefined
 
   const { stopClickAt, terminalRecord, stopAck, stoppingRecord } = await stopRecordLatencyCycle({
     remote,
@@ -369,6 +454,7 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
     mp4Path: finalization.mp4Path,
     compositorPath: compositor.path,
     compositorPathDetail: compositor.detail,
+    ...(windowsMediaPath ? { windowsMediaPath } : {}),
     artifact,
     backend: {
       startTimeline,
@@ -382,7 +468,8 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
       `start click→starting ${formatMs(cycle.clickToStartingMs)} click→recording ${formatMs(cycle.clickToRecordingMs)} · ` +
       `stop click→stopping ${formatMs(cycle.stopClickToStoppingMs)} click→idle ${formatMs(cycle.stopClickToIdleMs)} · ` +
       `idle→mp4 ${formatMs(cycle.idleToFinalizedMs)} (${finalization.source}) · ${artifact.width}x${artifact.height} ${artifact.durationSeconds.toFixed(2)}s · ` +
-      `compositor ${compositor.path ?? 'unknown'}`
+      `compositor ${compositor.path ?? 'unknown'}` +
+      (windowsMediaPath ? ` · media ${windowsMediaPath.path ?? 'unknown'}` : '')
   )
   return cycle
 }
@@ -419,6 +506,7 @@ function gitHead() {
 }
 
 let stopApp = null
+let fixture = null
 let renderer = null
 let remote = null
 let recorder = null
@@ -435,7 +523,9 @@ try {
   const launch = await launchDevApp({
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
-      VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+      // --real-screen: never 1, it swaps the screen capture for a synthetic
+      // pattern (the D3D11 Record then encodes black after its first frames).
+      VIDEORC_SMOKE_PREVIEW_MOTION: realScreen ? '0' : '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_USER_DATA_DIR: userDataDir,
       // The dev app has no microphone permission grant; the renderer still
@@ -464,17 +554,31 @@ try {
     `seeded renderer video profile ${videoProfile.preset} (${videoProfile.width}x${videoProfile.height}@${videoProfile.fps})${systemAudio ? ' with System audio on' : ''}`
   )
 
-  // Arm the renderer-owned test pattern so the Record button has a source, and
-  // prove the compositor renders it before measuring anything.
-  const compositorBefore = await request(renderer, timeoutMs, 'compositor.status')
-  await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 }, { timeoutMs })
-  await waitForBackendState(
-    renderer,
-    'compositor.status',
-    (compositor) => syntheticCompositorReady(compositor, compositorBefore),
-    'synthetic compositor readiness'
-  )
-  log('synthetic source live; preview compositor rendering')
+  if (realScreen) {
+    // The fresh profile's default source is the primary display; the Clips
+    // ring below proves a session runs on it before any cycle. Desktop
+    // Duplication only delivers changed frames, so a still desktop would fail
+    // the startup repeated-frame gate: the fixture window (#1088) covers the
+    // display with an animation that changes every frame.
+    fixture = await launchWindowsFixtureWindow({ displayIndex: 0, color: 'blue' })
+    const screen = await selectRealScreen(smoke)
+    log(`real screen: ${screen.id} (${screen.name}), Camera Off, full-bleed`)
+    log(
+      `real screen: fixture window ${fixture.ready.hwnd} (pid ${fixture.pid}) animates the primary display; Records take the D3D11 media path when it accepts the scene`
+    )
+  } else {
+    // Arm the renderer-owned test pattern so the Record button has a source, and
+    // prove the compositor renders it before measuring anything.
+    const compositorBefore = await request(renderer, timeoutMs, 'compositor.status')
+    await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 }, { timeoutMs })
+    await waitForBackendState(
+      renderer,
+      'compositor.status',
+      (compositor) => syntheticCompositorReady(compositor, compositorBefore),
+      'synthetic compositor readiness'
+    )
+    log('synthetic source live; preview compositor rendering')
+  }
 
   const { discovery } = await enableRemoteControl(renderer, { timeoutMs })
   remote = await connectRemote(discovery.host, discovery.port, discovery.token, { timeoutMs })
@@ -551,6 +655,8 @@ try {
     ).length
   }
   const warnings = warningEvents(recorder.events)
+  const windowsMediaPaths =
+    process.platform === 'win32' ? summarizeWindowsMediaPaths(measured) : undefined
   const microphoneRoute = windowsMicrophoneRoute
     ? {
         ...windowsMicrophoneRoute,
@@ -571,10 +677,12 @@ try {
       expectedWidth,
       expectedHeight,
       systemAudio,
-      replayBuffer
+      replayBuffer,
+      realScreen
     },
     systemAudioEvidence: systemAudio ? systemAudioEvidence : undefined,
     microphoneRoute,
+    windowsMediaPaths,
     warnings,
     budgets,
     enforce,
@@ -593,6 +701,11 @@ try {
   log(
     `compositor path: ${armedCycles} armed in place, ${restartedCycles} restarted, ${measured.length - armedCycles - restartedCycles} unknown`
   )
+  if (windowsMediaPaths) {
+    log(
+      `windows media path: ${windowsMediaPaths.d3d11} D3D11, ${windowsMediaPaths['cpu-compositor']} CPU compositor, ${windowsMediaPaths.unknown} unknown`
+    )
+  }
   if (systemAudio) {
     log(
       `system audio: ${systemAudioEvidence.mixedStatuses} mixed status event(s), ${systemAudioEvidence.unavailable} unavailable, ${systemAudioEvidence.lost} lost`
@@ -630,6 +743,12 @@ try {
   console.error(error instanceof Error ? (error.stack ?? error.message) : String(error))
   process.exitCode = 1
 } finally {
+  if (fixture) {
+    await stopWindowsFixtureWindow(fixture).catch((error) => {
+      console.error(`record-latency: could not stop the fixture window: ${error.message}`)
+      process.exitCode = 1
+    })
+  }
   const cleanup = await disposeRecordLatencyRun({
     recorder,
     renderer,

@@ -133,6 +133,15 @@ describe('record latency budget', () => {
       evaluateRecordLatencyBudget(issue1068Start, WINDOWS_RECORD_LATENCY_BUDGETS).pass,
       false
     )
+    // #1267: so does the start it was opened against (the MF bridge waiting
+    // on FFmpeg's DirectShow microphone, warm p95 1476 ms).
+    const issue1267Start = {
+      warm: { clickToRecordingMs: { n: 27, p95: 1476 }, stopClickToIdleMs: { n: 27, p95: 181 } }
+    }
+    assert.equal(
+      evaluateRecordLatencyBudget(issue1267Start, WINDOWS_RECORD_LATENCY_BUDGETS).pass,
+      false
+    )
   })
 })
 
