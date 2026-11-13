@@ -37,11 +37,11 @@ use objc2_foundation::NSString;
 use objc2_io_surface::IOSurfaceRef;
 use objc2_metal::{
     MTLBlendFactor, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable, MTLLibrary, MTLLoadAction, MTLOrigin,
-    MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor,
-    MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage,
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLDrawable, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion,
+    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
+    MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
+    MTLSamplerState, MTLSize, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -159,7 +159,7 @@ fragment float4 f_main(VOut in [[stage_in]],
     // Plan 233: a keyed camera draws the texture its key pass built, which is
     // premultiplied (so one bilinear tap of it is the honest mix of its kept
     // texels); the blend pipeline wants straight alpha. The key itself, the
-    // despill and the camera look ran in the key pass (f_key_reduce and
+    // despill and the camera look ran in the key pass (k_key_reduce and
     // f_key_finish below).
     if (params.layer.z > 0.5) {
         color.rgb = (color.a > 1e-5) ? color.rgb / color.a : float3(0.0);
@@ -202,73 +202,93 @@ static float key_alpha(float3 judged, constant KeyParams& p) {
         : clamp((saturation - floor_value) / ramp, 0.0, 1.0);
     return 1.0 - eligibility * (1.0 - angle_alpha);
 }
-// One row of the key's neighbourhood (plan 229): the row's [1 4 6 4 1]/16
-// across column u as three bilinear taps at 0 and +-tap_offset texels (a tap
-// 1.2 texels out reads the texels one and two out 4:1). Rows past the frame
-// repeat the edge: the sampler clamps.
-static float3 key_row(texture2d<float> cam, sampler samp, float u, float v,
-                      float step_u, float3 weights) {
-    return weights.x * cam.sample(samp, float2(u - step_u, v), level(0.0)).rgb
-        + weights.y * cam.sample(samp, float2(u, v), level(0.0)).rgb
-        + weights.z * cam.sample(samp, float2(u + step_u, v), level(0.0)).rgb;
+// The camera texels a pass 1 threadgroup loads on a side: its tile of keyed
+// texels times the block, plus the two-texel apron the 5x5 judge needs. The
+// host mirrors it (KEY_REDUCE_WINDOW_SIDE) and sizes the tile to fit. Kept
+// small (5 KB of threadgroup memory) so several threadgroups share a GPU core.
+constant int KEY_REDUCE_WINDOW_SIDE = 36;
+// One row of the key's neighbourhood (plan 229) from the window: the row's
+// [1 4 6 4 1] across the column, in 0..255 units over 16.
+static float3 window_row(threadgroup const uchar4* window, int side, int wx, int wy) {
+    int base = wy * side + wx;
+    return (float3(window[base - 2].rgb) + float3(window[base + 2].rgb)) * (1.0 / 16.0)
+        + (float3(window[base - 1].rgb) + float3(window[base + 1].rgb)) * (4.0 / 16.0)
+        + float3(window[base].rgb) * (6.0 / 16.0);
 }
-// Plan 233 pass 1: one keyed texel is the premultiplied average of its block
-// of camera texels, each keyed on its own 5x5 neighbourhood (plan 229), with
-// Hide edges (plan 227 B) and the capture alpha applied. The neighbourhood's
-// rows slide down each column in a ring of five, so a camera texel costs
-// three taps and one read whatever the block. The target is the keyed
-// texture at the reduction level: no full-size keyed picture, no mips.
-fragment float4 f_key_reduce(VOut in [[stage_in]],
-                             texture2d<float> cam [[texture(0)]],
-                             constant KeyParams& p [[buffer(0)]]) {
-    constexpr sampler key_samp(coord::normalized, address::clamp_to_edge, filter::linear);
+// Plan 233 pass 1: one thread per keyed texel, which is the premultiplied
+// average of its block of camera texels, each keyed on its own 5x5
+// neighbourhood (plan 229), with Hide edges (plan 227 B) and the capture
+// alpha applied. The threadgroup first loads its window of camera texels
+// (its blocks plus the apron, edges repeated) into threadgroup memory once,
+// so a camera texel is fetched about once instead of once per tap; the
+// neighbourhood's rows then slide down each column of the window in a ring
+// of five. The target is the keyed texture at the reduction level: no
+// full-size keyed picture, no mips.
+kernel void k_key_reduce(texture2d<float, access::read> cam [[texture(0)]],
+                         texture2d<float, access::write> reduced [[texture(1)]],
+                         constant KeyParams& p [[buffer(0)]],
+                         uint2 gid [[thread_position_in_grid]],
+                         uint2 lid [[thread_position_in_threadgroup]],
+                         uint2 tile [[threads_per_threadgroup]],
+                         uint2 group [[threadgroup_position_in_grid]]) {
+    threadgroup uchar4 window[KEY_REDUCE_WINDOW_SIDE * KEY_REDUCE_WINDOW_SIDE];
     int block = max(int(p.chroma_key2.w + 0.5), 1);
     int2 cam_size = int2(cam.get_width(), cam.get_height());
+    int side = int(tile.x) * block + 4;
+    int2 window_origin = int2(group) * int2(tile) * block - 2;
+    int threads = int(tile.x * tile.y);
+    for (int i = int(lid.y * tile.x + lid.x); i < side * side; i += threads) {
+        int2 at = clamp(window_origin + int2(i % side, i / side), int2(0), cam_size - 1);
+        window[i] = uchar4(round(cam.read(uint2(at)) * 255.0));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (int(gid.x) >= int(reduced.get_width()) || int(gid.y) >= int(reduced.get_height())) {
+        return;
+    }
     float2 cam_sizef = float2(cam_size);
-    int2 origin = int2(in.pos.xy) * block;
-    float step_u = p.chroma_key_neighbourhood.x / cam_sizef.x;
-    float side = p.chroma_key_neighbourhood.y;
-    float3 weights = float3(side, 1.0 - 2.0 * side, side);
+    int2 cam_origin = int2(gid) * block;
+    int2 block_origin = int2(lid) * block + 2;
     float4 kept = p.chroma_key_edges;
     float4 sum = float4(0.0);
     float count = 0.0;
     for (int i = 0; i < block; ++i) {
-        int x = origin.x + i;
+        int x = cam_origin.x + i;
         if (x >= cam_size.x) {
             break;
         }
+        int wx = block_origin.x + i;
         float u = (float(x) + 0.5) / cam_sizef.x;
-        float top = float(origin.y) + 0.5;
-        float3 h0 = key_row(cam, key_samp, u, (top - 2.0) / cam_sizef.y, step_u, weights);
-        float3 h1 = key_row(cam, key_samp, u, (top - 1.0) / cam_sizef.y, step_u, weights);
-        float3 h2 = key_row(cam, key_samp, u, top / cam_sizef.y, step_u, weights);
-        float3 h3 = key_row(cam, key_samp, u, (top + 1.0) / cam_sizef.y, step_u, weights);
-        float3 h4 = key_row(cam, key_samp, u, (top + 2.0) / cam_sizef.y, step_u, weights);
+        float3 h0 = window_row(window, side, wx, block_origin.y - 2);
+        float3 h1 = window_row(window, side, wx, block_origin.y - 1);
+        float3 h2 = window_row(window, side, wx, block_origin.y);
+        float3 h3 = window_row(window, side, wx, block_origin.y + 1);
+        float3 h4 = window_row(window, side, wx, block_origin.y + 2);
         for (int j = 0; j < block; ++j) {
-            int y = origin.y + j;
+            int y = cam_origin.y + j;
             if (y >= cam_size.y) {
                 break;
             }
+            int wy = block_origin.y + j;
             if (j > 0) {
                 h0 = h1;
                 h1 = h2;
                 h2 = h3;
                 h3 = h4;
-                h4 = key_row(cam, key_samp, u, (float(y) + 2.5) / cam_sizef.y, step_u, weights);
+                h4 = window_row(window, side, wx, wy + 2);
             }
             float3 judged = (h0 + h4) * (1.0 / 16.0) + (h1 + h3) * (4.0 / 16.0) + h2 * (6.0 / 16.0);
-            float alpha = key_alpha(judged, p);
+            float alpha = key_alpha(judged / 255.0, p);
             float v = (float(y) + 0.5) / cam_sizef.y;
             if (u < kept.x || u > kept.z || v < kept.y || v > kept.w) {
                 alpha = 0.0;
             }
-            float4 texel = cam.read(uint2(x, y));
+            float4 texel = float4(window[wy * side + wx]) / 255.0;
             alpha *= texel.a;
             sum += float4(texel.rgb * alpha, alpha);
             count += 1.0;
         }
     }
-    return sum / max(count, 1.0);
+    reduced.write(sum / max(count, 1.0), gid);
 }
 // scene_geometry::chroma_key_nearness in f32 (plan 233 D1 a): how close a
 // colour is to the key, 1 inside the cone and its band, fading to 0 over
@@ -462,10 +482,12 @@ pub(crate) fn gpu_chroma_key_reduction_level(
         return 0;
     }
     let ratio = (source_width / drawn_width).min(source_height / drawn_height);
-    if !(ratio >= 2.0) {
+    if ratio.is_nan() || ratio < 2.0 {
         return 0;
     }
-    ratio.log2().floor() as u32
+    // Mirrors scene_geometry::CHROMA_KEY_REDUCTION_LEVEL_MAX: a 32 × 32 block
+    // plus its apron is what one pass 1 thread's window holds.
+    (ratio.log2().floor() as u32).min(5)
 }
 
 /// The level a keyed quad is keyed at: its crop in texels against its box in
@@ -1142,8 +1164,9 @@ pub struct MetalSceneCompositor {
     /// Same shader with straight-alpha source-over blending, selected per quad
     /// for `GpuSource::blend` overlays (caption bar, comment highlight).
     blend_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    /// Plan 233: the key pass's two pipelines, into `KEYED_CAMERA_TEXTURE_FORMAT`.
-    key_reduce_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Plan 233: the key pass's two pipelines, into `KEYED_CAMERA_TEXTURE_FORMAT`:
+    /// pass 1 a compute kernel, pass 2 a full-quad render.
+    key_reduce_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     key_finish_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Plan 233: the keyed cameras' textures, per source slot.
     keyed_cameras: Vec<Option<KeyedCameraTexture>>,
@@ -1637,13 +1660,7 @@ impl MetalSceneCompositor {
             true,
             MTLPixelFormat::BGRA8Unorm,
         )?;
-        let key_reduce_pipeline = build_pipeline_from(
-            &device,
-            &library,
-            "f_key_reduce",
-            false,
-            KEYED_CAMERA_TEXTURE_FORMAT,
-        )?;
+        let key_reduce_pipeline = build_compute_pipeline(&device, &library, "k_key_reduce")?;
         let key_finish_pipeline = build_pipeline_from(
             &device,
             &library,
@@ -2215,7 +2232,11 @@ impl MetalSceneCompositor {
         let block = 1usize << level.min(31);
         let width = source.width.div_ceil(block).max(1);
         let height = source.height.div_ceil(block).max(1);
-        let usage = MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead;
+        // Pass 1 is a compute kernel writing `reduced`; pass 2 renders into
+        // `finished`; the quad samples `finished`.
+        let usage = MTLTextureUsage::RenderTarget
+            | MTLTextureUsage::ShaderRead
+            | MTLTextureUsage::ShaderWrite;
         let mut slot = match self.keyed_cameras[index]
             .take()
             .filter(|cached| cached.width == width && cached.height == height)
@@ -2258,13 +2279,13 @@ impl MetalSceneCompositor {
         }
         .ok_or(())?;
         let params = key.key_params(block as u32, source.camera_look);
-        encode_key_pass(
-            &self.device,
+        encode_key_reduce(
             command_buffer,
             &self.key_reduce_pipeline,
             camera,
             &slot.reduced,
             &params,
+            block,
         )?;
         encode_key_pass(
             &self.device,
@@ -3253,6 +3274,73 @@ fn build_pipeline(
     )
 }
 
+/// A compute pipeline of the kernel `kernel` (plan 233's key pass 1).
+fn build_compute_pipeline(
+    device: &MetalDevice,
+    library: &ProtocolObject<dyn MTLLibrary>,
+    kernel: &str,
+) -> Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>> {
+    let function = library.newFunctionWithName(&NSString::from_str(kernel))?;
+    device
+        .newComputePipelineStateWithFunction_error(&function)
+        .ok()
+}
+
+/// Mirrors the shader's KEY_REDUCE_WINDOW_SIDE: the camera texels a pass 1
+/// threadgroup loads on a side (its tile × block + 4), which sizes its
+/// threadgroup memory (5 KB, so several threadgroups share a core). A test
+/// pins the two equal.
+const KEY_REDUCE_WINDOW_SIDE: usize = 36;
+
+/// The threadgroup's side in keyed texels for pass 1, at most 8 (64
+/// threads): the window it loads must fit `KEY_REDUCE_WINDOW_SIDE` and its
+/// threads the pipeline's limit.
+fn key_reduce_tile(block: usize, max_threads: usize) -> usize {
+    let by_window = (KEY_REDUCE_WINDOW_SIDE - 4) / block.max(1);
+    let by_threads = (max_threads.max(1) as f64).sqrt().floor() as usize;
+    by_window.min(by_threads).clamp(1, 8)
+}
+
+/// Plan 233 pass 1: `k_key_reduce` over the whole of `reduced`, reading the
+/// camera.
+fn encode_key_reduce(
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    camera: &MetalTexture,
+    reduced: &MetalTexture,
+    params: &KeyParams,
+    block: usize,
+) -> Result<(), ()> {
+    let encoder = command_buffer.computeCommandEncoder().ok_or(())?;
+    encoder.setComputePipelineState(pipeline);
+    let tile = key_reduce_tile(block, pipeline.maxTotalThreadsPerThreadgroup());
+    let encoded = match NonNull::new(std::ptr::from_ref(params) as *mut c_void) {
+        Some(params_ptr) => {
+            unsafe {
+                encoder.setTexture_atIndex(Some(camera), 0);
+                encoder.setTexture_atIndex(Some(reduced), 1);
+                encoder.setBytes_length_atIndex(params_ptr, std::mem::size_of::<KeyParams>(), 0);
+            }
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                MTLSize {
+                    width: reduced.width().div_ceil(tile),
+                    height: reduced.height().div_ceil(tile),
+                    depth: 1,
+                },
+                MTLSize {
+                    width: tile,
+                    height: tile,
+                    depth: 1,
+                },
+            );
+            Ok(())
+        }
+        None => Err(()),
+    };
+    encoder.endEncoding();
+    encoded
+}
+
 /// A pipeline of `v_main` and the fragment function `fragment` into
 /// `format`, blending straight alpha when `blending`.
 fn build_pipeline_from(
@@ -3923,10 +4011,20 @@ mod tests {
             !f_main.contains("chroma_key") && !f_main.contains("acos"),
             "f_main keys:\n{f_main}"
         );
-        for pass in [
-            "fragment float4 f_key_reduce(",
-            "fragment float4 f_key_finish(",
-        ] {
+        assert!(
+            SHADER_SOURCE.contains(&format!(
+                "constant int KEY_REDUCE_WINDOW_SIDE = {KEY_REDUCE_WINDOW_SIDE};"
+            )),
+            "the host's window side mirrors the shader's"
+        );
+        // The tile fits the window and the thread limit: a 4K camera in the
+        // Large slot (block 4) runs 8×8 threads over a 36-texel window.
+        assert_eq!(key_reduce_tile(4, 1024), 8);
+        assert_eq!(key_reduce_tile(1, 1024), 8);
+        assert_eq!(key_reduce_tile(1, 16), 4);
+        assert_eq!(key_reduce_tile(8, 1024), 4);
+        assert_eq!(key_reduce_tile(32, 1024), 1);
+        for pass in ["kernel void k_key_reduce(", "fragment float4 f_key_finish("] {
             assert!(SHADER_SOURCE.contains(pass), "{pass} missing");
         }
     }

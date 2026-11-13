@@ -302,9 +302,6 @@ pub(super) struct Outline {
     pub(super) width: usize,
     pub(super) height: usize,
     pub(super) band: Vec<bool>,
-    /// The exact area-average reference composite of the clean frame over
-    /// the background grey, and its coverage.
-    pub(super) reference: Rendered,
 }
 
 /// `(input index, weight)` pairs of each output cell when `n_in` input cells
@@ -440,7 +437,6 @@ impl Outline {
             width: sw,
             height: sh,
             band,
-            reference,
         }
     }
 

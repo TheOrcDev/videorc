@@ -874,11 +874,16 @@ pub fn chroma_key_reduction_level(
         return 0;
     }
     let ratio = (source_width / drawn_width).min(source_height / drawn_height);
-    if !(ratio >= 2.0) {
+    if ratio.is_nan() || ratio < 2.0 {
         return 0;
     }
-    ratio.log2().floor() as u32
+    (ratio.log2().floor() as u32).min(CHROMA_KEY_REDUCTION_LEVEL_MAX)
 }
+
+/// The deepest reduction (a 32 × 32 block): the Metal key pass loads one
+/// block plus its apron per thread into threadgroup memory, and nothing
+/// draws a camera 64 times smaller than it is. The Metal mirror pins it.
+pub const CHROMA_KEY_REDUCTION_LEVEL_MAX: u32 = 5;
 
 /// Spill suppression on kept pixels: pull the key channel down toward the
 /// other channels' max, scaled by `spill`. Only pixels where the key channel
@@ -928,7 +933,9 @@ pub fn chroma_key_despill(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> (u8, u8,
 pub const CHROMA_KEY_EDGE_DESPILL_FADE_DEG: f64 = 30.0;
 pub const CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN: f64 = 6.0;
 
-/// The edge despill constants in shader order: `(fade_rad, proximity_gain)`.
+/// The edge despill constants in shader order: `(fade_rad, proximity_gain)`,
+/// what the compositor test pins the Metal mirror to.
+#[cfg(test)]
 pub const CHROMA_KEY_EDGE_DESPILL_PARAMS: [f64; 2] = [
     CHROMA_KEY_EDGE_DESPILL_FADE_DEG * std::f64::consts::PI / 180.0,
     CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN,
@@ -1903,6 +1910,11 @@ mod tests {
         assert_eq!(chroma_key_reduction_level(1920.0, 1080.0, 1000.0, 563.0), 0);
         // The smaller ratio decides: 3.84× across, 5.3× down → 1.
         assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 1000.0, 405.0), 1);
+        // The deepest level is 5, a 32 × 32 block.
+        assert_eq!(
+            chroma_key_reduction_level(3840.0, 2160.0, 10.0, 6.0),
+            CHROMA_KEY_REDUCTION_LEVEL_MAX
+        );
         // Degenerate sizes never reduce.
         assert_eq!(chroma_key_reduction_level(0.0, 2160.0, 720.0, 405.0), 0);
         assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 0.0, 405.0), 0);
