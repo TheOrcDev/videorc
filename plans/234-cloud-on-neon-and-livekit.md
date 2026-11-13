@@ -19,9 +19,11 @@
 
 ## Status
 
-- **Status**: PHASE 0 RUN 2026-11-13; stopped at gate G0. No product code
-  exists. The next section has Phase 0's results. The owner's answer to
-  Open question 9 decides whether Phase 1 starts.
+- **Status**: BUILDING since 2026-11-13. Phase 0 ran, and the owner
+  answered gate G0 the same day: "go all recommended and build it". Every
+  open question takes its recommended answer. Phases 1 to 3 are being
+  built; nothing is switched on, and no real stream key moves until the
+  owner sets the switches (Only the owner 5 and 6).
 - **Priority**: P1. Videorc Cloud is merged and released (0.25.0) with every
   switch off, and it can't be switched on: there is no media server and no
   account to rent one on.
@@ -68,9 +70,11 @@ Five things the bars did not cover:
 - **The LiveKit project takes two ingress objects**, which is one solo
   show with both orientations and matches LiveKit's entry plan (D13).
 
-**The plan waits here for the owner** (gate G0). No kill question fails
-outright, but two sit on their bars, and the lost frames and the slower
-return are a product call: Open question 9.
+**Gate G0 was answered on 2026-11-13.** No kill question failed outright,
+but two sat on their bars, and the lost frames and the slower return were
+a product call (Open question 9). The owner took every recommended
+answer: the gaps are accepted for the cohort, and the return bar is now
+7 s.
 
 Still to run, in the note's "Not run" list: a second sample of the 60 fps
 recording, lip sync with a real guest, three or more live destinations,
@@ -377,8 +381,8 @@ the plan, or sends it back to the owner with the measured gap.
 - **Measured**: the card is up 2.7 to 2.9 s after the last frame. The
   picture is back 4.8, 5.0 and 6.2 s after a re-push, against about 2 s
   by design on the node path. LiveKit takes 3.5 to 4.8 s to restart the
-  ingress; the page's wait and fade are the other 1.3 s (Open
-  question 9).
+  ingress; the page's wait and fade are the other 1.3 s. The owner
+  accepted this at G0: the return bar is 7 s (Open question 9).
 - The card is HTML: "Be right back" in Noto Sans 500 on `#0D0D0F`, per
   plan 184's card. A custom image replaces it (W6).
 - **The hold limit is the room's `departure_timeout`.** When the feed's
@@ -830,6 +834,11 @@ Stop and ask the owner when:
 
 ## Open questions for the owner
 
+**Answered 2026-11-13**: "go all recommended and build it". Each question
+below takes its recommended answer. Question 1's answer still has its
+condition: the legal copy and the YouTube answer change before a real
+key moves.
+
 1. **Keys.** Stream keys would pass through videorc.com's memory, and
    LiveKit would hold them for the show and keep a record with the first
    and last three characters. Acceptable? *Recommended: yes, with the
@@ -877,13 +886,15 @@ Stop and ask the owner when:
 - **Goal**: Videorc Cloud running with no server of ours: Neon for data
   and storage, LiveKit Cloud for media.
 - **Current state**: Phase 0 has run; its note is
-  `docs/cloud/spike-livekit-managed-2026-11.md`. No product code. Gate G0
-  is open on Open question 9. The node path is merged and off. Production
-  has Neon storage and a LiveKit project that takes two ingress objects,
-  and no VM.
+  `docs/cloud/spike-livekit-managed-2026-11.md`. Gate G0 is answered
+  (every recommended answer). Phases 1 to 3 are being built: the web on
+  branch `plan-234-managed-media` in `TheOrcDev/videorc-web`, the desktop
+  on this branch. The node path is merged and off. Production has Neon
+  storage and a LiveKit project that takes two ingress objects, and no
+  VM.
 - **Route**: Orchestrator, fit 10, `fable-5.1`.
-- **Start with** the owner's answer to Open question 9. Then the runs the
-  note lists as not run, then Phase 1.
+- **Start with** the exact wire contract,
+  `docs/cloud/managed-media-wire.md`. Every lane builds against it.
 - **Where things are**:
   - the runner: `TheOrcDev/videorc-cloud`, `docs/wire-notes.md`;
   - the web control plane: `TheOrcDev/videorc-web`, `lib/cloud/`,
