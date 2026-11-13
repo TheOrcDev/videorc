@@ -18,6 +18,16 @@ final class SinkAccessTests: XCTestCase {
         XCTAssertEqual(SinkAccessPolicy.decide(signingID: ""), .allowedUnverified)
     }
 
+    func testCMIOUnknownSigningIdentityIsAcceptedUnverified() {
+        // CMIO reports this literal for the signed, packaged backend on macOS.
+        XCTAssertEqual(SinkAccessPolicy.decide(signingID: "unknown"), .allowedUnverified)
+    }
+
+    func testUnknownSentinelDoesNotAllowOtherSigningIdentities() {
+        XCTAssertEqual(SinkAccessPolicy.decide(signingID: "com.example.unknown"), .denied)
+        XCTAssertEqual(SinkAccessPolicy.decide(signingID: "unknown-producer"), .denied)
+    }
+
     func testAllowlistIsInjectable() {
         XCTAssertEqual(SinkAccessPolicy.decide(signingID: "x", allowlist: ["x"]), .allowed)
     }
