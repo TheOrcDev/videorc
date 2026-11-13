@@ -13,8 +13,6 @@ import type { BannerRelayAction, BannerSummary } from '../../../shared/banner-co
 export const BANNER_COUNT_LIMIT_REASON = 'You have 24 banners. Delete one to import another.'
 /** Show refused at the cap (plan 186 D7, `BANNER_MAX_SHOWN`). */
 export const BANNER_SHOWN_LIMIT_REASON = 'Four banners are showing. Hide one first.'
-/** HTML banners draw on the macOS compositor only for now (plan 232 D9). */
-export const HTML_OVERLAY_UNSUPPORTED_REASON = 'HTML banners work on macOS only for now.'
 
 /**
  * The backend's refusals, verbatim (plan 186 "Refusals"). Each one is "can't
@@ -31,7 +29,6 @@ export const BANNER_REFUSALS: readonly string[] = [
   "This recording can't add banners after it starts. Show the banner before you press Record.",
   'Hide this banner before you delete it.',
   // HTML banners (plan 232 "Refusals").
-  HTML_OVERLAY_UNSUPPORTED_REASON,
   "This isn't an HTML file. Choose an .html file or a folder with index.html.",
   'This folder has no index.html.',
   'This HTML banner is too large. Use one under 64 MB and 512 files.',
@@ -84,19 +81,6 @@ export function bannerImportBlockedReason(state: {
   if (state.phase !== 'idle') return 'Wait for this import to finish.'
   if (state.count >= BANNER_MAX_COUNT) return BANNER_COUNT_LIMIT_REASON
   return null
-}
-
-/**
- * Why Import HTML… is off, or null when it can run: off macOS the one
- * sentence that says so (plan 232 D9), otherwise the image import's reasons.
- */
-export function bannerHtmlImportBlockedReason(state: {
-  mac: boolean
-  offline: boolean
-  phase: BannerImportPhase
-  count: number
-}): string | null {
-  return state.mac ? bannerImportBlockedReason(state) : HTML_OVERLAY_UNSUPPORTED_REASON
 }
 
 /** The delete question: an HTML banner (plan 232) keeps files, an image banner one image. */
