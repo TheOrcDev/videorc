@@ -814,11 +814,8 @@ fn metal_keyed_4k_camera_in_the_large_slot_has_no_edge_snow_or_skips() {
 #[cfg(target_os = "macos")]
 #[test]
 fn metal_keyed_4k_camera_compose_cost_report_or_skips() {
-    use crate::metal_compositor::{
-        GpuSource, GpuSourceContentKey, GpuSourceKind, GpuSourceSampler, MetalSceneCompositor,
-        SourceMask,
-    };
-    let Some(mut gpu) = MetalSceneCompositor::new() else {
+    use crate::metal_compositor::MetalSceneCompositor;
+    let Some(mut gpu_compositor) = MetalSceneCompositor::new() else {
         eprintln!("skipping: no Metal device available in this environment");
         return;
     };
@@ -836,48 +833,90 @@ fn metal_keyed_4k_camera_compose_cost_report_or_skips() {
         SLOT_WIDTH as f32 / canvas_w as f32,
         SLOT_HEIGHT as f32 / canvas_h as f32,
     ];
-    let mut times = Vec::new();
-    for frame in 0..70u64 {
-        let mut key = scene_chroma_key_into_metal(&spec).expect("green key");
-        key.spill += frame as f32 * 1e-6;
-        let source = GpuSource {
-            kind: GpuSourceKind::Camera,
-            bgra: &bgra,
-            content_key: Some(GpuSourceContentKey {
-                namespace: CAMERA_CAPTURE_STORAGE_CONTENT_NAMESPACE,
-                revision: 1,
-                variant: 0,
-            }),
-            iosurface: None,
-            pixel_buffer: None,
-            texture: None,
-            width: camera.width as usize,
-            height: camera.height as usize,
-            dest,
-            crop: [0.0; 4],
-            mirror: false,
-            mask: SourceMask::None,
-            blend: true,
-            chroma_key: Some(key),
-            camera_look: None,
-            corners: None,
-            sampler: GpuSourceSampler::Scene,
-            opacity: 1.0,
-        };
-        let timings = gpu
-            .compose_target_with_timings(canvas_w, canvas_h, [0.0, 0.0, 0.0, 1.0], &[source])
-            .expect("metal compose");
-        if frame >= 10 {
-            times.push(timings.total_ms);
+    // Two phases of 10 warm-up and 60 timed composes: the key pass runs
+    // every frame (the spill moves), then the kept texture draws (the frame
+    // and the key hold). The difference is the key pass's cost, whatever
+    // the host is doing; the GPU's own time comes from the command buffer.
+    let mut report = |label: &str, rekey: bool| {
+        let mut total = Vec::new();
+        let mut gpu = Vec::new();
+        let mut wait = Vec::new();
+        for frame in 0..70u64 {
+            let mut key = scene_chroma_key_into_metal(&spec).expect("green key");
+            if rekey {
+                key.spill += frame as f32 * 1e-6;
+            }
+            let timings = compose_keyed_4k(&mut gpu_compositor, &bgra, &camera, dest, key);
+            if frame >= 10 {
+                total.push(timings.total_ms);
+                gpu.push(timings.gpu_ms);
+                wait.push(timings.command_wait_ms);
+            }
+            if rekey {
+                assert_eq!(timings.keyed_camera_passes, 1, "frame {frame} keys");
+            } else if frame > 0 {
+                assert_eq!(
+                    timings.keyed_camera_passes, 0,
+                    "frame {frame} draws the kept texture"
+                );
+            }
         }
-    }
-    times.sort_by(f64::total_cmp);
-    let percentile = |p: f64| times[((times.len() - 1) as f64 * p).round() as usize];
-    eprintln!(
-        "[plan 233 S2] 4K keyed camera in the Large slot of a 1080p canvas, {} composes: p50 {:.2} ms, p95 {:.2} ms (debug build: {})",
-        times.len(),
-        percentile(0.5),
-        percentile(0.95),
-        cfg!(debug_assertions)
-    );
+        let percentile = |samples: &mut Vec<f64>, p: f64| {
+            samples.sort_by(f64::total_cmp);
+            samples[((samples.len() - 1) as f64 * p).round() as usize]
+        };
+        eprintln!(
+            "[plan 233 S2] {label}: {} composes, total p50 {:.2} ms p95 {:.2} ms, GPU p50 {:.2} ms p95 {:.2} ms, wait p50 {:.2} ms (debug build: {})",
+            total.len(),
+            percentile(&mut total, 0.5),
+            percentile(&mut total, 0.95),
+            percentile(&mut gpu, 0.5),
+            percentile(&mut gpu, 0.95),
+            percentile(&mut wait, 0.5),
+            cfg!(debug_assertions)
+        );
+    };
+    report("4K keyed camera, keyed every compose", true);
+    report("4K keyed camera, kept texture drawn", false);
+}
+
+/// One compose of the 4K camera `bgra` keyed with `key` into `dest` on a
+/// 1080p canvas, the camera texture uploaded once (one content key).
+#[cfg(target_os = "macos")]
+fn compose_keyed_4k(
+    gpu: &mut crate::metal_compositor::MetalSceneCompositor,
+    bgra: &[u8],
+    camera: &SyntheticCamera,
+    dest: [f32; 4],
+    key: crate::metal_compositor::GpuChromaKey,
+) -> crate::metal_compositor::MetalComposeTimings {
+    use crate::metal_compositor::{
+        GpuSource, GpuSourceContentKey, GpuSourceKind, GpuSourceSampler, SourceMask,
+    };
+    let source = GpuSource {
+        kind: GpuSourceKind::Camera,
+        bgra,
+        content_key: Some(GpuSourceContentKey {
+            namespace: CAMERA_CAPTURE_STORAGE_CONTENT_NAMESPACE,
+            revision: 1,
+            variant: 0,
+        }),
+        iosurface: None,
+        pixel_buffer: None,
+        texture: None,
+        width: camera.width as usize,
+        height: camera.height as usize,
+        dest,
+        crop: [0.0; 4],
+        mirror: false,
+        mask: SourceMask::None,
+        blend: true,
+        chroma_key: Some(key),
+        camera_look: None,
+        corners: None,
+        sampler: GpuSourceSampler::Scene,
+        opacity: 1.0,
+    };
+    gpu.compose_target_with_timings(1920, 1080, [0.0, 0.0, 0.0, 1.0], &[source])
+        .expect("metal compose")
 }
