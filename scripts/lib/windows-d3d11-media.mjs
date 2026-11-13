@@ -175,6 +175,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_preview::tests::windows_d3d11_preview_visible_owned_window_over_presenter_is_restacked',
     'windows_d3d11_preview::tests::windows_d3d11_preview_without_a_physical_placement_keeps_the_dip_numbers',
     'windows_d3d11_session::runtime::windows_buddy_legs_of_one_tick_share_the_animator_step',
+    'windows_d3d11_session::runtime::windows_html_banner_draws_its_latest_frame_on_each_leg',
     'windows_d3d11_session::runtime::windows_live_plan_draws_the_live_background_on_the_stream_target',
     'windows_d3d11_session::runtime::windows_live_scene_mapping_keeps_slots_auxiliary_geometry_and_takeover',
     'windows_d3d11_session::runtime::windows_live_snapshot_fences_precommit_same_id_generations_and_recovery_bootstrap',

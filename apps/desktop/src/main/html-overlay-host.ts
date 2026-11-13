@@ -22,6 +22,7 @@ import {
 } from './html-overlay-frames'
 import {
   HTML_OVERLAY_CONTENT_SECURITY_POLICY,
+  HTML_OVERLAY_FIRST_PAINT_TIMEOUT_MS,
   HTML_OVERLAY_SCHEME,
   htmlOverlayBitmapSize,
   htmlOverlayContentType,
@@ -54,6 +55,9 @@ export interface HtmlOverlayHostOptions {
     blockedRequests?: number
   }) => void
   log: (level: 'info' | 'warn', message: string) => void
+  /** What a page that loaded and never painted says it stopped for
+   * (`htmlOverlayNoPictureDetail`, plan 232 S11). */
+  noPictureDetail: string
 }
 
 /** The offscreen windows this host made. They are not app windows: nothing
@@ -109,6 +113,12 @@ interface OverlayWindow {
   state: HtmlOverlayHostState
   /** A repaint asked for because a frame was dropped (see `repaintSoon`). */
   repaintTimer: NodeJS.Timeout | null
+  /** Whether Chromium painted this page at all (sent or not). */
+  painted: boolean
+  /** Armed when the page loads; fires if it never paints (plan 232 S11). */
+  firstPaintTimer: NodeJS.Timeout | null
+  /** The page was called stopped because it never painted. */
+  stoppedForNoPicture: boolean
 }
 
 /** How often a page's blocked-request count is reported while it grows. */
@@ -225,7 +235,10 @@ export class HtmlOverlayHost {
       blockedRequests: 0,
       reportedBlockedRequests: 0,
       state: 'loading',
-      repaintTimer: null
+      repaintTimer: null,
+      painted: false,
+      firstPaintTimer: null,
+      stoppedForNoPicture: false
     }
     overlayWindows.add(window)
     this.windows.set(id, overlay)
@@ -248,6 +261,7 @@ export class HtmlOverlayHost {
       // Zoom is kept per origin; say it again once the page is in.
       contents.setZoomFactor(overlay.geometry.zoomFactor)
       this.setState(overlay, 'live')
+      this.armFirstPaint(overlay)
     })
     contents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
       // -3 is an aborted load (a navigation the rules cancelled).
@@ -267,6 +281,7 @@ export class HtmlOverlayHost {
     contents.on('paint', (_event, _dirty, image) => {
       if (this.windows.get(id) !== overlay) return
       this.framesPainted += 1
+      this.notePainted(overlay)
       const reported = image.getSize()
       const nowMs = performance.now()
       const decision = htmlOverlayFrameDecision({
@@ -381,6 +396,34 @@ export class HtmlOverlayHost {
     )
   }
 
+  /** A loaded page paints at least once, even one that stands still. One
+   * that never does (offscreen drawing failed on this desktop session) is
+   * said to have stopped, with the reason, instead of loading forever. */
+  private armFirstPaint(overlay: OverlayWindow): void {
+    if (overlay.painted || overlay.firstPaintTimer) return
+    overlay.firstPaintTimer = setTimeout(() => {
+      overlay.firstPaintTimer = null
+      if (this.windows.get(overlay.id) !== overlay || overlay.painted) return
+      overlay.stoppedForNoPicture = true
+      this.setState(overlay, 'failed', this.options.noPictureDetail)
+    }, HTML_OVERLAY_FIRST_PAINT_TIMEOUT_MS)
+    overlay.firstPaintTimer.unref?.()
+  }
+
+  private notePainted(overlay: OverlayWindow): void {
+    if (overlay.painted) return
+    overlay.painted = true
+    if (overlay.firstPaintTimer) {
+      clearTimeout(overlay.firstPaintTimer)
+      overlay.firstPaintTimer = null
+    }
+    // A late first paint after all: the page runs.
+    if (overlay.stoppedForNoPicture) {
+      overlay.stoppedForNoPicture = false
+      this.setState(overlay, 'live')
+    }
+  }
+
   private cancelRepaint(overlay: OverlayWindow): void {
     if (!overlay.repaintTimer) return
     clearTimeout(overlay.repaintTimer)
@@ -457,6 +500,8 @@ export class HtmlOverlayHost {
   private destroy(overlay: OverlayWindow): void {
     this.windows.delete(overlay.id)
     this.cancelRepaint(overlay)
+    if (overlay.firstPaintTimer) clearTimeout(overlay.firstPaintTimer)
+    overlay.firstPaintTimer = null
     if (!overlay.window.isDestroyed()) overlay.window.destroy()
     // The session is in memory only; drop what the page stored anyway.
     void overlay.session.clearStorageData().catch(() => {})

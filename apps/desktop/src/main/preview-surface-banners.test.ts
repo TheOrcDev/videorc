@@ -14,6 +14,8 @@ import {
   previewSurfaceBannerLayers,
   previewSurfaceCanvasFromCompositor,
   previewSurfaceCanvasFromOutputs,
+  previewSurfaceDrawsHtmlBannerFrames,
+  previewSurfaceHtmlBannerFrameUrl,
   previewSurfaceVisibleBanners,
   withPreviewSurfaceBanners
 } from './preview-surface-banners'
@@ -222,5 +224,58 @@ describe('proof surface program banners (plan 205)', () => {
     expect(withPreviewSurfaceBanners(scene, banners, shape).sources.map((item) => item.id)).toEqual(
       expected.map((id) => `banner:${id}`)
     )
+  })
+})
+
+describe('an HTML banner on the proof surface (plan 232 S11)', () => {
+  const canvas = { width: 1280, height: 720 }
+  const html = banner({
+    id: 'badge',
+    name: 'Badge',
+    kind: 'html',
+    width: 640,
+    height: 360,
+    horizontal: { x: 0.25, y: 0.25, w: 0.5, h: 0.5 }
+  })
+  const frameUrl = (id: string): string => `http://127.0.0.1:1/frame?id=${id}`
+
+  it('polls its live picture on Windows and Linux, never on macOS', () => {
+    expect(previewSurfaceDrawsHtmlBannerFrames('win32')).toBe(true)
+    expect(previewSurfaceDrawsHtmlBannerFrames('linux')).toBe(true)
+    // macOS: the native Preview draws it; the proof surface is a fallback.
+    expect(previewSurfaceDrawsHtmlBannerFrames('darwin')).toBe(false)
+  })
+
+  it('is a frame-polled layer at its place, not its stored picture', () => {
+    const [placed] = previewSurfaceBannerLayers([html], canvas, null, frameUrl)
+    expect(placed.frameUrl).toBe(frameUrl('badge'))
+    expect(placed.imageUrl).toBeUndefined()
+    expect(placed.kind).toBe('banner')
+    expect(placed.fit).toBe('fill')
+    expect(placed.transform).toMatchObject({ x: 0.25, y: 0.25, width: 0.5, height: 0.5 })
+  })
+
+  it('keeps its stored picture where the surface polls nothing, as before', () => {
+    const [still] = previewSurfaceBannerLayers([html], canvas, null)
+    expect(still.frameUrl).toBeUndefined()
+    expect(still.imageUrl).toBe('videorc-asset://banner/badge.png')
+    const [unpolled] = previewSurfaceBannerLayers([html], canvas, null, () => undefined)
+    expect(unpolled.imageUrl).toBe('videorc-asset://banner/badge.png')
+  })
+
+  it('leaves an image banner an image', () => {
+    const [image] = previewSurfaceBannerLayers([banner()], canvas, null, frameUrl)
+    expect(image.frameUrl).toBeUndefined()
+    expect(image.imageUrl).toBe('videorc-asset://banner/sponsor.png')
+  })
+
+  it("names the banner and the backend's token in the route", () => {
+    const url = new URL(
+      previewSurfaceHtmlBannerFrameUrl({ host: '127.0.0.1', port: 4123, token: 't k' }, 'badge')
+    )
+    expect(url.origin).toBe('http://127.0.0.1:4123')
+    expect(url.pathname).toBe('/preview/html-overlay/latest.bmp')
+    expect(url.searchParams.get('id')).toBe('badge')
+    expect(url.searchParams.get('token')).toBe('t k')
   })
 })
