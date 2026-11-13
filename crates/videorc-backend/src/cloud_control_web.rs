@@ -644,6 +644,37 @@ impl<W: CloudWebApi> WebControl<W> {
         poll
     }
 
+    /// The next state of a show no loop owns (the test show, section 13.1),
+    /// or why there is none. A failed poll backs off and asks again; the
+    /// test's own deadline bounds it. A test show is never listed by
+    /// `current`, so a 404 is its end.
+    pub(crate) async fn next_state(&mut self) -> std::result::Result<RunnerState, String> {
+        loop {
+            match self.poll().await {
+                WebPoll::State { state, .. } => return Ok(*state),
+                WebPoll::Ended(end_reason) => {
+                    return Ok(RunnerState {
+                        phase: "ended".to_string(),
+                        end_reason,
+                        ..RunnerState::default()
+                    });
+                }
+                WebPoll::Unauthorized => {
+                    return Err("videorc.com refused this computer's sign-in".to_string());
+                }
+                WebPoll::NotFound => {
+                    return Err("videorc.com no longer has the show".to_string());
+                }
+                WebPoll::Mismatch => {
+                    return Err("videorc.com says this show is not on web control".to_string());
+                }
+                WebPoll::Failed(problem) => {
+                    tracing::debug!("Videorc Cloud state poll failed: {problem}");
+                }
+            }
+        }
+    }
+
     /// A state with this `rev` was read before an intent this computer has
     /// had answered.
     fn is_stale(&self, rev: u64) -> bool {

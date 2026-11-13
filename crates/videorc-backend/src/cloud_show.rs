@@ -2113,8 +2113,14 @@ impl<T: ControlTransport, W: CloudWebApi> ControlLink<T, W> {
                     }
                 }
             },
-            Self::Web(_) => Err("a test show does not run on web control yet".to_string()),
+            Self::Web(web) => web.next_state().await,
         }
+    }
+
+    /// Whether `ping` keeps this transport alive. Web control has nothing
+    /// to keep open: each poll is its own request.
+    fn pings(&self) -> bool {
+        matches!(self, Self::Node(_))
     }
 
     /// The keep-alive of a transport no loop owns.
@@ -4650,7 +4656,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
     }
 
     async fn run_show(&mut self, created: &CreateShowResponse) -> Option<CloudTestResult> {
-        // 2. The socket, so the runner's own view of the feed is the measure.
+        // 2. The control transport, so the show's own view of the feed is
+        //    the measure: the runner's on the socket, the ingress's state on
+        //    web control (plan 234 D16).
         self.set_phase(CloudTestPhase::Connecting);
         let mut cancel = self.cancel.clone();
         let connected = tokio::select! {
@@ -4719,6 +4727,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
         let mut timed_out = false;
         let mut ping = tokio::time::interval(PING_INTERVAL);
         ping.tick().await;
+        // Only a socket is pinged. On web control the branch is off, so a
+        // tick never drops a state poll that is in flight.
+        let pings = transport.pings();
         let deadline = tokio::time::sleep(TEST_DEADLINE);
         tokio::pin!(deadline);
         loop {
@@ -4747,7 +4758,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
                         }
                     }
                 },
-                _ = ping.tick() => transport.ping().await,
+                _ = ping.tick(), if pings => transport.ping().await,
                 _ = wait_canceled(&mut cancel) => {
                     canceled = true;
                     break;
@@ -4780,7 +4791,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
         // Whatever is still pushing dies with its future (kill_on_drop).
         pushes.shutdown().await;
 
-        // 4. The show ends on the socket; the web's end follows in the caller.
+        // 4. The show ends on the socket; the web's end follows in the
+        //    caller, and on web control it is the only one.
         transport.end_show().await;
         transport.close().await;
         if canceled {
@@ -11931,5 +11943,185 @@ mod tests {
         assert!(matches!(outcome, PrepareOutcome::Cloud(_)));
         assert!(web.managed.lock().unwrap().hold_images.is_empty());
         assert_eq!(web.destination_bodies().len(), 1);
+    }
+
+    // --- Plan 234: Test cloud against an ingress (C5) ----------------------------
+    //
+    // Wire section 13.1 (D16): a managed test show is a room and one ingress
+    // per output, with no egress. The desktop pushes its 10 s pattern to the
+    // ingress and reads the show's state by polling; `ingress_started`
+    // makes it live. It ends through `POST …/end` alone. The verdict rules
+    // are the node test's.
+
+    fn created_managed_test() -> CreateShowResponse {
+        let mut created = created_managed();
+        created.show.kind = "test".to_string();
+        created
+    }
+
+    /// A managed test show's state: a feed, and never a leg.
+    fn managed_test_state(phase: &str, kbps: Option<u64>) -> Value {
+        let mut feed = json!({ "orientation": "horizontal", "connected": phase == "live" });
+        if let Some(kbps) = kbps {
+            feed["kbps"] = json!(kbps);
+        }
+        json!({
+            "phase": phase, "liveSeconds": 1, "feeds": [feed], "legs": [],
+            "destinationsSet": false, "restarts": 0, "holdImageSet": false,
+            "desktopConnected": true
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_test_on_a_managed_show_polls_its_state_and_ends_through_the_web() {
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed_test()));
+        web.set_state(managed_test_state("starting", None));
+        let pusher = FakePusher::clean();
+        harness
+            .context
+            .start_test(Some("bearer".to_string()), test_outputs(), pusher.clone())
+            .unwrap();
+        wait_until(|| test_status(&harness.context.slot).phase == CloudTestPhase::Pushing).await;
+        assert_eq!(
+            pusher.pushes.lock().unwrap().as_slice(),
+            &[("horizontal".to_string(), 6000)]
+        );
+        // `ingress_started`: the feed is connected and the show is live.
+        // LiveKit reported no bitrate in Phase 0, so the feed has no kbps:
+        // unmeasured, never slow.
+        web.set_state(managed_test_state("live", None));
+        wait_until(|| !lock(&harness.context.slot).test_running()).await;
+
+        let test = test_status(&harness.context.slot);
+        assert_eq!(test.phase, CloudTestPhase::Done);
+        let result = test.result.unwrap();
+        assert!(result.ok, "{result:?}");
+        assert_eq!(result.reason, None);
+        assert!(result.time_to_live_ms.is_some());
+        assert_eq!(result.uploads.len(), 1);
+        assert_eq!(result.uploads[0].target_kbps, 6000);
+        assert_eq!(result.uploads[0].measured_kbps, None);
+        // The web saw a test create and its end. Nothing else: no socket,
+        // no destination, no hold image.
+        assert_eq!(
+            web.create_kinds.lock().unwrap().as_slice(),
+            &["test".to_string()]
+        );
+        assert_eq!(
+            web.end_calls.lock().unwrap().as_slice(),
+            &["sh_abc".to_string()]
+        );
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.managed.lock().unwrap().hold_images.is_empty());
+        // The first state was asked without `since`, the rest with one.
+        let polls = web.polls();
+        assert_eq!(polls[0].0, None);
+        assert!(polls.len() >= 2 && polls[1..].iter().all(|(since, _)| since.is_some()));
+        // It stopped polling with the test, and the Studio's slot never
+        // changed hands.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(web.polls().len(), polls.len());
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+        assert!(lock(&harness.context.slot).show.is_none());
+    }
+
+    // The verdict rules stay (D16): readings above 0 are kept and judged
+    // against the target, a poll that fails is asked again, and a show the
+    // web ends first is named.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_test_keeps_the_verdict_rules() {
+        // A slow upload, with one poll failing on the way.
+        let slow = harness(true);
+        let web = slow.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed_test()));
+        web.set_state(managed_test_state("starting", None));
+        slow.context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        wait_until(|| test_status(&slow.context.slot).phase == CloudTestPhase::Pushing).await;
+        web.fail_polls([web_error(503, "cloud-media-unavailable")]);
+        for kbps in [2100, 0, 2050, 2100] {
+            web.set_state(managed_test_state("live", Some(kbps)));
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+        wait_until(|| !lock(&slow.context.slot).test_running()).await;
+        let result = test_status(&slow.context.slot).result.unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.reason, Some(CloudTestReason::TooSlow));
+        assert_eq!(result.uploads[0].measured_kbps, Some(2100));
+        assert!(result.time_to_live_ms.is_some());
+
+        // The web ends the test show before the push is done (`max-show`).
+        let ended = harness_remembering(true, None);
+        let web = ended.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed_test()));
+        web.set_state(managed_test_state("starting", None));
+        ended
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::holding(),
+            )
+            .unwrap();
+        wait_until(|| test_status(&ended.context.slot).phase == CloudTestPhase::Pushing).await;
+        web.set_state(managed_test_state("live", None));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        web.set_state(json!({
+            "phase": "ended", "endReason": "max-show", "liveSeconds": 30, "feeds": [], "legs": []
+        }));
+        wait_until(|| !lock(&ended.context.slot).test_running()).await;
+        let result = test_status(&ended.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::Failed));
+        assert!(
+            result.message.as_deref().unwrap().contains("max-show"),
+            "{result:?}"
+        );
+
+        // A feed that never arrives: the state never says live.
+        let silent = harness_remembering(true, None);
+        let web = silent.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed_test()));
+        web.set_state(managed_test_state("starting", None));
+        silent
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        wait_until(|| !lock(&silent.context.slot).test_running()).await;
+        let result = test_status(&silent.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::NoFeed));
+        assert_eq!(web.end_calls.lock().unwrap().len(), 1);
+
+        // A control this build does not know: the test cannot reach it, and
+        // the show it created is still ended.
+        let unknown = harness_remembering(true, None);
+        let web = unknown.context.web.clone();
+        let mut created = created_managed_test();
+        created.control.kind = Some("quic".to_string());
+        *web.create.lock().unwrap() = Some(Ok(created));
+        unknown
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        wait_until(|| !lock(&unknown.context.slot).test_running()).await;
+        let result = test_status(&unknown.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::CantReach));
+        assert_eq!(web.end_calls.lock().unwrap().len(), 1);
+        assert!(web.polls().is_empty());
     }
 }
