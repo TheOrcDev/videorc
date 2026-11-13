@@ -11,11 +11,13 @@ for it, an x264 re-encode stood in for the node path, and a LiveKit RTMP
 ingress in a second room stood in for a platform. Nothing was sent to a
 real platform, and every stream key was made up.
 
-**Cloud runs stopped early, on a limit and not on the budget.** Creating a
-third ingress object answered `resource_exhausted: total ingress object
-limit exceeded, delete an existing ingress first`. The brief said to stop
-on any limit error, so S0.3, the Cloud half of S0.6, and three follow-up
-checks are owed. The commands are at the end.
+**The project holds two ingress objects.** Creating a third answered
+`resource_exhausted: total ingress object limit exceeded, delete an
+existing ingress first`, which matches LiveKit's published limits for its
+free Build plan (2 ingresses, 2 egresses). Cloud runs stopped there once.
+The runs that were owed were then done in a second session with at most two
+ingress objects each: S0.3 in an adapted form, S0.6 on Cloud, more samples
+for S0.2, and the silent-feed limit. What is still not run is at the end.
 
 ## Verdict
 
@@ -25,16 +27,16 @@ Four kill questions first.
 | --- | --- | --- | --- |
 | S0.1 | Picture quality at 1080p30, within 3 VMAF points of the node path | As the plan wrote it (the matching egress preset): 8.6 and 8.9 under. With two settings changed (below): 2.2 to 3.0 under, four runs; 2.7 and 2.8 under with keyframes matched to the node path's | **Fails as planned. Passes narrowly with both levers** |
 | S0.1 | 1080p60, at most 1 frame in 100 dropped or repeated | 1.3 and 2.0 per 100 over a whole run; 0.6 and 1.0 once the first seconds are past | **Fails. D12's 1080p30 cap stands** |
-| S0.2 | Card within 3 s of the picture stopping | 2.80 to 2.87 s, four holds on Cloud | Pass |
-| S0.2 | Picture back within 5 s of a re-push | 6.2 s, one sample; 4.8 s of it is the ingress restarting | **Fails by 1.2 s** |
+| S0.2 | Card within 3 s of the picture stopping | 2.72 to 2.87 s, seven holds on Cloud | Pass |
+| S0.2 | Picture back within 5 s of a re-push | 4.80, 4.97 and 6.17 s; 3.5 to 4.8 s of each is the ingress restarting | **At the bar: two of three inside it** |
 | S0.2 | Destinations stay connected through a hold | The sink's stream stayed active with no retry; the egress output has no timestamp gap | Pass on what could be measured; the 100 ms receiver bar could not be measured |
-| S0.2 | The room outlives the feed for `departure_timeout`, then ends the egress | 124 s at a 120 s timeout, egress `COMPLETE`, recording finalised | Pass at 120 s; 300 s owed; 30 and 60 minutes not run |
+| S0.2 | The room outlives the feed for `departure_timeout`, then ends the egress | 124 s at a 120 s timeout and 307 s at 300 s, egress `COMPLETE`, recording finalised | Pass at 120 and 300 s; 30 and 60 minutes not run |
 | S0.4 | Only the redacted key anywhere we can see | True for all six platform shapes. Four custom shapes leak (below) | **Pass, if the web refuses those shapes**; written answer owed |
 | S0.5 | Segments land on a Neon show branch, and the remux plays | 20 recordings, no segment missing, every remux decodes; a write-only credential works | **Pass**; the 3 h 10 min run is not run |
-| S0.3 | Destinations: add, remove, kill one, kill the last, 16 URLs | Refused at setup by the ingress object limit | Owed; partial evidence below |
-| S0.6 | The talk-show page | Local: every probe passes. Cloud: not run | Local pass; Cloud owed |
+| S0.3 | Destinations: add, remove, kill one, kill the last, 16 URLs | Adapted to two sinks. Add 1.5 s, remove 1.6 s. A killed destination is retried 23 times and marked failed after 31 s; the other carried on. 17 entries accepted. **With its last destination killed the egress did not fail**, twice | Pass for add, remove and kill-one. **The plan's assumption about the last output is wrong** |
+| S0.6 | The talk-show page | Local: every probe passes. Cloud: room metadata and the host's byte stream reach LiveKit's recorder; all four layouts are right. Lip sync 113 ms (100 without the limiter), bar 80 | Pass, **except lip sync: fails as measured**, with a synthetic guest; cause not separated |
 | S0.7 | The meter | Ledger written to the private file | Done |
-| S0.8 | Go Live to on air | About 5 to 7 s after the feed starts | Measured; slower than today's 5 s |
+| S0.8 | Go Live to on air | About 5 to 7 s after the feed starts. 3.1 s from `StartEgress` to a destination's first frame when the feed is already in the room | Measured; slower than today's 5 s |
 | S0.9 | A WHIP feed with no ingress transcode | Works with FFmpeg 8.1.1. Same quality as the tuned RTMP path, far less even frame delivery | No-go as tested; worth a later look |
 
 What changes the picture, in order of weight:
@@ -52,6 +54,12 @@ What changes the picture, in order of weight:
    orientations uses both.
 4. **`roomRecord` is project-wide**, as the plan assumed, and a few URL
    shapes leak the key through LiveKit's redaction.
+5. **An egress whose only destination dies does not fail.** It stays
+   active and reports that stream as active with `retries: 1`. A show with
+   one destination gets no failure to act on.
+6. **Lip sync is not settled for talk shows.** The recording put the sound
+   100 to 113 ms behind the picture with a synthetic guest. The solo chain
+   measured 36 ms.
 
 ## What was built (all in the spike's scratch directory)
 
@@ -61,9 +69,9 @@ What changes the picture, in order of weight:
 | `pages/talk.html` | The talk-show program page: tiles from `protocol-fixtures/talk-show-layout.json`, stage state from room metadata, an overlay as a byte stream from the host only, a look-ahead limiter |
 | `pages/pub.html`, `pages/watch.html` | A stand-in host or guest (a colour, a tone, a screen share, a flash with a beep) and a subscriber that reports frame gaps |
 | `local-solo.mjs`, `local-talk.mjs` | The two pages against `livekit-server --dev` in headless Chrome, driven over the DevTools protocol (`cdp.mjs`) |
-| `chain.mjs`, `hold.mjs`, `dest.mjs`, `stall.mjs`, `talk-cloud.mjs` | The Cloud runs: the whole chain, the hold, destinations, the silent-connection limit, the talk show. The last three have not run |
+| `chain.mjs`, `hold.mjs`, `dest2.mjs`, `stall.mjs`, `talk-cloud.mjs` | The Cloud runs: the whole chain, the hold and the return, destinations with two sinks, the silent-connection limit, the talk show. `dest.mjs`, the three-sink version, has not run |
 | `rtmp-proxy.mjs`, `whip-relay.mjs` | Local relays. FFmpeg pushes to localhost with a placeholder; the relay adds the real key inside TLS, so no key is ever on a command line. The RTMP one can also stall or cut the connection |
-| `barcode.mjs`, `analyze.mjs`, `timeline.mjs`, `lipsync.mjs` | A frame counter a machine can read after three encodes, VMAF with every frame paired by that counter, the hold read from a recording, lip sync from a flash and a beep |
+| `barcode.mjs`, `analyze.mjs`, `frames60.mjs`, `timeline.mjs`, `lipsync.mjs` | A frame counter a machine can read after three encodes, VMAF with every frame paired by that counter, frames counted per source frame, the hold and the return read from a recording, lip sync from a flash and a beep |
 | `neon.mjs`, `lib.mjs` | The Neon spike branch and the LiveKit clients, the ledger, and clean-up |
 
 ## Setup
@@ -72,7 +80,7 @@ What changes the picture, in order of weight:
   load average 7 to 86, swap nearly full. Every run records the load. Local
   real-time readings taken above a load of about 30 are marked as
   unreliable; everything a verdict rests on is read from the recorded
-  output.
+  output. The second session ran at a load of 4 to 9.
 - LiveKit: server SDK 2.19.2, `livekit-client` 2.23.0, CLI 2.19.0, and
   `livekit-server` 1.13.10 for the local tests. FFmpeg 8.1.1 (Homebrew),
   Chrome 157.
@@ -228,32 +236,43 @@ for the number to mean much.
 
 ### On Cloud (read from the recording)
 
-One run, 247 s, an RTMP sink attached, `departure_timeout` 120 s.
+The first run: 247 s, an RTMP sink attached, `departure_timeout` 120 s,
+recorded at 30 fps. Later: a run of two cuts and returns recorded at
+60 fps, a run with a 300 s timeout, and a silent feed with no egress.
 
 - **Card:** freeze marked at 1533 ms, fade at 2533 ms, card at 2833 ms
-  after the last new frame, in both holds of this run; 2800 and 2867 ms in
-  two shorter runs. One output frame is 33 ms.
+  after the last new frame, in both holds of the first run; 2800 and
+  2867 ms in two shorter runs; 2717, 2783 and 2800 ms in the 60 fps run.
 - **The chain is about 2.3 s behind the feed.** Measured from the cut on
   the wire, the card came 5.2 s later: viewers see 2.3 s more picture, then
   the 2.8 s freeze and fade.
-- **Re-push on the same ingress, URL and key,** 13.8 s into the card. It was
-  accepted. First frame at the page 4.84 s after the push began (LiveKit
-  reports BUFFERING at 2.7 s and PUBLISHING at 3.8 s), then the page's
-  1.03 s steady wait and 0.30 s fade: **6.2 s to the picture fully back.**
-  Only 1.3 s of that is ours.
+- **Re-push on the same ingress, URL and key.** Accepted every time.
+
+  | Sample | Load | First frame at the page | Picture fully back |
+  | --- | --- | ---: | ---: |
+  | First run, 13.8 s into the card | 35 to 52 | 4.84 s | **6.17 s** |
+  | 60 fps run, first return | 5 to 7 | 3.48 s | **4.80 s** |
+  | 60 fps run, second return | 5 to 7 | 3.65 s | **4.97 s** |
+
+  Times are from the start of the push. The page's part is fixed at 1.3 s
+  (1.0 s of steady frames, 0.3 s of fade); the rest is LiveKit's ingress
+  restarting.
 - **Timestamp continuity:** every one of 7,419 frame steps is 33.33 ms.
-  None is over 50 ms, through both holds, the re-push and the wait.
+  None is over 50 ms, through both holds, the re-push and the wait. The
+  60 fps run: 4,501 frames, every step 16.67 ms.
 - **A cut and a dead network differ.** A closed connection is seen by the
   ingress in 1.3 s and the participant leaves. A network that goes silent
-  with its sockets open kept the participant in the room for at least 59 s;
-  the test's clip ended then, LiveKit had not given up. The real limit is
-  owed. The page's hold does not depend on it: the card came at 2833 ms
-  either way. But `departure_timeout` only starts counting once the
-  participant is gone.
+  with its sockets open kept the participant in the room for **100 s**
+  (one run, ingress only). Then the ingress went to an error state
+  ("source encoder not ready") and the participant left; LiveKit did not
+  close the connection first. The page's hold does not depend on it: the
+  card came at 2833 ms either way. But `departure_timeout` only starts
+  counting once the participant is gone.
 - **The room.** With only the recorder left, the egress ended `COMPLETE`
-  ("End reason: Source closed") 124.1 s after the feed's participant left,
-  and the recording was finalised with its end marker. The egress alone
-  does not keep a room open.
+  ("End reason: Source closed") 124.1 s after the feed's participant left
+  at a 120 s timeout, and 306.7 s after at 300 s. Each recording was
+  finalised with its end marker. The egress alone does not keep a room
+  open.
 - **The sink.** Its stream read active with no retry from start to the
   room's end; its ingress stayed PUBLISHING; its participant never left.
 - **The watcher's gaps are not in the egress output.** A headless Chrome
@@ -262,8 +281,12 @@ One run, 247 s, an RTMP sink attached, `departure_timeout` 120 s.
   of 2,067 ms while it was still. The worst gaps come 3 to 5 s after the
   picture turns into the card, twice. They are downstream of the RTMP
   output, inside the stand-in sink's own transcode and WebRTC leg or on
-  this Mac. Which of the two is owed: the next run polls LiveKit's own
-  frame-rate figures for the sink.
+  this Mac. LiveKit has no live figure to settle it: a sink ingress's
+  state read 60.0 fps and 0 kbps throughout, and its `updatedAt` never
+  moved. The watcher overstates: in the S0.3 run, at a load of 7, it saw
+  gaps over 100 ms in 4 of 42 seconds while a recording of the same sink
+  room showed no freeze of 200 ms or more. A still picture through a sink
+  was not measured again.
 
 ### Black frames at a clean end
 
@@ -277,30 +300,48 @@ One run, 247 s, an RTMP sink attached, `departure_timeout` 120 s.
   2.50 s. That timing says the page was given about 180 ms of full-size
   black frames, which it has to treat as picture. Inferred, not confirmed
   with the on-picture diagnostic. A cut with no clean end showed no black
-  frame, in two holds.
+  frame, in five holds.
 
-## S0.3 Destinations (owed)
+## S0.3 Destinations
 
-The run was refused at setup: a feed and three sinks need four ingress
-objects. What earlier runs show:
+Adapted to the project's two ingress objects. The feed was a direct
+publisher (the `lk` CLI, a 720p30 clip with the frame counter), so both
+ingress objects could be RTMP sinks, A and B. The main egress was
+stream-only on the solo page at 1080p60, High, 6 Mbps. A second egress
+recorded sink A's room to segments, to see what A received. Load 7.
 
-- Five destinations that could not resolve were marked `FAILED` the moment
-  the egress started streaming, with no 30 s retry; the healthy one carried
-  on to the end. The error text names the host only.
-- A destination added live that could not resolve was marked `FAILED`
-  0.16 s after the `UpdateStream` call, by LiveKit's own timestamps. The
-  egress carried on.
-- One egress held 16 stream entries at once, while still starting. It never
-  streamed to 16.
-- A URL removed with `UpdateStream` reads `FINISHED`.
+| Step | Result |
+| --- | --- |
+| Start with A, the feed already in the room | Egress active 3.0 s after `StartEgress`; A's stream started at 3.1 s by LiveKit's own timestamp; A publishing at 4.8 s. A second run: 3.2, 3.2 and 4.9 s |
+| Add B live | B publishing 1.5 s after the `UpdateStream` call, which took 52 ms |
+| Remove B | `FINISHED` in the direct answer; B gone 1.6 s after the call |
+| Add B again, the same URL | Accepted; publishing after 1.9 s. The results then hold **two entries with the same redacted URL**, one `FINISHED` and one `ACTIVE` |
+| 14 more URLs that cannot resolve, in one call | Accepted: 17 entries. `ACTIVE` in the direct answer, `FAILED` in `ListEgress` 1.7 s later. Both sinks kept publishing |
+| Kill B (its ingress deleted) | `retries: 1` after 1.7 s; 23 retries, the last at 29.8 s; `FAILED` at 31.1 s by LiveKit's timestamp, in `ListEgress` at 32.4 s. The egress stayed active and A kept publishing with no retry |
+| Kill A, the last output | **The egress did not fail.** A's stream read `ACTIVE` with `retries: 1` within 2 s and never changed. The egress stayed `ACTIVE`, no error, for the 90 s watched, and ended only on `StopEgress`. A second run: the same for 75 s |
+
+- **A while B was failing,** from the recording of A's room (6,347
+  frames, every timestamp step 33.3 ms): no freeze of 200 ms or more in
+  the 45 s before the kill, two of 200 ms in the 40 s after it. A small
+  hiccup; A never disconnected.
+- **The failed stream's error** names the cause and no key: "Failed to
+  connect: 'publish' cmd failed: … NetStream.Publish.Failed".
+- **Why the last output differs is not known.** The open-source egress
+  fails when its last stream fails. Here the stream never reached
+  `FAILED`: after one retry nothing more was reported. Whether it fails
+  later than 90 s was not watched.
+- A destination that cannot resolve fails at once, with no 30 s retry: at
+  the moment streaming begins, or 0.16 s after an `UpdateStream` call. The
+  error names the host only.
 - When a room closes, the egress reads `COMPLETE` while its still-connected
   stream reads `FAILED` ("connection closed remotely").
 - **`ListEgress` answers with the deprecated fields.** Stream results are
   in `stream.info` and segment results in `result.segments`;
-  `stream_results` and `segment_results` are empty there. The direct
-  answers of `StartEgress`, `UpdateStream` and `StopEgress` fill
-  `stream_results`.
-- Results by webhook were not seen: no public receiver was allowed.
+  `stream_results` and `segment_results` were empty in every one of 313
+  polls. The direct answers of `StartEgress`, `UpdateStream` and
+  `StopEgress` fill `stream_results`.
+- Not covered: three or more live destinations at once, 16 live ones, and
+  results by webhook (no public receiver was allowed).
 
 ## S0.4 Stream keys
 
@@ -374,8 +415,10 @@ sink.
 
 ## S0.6 The talk-show page
 
-Local only. A host (H.264, with a screen share) and five guests (VP8),
-each a colour and a tone, in headless Chrome. Load 16 to 29.
+### Locally
+
+A host (H.264, with a screen share) and five guests (VP8), each a colour
+and a tone, in headless Chrome. Load 16 to 29.
 
 - **Layouts:** 9 stage cases, 35 tile probes, all right. Solo with 6 and
   with 1, side-by-side with 2, 3 and 6, screen-people with 3 and 6 plus
@@ -395,9 +438,42 @@ each a colour and a tone, in headless Chrome. Load 16 to 29.
   also plays it.
 - A VP8 guest's pure green comes back about 48 RGB units off.
 - Not built: the 300 ms crossfade, the host's circle, plate design.
-- Not measured: whether metadata and byte streams reach LiveKit's recorder,
-  and lip sync. The method is ready: a flash and a beep read from the
-  recording, checked on synthetic clips to half a frame.
+
+### On Cloud
+
+Two runs of about 70 s. A host (H.264 camera, Opus, an H.264 screen share)
+and two guests (VP8) published from headless Chrome on this Mac; LiveKit's
+recorder opened the page from the Neon bucket and wrote segments, 1080p30,
+High, 6 Mbps. No ingress. Load 8.
+
+- **Room metadata reaches the recorder.** The stage was set before the
+  recorder joined; the page started on it (egress active 4.3 s after
+  `StartEgress`), and each later change of metadata changed the picture.
+- **All four layouts are right in the recording,** in both runs:
+  side-by-side with three, solo with the host alone, screen-people with
+  the host's screen and three people, spotlight on a guest. 11 tile probes
+  a run, each the median of nine frames.
+- **Byte streams reach the recorder.** The host's overlay was shown; a
+  guest's was refused and the picture did not change. Both runs.
+- **Lip sync misses the bar.** The host's tile flashes white and beeps at
+  the same instant once a second. In the recording the beep comes after
+  the flash:
+
+  | Run | Audio after video, median | Range | Flashes |
+  | --- | ---: | --- | ---: |
+  | Voices through the limiter | **113 ms** | 89 to 135 ms | 21 |
+  | Voices on plain audio elements | **100 ms** | 34 to 169 ms | 20 |
+  | For comparison: the solo chain, an RTMP feed with the same flash and beep | 52 ms (the feed itself reads 16) | 30 to 52 ms | 21 |
+
+- **What that says.** The reading's resolution is half a frame, 17 ms. The
+  limiter's path is about 13 ms of it. The recorder and a program page
+  account for about 36 ms, as the solo chain shows. The rest of the
+  talk-show figure is in the synthetic guest (a canvas and a Web Audio
+  tone in headless Chrome) or its WebRTC leg from this Mac; which is not
+  separated. A guest with a real camera and microphone, or a host tile fed
+  through an ingress, would settle it. Not run: S0.6 was held to two
+  attempts.
+- The solo chain's 36 ms is inside the bar.
 
 ## S0.8 Go Live to on air
 
@@ -408,11 +484,14 @@ API polled every 0.5 s; 19 runs.
 | `StartEgress` answers | 0.77 to 1.06 s |
 | Feed starts → ingress PUBLISHING | 1.9 to 4.4 s |
 | Feed starts → egress active, the egress already waiting | 4.3 to 6.8 s |
-| `StartEgress` → active, media already in the room | 4.1 s (once, 720p, LiveKit's template) |
+| `StartEgress` → active, media already in the room | 4.1 s (720p, LiveKit's template); 3.0 and 3.2 s (1080p60, the solo page) |
+| `StartEgress` → the destination's stream started, media already in the room | 3.1 and 3.2 s, by LiveKit's own timestamp |
+| `StartEgress` → the sink publishing, media already in the room | 4.8 and 4.9 s (a LiveKit ingress as the sink takes its own time to start) |
 | Egress active → the sink publishing | Within one poll, 0.2 s (once) |
 
 So a platform gets its first frame about 5 to 7 s after the desktop starts
-its feed, and the picture it gets is 2.3 s behind the feed.
+its feed, or about 3 s after `StartEgress` if the feed is already in the
+room, and the picture it gets is 2.3 s behind the feed.
 
 ## S0.9 WHIP
 
@@ -435,8 +514,8 @@ its feed, and the picture it gets is 2.3 s behind the feed.
 
 | Assumption | What Cloud does |
 | --- | --- |
-| A stalled stream is retried for 30 s, then removed; others carry on | A destination that cannot resolve fails at once. A connected one that dies: owed |
-| If the last output fails, the egress fails | Owed |
+| A stalled stream is retried for 30 s, then removed; others carry on | Yes, when it is not the last: 23 retries, failed after 31 s, the other carried on. A destination that cannot resolve fails at once |
+| If the last output fails, the egress fails | **No.** With its only destination gone the egress stayed active and the stream read active with `retries: 1`, for the 75 and 90 s watched |
 | Stream URLs are redacted to the first and last three characters | Yes |
 | A URL the pattern does not match is not redacted | It is refused. The leaks are shapes the pattern does match |
 | S3 credentials are replaced whole | Yes |
@@ -454,7 +533,11 @@ its feed, and the picture it gets is 2.3 s behind the feed.
   retry count.
 - **Results by webhook within 5 s.** No public receiver. Read from
   LiveKit's own timestamps in the egress record.
-- **30 and 60 minute timeouts.** Run at 120 s. 300 s is owed.
+- **30 and 60 minute timeouts.** Run at 120 and 300 s.
+- **Destinations.** Two sinks, not three, with a direct publisher as the
+  feed; 14 of the 17 URLs could not resolve.
+- **Lip sync.** Measured with a synthetic guest, not a camera and a
+  microphone.
 - **Card within 3 s.** Counted from the last frame shown, as the node
   path's switcher counts it, not from the cut on the wire.
 - **The 60 fps bar** is given both ways: over the whole run and after the
@@ -491,14 +574,25 @@ All from the scratch directory, after `. /tmp/plan-234/lkenv.sh`. The
 branch is deleted; `node neon.mjs setup && node neon.mjs put-pages`
 makes a new one. The minutes each needs are in the private file.
 
-Owed because Cloud runs stopped:
+Still owed:
 
 ```
-node talk-cloud.mjs                 # S0.6 on Cloud: no ingress, about 70 s
-node stall.mjs                      # how long a silent feed is kept
-node hold.mjs d300 300 timeout      # departure_timeout at 300 s
-node dest.mjs main extra=14         # S0.3; needs four ingress objects
+# S0.3 with three sinks and 16 live destinations: needs a project that
+# holds four or more ingress objects
+node dest.mjs main extra=14
+
+# a second sample of a 30 fps feed recorded at 60 fps
+node chain.mjs q30b-e60b 30 seconds=78 tail=6 page=v=final egress=advanced \
+  egressKbps=6000 egressFps=60 ingressKbps=12000 segment=2 \
+  feed=/tmp/plan-234/phase0/media/feed-30b.flv
 ```
+
+Owed with no script yet:
+
+- Talk-show lip sync with a guest on a real camera and microphone, or with
+  the host's tile fed through an ingress.
+- Whether an egress whose last destination died ever fails after 90 s.
+- A still picture (the card) through a sink, watched at a low load.
 
 Never meant to run in Phase 0 without the owner's word:
 
@@ -530,10 +624,11 @@ receiver.
 2. **D4, the ingress.** One 1080p layer at 12 Mbps, codec left to LiveKit.
    High is refused; 16 Mbps never starts.
 3. **D12, 60 fps.** Stays capped at 1080p30.
-4. **D5, the return.** "Back about 1 s after the feed" is 6 s here. Either
-   the bar moves or the steady wait shrinks; the ingress's 4.8 s cannot.
+4. **D5, the return.** "Back about 1 s after the feed" is 4.8 to 6.2 s
+   here. Either the bar moves or the steady wait shrinks; the ingress's
+   3.5 to 4.8 s cannot.
 5. **D5, the hold limit.** It is `departure_timeout` plus however long the
-   ingress keeps a silent feed (at least 59 s). The reaper has to end a
+   ingress keeps a silent feed (100 s in one run). The reaper has to end a
    show whose feed is silent but present.
 6. **D7, the guard.** Refuse a trailing slash, user info, any scheme but
    `rtmp` and `rtmps`, and any URL LiveKit would refuse (its error repeats
@@ -541,15 +636,30 @@ receiver.
    of nine or more, and most of a shorter one.
 7. **D8 and W4.** Read `stream.info` and `result.segments` from
    `ListEgress` as well as the `_results` fields. Do not take a stream's
-   `FAILED` at a room-closed end for a dead destination.
+   `FAILED` at a room-closed end for a dead destination. A URL that was
+   removed and added again has two entries with the same redacted URL, so
+   an HMAC of that URL does not name one entry: take the newest.
 8. **D10, recording.** Segments of 2 s if the same egress streams, or the
    stream gets 4 s keyframes. The credential can be write-only.
 9. **D13, capacity.** The project holds two ingress objects: one show with
    both orientations. The plan tier has to be settled before any cap is
    chosen.
-10. **D6, lip sync.** The limiter's path adds about 37 ms to every voice.
+10. **D6, lip sync.** Not settled. The recording was 100 to 113 ms off with
+    a synthetic guest, and the limiter is about 13 ms of that. T1 needs a
+    lip-sync test with a real camera and microphone before the 80 ms bar
+    is called either way. The solo chain measured 36 ms.
 11. **D20, the page.** The nine points above; and frames: about 1.3 in 100
     at 30 fps is the floor of this design.
 12. **D18, smokes.** No Docker on this Mac; the pages were tested against
     `livekit-server --dev` and headless Chrome alone, which covers the page
     and none of the egress.
+13. **D9, the last destination.** "The egress is gone" does not happen: the
+    egress stays active with a dead stream that reads `ACTIVE`,
+    `retries: 1`. The web has to notice `retries` rise on a show's only
+    stream and act itself (remove and add the URL, which takes about 1.5 s
+    when the destination is back, or stop and start the egress). `retries`
+    never clears, so it cannot say that a stream recovered. D11's meter
+    keeps counting such an egress.
+14. **D9, one of several.** A destination that dies is retried for 30 s
+    and marked failed at 31 s, as assumed. Reconnect is then a plain
+    `UpdateStream` add.
