@@ -5,10 +5,15 @@ import { anchorFromFlash } from './scene-window-switch-frames.mjs'
 import { SMART_SCENES_BUDGET, hideSpanVerdict } from './smart-scenes-gate.mjs'
 import {
   anchorHideFile,
+  FROST_LEAD_MAX_MS,
   captureAlignedHideBudget,
   distinctFrameRate,
   dxgiRefusalCode,
+  frostLeadFailure,
+  frostLeadMs,
+  hideCoverMs,
   selectWindowsHideScreen,
+  sessionFrostLeadMs,
   windowsHideOutputsVerdict,
   windowsHideSessionPath,
   windowsScreenStartSkip
@@ -282,6 +287,135 @@ test('a frame one capture interval before Show is alignment, a mid-span live fra
   })
   assert.equal(leaked.ok, false)
   assert.equal(leaked.hidden.leaks[0].index, 200)
+})
+
+// Issue #1329: a D3D11 Desktop Duplication file whose live content reaches
+// the file `latencyMs` after it was drawn, while the frost, built at the
+// source, lands on the next canvas tick after each press. Flash-aligned wall
+// time dates the live content, so both edges read `latencyMs` early.
+function sourceFrostFile({
+  latencyMs,
+  coverMs = 0,
+  unfrostEarlyMs = 0,
+  hideAtMs = 5000,
+  showAtMs = 9000
+}) {
+  const frameMs = 1000 / 30
+  const count = 420
+  const ptsMs = Array.from({ length: count }, (_, index) => index * frameMs)
+  // Output wall time of each frame; the flash anchor maps it `latencyMs` early.
+  const frostFrom = Math.ceil((hideAtMs + coverMs) / frameMs) * frameMs
+  const frostUntil = Math.ceil((showAtMs - unfrostEarlyMs) / frameMs) * frameMs
+  const features = ptsMs.map((output, index) => {
+    const hidden = output >= frostFrom && output < frostUntil
+    return {
+      index,
+      sharp: hidden ? 0 : 0.0011,
+      repeated: hidden && output > frostFrom,
+      centre: 'red'
+    }
+  })
+  return { features, ptsMs, offsetMs: -latencyMs, hideAtMs, showAtMs, untilMs: 12_000 }
+}
+
+test('the frost lead reads how early a source-frosted file is aligned', () => {
+  const file = sourceFrostFile({ latencyMs: 150 })
+  const lead = frostLeadMs(file)
+  assert.ok(lead >= 140 && lead <= 150, `lead ${lead}`)
+  // A frost that lands after the press reads as a negative lead.
+  assert.ok(frostLeadMs(sourceFrostFile({ latencyMs: -40 })) < 0)
+  // No frost in the middle of the span: no lead to measure.
+  const live = { ...file, features: file.features.map((f) => ({ ...f, sharp: 0.0011 })) }
+  assert.equal(frostLeadMs(live), null)
+})
+
+test('the Show slack grows by the frost lead, the hide cover and a canvas frame', () => {
+  const base = { hideEdgeMs: 700, showSlackMs: 70, hideLatencyMaxMs: 1000 }
+  const budget = captureAlignedHideBudget(base, 13.6, {
+    frostLeadMs: 140,
+    canvasFrameMs: 1000 / 30,
+    hideCoverMs: 5
+  })
+  assert.equal(budget.captureIntervalMs, 74)
+  assert.equal(budget.showSlackMs, 179)
+  assert.equal(budget.frostLeadMs, 140)
+  assert.equal(budget.hideEdgeMs, 700)
+  // A frost after the press never shrinks the slack below the base.
+  assert.equal(captureAlignedHideBudget(base, 30, { frostLeadMs: -30 }).showSlackMs, 70)
+  // A slow cover reads as a late frost (a negative lead); the cover gives it back.
+  assert.equal(
+    captureAlignedHideBudget(base, 24, {
+      frostLeadMs: -20,
+      canvasFrameMs: 1000 / 30,
+      hideCoverMs: 120
+    }).showSlackMs,
+    134
+  )
+  assert.equal(captureAlignedHideBudget(base, null, { frostLeadMs: null }).showSlackMs, 70)
+})
+
+test('issue #1329: capture latency at Show is alignment, an early un-frost is still a leak', () => {
+  const judge = (file) => {
+    const budget = captureAlignedHideBudget(SMART_SCENES_BUDGET, 13.6, {
+      frostLeadMs: frostLeadMs(file),
+      canvasFrameMs: 1000 / 30,
+      hideCoverMs: file.coverMs ?? 0
+    })
+    return hideSpanVerdict({ ...file, budget })
+  }
+  const latent = sourceFrostFile({ latencyMs: 150 })
+  // The interval-only slack (#1088) reads the Show edge as a leak.
+  assert.equal(
+    hideSpanVerdict({ ...latent, budget: captureAlignedHideBudget(SMART_SCENES_BUDGET, 13.6) }).ok,
+    false
+  )
+  const ok = judge(latent)
+  assert.equal(ok.ok, true, ok.failures.join('; '))
+  // The frost lifted 150 ms before Show, on the file's own clock: a leak,
+  // whatever the capture latency.
+  const early = judge(sourceFrostFile({ latencyMs: 150, unfrostEarlyMs: 150 }))
+  assert.equal(early.ok, false)
+  assert.match(early.failures.join('; '), /live frame\(s\) inside the hidden span/)
+  // The CPU bridge (issue #1329): 100 ms of content latency and a 120 ms
+  // cover, so the frost reads late and the Show edge early. The cover
+  // measured off the event keeps it alignment; without it, it reads as a leak.
+  const slowCover = { ...sourceFrostFile({ latencyMs: 100, coverMs: 120 }), coverMs: 120 }
+  assert.ok(frostLeadMs(slowCover) < 0)
+  const covered = judge(slowCover)
+  assert.equal(covered.ok, true, covered.failures.join('; '))
+  assert.equal(judge({ ...slowCover, coverMs: 0 }).ok, false)
+  const earlyCovered = judge({
+    ...sourceFrostFile({ latencyMs: 100, coverMs: 120, unfrostEarlyMs: 150 }),
+    coverMs: 120
+  })
+  assert.equal(earlyCovered.ok, false)
+})
+
+test('the session frost lead is the earliest frost any leg shows, within the cap', () => {
+  assert.equal(sessionFrostLeadMs([46, -21, 46]), 46)
+  assert.equal(sessionFrostLeadMs([-30, null, -5]), -5)
+  assert.equal(sessionFrostLeadMs([80, FROST_LEAD_MAX_MS + 1]), 80)
+  assert.equal(sessionFrostLeadMs([null, undefined]), null)
+  assert.equal(sessionFrostLeadMs(undefined), null)
+})
+
+test('the hide cover is the first hidden privacy event after the press', () => {
+  const events = [
+    { event: 'screen.privacy.changed', payload: { hidden: false }, atMs: 900 },
+    { event: 'screen.privacy.changed', payload: { hidden: true }, atMs: 950 },
+    { event: 'replay.status', payload: {}, atMs: 1010 },
+    { event: 'screen.privacy.changed', payload: { hidden: true }, atMs: 1042 },
+    { event: 'screen.privacy.changed', payload: { hidden: true }, atMs: 1300 }
+  ]
+  assert.equal(hideCoverMs(events, 1000), 42)
+  assert.equal(hideCoverMs(events, 2000), null)
+  assert.equal(hideCoverMs(undefined, 0), null)
+})
+
+test('a frost far ahead of the hide press is a misaligned file, not slack', () => {
+  assert.equal(frostLeadFailure(null), null)
+  assert.equal(frostLeadFailure(FROST_LEAD_MAX_MS), null)
+  assert.match(frostLeadFailure(FROST_LEAD_MAX_MS + 1), /misalign/)
 })
 
 test('the Windows fixture ready line parses', () => {

@@ -241,26 +241,15 @@ pub fn frost_bgra(width: u32, height: u32, bgra: Option<&[u8]>) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
     let (sw, sh) = (plan.small_width as usize, plan.small_height as usize);
 
-    // Three f32 planes (B, G, R); alpha is dropped and rewritten opaque.
-    let mut planes = vec![0.0_f32; w * h * 3];
-    for (index, pixel) in bgra[..pixel_count * 4].chunks_exact(4).enumerate() {
-        planes[index * 3] = f32::from(pixel[0]);
-        planes[index * 3 + 1] = f32::from(pixel[1]);
-        planes[index * 3 + 2] = f32::from(pixel[2]);
-    }
-    let narrow = area_resample_horizontal(&planes, w, h, sw);
+    // Issue #1329: the hide builds this under the capture's lock, so the full
+    // frame is read and written as bytes, never as full-size f32 planes. The
+    // arithmetic is the planes form's own (B, G, R in f32; alpha dropped and
+    // rewritten opaque), so the still is byte-identical to it at about a
+    // third of the time (1080p 51 -> 18 ms in release).
+    let narrow = area_resample_horizontal_bgra(&bgra[..pixel_count * 4], w, h, sw);
     let small = area_resample_vertical(&narrow, sw, h, sh);
     let blurred = gaussian_blur(&small, sw, sh, FROST_SIGMA);
-    let full = bilinear_upscale(&blurred, sw, sh, w, h);
-
-    let mut out = vec![0_u8; pixel_count * 4];
-    for (index, pixel) in out.chunks_exact_mut(4).enumerate() {
-        pixel[0] = quantize(full[index * 3]);
-        pixel[1] = quantize(full[index * 3 + 1]);
-        pixel[2] = quantize(full[index * 3 + 2]);
-        pixel[3] = 0xff;
-    }
-    out
+    bilinear_upscale_bgra(&blurred, sw, sh, w, h)
 }
 
 fn quantize(value: f32) -> u8 {
@@ -288,21 +277,28 @@ fn area_spans(source_len: usize, dest_len: usize) -> Vec<(usize, Vec<f32>)> {
         .collect()
 }
 
-fn area_resample_horizontal(planes: &[f32], w: usize, h: usize, dest_w: usize) -> Vec<f32> {
+/// The horizontal area pass straight from BGRA8 bytes (alpha ignored), into
+/// B, G, R f32 planes `dest_w` wide.
+fn area_resample_horizontal_bgra(bgra: &[u8], w: usize, h: usize, dest_w: usize) -> Vec<f32> {
     if dest_w == w {
-        return planes.to_vec();
+        let mut planes = vec![0.0_f32; w * h * 3];
+        for (cell, pixel) in planes.chunks_exact_mut(3).zip(bgra.chunks_exact(4)) {
+            cell[0] = f32::from(pixel[0]);
+            cell[1] = f32::from(pixel[1]);
+            cell[2] = f32::from(pixel[2]);
+        }
+        return planes;
     }
     let spans = area_spans(w, dest_w);
     let mut out = vec![0.0_f32; dest_w * h * 3];
-    for y in 0..h {
-        let row = &planes[y * w * 3..(y + 1) * w * 3];
+    for (y, row) in bgra.chunks_exact(w * 4).enumerate() {
         for (dx, (start, weights)) in spans.iter().enumerate() {
             let mut acc = [0.0_f32; 3];
-            for (offset, weight) in weights.iter().enumerate() {
-                let sx = start + offset;
-                acc[0] += row[sx * 3] * weight;
-                acc[1] += row[sx * 3 + 1] * weight;
-                acc[2] += row[sx * 3 + 2] * weight;
+            let pixels = &row[start * 4..(start + weights.len()) * 4];
+            for (pixel, weight) in pixels.chunks_exact(4).zip(weights) {
+                acc[0] += f32::from(pixel[0]) * weight;
+                acc[1] += f32::from(pixel[1]) * weight;
+                acc[2] += f32::from(pixel[2]) * weight;
             }
             let base = (y * dest_w + dx) * 3;
             out[base..base + 3].copy_from_slice(&acc);
@@ -393,11 +389,21 @@ fn gaussian_blur(planes: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
     out
 }
 
-fn bilinear_upscale(planes: &[f32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<f32> {
+/// The bilinear scale back up to `w`x`h`, quantized straight into opaque
+/// BGRA8. Each small row is first interpolated across the full width (the
+/// same products the per-pixel form takes, in the same order), so a pixel
+/// costs one vertical blend.
+fn bilinear_upscale_bgra(planes: &[f32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0_u8; w * h * 4];
     if sw == w && sh == h {
-        return planes.to_vec();
+        for (pixel, source) in out.chunks_exact_mut(4).zip(planes.chunks_exact(3)) {
+            pixel[0] = quantize(source[0]);
+            pixel[1] = quantize(source[1]);
+            pixel[2] = quantize(source[2]);
+            pixel[3] = 0xff;
+        }
+        return out;
     }
-    let mut out = vec![0.0_f32; w * h * 3];
     let x_scale = sw as f32 / w as f32;
     let y_scale = sh as f32 / h as f32;
     let max_x = (sw - 1) as f32;
@@ -409,20 +415,33 @@ fn bilinear_upscale(planes: &[f32], sw: usize, sh: usize, w: usize, h: usize) ->
             (x0, (x0 + 1).min(sw - 1), u - x0 as f32)
         })
         .collect();
-    for y in 0..h {
+    let mut wide = vec![0.0_f32; sh * w * 3];
+    for (row, dest) in planes
+        .chunks_exact(sw * 3)
+        .zip(wide.chunks_exact_mut(w * 3))
+    {
+        for (cell, &(x0, x1, fx)) in dest.chunks_exact_mut(3).zip(&xs) {
+            for channel in 0..3 {
+                cell[channel] = row[x0 * 3 + channel] * (1.0 - fx) + row[x1 * 3 + channel] * fx;
+            }
+        }
+    }
+    for (y, out_row) in out.chunks_exact_mut(w * 4).enumerate() {
         let v = (((y as f32 + 0.5) * y_scale) - 0.5).clamp(0.0, max_y);
         let y0 = v.floor() as usize;
         let y1 = (y0 + 1).min(sh - 1);
         let fy = v - y0 as f32;
-        for (x, &(x0, x1, fx)) in xs.iter().enumerate() {
-            let base = (y * w + x) * 3;
-            for channel in 0..3 {
-                let top = planes[(y0 * sw + x0) * 3 + channel] * (1.0 - fx)
-                    + planes[(y0 * sw + x1) * 3 + channel] * fx;
-                let bottom = planes[(y1 * sw + x0) * 3 + channel] * (1.0 - fx)
-                    + planes[(y1 * sw + x1) * 3 + channel] * fx;
-                out[base + channel] = top * (1.0 - fy) + bottom * fy;
-            }
+        let top = &wide[y0 * w * 3..(y0 + 1) * w * 3];
+        let bottom = &wide[y1 * w * 3..(y1 + 1) * w * 3];
+        for ((pixel, t), b) in out_row
+            .chunks_exact_mut(4)
+            .zip(top.chunks_exact(3))
+            .zip(bottom.chunks_exact(3))
+        {
+            pixel[0] = quantize(t[0] * (1.0 - fy) + b[0] * fy);
+            pixel[1] = quantize(t[1] * (1.0 - fy) + b[1] * fy);
+            pixel[2] = quantize(t[2] * (1.0 - fy) + b[2] * fy);
+            pixel[3] = 0xff;
         }
     }
     out
@@ -740,6 +759,125 @@ pub mod d3d11 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The f32-planes frost as it was before issue #1329, kept as the
+    // reference the byte-path frost must match exactly.
+    fn frost_bgra_planes_reference(width: u32, height: u32, bgra: &[u8]) -> Vec<u8> {
+        let pixel_count = width as usize * height as usize;
+        let plan = frost_plan(width, height);
+        let (w, h) = (width as usize, height as usize);
+        let (sw, sh) = (plan.small_width as usize, plan.small_height as usize);
+        let mut planes = vec![0.0_f32; w * h * 3];
+        for (index, pixel) in bgra[..pixel_count * 4].chunks_exact(4).enumerate() {
+            planes[index * 3] = f32::from(pixel[0]);
+            planes[index * 3 + 1] = f32::from(pixel[1]);
+            planes[index * 3 + 2] = f32::from(pixel[2]);
+        }
+        let narrow = area_resample_horizontal(&planes, w, h, sw);
+        let small = area_resample_vertical(&narrow, sw, h, sh);
+        let blurred = gaussian_blur(&small, sw, sh, FROST_SIGMA);
+        let full = bilinear_upscale(&blurred, sw, sh, w, h);
+        let mut out = vec![0_u8; pixel_count * 4];
+        for (index, pixel) in out.chunks_exact_mut(4).enumerate() {
+            pixel[0] = quantize(full[index * 3]);
+            pixel[1] = quantize(full[index * 3 + 1]);
+            pixel[2] = quantize(full[index * 3 + 2]);
+            pixel[3] = 0xff;
+        }
+        out
+    }
+
+    fn area_resample_horizontal(planes: &[f32], w: usize, h: usize, dest_w: usize) -> Vec<f32> {
+        if dest_w == w {
+            return planes.to_vec();
+        }
+        let spans = area_spans(w, dest_w);
+        let mut out = vec![0.0_f32; dest_w * h * 3];
+        for y in 0..h {
+            let row = &planes[y * w * 3..(y + 1) * w * 3];
+            for (dx, (start, weights)) in spans.iter().enumerate() {
+                let mut acc = [0.0_f32; 3];
+                for (offset, weight) in weights.iter().enumerate() {
+                    let sx = start + offset;
+                    acc[0] += row[sx * 3] * weight;
+                    acc[1] += row[sx * 3 + 1] * weight;
+                    acc[2] += row[sx * 3 + 2] * weight;
+                }
+                let base = (y * dest_w + dx) * 3;
+                out[base..base + 3].copy_from_slice(&acc);
+            }
+        }
+        out
+    }
+
+    fn bilinear_upscale(planes: &[f32], sw: usize, sh: usize, w: usize, h: usize) -> Vec<f32> {
+        if sw == w && sh == h {
+            return planes.to_vec();
+        }
+        let mut out = vec![0.0_f32; w * h * 3];
+        let x_scale = sw as f32 / w as f32;
+        let y_scale = sh as f32 / h as f32;
+        let max_x = (sw - 1) as f32;
+        let max_y = (sh - 1) as f32;
+        let xs: Vec<(usize, usize, f32)> = (0..w)
+            .map(|x| {
+                let u = (((x as f32 + 0.5) * x_scale) - 0.5).clamp(0.0, max_x);
+                let x0 = u.floor() as usize;
+                (x0, (x0 + 1).min(sw - 1), u - x0 as f32)
+            })
+            .collect();
+        for y in 0..h {
+            let v = (((y as f32 + 0.5) * y_scale) - 0.5).clamp(0.0, max_y);
+            let y0 = v.floor() as usize;
+            let y1 = (y0 + 1).min(sh - 1);
+            let fy = v - y0 as f32;
+            for (x, &(x0, x1, fx)) in xs.iter().enumerate() {
+                let base = (y * w + x) * 3;
+                for channel in 0..3 {
+                    let top = planes[(y0 * sw + x0) * 3 + channel] * (1.0 - fx)
+                        + planes[(y0 * sw + x1) * 3 + channel] * fx;
+                    let bottom = planes[(y1 * sw + x0) * 3 + channel] * (1.0 - fx)
+                        + planes[(y1 * sw + x1) * 3 + channel] * fx;
+                    out[base + channel] = top * (1.0 - fy) + bottom * fy;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_byte_path_frost_matches_the_planes_frost_exactly() {
+        let mut seed = 0x1329_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed & 0xff) as u8
+        };
+        for (w, h) in [
+            (1920_u32, 1080_u32),
+            (1280, 720),
+            (641, 47),
+            (640, 48),
+            (100, 30),
+            (48, 48),
+            (7, 5),
+            (3, 200),
+            (1, 1),
+        ] {
+            let len = w as usize * h as usize * 4;
+            let noise: Vec<u8> = (0..len).map(|_| next()).collect();
+            let stripes: Vec<u8> = (0..len)
+                .map(|i| if (i / 4 / 9) % 2 == 0 { 250 } else { 3 })
+                .collect();
+            for (name, bgra) in [("noise", &noise), ("stripes", &stripes)] {
+                assert!(
+                    frost_bgra(w, h, Some(bgra)) == frost_bgra_planes_reference(w, h, bgra),
+                    "{name} {w}x{h}"
+                );
+            }
+        }
+    }
 
     fn gate() -> ScreenPrivacyGate {
         ScreenPrivacyGate::default()

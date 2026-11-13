@@ -56,6 +56,10 @@ import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
   anchorHideFile,
   captureAlignedHideBudget,
+  frostLeadFailure,
+  frostLeadMs,
+  hideCoverMs,
+  sessionFrostLeadMs,
   distinctFrameRate,
   selectWindowsHideScreen,
   windowsHideOutputsVerdict,
@@ -391,6 +395,11 @@ async function hideStep({ renderer, smoke, screen }) {
   )
   const hideAckMs = Date.now() - hideAtMs
   await sleep(HIDDEN_SPAN_MS / 2)
+  // Issue #1329: screen.privacy.changed follows the stills into the stores,
+  // so its arrival bounds how late the frost could reach the outputs. It
+  // comes after the gate the ack above reads, so it is read here, two
+  // seconds on.
+  const coverMs = hideCoverMs(events, hideAtMs)
   const diagnosticsHidden = await request(ws, timeoutMs, 'diagnostics.stats').catch(() => null)
   await sleep(HIDDEN_SPAN_MS / 2)
   const showAtMs = Date.now()
@@ -429,6 +438,7 @@ async function hideStep({ renderer, smoke, screen }) {
   await waitForReceiverExit(receiver, 20_000)
   const files = { recording: combined, stream: receiver.path, screenFile: null, clip: clipPath }
   const outputs = {}
+  const analysed = []
   for (const [name, file] of Object.entries(files)) {
     if (name === 'screenFile' && screenFileSkip) {
       outputs[name] = { ok: true, skipped: true, reason: screenFileSkip, failures: [] }
@@ -455,7 +465,30 @@ async function hideStep({ renderer, smoke, screen }) {
     const liveFps = distinctFrameRate(analysis.features, analysis.ptsMs, {
       untilPts: hideAtMs - analysis.anchor.offsetMs
     })
-    const budget = captureAlignedHideBudget(SMART_SCENES_BUDGET, liveFps)
+    // Issue #1329: the frost has no capture latency and the flashes date
+    // live content, so the frost's lead over the hide press measures how
+    // early this file reads; the Show edge reads early by the same amount.
+    const leadMs = frostLeadMs({
+      features: analysis.features,
+      ptsMs: analysis.ptsMs,
+      offsetMs: analysis.anchor.offsetMs,
+      hideAtMs,
+      showAtMs
+    })
+    analysed.push({ name, file, analysis, liveFps, leadMs })
+  }
+  // Every leg reads one compositor, so the frost reached it no later than the
+  // earliest leg shows it; a leg showing it later repeated its last live frame
+  // across the hide's cover (the CPU bridge's stream leg does), which only
+  // kept the pre-hide picture on air longer.
+  const sessionLeadMs = sessionFrostLeadMs(analysed.map((leg) => leg.leadMs))
+  for (const { name, file, analysis, liveFps, leadMs } of analysed) {
+    const leadFailure = frostLeadFailure(leadMs)
+    const budget = captureAlignedHideBudget(SMART_SCENES_BUDGET, liveFps, {
+      frostLeadMs: leadFailure ? null : sessionLeadMs,
+      canvasFrameMs: 1000 / video.fps,
+      hideCoverMs: coverMs ?? hideAckMs
+    })
     const verdict = hideSpanVerdict({
       features: analysis.features,
       ptsMs: analysis.ptsMs,
@@ -465,11 +498,17 @@ async function hideStep({ renderer, smoke, screen }) {
       untilMs,
       budget
     })
+    if (leadFailure) {
+      verdict.failures.push(leadFailure)
+      verdict.ok = false
+    }
     outputs[name] = {
       ...verdict,
       file,
       frameCount: analysis.features.length,
       liveFps,
+      frostLeadMs: leadMs,
+      sessionFrostLeadMs: sessionLeadMs,
       showSlackMs: budget.showSlackMs,
       anchor: analysis.anchor,
       anchorDriftMs: analysis.anchorDriftMs,
@@ -514,6 +553,7 @@ async function hideStep({ renderer, smoke, screen }) {
     hideAtMs,
     showAtMs,
     hideAckMs,
+    hideCoverMs: coverMs,
     showAckMs,
     hiddenSpanMs: showAtMs - hideAtMs,
     flashes,
@@ -530,7 +570,7 @@ async function hideStep({ renderer, smoke, screen }) {
         output.skipped
           ? `${name}: SKIP (${output.reason})`
           : output.hidden
-            ? `${name}: frosted ${output.hidden.frostedFrames}/${output.hidden.frames} (sharp max ${output.hidden.sharpMax}, live p50 ${output.liveBefore.sharpP50}→${output.liveAfter.sharpP50}), ${output.liveFps ?? 'n/a'} distinct fps live (show slack ${output.showSlackMs} ms), hide +${fmt(output.hideLatencyMs)} ms, show +${fmt(output.showLatencyMs)} ms${output.endFlashSeen ? '' : ', end flash not captured'}${output.ok ? '' : ` FAIL: ${output.failures.join('; ')}`}`
+            ? `${name}: frosted ${output.hidden.frostedFrames}/${output.hidden.frames} (sharp max ${output.hidden.sharpMax}, live p50 ${output.liveBefore.sharpP50}→${output.liveAfter.sharpP50}), ${output.liveFps ?? 'n/a'} distinct fps live (show slack ${output.showSlackMs} ms, frost lead ${fmt(output.frostLeadMs)} ms, cover ${fmt(coverMs)} ms), hide +${fmt(output.hideLatencyMs)} ms, show +${fmt(output.showLatencyMs)} ms${output.endFlashSeen ? '' : ', end flash not captured'}${output.ok ? '' : ` FAIL: ${output.failures.join('; ')}`}`
             : `${name}: ${output.failures.join('; ')}`
       )
     ].join('; ')
