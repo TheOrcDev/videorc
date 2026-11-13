@@ -1,18 +1,21 @@
-// System audio smoke (plan 069 S7): the computer's sound in recordings and
-// streams, through the REAL dev app and its ScreenCaptureKit capture.
+// System audio smoke (plan 069 S7, Windows issue #1088): the computer's sound
+// in recordings and streams, through the REAL dev app's System audio capture
+// (ScreenCaptureKit on macOS, WASAPI process loopback on Windows).
 //
-// macOS only. It needs the dev app's Screen Recording grant (System Settings >
+// macOS needs the dev app's Screen Recording grant (System Settings >
 // Privacy & Security > Screen & System Audio Recording), the same grant the
-// real SCK screen smoke needs. Without it the smoke FAILS with the reason;
-// VIDEORC_SYSTEM_AUDIO_SMOKE_ALLOW_MISSING_GRANT=1 turns that into an explicit
-// SKIP (exit 0, "SKIPPED" in the output), never a silent pass.
+// real SCK screen smoke needs. Windows needs process loopback (build 20348 or
+// later, every Windows 11) and has no grant. Without System audio the smoke
+// FAILS with the reason; VIDEORC_SYSTEM_AUDIO_SMOKE_ALLOW_MISSING_GRANT=1
+// turns that into an explicit SKIP (exit 0, "SKIPPED" in the output), never a
+// silent pass. Linux SKIPS by name.
 //
-// Run it in a quiet state: it plays a 1 kHz tone through the speakers with
-// `afplay` (the owner's volume, mute and output device are never touched;
-// capture is before the master volume) and records what the computer plays.
-// A looping silent afplay keeps the output device awake for the whole run, so
-// a tone starts within a few hundred ms of its request instead of up to ~2 s
-// on a cold device.
+// Run it in a quiet state: it plays a 1 kHz tone through the speakers
+// (`afplay` on macOS, a pre-armed PowerShell `Media.SoundPlayer` on Windows;
+// see lib/tone-player.mjs). The owner's volume, mute and output device are
+// never touched; capture is before the master volume. A looping silent player
+// keeps the output device awake for the whole run, so a tone starts within a
+// few hundred ms of its request instead of up to ~2 s on a cold device.
 // Artifact verdicts use a 1 kHz-selective measure, so music or a notification
 // during a run cannot fake the tone; only energy at 1 kHz can fail a silence
 // check. The Off case also requires broadband digital silence, which holds
@@ -37,7 +40,7 @@
 //   off         System audio Off, tone at 3-6 s: no tone, digital silence, no
 //               system source in the mix (the privacy gate).
 //   self        On, a 1 kHz WebAudio tone played by Videorc's own renderer at
-//               3-6 s must be absent; an afplay control tone at 8 s must be
+//               3-6 s must be absent; a player control tone at 8 s must be
 //               present (self-exclusion, plan 069 decision 9 amended).
 //   stream      Record + stream with System audio On, tone at 3-6 s: in the
 //               file and in the stream the local RTMP listener received.
@@ -83,7 +86,6 @@ import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   CLIPS_IDLE_LEVEL_GATES,
-  SYSTEM_AUDIO_GATES,
   analyzeSystemAudioArtifact,
   bandMaxDbfs,
   cutoverFileSeconds,
@@ -93,6 +95,7 @@ import {
   evaluateSystemAudioOffCase,
   evaluateToggleOffCase,
   evaluateToggleOnCase,
+  systemAudioGatesFor,
   evaluateToneCapturedCase,
   evaluateMixedToneCapturedCase,
   evaluateStaticScreenEpoch,
@@ -105,6 +108,9 @@ import {
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
 import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
+import { bundledFfmpegPath } from './lib/recording-studio-gates.mjs'
+import { createTonePlayer } from './lib/tone-player.mjs'
+import { missingWindowsCaptureWorker } from './lib/windows-capture-worker.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
@@ -150,12 +156,18 @@ const outputDirectory = resolve(
 const reportPath = resolve(args.report ?? join(outputDirectory, 'system-audio-report.json'))
 // The bundled FFmpeg generates the tone and decodes the artifacts when it is
 // staged; any FFmpeg with lavfi and ffprobe works.
-const bundledFfmpeg = join(repoRoot, 'vendor', 'ffmpeg', 'current', 'bin', 'ffmpeg')
+const bundledFfmpeg = bundledFfmpegPath({ repoRoot })
 const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? (existsSync(bundledFfmpeg) ? bundledFfmpeg : 'ffmpeg')
 const ffprobePath =
   process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? resolveExistingSiblingFfprobe(ffmpegPath) ?? 'ffprobe'
+const platformGates = systemAudioGatesFor(process.platform)
 const rtmpPort = Number(process.env.VIDEORC_SYSTEM_AUDIO_SMOKE_RTMP_PORT ?? 19853)
+
+const SYSTEM_AUDIO_UNAVAILABLE_HINT =
+  process.platform === 'win32'
+    ? 'Windows process loopback needs Windows 10 build 20348 or later and an output device.'
+    : 'the dev app needs the Screen Recording grant (System Settings > Privacy & Security > Screen & System Audio Recording).'
 
 function fail(message) {
   throw new Error(`system-audio smoke FAIL: ${message}`)
@@ -218,7 +230,17 @@ class BackendEventRecorder {
     })
   }
 
-  waitFor(label, predicate, waitTimeoutMs = timeoutMs) {
+  /**
+   * Resolves with the first matching event. With `since`, an event already
+   * received at or after that instant counts too: Windows process loopback
+   * attaches within a few ms of Record, before a waiter registered after the
+   * start ack would see it.
+   */
+  waitFor(label, predicate, waitTimeoutMs = timeoutMs, { since } = {}) {
+    if (since !== undefined) {
+      const seen = this.events.find((record) => record.at >= since && predicate(record))
+      if (seen) return Promise.resolve(seen)
+    }
     return new Promise((resolveWait, rejectWait) => {
       const waiter = { predicate, resolve: null }
       const timer = setTimeout(() => {
@@ -300,49 +322,27 @@ function onAppLine(line) {
   if (dropped) audioSummaries.push({ at: performance.now(), aheadCapDrops: Number(dropped[1]) })
   const cutover = parseSystemAudioMixCutover(line)
   if (cutover) cutovers.push({ ...cutover, at: performance.now() })
-  if (/could not find the Videorc app to exclude|without excluding the Electron main/.test(line)) {
+  if (
+    /could not (?:find|name) the Videorc app to exclude|without excluding the Electron main/.test(
+      line
+    )
+  ) {
     exclusionWarnings.push(line.trim())
   }
   if (debug) console.log('[app]', line)
 }
 
-const players = new Set()
-let keepAlive = null
+const tonePlayer =
+  process.platform === 'darwin' || process.platform === 'win32'
+    ? createTonePlayer({ log: (message) => log(message) })
+    : null
 
-/**
- * Plays digital silence for the whole run so the output device stays awake.
- * A cold device delayed afplay's first sound by up to ~1.9 s; a running one
- * starts it within a few hundred ms. Silence adds nothing to the capture.
- */
-function startKeepAlive(wavPath) {
-  if (keepAlive?.stopped) return
-  const child = spawn('afplay', [wavPath], { stdio: 'ignore' })
-  keepAlive = { child, wavPath, stopped: false }
-  child.on('exit', () => {
-    if (keepAlive && !keepAlive.stopped && keepAlive.child === child) startKeepAlive(wavPath)
-  })
-  child.on('error', (error) => log(`keep-alive afplay failed: ${error.message}`))
-}
-
-function stopKeepAlive() {
-  if (!keepAlive) return
-  keepAlive.stopped = true
-  keepAlive.child.kill('SIGTERM')
-}
-
-/** Plays a WAV with afplay and returns the wall time of the spawn. */
 function playTone(wavPath) {
-  const at = performance.now()
-  const child = spawn('afplay', [wavPath], { stdio: 'ignore' })
-  players.add(child)
-  child.on('exit', () => players.delete(child))
-  child.on('error', (error) => log(`afplay failed: ${error.message}`))
-  return at
+  return tonePlayer.play(wavPath)
 }
 
 function stopPlayers() {
-  for (const child of players) child.kill('SIGTERM')
-  players.clear()
+  tonePlayer?.stopPlayers()
 }
 
 function runFfmpeg(argsList) {
@@ -409,12 +409,13 @@ function healthEvent(sessionId, codes) {
 }
 
 /** Waits for the session's mix to (not) include system audio; health failures fail fast. */
-async function waitForMix(recorder, sessionId, wantSystemAudio, label) {
+async function waitForMix(recorder, sessionId, wantSystemAudio, label, { since } = {}) {
   const unavailable = recorder
     .waitFor(
       `${label} health`,
       healthEvent(sessionId, ['system-audio-unavailable', 'system-audio-lost']),
-      15000
+      15000,
+      { since }
     )
     .then((record) => {
       fail(`${label}: ${record.payload.code}: ${record.payload.message ?? ''}`)
@@ -424,9 +425,35 @@ async function waitForMix(recorder, sessionId, wantSystemAudio, label) {
       return new Promise(() => {})
     })
   return Promise.race([
-    recorder.waitFor(label, mixEvent(sessionId, wantSystemAudio), 15000),
+    recorder.waitFor(label, mixEvent(sessionId, wantSystemAudio), 15000, { since }),
     unavailable
   ])
+}
+
+/** Stops a Record or Go Live session a failed case left running, if any. */
+async function stopLeftoverSession(renderer, recorder) {
+  const last = recorder.events.findLast(
+    (record) => record.event === 'recording.status' && record.payload?.replayOnly !== true
+  )
+  const state = last?.payload?.state
+  if (!last || state === 'idle' || state === 'failed') return
+  const sessionId = last.payload.sessionId
+  log(`stopping the session the failed case left ${state} (${sessionId})`)
+  const ended = recorder.waitFor(
+    'leftover session end',
+    (record) =>
+      record.event === 'recording.status' &&
+      record.payload?.sessionId === sessionId &&
+      (record.payload?.state === 'idle' || record.payload?.state === 'failed'),
+    30000,
+    { since: last.at }
+  )
+  try {
+    await request(renderer, timeoutMs, 'session.stop', {})
+    await ended
+  } catch (error) {
+    log(`could not stop the leftover session: ${error.message}`)
+  }
 }
 
 async function sendIntent(remote, acks, kind) {
@@ -489,11 +516,18 @@ async function seedRenderer(smoke, sources) {
         // grant), with Clips on. The idle case starts with System audio On.
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const audio = { ...(current.audio ?? {}), systemAudioEnabled: params.systemAudioEnabled, systemAudioGainDb: -6 };
-        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources: params.sources ?? current.sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
+        // No microphone is the Studio's None choice. Windows has no CoreAudio
+        // input for VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE to drop, so a
+        // remembered microphone would hear the speakers and leak the tone.
+        const sources = params.sources ?? (params.noMicrophone
+          ? { ...(current.sources ?? {}), microphoneId: undefined, microphoneName: undefined, microphoneOff: true }
+          : current.sources);
+        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
       sources,
+      noMicrophone: !args.microphone,
       systemAudioEnabled: selectedCases[0] === 'clips-idle',
       video: { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
     },
@@ -642,7 +676,10 @@ async function recordRendererSession(ctx, { name, systemAudioAtStart, timeline }
   const at = (seconds) => sleep(epochAt + seconds * 1000 - performance.now())
   const marks = {}
   if (systemAudioAtStart) {
-    const attached = await waitForMix(recorder, sessionId, true, `${name} attach at start`)
+    // Session-scoped, so an attach already received for this session counts.
+    const attached = await waitForMix(recorder, sessionId, true, `${name} attach at start`, {
+      since: recording.at
+    })
     marks.attachConfirmedAt = attached.at
   }
   await timeline({ at, marks, sessionId })
@@ -953,12 +990,15 @@ const cases = {
       : null
     const anchor = { wallMs: session.epochAt }
     const start = wallToFileSeconds(playAt, anchor)
-    const result = evaluateToggleOnCase({
-      envelope: analysis.envelope,
-      regions: analysis.regions,
-      expectedPlay: { start, end: start + 8 },
-      cutoverSeconds
-    })
+    const result = evaluateToggleOnCase(
+      {
+        envelope: analysis.envelope,
+        regions: analysis.regions,
+        expectedPlay: { start, end: start + 8 },
+        cutoverSeconds
+      },
+      platformGates
+    )
     checkDuration(analysis, 'toggle-on', result.failures)
     const window = sessionWindow(ctx.recorder, session)
     if (window.health.length) result.failures.push(`toggle-on: health ${window.health.join(', ')}`)
@@ -1102,7 +1142,7 @@ const cases = {
       })
       if (!started?.sessionId) fail(`stream: session.start returned ${JSON.stringify(started)}`)
       const epochAt = performance.now()
-      await waitForMix(recorder, started.sessionId, true, 'stream attach')
+      await waitForMix(recorder, started.sessionId, true, 'stream attach', { since: clickAt })
       await sleep(epochAt + 3000 - performance.now())
       playAt = playTone(ctx.tones[3])
       await sleep(epochAt + 10000 - performance.now())
@@ -1255,12 +1295,15 @@ let stopApp = async () => {}
 let staticStimulus
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-system-audio-user-data-'))
 try {
-  if (process.platform !== 'darwin') {
-    log('SKIPPED: the system-audio smoke is macOS only (Windows is plan 069 S8).')
+  if (!tonePlayer) {
+    log(`SKIPPED: the system-audio smoke runs on macOS and Windows, not ${process.platform}.`)
   } else {
+    const missingWorker = missingWindowsCaptureWorker({ repoRoot })
+    if (missingWorker) fail(missingWorker)
     mkdirSync(outputDirectory, { recursive: true })
     const tones = await generateTones(join(outputDirectory, 'tones'))
-    startKeepAlive(tones.silence)
+    await tonePlayer.startKeepAlive(tones.silence)
+    await tonePlayer.prepare([tones[2], tones[3], tones[6], tones[8]])
     const launch = await launchDevApp({
       env: {
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
@@ -1296,7 +1339,7 @@ try {
     const devices = await request(renderer, timeoutMs, 'devices.list', {})
     const device = (devices?.devices ?? []).find((entry) => entry.id === 'system-audio:default')
     if (device?.status !== 'available') {
-      const reason = `System audio device is ${device?.status ?? 'missing'}; the dev app needs the Screen Recording grant (System Settings > Privacy & Security > Screen & System Audio Recording).`
+      const reason = `System audio device is ${device?.status ?? 'missing'}; ${SYSTEM_AUDIO_UNAVAILABLE_HINT}`
       if (allowMissingGrant) {
         log(`SKIPPED (VIDEORC_SYSTEM_AUDIO_SMOKE_ALLOW_MISSING_GRANT=1): ${reason}`)
         process.exitCode = 0
@@ -1435,6 +1478,9 @@ try {
         results[caseKey] = await cases[name](ctx)
       } catch (error) {
         results[caseKey] = { pass: false, failures: [error.message], evidence: {} }
+        // A case that threw mid-session leaves it running; stop it so the
+        // next case judges its own session instead of "already recording".
+        await stopLeftoverSession(renderer, recorder)
       } finally {
         stopPlayers()
       }
@@ -1447,7 +1493,7 @@ try {
       `${JSON.stringify(
         {
           generatedAt: new Date().toISOString(),
-          gates: SYSTEM_AUDIO_GATES,
+          gates: platformGates,
           clipsIdleLevelGates: CLIPS_IDLE_LEVEL_GATES,
           ffmpegPath,
           pass,
@@ -1469,8 +1515,7 @@ try {
     process.exitCode = 1
   }
 } finally {
-  stopPlayers()
-  stopKeepAlive()
+  tonePlayer?.stopAll()
   if (staticStimulus) await stopScreenMotionStimulus(staticStimulus)
   try {
     await stopApp()

@@ -2,7 +2,8 @@
 // Soundboard app smoke (plan 189 S8): a soundboard press in recordings,
 // through the REAL dev app.
 //
-// macOS only (the dev app's synthetic screen and remote control). No camera
+// macOS and Windows (issue #1088; the dev app's synthetic screen and remote
+// control). No camera
 // or microphone: the bus writes paced silence for the mic slot, so the file
 // carries only what the soundboard (and, in one case, System audio) mixes in.
 // The fixture sound is a 600 ms 1 kHz tone imported through the real
@@ -18,8 +19,9 @@
 //   system-audio  the same with System audio on and the monitor playing: the
 //                 tone is in the file once, the same length and level as
 //                 on-air (the monitor never comes back through the capture).
-//                 Needs the dev app's Screen Recording grant; without it the
-//                 case SKIPS with the reason, never a silent pass.
+//                 Needs System audio (the Screen Recording grant on macOS,
+//                 process loopback on Windows); without it the case SKIPS
+//                 with the reason, never a silent pass.
 //
 // The precise placement gate (one chunk plus 5 ms) is
 // `pnpm smoke:soundboard-fixture`.
@@ -55,6 +57,8 @@ import {
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
 import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
+import { bundledFfmpegPath } from './lib/recording-studio-gates.mjs'
+import { missingWindowsCaptureWorker } from './lib/windows-capture-worker.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
@@ -79,7 +83,7 @@ const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-soundboard-${Date.now()}`)
 )
 const reportPath = resolve(args.report ?? join(outputDirectory, 'soundboard-report.json'))
-const bundledFfmpeg = join(repoRoot, 'vendor', 'ffmpeg', 'current', 'bin', 'ffmpeg')
+const bundledFfmpeg = bundledFfmpegPath({ repoRoot })
 const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? (existsSync(bundledFfmpeg) ? bundledFfmpeg : 'ffmpeg')
 const ffprobePath =
@@ -223,7 +227,10 @@ async function seedRenderer(smoke) {
         // grant), record only, System audio Off until a case turns it on.
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const audio = { ...(current.audio ?? {}), systemAudioEnabled: false, systemAudioGainDb: -6 };
-        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, layout, audio, recordEnabled: true, streamEnabled: false }));
+        // No microphone (the Studio's None): Windows has no CoreAudio input for
+        // VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE to drop.
+        const sources = { ...(current.sources ?? {}), microphoneId: undefined, microphoneName: undefined, microphoneOff: true };
+        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources, layout, audio, recordEnabled: true, streamEnabled: false }));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
@@ -371,7 +378,11 @@ const cases = {
     if (device?.status !== 'available') {
       return {
         pass: true,
-        skipped: `System audio device is ${device?.status ?? 'missing'}; the dev app needs the Screen Recording grant.`,
+        skipped: `System audio device is ${device?.status ?? 'missing'}; ${
+          process.platform === 'win32'
+            ? 'Windows process loopback needs build 20348 or later and an output device.'
+            : 'the dev app needs the Screen Recording grant.'
+        }`,
         failures: [],
         evidence: {}
       }
@@ -388,9 +399,13 @@ const cases = {
 let stopApp = async () => {}
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-soundboard-user-data-'))
 try {
-  if (process.platform !== 'darwin') {
-    log('SKIPPED: the soundboard app smoke is macOS only; the fixture smoke runs everywhere.')
+  if (process.platform !== 'darwin' && process.platform !== 'win32') {
+    log(
+      `SKIPPED: the soundboard app smoke runs on macOS and Windows, not ${process.platform}; the fixture smoke runs everywhere.`
+    )
   } else {
+    const missingWorker = missingWindowsCaptureWorker({ repoRoot })
+    if (missingWorker) fail(missingWorker)
     mkdirSync(outputDirectory, { recursive: true })
     const tonePath = join(outputDirectory, 'tone-1k-600ms.wav')
     await runFfmpeg(
