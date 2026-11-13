@@ -850,9 +850,44 @@ pub fn chroma_key_neighbourhood_rgb(
     sum.map(|total| f64::from(total) / 256.0)
 }
 
+/// Plan 233: how many halvings the keyed camera takes before it is drawn.
+///
+/// The owner's 4K camera in the 720×405 Large slot put 5.3 × 5.3 camera
+/// texels under every output pixel, and the key judged one bilinear tap of
+/// them per pixel: along the subject's outline a pixel flipped between kept
+/// and keyed out with every sub-texel movement, and left green specks in a
+/// new place every frame. The keyed picture is now built per camera texel,
+/// reduced by averaging 2^L × 2^L blocks (premultiplied), and drawn with one
+/// bilinear tap, which leaves a shrink under 2×. `L = floor(log2(camera px
+/// per drawn px))` on the axis with the SMALLER ratio, never below 0, so no
+/// axis is ever reduced past its drawn size. `source_*` is the camera window
+/// the draw reads (after its crop) in texels and `drawn_*` the box it fills
+/// in output pixels. The Metal compositor mirrors this (it also builds into
+/// the preview helper, which has no `scene_geometry`); a test pins the two.
+pub fn chroma_key_reduction_level(
+    source_width: f64,
+    source_height: f64,
+    drawn_width: f64,
+    drawn_height: f64,
+) -> u32 {
+    if !(source_width > 0.0 && source_height > 0.0 && drawn_width > 0.0 && drawn_height > 0.0) {
+        return 0;
+    }
+    let ratio = (source_width / drawn_width).min(source_height / drawn_height);
+    if !(ratio >= 2.0) {
+        return 0;
+    }
+    ratio.log2().floor() as u32
+}
+
 /// Spill suppression on kept pixels: pull the key channel down toward the
 /// other channels' max, scaled by `spill`. Only pixels where the key channel
 /// DOMINATES both others move, so neutral/yellow/cyan subject tones survive.
+///
+/// [`chroma_key_despill_rgb`] is the f64 form the keyed plane runs on a level
+/// texel's average colour (plan 233); this is the same rule for one 8-bit
+/// colour at the spec's strength, the tests' oracle.
+#[cfg(test)]
 pub fn chroma_key_despill(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     if spec.spill <= 0.0 {
         return (r, g, b);
@@ -871,6 +906,29 @@ pub fn chroma_key_despill(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> (u8, u8,
         }
     }
     (r, g, b)
+}
+
+/// [`chroma_key_despill`] for a colour in 0..=255 units that may be
+/// fractional (a level texel's average, plan 233) at `strength` in 0..=1:
+/// the key channel comes down toward the other two's max by that share,
+/// only where it dominates them. The Metal and D3D11 shaders mirror it.
+pub fn chroma_key_despill_rgb(spill_is_blue: bool, strength: f64, rgb: [f64; 3]) -> [f64; 3] {
+    if strength <= 0.0 {
+        return rgb;
+    }
+    let [r, g, b] = rgb;
+    if spill_is_blue {
+        let limit = r.max(g);
+        if b > limit {
+            return [r, g, b - strength * (b - limit)];
+        }
+    } else {
+        let limit = r.max(b);
+        if g > limit {
+            return [r, g - strength * (g - limit), b];
+        }
+    }
+    rgb
 }
 
 /// Mask geometry over a box that may hang off the canvas (plan 215 E2): the
@@ -1758,6 +1816,67 @@ mod tests {
                 "{label} {rgb:?} must survive with defaults"
             );
         }
+    }
+
+    /// Plan 233: the level just above the drawn size, on the axis with the
+    /// smaller ratio, never below 0.
+    #[test]
+    fn chroma_key_reduction_level_is_the_power_of_two_just_above_the_slot() {
+        // The owner's 4K camera in the 720×405 Large slot: 5.3× → level 2.
+        assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 720.0, 405.0), 2);
+        // The same camera in the Preview's 480-wide slot: 8× exactly → 3.
+        assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 480.0, 270.0), 3);
+        // A 1080p camera in the Large slot: 2.67× → 1.
+        assert_eq!(chroma_key_reduction_level(1920.0, 1080.0, 720.0, 405.0), 1);
+        // 1:1, an upscale, or a shrink under 2× stay at level 0.
+        assert_eq!(
+            chroma_key_reduction_level(1920.0, 1080.0, 1920.0, 1080.0),
+            0
+        );
+        assert_eq!(chroma_key_reduction_level(1280.0, 720.0, 1920.0, 1080.0), 0);
+        assert_eq!(chroma_key_reduction_level(1920.0, 1080.0, 1000.0, 563.0), 0);
+        // The smaller ratio decides: 3.84× across, 5.3× down → 1.
+        assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 1000.0, 405.0), 1);
+        // Degenerate sizes never reduce.
+        assert_eq!(chroma_key_reduction_level(0.0, 2160.0, 720.0, 405.0), 0);
+        assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 0.0, 405.0), 0);
+        assert_eq!(
+            chroma_key_reduction_level(f64::NAN, 2160.0, 720.0, 405.0),
+            0
+        );
+    }
+
+    /// Plan 233: the f64 despill is the 8-bit despill on whole colours and
+    /// leaves a colour the key channel does not dominate alone.
+    #[test]
+    fn chroma_key_despill_rgb_matches_the_eight_bit_despill() {
+        let spec = default_green_spec();
+        for rgb in [
+            [100u8, 200, 80],
+            [60, 61, 10],
+            [0, 150, 150],
+            [200, 150, 120],
+        ] {
+            let (r, g, b) = chroma_key_despill(&spec, rgb[0], rgb[1], rgb[2]);
+            let reference =
+                chroma_key_despill_rgb(spec.spill_is_blue(), spec.spill, rgb.map(f64::from));
+            assert_eq!(
+                [r, g, b],
+                reference.map(|value| value.round() as u8),
+                "{rgb:?}"
+            );
+        }
+        // The teal logo: green never dominates blue, so it is untouched at
+        // any strength.
+        assert_eq!(
+            chroma_key_despill_rgb(false, 1.0, [0.0, 150.0, 150.0]),
+            [0.0, 150.0, 150.0]
+        );
+        // Full strength clamps green to the other channels' max.
+        assert_eq!(
+            chroma_key_despill_rgb(false, 1.0, [100.0, 200.0, 80.0]),
+            [100.0, 100.0, 80.0]
+        );
     }
 
     #[test]

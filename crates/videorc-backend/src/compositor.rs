@@ -70,9 +70,9 @@ use crate::protocol::{
 use crate::scene_geometry::{
     CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS, ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask,
     SceneMaskTester, SignedPixelRect, background_stage_margin, background_zoom_crop,
-    camera_chroma_key, camera_mask, chroma_key_alpha_rgb, chroma_key_despill, contain_rect_pixels,
-    scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
-    scene_source_render_transform,
+    camera_chroma_key, camera_mask, chroma_key_alpha_rgb, chroma_key_despill_rgb,
+    chroma_key_reduction_level, contain_rect_pixels, scene_crop_from_transform, scene_source_fit,
+    scene_source_rect_pixels, scene_source_render_transform,
 };
 #[cfg(target_os = "macos")]
 pub use crate::source_mask::SourceMask;
@@ -86,6 +86,11 @@ pub(crate) use preview_frame_lease::{CompositorPreviewFrameLease, acquire_previe
 
 #[cfg(test)]
 use crate::protocol::LayoutPreset;
+
+/// Plan 233 S0: the keyer's edge oracle (a synthetic 4K camera in the Large
+/// slot), shared by the CPU and Metal keyer tests.
+#[cfg(test)]
+mod edge_snow_oracle;
 
 const COMPOSITOR_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(2);
 const COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -12343,15 +12348,26 @@ fn camera_look_rgb(r: u8, g: u8, b: u8, look: crate::protocol::CameraLook) -> (u
     if look.is_neutral() {
         return (r, g, b);
     }
-    let rgb = [r, g, b].map(|value| f64::from(value) / 255.0);
-    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-    let [r, g, b] = rgb.map(|value| {
-        ((y + look.brightness + (look.contrast - 1.0) * (y - 0.5) + look.saturation * (value - y))
-            .clamp(0.0, 1.0)
-            * 255.0)
-            .round() as u8
-    });
+    let [r, g, b] =
+        camera_look_rgb_f64([r, g, b].map(f64::from), look).map(|value| value.round() as u8);
     (r, g, b)
+}
+
+/// `camera_look_rgb` for a colour in 0..=255 units that may be fractional (a
+/// keyed level texel's average, plan 233): brightness, contrast and
+/// saturation in gamma-encoded RGB, clamped to the range. The Metal shader
+/// mirrors it.
+fn camera_look_rgb_f64(rgb: [f64; 3], look: crate::protocol::CameraLook) -> [f64; 3] {
+    if look.is_neutral() {
+        return rgb;
+    }
+    let rgb = rgb.map(|value| value / 255.0);
+    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    rgb.map(|value| {
+        (y + look.brightness + (look.contrast - 1.0) * (y - 0.5) + look.saturation * (value - y))
+            .clamp(0.0, 1.0)
+            * 255.0
+    })
 }
 
 struct RgbaSource<'a> {
@@ -13039,6 +13055,21 @@ fn blit_rgba_to_yuv420p(
         );
         return true;
     }
+    // Plan 233: a keyed camera is keyed per camera texel, reduced by powers
+    // of two to the level just above its drawn size and drawn with one
+    // bilinear tap, whatever its scale (the oracle of the Metal key pass).
+    if let Some(spec) = options.chroma_key.as_ref() {
+        blit_keyed_rgba_to_yuv420p(
+            source,
+            spec,
+            dest,
+            (canvas_width, canvas_height),
+            &fit,
+            options,
+            (draw_left, draw_top, draw_right, draw_bottom),
+        );
+        return true;
+    }
     if options.linear && cpu_fit_is_scaled(&fit) {
         blit_linear_rgba_to_yuv420p(
             source,
@@ -13051,34 +13082,8 @@ fn blit_rgba_to_yuv420p(
         return true;
     }
 
-    // Chroma key: resolve the source pixel to (rgb after despill, key alpha).
-    // None means the pixel keys fully out. Grade after despill, keeping the
-    // original pixel's key alpha unchanged. Hide edges (plan 227 B) test the
-    // sampled source texel: outside the kept box the pixel keys fully out.
-    // The key judges the texel's 5×5 neighbourhood (plan 229), built once
-    // for both passes; the pixel keeps its own colour.
-    let judged = options
-        .chroma_key
-        .is_some()
-        .then(|| KeyJudgedPlane::build(source));
-    let keyed_pixel = |r: u8, g: u8, b: u8, x: u32, y: u32| -> Option<(u8, u8, u8, u8)> {
-        let (r, g, b, key_alpha) =
-            if let (Some(spec), Some(judged)) = (options.chroma_key.as_ref(), judged.as_ref()) {
-                if !spec.edges.keeps_texel(x, y, source.width, source.height) {
-                    return None;
-                }
-                let alpha = chroma_key_alpha_rgb(spec, judged.rgb(x, y));
-                if alpha == 0 {
-                    return None;
-                }
-                let (r, g, b) = chroma_key_despill(spec, r, g, b);
-                (r, g, b, alpha)
-            } else {
-                (r, g, b, 255)
-            };
-        let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
-        Some((r, g, b, key_alpha))
-    };
+    // The camera look grades the source pixel; both planes read it.
+    let graded = |r: u8, g: u8, b: u8| camera_look_rgb(r, g, b, options.camera_look);
 
     let uv_left = draw_left / 2;
     let uv_top = draw_top / 2;
@@ -13126,17 +13131,9 @@ fn blit_rgba_to_yuv420p(
                         if a < 16 {
                             continue;
                         }
-                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b, source_x, source_y)
-                        else {
-                            continue;
-                        };
+                        let (r, g, b) = graded(r, g, b);
                         // This pass writes luma only (plan 191).
-                        let y_value = rgb_to_y(r, g, b);
-                        *output = if key_alpha == 255 {
-                            y_value
-                        } else {
-                            alpha_blend_channel(y_value, *output, u16::from(key_alpha))
-                        };
+                        *output = rgb_to_y(r, g, b);
                     }
                 });
         },
@@ -13163,20 +13160,10 @@ fn blit_rgba_to_yuv420p(
                         if a < 16 {
                             continue;
                         }
-                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b, source_x, source_y)
-                        else {
-                            continue;
-                        };
+                        let (r, g, b) = graded(r, g, b);
                         let (u_value, v_value) = rgb_to_uv(r, g, b);
-                        if key_alpha == 255 {
-                            u_row[uv_x] = u_value;
-                            v_row[uv_x] = v_value;
-                        } else {
-                            u_row[uv_x] =
-                                alpha_blend_channel(u_value, u_row[uv_x], u16::from(key_alpha));
-                            v_row[uv_x] =
-                                alpha_blend_channel(v_value, v_row[uv_x], u16::from(key_alpha));
-                        }
+                        u_row[uv_x] = u_value;
+                        v_row[uv_x] = v_value;
                     }
                 });
         },
@@ -13205,17 +13192,6 @@ struct LinearTap {
     first: u32,
     second: u32,
     weight: u16,
-}
-
-impl LinearTap {
-    /// The texel that carries most of the sample's weight.
-    fn nearest(self) -> u32 {
-        if self.weight < 128 {
-            self.first
-        } else {
-            self.second
-        }
-    }
 }
 
 /// Plan 229: the colour the key judges for every texel of a keyed source,
@@ -13272,35 +13248,11 @@ impl KeyJudgedPlane {
         Self { width, sums }
     }
 
-    /// The judged colour of texel (`x`, `y`), in 0..=255 units.
+    /// The judged colour of texel (`x`, `y`), in 0..=255 units. The shaders
+    /// reach the same kernel with nine bilinear taps on the texel centre.
     #[inline(always)]
     fn rgb(&self, x: u32, y: u32) -> [f64; 3] {
         self.sums[y as usize * self.width + x as usize].map(|sum| f64::from(sum) / 256.0)
-    }
-
-    /// The judged colour at a bilinear sample: the plane read with the
-    /// sample's own taps. On a texel centre it is [`Self::rgb`]; the shaders
-    /// reach the same kernel with nine bilinear taps, within a fraction of a
-    /// level between texels.
-    #[inline(always)]
-    fn rgb_linear(&self, column: LinearTap, row: LinearTap) -> [f64; 3] {
-        let (top_left, top_right) = (
-            self.rgb(column.first, row.first),
-            self.rgb(column.second, row.first),
-        );
-        let (bottom_left, bottom_right) = (
-            self.rgb(column.first, row.second),
-            self.rgb(column.second, row.second),
-        );
-        let (wx, wy) = (
-            f64::from(column.weight) / 256.0,
-            f64::from(row.weight) / 256.0,
-        );
-        std::array::from_fn(|channel| {
-            let top = top_left[channel] * (1.0 - wx) + top_right[channel] * wx;
-            let bottom = bottom_left[channel] * (1.0 - wx) + bottom_right[channel] * wx;
-            top * (1.0 - wy) + bottom * wy
-        })
     }
 }
 
@@ -13379,8 +13331,9 @@ fn read_source_rgba_linear(
 }
 
 /// The bilinear twin of `blit_rgba_to_yuv420p`'s general path (plan 200 D3):
-/// the same fit, mask, chroma key, alpha threshold and plane layout, with
-/// every sample read bilinear instead of from one texel.
+/// the same fit, mask, alpha threshold and plane layout, with every sample
+/// read bilinear instead of from one texel. A keyed camera takes
+/// `blit_keyed_rgba_to_yuv420p` instead (plan 233).
 fn blit_linear_rgba_to_yuv420p(
     source: &RgbaSource<'_>,
     dest: &mut [u8],
@@ -13392,38 +13345,7 @@ fn blit_linear_rgba_to_yuv420p(
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
     let uv_height = canvas_height.div_ceil(2);
-    // Hide edges (plan 227 B) test the texel nearest the bilinear sample. The
-    // key judges the sample's neighbourhood (plan 229), built once for both
-    // passes.
-    let judged = options
-        .chroma_key
-        .is_some()
-        .then(|| KeyJudgedPlane::build(source));
-    let keyed_pixel =
-        |r: u8, g: u8, b: u8, column: LinearTap, row: LinearTap| -> Option<(u8, u8, u8, u8)> {
-            let (r, g, b, key_alpha) = if let (Some(spec), Some(judged)) =
-                (options.chroma_key.as_ref(), judged.as_ref())
-            {
-                if !spec.edges.keeps_texel(
-                    column.nearest(),
-                    row.nearest(),
-                    source.width,
-                    source.height,
-                ) {
-                    return None;
-                }
-                let alpha = chroma_key_alpha_rgb(spec, judged.rgb_linear(column, row));
-                if alpha == 0 {
-                    return None;
-                }
-                let (r, g, b) = chroma_key_despill(spec, r, g, b);
-                (r, g, b, alpha)
-            } else {
-                (r, g, b, 255)
-            };
-            let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
-            Some((r, g, b, key_alpha))
-        };
+    let graded = |r: u8, g: u8, b: u8| camera_look_rgb(r, g, b, options.camera_look);
     let uv_left = draw_left / 2;
     let uv_top = draw_top / 2;
     let uv_right = draw_right.div_ceil(2).min(uv_width);
@@ -13488,17 +13410,8 @@ fn blit_linear_rgba_to_yuv420p(
                         if a < 16 {
                             continue;
                         }
-                        let Some((r, g, b, key_alpha)) =
-                            keyed_pixel(r, g, b, source_column, source_row)
-                        else {
-                            continue;
-                        };
-                        let y_value = rgb_to_y(r, g, b);
-                        *output = if key_alpha == 255 {
-                            y_value
-                        } else {
-                            alpha_blend_channel(y_value, *output, u16::from(key_alpha))
-                        };
+                        let (r, g, b) = graded(r, g, b);
+                        *output = rgb_to_y(r, g, b);
                     }
                 });
         },
@@ -13526,9 +13439,275 @@ fn blit_linear_rgba_to_yuv420p(
                         if a < 16 {
                             continue;
                         }
-                        let Some((r, g, b, key_alpha)) =
-                            keyed_pixel(r, g, b, source_column, source_row)
-                        else {
+                        let (r, g, b) = graded(r, g, b);
+                        let (u_value, v_value) = rgb_to_uv(r, g, b);
+                        u_row[uv_x] = u_value;
+                        v_row[uv_x] = v_value;
+                    }
+                });
+        },
+    );
+}
+
+/// Plan 233: the keyed camera, keyed per camera texel and reduced to the
+/// level it is drawn from.
+///
+/// The owner's 4K camera in the 720×405 Large slot put 5.3 × 5.3 camera
+/// texels under every output pixel. The key ran once per output pixel on one
+/// bilinear tap of them, so along the subject's outline a pixel flipped
+/// between kept and keyed out with every sub-texel movement (the crawl), and
+/// where the key's neighbourhood kept a pixel whose colour tap landed on the
+/// screen, the pixel was green (the snow). The keyed picture is now built per
+/// camera texel, exactly as a 1:1 draw keyed it: plan 229's judged
+/// neighbourhood, the angle, the floor and the ramp, Hide edges, then
+/// premultiplied by alpha and averaged over 2^level × 2^level blocks. Each
+/// level texel then gets the colour treatment (despill and the camera look)
+/// on its average colour, as one bilinear tap of the camera got it before,
+/// and the draw reads the plane with one bilinear tap: at most a 2× shrink.
+/// At level 0 every texel's alpha and colour are what a 1:1 draw gave.
+///
+/// The Metal compositor's key pass is this on the GPU; tests pin the two.
+struct KeyedLevelPlane {
+    width: usize,
+    height: usize,
+    /// Premultiplied: `[r × a, g × a, b × a, a]`, colour in 0..=255 units,
+    /// alpha in 0..=1, after despill and the camera look.
+    texels: Vec<[f32; 4]>,
+}
+
+impl KeyedLevelPlane {
+    fn build(
+        source: &RgbaSource<'_>,
+        spec: &ChromaKeySpec,
+        look: crate::protocol::CameraLook,
+        level: u32,
+    ) -> Self {
+        let judged = KeyJudgedPlane::build(source);
+        let block = 1usize << level.min(31);
+        let (width, height) = (source.width as usize, source.height as usize);
+        let (level_width, level_height) = (width.div_ceil(block), height.div_ceil(block));
+        let mut texels = vec![[0.0f32; 4]; level_width * level_height];
+        // Pass 1: key every camera texel and average each block, premultiplied.
+        texels
+            .par_chunks_mut(level_width.max(1))
+            .enumerate()
+            .for_each(|(level_y, row)| {
+                let rows = level_y * block..((level_y + 1) * block).min(height);
+                for (level_x, out) in row.iter_mut().enumerate() {
+                    let columns = level_x * block..((level_x + 1) * block).min(width);
+                    let mut sum = [0.0f32; 4];
+                    for y in rows.clone() {
+                        for x in columns.clone() {
+                            let (r, g, b, a) = read_source_rgba(source, x as u32, y as u32);
+                            // The capture alpha threshold every CPU blit
+                            // applies, and Hide edges (plan 227 B).
+                            if a < 16
+                                || !spec.edges.keeps_texel(
+                                    x as u32,
+                                    y as u32,
+                                    source.width,
+                                    source.height,
+                                )
+                            {
+                                continue;
+                            }
+                            let alpha = f32::from(chroma_key_alpha_rgb(
+                                spec,
+                                judged.rgb(x as u32, y as u32),
+                            )) / 255.0;
+                            sum[0] += f32::from(r) * alpha;
+                            sum[1] += f32::from(g) * alpha;
+                            sum[2] += f32::from(b) * alpha;
+                            sum[3] += alpha;
+                        }
+                    }
+                    let count = (rows.len() * columns.len()) as f32;
+                    *out = sum.map(|channel| channel / count.max(1.0));
+                }
+            });
+        // Pass 2: the colour treatment on each level texel's average colour.
+        let spill_is_blue = spec.spill_is_blue();
+        texels.par_iter_mut().for_each(|texel| {
+            let alpha = texel[3];
+            if alpha <= 0.0 {
+                *texel = [0.0; 4];
+                return;
+            }
+            let colour = [texel[0], texel[1], texel[2]].map(|channel| f64::from(channel / alpha));
+            let colour = chroma_key_despill_rgb(spill_is_blue, spec.spill, colour);
+            let colour = camera_look_rgb_f64(colour, look);
+            *texel = [
+                colour[0] as f32 * alpha,
+                colour[1] as f32 * alpha,
+                colour[2] as f32 * alpha,
+                alpha,
+            ];
+        });
+        Self {
+            width: level_width,
+            height: level_height,
+            texels,
+        }
+    }
+
+    #[inline(always)]
+    fn texel(&self, x: u32, y: u32) -> [f32; 4] {
+        self.texels[y as usize * self.width + x as usize]
+    }
+
+    /// One bilinear tap of the premultiplied plane.
+    #[inline(always)]
+    fn sample(&self, column: LinearTap, row: LinearTap) -> [f32; 4] {
+        let (top_left, top_right) = (
+            self.texel(column.first, row.first),
+            self.texel(column.second, row.first),
+        );
+        let (bottom_left, bottom_right) = (
+            self.texel(column.first, row.second),
+            self.texel(column.second, row.second),
+        );
+        let (wx, wy) = (
+            f32::from(column.weight) / 256.0,
+            f32::from(row.weight) / 256.0,
+        );
+        std::array::from_fn(|channel| {
+            let top = top_left[channel] * (1.0 - wx) + top_right[channel] * wx;
+            let bottom = bottom_left[channel] * (1.0 - wx) + bottom_right[channel] * wx;
+            top * (1.0 - wy) + bottom * wy
+        })
+    }
+}
+
+/// Plan 233: the keyed camera's blit. The keyed plane at this draw's
+/// reduction level, read with one bilinear tap per output pixel (the plane
+/// covers the whole frame, so the fit's source window scales into it and the
+/// half-texel crop clamp is the plane's texel), then un-premultiplied for the
+/// straight-alpha blend every plane uses. The same fit, mask and plane
+/// layout as `blit_linear_rgba_to_yuv420p`.
+#[allow(clippy::too_many_arguments)]
+fn blit_keyed_rgba_to_yuv420p(
+    source: &RgbaSource<'_>,
+    spec: &ChromaKeySpec,
+    dest: &mut [u8],
+    (canvas_width, canvas_height): (usize, usize),
+    fit: &SourceFit,
+    options: SourceRenderOptions,
+    (draw_left, draw_top, draw_right, draw_bottom): (usize, usize, usize, usize),
+) {
+    let level = chroma_key_reduction_level(
+        fit.source_width,
+        fit.source_height,
+        f64::from(fit.width),
+        f64::from(fit.height),
+    );
+    let plane = KeyedLevelPlane::build(source, spec, options.camera_look, level);
+    let scale_x = plane.width as f64 / f64::from(source.width.max(1));
+    let scale_y = plane.height as f64 / f64::from(source.height.max(1));
+    let y_len = canvas_width * canvas_height;
+    let uv_width = canvas_width.div_ceil(2);
+    let uv_height = canvas_height.div_ceil(2);
+    let uv_left = draw_left / 2;
+    let uv_top = draw_top / 2;
+    let uv_right = draw_right.div_ceil(2).min(uv_width);
+    let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
+    let masked = options.mask != SceneMask::None;
+    let mask_tester = source_mask_tester(options.mask, fit);
+    let column_tap = |dest_x: usize| {
+        linear_source_tap(
+            dest_x as u32,
+            fit.x,
+            fit.width,
+            fit.source_x * scale_x,
+            fit.source_width * scale_x,
+            plane.width as u32,
+            options.mirror_x,
+        )
+    };
+    let row_tap = |dest_y: usize| {
+        linear_source_tap(
+            dest_y as u32,
+            fit.y,
+            fit.height,
+            fit.source_y * scale_y,
+            fit.source_height * scale_y,
+            plane.height as u32,
+            false,
+        )
+    };
+    // One sample's straight colour and its alpha in 0..=255; None where the
+    // camera keys fully out.
+    let sample = |column: LinearTap, row: LinearTap| -> Option<(u8, u8, u8, u16)> {
+        let [r, g, b, alpha] = plane.sample(column, row);
+        let key_alpha = (alpha * 255.0).round() as u16;
+        if key_alpha == 0 {
+            return None;
+        }
+        let channel = |premultiplied: f32| (premultiplied / alpha).round().clamp(0.0, 255.0) as u8;
+        Some((channel(r), channel(g), channel(b), key_alpha))
+    };
+    let luma_columns = (draw_left..draw_right.max(draw_left))
+        .map(column_tap)
+        .collect::<Vec<_>>();
+    let chroma_columns = (uv_left..uv_right.max(uv_left))
+        .map(|uv_x| column_tap((uv_x * 2).min(draw_right.saturating_sub(1))))
+        .collect::<Vec<_>>();
+    let (y_plane, chroma_planes) = dest.split_at_mut(y_len);
+    let (u_plane, v_plane) = chroma_planes.split_at_mut(uv_width * uv_height);
+    rayon::join(
+        || {
+            y_plane[draw_top * canvas_width..draw_bottom * canvas_width]
+                .par_chunks_mut(canvas_width)
+                .enumerate()
+                .for_each(|(relative_y, row)| {
+                    let dest_y = draw_top + relative_y;
+                    let Some(source_row) = row_tap(dest_y) else {
+                        return;
+                    };
+                    for (column, (dest_x, output)) in row
+                        .iter_mut()
+                        .enumerate()
+                        .take(draw_right)
+                        .skip(draw_left)
+                        .enumerate()
+                    {
+                        if masked && !mask_tester.allows(dest_x, dest_y) {
+                            continue;
+                        }
+                        let Some(source_column) = luma_columns[column] else {
+                            continue;
+                        };
+                        let Some((r, g, b, key_alpha)) = sample(source_column, source_row) else {
+                            continue;
+                        };
+                        let y_value = rgb_to_y(r, g, b);
+                        *output = if key_alpha == 255 {
+                            y_value
+                        } else {
+                            alpha_blend_channel(y_value, *output, key_alpha)
+                        };
+                    }
+                });
+        },
+        || {
+            u_plane[uv_top * uv_width..uv_bottom * uv_width]
+                .par_chunks_mut(uv_width)
+                .zip(v_plane[uv_top * uv_width..uv_bottom * uv_width].par_chunks_mut(uv_width))
+                .enumerate()
+                .for_each(|(relative_y, (u_row, v_row))| {
+                    let uv_y = uv_top + relative_y;
+                    let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
+                    let Some(source_row) = row_tap(dest_y) else {
+                        return;
+                    };
+                    for (column, uv_x) in (uv_left..uv_right).enumerate() {
+                        let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
+                        if masked && !mask_tester.allows(dest_x, dest_y) {
+                            continue;
+                        }
+                        let Some(source_column) = chroma_columns[column] else {
+                            continue;
+                        };
+                        let Some((r, g, b, key_alpha)) = sample(source_column, source_row) else {
                             continue;
                         };
                         let (u_value, v_value) = rgb_to_uv(r, g, b);
@@ -13536,10 +13715,8 @@ fn blit_linear_rgba_to_yuv420p(
                             u_row[uv_x] = u_value;
                             v_row[uv_x] = v_value;
                         } else {
-                            u_row[uv_x] =
-                                alpha_blend_channel(u_value, u_row[uv_x], u16::from(key_alpha));
-                            v_row[uv_x] =
-                                alpha_blend_channel(v_value, v_row[uv_x], u16::from(key_alpha));
+                            u_row[uv_x] = alpha_blend_channel(u_value, u_row[uv_x], key_alpha);
+                            v_row[uv_x] = alpha_blend_channel(v_value, v_row[uv_x], key_alpha);
                         }
                     }
                 });
@@ -15883,7 +16060,7 @@ mod tests {
 
     /// Plan 229: the CPU blits' separable plane is the reference
     /// neighbourhood at every texel of an odd-sized, noisy frame (edges and
-    /// corners included), and its bilinear read is the plane on a texel.
+    /// corners included).
     #[test]
     fn key_judged_plane_is_the_reference_neighbourhood_at_every_texel() {
         let (width, height) = (13u32, 7u32);
@@ -15916,17 +16093,6 @@ mod tests {
                         height,
                     );
                     assert_eq!(plane.rgb(x, y), reference, "texel ({x}, {y})");
-                    let on_texel = LinearTap {
-                        first: x,
-                        second: (x + 1).min(width - 1),
-                        weight: 0,
-                    };
-                    let row = LinearTap {
-                        first: y,
-                        second: (y + 1).min(height - 1),
-                        weight: 0,
-                    };
-                    assert_eq!(plane.rgb_linear(on_texel, row), reference);
                 }
             }
         }
@@ -16260,6 +16426,27 @@ mod tests {
             crate::windows_d3d11_compositor::windows_chroma_key_neighbourhood_params(),
             neighbourhood
         );
+        // Plan 233: the reduction level, mirrored the same way.
+        #[cfg(target_os = "macos")]
+        for (source, drawn) in [
+            ((3840.0, 2160.0), (720.0, 405.0)),
+            ((3840.0, 2160.0), (480.0, 270.0)),
+            ((1920.0, 1080.0), (720.0, 405.0)),
+            ((1920.0, 1080.0), (1920.0, 1080.0)),
+            ((1280.0, 720.0), (1920.0, 1080.0)),
+            ((3840.0, 2160.0), (1000.0, 405.0)),
+            ((0.0, 2160.0), (720.0, 405.0)),
+        ] {
+            assert_eq!(
+                crate::metal_compositor::gpu_chroma_key_reduction_level(
+                    source.0, source.1, drawn.0, drawn.1
+                ),
+                crate::scene_geometry::chroma_key_reduction_level(
+                    source.0, source.1, drawn.0, drawn.1
+                ),
+                "{source:?} into {drawn:?}"
+            );
+        }
     }
 
     /// Plan 213 G1: the cropped-screen fixture as a Freeform scene on a
