@@ -17,6 +17,16 @@ pub(crate) const CAPTION_CHUNK_UPLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
 pub(crate) const AI_CAPABILITIES_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
+/// Videorc Cloud control-plane calls (plan 184) are row reads, except
+/// creating a show, which places it on a node: the web waits up to 8 s for
+/// the node, so the create gets more room than the rest.
+pub(crate) const CLOUD_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const CLOUD_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// The lost route asks the node's health for up to 8 s before it answers.
+pub(crate) const CLOUD_LOST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Plan 224: the guests list long-polls 25 s on the web; allow it and a margin.
+pub(crate) const CLOUD_GUESTS_POLL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(35);
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Co-host ticks are synchronous and small, but the server fans one tick out
 /// across a model ladder: a slow-but-alive gateway needs headroom beyond the
@@ -25,6 +35,37 @@ const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::
 /// simply delays the next one.
 pub(crate) const COHOST_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 const COHOST_TICK_PATH: &str = "/api/ai/cohost/tick";
+/// Plan 223 D2: a push is best effort and never holds anything up.
+pub(crate) const ALERTS_NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// Plan 223 B2: the watchdog's AI chat read.
+pub(crate) const WATCHDOG_CHAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const WATCHDOG_CHAT_PATH: &str = "/api/ai/watchdog/chat";
+
+/// `POST /api/ai/watchdog/chat`'s body (plan 223 B2), exactly the web's
+/// strict `watchdogChatRequestSchema`: `clientVersion`, `consentToProcessChat`
+/// (true), `messages` (1 to 20 of `watchdog::ai_read_messages`), `seq`,
+/// `sessionClientId`; nothing else. `watchdog::tests` holds it against the
+/// schema's bounds.
+pub(crate) fn watchdog_chat_request(
+    session_client_id: &str,
+    messages: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "clientVersion": env!("CARGO_PKG_VERSION"),
+        "consentToProcessChat": true,
+        "messages": messages,
+        "seq": 0,
+        "sessionClientId": session_client_id,
+    })
+}
+
+/// Why a watchdog chat read did not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchdogChatError {
+    /// 401 or 403: off for this account or deploy; the stream stops asking.
+    Refused(String),
+    Other(String),
+}
 /// The spotlight lane (plan 060 S3) is a fast lane: one evaluation-model call
 /// every few seconds while the streamer talks. A slow answer is worth nothing
 /// (the transcript has moved on), so the client gives up early and the engine
@@ -38,6 +79,30 @@ pub(crate) const COHOST_GREET_TIMEOUT: std::time::Duration =
 const COHOST_GREET_PATH: &str = "/api/ai/cohost/greet";
 /// Greetings one greet request may carry (the route's `items` cap).
 pub(crate) const COHOST_GREET_ITEMS_MAX: usize = 6;
+/// Plan 225 D10: the memory route's server budget is 20 s and its
+/// `maxDuration` 30; the pass runs after the stream, so the client waits
+/// for the whole of it.
+// The real runner is compiled out of unit tests (they drive a fake), so
+// the route's client is unused there.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) const COHOST_MEMORY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(32);
+const COHOST_MEMORY_PATH: &str = "/api/ai/cohost/memory";
+pub(crate) const COHOST_MEMORY_PROMPT_VERSION: u32 = 1;
+/// The memory route's caps (zod strict; a bigger body is `invalid-request`).
+pub(crate) const COHOST_MEMORY_MAX_BODY_BYTES: usize = 128 * 1024;
+pub(crate) const COHOST_MEMORY_PEOPLE_MAX: usize = 15;
+pub(crate) const COHOST_MEMORY_MESSAGES_MAX: usize = 20;
+pub(crate) const COHOST_MEMORY_MESSAGE_MAX_CHARS: usize = 200;
+pub(crate) const COHOST_MEMORY_TEXT_MAX_CHARS: usize = 100;
+pub(crate) const COHOST_MEMORY_ADDS_MAX: usize = 2;
+pub(crate) const COHOST_MEMORY_NOTE_MAX_CHARS: usize = 300;
+pub(crate) const COHOST_MEMORY_SUMMARY_MAX_CHARS: usize = 280;
+pub(crate) const COHOST_MEMORY_NAME_MAX_CHARS: usize = 120;
+/// Tick v5 (plan 225 D10): the people behind a batch, at most 10 (5 on
+/// banter), each with at most 3 memories.
+pub(crate) const COHOST_TICK_VIEWERS_MAX: usize = 10;
+pub(crate) const COHOST_TICK_BANTER_VIEWERS_MAX: usize = 5;
+pub(crate) const COHOST_TICK_VIEWER_NAME_MAX_CHARS: usize = 160;
 /// The server rejects a larger body (checked on content-length bytes) as
 /// `invalid-request`; the engine trims candidates until the JSON fits.
 pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
@@ -251,6 +316,48 @@ pub struct CohostTickRequest {
     /// a normal tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<CohostTickIntent>,
+    /// v5 (plan 225 D10): read-only context about the people behind this
+    /// batch (at most 10; the first 5 on banter): how often they come, what
+    /// Buddy remembers them saying and the streamer's note. Absent below v5
+    /// and when there is nothing to say, so a v4 body stays byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewers: Option<Vec<CohostTickViewer>>,
+}
+
+/// v5 (plan 225 D10), and the greet route's `arrival`: how often a
+/// returning person comes. The same three facts on both routes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickArrival {
+    pub regular: bool,
+    pub streams: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub away_days: Option<u32>,
+}
+
+impl CohostTickArrival {
+    pub fn from_viewer(arrival: &crate::community::ViewerArrival) -> Self {
+        Self {
+            regular: arrival.regular,
+            streams: arrival.streams,
+            away_days: arrival.away_days,
+        }
+    }
+}
+
+/// v5: one person behind the batch (plan 225 D10). `memories` holds at
+/// most 3 of at most 100 characters, `note` at most 300; the note is the
+/// streamer's own words and travels read-only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickViewer {
+    pub name: String,
+    pub platform: StreamPlatform,
+    pub regular: bool,
+    pub streams: u32,
+    pub memories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// v4: the persona the prompt speaks as (plan 164).
@@ -318,6 +425,14 @@ pub struct CohostTickMessage {
     /// v3: the author's first message in the channel. Absent on v1/v2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_message: Option<bool>,
+    /// v5 (plan 225 D10): a returning person's arrival row carries how
+    /// often they come. Absent below v5 and on every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival: Option<CohostTickArrival>,
+    /// The author's account key (`platform:author_id`), for the engine's
+    /// own bookkeeping of who is behind a batch (`viewers`). Never sent.
+    #[serde(skip)]
+    pub author_key: Option<String>,
 }
 
 /// Every v2 field is optional and absent means its default, so a v1 body
@@ -649,7 +764,121 @@ pub struct CohostGreetItem {
     /// Welcomes only: the viewer's first message, at most 200.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_message_text: Option<String>,
+    /// Plan 225 D10 (Premium): how often the viewer comes, on a welcome of
+    /// a returning person. Absent, the request is byte-identical to plan
+    /// 192's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival: Option<CohostTickArrival>,
+    /// Plan 225 D10 (Premium): what Buddy remembers them saying in earlier
+    /// streams, at most 3 of at most 100; the model may use one, never
+    /// word for word. Absent without "Buddy remembers".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memories: Option<Vec<String>>,
     pub fallback_line: String,
+}
+
+// --- Buddy memory wire types (plan 225 D10; field names are load-bearing) ---
+
+/// `POST /api/ai/cohost/memory`: one pass after a stream, for the people
+/// who chatted (never a YouTube message, never a bot, never anyone
+/// forgotten). Strict on the server and at most 128 KB.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryRequest {
+    pub prompt_version: u32,
+    pub client_version: String,
+    /// The live-chat session id.
+    pub session_client_id: String,
+    pub consent_to_process_chat: bool,
+    /// The route takes `null` for both.
+    pub persona: Option<CohostTickPersona>,
+    pub stream_title: Option<String>,
+    pub counts: CohostMemoryCounts,
+    /// 1 to 15, by message count.
+    pub people: Vec<CohostMemoryPerson>,
+}
+
+/// The stream's Community counts, for the audience summary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryCounts {
+    pub regulars_back: u32,
+    pub first_timers: u32,
+    pub first_timers_stayed: u32,
+    pub comebacks: u32,
+}
+
+/// One person of the pass: their newest messages this stream (1 to 20,
+/// each at most 200 characters, from Twitch, X or Kick only), what Buddy
+/// already knows (at most 8) and the streamer's note (read-only).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryPerson {
+    /// Unique in the request, at most 80.
+    pub r#ref: String,
+    pub name: String,
+    pub platforms: Vec<StreamPlatform>,
+    pub regular: bool,
+    pub streams: u32,
+    pub messages: Vec<CohostMemoryMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memories: Option<Vec<CohostMemoryKnown>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryMessage {
+    pub at: String,
+    pub platform: StreamPlatform,
+    pub text: String,
+}
+
+/// A memory the desktop already holds, by its id; the answer updates or
+/// removes it by that id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryKnown {
+    pub id: String,
+    pub text: String,
+}
+
+/// The route's 200: one entry per person in request order (an entry for a
+/// ref the request did not send is ignored), the two-sentence summary when
+/// there is one, the model and its usage. Item-wise tolerant like the tick.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryResponse {
+    #[serde(default, deserialize_with = "lenient_items")]
+    pub people: Vec<CohostMemoryPersonResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub usage: Option<CohostTickUsage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryPersonResult {
+    pub r#ref: String,
+    #[serde(default)]
+    pub add: Vec<CohostMemoryAdd>,
+    #[serde(default)]
+    pub update: Vec<CohostMemoryKnown>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// A new memory and the platform of the message that taught it, so it
+/// lands on the right account (a split returns it there, D4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryAdd {
+    pub text: String,
+    pub platform: StreamPlatform,
 }
 
 /// A missing id means "use the fallback". Item-wise tolerant like the tick
@@ -1746,6 +1975,54 @@ impl VideorcApiClient {
             .with_context(|| format!("Could not read Videorc API response for {path}."))
     }
 
+    // --- Videorc Cloud (plan 184, Wire shape: Desktop -> web) -----------------
+    // Bearer, `private, no-store`, the `{ error: { code, message } }` envelope.
+    // A 409 body carries the live show and a 429 body its `resetAt`; both are
+    // read leniently from the top level or from inside `error`.
+
+    async fn cloud_json<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<T, crate::cloud_show::CloudApiError> {
+        use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
+        let response = request
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|error| CloudApiError::Transport(format!("{path}: {error}")))?;
+        let status = response.status();
+        if status.is_success() {
+            return response.json().await.map_err(|error| CloudApiError::Other {
+                status: status.as_u16(),
+                code: "malformed-response".to_string(),
+                message: format!("Could not read {path}: {error}"),
+            });
+        }
+        let text = response.text().await.unwrap_or_default();
+        let (code, message) = parse_error_envelope(&text);
+        let body: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+        let live_show = body
+            .get("show")
+            .or_else(|| body.pointer("/error/show"))
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ShowRecord>(value).ok());
+        let reset_at = body
+            .get("resetAt")
+            .or_else(|| body.pointer("/error/resetAt"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        Err(classify_cloud_failure(
+            status.as_u16(),
+            &code,
+            message,
+            live_show,
+            reset_at,
+        ))
+    }
+
     /// One synchronous Live Co-host tick. Every failure class is mapped to a
     /// `CohostApiError` so the engine can pause/back off with an honest reason.
     pub async fn post_cohost_tick(
@@ -1784,6 +2061,90 @@ impl VideorcApiClient {
             message,
             retry_after.as_deref(),
         ))
+    }
+
+    /// The stream watchdog's phone push (plan 223 D2): `POST /api/alerts/notify`
+    /// with the alert's own words. A refusal is a string for the session log;
+    /// nothing here is ever a toast.
+    pub async fn post_alert_notify(
+        &self,
+        bearer_token: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<(), String> {
+        let response = self
+            .http
+            .post(self.endpoint(crate::watchdog::push::ALERTS_NOTIFY_PATH))
+            .bearer_auth(bearer_token)
+            .json(body)
+            .timeout(ALERTS_NOTIFY_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| format!("could not reach videorc.com: {error}"))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let (code, _message) = read_error_code_and_message(response).await;
+        Err(format!("videorc.com answered {} {code}", status.as_u16()))
+    }
+
+    /// The account's alert devices (plan 223 D2): ids and labels, never an
+    /// endpoint.
+    pub async fn get_alert_devices(
+        &self,
+        bearer_token: &str,
+    ) -> Result<crate::watchdog::push::AlertDevicesView> {
+        self.get_bearer_json(crate::watchdog::push::ALERTS_DEVICES_PATH, bearer_token)
+            .await
+    }
+
+    /// The watchdog's AI chat read (plan 223 B2): the last messages as text,
+    /// platform and a per-call author index, never ids or names. Answers the
+    /// raw class probabilities; the desktop keeps its own threshold.
+    pub async fn post_watchdog_chat(
+        &self,
+        bearer_token: &str,
+        session_client_id: &str,
+        messages: Vec<serde_json::Value>,
+    ) -> std::result::Result<Vec<(crate::watchdog::chat_signals::ChatClass, f64)>, WatchdogChatError>
+    {
+        let request = watchdog_chat_request(session_client_id, messages);
+        let response = self
+            .http
+            .post(self.endpoint(WATCHDOG_CHAT_PATH))
+            .bearer_auth(bearer_token)
+            .json(&request)
+            .timeout(WATCHDOG_CHAT_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| {
+                WatchdogChatError::Other(format!("could not reach videorc.com: {error}"))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let (code, message) = read_error_code_and_message(response).await;
+            return Err(match status.as_u16() {
+                // Off for this account or this deploy: stop asking this stream.
+                401 | 403 => WatchdogChatError::Refused(format!("{code}: {message}")),
+                _ => WatchdogChatError::Other(format!("{} {code}: {message}", status.as_u16())),
+            });
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|error| WatchdogChatError::Other(format!("unreadable answer: {error}")))?;
+        let probabilities = &body["problem"]["probabilities"];
+        let read = |key: &str| probabilities.get(key).and_then(serde_json::Value::as_f64);
+        match (read("audio"), read("video"), read("lag")) {
+            (Some(audio), Some(video), Some(lag)) => Ok(vec![
+                (crate::watchdog::chat_signals::ChatClass::Audio, audio),
+                (crate::watchdog::chat_signals::ChatClass::Video, video),
+                (crate::watchdog::chat_signals::ChatClass::Lag, lag),
+            ]),
+            _ => Err(WatchdogChatError::Other(
+                "the answer carried no probabilities".to_string(),
+            )),
+        }
     }
 
     /// One spotlight call (plan 060 S3). Same failure mapping as the tick so
@@ -1854,6 +2215,50 @@ impl VideorcApiClient {
                 CohostApiError::malformed_response(
                     status.as_u16(),
                     format!("Could not read Buddy's greet response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    /// One memory pass (plan 225 D10): the people who chatted and what Buddy
+    /// should add, rewrite or forget about them, plus the audience summary.
+    /// Same auth and failure mapping as the greet; the job decides what each
+    /// class means (a 403 or a 429 keeps the pass queued for later, anything
+    /// else retries sooner).
+    #[cfg_attr(test, allow(dead_code))]
+    pub async fn post_cohost_memory(
+        &self,
+        bearer_token: &str,
+        request: &CohostMemoryRequest,
+    ) -> std::result::Result<CohostMemoryResponse, CohostApiError> {
+        let response = self
+            .http
+            .post(self.endpoint(COHOST_MEMORY_PATH))
+            .bearer_auth(bearer_token)
+            .json(request)
+            .timeout(COHOST_MEMORY_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, COHOST_MEMORY_TIMEOUT))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return response.json().await.map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read Buddy's memory response: {error}"),
                 )
             });
         }
@@ -3092,6 +3497,215 @@ fn classify_caption_failure(status: u16, code: String, message: String) -> Capti
     }
 }
 
+impl crate::cloud_show::CloudWebApi for VideorcApiClient {
+    async fn create_show(
+        &self,
+        bearer: &str,
+        request: &crate::cloud_show::CreateShowRequest,
+    ) -> std::result::Result<crate::cloud_show::CreateShowResponse, crate::cloud_show::CloudApiError>
+    {
+        let path = "/api/cloud/shows";
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(path))
+                .bearer_auth(bearer)
+                .json(request),
+            path,
+            CLOUD_CREATE_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn current_show(
+        &self,
+        bearer: &str,
+    ) -> std::result::Result<crate::cloud_show::CurrentShowResponse, crate::cloud_show::CloudApiError>
+    {
+        let path = "/api/cloud/shows/current";
+        self.cloud_json(
+            self.http.get(self.endpoint(path)).bearer_auth(bearer),
+            path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn end_show(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<(), crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/end");
+        self.cloud_json::<serde_json::Value>(
+            self.http.post(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn allowance(
+        &self,
+        bearer: &str,
+    ) -> std::result::Result<crate::protocol::AiCapabilitiesCloud, crate::cloud_show::CloudApiError>
+    {
+        let path = "/api/cloud/allowance";
+        self.cloud_json(
+            self.http.get(self.endpoint(path)).bearer_auth(bearer),
+            path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn report_lost_show(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        report: &crate::cloud_show::LostShowReport,
+    ) -> std::result::Result<crate::cloud_show::LostShowResponse, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/lost");
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(report),
+            &path,
+            CLOUD_LOST_TIMEOUT,
+        )
+        .await
+    }
+
+    // --- Plan 224: talk shows (`docs/cloud.md` "Talk shows", the web's routes) ---
+
+    async fn room_token(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<crate::cloud_talk::RoomTokenAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/room/token");
+        self.cloud_json(
+            self.http.post(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn get_room(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<crate::cloud_talk::RoomSettingsAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/room");
+        self.cloud_json(
+            self.http.get(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn patch_room(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        patch: &crate::cloud_talk::RoomPatch,
+    ) -> std::result::Result<crate::cloud_talk::RoomSettingsAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/room");
+        self.cloud_json(
+            self.http
+                .patch(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(patch),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn rotate_invite(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<crate::cloud_talk::ShowInvite, crate::cloud_show::CloudApiError> {
+        #[derive(serde::Deserialize)]
+        struct Answer {
+            invite: crate::cloud_talk::ShowInvite,
+        }
+        let path = format!("/api/cloud/shows/{show_id}/invite/rotate");
+        self.cloud_json::<Answer>(
+            self.http.post(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map(|answer| answer.invite)
+    }
+
+    async fn list_guests(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        since: Option<&str>,
+    ) -> std::result::Result<crate::cloud_talk::GuestsAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/guests");
+        let mut request = self.http.get(self.endpoint(&path)).bearer_auth(bearer);
+        if let Some(since) = since {
+            request = request.query(&[("since", since)]);
+        }
+        // The web long-polls 25 s (plan 224 Wire shape): wait that out.
+        self.cloud_json(request, &path, CLOUD_GUESTS_POLL_TIMEOUT)
+            .await
+    }
+
+    async fn decide_request(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        request_id: &str,
+        decision: crate::cloud_talk::GuestDecision,
+    ) -> std::result::Result<(), crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/guests/requests/{request_id}");
+        self.cloud_json::<serde_json::Value>(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({ "decision": decision })),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn guest_action(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        guest_id: &str,
+        body: &crate::cloud_talk::GuestActionBody,
+    ) -> std::result::Result<crate::cloud_talk::GuestActionAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/guests/{guest_id}");
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+}
+
 pub(crate) async fn read_error_code_and_message(response: reqwest::Response) -> (String, String) {
     let text = response.text().await.unwrap_or_default();
     parse_error_envelope(&text)
@@ -3405,6 +4019,86 @@ mod tests {
         assert_eq!(off.cohost.unwrap().greet, Some(0));
     }
 
+    /// Plan 225 D10: the memory request matches the route's zod shape
+    /// (`persona` and `streamTitle` null, never absent; optionals absent,
+    /// never null) and the response tolerates a bad person and unknown keys.
+    #[test]
+    fn cohost_memory_wire_shapes_match_the_route_and_tolerate_bad_items() {
+        let request = CohostMemoryRequest {
+            prompt_version: COHOST_MEMORY_PROMPT_VERSION,
+            client_version: "videorc-desktop/0.21.0".to_string(),
+            session_client_id: "s1".to_string(),
+            consent_to_process_chat: true,
+            persona: None,
+            stream_title: None,
+            counts: CohostMemoryCounts {
+                regulars_back: 2,
+                first_timers: 1,
+                first_timers_stayed: 0,
+                comebacks: 1,
+            },
+            people: vec![CohostMemoryPerson {
+                r#ref: "p1".to_string(),
+                name: "Bo".to_string(),
+                platforms: vec![StreamPlatform::Twitch, StreamPlatform::Kick],
+                regular: true,
+                streams: 9,
+                messages: vec![CohostMemoryMessage {
+                    at: "2026-11-08T18:00:00.000Z".to_string(),
+                    platform: StreamPlatform::Kick,
+                    text: "hi".to_string(),
+                }],
+                memories: Some(vec![CohostMemoryKnown {
+                    id: "m1".to_string(),
+                    text: "Learning Rust".to_string(),
+                }]),
+                note: None,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({
+                "promptVersion": 1,
+                "clientVersion": "videorc-desktop/0.21.0",
+                "sessionClientId": "s1",
+                "consentToProcessChat": true,
+                "persona": null,
+                "streamTitle": null,
+                "counts": { "regularsBack": 2, "firstTimers": 1, "firstTimersStayed": 0, "comebacks": 1 },
+                "people": [{
+                    "ref": "p1",
+                    "name": "Bo",
+                    "platforms": ["twitch", "kick"],
+                    "regular": true,
+                    "streams": 9,
+                    "messages": [{ "at": "2026-11-08T18:00:00.000Z", "platform": "kick", "text": "hi" }],
+                    "memories": [{ "id": "m1", "text": "Learning Rust" }]
+                }]
+            })
+        );
+        let response: CohostMemoryResponse = serde_json::from_value(serde_json::json!({
+            "people": [
+                { "ref": "p1", "add": [{ "text": "Plays on Kick at night", "platform": "kick" }], "remove": ["m1"] },
+                { "ref": 7 },
+                "junk"
+            ],
+            "summary": "Two came back.",
+            "model": "fake",
+            "extra": true
+        }))
+        .unwrap();
+        assert_eq!(
+            response.people.len(),
+            1,
+            "a bad person is dropped on its own"
+        );
+        assert_eq!(response.people[0].add[0].platform, StreamPlatform::Kick);
+        assert_eq!(response.people[0].update, Vec::new());
+        assert_eq!(response.people[0].remove, vec!["m1".to_string()]);
+        assert_eq!(response.summary.as_deref(), Some("Two came back."));
+        assert_eq!(COHOST_MEMORY_PATH, "/api/ai/cohost/memory");
+    }
+
     /// Plan 192: the greet request matches the route's zod shape (camelCase,
     /// absent optionals, `persona` nullable) and the response tolerates a
     /// bad line, a missing mood and unknown keys.
@@ -3434,6 +4128,8 @@ mod tests {
                     amount: None,
                     reward: None,
                     first_message_text: Some("hey!".to_string()),
+                    arrival: None,
+                    memories: None,
                     fallback_line: "Hi Ana and Bo and 4 others, welcome to the stream!".to_string(),
                 },
                 CohostGreetItem {
@@ -3448,6 +4144,8 @@ mod tests {
                     amount: Some("500 Diamonds".to_string()),
                     reward: Some("Hydrate".to_string()),
                     first_message_text: None,
+                    arrival: None,
+                    memories: None,
                     fallback_line: "Thanks for redeeming, Cy!".to_string(),
                 },
             ],

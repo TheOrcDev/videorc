@@ -775,6 +775,208 @@ export async function renderCommentHighlightCards(
   return verticalPngBase64 ? { pngBase64, verticalPngBase64 } : { pngBase64 }
 }
 
+/**
+ * Plan 225 B6: the milestone card, both canvases. The highlight card's
+ * renderer variant: avatar, name, the milestone ("10th stream") and the
+ * persona's mark, never the message text. The backend path is the comment
+ * highlight's (the arrival row's id), so eligibility and the 10 s lifetime
+ * stay authoritative.
+ */
+export async function renderMilestoneCards(
+  milestone: import('@/lib/backend').CohostUtteranceMilestone,
+  avatarUrl: string | null,
+  personaName: string | null,
+  stream: HighlightCanvas,
+  vertical?: HighlightCanvas,
+  imageDeps: HighlightCardImageDeps = {}
+): Promise<{ pngBase64: string; verticalPngBase64?: string } | null> {
+  const deps = {
+    readImage: imageDeps.readImage ?? defaultHighlightImageReader,
+    cacheImage: imageDeps.cacheImage ?? defaultHighlightImageCacher,
+    decode: imageDeps.decode ?? defaultHighlightImageDecoder,
+    deadlineMs: imageDeps.deadlineMs ?? COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs
+  }
+  const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
+  const loadBrandMark = imageDeps.loadBrandMark ?? loadBrandMarkImage
+  const [platformMark, avatar] = await Promise.all([
+    milestone.platform === 'youtube'
+      ? (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
+      : milestone.platform === 'x'
+        ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null)
+        : null,
+    avatarUrl
+      ? decodeHighlightImage(avatarUrl, deps).catch((error: unknown) => {
+          warn(
+            `Milestone card: ${milestone.platform} avatar for ${milestone.name} fell back to the monogram (${describeImageFailure(error)}).`
+          )
+          return null
+        })
+      : null
+  ])
+  const render = (canvas: HighlightCanvas): Promise<string | null> =>
+    renderMilestoneCardPng({
+      name: milestone.name,
+      label: milestone.label,
+      personaName,
+      avatar,
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      maxCardWidthPx: canvas.rect ? Math.floor(canvas.rect.w * canvas.width) : undefined,
+      platform: milestone.platform,
+      platformMark
+    })
+  const [pngBase64, verticalPngBase64] = await Promise.all([
+    render(stream),
+    vertical ? render(vertical) : null
+  ])
+  if (!pngBase64) return null
+  return verticalPngBase64 ? { pngBase64, verticalPngBase64 } : { pngBase64 }
+}
+
+/** The milestone card's PNG for one canvas (plan 225 B6): the comment
+ * card's glass, the person's avatar as the picture, the name, the milestone
+ * line and the persona's mark. No text input exists: the message never
+ * reaches the card. */
+export async function renderMilestoneCardPng(params: {
+  name: string
+  label: string
+  personaName: string | null
+  avatar?: HighlightBitmap | null
+  canvasWidth: number
+  canvasHeight?: number
+  maxCardWidthPx?: number
+  platform?: import('@/lib/backend').StreamPlatform
+  platformMark?: HighlightBitmap | null
+}): Promise<string | null> {
+  const [{ monogramInitials }, { layoutMilestoneCard }] = await Promise.all([
+    import('@/lib/chat-avatar'),
+    import('@/lib/milestone-card')
+  ])
+  const measure = highlightCanvasMeasurer()
+  if (!measure) return null
+  const layout = layoutMilestoneCard({ ...params, measure })
+  if (!layout) return null
+  const { metrics } = layout
+  const pad = Math.round(metrics.textFontPx * 0.6)
+  const canvas = new OffscreenCanvas(layout.cardWidthPx + pad * 2, layout.cardHeightPx + pad * 2)
+  const context = canvas.getContext('2d')
+  if (!context) return null
+  const originX = pad
+  const originY = pad
+  // The comment card's glass recipe, unchanged.
+  context.save()
+  context.shadowColor = 'rgba(0, 0, 0, 0.4)'
+  context.shadowBlur = metrics.textFontPx * 0.45
+  context.shadowOffsetY = metrics.textFontPx * 0.1
+  context.beginPath()
+  context.roundRect(originX, originY, layout.cardWidthPx, layout.cardHeightPx, metrics.radiusPx)
+  context.fillStyle = 'rgba(16, 16, 18, 0.78)'
+  context.fill()
+  context.restore()
+  const sheen = context.createLinearGradient(0, originY, 0, originY + layout.cardHeightPx)
+  sheen.addColorStop(0, 'rgba(255, 255, 255, 0.07)')
+  sheen.addColorStop(0.35, 'rgba(255, 255, 255, 0.015)')
+  sheen.addColorStop(1, 'rgba(255, 255, 255, 0)')
+  context.beginPath()
+  context.roundRect(originX, originY, layout.cardWidthPx, layout.cardHeightPx, metrics.radiusPx)
+  context.fillStyle = sheen
+  context.fill()
+  context.beginPath()
+  context.roundRect(
+    originX + 0.5,
+    originY + 0.5,
+    layout.cardWidthPx - 1,
+    layout.cardHeightPx - 1,
+    metrics.radiusPx
+  )
+  context.strokeStyle = 'rgba(255, 255, 255, 0.1)'
+  context.lineWidth = 1
+  context.stroke()
+  // The picture: the avatar, centred on the text column's height.
+  const avatarX = originX + metrics.paddingPx
+  const avatarY = originY + Math.round((layout.cardHeightPx - layout.avatarPx) / 2)
+  context.save()
+  context.beginPath()
+  context.arc(
+    avatarX + layout.avatarPx / 2,
+    avatarY + layout.avatarPx / 2,
+    layout.avatarPx / 2,
+    0,
+    Math.PI * 2
+  )
+  context.clip()
+  if (params.avatar) {
+    context.drawImage(params.avatar, avatarX, avatarY, layout.avatarPx, layout.avatarPx)
+  } else {
+    context.fillStyle = 'rgba(255, 255, 255, 0.12)'
+    context.fillRect(avatarX, avatarY, layout.avatarPx, layout.avatarPx)
+    context.font = canvasFont(Math.round(layout.avatarPx * 0.42))
+    context.fillStyle = '#A1A1AA'
+    context.textAlign = 'center'
+    context.textBaseline = 'middle'
+    context.fillText(
+      monogramInitials(params.name.trim() || 'Viewer'),
+      avatarX + layout.avatarPx / 2,
+      avatarY + layout.avatarPx / 2 + 1
+    )
+  }
+  context.restore()
+  const platformBadge = commentHighlightPlatformBadge(params.platform)
+  if (platformBadge && 'color' in platformBadge) {
+    const badgeSize = Math.max(12, Math.round(layout.avatarPx * 0.3))
+    paintPlatformBadge(
+      context,
+      platformBadge,
+      avatarX + layout.avatarPx - badgeSize * 0.84,
+      avatarY + layout.avatarPx - badgeSize * 0.84,
+      badgeSize
+    )
+  } else if (params.platformMark) {
+    // YouTube's icon or X's mark, small, on the avatar's corner.
+    const markPx = Math.max(20, Math.round(layout.avatarPx * 0.3))
+    const markX = avatarX + layout.avatarPx - markPx * 0.84
+    const markY = avatarY + layout.avatarPx - markPx * 0.84
+    if (params.platform === 'youtube') {
+      const scaleX = params.platformMark.width / YOUTUBE_ARTBOARD.width
+      const scaleY = params.platformMark.height / YOUTUBE_ARTBOARD.height
+      context.drawImage(
+        params.platformMark,
+        YOUTUBE_MARK.x * scaleX,
+        YOUTUBE_MARK.y * scaleY,
+        YOUTUBE_MARK.width * scaleX,
+        YOUTUBE_MARK.height * scaleY,
+        markX,
+        markY,
+        markPx,
+        markPx
+      )
+    } else {
+      context.drawImage(params.platformMark, markX, markY, markPx, markPx)
+    }
+  }
+  // The words: the name, the milestone, the persona's mark.
+  const textX = originX + layout.textX
+  context.save()
+  context.shadowColor = 'rgba(0, 0, 0, 0.45)'
+  context.shadowBlur = metrics.textFontPx * 0.08
+  context.shadowOffsetY = Math.max(1, Math.round(metrics.textFontPx * 0.03))
+  context.textAlign = 'left'
+  context.textBaseline = 'middle'
+  context.font = canvasFont(layout.nameFontPx, HIGHLIGHT_NAME_WEIGHT)
+  context.fillStyle = '#F5F5F7'
+  context.fillText(layout.name, textX, originY + layout.nameY)
+  context.font = canvasFont(layout.labelFontPx, 700)
+  context.fillStyle = '#FFFFFF'
+  context.fillText(layout.label, textX, originY + layout.labelY)
+  if (layout.footer) {
+    context.font = canvasFont(layout.footerFontPx, HIGHLIGHT_TEXT_WEIGHT)
+    context.fillStyle = '#A1A1AA'
+    context.fillText(layout.footer, textX, originY + layout.footerY)
+  }
+  context.restore()
+  return canvasToBase64Png(canvas)
+}
+
 /** A viewer's avatar: the picture clipped to a circle, or their initials on
  * a faint disc when there is none. The highlight card's and the chat box's. */
 function paintAvatarCircle(

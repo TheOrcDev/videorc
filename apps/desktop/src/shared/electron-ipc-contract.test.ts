@@ -83,14 +83,21 @@ describe('Electron IPC contract', () => {
     // Settings, removal and setup).
     // 160: plan 215 A3 adds comments-window:sign-in-videorc ("Sign in to
     // Videorc" on a chat row; the main window starts the sign-in).
-    // 167: plan 226 S4 adds the Stream Manager's chat commands (get, push),
+    // 163: plan 223 adds watchdog:notify (the system notification),
+    // watchdog:idle (the idle time for still-there) and
+    // comments-window:watchdog-fix (a fix pressed in the Stream Manager's
+    // alert card, relayed to the Studio).
+    // 165: plan 225 C2 adds comments-window:community and its result push
+    // (the person card's calls, relayed to the Studio).
+    // 167: plan 225 D12 adds the Community Export… folder and Import… file
+    // pickers (capabilities, never paths).
+    // 169: plan 224 C-G4 adds the talk-show display sources and the media
+    // grant (talk-show:display-sources, talk-show:media-grant).
+    // 176: plan 226 S4 adds the Stream Manager's chat commands (get, push),
     // its `!go` relay pair, the failed replies (get, push) and ⋯ Chat commands….
-    // 169: plan 230 adds comments-window:swap-screen and
-    // comments-window:front-or-close (the Stream Manager Screen key's tap
-    // and hold).
-    // 170: plan 232 adds banners:pick-html (Assets → Banners → Import HTML…).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(170)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(170)
+    // The merged API includes community, Stream Manager screen actions and HTML banners.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(179)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(179)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -1238,6 +1245,55 @@ it('preserves and validates queue-loss revisions through delivery IPC mirrors', 
     ).toThrow()
 })
 
+describe('community file pickers IPC (plan 225 D12)', () => {
+  it('take no arguments and return null or exactly one capability of their kind', () => {
+    expect(electronInvokeApiMethods['community:pick-export-directory']).toBe(
+      'pickCommunityExportDirectory'
+    )
+    expect(electronInvokeApiMethods['community:pick-import-file']).toBe('pickCommunityImportFile')
+    for (const channel of [
+      'community:pick-export-directory',
+      'community:pick-import-file'
+    ] as const) {
+      expect(isElectronInvokeChannel(channel)).toBe(true)
+      expect(boundedPassthroughElectronInvokeChannels).not.toContain(channel)
+      expect(validateElectronInvokeArgs(channel, [])).toEqual([])
+      expect(() => validateElectronInvokeArgs(channel, ['/tmp/community.json'])).toThrow()
+      expect(validateElectronInvokeResult(channel, null)).toBeNull()
+    }
+    const folder = { capabilityId: 'cap-1', kind: 'output-directory', displayName: 'Exports' }
+    expect(validateElectronInvokeResult('community:pick-export-directory', folder)).toStrictEqual(
+      folder
+    )
+    expect(() =>
+      validateElectronInvokeResult('community:pick-export-directory', {
+        ...folder,
+        kind: 'input-file'
+      })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('community:pick-export-directory', {
+        ...folder,
+        path: '/tmp/exports'
+      })
+    ).toThrow()
+    const file = { capabilityId: 'cap-2', kind: 'input-file', displayName: 'community.json' }
+    expect(validateElectronInvokeResult('community:pick-import-file', file)).toStrictEqual(file)
+    expect(() =>
+      validateElectronInvokeResult('community:pick-import-file', {
+        ...file,
+        kind: 'output-directory'
+      })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('community:pick-import-file', {
+        ...file,
+        path: '/tmp/community.json'
+      })
+    ).toThrow()
+  })
+})
+
 describe('HTML overlay picker IPC (plan 232)', () => {
   it('takes no arguments and returns null, a file capability or a folder capability', () => {
     expect(isElectronInvokeChannel('banners:pick-html')).toBe(true)
@@ -1902,4 +1958,23 @@ it('delivers saved-scene actions through the validated global shortcut event', (
   for (const value of ['scene:', `scene:${'a'.repeat(129)}`, 'unknown']) {
     expect(() => validateElectronEventPayload('global-shortcuts:triggered', value)).toThrow()
   }
+})
+
+describe('the person card relay (plan 225 C2)', () => {
+  it('lets only the allowlisted community methods through', async () => {
+    const { validateElectronInvokeArgs } = await import('./electron-ipc-contract')
+    const ok = { requestId: 'r1', method: 'cohost.community.person', params: { personId: 'p1' } }
+    expect(validateElectronInvokeArgs('comments-window:community', [ok])).toEqual([ok])
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:community', [
+        { ...ok, method: 'cohost.community.forgetAll' }
+      ])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:community', [{ ...ok, method: 'liveChat.send' }])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:community', [{ ...ok, extra: 1 }])
+    ).toThrow()
+  })
 })

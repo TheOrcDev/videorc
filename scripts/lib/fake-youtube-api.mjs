@@ -122,7 +122,10 @@ export async function startFakeYouTubeApi({
   // `deleteFailure` scripts every `liveChatMessages.delete`: null answers 204;
   // 'forbidden' is a 403 insufficientPermissions (missing scope), 'not-found'
   // a 404, 'quota' the 403 quotaExceeded envelope.
-  const controls = { quotaExhausted: false, deleteFailure: null }
+  // Plan 223 A4: `configurationIssues` on every `liveStreams.list` answer
+  // (and `healthStatus.status` with them), so the watchdog's platform-health
+  // read can be driven; null keeps the plain `good` status.
+  const controls = { quotaExhausted: false, deleteFailure: null, configurationIssues: null }
   const broadcasts = new Map()
   const streams = new Map()
   const chat = { messages: [], sent: [], deleted: [] }
@@ -316,10 +319,26 @@ export async function startFakeYouTubeApi({
         }
         if (request.method === 'GET') {
           const id = url.searchParams.get('id')
-          send({
-            kind: 'youtube#liveStreamListResponse',
-            items: id ? [streams.get(id)].filter(Boolean) : [...streams.values()]
-          })
+          const items = (id ? [streams.get(id)].filter(Boolean) : [...streams.values()]).map(
+            (stream) =>
+              controls.configurationIssues
+                ? {
+                    ...stream,
+                    status: {
+                      ...stream.status,
+                      healthStatus: {
+                        status: controls.configurationIssues.some(
+                          (issue) => issue.severity === 'error'
+                        )
+                          ? 'bad'
+                          : 'ok',
+                        configurationIssues: controls.configurationIssues
+                      }
+                    }
+                  }
+                : stream
+          )
+          send({ kind: 'youtube#liveStreamListResponse', items })
           return
         }
         break

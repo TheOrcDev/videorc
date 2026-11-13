@@ -29,6 +29,7 @@ import {
   macosAppBundlePath,
   macosLaunchServicesAppSpawnSpec,
   performanceAppSpawnSpec,
+  prebuildDevBackend,
   readMacosLaunchServicesAppOwnership,
   resolveMacosLaunchServicesAppPid,
   resolveSmokeAppDirs,
@@ -990,14 +991,26 @@ test('dev backend prebuild builds the whole backend package unless opted out', (
   const spec = devBackendPrebuildSpec({ env: {}, platform: 'linux' })
   assert.deepEqual(spec.args, ['build', '-p', 'videorc-backend'])
   assert.equal(spec.command, 'cargo')
-  assert.equal(spec.timeoutMs, 20 * 60 * 1000)
+  // Linux leaves room for a cold rebuild after `cargo test` (20 min 05 s on ogre).
+  assert.equal(spec.timeoutMs, 45 * 60 * 1000)
+  assert.equal(devBackendPrebuildSpec({ env: {}, platform: 'darwin' }).timeoutMs, 20 * 60 * 1000)
   assert.equal(
     devBackendPrebuildSpec({ env: { VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS: '1000' } }).timeoutMs,
     1000
   )
   assert.equal(
-    devBackendPrebuildSpec({ env: { VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS: 'nope' } }).timeoutMs,
+    devBackendPrebuildSpec({
+      env: { VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS: 'nope' },
+      platform: 'darwin'
+    }).timeoutMs,
     20 * 60 * 1000
+  )
+  assert.equal(
+    devBackendPrebuildSpec({
+      env: { VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS: 'nope' },
+      platform: 'linux'
+    }).timeoutMs,
+    45 * 60 * 1000
   )
   assert.equal(devBackendPrebuildSpec({ env: { VIDEORC_SMOKE_SKIP_PREBUILD: '1' } }), null)
   assert.equal(devBackendPrebuildSpec({ env: {}, platform: 'win32' }).command, 'cargo.exe')
@@ -1018,7 +1031,7 @@ test('dev backend prebuild failures name the compile race instead of GPU noise',
   })
   assert.match(
     timedOut,
-    /Backend still compiling after 1200s; run `cargo build -p videorc-backend` first/
+    /Backend still compiling after 2700s; run `cargo build -p videorc-backend` first/
   )
   assert.match(timedOut, /Compiling videorc-backend/)
   const failed = devBackendPrebuildFailure(spec, {
@@ -1066,4 +1079,46 @@ test('a fake API origin refuses the release dev backend, which would call the re
     launchDevApp({ env: { ...fake, VIDEORC_DEV_BACKEND_PROFILE: 'release' }, timeoutMs: 1000 }),
     /only works with the debug backend/
   )
+})
+
+// Cloud test lane 3 F4: the synchronous prebuild blocked the smoke's own
+// event loop, so an in-process HTTP server (the fake cloud web) went deaf.
+test('the async dev backend prebuild keeps the event loop running and names its failures', async () => {
+  const nodeSpec = (script, timeoutMs = 10_000) => ({
+    command: process.execPath,
+    args: ['-e', script],
+    cwd: tmpdir(),
+    timeoutMs
+  })
+  let ticks = 0
+  const ticker = setInterval(() => {
+    ticks += 1
+  }, 20)
+  const lines = []
+  try {
+    const built = await prebuildDevBackend({
+      spec: nodeSpec('console.log("Finished dev profile"); setTimeout(() => {}, 300)'),
+      env: process.env,
+      onLine: (line) => lines.push(line)
+    })
+    assert.equal(built, null)
+    assert.ok(ticks >= 5, `the event loop ticked ${ticks} times while the prebuild ran`)
+    assert.ok(lines.some((line) => line.includes('Finished dev profile')))
+    assert.ok(lines.at(-1).startsWith('[smoke:prebuild] backend built in '))
+  } finally {
+    clearInterval(ticker)
+  }
+
+  const failed = await prebuildDevBackend({
+    spec: nodeSpec('console.error("error[E0425]: cannot find value"); process.exit(101)')
+  })
+  assert.match(failed, /Backend prebuild failed .*exited 101/)
+  assert.match(failed, /E0425/)
+  const timedOut = await prebuildDevBackend({ spec: nodeSpec('setTimeout(() => {}, 10_000)', 200) })
+  assert.match(timedOut, /Backend still compiling after 0s/)
+  const missing = await prebuildDevBackend({
+    spec: { command: 'videorc-no-such-cargo', args: [], cwd: tmpdir(), timeoutMs: 5_000 }
+  })
+  assert.match(missing, /could not start/)
+  assert.equal(await prebuildDevBackend({ spec: null }), null, 'opted out')
 })

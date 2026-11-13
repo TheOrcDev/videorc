@@ -23,12 +23,14 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
+  useStudioCloud,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
   useStudioRecordingState
 } from '@/hooks/use-studio'
 import { areEnabledStreamTargetsStartReady } from '@/lib/capture'
+import { cloudResumeNotice } from '@/lib/cloud-show-view'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { shouldIgnoreGoLiveAction } from '@/lib/go-live-flow'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
@@ -63,6 +65,13 @@ const AudioSection = lazy(async () => ({
 const StudioChatSection = lazy(async () => ({
   default: (await import('@/components/studio/studio-chat')).StudioChatSection
 }))
+// Plan 224 C-G3: the Show stage replaces the Preview while the room is open;
+// it loads with the room. Until it does, the Preview card says why.
+const ShowStage = lazy(() => import('@/components/studio/show-stage'))
+// Rare (a cloud show this computer stopped feeding): its own chunk.
+const CloudResumeNotice = lazy(async () => ({
+  default: (await import('@/components/studio/cloud-resume-notice')).CloudResumeNotice
+}))
 
 export function StudioTab(): ReactElement {
   const studio = useStudioCore()
@@ -72,6 +81,7 @@ export function StudioTab(): ReactElement {
   const StatusPill = retro ? RetroSessionStatus : SessionStatusPill
   const InspectorSession = retro ? RetroSessionPanel : SessionPanel
   const { recording } = useStudioRecordingState()
+  const { cloudStatus: talkStatus, talkShow } = useStudioCloud()
   const {
     canStop,
     startRequestPending,
@@ -203,7 +213,7 @@ export function StudioTab(): ReactElement {
           banner (post-0.9.4 fix batch F8). */}
       <div className={STUDIO_GRID}>
         <div className={STUDIO_PREVIEW_COLUMN}>
-          <StudioPreviewPanel />
+          <StudioStagePanel />
           {/* Scenes and the vertical leg: deferred so the launch surface
               paints its preview and transport first. */}
           <Suspense fallback={<StudioDashboardBottomRowFallback />}>
@@ -217,6 +227,17 @@ export function StudioTab(): ReactElement {
               still records. */}
           <Transport
             active={active}
+            talkShowOutputs={
+              talkStatus?.room?.phase === 'open'
+                ? {
+                    recording: talkStatus.recording?.active === true,
+                    live: talkStatus.room.live,
+                    onStopRecording: () => {
+                      void talkShow.stopCloudRecording()
+                    }
+                  }
+                : undefined
+            }
             blockedJump={
               banner?.jumpTo && banner.jumpLabel
                 ? { label: banner.jumpLabel, to: banner.jumpTo, settingsTab: banner.settingsTab }
@@ -241,6 +262,12 @@ export function StudioTab(): ReactElement {
         </div>
 
         <aside aria-label="Session inspector" className={STUDIO_INSPECTOR}>
+          <CloudResumeSlot
+            active={active}
+            blockedReason={liveStreamBlockedReason}
+            pending={startsBusy}
+            onResumeClick={() => noteRecordClick('start')}
+          />
           <InspectorSession
             active={active}
             live={sessionIsLive(recording)}
@@ -277,6 +304,51 @@ export function StudioTab(): ReactElement {
         </aside>
       </div>
     </div>
+  )
+}
+
+/**
+ * Plan 184 C5: "You're still live through Videorc Cloud." above Session. Its
+ * own component, so the cloud's status ticks during a show re-render only it.
+ * Resume is the provider's own start (C5b): bound to the live show, with no
+ * dialog and nothing set up on a platform. Never Go Live.
+ */
+function CloudResumeSlot({
+  active,
+  blockedReason,
+  pending,
+  onResumeClick
+}: {
+  active: boolean
+  blockedReason: string | null
+  pending: boolean
+  /** Arms the latency clock, like the Record and Go Live clicks. */
+  onResumeClick: () => void
+}): ReactElement | null {
+  const { cloudStatus, resumeCloudShow, talkShow } = useStudioCloud()
+  const notice = cloudResumeNotice(cloudStatus, active)
+  if (!notice) return null
+  // Plan 224 C-G8: a talk show's Resume rejoins the room (no local session,
+  // so no local source can block it); a solo show's is the start below.
+  const talk = cloudStatus?.show?.kind === 'talk'
+  const resumeBlockedReason = talk ? null : blockedReason
+  return (
+    <Suspense fallback={null}>
+      <CloudResumeNotice
+        blockedReason={resumeBlockedReason}
+        notice={notice}
+        pending={pending}
+        onResume={() => {
+          if (pending || resumeBlockedReason) return
+          onResumeClick()
+          if (talk) {
+            void talkShow.resumeRoom()
+            return
+          }
+          void resumeCloudShow()
+        }}
+      />
+    </Suspense>
   )
 }
 
@@ -323,6 +395,20 @@ function AudioSectionFallback({ retro }: { retro: boolean }): ReactElement {
       <Skeleton className="h-4 rounded-chip" />
       <Skeleton className="h-4 rounded-chip" />
     </PanelSection>
+  )
+}
+
+/**
+ * The Preview, or the Show stage while a talk show's room is open (plan 224
+ * D7, C-G3). Its own component, so only it re-renders with the cloud's state.
+ */
+function StudioStagePanel(): ReactElement {
+  const { talkShow } = useStudioCloud()
+  if (!talkShow.previewReplaced) return <StudioPreviewPanel />
+  return (
+    <Suspense fallback={<StudioPreviewPanel />}>
+      <ShowStage />
+    </Suspense>
   )
 }
 

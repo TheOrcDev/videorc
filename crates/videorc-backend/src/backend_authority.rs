@@ -168,7 +168,12 @@ pub fn authorize_backend_method(
 fn renderer_only_method(method: &str) -> bool {
     matches!(
         method,
-        "agent.intent.listen" | "agent.intent.ack" | "agent.surface.publish"
+        "agent.intent.listen"
+            | "agent.intent.ack"
+            | "agent.surface.publish"
+            // Plan 224: the one answer that carries a LiveKit token goes to
+            // the renderer that joins the room, never to a remote or main.
+            | "cloud.room.token.refresh"
     )
 }
 

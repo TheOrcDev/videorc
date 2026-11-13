@@ -116,6 +116,46 @@ describe('streamTargetNotices', () => {
   })
 })
 
+// Plan 222 U6: through Videorc Cloud the feed leg is this computer's upload,
+// not a destination. While it is down the cloud holds the show.
+describe('streamTargetNotices through Videorc Cloud', () => {
+  const runtime = (
+    targetId: string,
+    state: StreamTargetRuntime['state'],
+    label = targetId
+  ): StreamTargetRuntime => ({ targetId, platform: 'custom', label, state })
+
+  it('says the cloud holds the show while the feed reconnects, never "viewers see nothing"', () => {
+    const previous = new Map<string, StreamTargetRuntime['state']>([
+      ['videorc-cloud-horizontal', 'live'],
+      ['youtube', 'live'],
+      ['twitch', 'live']
+    ])
+    const targets = [
+      runtime('videorc-cloud-horizontal', 'reconnecting', 'Videorc Cloud'),
+      runtime('youtube', 'live', 'YouTube'),
+      runtime('twitch', 'live', 'Twitch')
+    ]
+    expect(streamTargetNotices(previous, targets)).toEqual([
+      {
+        key: 'stream-target:videorc-cloud-horizontal',
+        kind: 'warning',
+        title: 'Reconnecting to Videorc Cloud',
+        description: 'Viewers see Be right back until this computer reconnects.'
+      }
+    ])
+  })
+
+  it('never counts the cloud feed as another destination', () => {
+    const targets = [
+      runtime('videorc-cloud-horizontal', 'live'),
+      runtime('youtube', 'reconnecting'),
+      runtime('twitch', 'live')
+    ]
+    expect(otherDestinationsOnAir(targets, 'youtube')).toBe(1)
+  })
+})
+
 describe('otherDestinationsLine', () => {
   it('counts only the other destinations that are on air', () => {
     expect(otherDestinationsOnAir([target('live'), other('tw', 'live')], 'yt')).toBe(1)

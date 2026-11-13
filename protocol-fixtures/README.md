@@ -5,7 +5,12 @@ the Rust backend and TypeScript desktop tests. It covers the protocol shapes mos
 likely to cause silent cross-process failures: native preview placement, scene and
 layout data, recording/compositor status nullability, desktop account authorization
 (including its main-owned retry deadline),
-and Library comment pagination/deletion (including the terminal page shape).
+Library comment pagination/deletion (including the terminal page shape), and the
+account plan blocks (`accountPlans`, plan 185 T4): a Max `/api/ai/capabilities`
+answer with its optional `plan` and `cloud` blocks, the Premium `cloud` block
+(also the `GET /api/cloud/allowance` answer), and the desktop's own
+`EntitlementsSnapshot` with and without `plan`. `plan` is never a tier value and
+an absent option is an absent key, never `null`.
 
 The JSON is the authoritative example. A wire-shape change must update the fixture
 and keep both test suites green:
@@ -93,6 +98,31 @@ compares them with the JSON field for field.
 
 - Rust: `cargo test -p videorc-backend virtual_camera_fixture`
 - TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
+
+## `community.json`
+
+Know your viewers across platforms (plan 225, A6): a chat row with and
+without `arrival`, the smallest arrival, the `cohostSettings.community`
+block, the summary, a full person and the zero-count person an unknown
+account gets, a list page, the `cohost.state` lane (`welcomeBack`,
+`linkMade`), and shapes the renderer must refuse (a `null` optional field, an
+unknown milestone kind or status, a link with one name). Absent fields are
+omitted, never `null`; both sides round-trip every shape field for field.
+
+- Rust: `cargo test -p videorc-backend shared_community_fixture`
+- TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
+
+## `guest-consent-lines.json`
+
+Plan 224 D13 (review L2): the consent line a guest reads before "Ask to join",
+for a set of saved platforms, edited by hand. The guest page (videorc-web
+`lib/cloud/guest-consent.ts` `consentLine`) and the Guests tab
+(`apps/desktop/src/renderer/src/lib/guests-view.ts` `guestConsentLine`) must
+both say every case word for word; videorc-web keeps a byte-identical copy at
+`tests/fixtures/guest-consent-lines.json`.
+
+- TypeScript: `pnpm --filter @videorc/desktop test -- guests-view.test.ts`
+- Web: `node --test tests/guest-consent-lines.test.ts` in videorc-web
 
 ## `html-overlay-frame.json`
 

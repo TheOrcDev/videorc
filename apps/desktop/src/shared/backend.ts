@@ -83,6 +83,12 @@ export type FeatureId =
   | 'live-cohost'
 export type EntitlementState = 'enabled' | 'disabled' | 'developer-override'
 export type EntitlementTier = 'basic' | 'premium' | 'developer'
+/**
+ * The paid plan behind the Premium tier (plan 185 D2). Max keeps
+ * `tier: 'premium'` everywhere and says `plan: 'max'` beside it, so an older
+ * app or a rollback keeps every Max user at least Premium. Never a tier value.
+ */
+export type EntitlementPlan = 'premium' | 'max'
 export type EntitlementSource =
   | 'local-default'
   | 'env-override'
@@ -121,6 +127,8 @@ export interface EntitlementLimits {
 export interface EntitlementsSnapshot {
   schemaVersion: number
   tier: EntitlementTier
+  /** Plan 185 D2: `premium` or `max` while the account is Premium; absent otherwise. */
+  plan?: EntitlementPlan
   source: EntitlementSource
   capabilities: EntitlementCapability[]
   limits: EntitlementLimits
@@ -4131,6 +4139,19 @@ export interface ScopeReconnectCommand {
   platform: ScopeReconnectPlatform
 }
 
+/** `cloud` from `/api/ai/capabilities` and `GET /api/cloud/allowance` (plan 185). */
+export interface AiCapabilitiesCloud {
+  enabled: boolean
+  secondsPerMonth: number
+  secondsUsed: number
+  overageSeconds: number
+  resetAt?: string
+  talkShows: boolean
+  guestsOnStage?: number
+  roomSize?: number
+  recordingRetentionDays?: number
+}
+
 export interface AiCapabilities {
   /** Optional during rolling web deployments. Missing must fail closed when captions are enabled. */
   captions?: {
@@ -4179,6 +4200,9 @@ export interface AiCapabilities {
    * servers omit the block: Generate stays off. */
   cohost?: {
     tick?: number
+    /** Plan 225 D10: 1 when this user may call the memory route; the
+     * desktop keeps queued passes for later otherwise. */
+    memory?: number
     avatar?: {
       enabled: boolean
       remainingToday: number
@@ -4211,6 +4235,17 @@ export interface AiCapabilities {
     subscriptionStatus: string
     tier: string
   }
+  /** The paid plan (plan 185 D2): `{ id: 'max', name: 'Max' }`. Absent for
+   * Basic and on older web deploys. `id` is open: an unknown plan is still
+   * Premium. */
+  plan?: {
+    id: string
+    name: string
+  }
+  /** Cloud hours and talk-show limits (plan 185 wire shape, plan 184).
+   * Absent for Basic and on older web deploys, which means no cloud. The
+   * same block is the whole answer of `GET /api/cloud/allowance`. */
+  cloud?: AiCapabilitiesCloud
   features: {
     /** Clean cut kill switch off and its provider configured; older servers omit it. */
     cleanCutEnabled?: boolean
@@ -5015,6 +5050,8 @@ export interface CommentHighlightCommand {
   requestId: string
   sessionId: string
   messageId: string
+  /** Plan 225 B6: draw the milestone card for this row, never its text. */
+  milestone?: CohostUtteranceMilestone
 }
 
 export type CommentHighlightPhase = 'idle' | 'live' | 'failed'
@@ -5350,6 +5387,509 @@ export type AccountCallbackEnvelope = {
   expiresAtMs: number
 }
 
+// --- Videorc Cloud (plan 184) ----------------------------------------------
+
+/** The desktop's view of its cloud show (crates/videorc-backend/src/cloud_show.rs). */
+export type CloudPhase = 'off' | 'connecting' | 'live' | 'hold' | 'resuming' | 'ending' | 'failed'
+
+/** Why a Go Live streamed directly (D11): the ONE reason the renderer toasts. */
+export type CloudFallbackReason =
+  | 'cloud-disabled'
+  | 'cloud-full'
+  | 'cloud-hours-used-up'
+  | 'cloud-node-unreachable'
+  | 'cloud-show-limit'
+  | 'not-entitled'
+  /** Plan 222 D5: the stream quality is above what the first nodes carry (4K30). */
+  | 'cloud-quality'
+  /** Plan 222 D6: a remembered show the web could not be asked about. */
+  | 'cloud-unchecked'
+  /** Plan 224 W-G4: the month's guest-hours are used up. */
+  | 'cloud-guest-hours-used-up'
+  /** Plan 224: talk shows are off, or LiveKit is unreachable. */
+  | 'cloud-rooms-unavailable'
+
+/**
+ * The runner restarted mid-show and lost its destinations (plan 184 "When
+ * things break"). `destinationsResent` is false when this computer holds no
+ * keys to send again (a show resumed after a relaunch) or the cloud refused
+ * them: the platforms stay dark until a new Go Live.
+ */
+export interface CloudRestart {
+  at: string
+  destinationsResent: boolean
+}
+
+export interface CloudFallback {
+  reason: CloudFallbackReason
+  at: string
+  /** The session that went direct, so one toast per Go Live. */
+  sessionId: string
+  message?: string
+}
+
+export interface CloudShowSummary {
+  id: string
+  nodeId: string
+  createdAt?: string
+  expiresAt?: string
+  /** Live on the runner with no local feed: Resume or End (C5). Never while
+   * this computer holds the show's room (plan 224). */
+  resumable: boolean
+  /** Plan 224: a resumable talk show rejoins the room, never a local session. */
+  kind?: 'solo' | 'talk' | 'test'
+}
+
+export interface CloudHoldStatus {
+  active: boolean
+  since?: string
+  /** `feed-lost` or `manual`. */
+  reason?: string
+  remainingSeconds?: number
+}
+
+export interface CloudFeedStatus {
+  orientation: string
+  connected: boolean
+  kbps?: number
+}
+
+/** The Livestream page's section: the switch resolved, the choices beside the value. */
+export interface CloudSettingsView {
+  enabled: boolean
+  holdMaxSeconds: number
+  holdMaxChoices: number[]
+  holdImageScreenId?: string
+}
+
+/**
+ * The whole cloud state: the `cloud.state` event and every `cloud.*` answer.
+ * Secret-free by construction (no url, token or key reaches it).
+ */
+export interface CloudStatus {
+  phase: CloudPhase
+  /** The account's `cloud` block says on. */
+  entitled: boolean
+  plan?: EntitlementPlan
+  settings: CloudSettingsView
+  allowance?: AiCapabilitiesCloud
+  show?: CloudShowSummary
+  /** The local session feeding the show, when there is one. */
+  sessionId?: string
+  /** The control socket is up. */
+  connected: boolean
+  hold?: CloudHoldStatus
+  feeds?: CloudFeedStatus[]
+  /** The runner's platform legs in the desktop's leg model, keyed by target id (C2). */
+  legs?: StreamTargetRuntime[]
+  liveSeconds?: number
+  /** The last Go Live that streamed directly, and why. */
+  fallback?: CloudFallback
+  endReason?: string
+  message?: string
+  /**
+   * The web confirmed the show gone while this computer was feeding it (C2):
+   * direct legs may reopen (stop, then go live directly). Never before.
+   */
+  directFallbackAvailable: boolean
+  /** C6b: the Test cloud that runs, or the last one that ran. */
+  test?: CloudTestStatus
+  /** The runner restarted during this show (the last time it did). */
+  restart?: CloudRestart
+  /** Plan 222: while a show runs past the month's cloud hours, how far past (D18: it keeps going). */
+  allowancePast?: { seconds: number }
+  /** Plan 223 C3: the runner's program measurements while the show is live or holding. */
+  program?: CloudProgram
+  /** Plan 222 U1: "Videorc Cloud is on" is due for this account; absent once seen. */
+  announce?: boolean
+  /** Plan 224: the room this computer holds, while it holds one. */
+  room?: CloudRoomStatus
+  /** Plan 224 D10: the cloud recording, on a talk show. */
+  recording?: CloudRecordingStatus
+}
+
+// --- Talk shows (plan 224) ---------------------------------------------------
+// Everything below is secret-free but `CloudRoomTokenAnswer`, the answer to
+// `cloud.room.token.refresh` (renderer role only): the renderer joins the
+// LiveKit room with it and never shows, logs or stores it.
+
+export type CloudRoomPhase = 'closed' | 'opening' | 'open' | 'closing'
+export type CloudStageLayout = 'solo' | 'side-by-side' | 'screen-people' | 'spotlight'
+/** The host's camera shape from Sources (D8), on the host's tile only. */
+export type CloudHostShape = 'rounded' | 'circle'
+export type CloudRoomQuality = 'excellent' | 'good' | 'poor' | 'lost'
+export type CloudRoomRole = 'host' | 'guest'
+export type CloudGuestDevice = 'phone' | 'computer'
+/** The renderer's own room connection, as it reports it. */
+export type CloudRoomClientState =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'disconnected'
+
+/** Someone who asked to join and waits for Let in or Decline (D4). */
+export interface CloudRoomRequest {
+  requestId: string
+  name: string
+  askedAt: string
+  device: CloudGuestDevice
+}
+
+/** A guest the host let in, as videorc.com lists them. */
+export interface CloudRoomGuest {
+  guestId: string
+  name: string
+  joinedAt: string
+  muted: boolean
+  screenShareAllowed: boolean
+}
+
+/** One person in the room as the runner sees them. */
+export interface CloudRoomParticipant {
+  identity: string
+  name: string
+  role: CloudRoomRole
+  onStage: boolean
+  video: boolean
+  audio: boolean
+  muted: boolean
+  screen: boolean
+  quality: CloudRoomQuality
+  sinceMs: number
+  /** No camera frame for 5 s while on stage (D12): "Back in a moment". */
+  away: boolean
+}
+
+export interface CloudRoomLimits {
+  guestsOnStage: number
+  roomSize: number
+  recordingRetentionDays: number
+}
+
+/** The whole stage in one frame (`cloud.stage.set`; the runner diffs). */
+export interface CloudStage {
+  layout: CloudStageLayout
+  /** LiveKit identities: `host:<showId>` and `g_…` guest ids, never names. */
+  onStage: string[]
+  spotlight?: string
+  screen?: string
+  hostShape?: CloudHostShape
+}
+
+/**
+ * The stage as the program draws it (review M2, the runner's `state.room.shown`):
+ * whoever D12's re-flow took out is missing, and `screen` is the screen it shows.
+ */
+export interface CloudRoomShown {
+  onStage: string[]
+  screen?: string
+}
+
+/** `CloudStatus.room`: what the Guests tab, the Show stage and the strip draw. */
+export interface CloudRoomStatus {
+  phase: CloudRoomPhase
+  inviteUrl?: string
+  inviteExpiresAt?: string
+  doorOpen: boolean
+  title?: string
+  platforms?: string[]
+  requests?: CloudRoomRequest[]
+  guests?: CloudRoomGuest[]
+  declinedCount: number
+  participants?: CloudRoomParticipant[]
+  stage: CloudStage
+  hostAway: boolean
+  /** The runner is in the LiveKit room. */
+  connected: boolean
+  limits?: CloudRoomLimits
+  client: CloudRoomClientState
+  returnEnabled: boolean
+  stageSet: boolean
+  /** What the program draws of the stage; absent until the runner reports it. */
+  shown?: CloudRoomShown
+  /** On air: the runner holds platform legs for this room (never its `phase`). */
+  live: boolean
+  /** When this desktop handed the destinations over (this Go Live's clock); absent after a resume. */
+  liveSince?: string
+  message?: string
+}
+
+/** `CloudStatus.recording` (D10): the cloud recording of the program. */
+export interface CloudRecordingStatus {
+  active: boolean
+  since?: string
+  seconds: number
+  bytes: number
+  orientations?: string[]
+  problem?: string
+}
+
+/** `cloud.room.open`: the outputs a Go Live would create the show with. */
+export interface CloudRoomOpenParams {
+  outputs: CloudTestOutput[]
+  title?: string
+  platforms?: string[]
+}
+
+/** The one token-carrying answer (`cloud.room.token.refresh`). */
+export interface CloudRoomTokenAnswer {
+  hostToken: string
+  url: string
+  /** `host:<showId>`: what the guest page trusts the stage topic from. */
+  identity: string
+  showId: string
+}
+
+export type CloudGuestDecision = 'let-in' | 'decline'
+export type CloudGuestAction =
+  | 'mute'
+  | 'unmute'
+  | 'remove'
+  | 'ban'
+  | 'rename'
+  | 'allow-screen-share'
+  | 'disallow-screen-share'
+
+export interface CloudGuestDecideParams {
+  requestId: string
+  decision: CloudGuestDecision
+}
+
+export interface CloudGuestActParams {
+  guestId: string
+  action: CloudGuestAction
+  name?: string
+}
+
+export interface CloudRoomClientReportParams {
+  state: CloudRoomClientState
+  detail?: string
+}
+
+/** `cloud.show.goLive` (C-G6): the destinations the Go Live dialog settled. */
+export interface CloudTalkGoLiveParams {
+  streaming: StreamingSettings
+}
+
+/** Plan 224 C-G4: one `desktopCapturer` source, as the host picks it. */
+export interface TalkShowDisplaySource {
+  id: string
+  name: string
+  kind: 'screen' | 'window'
+  /** A small PNG data URL, for the picker. */
+  thumbnailDataUrl: string | null
+}
+
+/** Plan 224 C-G4: what main lets the renderer's web media do while a room is open. */
+export interface TalkShowMediaGrant {
+  video: boolean
+  /** The `desktopCapturer` source the next `getDisplayMedia` gets, once. */
+  screenSourceId: string | null
+}
+
+/** The runner's `program` block (plan 223 C1): what leaves our servers, as numbers. */
+export interface CloudProgram {
+  audioRmsDb?: number
+  audioSilentSeconds?: number
+  blackSeconds?: number
+  frozenSeconds?: number
+  avSkewMs?: number
+}
+
+// --- The stream watchdog (plan 223) ---
+
+export type WatchdogCheck =
+  | 'mic-muted'
+  | 'mic-silent'
+  | 'no-voice'
+  | 'program-silent'
+  | 'picture-black'
+  | 'picture-stopped'
+  | 'destination-down'
+  | 'platform-health'
+  | 'bitrate-floor'
+  | 'av-drift'
+  | 'chat-says'
+  | 'brb-long'
+  | 'still-there'
+
+export type WatchdogAlertSeverity = 'critical' | 'warning' | 'notice'
+export type WatchdogAlertState = 'open' | 'acknowledged' | 'snoozed'
+export type WatchdogAlertSource = 'desktop' | 'cloud' | 'platform'
+export type WatchdogFixKind =
+  | 'unmute'
+  | 'end-takeover'
+  | 'switch-scene'
+  | 'open-audio'
+  | 'open-health'
+  | 'open-livestream'
+  | 'reconnect-destination'
+  | 'open-platform-dashboard'
+  | 'show-brb'
+
+export interface WatchdogAlertFix {
+  kind: WatchdogFixKind
+  label: string
+  url?: string
+}
+
+/** One open alert (`watchdog.alerts`): the backend owns it, the renderer draws it (D2). */
+export interface WatchdogAlert {
+  id: string
+  check: WatchdogCheck
+  severity: WatchdogAlertSeverity
+  state: WatchdogAlertState
+  /** RFC 3339: when it opened. */
+  since: string
+  lastRepeatAt?: string
+  title: string
+  detail: string
+  source: WatchdogAlertSource
+  platform?: string
+  targetId?: string
+  fixes?: WatchdogAlertFix[]
+  snoozedUntil?: string
+  meantTo?: boolean
+}
+
+export interface WatchdogAlertsView {
+  sessionId?: string
+  alerts: WatchdogAlert[]
+  /**
+   * Ids that left the list in this update without a recovery (plan 223 M2):
+   * a fold, a replace, the session's end. Their toasts are dropped, never
+   * replaced by "is back". Only on the event; absent when empty.
+   */
+  withdrawn?: string[]
+}
+
+export type WatchdogSnoozeScope = 'ten-minutes' | 'stream'
+
+export interface WatchdogSettings {
+  checks: Record<string, { enabled: boolean }>
+  micMutedAfterSeconds: number
+  systemNotifications: boolean
+  phonePush: boolean
+  aiChatRead: boolean
+}
+
+export interface WatchdogSettingsPatch {
+  checks?: Record<string, { enabled: boolean }>
+  micMutedAfterSeconds?: number
+  systemNotifications?: boolean
+  phonePush?: boolean
+  aiChatRead?: boolean
+}
+
+export interface WatchdogAlertDevice {
+  id: string
+  label?: string
+  createdAt?: string
+  lastOkAt?: string
+}
+
+export interface WatchdogAlertDevicesView {
+  devices: WatchdogAlertDevice[]
+}
+
+/** Why the renderer asks for a system notification (plan 223 D2, D3). */
+export type WatchdogNoticeReason = 'opened' | 'stayed-open' | 'repeat'
+
+/** `watchdog:notify` (renderer → main): the system notification's words. */
+export interface WatchdogNotice {
+  alertId: string
+  title: string
+  body: string
+  critical: boolean
+  /** Seconds the alert has been open; main applies the 60 s rule to it. */
+  openSeconds: number
+  /**
+   * `opened`: the alert just opened (critical shows at once when the Studio
+   * is not in front). `stayed-open`: the second ask at since + 60 s for an
+   * alert still open (a warning's first chance; a critical one shows even
+   * over a focused Studio). `repeat`: the severity's repeat cadence.
+   */
+  reason: WatchdogNoticeReason
+}
+
+/** A fix pressed on a card in the Stream Manager (`watchdog:fix-request`). */
+export interface WatchdogFixRequest {
+  alertId: string
+  kind: WatchdogFixKind
+  url?: string
+}
+
+/** `cloud.settings.set`: a partial patch; `holdImageScreenId: null` clears the image. */
+export interface CloudSettingsPatch {
+  enabled?: boolean
+  holdMaxSeconds?: number
+  holdImageScreenId?: string | null
+}
+
+// --- Test cloud (plan 184 C6b) ---
+
+export type CloudTestPhase = 'creating' | 'connecting' | 'pushing' | 'ending' | 'done'
+
+/** Why a test failed; `cloud-view.ts` words each one. */
+export type CloudTestReason =
+  | 'cant-reach'
+  | 'off'
+  | 'full'
+  | 'not-entitled'
+  | 'no-hours'
+  | 'limit'
+  | 'show-live'
+  | 'certificate'
+  | 'no-feed'
+  | 'too-slow'
+  | 'failed'
+
+export interface CloudTestUpload {
+  orientation: string
+  /** The stream quality's video bitrate, the number the streamer chose. */
+  targetKbps: number
+  /** What the cloud received, video and audio together; absent when nothing arrived. */
+  measuredKbps?: number
+}
+
+export interface CloudTestResult {
+  ok: boolean
+  reason?: CloudTestReason
+  /** The detail for the console, never copy. */
+  message?: string
+  /** From the Test click to the cloud reporting live. */
+  timeToLiveMs?: number
+  uploads?: CloudTestUpload[]
+  /** When the hour's tests free up again (`limit`), or the hours reset (`no-hours`). */
+  resetAt?: string
+  /** Plan 222 O5: the node the test reached, its region, and the time to the first RTMPS byte accepted. */
+  nodeId?: string
+  region?: string
+  handshakeMs?: number
+}
+
+export interface CloudTestStatus {
+  phase: CloudTestPhase
+  startedAt: string
+  result?: CloudTestResult
+}
+
+/** One output of `cloud.selftest.run`: the stream quality per orientation. */
+export interface CloudTestOutput {
+  orientation: 'horizontal' | 'vertical'
+  width: number
+  height: number
+  fps: number
+  videoKbps: number
+}
+
+export interface CloudTestParams {
+  outputs: CloudTestOutput[]
+  /** The smokes' FFmpeg; a packaged renderer never sends one. */
+  ffmpegPath?: string
+}
+
 export type OAuthCallbackEnvelope = {
   id: string
   url: string
@@ -5643,6 +6183,12 @@ export interface VideorcApi {
   /** Assets → Banners → Import image… (plan 186): PNG, JPEG or WebP, as an
    * `input-file` capability for `banners.importImage`. */
   pickBannerImage: () => Promise<ResourceSelection | null>
+  /** Community → Settings → Export… (plan 225 D12): the folder the export
+   * goes into, as an `output-directory` capability; null on cancel. */
+  pickCommunityExportDirectory: () => Promise<ResourceSelection | null>
+  /** Community → Settings → Import… (plan 225 D12): one export file, as an
+   * `input-file` capability; null on cancel. */
+  pickCommunityImportFile: () => Promise<ResourceSelection | null>
   /** Assets → Banners → Import HTML… (plan 232): an `.html` file or a folder. */
   pickBannerHtml: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
@@ -5719,6 +6265,8 @@ export interface VideorcApi {
   pushMarkerContext: (context: MarkerContext | null) => Promise<boolean>
   onMarkerContext: (callback: (context: MarkerContext | null) => void) => () => void
   markerFromCommentsWindow: (command: MarkerRelayCommand) => Promise<MarkerRelayResult>
+  /** A watchdog fix from the Stream Manager's alert card (plan 223 A6): relayed, never run here. */
+  watchdogFixFromCommentsWindow: (request: WatchdogFixRequest) => Promise<boolean>
   onMarkerRequest: (callback: (command: MarkerRelayCommand) => void) => () => void
   pushMarkerResult: (resolution: CommentsCommandResolution<MarkerRelayResult>) => Promise<boolean>
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
@@ -5809,6 +6357,13 @@ export interface VideorcApi {
   closePreviewWindow: () => Promise<PreviewWindowState>
   togglePreviewWindow: () => Promise<PreviewWindowState>
   getPreviewWindowState: () => Promise<PreviewWindowState>
+  /** Plan 224 C-G4: the screens and windows the host may share, from main's
+   * `desktopCapturer`; empty unless a talk-show room holds the grant. */
+  getTalkShowDisplaySources: () => Promise<TalkShowDisplaySource[]>
+  /** Plan 224 C-G4: while a room is open the main renderer may open a camera
+   * (web `media` video) and, once a source is named, answer one
+   * `getDisplayMedia` with it. `{ video: false }` ends both. */
+  setTalkShowMediaGrant: (grant: TalkShowMediaGrant) => Promise<boolean>
   reportPreviewPermissionRequired: (
     permissionStatus: Exclude<PreviewPermissionStatus, 'ok'>,
     message?: string,
@@ -5993,6 +6548,16 @@ export interface VideorcApi {
   onShortcutModifier: (callback: (held: boolean) => void) => () => void
   /** Whether the main window is on screen (minimise/hide aware, unlike the Page Visibility API here). */
   onWindowVisible: (callback: (visible: boolean) => void) => () => void
+  // The stream watchdog (plan 223 A7): main shows the system notification
+  // when the Studio isn't the front window, or the alert is critical and
+  // has stayed open; a click brings the Studio forward (`onWatchdogFocus`)
+  // and never runs the fix.
+  notifyWatchdog: (notice: WatchdogNotice) => Promise<boolean>
+  onWatchdogFocus: (callback: (alertId: string) => void) => () => void
+  /** `powerMonitor.getSystemIdleTime()`, for the still-there check. */
+  getSystemIdleSeconds: () => Promise<number>
+  /** A fix pressed in the Stream Manager's card, relayed to the Studio (D2). */
+  onWatchdogFixRequest: (callback: (request: WatchdogFixRequest) => void) => () => void
   onBackendConnection: (callback: (connection: BackendConnection) => void) => () => void
   onBackendLifecycle: (callback: (event: BackendLifecycleEvent) => void) => () => void
   onBackendLog: (callback: (log: BackendLogEvent) => void) => () => void
@@ -6351,6 +6916,12 @@ export interface LiveChatMessage {
   reply?: LiveChatReply
   /** The author's first message in the channel (Twitch intro, or unseen in earlier sessions). */
   firstMessage?: boolean
+  /**
+   * A returning person's arrival facts (plan 225 D11): only on the arrival
+   * row, never on a first-timer's, a bot's or the streamer's. Absent, never
+   * null. The chip is pure render from it.
+   */
+  arrival?: ViewerArrival
 }
 
 /** Authoritative live-chat snapshot: provider rows + persisted/buffered messages + unread count. */
@@ -6483,6 +7054,12 @@ export interface CohostSettings {
   persona: CohostPersona
   /** Automatic chat (plan 164 S-A2). Everything off by default. */
   autoChat: CohostAutoChat
+  /**
+   * Know your viewers (plan 225): the community store's switches and the
+   * regular threshold. Absent only from an older backend; the renderer then
+   * reads Rust's defaults (store on, welcomes on, 3 streams).
+   */
+  community?: CommunitySettings
 }
 
 /** The avatar's state images (plan 164 D16). `idle` is required on stream;
@@ -6599,8 +7176,14 @@ export interface CohostCooldownBehaviour {
  * `greetings.welcomes`, never in `templates[]`, so an older app never meets
  * an unknown template kind (S1.1).
  */
-export type CohostWelcomeKind = 'first-time' | 'returning'
-export const COHOST_WELCOME_KINDS: readonly CohostWelcomeKind[] = ['first-time', 'returning']
+export type CohostWelcomeKind = 'first-time' | 'returning' | 'regular' | 'comeback' | 'milestone'
+export const COHOST_WELCOME_KINDS: readonly CohostWelcomeKind[] = [
+  'first-time',
+  'returning',
+  'regular',
+  'comeback',
+  'milestone'
+]
 
 /**
  * One welcome's line (plan 192 S1.1). `text` absent (never null, never
@@ -6614,10 +7197,17 @@ export interface CohostWelcomeLine {
   reaction?: string
 }
 
-/** First-time and returning chatters, each with its own line (plan 192 D2). */
+/**
+ * First-time and returning chatters, each with its own line (plan 192 D2);
+ * plan 225 D9 adds a regular's arrival, a comeback and a milestone. The
+ * three are absent from an older backend (read as on, built-in lines).
+ */
 export interface CohostGreetingWelcomes {
   firstTime: CohostWelcomeLine
   returning: CohostWelcomeLine
+  regular?: CohostWelcomeLine
+  comeback?: CohostWelcomeLine
+  milestone?: CohostWelcomeLine
 }
 
 /**
@@ -6748,6 +7338,8 @@ export interface CohostSettingsPatch {
   persona?: CohostPersona
   /** Replaces the whole block; the backend validates it. */
   autoChat?: CohostAutoChat
+  /** Replaces the whole community block (plan 225); the backend clamps it. */
+  community?: CommunitySettings
 }
 
 // --- Overlay layout (plan 164) ---------------------------------------------
@@ -7346,6 +7938,260 @@ export interface CohostRecap {
   expiresAt: string
 }
 
+// --- Know your viewers across platforms (plan 225) ---------------------------
+
+/** Which milestone an arrival celebrates (plan 225 D8). */
+export type ViewerMilestoneKind = 'streams' | 'row' | 'anniversary'
+export interface ViewerMilestone {
+  kind: ViewerMilestoneKind
+  /** The stream count, the run, or the anniversary's year. */
+  value: number
+}
+
+/**
+ * What a returning person's arrival row carries (plan 225 Wire shape). Every
+ * optional field is absent, never null.
+ */
+export interface ViewerArrival {
+  /** Streams chatted in, including this one. */
+  streams: number
+  regular: boolean
+  /** Only for Back (D7): days since the last chat, 30 or more. */
+  awayDays?: number
+  inARow: number
+  milestone?: ViewerMilestone
+  /** Only when the person has two or more accounts. */
+  platforms?: StreamPlatform[]
+  /** "2026-03", for the hover line. */
+  since?: string
+}
+
+export type CommunityPersonStatus = 'normal' | 'bot' | 'forgotten'
+
+/** Support totals from Activity rows (D2); every zero is absent. */
+export interface CommunitySupport {
+  bits?: number
+  kicks?: number
+  giftedSubs?: number
+  subMonths?: number
+  /** Tips by currency, in micros. */
+  tips?: Record<string, number>
+}
+
+export interface CommunityAccount {
+  accountKey: string
+  platform: StreamPlatform
+  authorId: string
+  name: string
+  handle?: string
+  avatarUrl?: string
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+/** A memory Buddy learned (Premium, D10). */
+export interface CommunityMemory {
+  id: string
+  /** The account whose words taught it. */
+  accountKey: string
+  text: string
+  sessionId?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type CommunitySuggestionReason = 'name' | 'link-cancelled'
+/** "Might be the same person" (D4 c), or a cancelled `!link` (D4 b). */
+export interface CommunitySuggestion {
+  accountA: CommunityAccount
+  accountB: CommunityAccount
+  reason: CommunitySuggestionReason
+  createdAt: string
+}
+
+export type CommunityLinkKind = 'self' | 'manual' | 'split' | 'suggestion-accepted'
+export interface CommunityLinkEvent {
+  id: string
+  accountKey: string
+  kind: CommunityLinkKind
+  at: string
+}
+
+/** `cohost.community.person`: one person in full (D11, D12). */
+export interface CommunityPerson {
+  /** Empty for the zero-count person an unknown account gets. */
+  id: string
+  name: string
+  avatarUrl?: string
+  accounts: CommunityAccount[]
+  streams: number
+  messages: number
+  inARow: number
+  bestInARow: number
+  regular: boolean
+  awayDays?: number
+  firstSeenAt?: string
+  lastSeenAt?: string
+  support: CommunitySupport
+  /** Milestone keys celebrated so far ("streams-10"); absent while empty. */
+  milestones?: string[]
+  note: string
+  status: CommunityPersonStatus
+  memories?: CommunityMemory[]
+  suggestions?: CommunitySuggestion[]
+  linkEvents?: CommunityLinkEvent[]
+  /** The person has a YouTube account: the card shows the retention line. */
+  youtube?: boolean
+}
+
+/** `cohost.community.suggestions` (D12 "Links that need you"). */
+export interface CommunitySuggestionsPage {
+  suggestions: CommunitySuggestion[]
+}
+
+export interface CommunityPersonRow {
+  id: string
+  name: string
+  avatarUrl?: string
+  platforms: StreamPlatform[]
+  streams: number
+  regular: boolean
+  lastSeenAt?: string
+  status: CommunityPersonStatus
+}
+
+export type CommunityListFilter = 'regulars' | 'everyone' | 'linked' | 'bots'
+export type CommunityListSort = 'streams' | 'recent' | 'name'
+export interface CommunityListParams {
+  query?: string
+  filter?: CommunityListFilter
+  sort?: CommunityListSort
+  cursor?: string
+  /** At most 100. */
+  limit?: number
+}
+export interface CommunityListPage {
+  people: CommunityPersonRow[]
+  nextCursor?: string
+}
+
+export type CommunityBackfillState = 'idle' | 'running' | 'done'
+export interface CommunityBackfill {
+  state: CommunityBackfillState
+  done: number
+  total: number
+}
+
+/** `cohost.community.summary` and the `cohost.community.changed` event. */
+export interface CommunitySummary {
+  people: number
+  regulars: number
+  streams: number
+  newRegularsThisWeek: number
+  linksPending: number
+  backfill: CommunityBackfill
+}
+
+/** `cohost.community.person` takes a person id, or a platform and author id. */
+export interface CommunityPersonParams {
+  personId?: string
+  platform?: StreamPlatform
+  authorId?: string
+  /** The latest name the caller knows, for an unknown account's zero-count person. */
+  name?: string
+}
+export interface CommunityUpdateParams {
+  personId: string
+  /** At most 300 characters; the backend trims it. */
+  note?: string
+  /** `normal` or `bot`; forgetting goes through `cohost.community.forget`. */
+  status?: 'normal' | 'bot'
+}
+export interface CommunityLinkParams {
+  personId: string
+  otherPersonId: string
+}
+export interface CommunityUnlinkParams {
+  accountKey: string
+}
+export interface CommunityUnlinkResult {
+  /** The new person the account moved into. */
+  personId: string
+}
+export interface CommunitySuggestionParams {
+  accountA: string
+  accountB: string
+}
+export interface CommunityPersonIdParams {
+  personId: string
+}
+export interface CommunityIdParams {
+  id: string
+}
+/** `cohost.community.export`: the folder, as main's picker issued it (an
+ * `output-directory` capability); never a path the renderer names. */
+export interface CommunityExportParams {
+  outputDirectoryCapability: string
+}
+/** `cohost.community.import`: the export file, as main's picker issued it
+ * (an `input-file` capability); never a path the renderer names. */
+export interface CommunityImportParams {
+  sourceCapability: string
+}
+export interface CommunityAccepted {
+  accepted: boolean
+}
+export interface CommunityExportResult {
+  people: number
+  bytes: number
+  /** The file written into the chosen folder: `videorc-community-<date>.json`. */
+  fileName: string
+}
+export interface CommunityImportResult {
+  people: number
+  merged: number
+}
+
+/** `cohost.state.welcomeBack[]` (D11): a returning person under "Say hi". */
+export interface CohostWelcomeBack {
+  personId: string
+  authorKey: string
+  name: string
+  platform: StreamPlatform
+  arrival: ViewerArrival
+  firstSeenAt: string
+}
+
+/** `cohost.state.linkMade[]` (D4 b): the "Linked … Undo" card. */
+export interface CohostLinkMade {
+  personId: string
+  names: [string, string]
+  platforms: [StreamPlatform, StreamPlatform]
+  /** The account the Undo splits off. */
+  accountKey: string
+  at: string
+}
+
+/** `cohostSettings.community` (plan 225): every field always present. */
+export interface CommunitySettings {
+  /** Remember my community (the master switch, default on). */
+  enabled: boolean
+  /** Regular after N streams, 2 to 10 (default 3). */
+  regularStreams: number
+  /** Welcome regulars on stream (default on). */
+  welcomeOnStream: boolean
+  /** Show milestone cards automatically (default off). */
+  milestoneCards: boolean
+  /** Buddy remembers (Premium, default off). */
+  remember: boolean
+  /** D10: the one-time "Let Buddy remember…" card was answered. */
+  rememberOffered: boolean
+  /** Community sync (Premium, default off). */
+  sync: boolean
+}
+
+// --- end Know your viewers (plan 225) ---
+
 /** A first-time chatter nobody greeted yet (plan 068 D9). */
 export interface CohostSayHi {
   /** The engine's author key; `cohost.author.greeted` takes it back. */
@@ -7493,6 +8339,10 @@ export type CohostCommandKind =
   // or `refused` says what ran; `confirm` asks for a spoken yes first (D14:
   // going live, ending what runs), answered like any card.
   | 'act'
+  // Plan 225 B5: "wave at {name}" (done at once) and "remember that {name}
+  // {fact}" (a confirm card, then the person's note).
+  | 'wave'
+  | 'remember'
 
 /**
  * Where the latest voice command stands:
@@ -7673,6 +8523,16 @@ export interface CohostState {
   utterances?: CohostUtterance[]
   /** Plan 164 D10: automatic sends this chat session; absent while zero. */
   autoChatSends?: number
+  /**
+   * Plan 225 D11: returning people not waved at or welcomed yet, oldest
+   * first, gone after 15 minutes; absent while empty (never null).
+   */
+  welcomeBack?: CohostWelcomeBack[]
+  /**
+   * Plan 225 D4: links viewers made with `!link`, each with an Undo, for 15
+   * minutes; absent while empty (never null).
+   */
+  linkMade?: CohostLinkMade[]
 }
 
 /**
@@ -7856,6 +8716,50 @@ export interface CohostSessionReport {
    * too), oldest first, at most 200; absent while empty and in older reports.
    */
   said?: CohostReportSaid[]
+  /**
+   * Plan 225 D15: who came, from the community store, written when the chat
+   * session ends; absent while empty and in older reports.
+   */
+  community?: CohostReportCommunity
+}
+
+/** Plan 225 D15: one regular a report names. */
+export interface CohostReportCommunityPerson {
+  name: string
+  platform: StreamPlatform
+  /** Linked platforms, only when two or more. */
+  platforms?: StreamPlatform[]
+  /** Streams chatted in, including this one. */
+  streams: number
+}
+
+/** Plan 225 D15: one milestone celebrated this stream. */
+export interface CohostReportCommunityMilestone {
+  name: string
+  platform: StreamPlatform
+  milestone: ViewerMilestone
+}
+
+/**
+ * Plan 225 D15: the report's Community block. Counts are free and local;
+ * `summary` is Premium (the memory pass) and absent until it runs. Opt-outs
+ * are counted, never named.
+ */
+export interface CohostReportCommunity {
+  regularsBack: number
+  /** Most streams first, at most 10. */
+  regulars?: CohostReportCommunityPerson[]
+  newRegulars: number
+  comebacks: number
+  firstTimers: number
+  /** First-timers whose first and last message were 40+ minutes apart. */
+  firstTimersStayed: number
+  milestones?: CohostReportCommunityMilestone[]
+  linksMade: number
+  memoriesLearned: number
+  optOuts: number
+  /** Premium: at most 280 characters. */
+  summary?: string
 }
 
 /** Plan 211 D11: one line Buddy said in its bubble on stream, written when it showed. */
@@ -8008,7 +8912,7 @@ export interface CohostSayParams {
 }
 
 /** What made the Buddy speak (plan 164 D7). */
-export type CohostUtteranceTriggerKind = 'greeting' | 'answer' | 'banter' | 'manual'
+export type CohostUtteranceTriggerKind = 'greeting' | 'answer' | 'banter' | 'manual' | 'community'
 
 export interface CohostUtteranceTrigger {
   kind: CohostUtteranceTriggerKind
@@ -8038,6 +8942,23 @@ export interface CohostUtterance {
   at: string
   /** Present while `proposed` in Suggest mode: the card leaves then. */
   expiresAt?: string
+  /**
+   * Plan 225 B6: a milestone welcome's card facts (the person and the
+   * milestone, never the message text), so the Stream Manager can put the
+   * milestone card on stream. Absent on every other line (never null).
+   */
+  milestone?: CohostUtteranceMilestone
+}
+
+/** Plan 225 B6: what the milestone card draws. `messageId` is the arrival
+ * row the backend highlights, so its eligibility and 10 s lifetime hold. */
+export interface CohostUtteranceMilestone {
+  messageId: string
+  name: string
+  avatarUrl?: string
+  platform: StreamPlatform
+  /** "10th stream", "5 in a row", "One year". */
+  label: string
 }
 
 /**

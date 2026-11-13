@@ -896,6 +896,7 @@ fn relay_event_to_message(
         reply: None,
         first_message: false,
         first_in_session: false,
+        arrival: None,
         // Plan 226: the @-mentionable login (the display name is `name`).
         author_handle: username,
     })
@@ -946,6 +947,7 @@ fn follow_event_to_message(
         reply: None,
         first_message: false,
         first_in_session: false,
+        arrival: None,
         author_handle: None,
         author_affiliation: None,
         author_verified: None,

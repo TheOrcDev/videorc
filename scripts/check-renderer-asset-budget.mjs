@@ -130,16 +130,17 @@ const htmlPath = resolve(
 // recording/folder and Linux OpenH264 wiring) measure 2,322,131 raw /
 // 476,319 gzip. Raise raw to 2,325,000 and gzip to 477,000; keep
 // re-splitting the answer for net-new UI.
-// 2026-11-09: #1241 (#1068: keep the fresher of a camera start reply and the
-// status already held, freshestPreviewCameraStatus) put main at 2,325,142 raw /
-// 477,033 gzip, 142 and 33 bytes over, so every PR's JS job failed. Raise raw
-// to 2,330,000 and gzip to 478,000.
-// After #1307/#1301 (Stream Manager Screen key, Scene canvas note) main
-// measured 2,328,916 raw / 478,060 gzip, 60 gzip bytes over. Raise raw to
-// 2,340,000 and gzip to 480,000.
+// 2026-11-08 (owner-approved: "Raise to 485,000"): plans 221-225 on #727
+// (Videorc Cloud, the stream watchdog, know your viewers, guests) measure
+// 2,340,109 raw / 480,639 gzip against main's 476,939. The card, toasts,
+// sections, Community, the person card and LiveKit already load lazily; what
+// stays eager is Studio provider wiring (cloud state, alert list, arrival
+// chips) and the strict contract schemas. Raise raw to 2,365,000 and gzip to
+// 485,000, leaving room for the guests' remaining wiring; the entry ceilings
+// hold. Keep new surfaces lazy.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_340_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 480_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_365_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 485_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

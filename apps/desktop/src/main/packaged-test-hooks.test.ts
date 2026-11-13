@@ -26,6 +26,8 @@ function hookEnv(): NodeJS.ProcessEnv {
     VIDEORC_NATIVE_PREVIEW_HOST_MODULE: '/tmp/evil.node',
     VIDEORC_NATIVE_PREVIEW_IN_PROCESS_MODULE: '/tmp/evil.node',
     VIDEORC_NATIVE_PREVIEW_HOST_HELPER: '/tmp/evil',
+    VIDEORC_SMOKE_FAKE_MEDIA_VIDEO: '/tmp/host.y4m',
+    VIDEORC_SMOKE_FAKE_MEDIA_AUDIO: '/tmp/host.wav',
     VIDEORC_USER_DATA_DIR: '/tmp/profile',
     PATH: '/usr/bin'
   }
@@ -34,7 +36,14 @@ function hookEnv(): NodeJS.ProcessEnv {
 describe('packaged test hooks', () => {
   it('a release build drops the CDP port, module overrides and DevTools switches', () => {
     const env = hookEnv()
-    const switches = commandLine(['remote-debugging-port', 'remote-debugging-pipe', 'disable-gpu'])
+    const switches = commandLine([
+      'remote-debugging-port',
+      'remote-debugging-pipe',
+      'use-fake-device-for-media-stream',
+      'use-file-for-fake-video-capture',
+      'use-file-for-fake-audio-capture',
+      'disable-gpu'
+    ])
     const refused = refusePackagedTestHooks(env, switches, {
       isPackaged: true,
       buildAllowsTestHooks: false
@@ -42,7 +51,10 @@ describe('packaged test hooks', () => {
     expect(refused).toEqual([
       ...PACKAGED_TEST_HOOK_ENV_NAMES,
       '--remote-debugging-port',
-      '--remote-debugging-pipe'
+      '--remote-debugging-pipe',
+      '--use-fake-device-for-media-stream',
+      '--use-file-for-fake-video-capture',
+      '--use-file-for-fake-audio-capture'
     ])
     expect(env).toEqual({ VIDEORC_USER_DATA_DIR: '/tmp/profile', PATH: '/usr/bin' })
     expect([...switches.present]).toEqual(['disable-gpu'])

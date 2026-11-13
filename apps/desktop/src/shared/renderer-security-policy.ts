@@ -62,6 +62,9 @@ export const IPC_INVOKE_ROLES = {
   'screens:pick-image': MAIN_ONLY,
   // Assets → Banners → Import image… (plan 186): the Studio renderer only.
   'banners:pick-image': MAIN_ONLY,
+  // Plan 225 D12: Community → Settings lives in the main window.
+  'community:pick-export-directory': MAIN_ONLY,
+  'community:pick-import-file': MAIN_ONLY,
   // Assets → Banners → Import HTML… (plan 232): the Studio renderer only.
   'banners:pick-html': MAIN_ONLY,
   // Assets → Sounds and the starter seeding (plan 189): the Studio renderer only.
@@ -104,6 +107,9 @@ export const IPC_INVOKE_ROLES = {
   'obs:read-stream-key': MAIN_ONLY,
   // The Stream Manager's status bar offers Open Preview (plan 055, decision 4).
   'preview-window:open': MAIN_AND_COMMENTS,
+  // Plan 224 C-G4: the host's screen share and camera grant (the Studio only).
+  'talk-show:display-sources': MAIN_ONLY,
+  'talk-show:media-grant': MAIN_ONLY,
   'preview-window:close': MAIN_ONLY,
   'preview-window:toggle': MAIN_ONLY,
   'preview-window:get-state': MAIN_ONLY,
@@ -167,6 +173,12 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:marker-context-get': MAIN_AND_COMMENTS,
   'comments-window:marker-context-push': MAIN_ONLY,
   'comments-window:marker': MAIN_AND_COMMENTS,
+  // The stream watchdog (plan 223): a fix pressed in the Stream Manager's
+  // card is relayed to the Studio; the notification and the idle time are
+  // the Studio's own.
+  'comments-window:watchdog-fix': MAIN_AND_COMMENTS,
+  'watchdog:notify': MAIN_ONLY,
+  'watchdog:idle': MAIN_ONLY,
   'comments-window:marker-result-push': MAIN_ONLY,
   'comments-window:clip-mark': MAIN_AND_COMMENTS,
   'comments-window:clip-mark-result-push': MAIN_ONLY,
@@ -188,6 +200,8 @@ export const IPC_INVOKE_ROLES = {
   // refuses any other sender); Studio replies with Buddy's answer.
   'comments-window:buddy-act': MAIN_AND_COMMENTS,
   'comments-window:buddy-act-result-push': MAIN_ONLY,
+  'comments-window:community': MAIN_AND_COMMENTS,
+  'comments-window:community-result-push': MAIN_ONLY,
   // Chat commands (plan 226 S4): the Stream Manager reads the commands and
   // the failed replies Studio pushes, and asks for a `!go` post or the
   // section (each handler refuses any other sender); Studio replies.
@@ -322,8 +336,46 @@ export interface RendererInvokeIdentity {
  * Main-process authority for renderer identities. The role comes from the
  * BrowserWindow that main created, never from renderer-controlled content.
  */
+/** Plan 224 C-G4: what a renderer's web media may do while its room is open. */
+export interface TalkShowMediaGrantRecord {
+  video: boolean
+  screenSourceId: string | null
+}
+
 export class RendererSecurityRegistry {
   readonly #renderers = new Map<number, RegisteredRenderer>()
+  readonly #talkShowMediaGrants = new Map<number, TalkShowMediaGrantRecord>()
+
+  /** The grant for one renderer: `video` for camera `media`, the source for
+   * one `getDisplayMedia`. Only a registered main renderer may hold one. */
+  setTalkShowMediaGrant(senderId: number, grant: TalkShowMediaGrantRecord): boolean {
+    if (this.role(senderId) !== 'main') {
+      return false
+    }
+    if (!grant.video) {
+      this.#talkShowMediaGrants.delete(senderId)
+      return true
+    }
+    this.#talkShowMediaGrants.set(senderId, {
+      video: true,
+      screenSourceId: grant.screenSourceId
+    })
+    return true
+  }
+
+  talkShowMediaGrant(senderId: number): TalkShowMediaGrantRecord | null {
+    return this.#talkShowMediaGrants.get(senderId) ?? null
+  }
+
+  /** The named source is answered once: the next `getDisplayMedia` takes it. */
+  takeTalkShowScreenSource(senderId: number): string | null {
+    const grant = this.#talkShowMediaGrants.get(senderId)
+    if (!grant?.screenSourceId) {
+      return null
+    }
+    this.#talkShowMediaGrants.set(senderId, { video: grant.video, screenSourceId: null })
+    return grant.screenSourceId
+  }
 
   register(senderId: number, role: RendererRole): void {
     this.#renderers.set(senderId, { role, trustedDocuments: new Set() })
@@ -331,6 +383,7 @@ export class RendererSecurityRegistry {
 
   unregister(senderId: number): void {
     this.#renderers.delete(senderId)
+    this.#talkShowMediaGrants.delete(senderId)
   }
 
   trustDocument(senderId: number, rawUrl: string): void {

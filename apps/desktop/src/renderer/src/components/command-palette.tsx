@@ -1,5 +1,7 @@
+import { useStudioCloud } from '@/hooks/use-studio'
 import { DEFAULT_SCREEN_HIDE_SHORTCUT } from '../../../shared/global-shortcuts'
 import {
+  AccountIcon,
   CaptionsIcon,
   ChatIcon,
   ClipIcon,
@@ -42,7 +44,7 @@ import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
 import { firstRunReplayLocked } from '@/lib/first-run'
 import { GO_LIVE_COMMAND, START_RECORDING_COMMAND } from '@/lib/go-live-copy'
 import { HEALTH_SEARCH_KEYWORDS } from '@/lib/health-door'
-import { openLivestreamView } from '@/lib/livestream-tabs'
+import { openLivestreamView, guestsVisible } from '@/lib/livestream-tabs'
 import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { sessionStopControl } from '@/lib/studio-session-view'
@@ -115,6 +117,7 @@ const SETTINGS_KEYWORDS: Readonly<Record<SettingsTabId, readonly string[]>> = {
 const BUDDY_KEYWORDS: Readonly<Record<BuddyTabId, readonly string[]>> = {
   live: ['profile', 'persona', 'buddy live', 'status'],
   chat: ['posting', 'suggest', 'bubble', 'moderation'],
+  community: ['regulars', 'viewers', 'people', 'link', 'forget'],
   voice: ['commands', 'speak', 'listen'],
   reports: ['summary', 'stream report'],
   'clean-cut': ['edit', 'export', 'cut', 'recording']
@@ -141,6 +144,7 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void
 }): ReactElement {
   const { active, setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
+  const { cloudStatus } = useStudioCloud()
   const editScene = useEditScene()
   const {
     screenPrivacy,
@@ -404,6 +408,18 @@ export function CommandPalette({
             Upcoming events
             <Context>Livestream</Context>
           </CommandItem>
+          {/* Plan 224 D16: the talk show's room and its invite link. */}
+          {guestsVisible(cloudStatus) ? (
+            <CommandItem
+              value="Open Guests"
+              keywords={['guest', 'invite', 'room', 'talk show', 'co-host', 'link']}
+              onSelect={() => run(() => openLivestreamView('guests'))}
+            >
+              <AccountIcon className="size-4" />
+              Guests
+              <Context>Livestream</Context>
+            </CommandItem>
+          ) : null}
         </CommandGroup>
 
         <CommandSeparator />

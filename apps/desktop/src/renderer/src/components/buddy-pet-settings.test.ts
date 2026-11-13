@@ -444,7 +444,7 @@ describe('BuddyPetSettings: Reactions and Motion (plan 168 S-D2)', () => {
       cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
       list: pets([PACK_A])
     })
-    expect(document.querySelectorAll('[data-testid="buddy-reaction-row"]')).toHaveLength(8)
+    expect(document.querySelectorAll('[data-testid="buddy-reaction-row"]')).toHaveLength(11)
     // Follow's default chain is wave, then proud: this pack has proud.
     const follow = reactionRow('follow')
     expect(follow.querySelector('[role="combobox"] [data-slot="select-value"]')?.textContent).toBe(

@@ -33,6 +33,17 @@ describe('premium upgrade helpers', () => {
     ).toBe(false)
   })
 
+  // Plan 185 T4: Max is recognised only with the Videorc prefix. A bare
+  // "max" is a limit ("max 5 destinations"), never an upgrade prompt.
+  it('detects Videorc Max copy but never a bare max', () => {
+    expect(isPremiumUpgradeMessage('Talk shows with guests come with Videorc Max.')).toBe(true)
+    expect(isPremiumUpgradeMessage('Cloud recording requires videorc max')).toBe(true)
+    expect(isPremiumUpgradeMessage('Streaming is limited to max 5 destinations.')).toBe(false)
+    expect(isPremiumUpgradeMessage('Max bitrate is 30000 kbps.')).toBe(false)
+    expect(isPremiumUpgradeMessage('Max')).toBe(false)
+    expect(isPremiumUpgradeMessage('Videorc Maximum')).toBe(false)
+  })
+
   it('returns the first premium error issue from Go Live preflight', () => {
     expect(
       premiumRequiredIssueMessage({

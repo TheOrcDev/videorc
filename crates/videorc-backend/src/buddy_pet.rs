@@ -1342,11 +1342,17 @@ pub enum BuddyTrigger {
     WatchStreak,
     Redemption,
     DestinationFailed,
+    /// Plan 225 D9: a regular's arrival.
+    Regular,
+    /// Plan 225 D9: back after 30 days or more.
+    Comeback,
+    /// Plan 225 D9: the Nth stream, N in a row, or an anniversary.
+    Milestone,
 }
 
 impl BuddyTrigger {
     #[cfg_attr(not(test), allow(dead_code))] // tests walk every trigger
-    pub const ALL: [BuddyTrigger; 8] = [
+    pub const ALL: [BuddyTrigger; 11] = [
         Self::Follow,
         Self::Subscription,
         Self::Gift,
@@ -1355,6 +1361,9 @@ impl BuddyTrigger {
         Self::WatchStreak,
         Self::Redemption,
         Self::DestinationFailed,
+        Self::Regular,
+        Self::Comeback,
+        Self::Milestone,
     ];
 
     /// D14's default reaction, as a fallback chain: the first id the pack
@@ -1368,6 +1377,9 @@ impl BuddyTrigger {
             Self::WatchStreak => &["proud"],
             Self::Redemption => &["wink"],
             Self::DestinationFailed => &[],
+            Self::Regular => &["wave", "proud"],
+            Self::Comeback => &["excited", "wave"],
+            Self::Milestone => &["excited", "proud"],
         }
     }
 }
@@ -2508,6 +2520,6 @@ pub(crate) mod tests {
                 .default_reactions()
                 .is_empty()
         );
-        assert_eq!(BuddyTrigger::ALL.len(), 8);
+        assert_eq!(BuddyTrigger::ALL.len(), 11);
     }
 }

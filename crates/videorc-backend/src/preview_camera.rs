@@ -186,6 +186,9 @@ pub struct PreviewCameraRuntime {
     #[cfg(all(test, target_os = "windows"))]
     test_dshow_inventory: Option<String>,
     pub status: PreviewCameraStatus,
+    /// Plan 224 D6: the camera is lent to the talk show's room (the renderer
+    /// publishes it). Every start is refused until the room gives it back.
+    pub(crate) lent_to_talk_show: bool,
     /// Source-level ownership keeps surface-backed frames observable while a
     /// capture session replaces its per-session `FrameStore`.
     surface_backing_tracker: SurfaceBackingTrackerHandle,
@@ -882,6 +885,7 @@ pub fn initial_preview_camera_state() -> PreviewCameraRuntime {
         #[cfg(all(test, target_os = "windows"))]
         test_dshow_inventory: None,
         status: idle_status(Some("Native camera preview is not running.".to_string())),
+        lent_to_talk_show: false,
         surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
         source_key: None,
@@ -1065,6 +1069,15 @@ async fn start_preview_camera_with_owner(
     }
     if state.process_shutdown_requested() {
         let status = camera_start_rejected_for_shutdown(preview_camera_status(&state).await);
+        signal_camera_layout_admission(&mut admission_ready, None);
+        return PreviewCameraLayoutStart::without_admission(status);
+    }
+    // Plan 224 D6: one owner at a time. While the room holds the camera, a
+    // layout transaction or the Sources page must not take it back under
+    // the renderer's `getUserMedia`; the status says why.
+    if camera_lent_to_talk_show(&state).await {
+        let mut status = preview_camera_status(&state).await;
+        status.message = Some(CAMERA_LENT_TO_TALK_SHOW_MESSAGE.to_string());
         signal_camera_layout_admission(&mut admission_ready, None);
         return PreviewCameraLayoutStart::without_admission(status);
     }
@@ -2720,6 +2733,60 @@ pub async fn stop_preview_camera_from_client(state: &AppState) -> PreviewCameraS
         return status;
     }
     stop_preview_camera(state).await
+}
+
+/// Plan 224 D6: the status message while the room holds the camera.
+pub const CAMERA_LENT_TO_TALK_SHOW_MESSAGE: &str =
+    "Camera lent to the talk show. It comes back when the room closes.";
+/// Plan 224 D6: "Open the room" refused because a take still records the
+/// camera (the ISO-take trap, 2026-11-03).
+pub const CAMERA_LEND_REFUSED_BY_SOURCE_TAKE_MESSAGE: &str = "Camera kept running: the separate Camera file of the current take records it. Stop the take, then open the room.";
+pub const CAMERA_RETURNED_FROM_TALK_SHOW_MESSAGE: &str = "Camera returned by the talk show.";
+
+/// True while the talk show's room holds the camera.
+pub async fn camera_lent_to_talk_show(state: &AppState) -> bool {
+    state.preview_camera.lock().await.lent_to_talk_show
+}
+
+/// "Open the room" (plan 224 D6): stop the preview camera with reason
+/// `talk-show` and refuse every start until `return_camera_from_talk_show`.
+/// Refused while a separate-source take records the camera, like the
+/// renderer's own stop: the Combined recording, the Screen file and the
+/// Clips ring would freeze on their first frame.
+pub async fn lend_camera_to_talk_show(state: &AppState) -> std::result::Result<(), String> {
+    if source_take_records_camera(state).await {
+        return Err(CAMERA_LEND_REFUSED_BY_SOURCE_TAKE_MESSAGE.to_string());
+    }
+    {
+        let mut slot = state.preview_camera.lock().await;
+        if slot.lent_to_talk_show {
+            return Ok(());
+        }
+        slot.lent_to_talk_show = true;
+    }
+    let _ = stop_preview_camera(state).await;
+    let status = {
+        let mut slot = state.preview_camera.lock().await;
+        slot.status.message = Some(CAMERA_LENT_TO_TALK_SHOW_MESSAGE.to_string());
+        slot.status.clone()
+    };
+    state.emit_event("preview.camera.status", status);
+    Ok(())
+}
+
+/// The room closed (plan 224 D6): the preview camera may run again. The
+/// renderer restarts it for the scene that shows one; nothing starts here.
+pub async fn return_camera_from_talk_show(state: &AppState) {
+    let status = {
+        let mut slot = state.preview_camera.lock().await;
+        if !slot.lent_to_talk_show {
+            return;
+        }
+        slot.lent_to_talk_show = false;
+        slot.status.message = Some(CAMERA_RETURNED_FROM_TALK_SHOW_MESSAGE.to_string());
+        slot.status.clone()
+    };
+    state.emit_event("preview.camera.status", status);
 }
 
 /// True while the installed program scene names a camera that an armed

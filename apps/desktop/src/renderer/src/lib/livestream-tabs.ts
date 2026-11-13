@@ -1,10 +1,12 @@
+import type { CloudStatus } from '@/lib/backend'
 import { STORAGE_KEYS } from '@/lib/capture'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 /**
  * The Livestream page's views (plan 174 S1.6b, A-14), in strip order, built
  * like Settings' tabs: Setup prepares the destinations and the stream
- * details, Upcoming lists scheduled streams. Ids are stable: they are stored
+ * details, Upcoming lists scheduled streams, Guests holds the talk show's
+ * room (plan 224 D16). Ids are stable: they are stored
  * as the view used last and carried by links. Labels are copy.
  *
  * The shell imports this module, so it sits in the eager chunk: keep it to
@@ -12,8 +14,22 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
  */
 export const LIVESTREAM_VIEWS = [
   { id: 'setup', label: 'Setup' },
-  { id: 'upcoming', label: 'Upcoming' }
+  { id: 'upcoming', label: 'Upcoming' },
+  // Plan 224 D16: the talk show's room, its invite link and who is in it.
+  { id: 'guests', label: 'Guests' }
 ] as const
+
+/** Launch flags fail closed, but an existing room remains controllable. */
+export function guestsVisible(status: CloudStatus | null): boolean {
+  return Boolean(
+    (status?.allowance?.enabled && status.allowance.talkShows) ||
+    (status?.room && status.room.phase !== 'closed')
+  )
+}
+
+export function livestreamViews(status: CloudStatus | null): (typeof LIVESTREAM_VIEWS)[number][] {
+  return LIVESTREAM_VIEWS.filter((view) => view.id !== 'guests' || guestsVisible(status))
+}
 
 export type LivestreamViewId = (typeof LIVESTREAM_VIEWS)[number]['id']
 

@@ -62,6 +62,32 @@ describe('evaluateOutputStall (plan 076)', () => {
     assert.ok(silent.failures.some((failure) => failure.includes('already silent')))
   })
 
+  it('fails when the record-only session opens a watchdog alert (plan 223 L8)', () => {
+    const result = evaluateOutputStall({
+      ...base,
+      windows: windows(12, (t) => t < 4.5 || t >= 7.5),
+      health: [
+        stall,
+        { code: 'stream-output-stalled', message: 'not an alert' },
+        { code: 'watchdog-picture-stopped', message: 'The picture has stopped. x' }
+      ]
+    })
+    assert.equal(result.watchdogAlerts, 1)
+    assert.ok(
+      result.failures.some((failure) => failure.includes('watchdog-picture-stopped')),
+      result.failures.join('; ')
+    )
+    // The 1064 silence report is the one check a recording keeps (its
+    // adoption as mic-silent is not a watchdog alert of the stream).
+    const silence = evaluateOutputStall({
+      ...base,
+      windows: windows(12, (t) => t < 4.5 || t >= 7.5),
+      health: [stall, { code: 'watchdog-mic-silent', message: 'x' }]
+    })
+    assert.deepEqual(silence.failures, [])
+    assert.equal(silence.watchdogAlerts, 0)
+  })
+
   it('is vacuous without a stall event, and ignores the file edges', () => {
     const result = evaluateOutputStall({ ...base, windows: windows(12, () => true), health: [] })
     assert.deepEqual(result.failures, [

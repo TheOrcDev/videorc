@@ -1209,6 +1209,7 @@ mod tests {
             status,
             at: "2026-10-08T12:00:00Z".to_string(),
             expires_at: None,
+            milestone: None,
         }
     }
 

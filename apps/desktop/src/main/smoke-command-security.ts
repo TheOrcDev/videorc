@@ -44,6 +44,9 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-context-click-link',
   'comments-window-close',
   'comments-window-command-trace',
+  // Plan 225 C4: the person card fixture and its geometry.
+  'comments-window-community-fixture',
+  'comments-window-person-card',
   'comments-window-layout-metrics',
   'comments-window-open',
   'comments-window-push-delta',

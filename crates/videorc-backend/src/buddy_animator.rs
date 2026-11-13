@@ -1088,6 +1088,39 @@ pub fn live_chat_events(
     events
 }
 
+/// Plan 225 D9: a returning person's arrival row makes Buddy react (the
+/// regular wave, the comeback's excitement, the milestone's), whatever the
+/// talk mode. The welcome line's own reaction wins when the user set one
+/// (`none` turns it off). Stale rows (a replay) never react.
+pub fn arrival_trigger(
+    message: &LiveChatMessage,
+    auto_chat: &CohostAutoChat,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<BuddyAnimatorEvent> {
+    let arrival = message.arrival.as_ref()?;
+    if message.is_deleted || !reaction_fresh(message, now) {
+        return None;
+    }
+    let (trigger, line) = match crate::cohost_greetings::arrival_kind(arrival, true) {
+        crate::cohost_greetings::GreetingKind::Milestone => (
+            BuddyTrigger::Milestone,
+            &auto_chat.greetings.welcomes.milestone,
+        ),
+        crate::cohost_greetings::GreetingKind::Comeback => (
+            BuddyTrigger::Comeback,
+            &auto_chat.greetings.welcomes.comeback,
+        ),
+        crate::cohost_greetings::GreetingKind::Regular => {
+            (BuddyTrigger::Regular, &auto_chat.greetings.welcomes.regular)
+        }
+        _ => return None,
+    };
+    Some(BuddyAnimatorEvent::Trigger {
+        trigger,
+        reaction: line.reaction.clone(),
+    })
+}
+
 /// A row counts when it was published within
 /// [`ACTIVITY_REACTION_FRESH_SECONDS`]; an unparseable time counts.
 fn reaction_fresh(message: &LiveChatMessage, now: chrono::DateTime<chrono::Utc>) -> bool {

@@ -2,11 +2,13 @@ import { AlertIcon, SaveIcon, TextIcon } from '@/components/icons'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { PageTabs } from '@/components/page-tabs'
 import { TabsContent } from '@/components/ui/tabs'
-import { LIVESTREAM_VIEWS, type LivestreamViewId } from '@/lib/livestream-tabs'
+import { guestsVisible, livestreamViews, type LivestreamViewId } from '@/lib/livestream-tabs'
 import { LIVESTREAM_SETUP_GRID, PAGE_LEAD_COLUMN } from '@/lib/page-layout'
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
+// Plan 224 C-G2: the Guests tab loads with its first open.
+const GuestsTab = lazy(() => import('@/components/guests/guests-tab'))
 // Plan 226: Chat commands loads on its own, after the page.
 const ChatCommandsSection = lazy(() =>
   import('@/components/streaming/chat-commands-section').then((m) => ({
@@ -57,7 +59,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import type {
   PlatformAccount,
   PlatformAccountValidation,
@@ -84,10 +86,10 @@ import { broadcastThumbnailHint } from '@/lib/broadcast-info'
 import { streamLanguageOptions } from '@/lib/stream-languages'
 
 /**
- * Livestream (plan 174 S1.6b, A-14): Setup and Upcoming in a strip pinned
- * under the toolbar, like Settings; only the view under it scrolls. The view
- * lives in the shell, so the page reopens on the one used last and ⌘K can
- * open Upcoming by name.
+ * Livestream (plan 174 S1.6b, A-14): Setup, Upcoming and Guests (plan 224
+ * D16) in a strip pinned under the toolbar, like Settings; only the view
+ * under it scrolls. The view lives in the shell, so the page reopens on the
+ * one used last and ⌘K can open Upcoming and Guests by name.
  */
 export function StreamingTab({
   view,
@@ -101,11 +103,14 @@ export function StreamingTab({
   destinationToOpen?: string | null
   onDestinationOpened?: () => void
 }): ReactElement {
+  const { cloudStatus } = useStudioCloud()
+  const showGuests = guestsVisible(cloudStatus)
+  const visibleView = view === 'guests' && !showGuests ? 'setup' : view
   return (
     <PageTabs
       label="Livestream view"
-      tabs={LIVESTREAM_VIEWS}
-      value={view}
+      tabs={livestreamViews(cloudStatus)}
+      value={visibleView}
       onValueChange={onViewChange}
     >
       <TabsContent value="setup">
@@ -119,6 +124,13 @@ export function StreamingTab({
           <ScheduledStreams />
         </Suspense>
       </TabsContent>
+      {showGuests ? (
+        <TabsContent value="guests">
+          <Suspense fallback={<p role="status">Loading guests…</p>}>
+            <GuestsTab />
+          </Suspense>
+        </TabsContent>
+      ) : null}
     </PageTabs>
   )
 }
@@ -420,7 +432,7 @@ function sharedAccountLabel(
 }
 
 /** What the session lock covers on Setup, named in its one notice (D-15). */
-const LIVESTREAM_SETUP_LOCKS = 'Destinations, stream quality and stream details'
+const LIVESTREAM_SETUP_LOCKS = 'Destinations, stream quality, Videorc Cloud and stream details'
 
 /** The one cap notice; a switch held off by the cap points at it (D-14). */
 const DESTINATION_CAP_NOTICE_ID = 'livestream-destination-cap'

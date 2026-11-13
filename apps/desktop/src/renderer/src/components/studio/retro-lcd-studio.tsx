@@ -33,6 +33,7 @@ import {
 } from '@/components/studio/quick-settings'
 import {
   CohostSessionRow,
+  GuestsSessionSlot,
   LiveDestinationRows,
   LiveStreamHealthRow,
   SESSION_STATUS_ICONS,
@@ -89,6 +90,7 @@ import { WINDOW_NAMES } from '../../../../shared/window-names'
  */
 export function RetroSessionTransport({
   active,
+  talkShowOutputs,
   canStop,
   stopLabel,
   stopNote,
@@ -105,6 +107,8 @@ export function RetroSessionTransport({
   onStop
 }: Parameters<typeof SessionTransport>[0]): ReactElement {
   const startsBusy = startRequestPending || goLivePending
+  const recordActive = talkShowOutputs?.recording === true
+  const liveActive = talkShowOutputs?.live === true
   return (
     <section
       aria-label="Session controls"
@@ -123,7 +127,7 @@ export function RetroSessionTransport({
         </div>
         <LcdDisplaySeparator />
         <div className="flex flex-wrap gap-2 py-2">
-          {active ? (
+          {active && !talkShowOutputs ? (
             <LcdPanelKey className="flex-1" disabled={!canStop} tone="record" onClick={onStop}>
               <StopIcon weight="fill" />
               {stopLabel}
@@ -132,15 +136,18 @@ export function RetroSessionTransport({
             <>
               {/* Why a start is blocked shows on hover and on keyboard focus
                   (plan 174 S1.1, B-9): a disabled key never shows a title. */}
-              <DisabledReason className="flex flex-1" reason={recordBlockedReason}>
+              <DisabledReason
+                className="flex flex-1"
+                reason={recordActive ? null : recordBlockedReason}
+              >
                 <LcdPanelKey
                   className="flex-1"
-                  disabled={Boolean(recordBlockedReason) || startsBusy}
+                  disabled={recordActive ? !canStop : Boolean(recordBlockedReason) || startsBusy}
                   tone="record"
-                  onClick={onRecord}
+                  onClick={recordActive ? talkShowOutputs?.onStopRecording : onRecord}
                 >
                   <RecordIcon weight="fill" />
-                  {RECORD_LABEL}
+                  {recordActive ? 'Stop recording' : RECORD_LABEL}
                   <ShortcutKeys
                     accelerator={shortcutAccelerator('record-toggle')}
                     className="font-normal opacity-70"
@@ -150,16 +157,20 @@ export function RetroSessionTransport({
               </DisabledReason>
               <DisabledReason
                 className="flex flex-1"
-                reason={goLivePending ? null : liveStreamBlockedReason}
+                reason={goLivePending || liveActive ? null : liveStreamBlockedReason}
               >
                 <LcdPanelKey
                   className="flex-1"
                   data-testid="go-live-button"
-                  disabled={Boolean(liveStreamBlockedReason) || startsBusy}
-                  onClick={onLiveStream}
+                  disabled={liveActive ? !canStop : Boolean(liveStreamBlockedReason) || startsBusy}
+                  onClick={liveActive ? onStop : onLiveStream}
                 >
                   <LivestreamIcon weight="fill" />
-                  {goLivePending ? GO_LIVE_CHECKING_LABEL : GO_LIVE_LABEL}
+                  {liveActive
+                    ? 'End livestream'
+                    : goLivePending
+                      ? GO_LIVE_CHECKING_LABEL
+                      : GO_LIVE_LABEL}
                 </LcdPanelKey>
               </DisabledReason>
             </>
@@ -287,6 +298,7 @@ export function RetroSessionPanel({ live = false, ...notices }: SessionPanelProp
         {live ? <LiveDestinationRows look="lcd" /> : null}
         {live ? <LiveStreamHealthRow look="lcd" /> : null}
         {live ? <CohostSessionRow look="lcd" /> : null}
+        <GuestsSessionSlot look="lcd" />
         <AgentsSessionRow look="lcd" />
       </LcdPanel>
       <SessionNotices {...notices} />

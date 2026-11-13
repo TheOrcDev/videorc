@@ -34,6 +34,8 @@ export const AUXILIARY_API_KEYS = {
     'getMarkerContext',
     'onMarkerContext',
     'markerFromCommentsWindow',
+    // A watchdog fix from the alert chip's card (plan 223 A6): ask, never run.
+    'watchdogFixFromCommentsWindow',
     'markClipFromCommentsWindow',
     // Banners (plan 186 S7): read the list, ask for a show or hide; never push.
     'getCommentsBanners',
@@ -46,6 +48,8 @@ export const AUXILIARY_API_KEYS = {
     'soundFromCommentsWindow',
     // `/buddy <words>` (plan 209 S20): ask, never answer or push.
     'buddyActFromCommentsWindow',
+    // The person card (plan 225 C2): ask, never answer or push.
+    'communityFromCommentsWindow',
     // Chat commands (plan 226 S4): read the commands and the failed replies,
     // ask for a `!go` post or the section; never push, answer or post itself.
     'getCommentsChatCommands',

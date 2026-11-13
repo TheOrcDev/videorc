@@ -71,7 +71,14 @@ export const DEFAULT_COHOST_AUTO_CHAT: CohostAutoChat = {
     enabled: true,
     templates: [],
     ai: true,
-    welcomes: { firstTime: { enabled: true }, returning: { enabled: true } }
+    welcomes: {
+      firstTime: { enabled: true },
+      returning: { enabled: true },
+      // Plan 225 D9: the arrival welcomes, on like the other two.
+      regular: { enabled: true },
+      comeback: { enabled: true },
+      milestone: { enabled: true }
+    }
   },
   answers: { enabled: true, cooldownSeconds: 20 },
   banter: { enabled: false, cooldownSeconds: 240 }

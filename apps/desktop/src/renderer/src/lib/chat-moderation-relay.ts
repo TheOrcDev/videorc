@@ -84,6 +84,8 @@ export interface ChatModerationRelay {
 export { startCohostCommandRelay } from '@/lib/cohost-command-relay'
 // And `/buddy <words>` from the Stream Manager (plan 209 S20).
 export { startBuddyActRelay } from '@/lib/buddy-act-relay'
+// And the person card's `cohost.community.*` calls (plan 225 C2).
+export { startCommunityRelay } from '@/lib/community-relay'
 
 export const REMOVAL_TOAST_ID_PREFIX = 'chat-removal:'
 

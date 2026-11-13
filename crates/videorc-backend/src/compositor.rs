@@ -4800,7 +4800,28 @@ fn set_capture_health_stage_latch(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     latches.set(stage, degraded);
-    latches.current()
+    let current = latches.current();
+    drop(latches);
+    // Plan 223 A3: a stalled render is a stopped picture; a still screen
+    // only sharpens the detail. Never waits on anything.
+    crate::watchdog::observe_capture_stage(state, stage, degraded);
+    current
+}
+
+/// Plan 223 A7: the frame store whose frames leave for the platforms: the
+/// split stream leg's when one runs (macOS record+stream), else the
+/// primary's, which then carries the stream. None while no compositor runs.
+pub async fn compositor_program_frame_store_for_stream(
+    state: &AppState,
+) -> Option<CompositorFrameStore> {
+    let compositor = state.compositor.lock().await;
+    compositor.run_id.as_ref()?;
+    Some(
+        compositor
+            .stream_frame_store
+            .clone()
+            .unwrap_or_else(|| compositor.frame_store.clone()),
+    )
 }
 
 fn current_capture_health_stage(state: &AppState) -> Option<crate::capture_health::CaptureStage> {

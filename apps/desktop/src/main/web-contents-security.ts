@@ -56,7 +56,32 @@ export function rendererWebPermissionAllowed(
   }
 
   const mediaTypes = request.mediaTypes
-  return Boolean(mediaTypes?.length && mediaTypes.every((mediaType) => mediaType === 'audio'))
+  if (!mediaTypes?.length) {
+    return false
+  }
+  // Plan 224 C-G4: while a talk-show room is open the host publishes the
+  // camera from this renderer, so video is allowed under main's grant and
+  // never otherwise.
+  const videoAllowed = registry.talkShowMediaGrant(request.senderId)?.video === true
+  return mediaTypes.every(
+    (mediaType) => mediaType === 'audio' || (videoAllowed && mediaType === 'video')
+  )
+}
+
+/** Plan 224 C-G4: main's answer to `getDisplayMedia` for a talk-show screen
+ * share: the one `desktopCapturer` source the renderer named through the
+ * grant, consumed once. Main installs the resolver; the tests run without
+ * Electron. */
+export type TalkShowDisplaySourceResolver = (request: {
+  frame: { url: string } | null
+}) => Promise<Electron.Video | null>
+
+let talkShowDisplaySourceResolver: TalkShowDisplaySourceResolver | null = null
+
+export function setTalkShowDisplaySourceResolver(
+  resolver: TalkShowDisplaySourceResolver | null
+): void {
+  talkShowDisplaySourceResolver = resolver
 }
 
 /** Install after app.whenReady(), before creating any BrowserWindow. */
@@ -90,7 +115,18 @@ export function installRendererSessionPermissions(
     )
   }
 
-  const displayMediaHandler: DisplayMediaRequestHandler = (_request, callback) => callback({})
+  // Display capture is refused unless a talk-show room named a source
+  // (plan 224 C-G4); the resolver answers once per named source.
+  const displayMediaHandler: DisplayMediaRequestHandler = (request, callback) => {
+    const resolver = talkShowDisplaySourceResolver
+    if (!resolver) {
+      callback({})
+      return
+    }
+    void resolver({ frame: request.frame ? { url: request.frame.url } : null })
+      .then((video) => callback(video ? { video } : {}))
+      .catch(() => callback({}))
+  }
 
   // Electron otherwise auto-approves permission requests. Both handlers are
   // required because Chromium APIs commonly check first and request second.

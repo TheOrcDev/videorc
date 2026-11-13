@@ -1,7 +1,9 @@
+import { CloudSection } from './cloud-section'
+
 import { StreamQualityControl } from './stream-quality-control'
 import { withStreamQuality } from '@/lib/output-quality'
 import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
-import { useMemo, useState, type ReactElement, type ReactNode } from 'react'
+import { lazy, Suspense, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
@@ -11,8 +13,10 @@ import { Button } from '@/components/ui/button'
 import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
+  useStudioCloud,
   useStudioCore,
   useStudioDiagnostics,
+  useStudioRecording,
   type StreamOutputTopologyPreflight
 } from '@/hooks/use-studio'
 import type {
@@ -54,8 +58,24 @@ import {
   type RecentStreamDrops,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
+import { cloudDestinationCount, cloudHealthySummary } from '@/lib/cloud-show-view'
+import { cloudStreamReading } from '@/lib/live-session-view'
+
+import {
+  dashboardCloudFromStatus,
+  type LiveDashboardCloud
+} from '../../../../shared/live-dashboard'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+
+// The Watchdog section (plan 223 D7) loads with the page's first paint of it;
+// its rows, the QR code and the phone list stay out of the eager bundle.
+// Below the imports: the dev server turns `import { lazy }` into a const at
+// that line, so a use above it throws "Cannot access 'lazy' before
+// initialization" and the Livestream page shows its error panel.
+const WatchdogSection = lazy(async () => ({
+  default: (await import('./watchdog-section')).WatchdogSection
+}))
 
 // The Livestream right column (plan 080 S7). Owner, 2026-09-30: "Live stream
 // should be about connecting your accounts and not about reading some tech
@@ -88,6 +108,12 @@ export function GoLivePanel({
     streamTargets
   } = useStudioCore()
   const { diagnosticStats, recentStreamDrops, streamHealth } = useStudioDiagnostics()
+  const { cloudStatus } = useStudioCloud()
+  const { recording } = useStudioRecording()
+  // Plan 184 C7: the cloud show carrying this session, for the health rows.
+  const cloud = cloudStatus
+    ? dashboardCloudFromStatus(cloudStatus, recording.sessionId ?? null)
+    : null
   const streaming = captureConfig.streaming
   // No separate stream encoder on this computer: the session records at the
   // stream's profile, so show that instead of the Output setting.
@@ -156,7 +182,12 @@ export function GoLivePanel({
           }}
         />
       </PanelSection>
+      <CloudSection />
+      <Suspense fallback={null}>
+        <WatchdogSection />
+      </Suspense>
       <ReadyToGoLive
+        cloud={cloud}
         accountByPlatform={accountByPlatform}
         captions={
           captureConfig.captions.enabled
@@ -180,6 +211,7 @@ export function GoLivePanel({
         onRetry={refreshStreamOutputTopology}
       />
       <TechnicalDetails
+        cloud={cloud}
         diagnosticStats={diagnosticStats}
         liveOutputActive={liveOutputActive}
         preflight={streamOutputTopologyPreflight}
@@ -226,6 +258,7 @@ export function ReadyToGoLive({
   recordingVideo,
   preflight,
   liveOutputActive,
+  cloud = null,
   diagnosticStats,
   recentStreamDrops,
   streamHealth,
@@ -234,6 +267,8 @@ export function ReadyToGoLive({
   onRetry
 }: {
   targets: StreamTargetSettings[]
+  /** The Videorc Cloud show carrying the session, if any (plan 184 C7). */
+  cloud?: LiveDashboardCloud | null
   accountByPlatform: ReadonlyMap<StreamPlatform, PlatformAccount>
   /**
    * Live captions, when on: the output rule a livestream would break (plan
@@ -311,6 +346,7 @@ export function ReadyToGoLive({
       ) : null}
       {liveOutputActive ? (
         <LiveStreamRow
+          cloud={cloud}
           diagnosticStats={diagnosticStats}
           recentStreamDrops={recentStreamDrops}
           streamHealth={streamHealth}
@@ -423,11 +459,13 @@ function StreamCheckRow({
 
 /** While live: quiet when healthy, the problem in a few words when not. */
 function LiveStreamRow({
+  cloud = null,
   diagnosticStats,
   recentStreamDrops,
   streamHealth,
   streamTargets
 }: {
+  cloud?: LiveDashboardCloud | null
   diagnosticStats: DiagnosticStats
   recentStreamDrops: RecentStreamDrops
   streamHealth: StreamHealth | null
@@ -439,10 +477,12 @@ function LiveStreamRow({
     streamTargets,
     recentStreamDrops
   )
-  const healthy = attribution === 'healthy'
+  // Plan 184 C7: while the cloud holds or resumes the show, that is the word.
+  const cloudReading = cloudStreamReading(cloud)
+  const healthy = attribution === 'healthy' && !cloudReading
   return (
     <ChecklistRow
-      detail={healthy ? 'Healthy' : liveProblemLabel(attribution)}
+      detail={cloudReading ?? (healthy ? 'Healthy' : liveProblemLabel(attribution))}
       // The problem's whole sentence on hover and on focus (plan 174 S1.10).
       detailHint={streamHealthDescription(attribution, true, { state: 'not-requested' })}
       label="Stream"
@@ -452,6 +492,7 @@ function LiveStreamRow({
 }
 
 export function TechnicalDetails({
+  cloud = null,
   diagnosticStats,
   liveOutputActive,
   preflight,
@@ -460,6 +501,8 @@ export function TechnicalDetails({
   streamHealth,
   streamTargets
 }: {
+  /** The Videorc Cloud show carrying the session, if any (plan 184 C7). */
+  cloud?: LiveDashboardCloud | null
   diagnosticStats: DiagnosticStats
   liveOutputActive: boolean
   preflight: StreamOutputTopologyPreflight
@@ -497,12 +540,20 @@ export function TechnicalDetails({
   const coalescedFrames = diagnosticStats.encoderBridgeSeparateOutputEncodersActive
     ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
     : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
-  const bitrate = streamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps
+  // Through the cloud, the cloud's own measure of the upload when FFmpeg
+  // can't count one (the raw path's tee says `bitrate=N/A`; plan 184 C7).
+  const bitrate =
+    streamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps ?? cloud?.feedKbps
   const loweredBitrate = formatLoweredBitrate(diagnosticStats.streamDelivery)
   const summary = liveOutputActive
-    ? attribution === 'healthy'
-      ? [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)].filter(Boolean).join(' · ')
-      : liveProblemLabel(attribution)
+    ? (cloudStreamReading(cloud) ??
+      (attribution === 'healthy'
+        ? cloudHealthySummary(
+            cloud,
+            [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)],
+            cloudDestinationCount(streamTargets)
+          )
+        : liveProblemLabel(attribution)))
     : null
   const outputs = streamOutputs(providerPlan)
 

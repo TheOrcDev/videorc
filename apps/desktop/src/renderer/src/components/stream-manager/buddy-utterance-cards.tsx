@@ -35,6 +35,23 @@ export function utteranceDestinationLabels(
   return [...new Set(picked.map((destination) => platformLabel(destination.platform)))]
 }
 
+/** Plan 225 B6: a milestone card stays offered this long after the welcome. */
+export const MILESTONE_CARD_OFFER_MS = 10 * 60_000
+
+/** The milestone welcomes the streamer may still put on stream (D9): the
+ * card is the person's, never the message text. */
+export function openMilestoneUtterances(
+  utterances: readonly CohostUtterance[],
+  nowMs: number
+): CohostUtterance[] {
+  return utterances.filter(
+    (utterance) =>
+      utterance.milestone !== undefined &&
+      utterance.status !== 'dismissed' &&
+      nowMs - Date.parse(utterance.at) < MILESTONE_CARD_OFFER_MS
+  )
+}
+
 /** The cards still waiting on the streamer: proposed and not yet expired. */
 export function openProposedUtterances(
   utterances: readonly CohostUtterance[],
@@ -100,7 +117,8 @@ export function BuddyUtteranceCards({
   name = null,
   destinations = NO_DESTINATIONS,
   onApprove,
-  onDismiss
+  onDismiss,
+  onShowMilestone
 }: {
   utterances: readonly CohostUtterance[]
   pending?: boolean
@@ -113,9 +131,12 @@ export function BuddyUtteranceCards({
   active?: boolean
   onApprove: (utterance: CohostUtterance) => void
   onDismiss: (utterance: CohostUtterance) => void
+  /** Plan 225 B6: put a milestone card on stream (the card, never the text). */
+  onShowMilestone?: (utterance: CohostUtterance) => void
 }): ReactElement | null {
   const [nowMs, setNowMs] = useState(() => Date.now())
   const proposed = openProposedUtterances(utterances, nowMs)
+  const milestones = onShowMilestone ? openMilestoneUtterances(utterances, nowMs) : []
   const recent = utterances
     .filter((utterance) => utterance.status !== 'proposed' && utterance.status !== 'dismissed')
     .slice(-RECENT_MAX)
@@ -148,10 +169,33 @@ export function BuddyUtteranceCards({
   )
   useBuddyCardKeys('utterance', newest && !pending && active ? handleWindowKey : null)
 
-  if (proposed.length === 0 && recent.length === 0) return null
+  if (proposed.length === 0 && recent.length === 0 && milestones.length === 0) return null
 
   return (
     <div className="shrink-0 border-b border-border" data-slot="buddy-utterances">
+      {milestones.length > 0 ? (
+        <div className="flex flex-col gap-2 p-2" data-slot="buddy-milestones">
+          {milestones.map((utterance) => (
+            <BuddyCard
+              key={`milestone-${utterance.id}`}
+              busy={pending}
+              data-utterance-id={utterance.id}
+              icon={BuddyIcon}
+              label={`${utterance.milestone!.name}'s milestone`}
+              primary={{ label: 'Show on stream', testId: 'buddy-milestone-show' }}
+              testId="buddy-milestone-card"
+              title={
+                <span data-slot="buddy-milestone-title">
+                  {utterance.milestone!.name} · {utterance.milestone!.label}
+                </span>
+              }
+              onPrimary={() => onShowMilestone?.(utterance)}
+            >
+              <span data-testid="buddy-milestone-text">{utterance.text}</span>
+            </BuddyCard>
+          ))}
+        </div>
+      ) : null}
       {proposed.length > 0 ? (
         <div className="flex flex-col gap-2 p-2">
           {proposed.map((utterance) => (

@@ -1,4 +1,4 @@
-import { useState, type DragEvent, type ReactElement } from 'react'
+import { lazy, Suspense, useState, type DragEvent, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { HiddenIcon } from '@/components/icons'
@@ -27,6 +27,61 @@ import {
 } from '@/lib/stream-manager-stats-layout'
 import { SCREEN_HIDDEN_LABEL } from '@/lib/screen-privacy-view'
 import { cn } from '@/lib/utils'
+import { watchdogChipLabel } from '@/lib/watchdog-rank'
+import type { WatchdogAlert } from '@/lib/backend'
+
+// The watchdog's card (plan 223 A6) rides the chip's hover; its chunk loads
+// with the first alert, in this window as in the Studio.
+const WatchdogAlertCard = lazy(async () => ({
+  default: (await import('@/components/studio/watchdog-alert-card')).WatchdogAlertCard
+}))
+
+/**
+ * Plan 223 A6: the alert chip beside ON AIR, only while an alert is open.
+ * The tone is a dot, the title in a few words; the same card as the
+ * Studio's on hover. A fix pressed here is relayed to the Studio, which
+ * runs it; Got it and Snooze stay in the Studio (this window has no
+ * backend socket).
+ */
+function AlertChip({ alert }: { alert: WatchdogAlert }): ReactElement {
+  const critical = alert.severity === 'critical'
+  const chip = (
+    <Badge
+      className="max-w-48 gap-1.5"
+      data-severity={alert.severity}
+      data-testid="session-alert"
+      variant="outline"
+    >
+      <span
+        aria-hidden
+        className={cn('size-1.5 shrink-0 rounded-full', critical ? 'bg-destructive' : 'bg-warning')}
+      />
+      <span className="min-w-0 truncate">{watchdogChipLabel(alert)}</span>
+    </Badge>
+  )
+  return (
+    <HoverCard>
+      <HoverCardTrigger closeDelay={120} delay={300} render={chip} />
+      <HoverCardContent align="start" className="w-80 p-0" data-testid="session-alert-card">
+        <Suspense fallback={null}>
+          <WatchdogAlertCard
+            compact
+            alert={alert}
+            onAcknowledge={() => {}}
+            onFix={(target, fix) =>
+              void window.videorc?.watchdogFixFromCommentsWindow?.({
+                alertId: target.id,
+                kind: fix.kind,
+                ...(fix.url ? { url: fix.url } : {})
+              })
+            }
+            onSnooze={() => {}}
+          />
+        </Suspense>
+      </HoverCardContent>
+    </HoverCard>
+  )
+}
 
 // The stats bar (plan 057, D1): one 32 px row at every width, flush under the
 // title row. The main slots (by default the clock, viewers and followers) sit
@@ -77,7 +132,12 @@ function SessionChip({ badge }: { badge: StatItemModel['badge'] }): ReactElement
 function StatLead({ item }: { item: StatItemModel }): ReactElement | null {
   switch (item.id) {
     case 'session':
-      return <SessionChip badge={item.badge} />
+      return (
+        <>
+          <SessionChip badge={item.badge} />
+          {item.alert ? <AlertChip alert={item.alert} /> : null}
+        </>
+      )
     case 'viewers':
       return <ViewersIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
     default:

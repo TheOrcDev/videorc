@@ -223,6 +223,10 @@ pub enum CommentHighlightError {
     UnsupportedOutput,
     #[error("The comment highlight image is invalid: {0}")]
     InvalidImage(String),
+    /// Plan 224 D9: the runner refused the card (the socket is down, or the
+    /// rect is off the canvas).
+    #[error("Videorc Cloud did not take the card: {0}")]
+    CloudRefused(String),
 }
 
 impl CommentHighlightError {
@@ -235,6 +239,7 @@ impl CommentHighlightError {
             Self::IneligibleMessage => "comments-highlight-ineligible-message",
             Self::UnsupportedOutput => "highlight-unavailable",
             Self::InvalidImage(_) => "comments-highlight-invalid",
+            Self::CloudRefused(_) => "comments-highlight-cloud-refused",
         }
     }
 }
@@ -373,6 +378,21 @@ async fn set_comment_highlight_with_ttl(
         .vertical_png_base64
         .take()
         .filter(|value| !value.trim().is_empty());
+    // Plan 224 D9 (C-G7): in a talk show on air the desktop composes nothing
+    // for the stream; the PNG and its rect go to the runner's `card` slot
+    // with the same ten-second life, and the state keeps its shape so the
+    // renderer's "On stream" reads as today.
+    if let Some(show_id) = crate::cloud_talk_show_live_show_id(state) {
+        return set_talk_show_highlight(
+            state,
+            &show_id,
+            params,
+            png_base64,
+            vertical_png_base64,
+            ttl,
+        )
+        .await;
+    }
     #[cfg(test)]
     let preparation_blocker = params.preparation_blocker.take();
     #[cfg(test)]
@@ -461,6 +481,114 @@ async fn set_comment_highlight_with_ttl(
     drop(_commit);
     drop(recording);
 
+    schedule_expiry(state.clone(), generation, ttl);
+    Ok(snapshot)
+}
+
+/// The card's rect when the renderer sent none: the bottom-left corner's
+/// default, normalized (the runner fits the PNG inside, centred).
+const TALK_SHOW_CARD_DEFAULT_RECT: crate::cloud_talk::CloudOverlayRect =
+    crate::cloud_talk::CloudOverlayRect {
+        x: 0.04,
+        y: 0.60,
+        w: 0.44,
+        h: 0.36,
+    };
+
+fn talk_show_overlay_rect(rect: Option<OverlayRect>) -> crate::cloud_talk::CloudOverlayRect {
+    rect.map(|rect| crate::cloud_talk::CloudOverlayRect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    })
+    .filter(crate::cloud_talk::CloudOverlayRect::is_valid)
+    .unwrap_or(TALK_SHOW_CARD_DEFAULT_RECT)
+}
+
+/// Plan 224 D9: the card on a talk show. Eligibility is the show's (its id
+/// is the chat's session; the message must be the show's and eligible), the
+/// PNGs go to the runner per orientation, and the state is installed with
+/// the same generation and expiry as the compositor path.
+async fn set_talk_show_highlight(
+    state: &AppState,
+    show_id: &str,
+    params: SetCommentHighlightParams,
+    png_base64: String,
+    vertical_png_base64: Option<String>,
+    ttl: Duration,
+) -> Result<CommentHighlightState, CommentHighlightError> {
+    use crate::cloud_talk::{CloudOverlayOrientation, CloudOverlaySlot};
+    if params.session_id != show_id {
+        return Err(CommentHighlightError::WrongSession);
+    }
+    let message = state
+        .live_chat
+        .lock()
+        .await
+        .highlight_message_eligibility(&params.session_id, &params.message_id);
+    match message {
+        HighlightMessageEligibility::Eligible => {}
+        HighlightMessageEligibility::WrongSession => {
+            return Err(CommentHighlightError::WrongSession);
+        }
+        HighlightMessageEligibility::Missing => {
+            return Err(CommentHighlightError::MessageNotFound);
+        }
+        HighlightMessageEligibility::Ineligible => {
+            return Err(CommentHighlightError::IneligibleMessage);
+        }
+    }
+    let Some(context) = crate::cloud_context(state) else {
+        return Err(CommentHighlightError::UnsupportedOutput);
+    };
+    let ttl_seconds = Some(ttl.as_secs().max(1));
+    context
+        .set_overlay(
+            CloudOverlaySlot::Card,
+            CloudOverlayOrientation::H,
+            &png_base64,
+            talk_show_overlay_rect(params.rect),
+            ttl_seconds,
+        )
+        .await
+        .map_err(CommentHighlightError::CloudRefused)?;
+    if let Some(vertical) = vertical_png_base64.as_deref()
+        && let Err(problem) = context
+            .set_overlay(
+                CloudOverlaySlot::Card,
+                CloudOverlayOrientation::V,
+                vertical,
+                talk_show_overlay_rect(params.vertical_rect),
+                ttl_seconds,
+            )
+            .await
+    {
+        tracing::warn!("The vertical card did not reach Videorc Cloud: {problem}");
+    }
+    let _commit = state.comment_highlight_commit.lock().await;
+    let mut highlight = state.comment_highlight.lock().await;
+    let generation = next_generation(highlight.generation);
+    let expires_at =
+        Utc::now() + ChronoDuration::from_std(ttl).unwrap_or_else(|_| ChronoDuration::seconds(10));
+    *highlight = CommentHighlightState {
+        session_id: Some(params.session_id),
+        message_id: Some(params.message_id),
+        generation,
+        phase: CommentHighlightPhase::Live,
+        expires_at: Some(expires_at.to_rfc3339()),
+        reason: None,
+    };
+    let snapshot = highlight.clone();
+    emit_state(state, &snapshot);
+    tracing::info!(
+        show = show_id,
+        generation,
+        vertical_card = vertical_png_base64.is_some(),
+        "comment highlight on the talk show's stream"
+    );
+    drop(highlight);
+    drop(_commit);
     schedule_expiry(state.clone(), generation, ttl);
     Ok(snapshot)
 }
@@ -592,6 +720,23 @@ async fn clear_internal_under_commit_fence(
 fn clear_highlight_overlays(state: &AppState) {
     crate::captions::clear_caption_overlay(&state.highlight_overlay);
     crate::captions::clear_caption_overlay(&state.simulcast_highlight_overlay);
+    // Plan 224 D9: the runner's card goes too (its TTL would clear it; a
+    // click or an expiry clears it now). Off the locks: best effort.
+    if crate::cloud_talk_show_live_show_id(state).is_some()
+        && let Some(context) = crate::cloud_context(state)
+    {
+        tokio::spawn(async move {
+            use crate::cloud_talk::{CloudOverlayOrientation, CloudOverlaySlot};
+            for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+                if let Err(problem) = context
+                    .clear_overlay(CloudOverlaySlot::Card, orientation)
+                    .await
+                {
+                    tracing::debug!("The card clear did not reach Videorc Cloud: {problem}");
+                }
+            }
+        });
+    }
 }
 
 /// Explicit user action: clear whichever comment is currently on stream.
@@ -715,6 +860,7 @@ pub(crate) mod tests {
             reply: None,
             first_message: false,
             first_in_session: false,
+            arrival: None,
             author_handle: None,
             author_affiliation: None,
             author_verified: None,
@@ -1101,6 +1247,83 @@ pub(crate) mod tests {
                 "vertical_canvas={vertical_canvas:?}"
             );
             state.recording.lock().await.take();
+        }
+    }
+
+    /// Plan 224 C-G7 (review L9, the overlay forks): in a talk show on air
+    /// the card goes to the runner's `card` slot, horizontal then vertical,
+    /// with its rect (the default when none) and the ten-second life; the
+    /// compositor never draws it; only the show's own chat may be shown; a
+    /// clear takes it off both of the runner's outputs.
+    #[tokio::test]
+    async fn a_talk_show_on_air_sends_the_card_to_the_runner_and_never_composes_it() {
+        let state = test_state();
+        let mut runner =
+            crate::cloud_talk::open_talk_show_for_tests(&state.cloud_show, "session-1", true);
+        {
+            let mut chat = state.live_chat.lock().await;
+            chat.start_session("session-1".to_string(), Vec::new());
+            chat.ingest(message(LiveChatEventType::Message, false));
+        }
+        let mut request = params();
+        request.vertical_png_base64 = Some(TEST_PNG.to_string());
+        request.rect = Some(OverlayRect {
+            x: 0.1,
+            y: 0.5,
+            w: 0.4,
+            h: 0.3,
+        });
+        let answer = async {
+            let mut frames = Vec::new();
+            for _ in 0..2 {
+                let intent = runner.recv().await.expect("an overlay intent");
+                frames.push(intent.answer_for_tests(None));
+            }
+            frames
+        };
+        let (status, frames) = tokio::join!(set_comment_highlight(&state, request), answer);
+        assert_eq!(status.unwrap().phase, CommentHighlightPhase::Live);
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.set");
+            assert_eq!(frame["slot"], "card");
+            assert_eq!(frame["orientation"], orientation);
+            assert_eq!(frame["ttlSeconds"], 10);
+            assert_eq!(frame["pngBase64"], TEST_PNG);
+        }
+        assert_eq!(
+            frames[0]["rect"],
+            serde_json::json!({ "x": 0.1, "y": 0.5, "w": 0.4, "h": 0.3 })
+        );
+        assert_eq!(
+            frames[1]["rect"],
+            serde_json::json!({ "x": 0.04, "y": 0.6, "w": 0.44, "h": 0.36 }),
+            "no vertical rect: the default card place"
+        );
+        assert!(
+            crate::captions::current_caption_overlay(&state.highlight_overlay).is_none(),
+            "the desktop composes nothing for a talk show's stream"
+        );
+        assert!(
+            crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay).is_none()
+        );
+
+        let mut other = params();
+        other.session_id = "session-2".to_string();
+        assert!(matches!(
+            set_comment_highlight(&state, other).await,
+            Err(CommentHighlightError::WrongSession)
+        ));
+
+        clear_comment_highlight(&state).await;
+        for orientation in ["h", "v"] {
+            let frame = runner
+                .recv()
+                .await
+                .expect("an overlay clear")
+                .answer_for_tests(None);
+            assert_eq!(frame["kind"], "overlay.clear");
+            assert_eq!(frame["slot"], "card");
+            assert_eq!(frame["orientation"], orientation);
         }
     }
 

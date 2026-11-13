@@ -123,6 +123,8 @@ import {
 } from '@/lib/scene-transform-commit'
 import {
   createContext,
+  lazy,
+  Suspense,
   useCallback,
   useContext,
   useEffect,
@@ -165,6 +167,15 @@ import {
   replayStartWaitsForScreen
 } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
+import { CLOUD_TOAST_ID } from '@/lib/cloud-toast-id'
+import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
+import type { TalkShowRoomControllerDeps } from '@/hooks/use-talk-show-room'
+import {
+  talkShowLiveStartedAt as talkShowLiveStartedAtFrom,
+  talkShowStartBlockedReason,
+  startTalkShowLivestream,
+  talkShowSessionView
+} from '@/lib/talk-show-session'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
 
@@ -434,10 +445,14 @@ import type {
   CohostSettingsPatch,
   CohostState,
   CohostWindowState,
+  CloudSettingsPatch,
+  CloudStatus,
+  CloudTestOutput,
   BuddyOverlaySnapshot,
   CommentHighlightAnchor,
   CommentHighlightCanvases,
   CommentHighlightCommand,
+  CohostUtteranceMilestone,
   CommentHighlightState,
   CommentsClearCommand,
   CommentsSendCommand,
@@ -582,6 +597,7 @@ import {
   normalizeCommentHighlightAnchor,
   offCohostState
 } from '@/lib/backend'
+import type { WatchdogAlert, WatchdogAlertFix, WatchdogAlertsView } from '@/lib/backend'
 import { backendAudioLevels } from '@/lib/backend-audio-levels'
 import { soundboard } from '@/lib/soundboard-store'
 import {
@@ -669,7 +685,8 @@ import {
   sessionStartFailedTitle,
   sessionStartFailureMessage,
   sessionStartFailureToastOptions,
-  type SessionStartFailure
+  type SessionStartFailure,
+  type SessionStartFailureKind
 } from '@/lib/session-start-failure'
 import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
@@ -778,6 +795,14 @@ function loadCaptionOverlay() {
 
 // Chat on stream (plan 215 G): the box's driver and painter, lazy, loaded the
 // first time a chat switch is on while live.
+/** Plan 222 U1, U5: the cloud's rarer notices load when one is due. */
+const loadCloudNotices = () => import('@/lib/cloud-notices')
+// The cloud's toast copy loads with the first cloud status (plan 184); the
+// eager provider keeps only the toast id.
+const loadCloudToasts = () => import('@/lib/cloud-toasts')
+// Plan 224 C-G4: the room controller mounts lazily under the provider.
+const TalkShowRoomHost = lazy(() => import('@/components/studio/talk-show-room-host'))
+
 async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlayDriver> {
   const [{ createChatOverlayDriver }, { renderChatOverlayCards }] = await Promise.all([
     import('@/lib/chat-overlay'),
@@ -1903,7 +1928,18 @@ interface StudioDiagnosticsContextValue {
   streamHealth: StreamHealth | null
   previewSurfaceStatus: PreviewSurfaceStatus
   retryCaptureRecovery: () => Promise<void>
+  /** The stream watchdog's open alerts (plan 223): the backend's list, as sent. */
+  watchdogAlerts: WatchdogAlert[]
+  /** A card's buttons: the fix, Got it, Snooze (plan 223 A5). */
+  watchdogAct: (action: WatchdogAction) => void
+  /** The backend socket, for the Livestream page's Watchdog section (its own RPCs, lazily). */
+  client: BackendClient | null
 }
+
+export type WatchdogAction =
+  | { kind: 'fix'; alert: WatchdogAlert; fix: WatchdogAlertFix }
+  | { kind: 'acknowledge'; alert: WatchdogAlert }
+  | { kind: 'snooze'; alert: WatchdogAlert; scope: 'ten-minutes' | 'stream' }
 
 interface StudioChatContextValue {
   liveChatSnapshot: LiveChatSnapshot
@@ -1990,6 +2026,53 @@ const StudioBannersContext = createContext<StudioBannersContextValue | null>(nul
 // Captions page and its preview subscribe.
 const StudioCaptionsContext = createContext<StudioCaptionsContextValue | null>(null)
 
+/**
+ * Videorc Cloud (plan 184): the backend's whole `CloudStatus`, plus the three
+ * things the renderer can ask of it. Its own context because the status
+ * changes every couple of seconds during a cloud show, and nothing else
+ * should re-render for it.
+ */
+export interface StudioCloudContextValue {
+  /** Null until the backend answers (an older backend never does). */
+  cloudStatus: CloudStatus | null
+  setCloudSettings: (patch: CloudSettingsPatch) => Promise<void>
+  refreshCloudAllowance: () => Promise<void>
+  endCloudShow: () => Promise<void>
+  /**
+   * The Resume notice (plan 184 C5b): feed the show that is live again. No
+   * dialog, no preflight, no metadata update and nothing set up on a
+   * platform; the runner keeps the legs it holds. Resolves like a start.
+   */
+  resumeCloudShow: () => Promise<boolean>
+  /**
+   * Test cloud (plan 184 C6b): 10 seconds of test video to a runner, with no
+   * platforms. The backend runs it on its own and reports through
+   * `cloud.state` (`CloudStatus.test`); this only starts it.
+   */
+  runCloudTest: (outputs: CloudTestOutput[]) => Promise<void>
+  /**
+   * Plan 224: the talk show's room from the renderer's side (C-G4): the
+   * LiveKit connection and its tracks, and every move the Guests tab and the
+   * Show stage make. Idle outside a room.
+   */
+  talkShow: TalkShowContextValue
+}
+
+const NO_CLOUD: StudioCloudContextValue = {
+  cloudStatus: null,
+  setCloudSettings: async () => {},
+  refreshCloudAllowance: async () => {},
+  endCloudShow: async () => {},
+  resumeCloudShow: async () => false,
+  runCloudTest: async () => {},
+  talkShow: NO_TALK_SHOW
+}
+
+/** Which start RPC a session start sends (plan 184 C5b). */
+type SessionStartRpc = 'session.start' | 'cloud.show.resume'
+
+const StudioCloudContext = createContext<StudioCloudContextValue | null>(null)
+
 interface StudioShellContextValue {
   wsStatus: WsStatus
   backendConnected: boolean
@@ -1998,6 +2081,8 @@ interface StudioShellContextValue {
   entitlementTier: EntitlementsSnapshot['tier'] | null
   /** Chat or Buddy waits on the Videorc sign-in (plan 215 A5): the sidebar's account dot. */
   accountNeedsSignIn: boolean
+  /** Plan 185 T4: `max` names the account Max; absent for every other plan. */
+  entitlementPlan: EntitlementsSnapshot['plan'] | null
   previewWindowOpen: boolean
   togglePreviewWindow: () => Promise<void>
   notesWindowOpen: boolean
@@ -2454,6 +2539,11 @@ export function useStudioDiagnostics(): StudioDiagnosticsContextValue {
   return value
 }
 
+/** Outside a provider (tests, isolated renders) the cloud simply isn't there. */
+export function useStudioCloud(): StudioCloudContextValue {
+  return useContext(StudioCloudContext) ?? NO_CLOUD
+}
+
 export function useStudioRecordingState(): StudioRecordingStateContextValue {
   const value = useContext(StudioRecordingStateContext)
   if (!value) {
@@ -2553,7 +2643,7 @@ export function handleAccountChangedEvent(
     deps.setAccount(event.account)
   }
   if (event.reason === 'session-expired') {
-    showVideorcSignInExpired()
+    void showVideorcSignInExpired()
   }
 }
 
@@ -2577,6 +2667,13 @@ type StudioContextProvidersProps = {
   replay?: ReplayBufferControls
   /** Plan 191. Optional so a test that mounts the providers alone has no caption lines. */
   captions?: StudioCaptionsContextValue
+  cloud?: StudioCloudContextValue
+  /**
+   * Plan 224 C-G4: the room controller's inputs. When given, the lazy
+   * controller runs under the cloud provider and its value replaces
+   * `cloud.talkShow`.
+   */
+  talkShowDeps?: TalkShowRoomControllerDeps
   children?: ReactNode
 }
 
@@ -2606,6 +2703,8 @@ export function StudioContextProviders({
   audio,
   replay = REPLAY_BUFFER_OFF_CONTROLS,
   captions = NO_CAPTION_LINES,
+  cloud,
+  talkShowDeps,
   children
 }: StudioContextProvidersProps): ReactElement {
   return (
@@ -2618,7 +2717,9 @@ export function StudioContextProviders({
                 <StudioAudioContext.Provider value={audio}>
                   <StudioReplayContext.Provider value={replay}>
                     <StudioCaptionsContext.Provider value={captions}>
-                      {children}
+                      <StudioCloudProvider cloud={cloud} talkShowDeps={talkShowDeps}>
+                        {children}
+                      </StudioCloudProvider>
                     </StudioCaptionsContext.Provider>
                   </StudioReplayContext.Provider>
                 </StudioAudioContext.Provider>
@@ -2628,6 +2729,41 @@ export function StudioContextProviders({
         </StudioRecordingContext.Provider>
       </StudioRecordingStateContext.Provider>
     </StudioContext.Provider>
+  )
+}
+
+/**
+ * The cloud context, with the talk show's room controller mounted lazily
+ * beside it (plan 224 C-G4). The controller's value lives here, below the
+ * Studio provider, so a room snapshot re-renders only the cloud's readers.
+ */
+function StudioCloudProvider({
+  cloud,
+  talkShowDeps,
+  children
+}: {
+  cloud?: StudioCloudContextValue
+  talkShowDeps?: TalkShowRoomControllerDeps
+  children?: ReactNode
+}): ReactElement {
+  const [talkShow, setTalkShow] = useState<TalkShowContextValue>(NO_TALK_SHOW)
+  const value = useMemo(() => {
+    if (!cloud || !talkShowDeps) return cloud ?? null
+    // DEV only: a scripted room (screenshots, probes) stands in for the status.
+    if (import.meta.env.DEV && talkShow.scriptedCloudStatus) {
+      return { ...cloud, cloudStatus: talkShow.scriptedCloudStatus, talkShow }
+    }
+    return { ...cloud, talkShow }
+  }, [cloud, talkShow, talkShowDeps])
+  return (
+    <>
+      {talkShowDeps ? (
+        <Suspense fallback={null}>
+          <TalkShowRoomHost deps={talkShowDeps} onValue={setTalkShow} />
+        </Suspense>
+      ) : null}
+      <StudioCloudContext.Provider value={value}>{children}</StudioCloudContext.Provider>
+    </>
   )
 }
 
@@ -2766,6 +2902,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const performanceCheckHoldRef = useRef(false)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
+  // Plan 223: the watchdog's alerts, drawn here and in the Stream Manager.
+  const [watchdogAlerts, setWatchdogAlerts] = useState<WatchdogAlert[]>([])
+  const watchdogAlertsRef = useRef<WatchdogAlert[]>([])
+  // Ids that left without a recovery (M2), gathered from every event until
+  // the surface drains them with the next list.
+  const watchdogWithdrawnRef = useRef<string[]>([])
+  // Whether the session streams (L5): the surface notifies for a stream,
+  // never for a recording alone.
+  const watchdogLiveRef = useRef(false)
+  // The Studio's action source is built far below (plan 209 S5); a fix
+  // pressed on a card reads it at click time.
+  const studioActionSourceRef = useRef<(() => StudioActionSource | null) | null>(null)
   // Plan 069: the newest system-audio health issue, kept apart from the
   // bounded event list so a long session cannot scroll it away.
   const [systemAudioIssueEvent, setSystemAudioIssueEvent] = useState<{
@@ -3163,7 +3311,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         continue
       }
       chatSetupWarnedRef.current.warned.add(key)
-      showChatNeedsVideorcSignIn(CHAT_PLATFORM_LABELS[warning.platform])
+      void showChatNeedsVideorcSignIn(CHAT_PLATFORM_LABELS[warning.platform])
     }
   }, [liveChatSnapshot, captureConfig.streamEnabled])
   // Live captions: status + transcript driven by captions.* events; the mic
@@ -3611,8 +3759,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       intent: number,
       // `alwaysSet` re-sends the message that is already live instead of reading
       // the repeat as "un-pin": a corner move re-places the card, and a phone
-      // remote 'show' restarts its lifetime.
-      options?: { alwaysSet?: boolean }
+      // remote 'show' restarts its lifetime. `milestone` (plan 225 B6) draws
+      // the milestone card for the row instead of its text.
+      options?: { alwaysSet?: boolean; milestone?: CohostUtteranceMilestone }
     ): Promise<CommentHighlightState | null> => {
       if (!client) throw offlineError()
       const sessionId = expectedSessionId ?? liveChatSnapshot.sessionId
@@ -3648,14 +3797,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           captureConfig.video,
           captureConfig.streamEnabled ? captureConfig.streaming : undefined
         )
+        const avatarSource = options?.milestone?.avatarUrl ?? message.authorAvatarUrl
         const [avatarUrl, canvases] = await Promise.all([
-          message.authorAvatarUrl
-            ? window.videorc?.cacheChatAvatar?.(message.authorAvatarUrl).catch(() => null)
-            : null,
+          avatarSource ? window.videorc?.cacheChatAvatar?.(avatarSource).catch(() => null) : null,
           client.request<CommentHighlightCanvases>('comments.highlight.canvases').catch(() => null)
         ])
         if (commentHighlightIntentRef.current !== intent) return null
-        const { renderCommentHighlightCards } = await loadCaptionOverlay()
+        const { renderCommentHighlightCards, renderMilestoneCards } = await loadCaptionOverlay()
         if (commentHighlightIntentRef.current !== intent) return null
         // The streamer's placement (plan 164): the card wraps to the rect's
         // width on each canvas and the backend blits it inside that rect.
@@ -3663,12 +3811,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const rect =
           highlightLayout[overlayOrientationForCanvas(streamVideo.width, streamVideo.height)]
         const verticalRect = highlightLayout.vertical
-        const cards = await renderCommentHighlightCards(
-          message,
-          avatarUrl ?? null,
-          { ...streamVideo, rect },
-          canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
-        )
+        const cards = options?.milestone
+          ? await renderMilestoneCards(
+              options.milestone,
+              avatarUrl ?? null,
+              cohostSettingsRef.current?.persona.name ?? null,
+              { ...streamVideo, rect },
+              canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
+            )
+          : await renderCommentHighlightCards(
+              message,
+              avatarUrl ?? null,
+              { ...streamVideo, rect },
+              canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
+            )
         if (!cards) throw new Error("Couldn't render this message for the stream.")
         if (commentHighlightIntentRef.current !== intent) return null
         let state: CommentHighlightState
@@ -3793,7 +3949,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
       void (
         message
-          ? applyCommentHighlight(message, command.sessionId, intent)
+          ? applyCommentHighlight(
+              message,
+              command.sessionId,
+              intent,
+              command.milestone ? { milestone: command.milestone } : undefined
+            )
           : Promise.reject(new Error('The selected live message is no longer available.'))
       )
         .then(async (state) => {
@@ -4553,6 +4714,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     latestLayoutTransactionCommitRef.current = null
   }, [client])
+  // Plan 224 C-G5: the lifecycle probe scripts a room open and close with
+  // no LiveKit behind it, to prove the Preview hides and comes back.
+  const [smokeTalkShowRoomOpen, setSmokeTalkShowRoomOpen] = useState(false)
   // Smoke-only: isolated smoke profiles persist no camera selection, so
   // camera-dependent layout presets would always be disabled under gates.
   // DEV-gated like the synthetic-source toggle; driven by the
@@ -4562,6 +4726,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     const smokeWindow = window as Window & {
+      __videorcSmokeSetTalkShowRoomOpen?: (open: boolean) => boolean
       __videorcSmokeSelectFirstCamera?: () => string | null
       __videorcSmokeSelectFirstScreen?: (
         sourceId?: string
@@ -4592,6 +4757,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       setReplayArmedRef.current(armed)
       return true
+    }
+    smokeWindow.__videorcSmokeSetTalkShowRoomOpen = (open: boolean): boolean => {
+      setSmokeTalkShowRoomOpen(open)
+      return open
     }
     smokeWindow.__videorcSmokeSelectFirstCamera = (): string | null => {
       const camera = deviceList.devices.find(
@@ -4756,6 +4925,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     streamingOverride?: StreamingSettings
     suppressCaptionsForSession: boolean
     intent: SessionStartIntent
+    rpc: SessionStartRpc
     promise: Promise<boolean>
   } | null>(null)
   const confirmGoLiveInFlightPromiseRef = useRef<Promise<GoLiveConfirmOutcome> | null>(null)
@@ -5200,7 +5370,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     toast.dismiss(SESSION_START_FAILED_TOAST_ID)
   }, [clearSessionRuntimeState])
   const reportSessionStartFailure = useCallback(
-    (error: unknown, retry: () => void, goLive: boolean) => {
+    (error: unknown, retry: () => void, kind: SessionStartFailureKind) => {
       const message = sessionStartFailureMessage(error)
       setLastError(message)
       sessionStartRetryRef.current = retry
@@ -5214,7 +5384,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       toast.error(
-        sessionStartFailedTitle(goLive),
+        sessionStartFailedTitle(kind),
         sessionStartFailureToastOptions(message, retrySessionStart, () => {
           // The user closed the toast: the Session-panel line goes with it.
           sessionStartRetryRef.current = null
@@ -5297,6 +5467,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [replaceSessionRuntimeNotice]
   )
+
+  // --- Videorc Cloud (plan 184) ----------------------------------------------
+  // The BACKEND owns the show (cloud_show.rs); the renderer renders
+  // `cloud.state` and asks for three things. Toast discipline: a Go Live that
+  // streamed directly says why once (the fallback names its session), a
+  // show the cloud lost while this computer fed it warns once, and so does a
+  // runner restart (its platforms reconnect, or they could not), and so
+  // does the hour before a show's 12-hour cap (D18). Nothing else
+  // here is news: the Livestream page and the Stream health stat show the rest.
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
+  const cloudStatusRef = useRef<CloudStatus | null>(null)
+  const commitCloudStatus = useCallback((next: CloudStatus): void => {
+    const previous = cloudStatusRef.current
+    cloudStatusRef.current = next
+    setCloudStatus(next)
+    void loadCloudToasts().then((words) => {
+      const fallback = words.cloudFallbackToast(previous, next)
+      if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
+      const lost = words.cloudLostToast(previous, next)
+      if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
+      const restarted = words.cloudRestartToast(previous, next)
+      if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
+      const cap = words.cloudShowCapToast(previous, next)
+      if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
+    })
+    // Plan 222 U5: past the month's hours is news, never a cut (D18); the
+    // words load only when a show runs past them.
+    if (next.allowancePast)
+      void loadCloudNotices().then((n) => n.toastCloudAllowancePast(previous, next))
+  }, [])
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
   // The BACKEND owns the engine: the tick scheduler, the open-question set,
@@ -5389,6 +5589,142 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelled = true
     }
   }, [client, commitCohostState, wsStatus])
+
+  // The cloud status once per connection; `cloud.state` keeps it current. An
+  // older backend has no cloud, and the Livestream section simply stays away.
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    let cancelled = false
+    void client
+      .requestTyped('cloud.status')
+      .then((next) => {
+        if (!cancelled) commitCloudStatus(next)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [client, commitCloudStatus, wsStatus])
+
+  // Plan 223: the watchdog's alerts once per connection (a reload mid-stream
+  // must show the open card); `watchdog.alerts` keeps them current. The
+  // toasts, the system notification and the fixes live in a chunk loaded
+  // with the first alert.
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    let cancelled = false
+    void client
+      .requestTyped('watchdog.alerts.list')
+      .then((view) => {
+        if (!cancelled) setWatchdogAlerts(view.alerts)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [client, wsStatus])
+  const watchdogDeps = useCallback(
+    () => ({
+      client,
+      live: () => watchdogLiveRef.current,
+      source: () => studioActionSourceRef.current?.() ?? null,
+      openStudioPanel: (panel: 'assets' | 'layouts') => openWorkspaceTab(panel),
+      openStudio: () => openWorkspaceTab('studio')
+    }),
+    [client]
+  )
+  useEffect(() => {
+    const previous = watchdogAlertsRef.current
+    watchdogAlertsRef.current = watchdogAlerts
+    const withdrawn = watchdogWithdrawnRef.current.splice(0)
+    if (previous.length === 0 && watchdogAlerts.length === 0) return
+    void import('@/lib/watchdog-surface').then((surface) =>
+      surface.onWatchdogAlertsChanged(previous, watchdogAlerts, watchdogDeps(), { withdrawn })
+    )
+  }, [watchdogAlerts, watchdogDeps])
+  const watchdogAct = useCallback(
+    (action: WatchdogAction) => {
+      void import('@/lib/watchdog-surface').then((surface) => {
+        if (action.kind === 'fix')
+          return surface.runWatchdogFix(action.alert, action.fix, watchdogDeps())
+        if (action.kind === 'acknowledge')
+          return surface.acknowledgeWatchdogAlert(client, action.alert.id)
+        return surface.snoozeWatchdogAlert(client, action.alert.id, action.scope)
+      })
+    },
+    [client, watchdogDeps]
+  )
+  // The notification's click, a fix from the Stream Manager and the idle
+  // time for still-there (plan 223 A6, A7), mounted from the lazy chunk.
+  const watchdogLive = sessionIsLive(recording)
+  watchdogLiveRef.current = watchdogLive
+  useEffect(() => {
+    let dispose: (() => void) | null = null
+    let cancelled = false
+    void import('@/lib/watchdog-surface').then((surface) => {
+      if (cancelled) return
+      dispose = surface.mountWatchdogSurface({
+        client,
+        live: watchdogLive,
+        alerts: () => watchdogAlertsRef.current,
+        act: (alert, fix) => watchdogAct({ kind: 'fix', alert, fix })
+      })
+    })
+    return () => {
+      cancelled = true
+      dispose?.()
+    }
+  }, [client, watchdogLive, watchdogAct])
+
+  const setCloudSettings = useCallback(
+    async (patch: CloudSettingsPatch): Promise<void> => {
+      if (!client) return
+      try {
+        commitCloudStatus(await client.requestTyped('cloud.settings.set', patch))
+      } catch (error) {
+        toastUserError(
+          error,
+          { action: 'save', object: 'the Videorc Cloud setting' },
+          { id: CLOUD_TOAST_ID }
+        )
+      }
+    },
+    [client, commitCloudStatus]
+  )
+  const refreshCloudAllowance = useCallback(async (): Promise<void> => {
+    if (!client) return
+    try {
+      commitCloudStatus(await client.requestTyped('cloud.allowance.refresh'))
+    } catch {
+      // The section keeps the hours it last had; signed out says so itself.
+    }
+  }, [client, commitCloudStatus])
+  const endCloudShow = useCallback(async (): Promise<void> => {
+    if (!client) return
+    try {
+      commitCloudStatus(await client.requestTyped('cloud.show.end'))
+    } catch (error) {
+      toastUserError(
+        error,
+        { action: 'end', object: 'the stream on Videorc Cloud' },
+        { id: CLOUD_TOAST_ID }
+      )
+    }
+  }, [client, commitCloudStatus])
+  // The result is never a toast: the Livestream row shows it (C6b). Only a
+  // refusal of the click itself reaches one, as a warning.
+  const runCloudTest = useCallback(
+    async (outputs: CloudTestOutput[]): Promise<void> => {
+      if (!client) return
+      try {
+        commitCloudStatus(await client.requestTyped('cloud.selftest.run', { outputs }))
+      } catch (error) {
+        toastUserError(error, { action: 'test', object: 'Videorc Cloud' }, { id: CLOUD_TOAST_ID })
+      }
+    },
+    [client, commitCloudStatus]
+  )
+  // `cloudValue` is built after the starts below: Resume is one of them.
 
   useEffect(() => {
     if (
@@ -5656,7 +5992,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     )
     if (!message || !commentCanHighlight(message)) return
     const intent = ++commentHighlightIntentRef.current
-    void applyCommentHighlight(message, undefined, intent, { alwaysSet: true })
+    // Plan 225 B6: a milestone welcome's row goes on as the milestone card.
+    const milestone = cohostState?.utterances?.find(
+      (utterance) => utterance.milestone?.messageId === messageId
+    )?.milestone
+    void applyCommentHighlight(message, undefined, intent, { alwaysSet: true, milestone })
       .then((state) => {
         if (state && commentHighlightIntentRef.current === intent) {
           publishCommentHighlightState(state)
@@ -7217,7 +7557,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         {}
       )
       await window.videorc.openOAuthUrl(result.authUrl)
-      showBrowserApproval('Approve X Live in your browser', result.authUrl)
+      await showBrowserApproval('Approve X Live in your browser', result.authUrl)
     } catch (error) {
       reportError(error, { action: 'start', object: 'X Live approval' })
     }
@@ -7614,9 +7954,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let moderation: typeof chatModerationRef.current = null
     let stopCohostCommandRelay: (() => void) | null = null
     let stopBuddyActRelay: (() => void) | null = null
+    let stopCommunityRelay: (() => void) | null = null
     const moderationBacklog: ModerationOperation[] = []
     void import('@/lib/chat-moderation-relay')
-      .then(({ startChatModerationRelay, startCohostCommandRelay, startBuddyActRelay }) => {
+      .then((relays) => {
+        const { startChatModerationRelay, startCohostCommandRelay, startBuddyActRelay } = relays
         if (!generationIsCurrent()) return
         // Plan 140, S6 part B: the Stream Manager's answers to Buddy's cards.
         stopCohostCommandRelay = startCohostCommandRelay({
@@ -7630,6 +7972,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           consent: () => buddyActGateRef.current.consent,
           entitled: () => buddyActGateRef.current.entitled
         })
+        stopCommunityRelay = relays.startCommunityRelay({ client: nextClient })
         moderation = startChatModerationRelay({
           client: nextClient,
           sessionId: () => liveChatSnapshotRef.current.sessionId,
@@ -8217,6 +8560,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (settings.twitchGifs) void window.videorc?.pushChatGifMode?.(settings.twitchGifs)
       }),
       nextClient.on('stream.audience', (payload) => feedDashboard('stream.audience', payload)),
+      nextClient.on('watchdog.alerts', (payload) => {
+        const view = payload as WatchdogAlertsView
+        if (view.withdrawn?.length) watchdogWithdrawnRef.current.push(...view.withdrawn)
+        setWatchdogAlerts(view.alerts)
+        feedDashboard('watchdog.alerts', payload)
+      }),
       nextClient.on('health.event', (payload) => {
         bootstrapGuard.mark('sessions')
         const event = payload as HealthEvent
@@ -8608,6 +8957,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('cohost.state', (payload) => {
         commitCohostState(payload as CohostState)
+      }),
+      nextClient.on('cloud.state', (payload) => {
+        commitCloudStatus(payload)
+        feedDashboard('cloud.state', payload)
       }),
       nextClient.on('cohost.buddy.state', (payload) => {
         setBuddyOverlay(payload as BuddyOverlaySnapshot)
@@ -9270,6 +9623,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       moderation?.dispose()
       stopCohostCommandRelay?.()
       stopBuddyActRelay?.()
+      stopCommunityRelay?.()
       if (chatModerationRef.current === moderation) chatModerationRef.current = null
       moderationBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {
@@ -9357,6 +9711,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     clearLiveChatForTerminalSession,
     publishLiveCommentsSnapshot,
     commitActiveScreen,
+    commitCloudStatus,
     commitCohostState,
     commitCaptureRecoveryStatus,
     commitDiagnosticStatsThrottled,
@@ -12320,6 +12675,55 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void openPreviewWindow()
   }, [closePreviewWindow, firstRunSetupOpen, openPreviewWindow, previewWindow.open])
 
+  // Plan 224 D7 (C-G5): the native Preview shows the backend's program, which
+  // is not the show while the room is open; the Show stage replaces it. The
+  // docked slot and the detached window close when the room opens and come
+  // back when it closes, only if the room closed them (the first-run rule
+  // above; the dock reporter sees one unmount and one mount).
+  const talkShowRoomOpen = cloudStatus?.room?.phase === 'open' || smokeTalkShowRoomOpen
+  const reopenPreviewAfterRoomRef = useRef(false)
+  useEffect(() => {
+    if (talkShowRoomOpen) {
+      if (!previewWindow.open) return
+      reopenPreviewAfterRoomRef.current = true
+      void closePreviewWindow()
+      return
+    }
+    if (!reopenPreviewAfterRoomRef.current) return
+    reopenPreviewAfterRoomRef.current = false
+    void openPreviewWindow()
+  }, [closePreviewWindow, openPreviewWindow, previewWindow.open, talkShowRoomOpen])
+
+  // Plan 224 C-G6: while the room is open, Record and Go Live stay the same
+  // buttons and work through the room. The cloud recording and the runner's
+  // legs project into the recording-state view the transport, the pill and
+  // the clocks already read (`talkShowSessionView`); the start and stop
+  // paths fork below. The on-air start is taken once from the runner's
+  // clock so the transport's clock never jitters with a status tick.
+  const talkShowRoomOpenRef = useRef(false)
+  talkShowRoomOpenRef.current = talkShowRoomOpen
+  const talkShowLive = cloudStatus?.room?.phase === 'open' && cloudStatus.room.live === true
+  const talkShowShowId = cloudStatus?.show?.id ?? null
+  const [talkShowLiveStartedAt, setTalkShowLiveStartedAt] = useState<string | null>(null)
+  useEffect(() => {
+    setTalkShowLiveStartedAt(
+      talkShowLive ? talkShowLiveStartedAtFrom(cloudStatusRef.current, Date.now()) : null
+    )
+  }, [talkShowLive, talkShowShowId])
+  const talkShowSession = useMemo(
+    () => talkShowSessionView(cloudStatus, talkShowLiveStartedAt),
+    [cloudStatus, talkShowLiveStartedAt]
+  )
+  const talkShowSessionRef = useRef(talkShowSession)
+  talkShowSessionRef.current = talkShowSession
+  // The runner's legs are the session's destinations while the room is on
+  // air (the Session inspector's rows); nothing else feeds them in a talk show.
+  const talkShowLegs = cloudStatus?.legs
+  useEffect(() => {
+    if (talkShowLive) setStreamTargets(talkShowLegs ?? [])
+    else if (talkShowRoomOpen) setStreamTargets([])
+  }, [talkShowLegs, talkShowLive, talkShowRoomOpen])
+
   const setPreviewWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     const next = await window.videorc?.setPreviewWindowAlwaysOnTop?.(alwaysOnTop)
     if (next) {
@@ -12951,8 +13355,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // updater): those lock for a recording or a livestream only, and a
   // setting that shapes the ring restarts it instead (below).
   const isSessionActive =
+    sessionOwnsTransport(recording) ||
+    startRequestPending ||
+    stopRequestPending ||
+    talkShowSession !== null
+  const transportSessionActive =
     sessionOwnsTransport(recording) || startRequestPending || stopRequestPending
-  const transportSessionActive = isSessionActive
+
+  // Plan 222 U1: "Videorc Cloud is on", once per account, never during a
+  // session; the backend forgets it for this account once it showed.
+  const cloudAnnounceShownRef = useRef(false)
+  const cloudAnnounceDue = cloudStatus?.announce === true
+  useEffect(() => {
+    if (!client || !cloudAnnounceDue || isSessionActive || cloudAnnounceShownRef.current) return
+    cloudAnnounceShownRef.current = true
+    void loadCloudNotices().then((n) => n.announceCloud(client, commitCloudStatus))
+  }, [client, cloudAnnounceDue, commitCloudStatus, isSessionActive])
   // Plan 215 D1: the Scene page unlocks a source's position and size only
   // once the session says a commit reaches its picture.
   const acceptsLiveSceneEdits = recording.acceptsLiveSceneEdits ?? null
@@ -14146,7 +14564,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // are developer-portal instructions, not something an end user can act
         // on, so the toast stays quiet.
         if (!flow?.showsBrowserStep) {
-          showBrowserApproval('Approve the connection in your browser', result.authUrl)
+          await showBrowserApproval('Approve the connection in your browser', result.authUrl)
         }
         return result.authUrl
       } catch (error) {
@@ -14584,6 +15002,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!intent.record && !intent.stream) {
         return START_BLOCKED_COPY.noOutput
       }
+      // Plan 224 C-G6: in a talk show the runner composes from the room, so
+      // the local scene's sources never block a start; the runner's own
+      // recording problem does (the wire notes' `recording.problem`).
+      if (talkShowRoomOpen) {
+        return talkShowStartBlockedReason(cloudStatus, intent)
+      }
       const config = captureConfigForIntent(captureConfig, intent)
       const turnedOff = sceneSourcesTurnedOff(
         { layout: config.layout, sources: usingVisualSources(config.sources), background: null },
@@ -14663,6 +15087,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       activeSavedSceneId,
       captureConfig,
+      cloudStatus,
+      talkShowRoomOpen,
       currentStreamOutputTopologyRequestKey,
       deviceList.devices,
       entitlements,
@@ -14964,7 +15390,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               }
               await client.request<LiveChatSnapshot>('liveChat.x.start', params)
             } catch (chatError) {
-              showXBroadcastProblem('chat', target, chatError)
+              await showXBroadcastProblem('chat', target, chatError)
             }
           }
         } catch (error) {
@@ -14989,7 +15415,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          showXBroadcastProblem('start', target, error)
+          await showXBroadcastProblem('start', target, error)
         }
       }
       return nextStreaming
@@ -15145,7 +15571,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          showXBroadcastProblem('end', target, error)
+          await showXBroadcastProblem('end', target, error)
         }
       }
       return nextStreaming
@@ -15516,7 +15942,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         streamingOverride?: StreamingSettings,
         preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null,
         intent?: SessionStartIntent,
-        suppressCaptions?: boolean
+        suppressCaptions?: boolean,
+        rpc?: SessionStartRpc
       ) => Promise<boolean>)
     | null
   >(null)
@@ -15529,9 +15956,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       intent: SessionStartIntent = savedModeIntent(captureConfig),
       // A Go Live without the dialog says whether it skips captions (plan
       // 209 S10); every other start reads the session's choice.
-      suppressCaptionsOverride?: boolean
+      suppressCaptionsOverride?: boolean,
+      // Plan 184 C5b: a cloud resume is the same start bound to the live show.
+      // Its destinations are the runner's, so no account is checked and no
+      // broadcast is activated here.
+      rpc: SessionStartRpc = 'session.start'
     ) => {
       const suppressCaptions = suppressCaptionsOverride ?? suppressCaptionsForSession
+      const resumingCloudShow = rpc === 'cloud.show.resume'
       recordLatencyTrackerRef.current.markClick('start', performance.now(), 'session-call')
       const requestSnapshot = {
         captureConfig,
@@ -15540,7 +15972,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         settings,
         streamingOverride,
         suppressCaptionsForSession: suppressCaptions,
-        intent
+        intent,
+        rpc
       }
       const pendingStart = sessionStartInFlightRef.current
       if (pendingStart) {
@@ -15551,6 +15984,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           pendingStart.settings === requestSnapshot.settings &&
           pendingStart.streamingOverride === requestSnapshot.streamingOverride &&
           pendingStart.suppressCaptionsForSession === requestSnapshot.suppressCaptionsForSession &&
+          pendingStart.rpc === requestSnapshot.rpc &&
           sameSessionStartIntent(pendingStart.intent, requestSnapshot.intent)
         if (sameRequest) {
           return pendingStart.promise
@@ -15614,10 +16048,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           setStartRequestPending(true)
           const lifecycleRunId = platformLifecycleRun.current + 1
           platformLifecycleRun.current = lifecycleRunId
-          const enabledOauthTargets =
-            streamingForStart?.targets.filter(
-              (target) => target.enabled && target.authMode === 'oauth'
-            ) ?? []
+          const enabledOauthTargets = resumingCloudShow
+            ? []
+            : (streamingForStart?.targets.filter(
+                (target) => target.enabled && target.authMode === 'oauth'
+              ) ?? [])
           if (enabledOauthTargets.length) {
             const validations = await validatePlatformAccountsForClient(client)
             let unhealthy: StreamTargetSettings | null = null
@@ -15656,6 +16091,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                   `Reconnect ${unhealthy.label} in Livestream → Setup, then go live.`
               )
             }
+          }
+          // Plan 224 C-G6: Go Live in a talk show. The platforms' setup ran
+          // as today (the preflight, the YouTube broadcast); the destinations
+          // go to the runner over the socket this computer already holds,
+          // and no local session, leg or file starts. The YouTube and X
+          // activations run against the show id, the way they run against a
+          // session id; Stop completes them the same way.
+          if (talkShowRoomOpenRef.current && streamingForStart) {
+            const talkStreaming = streamingForStart
+            const cloudAfterGoLive = await startTalkShowLivestream(
+              intent.record,
+              cloudStatusRef.current?.recording?.active === true,
+              async () => {
+                commitCloudStatus(await client.requestTyped('cloud.recording.start'))
+              },
+              () => client.requestTyped('cloud.show.goLive', { streaming: talkStreaming })
+            )
+            commitCloudStatus(cloudAfterGoLive)
+            const showId = cloudAfterGoLive.show?.id
+            await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId, showId)
+            streamingForStart = await activatePreparedXBroadcasts(
+              streamingForStart,
+              lifecycleRunId,
+              showId
+            )
+            platformLifecycleOwnerRef.current = {
+              sessionId: showId ?? 'talk-show',
+              streaming: streamingForStart
+            }
+            return true
           }
           const optimisticRecording = isActiveRecordingState(recordingRef.current.state)
             ? recordingRef.current
@@ -15757,7 +16222,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sessionStartLifecycleActiveRef.current = true
           let status: RecordingStatus
           try {
-            status = await client.requestTyped('session.start', {
+            status = await client.requestTyped(rpc, {
               ...nextSessionParams,
               requestedAtMs: takeRecordClickEpochMs('start')
             })
@@ -15850,7 +16315,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (await settleTerminalStart(startResolution)) {
             return false
           }
-          if (streamingForStart) {
+          if (streamingForStart && !resumingCloudShow) {
             startResolution = reconcileLatestStartStatus()
             if (await settleTerminalStart(startResolution)) {
               return false
@@ -15914,10 +16379,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 streamingOverride,
                 preparedOutput,
                 intent,
-                suppressCaptionsOverride
+                suppressCaptionsOverride,
+                rpc
               )
             },
-            Boolean(streamingOverride)
+            resumingCloudShow ? 'resume' : streamingOverride ? 'live' : 'record'
           )
           if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
             applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
@@ -15950,6 +16416,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       takeRecordClickEpochMs,
       activatePreparedYouTubeBroadcasts,
+      commitCloudStatus,
+      setDeviceList,
       activatePreparedXBroadcasts,
       applyRecordingStatus,
       captureConfig,
@@ -16435,7 +16903,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             () => {
               void openGoLiveConfirmationRef.current?.(intent)
             },
-            true
+            'live'
           )
         } finally {
           setGoLiveConfirmationPending(false)
@@ -16490,9 +16958,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         refuseStart(blockedReason, intent)
         return false
       }
+      // Plan 224 D10 (C-G6): Record while the room is open records in the
+      // cloud; no local session starts (the backend refuses one anyway).
+      if (talkShowRoomOpenRef.current) {
+        if (!client) return false
+        try {
+          setStartRequestPending(true)
+          commitCloudStatus(await client.requestTyped('cloud.recording.start'))
+          return true
+        } catch (error) {
+          toastUserError(
+            error,
+            { action: 'start', object: 'the cloud recording' },
+            { id: CLOUD_TOAST_ID }
+          )
+          return false
+        } finally {
+          setStartRequestPending(false)
+        }
+      }
       return runStartSession(undefined, undefined, intent)
     },
     [
+      client,
+      commitCloudStatus,
       goLiveConfirmationOpen,
       goLiveConfirmationPending,
       openGoLiveConfirmation,
@@ -16518,6 +17007,127 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const startLivestream = useCallback(
     () => startWithIntent(livestreamIntent(captureConfig.recordEnabled)),
     [captureConfig.recordEnabled, startWithIntent]
+  )
+  // Plan 184 C5b: the Resume notice. The show is live on Videorc Cloud and the
+  // runner holds every platform leg, so nothing is set up again: no dialog,
+  // no preflight, no metadata update, no broadcast (a new YouTube broadcast
+  // here split the live one and its VOD). The saved destinations go along as
+  // rows only; the backend binds the start to the show (`cloud.show.resume`)
+  // and feeds its ingest. Same guards as Go Live: busy, or blocked for a reason.
+  const resumeCloudShow = useCallback(async (): Promise<boolean> => {
+    if (
+      goLiveConfirmationOpen ||
+      shouldIgnoreGoLiveAction({
+        goLiveConfirmationPending:
+          goLiveConfirmationPending ||
+          openGoLiveConfirmationInFlightRef.current !== null ||
+          confirmGoLiveInFlightPromiseRef.current !== null,
+        startRequestPending: startRequestPending || sessionStartInFlightRef.current !== null
+      })
+    ) {
+      return false
+    }
+    const intent = livestreamIntent(captureConfig.recordEnabled)
+    const blockedReason = startBlockedReasonFor(intent)
+    if (blockedReason) {
+      refuseStart(blockedReason, intent)
+      return false
+    }
+    return runStartSession(
+      captureConfig.streaming,
+      undefined,
+      intent,
+      undefined,
+      'cloud.show.resume'
+    )
+  }, [
+    captureConfig.recordEnabled,
+    captureConfig.streaming,
+    goLiveConfirmationOpen,
+    goLiveConfirmationPending,
+    refuseStart,
+    runStartSession,
+    startBlockedReasonFor,
+    startRequestPending
+  ])
+  // Plan 224 C-G4: the room from the renderer's side. The camera comes back
+  // through the same path the Studio starts it with, once the backend
+  // returned it (D6).
+  const talkShowOutputs = useCallback((): CloudTestOutput[] => {
+    const video = streamOutputVideoSettings(
+      captureConfigRef.current.video,
+      captureConfigRef.current.streamEnabled ? captureConfigRef.current.streaming : undefined
+    )
+    return [
+      {
+        orientation: 'horizontal',
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        videoKbps: video.bitrateKbps
+      }
+    ]
+  }, [])
+  const talkShowHostShape = useCallback(
+    (): 'rounded' | 'circle' =>
+      captureConfigRef.current.layout.cameraShape === 'circle' ? 'circle' : 'rounded',
+    []
+  )
+  const talkShowCameraReturned = useCallback(() => {
+    nativePreviewCameraKeyRef.current = null
+    void ensureNativePreviewCamera()
+  }, [ensureNativePreviewCamera])
+  const talkShowError = useCallback((error: unknown, action: string) => {
+    toastUserError(error, { action, object: 'the room' }, { id: CLOUD_TOAST_ID })
+  }, [])
+  const talkShowCameraId = captureConfig.sources.cameraId ?? null
+  const talkShowMicrophoneId = captureConfig.sources.microphoneId ?? null
+  const talkShowDeps = useMemo<TalkShowRoomControllerDeps>(
+    () => ({
+      client,
+      cloudStatus,
+      commitCloudStatus,
+      cameraId: talkShowCameraId,
+      microphoneId: talkShowMicrophoneId,
+      devices: deviceList.devices,
+      outputs: talkShowOutputs,
+      hostShape: talkShowHostShape,
+      onCameraReturned: talkShowCameraReturned,
+      onError: talkShowError,
+      previewReplacedOverride: smokeTalkShowRoomOpen
+    }),
+    [
+      client,
+      cloudStatus,
+      commitCloudStatus,
+      deviceList.devices,
+      smokeTalkShowRoomOpen,
+      talkShowCameraId,
+      talkShowCameraReturned,
+      talkShowError,
+      talkShowHostShape,
+      talkShowMicrophoneId,
+      talkShowOutputs
+    ]
+  )
+  const cloudValue = useMemo<StudioCloudContextValue>(
+    () => ({
+      cloudStatus,
+      endCloudShow,
+      refreshCloudAllowance,
+      resumeCloudShow,
+      runCloudTest,
+      setCloudSettings,
+      talkShow: NO_TALK_SHOW
+    }),
+    [
+      cloudStatus,
+      endCloudShow,
+      refreshCloudAllowance,
+      resumeCloudShow,
+      runCloudTest,
+      setCloudSettings
+    ]
   )
 
   const cancelGoLiveConfirmation = useCallback(() => {
@@ -16687,7 +17297,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               () => {
                 void confirmGoLiveRef.current?.()
               },
-              true
+              'live'
             )
           }
           return { kind: 'failed', error }
@@ -16797,6 +17407,42 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         recordLatencyTrackerRef.current.markClick('stop', performance.now(), 'session-call')
         const stopRequestedAtMs = takeRecordClickEpochMs('stop')
         liveAudioProcessingSyncRef.current?.queue.stop()
+        // Plan 224 D17 (C-G6): in a talk show, End livestream completes the
+        // platforms' broadcasts as today and ends the runner's legs; the
+        // room and the cloud recording stay. Stop recording stops the cloud
+        // recording. Neither touches a local session: there is none.
+        const talkSession = talkShowSessionRef.current
+        if (talkSession) {
+          if (talkSession.streamUrl) {
+            const owner = platformLifecycleOwnerRef.current
+            if (owner) {
+              platformLifecycleOwnerRef.current = null
+              await completePreparedPlatformBroadcasts(owner.streaming, owner.sessionId)
+            }
+            try {
+              commitCloudStatus(await client.requestTyped('cloud.show.legs.end'))
+              return true
+            } catch (error) {
+              toastUserError(
+                error,
+                { action: 'end', object: 'the livestream' },
+                { id: CLOUD_TOAST_ID }
+              )
+              return false
+            }
+          }
+          try {
+            commitCloudStatus(await client.requestTyped('cloud.recording.stop'))
+            return true
+          } catch (error) {
+            toastUserError(
+              error,
+              { action: 'stop', object: 'the cloud recording' },
+              { id: CLOUD_TOAST_ID }
+            )
+            return false
+          }
+        }
         const pendingStart = sessionStartInFlightRef.current
         const currentSessionId = recordingRef.current.sessionId
         const currentOwner = currentSessionId
@@ -16884,6 +17530,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [
     takeRecordClickEpochMs,
     applyRecordingStatus,
+    commitCloudStatus,
     claimPlatformLifecycleOwner,
     clearLiveChatForTerminalSession,
     client,
@@ -16904,7 +17551,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const requestStopSession = useCallback(
     (origin: SessionStopOrigin): Promise<boolean> => {
       const now = Date.now()
-      const status = recordingRef.current
+      const status = talkShowSessionRef.current ?? recordingRef.current
       const decision = stopDecision({
         origin,
         live: sessionIsLive(status),
@@ -18123,7 +18770,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const canStart = !startBlockedReason
   const canStop =
     wsStatus === 'connected' &&
-    ['recording', 'streaming', 'starting', 'stopping'].includes(recording.state) &&
+    ['recording', 'streaming', 'starting', 'stopping'].includes(
+      talkShowSession?.state ?? recording.state
+    ) &&
     !stopRequestPending
   // Plan 174 S3.1 (B-9): the reason behind a disabled transport button, the
   // record one first. It shows whether or not an error is on screen: the
@@ -18497,6 +19146,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       noteRecordClick
     }
 
+  studioActionSourceRef.current = studioActionSource
+
   // An effect event: stable identity for the one-time client subscription,
   // latest closure inside.
   const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
@@ -18846,6 +19497,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       runtimeInfo,
       entitlementTier: entitlements?.tier ?? null,
       accountNeedsSignIn,
+      entitlementPlan: entitlements?.plan ?? null,
       previewWindowOpen: previewWindow.open,
       togglePreviewWindow,
       notesWindowOpen: notesWindow.open,
@@ -18878,6 +19530,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       commentsWindow.open,
       confirmStopSession,
       connection,
+      entitlements?.plan,
       entitlements?.tier,
       notesWindow.open,
       openCommentsWindow,
@@ -18905,7 +19558,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recentStreamDrops: recentDrops,
       recordLatency,
       retryCaptureRecovery,
-      streamHealth
+      streamHealth,
+      watchdogAlerts,
+      watchdogAct,
+      client
     }),
     [
       captureRecoveryRetryPending,
@@ -18917,7 +19573,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recentDrops,
       recordLatency,
       retryCaptureRecovery,
-      streamHealth
+      streamHealth,
+      watchdogAlerts,
+      watchdogAct,
+      client
     ]
   )
   const chatNewCount = useChatNewCount(
@@ -18975,24 +19634,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   ])
   const recordingStateValue = useMemo<StudioRecordingStateContextValue>(
     () => ({
-      recording: {
-        state: recording.state,
-        sessionId: recording.sessionId,
-        streamUrl: recording.streamUrl,
-        startedAt: recording.startedAt,
-        // Plan 181: the shell keeps Record and Go Live on a buffer-only session.
-        ...(recording.replayOnly ? { replayOnly: true } : {})
-      }
+      // Plan 224 C-G6: the room's recording or on-air state, when it has one.
+      recording: talkShowSession
+        ? {
+            state: talkShowSession.state,
+            sessionId: talkShowSession.sessionId,
+            streamUrl: talkShowSession.streamUrl,
+            startedAt: talkShowSession.startedAt
+          }
+        : {
+            state: recording.state,
+            sessionId: recording.sessionId,
+            streamUrl: recording.streamUrl,
+            startedAt: recording.startedAt,
+            // Plan 181: the shell keeps Record and Go Live on a buffer-only session.
+            ...(recording.replayOnly ? { replayOnly: true } : {})
+          }
     }),
     [
       recording.replayOnly,
       recording.sessionId,
       recording.startedAt,
       recording.state,
-      recording.streamUrl
+      recording.streamUrl,
+      talkShowSession
     ]
   )
-  const recordingValue = useMemo<StudioRecordingContextValue>(() => ({ recording }), [recording])
+  const recordingValue = useMemo<StudioRecordingContextValue>(
+    () => ({ recording: talkShowSession ? { ...recording, ...talkShowSession } : recording }),
+    [recording, talkShowSession]
+  )
   const previewValue = useMemo<StudioPreviewContextValue>(
     () => ({
       previewLiveStatus,
@@ -19602,7 +20273,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             audio={audioValue}
             captions={captionsValue}
             chat={chatValue}
+            cloud={cloudValue}
             core={value}
+            talkShowDeps={talkShowDeps}
             diagnostics={diagnosticsValue}
             preview={previewValue}
             recording={recordingValue}

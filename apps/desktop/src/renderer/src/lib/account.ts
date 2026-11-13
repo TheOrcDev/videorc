@@ -1,4 +1,4 @@
-import type { EntitlementTier, VideorcAccountSnapshot } from './backend'
+import type { EntitlementPlan, EntitlementTier, VideorcAccountSnapshot } from './backend'
 
 // The Videorc PRODUCT account — not a YouTube/Twitch/X platform account. Real
 // desktop web auth + token storage are out of scope for the first UI slice, so
@@ -51,11 +51,15 @@ export function accountDisplayName(account: VideorcAccount): string {
 }
 
 // Local entitlement tier shown as metadata. It reflects the device's plan, not
-// sign-in state, so it is safe to show while signed out.
-export function entitlementTierLabel(tier: EntitlementTier | null | undefined): string {
+// sign-in state, so it is safe to show while signed out. Max is Premium plus a
+// plan (plan 185 D2): the tier stays `premium` and the plan names it.
+export function entitlementTierLabel(
+  tier: EntitlementTier | null | undefined,
+  plan?: EntitlementPlan | null
+): string {
   switch (tier) {
     case 'premium':
-      return 'Premium'
+      return plan === 'max' ? 'Max' : 'Premium'
     case 'developer':
       return 'Developer'
     case 'basic':

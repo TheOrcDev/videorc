@@ -232,7 +232,11 @@ for (const script of scripts) {
       ['preparation', 'app']
     )
     assert.deepEqual(result.trace[0].args, ['build', '-p', 'videorc-backend'])
-    assert.equal(result.timers[0].delay, 20 * 60 * 1000)
+    // The launcher's default: 45 min on Linux (a cold rebuild), 20 elsewhere.
+    assert.equal(
+      result.timers[0].delay,
+      process.platform === 'linux' ? 45 * 60 * 1000 : 20 * 60 * 1000
+    )
     assert.equal(result.timers.find((timer) => timer.delay === 90_000).delay, 90_000)
     assert.equal(result.timers.find((timer) => timer.delay === 90_000).at, result.trace[1].at)
     assert.equal(result.backendConnections, 1)

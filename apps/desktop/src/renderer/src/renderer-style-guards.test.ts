@@ -42,6 +42,7 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/components/tabs/layout-tab.tsx',
   // A QR code must stay black on white for scanners.
   'src/components/phone-remote-section.tsx',
+  'src/components/streaming/watchdog-section.tsx',
   // The recording-invisibility smoke marker is loud red on purpose.
   'src/components/notes-window.tsx',
   // shadcn chart: selectors that MATCH Recharts' own default strokes

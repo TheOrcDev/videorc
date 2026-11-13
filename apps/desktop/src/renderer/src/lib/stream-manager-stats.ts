@@ -1,3 +1,5 @@
+import { topWatchdogAlert } from './watchdog-rank'
+import type { WatchdogAlert } from '@/lib/backend'
 import type {
   AudienceSnapshot,
   CommentsHistoryStats,
@@ -46,6 +48,8 @@ export interface StatItemModel {
   tone: StatTone
   /** Session only. */
   badge?: SessionBadge
+  /** Session only (plan 223 A6): the top open watchdog alert, for the chip beside ON AIR. */
+  alert?: WatchdogAlert
   /** Sparkline points, oldest first. */
   spark?: number[]
   details: StatDetailRow[]
@@ -144,14 +148,18 @@ function sessionItem(input: StatsInput): StatItemModel {
   if (session && session.state !== 'off-air' && session.startedAt) {
     const clock = formatClock(input.nowMs - Date.parse(session.startedAt))
     const live = session.state === 'live'
+    const alert = topWatchdogAlert(input.dashboard?.alerts ?? []) ?? undefined
     return {
       id: 'session',
       label: 'Session',
       value: clock,
-      tone: 'neutral',
+      tone: alert ? (alert.severity === 'critical' ? 'error' : 'warning') : 'neutral',
       badge: live ? 'live' : 'recording',
+      ...(alert ? { alert } : {}),
       details: [{ label: 'Started', value: timeOfDay(session.startedAt) }],
-      description: `${live ? 'On air' : 'Recording'} for ${clock}`
+      description: alert
+        ? `${live ? 'On air' : 'Recording'} for ${clock}. ${alert.title}`
+        : `${live ? 'On air' : 'Recording'} for ${clock}`
     }
   }
   return {

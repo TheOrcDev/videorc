@@ -180,6 +180,48 @@ pub(crate) fn sample_frame_store(
     Ok(json!({"frameId":frame.sequence,"width":width,"height":height,"samples":samples}))
 }
 
+/// Plan 223 A7: the mean luma of the store's latest frame over a 64×36
+/// grid (watchdog::luma). On macOS the retained IOSurface-backed BGRA
+/// target is read under CoreVideo's read-only lock, as the oracle above
+/// does; elsewhere the planar Y of the CPU frame. None without a frame.
+pub(crate) fn program_mean_luma(store: &CompositorFrameStore) -> Option<u8> {
+    let frame = store.lock().unwrap_or_else(|p| p.into_inner()).latest()?;
+    let width = frame.width;
+    let height = frame.height;
+    #[cfg(target_os = "macos")]
+    if let Some(target) = &frame.metadata.metal_target {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let buffer = target.pixel_buffer();
+        unsafe {
+            if CVPixelBufferLockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly) != 0 {
+                return None;
+            }
+            let base = CVPixelBufferGetBaseAddress(buffer);
+            let stride = CVPixelBufferGetBytesPerRow(buffer);
+            let luma = if base.is_null() {
+                None
+            } else {
+                crate::watchdog::luma::mean_luma_rgba(
+                    std::slice::from_raw_parts(base.cast::<u8>(), stride * height as usize),
+                    width,
+                    height,
+                    stride,
+                    true,
+                )
+            };
+            CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly);
+            return luma;
+        }
+    }
+    if frame.bytes.is_empty() {
+        return None;
+    }
+    crate::watchdog::luma::mean_luma_y_plane(&frame.bytes, width, height, width as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

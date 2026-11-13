@@ -584,7 +584,7 @@ fn redact_health_event(
     mut event: HealthEvent,
     summary: &mut SupportBundleRedactionSummary,
 ) -> HealthEvent {
-    event.message = redact_message(event.message, summary);
+    event.message = redact_chat_quotes(&event.code, redact_message(event.message, summary));
     event
 }
 
@@ -592,8 +592,22 @@ fn redact_session_log(
     mut entry: SessionLogEntry,
     summary: &mut SupportBundleRedactionSummary,
 ) -> SessionLogEntry {
-    entry.message = redact_message(entry.message, summary);
+    entry.message = redact_chat_quotes(&entry.code, redact_message(entry.message, summary));
     entry
+}
+
+/// Plan 223 L4: a `watchdog-chat-says*` row keeps the count and the class,
+/// never a viewer's words. New rows are written that way; a row from
+/// before the rule, with the card's quotes ("3 people in the last 2
+/// minutes: “no sound??”, …"), is cut at the quotes here.
+pub(crate) fn redact_chat_quotes(code: &str, message: String) -> String {
+    if !code.starts_with("watchdog-chat-says") {
+        return message;
+    }
+    match message.find(": \u{201c}") {
+        Some(index) => format!("{}.", message[..index].trim_end_matches('.')),
+        None => message,
+    }
 }
 
 fn redact_message(message: String, summary: &mut SupportBundleRedactionSummary) -> String {
@@ -761,6 +775,39 @@ fn redact_home_path(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Plan 223 L4: an older chat-says row with the card's quotes loses
+    /// them in the bundle; the count-and-class row and every other code
+    /// pass through.
+    #[test]
+    fn a_chat_says_row_keeps_the_count_and_the_class_only() {
+        assert_eq!(
+            super::redact_chat_quotes(
+                "watchdog-chat-says",
+                "Chat says they can't hear you. 3 people in the last 2 minutes: \u{201c}no sound??\u{201d}, \u{201c}sin audio\u{201d}.".to_string()
+            ),
+            "Chat says they can't hear you. 3 people in the last 2 minutes."
+        );
+        assert_eq!(
+            super::redact_chat_quotes(
+                "watchdog-chat-says-cleared",
+                "Chat has gone quiet about it".to_string()
+            ),
+            "Chat has gone quiet about it"
+        );
+        assert_eq!(
+            super::redact_chat_quotes(
+                "watchdog-chat-says",
+                "Chat says they can't hear you. 3 people in the last 2 minutes (audio)."
+                    .to_string()
+            ),
+            "Chat says they can't hear you. 3 people in the last 2 minutes (audio)."
+        );
+        assert_eq!(
+            super::redact_chat_quotes("ffmpeg-warning", "x: \u{201c}y\u{201d}".to_string()),
+            "x: \u{201c}y\u{201d}"
+        );
+    }
+
     use serde_json::json;
 
     use super::*;

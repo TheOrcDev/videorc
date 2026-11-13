@@ -6,7 +6,8 @@ import type {
   CohostReportQuestion,
   CohostReportQuestions,
   CohostSessionReport,
-  SessionSummary
+  SessionSummary,
+  StreamPlatform as StreamPlatformName
 } from './backend'
 import { dayLabel } from './format'
 import {
@@ -799,5 +800,84 @@ describe('isAutoSessionTitle (plan 150)', () => {
     expect(isAutoSessionTitle('Session 2026-10-02')).toBe(false)
     expect(isAutoSessionTitle('Rust night')).toBe(false)
     expect(isAutoSessionTitle('Session with chat 2026-10-02 14:55')).toBe(false)
+  })
+})
+
+describe('the report Community block (plan 225 D15, E2)', () => {
+  const community = {
+    regularsBack: 12,
+    regulars: [
+      {
+        name: 'Ada',
+        platform: 'twitch' as const,
+        platforms: ['twitch', 'youtube'] as StreamPlatformName[],
+        streams: 14
+      },
+      { name: 'Bo', platform: 'kick' as const, streams: 1 }
+    ],
+    newRegulars: 1,
+    comebacks: 2,
+    firstTimers: 5,
+    firstTimersStayed: 3,
+    milestones: [
+      {
+        name: 'Kim',
+        platform: 'twitch' as const,
+        milestone: { kind: 'streams' as const, value: 10 }
+      }
+    ],
+    linksMade: 1,
+    memoriesLearned: 0,
+    optOuts: 1
+  }
+
+  it('an older report without the block renders as before', () => {
+    const view = buddyReportView({ payload: payload(), session: SESSION, buddyOn: true })
+    expect(view.kind).toBe('report')
+    if (view.kind === 'empty') return
+    expect(view.community).toBeNull()
+  })
+
+  it('shows the stats row, the quiet line and the names', () => {
+    const view = buddyReportView({
+      payload: payload({ report: report({ community }) }),
+      session: SESSION,
+      buddyOn: true
+    })
+    if (view.kind === 'empty') throw new Error('expected a report')
+    expect(view.community?.stats.map((stat) => [stat.label, stat.value, stat.of])).toEqual([
+      ['Regulars back', '12', undefined],
+      ['First-timers stayed 40+ min', '3', '5'],
+      ['Comebacks', '2', undefined],
+      ['Milestones', '1', undefined]
+    ])
+    // Opt-outs are counted, never named.
+    expect(view.community?.line).toBe('1 new regular · 1 link made · 1 opt-out')
+    expect(view.community?.regulars).toEqual([
+      { key: '0-Ada', name: 'Ada', platforms: ['twitch', 'youtube'], streams: '14 streams' },
+      { key: '1-Bo', name: 'Bo', platforms: ['kick'], streams: '1 stream' }
+    ])
+    expect(view.community?.milestones[0]?.label).toBe('10th stream')
+    expect(view.community?.summary).toBeNull()
+  })
+
+  it('a stream Buddy never joined still reads as Buddy-off, with its Community block', () => {
+    const view = buddyReportView({
+      payload: payload({
+        report: report({
+          segments: 0,
+          posts: undefined,
+          said: undefined,
+          commands: undefined,
+          community: { ...community, summary: 'Rust learners came back in force.' }
+        })
+      }),
+      session: SESSION,
+      buddyOn: false
+    })
+    expect(view.kind).toBe('buddy-off')
+    if (view.kind === 'empty') return
+    expect(view.stats).toEqual([])
+    expect(view.community?.summary).toBe('Rust learners came back in force.')
   })
 })

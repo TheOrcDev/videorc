@@ -6,6 +6,8 @@ import {
   type ChatDeliveryMessage
 } from '../../../../shared/chat-delivery'
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -15,6 +17,15 @@ import {
   type RefObject
 } from 'react'
 import { toast } from '@/lib/toast'
+import type { PersonCardRequest } from '@/components/stream-manager/person-card-host'
+import type { ChatPersonAction } from '@/components/stream-manager/chat-pane'
+import { BUDDY_REMEMBERS_LOCK_REASON, chatRowPerson } from '@/lib/community-view'
+import { UserFacingError, toastUserError } from '@/lib/user-error'
+import type { CommunityRelayCall } from '../../../../shared/community-relay'
+
+// The person card (plan 225 C2) is its own chunk: nothing of it loads until
+// the streamer opens one.
+const PersonCardHost = lazy(() => import('@/components/stream-manager/person-card-host'))
 
 import {
   BuddyIdentity,
@@ -25,6 +36,11 @@ import {
 import type { BuddyPetPreviewHandle } from '@/components/buddy-pet-preview'
 import { BuddyCardsArea } from '@/components/stream-manager/buddy-cards-area'
 import { BuddyChatControls } from '@/components/stream-manager/buddy-chat-controls'
+import {
+  LinkMadeCards,
+  linkMadeId,
+  linkMadeTitle
+} from '@/components/stream-manager/link-made-cards'
 import {
   BuddyUtteranceCards,
   openProposedUtterances
@@ -57,6 +73,7 @@ import type {
   CohostUtteranceState,
   CohostWindowBuddy,
   CohostUtterance,
+  CohostUtteranceMilestone,
   CommentHighlightAnchor,
   CommentHighlightState,
   CommentsHistoryStats,
@@ -291,6 +308,8 @@ export interface StreamManagerProps {
   highlightFailure?: { messageId: string; reason: string } | null
   onBackToLive?: () => void
   onHighlight?: (message: LiveChatMessage) => void
+  /** Plan 225 B6: put the milestone card (never the message) on stream. */
+  onHighlightMilestone?: (message: LiveChatMessage, milestone: CohostUtteranceMilestone) => void
   onClear?: () => void
   /** Mark the current moment for a clip (plan 068 D6); shown only on air. */
   markerContext?: import('@/lib/backend').MarkerContext | null
@@ -427,6 +446,11 @@ export interface StreamManagerProps {
   onCohostAuthorGreeted?: (entry: CohostSayHi) => void
   onCohostEnableConsent?: () => void
   onCohostUpgrade?: (url: string) => void
+  /**
+   * Plan 225 C2: `cohost.community.*` through the Studio relay, for the
+   * person card. Absent: no card, no "About" and no right-click menu.
+   */
+  communityCall?: CommunityRelayCall
 }
 
 // The Stream Manager (plan 055): the Chat window grown into a live dashboard.
@@ -451,6 +475,7 @@ export function StreamManager({
   highlightFailure = null,
   onBackToLive,
   onHighlight,
+  onHighlightMilestone,
   onClear,
   onMarkClip,
   onClip,
@@ -519,7 +544,8 @@ export function StreamManager({
   onCohostRecapDraft,
   onCohostAuthorGreeted,
   onCohostEnableConsent,
-  onCohostUpgrade
+  onCohostUpgrade,
+  communityCall
 }: StreamManagerProps): ReactElement {
   // The buffer almost always arrives sorted: one scan instead of a copy and a
   // full sort per chat message (plan 191). Either way the rows are the same.
@@ -577,11 +603,18 @@ export function StreamManager({
         (utterance) => utterance.id
       )
     : NO_IDS
+  // Plan 225 D4 b: the viewers' `!link` cards, minus the ones kept here.
+  const [keptLinks, setKeptLinks] = useState<ReadonlySet<string>>(() => new Set())
+  const [linkBusyId, setLinkBusyId] = useState<string | null>(null)
+  const linkCards = live
+    ? (cohostState?.linkMade ?? []).filter((link) => !keptLinks.has(linkMadeId(link)))
+    : []
   const buddyCardsActive =
     removalPane.active ||
     commandStrip !== null ||
     commandCardId !== '' ||
-    proposedUtteranceIds.length > 0
+    proposedUtteranceIds.length > 0 ||
+    (communityCall !== undefined && linkCards.length > 0)
   useEffect(() => {
     const timer = setInterval(
       () => setNowMs(Date.now()),
@@ -682,6 +715,34 @@ export function StreamManager({
 
   // --- Panes (D1): one segmented pick below Wide, a right pane at Wide ---
   const [narrowPane, setNarrowPane] = useState<StreamManagerPane>('chat')
+  // The person card (plan 225 C2): which person, from which row.
+  const [personCard, setPersonCard] = useState<PersonCardRequest | null>(null)
+  const personCardSeq = useRef(0)
+  const personMemoryLock =
+    cohostGate && !cohostGate.allowed
+      ? {
+          reason: BUDDY_REMEMBERS_LOCK_REASON,
+          upgradeUrl: cohostGate.upgradeUrl,
+          onUpgrade: onCohostUpgrade
+        }
+      : null
+  const onPersonAction = communityCall
+    ? (action: ChatPersonAction, message: LiveChatMessage): void => {
+        const person = chatRowPerson(message)
+        if (!person) return
+        if (action === 'mark-bot') {
+          void markAsBot(communityCall, person)
+          return
+        }
+        personCardSeq.current += 1
+        setPersonCard({
+          target: person,
+          messageId: message.id,
+          startIn: action === 'same-person' ? 'link' : 'card',
+          seq: personCardSeq.current
+        })
+      }
+    : undefined
   const [rightPane, setRightPane] = useState<StreamManagerRightPane>('activity')
   const [prefill, setPrefill] = useState<ChatPrefill | null>(null)
   const [jumpTo, setJumpTo] = useState<{ messageId: string; seq: number } | null>(null)
@@ -953,7 +1014,10 @@ export function StreamManager({
     ...proposedUtteranceIds.map((id) => ({
       id,
       label: `${buddyName ?? 'Buddy'} wants to post, it expires soon`
-    }))
+    })),
+    ...(communityCall
+      ? linkCards.map((link) => ({ id: linkMadeId(link), label: linkMadeTitle(link) }))
+      : [])
   ]
   const recentUtterances =
     live &&
@@ -1028,6 +1092,26 @@ export function StreamManager({
           pane is on screen (plan 174 S0.2). */}
       <BuddyCardsArea active={buddyCardsActive || recentUtterances} cards={cardNotices}>
         <CommandStrip view={commandStrip} />
+        {communityCall ? (
+          <LinkMadeCards
+            busyId={linkBusyId}
+            links={linkCards}
+            onKeep={(link) => setKeptLinks((current) => new Set(current).add(linkMadeId(link)))}
+            onUndo={(link) => {
+              const id = linkMadeId(link)
+              setLinkBusyId(id)
+              communityCall('cohost.community.unlink', { accountKey: link.accountKey })
+                .catch((error: unknown) =>
+                  toastUserError(
+                    error,
+                    { action: 'undo', object: 'the link' },
+                    { id: 'community-link-undo' }
+                  )
+                )
+                .finally(() => setLinkBusyId(null))
+            }}
+          />
+        ) : null}
         {onAnswerCommand ? (
           <CommandCards
             chooser={commandChooser}
@@ -1055,6 +1139,17 @@ export function StreamManager({
             utterances={shownCohostState?.utterances ?? []}
             onApprove={onCohostUtteranceApprove}
             onDismiss={onCohostUtteranceDismiss}
+            onShowMilestone={
+              onHighlightMilestone
+                ? (utterance) => {
+                    const milestone = utterance.milestone
+                    const message = snapshot.messages.find(
+                      (candidate) => candidate.id === milestone?.messageId
+                    )
+                    if (milestone && message) onHighlightMilestone(message, milestone)
+                  }
+                : undefined
+            }
           />
         ) : null}
       </BuddyCardsArea>
@@ -1102,6 +1197,20 @@ export function StreamManager({
           onPromiseDismiss={onCohostPromiseDismiss}
           onPromiseDone={onCohostPromiseDone}
           onSayHiGreeted={onCohostAuthorGreeted}
+          onWelcomeBackWave={
+            communityCall
+              ? (entry) => {
+                  communityCall('cohost.community.wave', { personId: entry.personId }).catch(
+                    (error: unknown) =>
+                      toastUserError(
+                        error,
+                        { action: 'wave at', object: entry.name },
+                        { id: 'community-wave' }
+                      )
+                  )
+                }
+              : undefined
+          }
           onRecapDismiss={onCohostRecapDismiss}
           onRecapDraft={
             onCohostRecapDraft
@@ -1323,6 +1432,7 @@ export function StreamManager({
             onChatOnStreamChange={inHistory ? undefined : onChatOnStream}
             onSignInToVideorc={inHistory ? undefined : onSignInToVideorc}
             onSend={onSend}
+            onPersonAction={onPersonAction}
           />
         </div>
         <div
@@ -1386,6 +1496,55 @@ export function StreamManager({
         onToggleAlwaysOnTop={onToggleAlwaysOnTop}
         statsLayout={statsLayout}
       />
+      {communityCall && personCard ? (
+        <Suspense fallback={null}>
+          <PersonCardHost
+            call={communityCall}
+            memoryLock={personMemoryLock}
+            request={personCard}
+            onClose={() => setPersonCard(null)}
+          />
+        </Suspense>
+      ) : null}
     </div>
   )
+}
+
+/**
+ * Right-click → Mark as bot (plan 225 D11): mark the row's person a bot at
+ * once, with Undo. The person comes from the row's account.
+ */
+async function markAsBot(
+  call: CommunityRelayCall,
+  person: { platform: LiveChatMessage['platform']; authorId: string; name: string }
+): Promise<void> {
+  try {
+    const found = await call('cohost.community.person', person)
+    if (!found.id) {
+      throw new UserFacingError(
+        `Videorc starts remembering ${person.name} from their next message.`,
+        'warning'
+      )
+    }
+    await call('cohost.community.update', { personId: found.id, status: 'bot' })
+    toast.success(`${person.name} is marked as a bot`, {
+      id: 'community-bot',
+      description: 'Bots get no welcome and never count as regulars.',
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          void call('cohost.community.update', { personId: found.id, status: 'normal' }).catch(
+            (error: unknown) =>
+              toastUserError(error, { action: 'undo', object: 'that' }, { id: 'community-bot' })
+          )
+        }
+      }
+    })
+  } catch (error) {
+    toastUserError(
+      error,
+      { action: 'mark', object: `${person.name} as a bot` },
+      { id: 'community-bot' }
+    )
+  }
 }

@@ -8,7 +8,15 @@ import {
   BuddyIcon,
   RecordIcon
 } from '@/components/icons'
-import { useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
+import {
+  lazy,
+  Suspense,
+  useContext,
+  useEffect,
+  useState,
+  type ReactElement,
+  type ReactNode
+} from 'react'
 
 import { LCD_STATUS_DOT, LcdPanelNavRow, type StudioLook } from '@/components/lcd-panel'
 import { CohostPresenceDot } from '@/components/cohost-status'
@@ -30,6 +38,7 @@ import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav
 import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import {
   useStudioChat,
+  useStudioCloud,
   useStudioCore,
   useStudioDiagnostics,
   useStudioRecording,
@@ -39,6 +48,12 @@ import { cohostPresenceView } from '@/lib/cohost-presence'
 import { activeCohostAlerts, cohostAlertLabel } from '@/lib/cohost-view'
 import { providerStreamOutputPlanOptions, streamOutputVideosForTargets } from '@/lib/capture'
 import { liveDestinationsView, streamHealthFact } from '@/lib/live-session-view'
+import { MICROPHONE_SILENT_CODE } from '@/lib/session-runtime-notice'
+import { topWatchdogAlert, visibleWatchdogAlerts } from '@/lib/watchdog-rank'
+import {
+  dashboardCloudFromStatus,
+  type LiveDashboardCloud
+} from '../../../../shared/live-dashboard'
 import { sessionOutputSummary } from '@/lib/session-output-video'
 import { classifyStreamHealthAttribution } from '@/lib/stream-health-attribution'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
@@ -75,6 +90,7 @@ import { WINDOW_NAMES } from '../../../../shared/window-names'
  */
 export function SessionTransport({
   active,
+  talkShowOutputs,
   canStop,
   stopLabel,
   stopNote,
@@ -93,6 +109,7 @@ export function SessionTransport({
   onStop
 }: {
   active: boolean
+  talkShowOutputs?: { recording: boolean; live: boolean; onStopRecording: () => void }
   canStop: boolean
   stopLabel: string
   /** What Stop does beyond its label, said visibly ("Your recording stops too."). */
@@ -121,12 +138,16 @@ export function SessionTransport({
   onLiveStream: () => void
   onStop: () => void
 }): ReactElement {
+  const recordActive = talkShowOutputs?.recording ?? active
+  const recordStop = talkShowOutputs ? talkShowOutputs.onStopRecording : onStop
+  const recordStopLabel = talkShowOutputs ? 'Stop recording' : stopLabel
+  const liveActive = talkShowOutputs?.live === true
   const startsBusy = startRequestPending || goLivePending
   // Record answers its own click, lit from the click; a Go Live… start,
   // checks included, is Go Live's to answer, so Record is off for it.
   const recordStarting = startRequestPending && !goLivePending && !startingLivestream
   let recordState: RecordButtonState = 'idle'
-  if (active) {
+  if (recordActive) {
     recordState = stopRequestPending ? 'stopping' : 'running'
   } else if (recordStarting) {
     recordState = 'starting'
@@ -152,35 +173,39 @@ export function SessionTransport({
             while the session runs; Go Live… is the chrome primary. Why a
             start is blocked shows on hover and on keyboard focus (plan 174
             S1.1, B-9): a disabled button never shows a title. */}
-        <DisabledReason className="flex-1" reason={active ? null : recordBlockedReason}>
+        <DisabledReason className="flex-1" reason={recordActive ? null : recordBlockedReason}>
           <RecordButton
             className="flex-1"
             disabled={
-              active
+              recordActive
                 ? !canStop && !stopRequestPending
                 : Boolean(recordBlockedReason) || (startsBusy && !recordStarting)
             }
-            labels={{ idle: recordWords, starting: recordWords, running: stopLabel }}
+            labels={{ idle: recordWords, starting: recordWords, running: recordStopLabel }}
             size="lg"
             state={recordState}
-            onClick={active ? onStop : onRecord}
+            onClick={recordActive ? recordStop : onRecord}
           />
         </DisabledReason>
-        {active ? null : (
+        {active && !talkShowOutputs ? null : (
           <DisabledReason
             className="flex-1"
-            reason={goLivePending ? null : liveStreamBlockedReason}
+            reason={goLivePending || liveActive ? null : liveStreamBlockedReason}
           >
             <Button
               className="flex-1"
               data-testid="go-live-button"
-              disabled={Boolean(liveStreamBlockedReason) || startsBusy}
+              disabled={liveActive ? !canStop : Boolean(liveStreamBlockedReason) || startsBusy}
               size="lg"
               variant="default"
-              onClick={onLiveStream}
+              onClick={liveActive ? onStop : onLiveStream}
             >
               <LivestreamIcon data-icon="inline-start" weight="fill" />
-              {goLivePending ? GO_LIVE_CHECKING_LABEL : GO_LIVE_LABEL}
+              {liveActive
+                ? 'End livestream'
+                : goLivePending
+                  ? GO_LIVE_CHECKING_LABEL
+                  : GO_LIVE_LABEL}
             </Button>
           </DisabledReason>
         )}
@@ -367,6 +392,8 @@ export function SessionPanel({ live = false, ...notices }: SessionPanelProps): R
             session fact, knowable without the Stream Manager; a recording
             has no chat for it to read. */}
         {live ? <CohostSessionRow /> : null}
+        {/* Plan 224 D16: the room's one row, which opens Livestream → Guests. */}
+        <GuestsSessionSlot />
         {/* Plan 209 D12: which agents are connected, with Stop. */}
         <AgentsSessionRow />
       </GroupedList>
@@ -398,6 +425,32 @@ export function useSessionOutputSummary(live: boolean): string {
 }
 
 /** The last refused start and a mid-session notice, under the Session facts. */
+// The watchdog's cards (plan 223 A5) load with the first alert: the chunk
+// holds the card and its words, and the eager Studio keeps only the list.
+// Plan 224 D16: the Guests row loads with the room, never with the Studio.
+const GuestsSessionRow = lazy(async () => ({
+  default: (await import('@/components/studio/guests-session-row')).GuestsSessionRow
+}))
+
+/** The Guests row while the room is open, in either look (plan 224 D16). */
+export function GuestsSessionSlot({
+  look = 'default'
+}: {
+  look?: StudioLook
+}): ReactElement | null {
+  const { cloudStatus } = useStudioCloud()
+  if (cloudStatus?.room?.phase !== 'open') return null
+  return (
+    <Suspense fallback={null}>
+      <GuestsSessionRow look={look} />
+    </Suspense>
+  )
+}
+
+const WatchdogAlertCard = lazy(async () => ({
+  default: (await import('@/components/studio/watchdog-alert-card')).WatchdogAlertCard
+}))
+
 export function SessionNotices({
   active,
   startRequestPending,
@@ -409,10 +462,32 @@ export function SessionNotices({
 }: Omit<SessionPanelProps, 'live'>): ReactElement {
   const { setActive } = useWorkspaceNav()
   const { recording } = useStudioRecording()
-  const { diagnosticStats } = useStudioDiagnostics()
+  const { diagnosticStats, watchdogAlerts = [], watchdogAct } = useStudioDiagnostics()
   const cameraNotice = cameraCaptureNotice(recording, diagnosticStats)
+  // The 1064 silence notice already renders below as a SessionRuntimeAlert;
+  // the watchdog's adoption of it (repeats, the notification) draws no
+  // second card while that notice is up.
+  const silenceNoticeShown =
+    runtimeNotice?.kind === 'microphone-input-lost' &&
+    runtimeNotice.audioIssues?.every((issue) => issue.code === MICROPHONE_SILENT_CODE) === true
+  const cards = visibleWatchdogAlerts(watchdogAlerts).filter(
+    (alert) => !(silenceNoticeShown && alert.check === 'mic-silent')
+  )
   return (
     <>
+      {cards.length > 0 ? (
+        <Suspense fallback={null}>
+          {cards.map((alert) => (
+            <WatchdogAlertCard
+              key={alert.id}
+              alert={alert}
+              onAcknowledge={(target) => watchdogAct({ kind: 'acknowledge', alert: target })}
+              onFix={(target, fix) => watchdogAct({ kind: 'fix', alert: target, fix })}
+              onSnooze={(target, scope) => watchdogAct({ kind: 'snooze', alert: target, scope })}
+            />
+          ))}
+        </Suspense>
+      ) : null}
       {/* A refused start is the ONE place destructive red is allowed on chrome:
           it is status, it persists, and it carries the backend's reason
           verbatim (the toast can be missed mid-stream; this line cannot). */}
@@ -494,6 +569,17 @@ function FactRow({
   )
 }
 
+/**
+ * The Videorc Cloud show carrying this session, or null (plan 184 C7): the
+ * same view the Stream Manager's dashboard keeps, from the status the
+ * backend emits.
+ */
+function useSessionCloud(): LiveDashboardCloud | null {
+  const { cloudStatus } = useStudioCloud()
+  const { recording } = useStudioRecording()
+  return cloudStatus ? dashboardCloudFromStatus(cloudStatus, recording.sessionId ?? null) : null
+}
+
 /** A status dot's words: the row's text, or lit on the screen. */
 const dotClassName = (look: StudioLook): string =>
   look === 'lcd' ? LCD_STATUS_DOT : 'text-sm text-foreground'
@@ -511,7 +597,9 @@ export function LiveDestinationRows({
 }): ReactElement | null {
   const { streamTargets } = useStudioCore()
   const { openStudioPanel } = useWorkspaceNav()
-  const view = liveDestinationsView(streamTargets)
+  // Plan 184 C7: through Videorc Cloud the feed legs fold into one row.
+  const cloud = useSessionCloud()
+  const view = liveDestinationsView(streamTargets, cloud)
   if (!view) {
     return null
   }
@@ -563,10 +651,23 @@ export function LiveDestinationRows({
  */
 export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook }): ReactElement {
   const { streamTargets } = useStudioCore()
-  const { diagnosticStats, recentStreamDrops, streamHealth } = useStudioDiagnostics()
+  const {
+    diagnosticStats,
+    recentStreamDrops,
+    streamHealth,
+    watchdogAlerts = []
+  } = useStudioDiagnostics()
   const { setActive } = useWorkspaceNav()
+  const cloud = useSessionCloud()
   const fact = streamHealthFact(
-    classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets, recentStreamDrops)
+    classifyStreamHealthAttribution(
+      diagnosticStats,
+      streamHealth,
+      streamTargets,
+      recentStreamDrops
+    ),
+    cloud,
+    topWatchdogAlert(watchdogAlerts)
   )
   return (
     <FactRow

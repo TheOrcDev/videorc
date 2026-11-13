@@ -18,6 +18,12 @@ export const OUTPUT_STALL_GATES = Object.freeze({
 })
 
 const SOURCE_LOSS_CODES = new Set(['microphone-input-lost', 'microphone-timeline-lost'])
+/**
+ * Plan 223 (D3, plan 221 Q7): the watchdog runs no check on a record-only
+ * session. This smoke records only, so the stall it provokes must never
+ * open "The picture has stopped" (or any other watchdog alert).
+ */
+const WATCHDOG_ALERT_CODE = /^watchdog-(?!mic-silent)[a-z-]+$/
 
 /**
  * @param {object} input
@@ -90,5 +96,22 @@ export function evaluateOutputStall({
       'No audio-output-stalled event: the pause never stalled the audio output, so this run proves nothing.'
     )
   }
-  return { failures, resumedAt: resumedAt ?? null, stallEvents: stalls.length }
+  const alerts = health.filter(
+    (event) =>
+      WATCHDOG_ALERT_CODE.test(event.code) &&
+      !/-(cleared|acknowledged|snoozed|withdrawn)$/.test(event.code)
+  )
+  if (alerts.length > 0) {
+    failures.push(
+      `A record-only session opened a watchdog alert (plan 223 D3: none run while only recording): ${[
+        ...new Set(alerts.map((event) => event.code))
+      ].join(', ')}.`
+    )
+  }
+  return {
+    failures,
+    resumedAt: resumedAt ?? null,
+    stallEvents: stalls.length,
+    watchdogAlerts: alerts.length
+  }
 }

@@ -16,9 +16,69 @@ import {
   planTickHighlights,
   startFakeCohostService,
   validateBuddyActRequest,
+  validateCohostMemoryRequest,
   validateCohostSpotlightRequest,
-  validateCohostTickRequest
+  validateCohostTickRequest,
+  planCohostMemory
 } from './fake-cohost-service.mjs'
+
+// Plan 225 D10: the memory pass's body, as the desktop sends it.
+function memoryBody(overrides = {}) {
+  return {
+    promptVersion: 1,
+    clientVersion: 'videorc-desktop/0.0.0-test',
+    sessionClientId: 'smoke-session',
+    consentToProcessChat: true,
+    persona: null,
+    streamTitle: null,
+    counts: { regularsBack: 2, firstTimers: 1, firstTimersStayed: 0, comebacks: 1 },
+    people: [
+      {
+        ref: 'p1',
+        name: 'Ada',
+        platforms: ['twitch'],
+        regular: true,
+        streams: 9,
+        messages: [
+          { at: '2026-11-08T18:00:00.000Z', platform: 'twitch', text: 'hi' },
+          { at: '2026-11-08T18:01:00.000Z', platform: 'twitch', text: 'I am learning Rust' }
+        ]
+      }
+    ],
+    ...overrides
+  }
+}
+
+describe('fake memory pass (plan 225 D10)', () => {
+  it('accepts the contract shape, refuses a YouTube message and plans one memory per person', () => {
+    assert.equal(validateCohostMemoryRequest(memoryBody()), null)
+    assert.equal(
+      validateCohostMemoryRequest(memoryBody({ consentToProcessChat: false })).code,
+      'consent-required'
+    )
+    assert.equal(
+      validateCohostMemoryRequest(memoryBody({ promptVersion: 2 })).code,
+      'prompt-version-unsupported'
+    )
+    const youtube = memoryBody()
+    youtube.people[0].messages[0].platform = 'youtube'
+    const refused = validateCohostMemoryRequest(youtube)
+    assert.equal(refused.code, 'invalid-request')
+    assert.match(refused.message, /YouTube message is never accepted/)
+    assert.equal(validateCohostMemoryRequest(memoryBody({ people: [] })).code, 'invalid-request')
+    assert.equal(validateCohostMemoryRequest(memoryBody({ extra: 1 })).code, 'invalid-request')
+    const planned = planCohostMemory(memoryBody())
+    assert.deepEqual(planned.people, [
+      {
+        ref: 'p1',
+        add: [{ text: 'Said: I am learning Rust', platform: 'twitch' }],
+        update: [],
+        remove: []
+      }
+    ])
+    assert.ok(planned.summary.length <= 280 && planned.summary.includes('2 regulars came back'))
+  })
+})
 
 const sessionToken = 'fake-cohost-session-token'
 
@@ -34,6 +94,11 @@ it('serves opt-in voice greeting text and an AI outage without calling the plann
       (r) => r.json()
     )
     assert.equal(capabilities.cohost.greet, 1)
+    fake.setCapabilities({ tick: 5, memory: 1 })
+    const combined = await fetch(`${fake.httpOrigin}/api/ai/capabilities`, { headers }).then((r) =>
+      r.json()
+    )
+    assert.deepEqual(combined.cohost, { greet: 1, tick: 5, memory: 1 })
     const greet = () =>
       fetch(`${fake.httpOrigin}/api/ai/cohost/greet`, {
         method: 'POST',
@@ -162,8 +227,35 @@ describe('fake co-host planner', () => {
       'consent-required'
     )
     assert.equal(
-      validateCohostTickRequest(tickBody({ promptVersion: 4 })).code,
+      validateCohostTickRequest(tickBody({ promptVersion: 6 })).code,
       'prompt-version-unsupported'
+    )
+    // v4 (plan 164) and v5 (plan 225) are additive: a v3 body is valid as
+    // either; `arrival` and `viewers` ride only on v5.
+    assert.equal(validateCohostTickRequest(tickBody({ promptVersion: 4 })), null)
+    assert.equal(validateCohostTickRequest(tickBody({ promptVersion: 5 })), null)
+    assert.equal(
+      validateCohostTickRequest(
+        tickBody({
+          promptVersion: 5,
+          viewers: [
+            {
+              name: 'Ada',
+              platform: 'twitch',
+              regular: true,
+              streams: 14,
+              memories: ['Learning Rust'],
+              note: 'Rust meetup'
+            }
+          ]
+        })
+      ),
+      null
+    )
+    assert.equal(
+      validateCohostTickRequest(tickBody({ promptVersion: 4, viewers: [] })).code,
+      'invalid-request',
+      'viewers is a v5 key'
     )
     // v2 = v1 plus the optional, already-normalised `rules`.
     assert.equal(validateCohostTickRequest(tickBody({ promptVersion: 2 })), null)

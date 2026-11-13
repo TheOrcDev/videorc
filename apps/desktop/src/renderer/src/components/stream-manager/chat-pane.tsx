@@ -69,7 +69,17 @@ import {
   PlatformFilterMenuItems
 } from '@/components/stream-manager/platform-filter'
 import { ChatJumpChip } from '@/components/chat-jump-chip'
-import { AlertIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
+import {
+  AccountIcon,
+  AlertIcon,
+  ChevronDownIcon,
+  LinkIcon,
+  SearchIcon,
+  SendIcon,
+  TerminalIcon
+} from '@/components/icons'
+import { DisabledReason } from '@/components/ui/disabled-reason'
+import { X_SELF_LINK_REASON, chatRowPerson } from '@/lib/community-view'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -190,7 +200,8 @@ export function ChatPane({
   onUseSignIn,
   chatOnStream,
   onChatOnStreamChange,
-  onSignInToVideorc
+  onSignInToVideorc,
+  onPersonAction
 }: {
   delivery?: ChatDelivery
   arrivalKey?: string
@@ -267,6 +278,12 @@ export function ChatPane({
   /** "Sign in to Videorc" on a chat row the relay parked (plan 215 A3):
    * the main window starts the sign-in. Absent in History. */
   onSignInToVideorc?: () => void
+  /**
+   * The person card (plan 225 D11): ⋯ "About {name}" and a right-click on
+   * a viewer's row (About, Same person as…, Mark as bot). One menu for the
+   * whole list, so no row gains a hook. The row click stays on stream.
+   */
+  onPersonAction?: (action: ChatPersonAction, message: LiveChatMessage) => void
 }): ReactElement {
   const [filter, setFilter] = useState<ChatPaneFilter>({
     platform: 'all',
@@ -274,6 +291,9 @@ export function ChatPane({
     mentions: false,
     search: ''
   })
+  // Plan 225 D11: the row a right-click asked about, and the pointer it
+  // came from; the menu is the list's sibling (ChatPersonMenu).
+  const [personMenu, setPersonMenu] = useState<ChatPersonMenuTarget | null>(null)
   // One prefill stream for the composer: the window's (Buddy Reply, Thank in
   // chat) and a row's ⋯ Reply, in the order they were asked for.
   const [composerPrefill, setComposerPrefill] = useState<ChatPrefill | null>(null)
@@ -598,66 +618,96 @@ export function ChatPane({
               />
             )
           ) : (
-            <ol
-              aria-label="Chat messages"
-              className="relative w-full"
-              style={{ height: virtualizer.getTotalSize() }}
-              onFocusCapture={(event) => {
-                // A click or a Tab onto a row makes it the active one.
-                const id = event.target
-                  .closest('[data-message-id]')
-                  ?.getAttribute('data-message-id')
-                if (id) setActiveId(id)
-              }}
-              onKeyDown={handleListKeyDown}
-            >
-              {virtualizer.getVirtualItems().map((item) => {
-                const message = shown[item.index]
-                if (!message) return null
-                const removal = removals?.get(message.id)
-                const requesting = removalRequestIds?.has(message.id) ?? false
-                const { onRemove, reason } = rowRemoval(message)
-                return (
-                  <CommentRow
-                    key={item.key}
-                    ref={virtualizer.measureElement}
-                    cohostFlag={cohostFlags?.get(message.id)}
-                    cohostSpotlight={cohostSpotlight === message.id}
-                    cohostSuggested={cohostSuggested?.has(message.id) ?? false}
-                    density="comfortable"
-                    timestamps={live ? 'hover' : 'always'}
-                    highlight={commentHighlightPresentationForMessage({
-                      messageId: message.id,
-                      highlightedId,
-                      state: highlightState,
-                      applyingId: highlightApplyingId,
-                      failure: highlightFailure
-                    })}
-                    index={item.index}
-                    mentionNames={mentionNames}
-                    message={message}
-                    removal={removalStatusView(message, removal, requesting)}
-                    removeFromChatReason={reason}
-                    tabIndex={item.index === activeIndex ? 0 : -1}
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      transform: `translateY(${item.start}px)`,
-                      paddingBottom: 4
-                    }}
-                    onHighlight={live ? onHighlight : undefined}
-                    onRemoveFromChat={onRemove}
-                    onReply={
-                      composerVisible
-                        ? (target) => pushPrefill(`@${target.authorName} `)
-                        : undefined
-                    }
-                  />
-                )
-              })}
-            </ol>
+            <>
+              <ol
+                aria-label="Chat messages"
+                className="relative w-full"
+                style={{ height: virtualizer.getTotalSize() }}
+                onContextMenu={
+                  onPersonAction
+                    ? (event) => {
+                        const element = event.target instanceof Element ? event.target : null
+                        // A link keeps its own menu (Open link, Copy link).
+                        if (element?.closest('[data-slot="comment-link"]')) return
+                        event.preventDefault()
+                        const id = element
+                          ?.closest('[data-message-id]')
+                          ?.getAttribute('data-message-id')
+                        const message = id ? (shown.find((entry) => entry.id === id) ?? null) : null
+                        // Nobody to ask about (the streamer, a system line): no menu.
+                        setPersonMenu(
+                          message && chatRowPerson(message)
+                            ? { message, x: event.clientX, y: event.clientY }
+                            : null
+                        )
+                      }
+                    : undefined
+                }
+                onFocusCapture={(event) => {
+                  // A click or a Tab onto a row makes it the active one.
+                  const id = event.target
+                    .closest('[data-message-id]')
+                    ?.getAttribute('data-message-id')
+                  if (id) setActiveId(id)
+                }}
+                onKeyDown={handleListKeyDown}
+              >
+                {virtualizer.getVirtualItems().map((item) => {
+                  const message = shown[item.index]
+                  if (!message) return null
+                  const removal = removals?.get(message.id)
+                  const requesting = removalRequestIds?.has(message.id) ?? false
+                  const { onRemove, reason } = rowRemoval(message)
+                  return (
+                    <CommentRow
+                      key={item.key}
+                      ref={virtualizer.measureElement}
+                      cohostFlag={cohostFlags?.get(message.id)}
+                      cohostSpotlight={cohostSpotlight === message.id}
+                      cohostSuggested={cohostSuggested?.has(message.id) ?? false}
+                      density="comfortable"
+                      timestamps={live ? 'hover' : 'always'}
+                      highlight={commentHighlightPresentationForMessage({
+                        messageId: message.id,
+                        highlightedId,
+                        state: highlightState,
+                        applyingId: highlightApplyingId,
+                        failure: highlightFailure
+                      })}
+                      index={item.index}
+                      mentionNames={mentionNames}
+                      message={message}
+                      removal={removalStatusView(message, removal, requesting)}
+                      removeFromChatReason={reason}
+                      tabIndex={item.index === activeIndex ? 0 : -1}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        transform: `translateY(${item.start}px)`,
+                        paddingBottom: 4
+                      }}
+                      onHighlight={live ? onHighlight : undefined}
+                      onRemoveFromChat={onRemove}
+                      onReply={
+                        composerVisible
+                          ? (target) => pushPrefill(`@${target.authorName} `)
+                          : undefined
+                      }
+                      onAbout={
+                        onPersonAction ? (target) => onPersonAction('about', target) : undefined
+                      }
+                    />
+                  )
+                })}
+              </ol>
+              <ChatPersonMenu
+                target={personMenu}
+                onClose={() => setPersonMenu(null)}
+                onPersonAction={onPersonAction}
+              />
+            </>
           )}
         </ScrollArea>
         {/* Whenever the list is not on the newest message, one way back. */}
@@ -1406,5 +1456,95 @@ function OffAir({
       </EmptyHeader>
       <CommentsDestinationStatus providers={[...providers]} />
     </Empty>
+  )
+}
+
+export type ChatPersonAction = 'about' | 'same-person' | 'mark-bot'
+
+/** The row a right-click asked about, and the pointer it came from. */
+interface ChatPersonMenuTarget {
+  message: LiveChatMessage
+  x: number
+  y: number
+}
+
+/**
+ * The chat list's one right-click menu (plan 225 D11): About, Same person
+ * as… and Mark as bot for the viewer whose row was right-clicked. A menu
+ * opened at the pointer and rendered beside the list, never a Base UI
+ * ContextMenu wrapping the list: Base UI reads the nearest menu context, so
+ * a menu around the list made every link's own menu (Open link, Copy link)
+ * and every row's ⋯ a nested submenu of this one, and Copy link's click no
+ * longer reached the clipboard (probe:comments-window, 2026-11-08). The
+ * list's handler decides who gets a menu: a row with no person (the
+ * streamer, a system line) gets none.
+ */
+function ChatPersonMenu({
+  target,
+  onClose,
+  onPersonAction
+}: {
+  target: ChatPersonMenuTarget | null
+  onClose: () => void
+  onPersonAction?: (action: ChatPersonAction, message: LiveChatMessage) => void
+}): ReactElement | null {
+  const anchor = useMemo(
+    () =>
+      target
+        ? {
+            getBoundingClientRect: () =>
+              DOMRect.fromRect({ x: target.x, y: target.y, width: 0, height: 0 })
+          }
+        : null,
+    [target]
+  )
+  if (!onPersonAction) return null
+  const message = target?.message ?? null
+  const person = message ? chatRowPerson(message) : null
+  return (
+    <DropdownMenu
+      open={message !== null && person !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+    >
+      <DropdownMenuContent
+        align="start"
+        alignOffset={4}
+        anchor={anchor}
+        className="w-56"
+        data-testid="comment-person-menu"
+        side="right"
+        sideOffset={0}
+      >
+        {message && person ? (
+          <>
+            <DropdownMenuLabel className="truncate font-normal text-subtle">
+              {person.name}
+            </DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => onPersonAction('about', message)}>
+              <AccountIcon aria-hidden />
+              About {person.name}
+            </DropdownMenuItem>
+            <DisabledReason
+              focusable={false}
+              reason={message.platform === 'x' ? X_SELF_LINK_REASON : null}
+            >
+              <DropdownMenuItem
+                disabled={message.platform === 'x'}
+                onClick={() => onPersonAction('same-person', message)}
+              >
+                <LinkIcon aria-hidden />
+                Same person as…
+              </DropdownMenuItem>
+            </DisabledReason>
+            <DropdownMenuItem onClick={() => onPersonAction('mark-bot', message)}>
+              <TerminalIcon aria-hidden />
+              Mark as bot
+            </DropdownMenuItem>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }

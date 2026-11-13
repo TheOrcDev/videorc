@@ -42,6 +42,8 @@ mod chat_commands;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
+mod cloud_show;
+mod cloud_talk;
 mod cohost;
 mod cohost_ack;
 mod cohost_auto_chat;
@@ -52,6 +54,9 @@ mod cohost_library;
 mod cohost_throttle;
 mod color;
 mod comment_highlight;
+mod community;
+mod community_service;
+mod community_store;
 mod compositor;
 mod compositor_synthetic;
 mod device_watch;
@@ -181,6 +186,7 @@ mod virtual_camera_linux;
 mod virtual_camera_macos;
 mod virtual_camera_service;
 mod warm_microphone;
+mod watchdog;
 #[allow(dead_code)]
 mod windows_capture_owner;
 #[cfg(target_os = "windows")]
@@ -751,13 +757,17 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     if account::stored_session_token().is_some()
         && let Some(entitlement_token) = account::stored_entitlement_token()
         && let Err(error) =
-            entitlements::hydrate_account_entitlements_from_token(&entitlement_token)
+            entitlements::hydrate_account_entitlements_from_token(&entitlement_token, None)
     {
         tracing::info!("Stored entitlement token not restored: {error:#}");
     }
     {
         let entitlement_state = state.clone();
-        tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
+        tokio::spawn(async move {
+            refresh_account_entitlements(&entitlement_state).await;
+            // Plan 184 C5: a show a crash left live shows the Resume banner.
+            cloud_show_detect_at_launch(&entitlement_state).await;
+        });
     }
     // Plan 094 (S7): remote service flags at startup and every 30 minutes;
     // fails open to compiled defaults.
@@ -767,6 +777,10 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     usage_stats::spawn(&state);
     // Plan 187: the Discord go-live announcement (free, off until a webhook is set).
     discord_announce::spawn(&state);
+    // Plan 225: the community store's retention prune (now and daily) and
+    // its one-time, resumable backfill.
+    community_service::spawn_startup_jobs(&state);
+    watchdog::spawn_talk_show_watch(&state);
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
@@ -5369,6 +5383,17 @@ impl CoalescingEventBuffer {
     }
 }
 
+/// Plan 225: one answer shape for every `cohost.community.*` handler.
+fn community_rpc<T: serde::Serialize>(
+    id: String,
+    result: Result<T, community_store::CommunityError>,
+) -> ServerResponse {
+    match result {
+        Ok(payload) => ServerResponse::ok(id, payload),
+        Err(error) => ServerResponse::error(id, error.code(), error.to_string()),
+    }
+}
+
 fn websocket_event_is_coalescible(event: &str) -> bool {
     matches!(
         event,
@@ -5652,8 +5677,14 @@ fn websocket_command_is_session_stop(text: &str) -> bool {
 }
 
 fn websocket_command_is_session_start(text: &str) -> bool {
-    serde_json::from_str::<ClientCommand>(text)
-        .is_ok_and(|command| command.method == "session.start")
+    // Plan 184 C5: a cloud resume IS a session start (the same params, the
+    // same publication fence), bound to the show that is live.
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "session.start" | "cloud.show.resume"
+        )
+    })
 }
 
 /// These commands already own stricter process-lifecycle contracts than a
@@ -5665,7 +5696,11 @@ fn websocket_command_has_session_lifecycle_policy(text: &str) -> bool {
     serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
         matches!(
             command.method.as_str(),
-            "session.start" | "session.stop" | "recording.stop" | "recording.start_test"
+            "session.start"
+                | "cloud.show.resume"
+                | "session.stop"
+                | "recording.stop"
+                | "recording.start_test"
         )
     })
 }
@@ -5754,6 +5789,17 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.utterance.approve"
         | "cohost.utterance.dismiss"
         | "cohost.utterance.say"
+        | "cohost.community.update"
+        | "cohost.community.link"
+        | "cohost.community.unlink"
+        | "cohost.community.suggestion.dismiss"
+        | "cohost.community.suggestion.accept"
+        | "cohost.community.forget"
+        | "cohost.community.forgetAll"
+        | "cohost.community.memory.delete"
+        | "cohost.community.wave"
+        | "cohost.community.export"
+        | "cohost.community.import"
         | "clip.mark"
         // Plan 181 S3: answers at once; the save runs on its own task and
         // reports through replay.saved / replay.saveFailed.
@@ -5792,6 +5838,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "agent.surface.publish"
         | "agent.intent.ack"
         | "remote.intent"
+        | "cloud.settings.set"
+        // Plan 222 U1: the "Videorc Cloud is on" notice was shown.
+        | "cloud.announce.seen"
+        // Plan 184 C6b: the test runs on its own task and reports through
+        // `cloud.state`; the RPC only starts it.
+        | "cloud.selftest.run"
         | "compositor.scene.update"
         | "preview.camera.start"
         | "preview.camera.stop"
@@ -5925,6 +5977,24 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.x.prepare"
         | "streamTargets.x.publish"
         | "streamTargets.x.end"
+        // Plan 184: both talk to videorc.com (and the show's node).
+        | "cloud.allowance.refresh"
+        | "cloud.show.end"
+        // Plan 224: the room's doors, all through videorc.com or the node.
+        | "cloud.room.open"
+        | "cloud.room.close"
+        | "cloud.room.resume"
+        | "cloud.room.invite.rotate"
+        | "cloud.room.door.set"
+        | "cloud.room.token.refresh"
+        | "cloud.guest.decide"
+        | "cloud.guest.act"
+        | "cloud.stage.set"
+        | "cloud.recording.start"
+        | "cloud.recording.stop"
+        | "cloud.return.set"
+        | "cloud.show.goLive"
+        | "cloud.show.legs.end"
         | "repair.restore_file"
         | "preview.snapshot" => Some(Mutation {
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
@@ -5956,11 +6026,19 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "discord.announce.update"
         | "discord.webhook.save"
         | "discord.webhook.remove"
-        | "discord.webhook.sendTest" => Some(DEFAULT_MUTATION_POLICY),
+        | "discord.webhook.sendTest"
+        | "watchdog.alert.acknowledge"
+        | "watchdog.alert.snooze"
+        | "watchdog.settings.set"
+        | "watchdog.idle.report"
+        | "cloud.show.reconnectDestination"
+        | "cloud.room.client.report" => Some(DEFAULT_MUTATION_POLICY),
 
-        "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
-            Some(SessionLifecycle)
-        }
+        "session.start"
+        | "cloud.show.resume"
+        | "session.stop"
+        | "recording.stop"
+        | "recording.start_test" => Some(SessionLifecycle),
 
         COMMAND_LANE_SMOKE_STATUS_METHOD
         | CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD
@@ -5993,6 +6071,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.get"
         | "cohost.report.get"
         | "cohost.report.latest"
+        | "cohost.community.summary"
+        | "cohost.community.list"
+        | "cohost.community.suggestions"
+        | "cohost.community.person"
         | "ai.capabilities.get"
         | "ai.quota.get"
         | "devices.list"
@@ -6007,6 +6089,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.describe"
         | "agents.status"
         | "agents.activity.list"
+        | "cloud.status"
         | "compositor.status"
         | "preview.debug.sample"
         | "preview.camera.status"
@@ -6073,6 +6156,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "virtualCamera.status"
         // Issue #1066: reads the camera control; never waits behind a set.
         | "camera.lowLight.get"
+        | "watchdog.alerts.list"
+        | "watchdog.settings.get"
+        | "watchdog.phone.devices"
         | "stream.targets.snapshot" => Some(Observation),
 
         "screens.active" => Some(DEFAULT_MUTATION_POLICY),
@@ -8805,9 +8891,79 @@ async fn apply_active_screen_output(
             }
         }
     }
+    // Plan 224 D9 (C-G7): in a talk show on air the desktop composes nothing
+    // for the stream; the takeover goes to the runner's `takeover` slot, full
+    // frame, per orientation, each output's own render (review L6: the 9:16
+    // output gets a 9:16 image, never the 16:9 one with the stage around
+    // it). Best effort: a refusal is logged, the local preview still shows
+    // the screen below.
+    if cloud_talk_show_live_show_id(state).is_some()
+        && let Some(context) = cloud_context(state)
+    {
+        use cloud_talk::{CloudOverlayOrientation, CloudOverlayRect, CloudOverlaySlot};
+        match active_screen.as_ref() {
+            Some(screen) => {
+                let image_path = screen.image_path.clone();
+                let overlays =
+                    tokio::task::spawn_blocking(move || cloud_talk::takeover_overlays(&image_path))
+                        .await
+                        .context("The takeover render task stopped")
+                        .and_then(|rendered| rendered);
+                match overlays {
+                    Ok(overlays) => {
+                        for (orientation, png) in overlays {
+                            if let Err(problem) = context
+                                .set_overlay(
+                                    CloudOverlaySlot::Takeover,
+                                    orientation,
+                                    &png,
+                                    CloudOverlayRect::FULL,
+                                    None,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    orientation = orientation.as_str(),
+                                    "The takeover did not reach Videorc Cloud: {problem}"
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "The takeover image could not be sent to Videorc Cloud: {error:#}"
+                        );
+                    }
+                }
+            }
+            None => {
+                for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+                    if let Err(problem) = context
+                        .clear_overlay(CloudOverlaySlot::Takeover, orientation)
+                        .await
+                    {
+                        tracing::debug!(
+                            "The takeover clear did not reach Videorc Cloud: {problem}"
+                        );
+                    }
+                }
+            }
+        }
+    }
     // Standby preview uses the same compositor. Publish the takeover there
     // before changing the authoritative persisted pointer.
+    let watched = active_screen.clone();
     update_compositor_active_screen(state, active_screen).await;
+    // Plan 223: the watchdog guards on this takeover from its cache, never
+    // from a SQLite read on the tick (a rollback passes back through here).
+    // The image's mean luma (the dark-takeover guard) is decoded here, on a
+    // blocking thread after the picture changed, and cached beside the
+    // path, so the tick never opens the file under the watchdog's lock.
+    let luma = match crate::watchdog::takeover_image_path(watched.as_ref()) {
+        Some(image_path) => crate::watchdog::read_takeover_luma(image_path).await,
+        None => None,
+    };
+    crate::watchdog::observe_takeover(state, watched.as_ref(), luma);
     Ok(())
 }
 
@@ -9082,6 +9238,38 @@ fn resolve_banner_html_import_resource(
 /// Plan 189: `sounds.import` makes the same exchange; main's picker (and the
 /// starter seed) issue one single-use `input-file` capability per file.
 fn resolve_sound_import_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    resolve_screen_import_resource(state, params, role)
+}
+
+/// Plan 225 D12: Export… writes into the folder main's picker issued as an
+/// `output-directory` capability (`outputDirectoryCapability` →
+/// `outputDirectory`); a raw folder from the renderer is refused, the admin
+/// role may pass one.
+fn resolve_community_export_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    let object = params.as_object_mut().context("params must be an object")?;
+    consume_resource_field(
+        state,
+        object,
+        role,
+        "outputDirectoryCapability",
+        "outputDirectory",
+        resource_authority::ResourceCapabilityKind::OutputDirectory,
+        true,
+    )
+}
+
+/// Plan 225 D12: Import… reads the file main's picker issued as an
+/// `input-file` capability (`sourceCapability` → `path`), like
+/// `sounds.import`; a raw path from the renderer is refused.
+fn resolve_community_import_resource(
     state: &AppState,
     params: &mut serde_json::Value,
     role: BackendRole,
@@ -9707,6 +9895,7 @@ async fn handle_text_message_with_role(
                         if entitlements::clear_account_entitlements() {
                             publish_entitlements_updated(state);
                         }
+                        cloud_show_hydrate(state, None, None);
                     },
                     account::clear_persisted_account_and_advance_intent,
                 ));
@@ -9882,6 +10071,7 @@ async fn handle_text_message_with_role(
                         if entitlements::clear_account_entitlements() {
                             publish_entitlements_updated(state);
                         }
+                        cloud_show_hydrate(state, None, None);
                     },
                 ) {
                     Some(outcome) => (outcome.account, true, outcome.change),
@@ -10319,6 +10509,180 @@ async fn handle_text_message_with_role(
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 225: the community store (A5). Every handler runs its store
+        // call off the runtime; none touches chat delivery.
+        "cohost.community.summary" => {
+            community_rpc(command.id, community_service::summary(state).await)
+        }
+        "cohost.community.list" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::list(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        // Plan 225 D-2: "Links that need you", the open suggestions and
+        // cancelled `!link`s, newest first.
+        "cohost.community.suggestions" => {
+            community_rpc(command.id, community_service::suggestions(state).await)
+        }
+        "cohost.community.person" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::person(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.update" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::update(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.link" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::link(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.unlink" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::unlink(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.suggestion.dismiss" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(
+                command.id,
+                community_service::suggestion_dismiss(state, params).await,
+            ),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.suggestion.accept" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(
+                command.id,
+                community_service::suggestion_accept(state, params).await,
+            ),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.forget" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::forget(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.forgetAll" => {
+            community_rpc(command.id, community_service::forget_all(state).await)
+        }
+        "cohost.community.memory.delete" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(
+                command.id,
+                community_service::memory_delete(state, params).await,
+            ),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.wave" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::wave(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.export" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_community_export_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value(params_value) {
+                Ok(params) => {
+                    community_rpc(command.id, community_service::export(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.community.import" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_community_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value(params_value) {
+                Ok(params) => {
+                    community_rpc(command.id, community_service::import(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- The stream watchdog (plan 223) ---
+        "watchdog.alerts.list" => ServerResponse::ok(command.id, watchdog::alerts_view(state)),
+        "watchdog.alert.acknowledge" => {
+            match serde_json::from_value::<watchdog::AlertIdParams>(command.params) {
+                Ok(params) => match watchdog::acknowledge(state, &params.id) {
+                    Ok(view) => ServerResponse::ok(command.id, view),
+                    Err(error) => ServerResponse::error(command.id, "watchdog-alert-gone", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "watchdog.alert.snooze" => {
+            match serde_json::from_value::<watchdog::AlertSnoozeParams>(command.params) {
+                Ok(params) => match watchdog::snooze(state, &params.id, params.scope) {
+                    Ok(view) => ServerResponse::ok(command.id, view),
+                    Err(error) => ServerResponse::error(command.id, "watchdog-alert-gone", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "watchdog.settings.get" => ServerResponse::ok(command.id, watchdog::get_settings(state)),
+        "watchdog.settings.set" => {
+            match serde_json::from_value::<watchdog::WatchdogSettingsPatch>(command.params) {
+                Ok(patch) => match watchdog::set_settings(state, patch) {
+                    Ok(settings) => ServerResponse::ok(command.id, settings),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "watchdog-settings-invalid", error)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // The renderer relays main's `powerMonitor` idle time (still-there).
+        "watchdog.idle.report" => {
+            match serde_json::from_value::<watchdog::IdleReportParams>(command.params) {
+                Ok(params) => {
+                    watchdog::report_system_idle(
+                        state,
+                        std::time::Duration::from_secs(params.idle_seconds),
+                    );
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 223 D2: the phones that get alerts, from the web.
+        "watchdog.phone.devices" => {
+            let Some(bearer) = account::stored_session_token() else {
+                return ServerResponse::error(
+                    command.id,
+                    "watchdog-signed-out",
+                    "Sign in to see your phones.",
+                );
+            };
+            match videorc_api::VideorcApiClient::new() {
+                Ok(client) => match client.get_alert_devices(&bearer).await {
+                    Ok(devices) => ServerResponse::ok(command.id, devices),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "watchdog-devices-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "watchdog-devices-failed", error.to_string())
                 }
             }
         }
@@ -11195,6 +11559,432 @@ async fn handle_text_message_with_role(
                 serde_json::json!({ "describe": describe, "state": snapshot, "protocol": 1 }),
             )
         }
+        // Plan 184 (C2 to C6): the cloud show surface. `cloud.status` is the
+        // one cloud method a remote role may call (backend_authority.rs);
+        // every answer and the `cloud.state` event are the same secret-free
+        // `CloudStatus`.
+        "cloud.status" => ServerResponse::ok(command.id, cloud_show_status(state)),
+        "cloud.settings.set" => {
+            match serde_json::from_value::<cloud_show::CloudSettingsPatch>(command.params) {
+                Ok(patch) => match cloud_show_set_settings(state, &patch) {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-settings-invalid",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.announce.seen" => match cloud_show_announce_seen(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => {
+                ServerResponse::error(command.id, "cloud-settings-invalid", error.to_string())
+            }
+        },
+        "cloud.allowance.refresh" => {
+            let Some(bearer) = account::stored_session_token() else {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-signed-out",
+                    "Sign in to use Videorc Cloud.",
+                );
+            };
+            match cloud_context(state) {
+                Some(context) => match context.refresh_allowance(&bearer).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-allowance-failed",
+                        error.to_string(),
+                    ),
+                },
+                None => ServerResponse::error(
+                    command.id,
+                    "cloud-unavailable",
+                    "Videorc Cloud is unavailable in this build.",
+                ),
+            }
+        }
+        // Plan 223 C3: Reconnect one destination of a cloud show (D8).
+        "cloud.show.reconnectDestination" => {
+            match serde_json::from_value::<cloud_show::ReconnectDestinationParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context.reconnect_destination(&params.target_id).await {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-reconnect-failed",
+                            error.to_string(),
+                        ),
+                    },
+                    None => ServerResponse::error(
+                        command.id,
+                        "cloud-unavailable",
+                        "Videorc Cloud is unavailable in this build.",
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.show.end" => match cloud_context(state) {
+            // Plan 224: a held room goes with the show (its camera comes back)
+            // and so does the show's live chat, as with `cloud.room.close`
+            // (review L8).
+            Some(context) if cloud_talk_show_open(state) => {
+                match context.close_room(account::stored_session_token()).await {
+                    Ok(status) => {
+                        live_chat::stop_live_chat(state).await;
+                        ServerResponse::ok(command.id, status)
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "cloud-end-failed", error.to_string())
+                    }
+                }
+            }
+            Some(context) => match context
+                .end_current_show(account::stored_session_token())
+                .await
+            {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-end-failed", error.to_string())
+                }
+            },
+            None => ServerResponse::error(
+                command.id,
+                "cloud-unavailable",
+                "Videorc Cloud is unavailable in this build.",
+            ),
+        },
+        // Plan 184 C6b: Test cloud. The test never touches the Studio's
+        // session, so it refuses while one runs or finalizes; the show module
+        // refuses while a show is live or resumable or a test runs.
+        "cloud.selftest.run" => {
+            if !matches!(
+                current_recording_status(state).await.state,
+                RecordingState::Idle
+            ) {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-test-session-active",
+                    "Locked while you're recording or live.",
+                );
+            }
+            let params = match serde_json::from_value::<cloud_show::CloudTestParams>(command.params)
+            {
+                Ok(params) => params,
+                Err(error) => {
+                    return ServerResponse::error(command.id, "invalid-params", error.to_string());
+                }
+            };
+            let ffmpeg_path = resolve_trusted_ffmpeg_path(
+                params.ffmpeg_path.as_deref(),
+                role,
+                state.smoke_rpc_enabled,
+            );
+            let Some(context) = cloud_context(state) else {
+                return ServerResponse::error(
+                    command.id,
+                    "cloud-unavailable",
+                    "Videorc Cloud is unavailable in this build.",
+                );
+            };
+            let pusher = match recording::CloudTestFeedPusher::new(state, ffmpeg_path) {
+                Ok(pusher) => pusher,
+                Err(error) => {
+                    return ServerResponse::error(
+                        command.id,
+                        "cloud-test-failed",
+                        format!("{error:#}"),
+                    );
+                }
+            };
+            match context.start_test(
+                account::stored_session_token(),
+                recording::cloud_test_output_specs(&params.outputs),
+                std::sync::Arc::new(pusher),
+            ) {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(refusal) => {
+                    ServerResponse::error(command.id, refusal.code(), refusal.to_string())
+                }
+            }
+        }
+        // Plan 224: talk shows. Every answer is the secret-free `CloudStatus`
+        // but `cloud.room.token.refresh`, the renderer's alone.
+        "cloud.room.open" => {
+            let params = match serde_json::from_value::<cloud_talk::RoomOpenParams>(command.params)
+            {
+                Ok(params) => params,
+                Err(error) => {
+                    return ServerResponse::error(command.id, "invalid-params", error.to_string());
+                }
+            };
+            let session_active = !matches!(
+                current_recording_status(state).await.state,
+                RecordingState::Idle
+            );
+            match cloud_context(state) {
+                Some(context) => match context
+                    .open_room(account::stored_session_token(), params, session_active)
+                    .await
+                {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        cloud_talk_error_code(&error, "cloud-room-open-failed"),
+                        format!("{error:#}"),
+                    ),
+                },
+                None => cloud_unavailable(command.id),
+            }
+        }
+        "cloud.room.close" => match cloud_context(state) {
+            Some(context) => match context.close_room(account::stored_session_token()).await {
+                Ok(status) => {
+                    live_chat::stop_live_chat(state).await;
+                    ServerResponse::ok(command.id, status)
+                }
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-room-close-failed",
+                    format!("{error:#}"),
+                ),
+            },
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.room.resume" => match cloud_context(state) {
+            Some(context) => match context.resume_room(account::stored_session_token()).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    cloud_talk_error_code(&error, "cloud-room-resume-failed"),
+                    format!("{error:#}"),
+                ),
+            },
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.room.invite.rotate" => match cloud_context(state) {
+            Some(context) => match context.rotate_invite(account::stored_session_token()).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-room-invite-failed",
+                    format!("{error:#}"),
+                ),
+            },
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.room.door.set" => {
+            match serde_json::from_value::<cloud_talk::RoomDoorParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .set_door(account::stored_session_token(), params.open)
+                        .await
+                    {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-room-door-failed",
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.room.token.refresh" => match cloud_context(state) {
+            Some(context) => match context.room_token(account::stored_session_token()).await {
+                Ok(answer) => ServerResponse::ok(command.id, answer),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-room-token-failed",
+                    format!("{error:#}"),
+                ),
+            },
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.room.client.report" => {
+            match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => ServerResponse::ok(command.id, context.report_client(params)),
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.guest.decide" => {
+            match serde_json::from_value::<cloud_talk::GuestDecideParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .decide_guest(account::stored_session_token(), params)
+                        .await
+                    {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            cloud_talk_error_code(&error, "cloud-guest-decide-failed"),
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.guest.act" => {
+            match serde_json::from_value::<cloud_talk::GuestActParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .act_on_guest(account::stored_session_token(), params)
+                        .await
+                    {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-guest-action-failed",
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.stage.set" => {
+            match serde_json::from_value::<cloud_talk::CloudStage>(command.params) {
+                Ok(stage) => match cloud_context(state) {
+                    Some(context) => match context.set_stage(stage).await {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-stage-failed",
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.recording.start" | "cloud.recording.stop" => match cloud_context(state) {
+            Some(context) => {
+                let result = if command.method == "cloud.recording.start" {
+                    context.recording_start().await
+                } else {
+                    context.recording_stop().await
+                };
+                match result {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-recording-failed",
+                        format!("{error:#}"),
+                    ),
+                }
+            }
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.return.set" => {
+            match serde_json::from_value::<cloud_talk::RoomDoorParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context.set_return(params.open).await {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-return-failed",
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // C-G6: Go Live in a talk show hands the destinations over; no local
+        // leg. The platforms' own setup (a YouTube broadcast) stays with the
+        // renderer, as today.
+        "cloud.show.goLive" => {
+            match serde_json::from_value::<cloud_talk::TalkGoLiveParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => {
+                        let (destinations, platforms) =
+                            match recording::cloud_talk_handover(&params.streaming) {
+                                Ok(resolved) => resolved,
+                                Err(error) => {
+                                    return ServerResponse::error(
+                                        command.id,
+                                        "cloud-go-live-failed",
+                                        format!("{error:#}"),
+                                    );
+                                }
+                            };
+                        match context
+                            .talk_go_live(account::stored_session_token(), destinations, platforms)
+                            .await
+                        {
+                            Ok(status) => {
+                                // The chat attaches to the show the way it
+                                // attaches to a session: its id is the
+                                // session the renderer's cards name.
+                                if let Some(show_id) =
+                                    status.show.as_ref().map(|show| show.id.clone())
+                                    && let Some(chat) = prepare_session_live_chat(
+                                        state,
+                                        &show_id,
+                                        &params.streaming,
+                                    )
+                                    .await
+                                {
+                                    live_chat::start_live_chat(state, chat).await;
+                                }
+                                ServerResponse::ok(command.id, status)
+                            }
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "cloud-go-live-failed",
+                                format!("{error:#}"),
+                            ),
+                        }
+                    }
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.show.legs.end" => match cloud_context(state) {
+            Some(context) => match context.legs_end().await {
+                Ok(status) => {
+                    live_chat::stop_live_chat(state).await;
+                    ServerResponse::ok(command.id, status)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-legs-end-failed", format!("{error:#}"))
+                }
+            },
+            None => cloud_unavailable(command.id),
+        },
         "remote.intent" => {
             match serde_json::from_value::<crate::remote_control::RemoteIntent>(
                 command.params.clone(),
@@ -11859,62 +12649,12 @@ async fn handle_text_message_with_role(
             ServerResponse::ok(command.id, performance_check::current_state(state).await)
         }
         "session.start" => {
-            let mut params_value = command.params;
-            if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
-                return ServerResponse::error(
-                    command.id,
-                    "resource-capability-rejected",
-                    error.to_string(),
-                );
-            }
-            match serde_json::from_value::<protocol::StartSessionParams>(params_value) {
-                Ok(params) => {
-                    let streaming = params.streaming.clone();
-                    let attach_live_chat = session_attaches_live_chat(&params);
-                    match start_session(state.clone(), params).await {
-                        Ok(status) => {
-                            // Plan 187: a fact for the announcer; never waits.
-                            discord_announce::on_session_started(
-                                state,
-                                &status,
-                                streaming.as_ref(),
-                            );
-                            if attach_live_chat
-                                && let Some(streaming) = streaming.as_ref()
-                                && let Some(session_id) = status.session_id.as_deref()
-                            {
-                                spawn_session_live_chat(state, session_id, streaming).await;
-                            }
-                            ServerResponse::ok(command.id, status)
-                        }
-                        Err(error) => {
-                            // Plan 181 (owner redesign, guard): an automatic
-                            // buffer-only start on a software encoder is a
-                            // typed refusal, so the renderer keeps the switch
-                            // off and says why instead of retrying.
-                            let code = if let Some(refusal) =
-                                error.downcast_ref::<replay_buffer::AutoStartRefused>()
-                            {
-                                // The ring's status carries the reason too,
-                                // not a bare "off".
-                                replay_buffer::note_auto_start_refused(state, &refusal.message);
-                                replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE
-                            } else if error
-                                .downcast_ref::<replay_buffer::AutoStartSourcesNotReady>()
-                                .is_some()
-                            {
-                                replay_buffer::SOURCES_NOT_READY_CODE
-                            } else {
-                                "session-start-failed"
-                            };
-                            ServerResponse::error(command.id, code, error.to_string())
-                        }
-                    }
-                }
-                Err(error) => {
-                    ServerResponse::error(command.id, "invalid-params", error.to_string())
-                }
-            }
+            start_session_command(state, command, role, SessionStartKind::GoLive).await
+        }
+        // Plan 184 C5: the Resume banner. The same params as `session.start`;
+        // the start then feeds the show that is live instead of creating one.
+        "cloud.show.resume" => {
+            start_session_command(state, command, role, SessionStartKind::CloudResume).await
         }
         "session.stop" => {
             // Buddy's listen task drains with this capture (plan 068 review).
@@ -11928,7 +12668,12 @@ async fn handle_text_message_with_role(
                     .unwrap_or_default()
             };
             match stop_recording_with_intent(state.clone(), stop_params).await {
-                Ok(status) => ServerResponse::ok(command.id, status),
+                Ok(status) => {
+                    // Plan 184 C4: the desktop's Stop ends the cloud show this
+                    // session fed. YouTube's `complete` stays with the renderer.
+                    cloud_show_session_stopped(state, status.session_id.as_deref()).await;
+                    ServerResponse::ok(command.id, status)
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "session-stop-failed", error.to_string())
                 }
@@ -14581,7 +15326,10 @@ async fn handle_text_message_with_role(
             ServerResponse::ok(command.id, status)
         }
         "recording.stop" => match stop_recording(state.clone()).await {
-            Ok(status) => ServerResponse::ok(command.id, status),
+            Ok(status) => {
+                cloud_show_session_stopped(state, status.session_id.as_deref()).await;
+                ServerResponse::ok(command.id, status)
+            }
             Err(error) => {
                 ServerResponse::error(command.id, "recording-stop-failed", error.to_string())
             }
@@ -14653,6 +15401,382 @@ fn clear_account_credentials_fail_closed<T>(
 
 fn stored_ai_session_token() -> Result<String> {
     account::stored_session_token().context("Sign in to use cloud AI.")
+}
+
+// --- Videorc Cloud glue (plan 184) --------------------------------------------
+// The show module owns the state machine behind traits; this is the one place
+// that binds it to the real web client, the real socket, the event bus and the
+// session's leg model.
+
+type AppCloudShowContext =
+    cloud_show::CloudShowContext<videorc_api::VideorcApiClient, cloud_show::WsConnector>;
+
+fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
+    let emit_state = state.clone();
+    let legs_state = state.clone();
+    let remember_state = state.clone();
+    let camera_state = state.clone();
+    let request_state = state.clone();
+    cloud_show::CloudHooks {
+        emit: std::sync::Arc::new(move |status| {
+            emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
+        }),
+        // Lane 3 F2: the show this desktop holds survives a relaunch, so the
+        // launch check asks the web about it whatever the account says then.
+        remember: std::sync::Arc::new(move |remembered: Option<String>| {
+            if let Err(error) = remember_state
+                .database
+                .save_setting(cloud_show::CLOUD_OPEN_SHOW_KEY, &remembered)
+            {
+                tracing::warn!("Could not save the remembered Videorc Cloud show: {error:#}");
+            }
+        }),
+        legs: std::sync::Arc::new(move |session_id: &str, legs| {
+            // C2: the runner's legs into the session's own leg model, then
+            // the same `stream.targets` event the FFmpeg monitor emits.
+            let state = legs_state.clone();
+            let session_id = session_id.to_string();
+            tokio::spawn(async move {
+                if let Some(snapshot) =
+                    recording::apply_cloud_leg_states(&state, &session_id, &legs).await
+                {
+                    state.emit_event("stream.targets", snapshot);
+                }
+            });
+        }),
+        // Plan 224 D6: the camera has one owner at a time. The room borrows
+        // it with reason `talk-show` and gives it back when it closes.
+        camera: std::sync::Arc::new(move |handover| {
+            let state = camera_state.clone();
+            Box::pin(async move {
+                match handover {
+                    cloud_talk::CameraHandover::Lend => {
+                        preview_camera::lend_camera_to_talk_show(&state).await
+                    }
+                    cloud_talk::CameraHandover::Return => {
+                        preview_camera::return_camera_from_talk_show(&state).await;
+                        Ok(())
+                    }
+                }
+            })
+        }),
+        // Plan 224: "Ada wants to join", one event per new request.
+        request: std::sync::Arc::new(move |request| {
+            request_state.emit_event(cloud_talk::CLOUD_ROOM_REQUESTS_EVENT, request);
+        }),
+    }
+}
+
+fn cloud_context(state: &AppState) -> Option<AppCloudShowContext> {
+    let web = match videorc_api::VideorcApiClient::new() {
+        Ok(web) => web,
+        Err(error) => {
+            tracing::warn!("Videorc Cloud web client could not be built: {error:#}");
+            return None;
+        }
+    };
+    Some(cloud_show::CloudShowContext {
+        slot: state.cloud_show.clone(),
+        hooks: cloud_hooks(state),
+        web: std::sync::Arc::new(web),
+        connector: std::sync::Arc::new(cloud_show::WsConnector),
+    })
+}
+
+/// Plan 224 C-G7: the talk show on air, when cards and takeovers go to the
+/// runner instead of the compositor.
+pub(crate) fn cloud_talk_show_live_show_id(state: &AppState) -> Option<String> {
+    state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .talk_show_live_show_id()
+}
+
+/// Plan 224: this desktop holds a talk show's room.
+fn cloud_talk_show_open(state: &AppState) -> bool {
+    state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .talk_show_open()
+}
+
+fn cloud_unavailable(id: String) -> ServerResponse {
+    ServerResponse::error(
+        id,
+        "cloud-unavailable",
+        "Videorc Cloud is unavailable in this build.",
+    )
+}
+
+/// A talk-show refusal's own code (`RoomOpenRefusal`, the web's refusals),
+/// else the arm's default.
+fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'static str {
+    if let Some(refusal) = error.downcast_ref::<cloud_talk::RoomOpenRefusal>() {
+        return refusal.code();
+    }
+    if let Some(api) = error.downcast_ref::<cloud_show::CloudApiError>()
+        && let Some(code) = cloud_talk::talk_show_create_refusal(api)
+    {
+        return code;
+    }
+    default
+}
+
+fn cloud_show_status(state: &AppState) -> cloud_show::CloudStatus {
+    state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .status()
+}
+
+/// The account's plan and `cloud` block, from the capabilities refresh;
+/// `(None, None)` at sign-out.
+fn cloud_show_hydrate(
+    state: &AppState,
+    plan: Option<protocol::EntitlementPlan>,
+    cloud: Option<protocol::AiCapabilitiesCloud>,
+) {
+    if let Some(context) = cloud_context(state) {
+        context.hydrate_entitlement(plan, cloud);
+    }
+}
+
+fn cloud_show_set_settings(
+    state: &AppState,
+    patch: &cloud_show::CloudSettingsPatch,
+) -> Result<cloud_show::CloudStatus> {
+    let status = {
+        let mut runtime = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut next = runtime.settings.clone();
+        next.apply(patch)?;
+        state
+            .database
+            .save_setting(cloud_show::CLOUD_SETTINGS_KEY, &next)
+            .context("Could not save the Videorc Cloud settings.")?;
+        runtime.settings = next;
+        runtime.status()
+    };
+    state.emit_event(cloud_show::CLOUD_STATE_EVENT, &status);
+    Ok(status)
+}
+
+/// Plan 222 U1: the signed-in account's key in the notice list, or `None`
+/// while signed out.
+async fn cloud_announce_account_key(state: &AppState) -> Option<String> {
+    let session = state.account_session.lock().await;
+    let account = account::current_account(session.as_ref());
+    cloud_show::announce_account_key(account.username.as_deref(), account.email.as_deref())
+}
+
+/// Plan 222 U1: after the entitlement refresh, whether this account still
+/// has "Videorc Cloud is on" to see on this computer.
+async fn cloud_show_refresh_announce(state: &AppState) {
+    let key = cloud_announce_account_key(state).await;
+    let due = key.is_some_and(|key| !cloud_show::load_announced(&state.database).contains(&key));
+    let status = {
+        let mut runtime = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime.set_announce_due(due).then(|| runtime.status())
+    };
+    if let Some(status) = status {
+        state.emit_event(cloud_show::CLOUD_STATE_EVENT, &status);
+    }
+}
+
+/// `cloud.announce.seen` (plan 222 U1): the notice showed; never again for
+/// this account here.
+async fn cloud_show_announce_seen(state: &AppState) -> Result<cloud_show::CloudStatus> {
+    if let Some(key) = cloud_announce_account_key(state).await {
+        let next = cloud_show::announced_with(cloud_show::load_announced(&state.database), &key);
+        state
+            .database
+            .save_setting(cloud_show::CLOUD_ANNOUNCED_KEY, &next)
+            .context("Could not save the Videorc Cloud notice.")?;
+    }
+    let status = {
+        let mut runtime = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime.set_announce_due(false);
+        runtime.status()
+    };
+    state.emit_event(cloud_show::CLOUD_STATE_EVENT, &status);
+    Ok(status)
+}
+
+/// After a stop: end the show the stopped session fed. With no session id
+/// (an older status), the show with a feeding session is the one that stopped.
+async fn cloud_show_session_stopped(state: &AppState, session_id: Option<&str>) {
+    let feeding = state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .feeding_session();
+    let Some(session_id) = session_id.map(str::to_string).or(feeding) else {
+        return;
+    };
+    let Some(context) = cloud_context(state) else {
+        return;
+    };
+    context
+        .on_session_stopped(&session_id, account::stored_session_token())
+        .await;
+}
+
+/// C5: at launch, after the entitlement refresh, ask the web for a live show
+/// whenever the account could own one (`may_own_a_show`), has cloud hours,
+/// or this desktop remembers a show, whatever the cloud switch or the
+/// rollout says (lane 3 F2, `launch_check_due`): a show started before a
+/// rollback is still live on its node, and its Resume and End banner must
+/// show. Until the web has answered, every successful entitlement refresh
+/// calls this again (plan 222 review L4); two at once are one.
+async fn cloud_show_detect_at_launch(state: &AppState) {
+    let Some(bearer) = account::stored_session_token() else {
+        return;
+    };
+    let due = cloud_show::launch_check_due(
+        &state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        true,
+    );
+    if !due {
+        return;
+    }
+    let Some(context) = cloud_context(state) else {
+        return;
+    };
+    if let Err(error) = context.detect_current_show(&bearer).await {
+        tracing::info!("Videorc Cloud launch check did not complete: {error:#}");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionStartKind {
+    GoLive,
+    /// Plan 184 C5: the same params as `session.start`, bound to the show
+    /// that is live. C5b: nothing is set up on a platform and no key is
+    /// needed; the runner keeps the legs it holds.
+    CloudResume,
+}
+
+async fn start_session_command(
+    state: &AppState,
+    command: ClientCommand,
+    role: BackendRole,
+    kind: SessionStartKind,
+) -> ServerResponse {
+    // Plan 224 C-G6: while the room is open, Record and Go Live work
+    // through it (`cloud.recording.start`, `cloud.show.goLive`); no local
+    // session, so no `StreamTarget` is ever built beside the runner's legs.
+    if cloud_talk_show_open(state) {
+        return ServerResponse::error(
+            command.id,
+            "cloud-talk-show-open",
+            "Record and Go Live work through the room while it is open.",
+        );
+    }
+    if kind == SessionStartKind::CloudResume {
+        let resumable = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .resumable_show_id();
+        if resumable.is_none() {
+            return ServerResponse::error(
+                command.id,
+                "cloud-nothing-to-resume",
+                "There is no Videorc Cloud show to resume.",
+            );
+        }
+    }
+    let mut params_value = command.params;
+    if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
+        return ServerResponse::error(
+            command.id,
+            "resource-capability-rejected",
+            error.to_string(),
+        );
+    }
+    match serde_json::from_value::<protocol::StartSessionParams>(params_value) {
+        Ok(params) => {
+            let streaming = params.streaming.clone();
+            let attach_live_chat = session_attaches_live_chat(&params);
+            // Plan 184 C6b: a running Test cloud yields to the session, which
+            // needs the upload and the encoder; a cloud start also waits for
+            // the test's show to end (`prepare_session`).
+            if session_start_stops_cloud_test(&params)
+                && state
+                    .cloud_show
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .signal_test_cancel()
+            {
+                tracing::info!("A session start stops the running Videorc Cloud test.");
+            }
+            let started = match kind {
+                SessionStartKind::GoLive => start_session(state.clone(), params).await,
+                SessionStartKind::CloudResume => {
+                    recording::start_cloud_resume_session(state.clone(), params).await
+                }
+            };
+            match started {
+                Ok(status) => {
+                    // Plan 187: a fact for the announcer; never waits.
+                    discord_announce::on_session_started(state, &status, streaming.as_ref());
+                    if attach_live_chat
+                        && let Some(streaming) = streaming.as_ref()
+                        && let Some(session_id) = status.session_id.as_deref()
+                    {
+                        spawn_session_live_chat(state, session_id, streaming).await;
+                    }
+                    ServerResponse::ok(command.id, status)
+                }
+                Err(error) => {
+                    // Plan 181 (owner redesign, guard): an automatic
+                    // buffer-only start on a software encoder is a
+                    // typed refusal, so the renderer keeps the switch
+                    // off and says why instead of retrying.
+                    let code = if let Some(refusal) =
+                        error.downcast_ref::<replay_buffer::AutoStartRefused>()
+                    {
+                        // The ring's status carries the reason too,
+                        // not a bare "off".
+                        replay_buffer::note_auto_start_refused(state, &refusal.message);
+                        replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE
+                    } else if error
+                        .downcast_ref::<replay_buffer::AutoStartSourcesNotReady>()
+                        .is_some()
+                    {
+                        replay_buffer::SOURCES_NOT_READY_CODE
+                    } else {
+                        "session-start-failed"
+                    };
+                    ServerResponse::error(command.id, code, error.to_string())
+                }
+            }
+        }
+        Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+    }
+}
+
+/// Plan 184 C6b on main: a start that records or streams needs the upload
+/// and the encoder, so a running Test cloud yields to it. Plan 181's
+/// automatic buffer-only start (the clips ring) is neither, and it must not
+/// end a test the streamer clicked: the ring yields to the real start that
+/// follows (`replay_hand_over_pending`), and the test ends on its own.
+fn session_start_stops_cloud_test(params: &protocol::StartSessionParams) -> bool {
+    params.output.record_enabled || params.output.stream_enabled
 }
 
 async fn get_ai_capabilities() -> Result<protocol::AiCapabilities> {
@@ -14760,11 +15884,21 @@ fn apply_prepared_account_entitlement_refresh(
             entitlements::clear_account_entitlements()
         }
         PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+            // Plan 185 D2: the plan named beside the tier. The token's own
+            // `plan` claim wins when present; this is the fallback for tokens
+            // minted before the claim existed.
+            let plan = capabilities
+                .plan
+                .as_ref()
+                .and_then(|plan| protocol::EntitlementPlan::parse(&plan.id));
             match capabilities.entitlement_token.as_deref() {
                 // Prefer the signed token: verified locally, persisted for
                 // offline grace until its exp.
                 Some(entitlement_token) => {
-                    match entitlements::hydrate_account_entitlements_from_token(entitlement_token) {
+                    match entitlements::hydrate_account_entitlements_from_token(
+                        entitlement_token,
+                        plan,
+                    ) {
                         Ok(changed) => {
                             account::persist_entitlement_token(entitlement_token);
                             changed
@@ -14776,15 +15910,17 @@ fn apply_prepared_account_entitlement_refresh(
                             );
                             entitlements::hydrate_account_entitlements(
                                 capabilities.entitlement.is_premium,
+                                plan,
                             )
                         }
                     }
                 }
                 // Older web deploy / unconfigured signing key: unsigned
                 // boolean with its short staleness ceiling.
-                None => {
-                    entitlements::hydrate_account_entitlements(capabilities.entitlement.is_premium)
-                }
+                None => entitlements::hydrate_account_entitlements(
+                    capabilities.entitlement.is_premium,
+                    plan,
+                ),
             }
         }
         PreparedAccountEntitlementRefreshOutcome::KeepCached(error) => {
@@ -14825,11 +15961,22 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Plan 192 D4: and whether the greet route is on (the AI writes the
     // greetings). Signed out reads as unknown; absent reads as off.
     let mut greet_version: Option<Option<u32>> = None;
+    // Plan 225 D10: and whether the memory route is on (queued passes run).
+    let mut memory_version: Option<Option<u32>> = None;
     // Plan 170 D9: the same read turns the account Buddy library on or off.
     let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
     // Plan 209 S19: and whether Buddy's tool planner may be asked
     // (`buddy.act`). Signed out or absent reads as off.
     let mut buddy_act: Option<bool> = None;
+    // Plan 184 / 185: the same read carries the plan and the `cloud` block.
+    // Signed out reads as no cloud; a failed read keeps the last answer.
+    let mut cloud_block: Option<(
+        Option<protocol::EntitlementPlan>,
+        Option<protocol::AiCapabilitiesCloud>,
+    )> = None;
+    // Plan 222 review L4: a successful read runs the launch check again
+    // while the web has not answered it for this sign-in.
+    let mut capabilities_read = false;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -14854,6 +16001,16 @@ async fn refresh_account_entitlements(state: &AppState) {
                     }
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
+                memory_version = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => Some(
+                        capabilities
+                            .cohost
+                            .as_ref()
+                            .and_then(|cohost| cohost.memory),
+                    ),
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
                 buddy_act = match &prepared.outcome {
                     PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(false),
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
@@ -14871,6 +16028,21 @@ async fn refresh_account_entitlements(state: &AppState) {
                     ),
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
+                cloud_block = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some((None, None)),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => Some((
+                        capabilities
+                            .plan
+                            .as_ref()
+                            .and_then(|plan| protocol::EntitlementPlan::parse(&plan.id)),
+                        capabilities.cloud.clone(),
+                    )),
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                capabilities_read = matches!(
+                    &prepared.outcome,
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(_)
+                );
                 apply_prepared_account_entitlement_refresh(prepared.outcome)
             })
             .unwrap_or(false)
@@ -14887,6 +16059,17 @@ async fn refresh_account_entitlements(state: &AppState) {
         publish_entitlements_updated(state);
     }
     drop(transition);
+    if let Some((plan, cloud)) = cloud_block {
+        cloud_show_hydrate(state, plan, cloud);
+        cloud_show_refresh_announce(state).await;
+        // Plan 222 review L4: the launch check the web could not answer at
+        // launch (or that this sign-in still owes) runs again, on its own
+        // task; `launch_check_due` is false once the web has answered.
+        if capabilities_read {
+            let check_state = state.clone();
+            tokio::spawn(async move { cloud_show_detect_at_launch(&check_state).await });
+        }
+    }
     if let Some(enabled) = command_parser {
         cohost::set_command_parser_capability(state, enabled).await;
     }
@@ -14895,6 +16078,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     }
     if let Some(greet) = greet_version {
         cohost::set_greet_capability(state, greet).await;
+    }
+    if let Some(memory) = memory_version {
+        community_service::set_memory_capability(state, memory);
     }
     if let Some(library) = buddy_library {
         cohost_library::set_capability(state, library).await;
@@ -17993,6 +19179,9 @@ mod tests {
         assert_eq!(
             lifecycle_exemptions,
             [
+                // Plan 184 C5: Resume is the same atomic Start, bound to the
+                // live cloud show.
+                "cloud.show.resume",
                 "recording.start_test",
                 "recording.stop",
                 "session.start",
@@ -21776,6 +22965,134 @@ mod tests {
         )
     }
 
+    /// Plan 224 C-G6 (review L9: the `session.start` refusal and the
+    /// no-local-target test): while a room is open, Record and Go Live work
+    /// through it. A `session.start` with a stream target, and the solo
+    /// Resume, are refused before any resource or target is built, so no
+    /// local leg ever streams beside the runner's.
+    #[tokio::test]
+    async fn session_start_is_refused_while_a_room_is_open_and_builds_no_local_target() {
+        let state = test_state();
+        let mut runner = cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_talk", true);
+        for kind in [SessionStartKind::GoLive, SessionStartKind::CloudResume] {
+            let response = start_session_command(
+                &state,
+                ClientCommand {
+                    id: "start-1".to_string(),
+                    method: "session.start".to_string(),
+                    params: json!({
+                        "streaming": { "targets": [{
+                            "id": "youtube-main", "platform": "youtube", "label": "YouTube",
+                            "enabled": true, "authMode": "stream-key",
+                            "serverUrl": "rtmp://a.rtmp.youtube.com/live2", "streamKey": "abcd-efgh"
+                        }] }
+                    }),
+                },
+                BackendRole::Renderer,
+                kind,
+            )
+            .await;
+            assert!(!response.ok, "{kind:?}");
+            assert_eq!(
+                response.error.as_ref().map(|error| error.code.as_str()),
+                Some("cloud-talk-show-open"),
+                "{kind:?}"
+            );
+        }
+        assert!(
+            state.recording.lock().await.is_none(),
+            "no local session, so no StreamTarget beside the runner's legs"
+        );
+        assert!(
+            runner.try_recv().is_err(),
+            "nothing reached the runner either"
+        );
+    }
+
+    /// Plan 224 C-G7 and review L6 (L9's overlay forks): a takeover in a
+    /// talk show on air goes to the runner's `takeover` slot, full frame,
+    /// each output its own render, with no TTL; taking it down clears both.
+    #[tokio::test]
+    async fn a_takeover_on_a_talk_show_on_air_goes_to_the_runner_per_output() {
+        use base64::Engine as _;
+        let state = test_state();
+        let mut runner = cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_talk", true);
+        let dir =
+            std::env::temp_dir().join(format!("videorc-talk-takeover-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("brb.png");
+        image::RgbaImage::from_pixel(160, 90, image::Rgba([0, 128, 255, 255]))
+            .save(&path)
+            .unwrap();
+        let screen = protocol::StreamScreen {
+            id: "brb".to_string(),
+            name: "Be right back".to_string(),
+            image_path: path.to_string_lossy().into_owned(),
+            thumbnail_path: None,
+            sort_order: 0,
+            status: protocol::StreamScreenStatus::Ready,
+            created_at: "2026-11-09T10:00:00Z".to_string(),
+            updated_at: "2026-11-09T10:00:00Z".to_string(),
+        };
+        let leftover =
+            |runner: &mut tokio::sync::mpsc::UnboundedReceiver<cloud_show::ControlRequest>| {
+                let mut frames = Vec::new();
+                while let Ok(intent) = runner.try_recv() {
+                    frames.push(intent.answer_for_tests(None));
+                }
+                frames
+            };
+        let answer = async {
+            let mut frames = Vec::new();
+            for _ in 0..2 {
+                let intent = runner.recv().await.expect("a takeover intent");
+                frames.push(intent.answer_for_tests(None));
+            }
+            frames
+        };
+        let (applied, frames) =
+            tokio::join!(apply_active_screen_output(&state, Some(screen)), answer);
+        applied.unwrap();
+        let full = json!({ "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 });
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.set");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+            assert_eq!(frame["rect"], full);
+            assert!(
+                frame.get("ttlSeconds").is_none(),
+                "a takeover stays until cleared"
+            );
+        }
+        let vertical = base64::engine::general_purpose::STANDARD
+            .decode(frames[1]["pngBase64"].as_str().unwrap())
+            .unwrap();
+        let vertical = image::load_from_memory(&vertical).unwrap();
+        assert_eq!(
+            (vertical.width(), vertical.height()),
+            (1080, 1920),
+            "the 9:16 output gets a 9:16 render (L6)"
+        );
+        assert!(leftover(&mut runner).is_empty(), "one intent per output");
+
+        let answer = async {
+            let mut frames = Vec::new();
+            for _ in 0..2 {
+                let intent = runner.recv().await.expect("a takeover clear");
+                frames.push(intent.answer_for_tests(None));
+            }
+            frames
+        };
+        let (cleared, frames) = tokio::join!(apply_active_screen_output(&state, None), answer);
+        cleared.unwrap();
+        for (frame, orientation) in frames.iter().zip(["h", "v"]) {
+            assert_eq!(frame["kind"], "overlay.clear");
+            assert_eq!(frame["slot"], "takeover");
+            assert_eq!(frame["orientation"], orientation);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Plan 215 A5 (D7): the account change goes out as one event the
     /// renderer's strict contract accepts, with the reason; the sign-out the
     /// server made is `session-expired`. Desktop sockets only: it is not a
@@ -22530,6 +23847,60 @@ mod tests {
                 .message
                 .contains("raw outputDirectory is not accepted")
         );
+    }
+
+    /// Plan 225 D12: Export… and Import… take main's single-use capabilities,
+    /// never a path the renderer typed.
+    #[tokio::test]
+    async fn renderer_community_export_and_import_reject_raw_paths() {
+        let state = test_state();
+        let cases = [
+            (
+                "cohost.community.export",
+                serde_json::json!({ "outputDirectory": "/tmp/renderer-chosen-folder" }),
+                "raw outputDirectory is not accepted",
+            ),
+            (
+                "cohost.community.export",
+                serde_json::json!({}),
+                "outputDirectoryCapability is required",
+            ),
+            (
+                "cohost.community.import",
+                serde_json::json!({ "path": "/tmp/renderer-chosen.json" }),
+                "raw path is not accepted",
+            ),
+            (
+                "cohost.community.import",
+                serde_json::json!({}),
+                "sourceCapability is required",
+            ),
+            (
+                "cohost.community.import",
+                serde_json::json!({ "sourceCapability": "resource:not-issued" }),
+                "Resource capability",
+            ),
+        ];
+        for (method, params, expected) in cases {
+            let response = handle_text_message_with_role(
+                &state,
+                &serde_json::json!({ "id": "community-raw", "method": method, "params": params })
+                    .to_string(),
+                BackendRole::Renderer,
+            )
+            .await;
+            assert!(!response.ok, "{method} {params} must be refused");
+            let error = response.error.expect("renderer refusal");
+            assert_eq!(
+                error.code, "resource-capability-rejected",
+                "{method} {params}"
+            );
+            assert!(
+                error.message.contains(expected),
+                "{method} {params}: {}",
+                error.message
+            );
+        }
     }
 
     #[tokio::test]
@@ -24345,6 +25716,19 @@ mod tests {
             default_bitrate_kbps: 6_000,
             enabled_target_ids,
         }
+    }
+
+    /// Plan 184 C6b on main: the clips ring's automatic buffer-only start
+    /// leaves a running Test cloud alone; a Record or a Go Live ends it.
+    #[test]
+    fn only_a_start_that_records_or_streams_stops_the_cloud_test() {
+        let go_live = session_params_with_stream_output(true);
+        assert!(session_start_stops_cloud_test(&go_live));
+        let record = session_params_with_stream_output(false);
+        assert!(session_start_stops_cloud_test(&record));
+        let mut buffer_only = session_params_with_stream_output(false);
+        buffer_only.output.record_enabled = false;
+        assert!(!session_start_stops_cloud_test(&buffer_only));
     }
 
     fn session_params_with_stream_output(stream_enabled: bool) -> protocol::StartSessionParams {

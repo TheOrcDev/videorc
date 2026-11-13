@@ -443,6 +443,11 @@ pub struct LiveChatMessage {
     /// returning chatter.
     #[serde(skip)]
     pub first_in_session: bool,
+    /// A returning person's arrival facts (plan 225 D11): set only on the
+    /// arrival row, by the community lookup that rides the first-time
+    /// marker. Optional and never null; stored as `arrival_json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival: Option<crate::community::ViewerArrival>,
     /// The @-mentionable login where the platform has one apart from the
     /// display name: Twitch `chatter_user_login`, X `username` (plan 226's
     /// command replies). Local only, like `first_in_session`: never on the
@@ -2281,6 +2286,16 @@ where
         coordinator.start_session(params.session_id.clone(), providers);
         coordinator.session_generation()
     };
+    // Plan 225 B1: the stream row and a fresh arrival set.
+    crate::community_service::session_started(
+        state,
+        &params.session_id,
+        params
+            .destinations
+            .iter()
+            .map(|destination| destination.platform)
+            .collect(),
+    );
     // The coordinator session and every connector/sender handle are one
     // lifecycle transaction. A stop that observes this session must wait for
     // all of its runtime ownership to be attached so stop_session can retire
@@ -3400,6 +3415,7 @@ where
         coordinator.stop_session();
         (kick_cleanup, ended_session)
     };
+    crate::community_service::session_ended(state);
     spawn_kick_cleanup(state, kick_cleanup);
     if let Some(session_id) = ended_session {
         // Plan 140: a removal card still open when the session ends is
@@ -3457,6 +3473,7 @@ where
         }
     };
     let kick_cleanup = stopped?;
+    crate::community_service::session_ended(state);
     spawn_kick_cleanup(state, kick_cleanup);
     crate::live_chat_moderation::note_session_ended(state, expected_session_id.to_string());
 
@@ -3627,11 +3644,27 @@ async fn mark_first_time_chatters(
     let database = state.database.clone();
     let lookup = fresh.clone();
     let lookup_session_id = session_id.clone();
-    let returning = tokio::task::spawn_blocking(move || {
-        database.live_chat_returning_authors(&lookup_session_id, &lookup)
+    let community = state.community.clone();
+    // Plan 225 B1, D14: the community lookup rides the same blocking read
+    // (one indexed read per fresh account); a store error leaves every row
+    // without `arrival`. The first-time query is unchanged.
+    let looked_up = tokio::task::spawn_blocking(move || {
+        let returning = database.live_chat_returning_authors(&lookup_session_id, &lookup);
+        let (arrivals, already_arrived, log) = crate::community_service::lookup_arrivals_blocking(
+            &database,
+            &community,
+            &lookup_session_id,
+            &lookup,
+            chrono::Utc::now(),
+        );
+        (returning, arrivals, already_arrived, log)
     })
     .await;
-    if let Ok(Ok(returning)) = returning {
+    if let Ok((returning, mut arrivals, already_arrived, log)) = looked_up {
+        if let Some(line) = log {
+            state.emit_log("warn", line);
+        }
+        let returning = returning.ok();
         let mut marked = HashSet::new();
         for message in &mut messages {
             let Some(author_id) = message.author_id.clone() else {
@@ -3646,11 +3679,25 @@ async fn mark_first_time_chatters(
             {
                 continue;
             }
-            // Plan 192 S1.2: the first row of each fresh author this session,
-            // first-time or not, so the Buddy can welcome them back.
-            message.first_in_session = true;
-            if !returning.contains(&key) {
-                message.first_message = true;
+            if already_arrived.contains(&key) {
+                // Plan 225 F6: the person already arrived this stream on
+                // another account. The row is neither their first chat
+                // (D7: a linked person is first-time only when no account
+                // was seen before) nor a return, so it earns no welcome.
+                message.first_message = false;
+                continue;
+            }
+            if let Some(returning) = &returning {
+                // Plan 192 S1.2: the first row of each fresh author this
+                // session, first-time or not, so the Buddy can welcome them
+                // back.
+                message.first_in_session = true;
+                if !returning.contains(&key) {
+                    message.first_message = true;
+                }
+            }
+            if let Some(arrival) = arrivals.remove(&key) {
+                message.arrival = Some(arrival);
             }
         }
     }
@@ -3871,6 +3918,9 @@ pub(crate) async fn try_deliver_messages(
             .await;
         }
         state.emit_event("liveChat.message", message);
+        // Plan 223 B1: the watchdog's phrase match, after delivery, never
+        // waiting on anything.
+        crate::watchdog::observe_chat(state, message);
     }
     // A confirmed persisted snapshot, independent of the bounded paint buffer
     // and unread owner. Reconnect/lag readers hydrate it through the totals RPC.
@@ -3890,6 +3940,9 @@ pub(crate) async fn try_deliver_messages(
         &authoritative_messages,
         &new_message_ids,
     );
+    // Plan 225 B1, D14: one detached store write per batch, after delivery,
+    // outside every fence; the delivery never waits on it.
+    crate::community_service::record_delivered(state, &delivery_session_id, authoritative_messages);
     Ok(())
 }
 
@@ -4464,10 +4517,38 @@ fn fake_echo_message(
     );
     message.author_id = Some("fake-broadcaster".to_string());
     message.author_name = "You".to_string();
-    message.author_roles = vec!["broadcaster".to_string()];
+    // The connectors normalize the streamer to `owner` (plan 223 M1): the
+    // echo wears the same role, so every reader excludes it the same way.
+    message.author_roles = vec!["owner".to_string()];
     message.author_verified = None;
     message.message_text = text.to_string();
     message
+}
+
+/// The echo's row as a test sees it (plan 223 M1: it wears `owner`).
+#[cfg(test)]
+pub(crate) fn fake_echo_message_for_tests(
+    session_id: &str,
+    platform: StreamPlatform,
+    text: &str,
+) -> LiveChatMessage {
+    let provider = LiveChatProviderState {
+        id: format!("{}:fake", stream_platform_id(platform)),
+        platform,
+        target_id: None,
+        account_id: None,
+        account_label: None,
+        read: CommentsReadState::Ready,
+        write: CommentsWriteState::Ready,
+        moderate: None,
+        state: LiveChatProviderConnectionState::Connected,
+        message: String::new(),
+        last_connected_at: None,
+        last_message_at: None,
+        last_error: None,
+        retry_at: None,
+    };
+    fake_echo_message(session_id, &provider, "fake-echo-1", text)
 }
 
 pub(crate) fn fake_message(
@@ -4501,6 +4582,7 @@ pub(crate) fn fake_message(
         reply: None,
         first_message: false,
         first_in_session: false,
+        arrival: None,
         author_handle: None,
         author_affiliation: None,
         // Fake X chat shows each of X's checks and an unverified viewer, so
@@ -7911,6 +7993,7 @@ mod tests {
             reply: None,
             first_message: false,
             first_in_session: false,
+            arrival: None,
             author_handle: None,
             author_affiliation: None,
             author_verified: None,

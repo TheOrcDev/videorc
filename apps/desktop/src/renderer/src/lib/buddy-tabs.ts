@@ -26,6 +26,7 @@ export const BUDDY_TAB_LABEL = 'Buddy'
 export const BUDDY_TABS = [
   { id: 'live', label: 'Profile' },
   { id: 'chat', label: 'Chat' },
+  { id: 'community', label: 'Community' },
   { id: 'voice', label: 'Voice' },
   { id: 'reports', label: 'Reports' },
   { id: 'clean-cut', label: 'Clean cut' }

@@ -40,6 +40,8 @@ import {
   BUDDY_TEMPLATE_TEXT_MAX_CHARS,
   BUDDY_TEMPLATES_MAX,
   BUDDY_WELCOME_FIELDS,
+  BUDDY_ARRIVAL_FIELDS,
+  isArrivalWelcomeKind,
   BUDDY_WELCOME_KEYS,
   BUDDY_WELCOME_TITLES,
   buddyDisplayName,
@@ -176,7 +178,7 @@ export function BuddyGreetingsSection({
             chatCaps={chatCaps}
             editing={editing === `welcome:${kind}`}
             kind={kind}
-            welcome={welcomes[BUDDY_WELCOME_KEYS[kind]]}
+            welcome={welcomes[BUDDY_WELCOME_KEYS[kind]] ?? { enabled: true }}
             onChange={(next) => saveWelcome(kind, next)}
             onEdit={(open) => setEditing(open ? `welcome:${kind}` : null)}
           />
@@ -479,7 +481,7 @@ function WelcomeRow({
         <LineEditor
           chatCaps={chatCaps}
           fallback={builtin.text}
-          fields={BUDDY_WELCOME_FIELDS}
+          fields={isArrivalWelcomeKind(kind) ? BUDDY_ARRIVAL_FIELDS : BUDDY_WELCOME_FIELDS}
           kind={kind}
           label={`${title} welcome text`}
           state={welcome.state ?? builtin.state}

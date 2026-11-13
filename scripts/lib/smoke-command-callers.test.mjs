@@ -75,7 +75,11 @@ test('every direct smoke command HTTP caller sends the per-run bearer capability
 
   for (const path of scriptFiles()) {
     const source = readFileSync(path, 'utf8')
-    for (const match of source.matchAll(/\/command\b|\/health\b|\/preview-frame\.png\b/g)) {
+    // The node agent's `/v1/health` (plan 222 D7: the fake web's node-signed
+    // probe) is not a smoke command call; the command server's is `/health`.
+    for (const match of source.matchAll(
+      /\/command\b|(?<!\/v1)\/health\b|\/preview-frame\.png\b/g
+    )) {
       const requestWindow = source.slice(match.index, match.index + 800)
       if (!/Bearer \$\{(?:smoke|conn\.smoke)\.capability\}|Bearer \$\{C\}/.test(requestWindow)) {
         unauthenticated.push(`${relativeScriptPath(path)}:${lineNumber(source, match.index)}`)

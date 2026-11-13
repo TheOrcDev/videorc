@@ -154,7 +154,8 @@ const shootAll = async (tag, size, theme) => {
       await shootStripTabs(name, '[data-videorc-settings-tab]', tag, size, theme)
     } else if (name === 'buddy') {
       const buddyTabs = await shootStripTabs(name, '[data-videorc-buddy-tab]', tag, size, theme)
-      if (buddyTabs.length !== 5) failures.push(`buddy tabs: expected 5, found ${buddyTabs.length}`)
+      // Plan 225 D12: Profile, Chat, Community, Voice, Reports, Clean cut.
+      if (buddyTabs.length !== 6) failures.push(`buddy tabs: expected 6, found ${buddyTabs.length}`)
     } else if (name === 'streaming') {
       await shootStripTabs('livestream', 'main [data-slot="pane-strip"] [role="tab"]', tag, size, theme)
     }

@@ -40,7 +40,8 @@ import { Switch } from '@/components/ui/switch'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { VideoPresetSelectItems, videoPresetItems } from '@/components/video-preset-select-items'
-import { useStudioCore, useStudioReplay } from '@/hooks/use-studio'
+import { useStudioCloud, useStudioCore, useStudioReplay } from '@/hooks/use-studio'
+import { RECORDING_GOES_TO_CLOUD } from '@/lib/talk-show-session'
 import type { DirectoryFacts, VideoSettings } from '@/lib/backend'
 import {
   REPLAY_RING_SECONDS,
@@ -234,7 +235,12 @@ function LocalRecordingSection(): ReactElement {
     platform: runtimeInfo?.platform,
     clipsOn: captureConfig.replayBuffer.enabled
   })
-  const sessionLocked = isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
+  // Plan 224 D10: while the room is open, Record records in the cloud; the
+  // local file waits for the room to close.
+  const { cloudStatus } = useStudioCloud()
+  const roomOpen = cloudStatus?.room?.phase === 'open'
+  const sessionLocked =
+    isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup) || roomOpen
   // Off means stream-only: the quality is the file's, so it waits for the
   // switch, and the switch's own line says so (D-3).
   const qualityLocked = sessionLocked || !captureConfig.recordEnabled
@@ -249,7 +255,13 @@ function LocalRecordingSection(): ReactElement {
       <FieldGroup variant="grouped">
         <SettingsRow
           data-testid="output-save-recording"
-          description={captureConfig.recordEnabled ? SAVE_RECORDING_ON : SAVE_RECORDING_OFF}
+          description={
+            roomOpen
+              ? RECORDING_GOES_TO_CLOUD
+              : captureConfig.recordEnabled
+                ? SAVE_RECORDING_ON
+                : SAVE_RECORDING_OFF
+          }
           label="Save a local recording"
         >
           <Switch

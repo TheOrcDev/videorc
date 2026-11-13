@@ -117,6 +117,30 @@ pub enum EntitlementTier {
     Developer,
 }
 
+/// The paid plan behind the Premium tier (plan 185 D2). Max keeps
+/// `tier = premium` everywhere and says `plan = max` beside it, so a rollback
+/// or an older app keeps every Max user at least Premium. Absent for Basic,
+/// for the Developer tier, and for a Premium account on an older web deploy.
+/// Never a new `EntitlementTier` value.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntitlementPlan {
+    Premium,
+    Max,
+}
+
+impl EntitlementPlan {
+    /// The web's open `plan.id`. An unknown id reads as "no plan" so a plan
+    /// the shipped app has never heard of cannot break the capabilities load.
+    pub fn parse(id: &str) -> Option<Self> {
+        match id.trim() {
+            "premium" => Some(Self::Premium),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum EntitlementSource {
@@ -170,6 +194,11 @@ pub struct EntitlementCapability {
 pub struct EntitlementsSnapshot {
     pub schema_version: u32,
     pub tier: EntitlementTier,
+    /// Plan 185 D2: `premium` or `max` while the account is Premium. Optional
+    /// on the wire and never a tier value ([[videorc-serde-null-contract-trap]]:
+    /// a `null` here would fail the strict renderer schema).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<EntitlementPlan>,
     pub source: EntitlementSource,
     pub capabilities: Vec<EntitlementCapability>,
     pub limits: EntitlementLimits,
@@ -1598,11 +1627,19 @@ pub enum SessionPurpose {
     #[default]
     Capture,
     PerformanceCheck,
+    /// A capture that feeds the show already live on Videorc Cloud again
+    /// (plan 184 C5b). The runner keeps the platform legs it holds, so the
+    /// start needs no stream key and sets nothing up on a platform.
+    CloudResume,
 }
 
 impl SessionPurpose {
     pub fn is_performance_check(self) -> bool {
         self == Self::PerformanceCheck
+    }
+
+    pub fn resumes_cloud_show(self) -> bool {
+        self == Self::CloudResume
     }
 }
 
@@ -6130,6 +6167,9 @@ pub struct CohostSettingsPatch {
     /// The whole automatic chat block (plan 164 S-A2), validated likewise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_chat: Option<crate::cohost::CohostAutoChat>,
+    /// The whole community block (plan 225), clamped by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<crate::community::CommunitySettings>,
 }
 
 /// Why a Buddy look picture failed (plan 169), in the web's code and the
@@ -6568,6 +6608,81 @@ pub struct CohostSessionReport {
     /// older reports read unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub said: Vec<CohostReportSaid>,
+    /// Plan 225 D15: who came, from the community store, computed when the
+    /// chat session ends. Omitted while empty, so older reports read
+    /// unchanged and an older app ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<CohostReportCommunity>,
+}
+
+/// The most regulars a report names (D15).
+pub const COHOST_REPORT_COMMUNITY_NAMES_CAP: usize = 10;
+/// The most milestones a report names.
+pub const COHOST_REPORT_COMMUNITY_MILESTONES_CAP: usize = 20;
+
+/// One regular the report names (D15): the name, where they chatted, and
+/// their linked platforms when they have two or more.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommunityPerson {
+    pub name: String,
+    pub platform: crate::streaming::StreamPlatform,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<crate::streaming::StreamPlatform>,
+    /// Streams chatted in, including this one.
+    pub streams: u32,
+}
+
+/// One milestone celebrated this stream (D15).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommunityMilestone {
+    pub name: String,
+    pub platform: crate::streaming::StreamPlatform,
+    pub milestone: crate::community::ViewerMilestone,
+}
+
+/// The report's Community block (plan 225 D15). Every count is free and
+/// local; `summary` is the Premium memory pass's two sentences (F3) and is
+/// absent until then. Opt-outs are counted, never named.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommunity {
+    /// Regulars who chatted this stream.
+    #[serde(default)]
+    pub regulars_back: u32,
+    /// The regulars by name, most streams first, at most 10.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regulars: Vec<CohostReportCommunityPerson>,
+    /// People who became regulars with this stream.
+    #[serde(default)]
+    pub new_regulars: u32,
+    /// People back after 30 days or more.
+    #[serde(default)]
+    pub comebacks: u32,
+    /// People whose first chat was this stream.
+    #[serde(default)]
+    pub first_timers: u32,
+    /// First-timers whose first and last message were 40 minutes or more apart.
+    #[serde(default)]
+    pub first_timers_stayed: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub milestones: Vec<CohostReportCommunityMilestone>,
+    #[serde(default)]
+    pub links_made: u32,
+    #[serde(default)]
+    pub memories_learned: u32,
+    #[serde(default)]
+    pub opt_outs: u32,
+    /// Premium (F3): at most 280 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+impl CohostReportCommunity {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl CohostSessionReport {
@@ -6728,7 +6843,22 @@ impl CohostSessionReport {
         while self.said.len() > COHOST_REPORT_SAID_CAP {
             self.said.remove(0);
         }
+        // Plan 225 D15: the block is computed whole from the store, so the
+        // later computation replaces the earlier one.
+        if later.community.is_some() {
+            self.community = later.community;
+        }
         self
+    }
+
+    /// Plan 225 D15: a report that carries only the Community block, folded
+    /// into the session's report when the chat session ends (like
+    /// `post_only`).
+    pub fn community_only(session_id: &str, community: CohostReportCommunity, at: &str) -> Self {
+        Self {
+            community: Some(community).filter(|community| !community.is_empty()),
+            ..Self::empty(session_id, at)
+        }
     }
 
     /// A report that carries nothing but `post` (plan 164 D10): folded into
@@ -6789,6 +6919,7 @@ impl CohostSessionReport {
             commands: None,
             posts: Vec::new(),
             said: Vec::new(),
+            community: None,
         }
     }
 }
@@ -6936,6 +7067,20 @@ pub struct AiCapabilities {
     /// omit it, which reads as off: the old wake-word path stays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buddy: Option<AiCapabilitiesBuddy>,
+    /// The paid plan (plan 185 D2): `{ id: "max", name: "Max" }`. Absent for
+    /// Basic and on older web deploys. `id` is an open string; the desktop
+    /// maps the ids it knows with `EntitlementPlan::parse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<AiCapabilitiesPlan>,
+    /// Cloud hours and talk-show limits (plan 185 wire shape, plan 184).
+    /// Absent for Basic and on older web deploys, which means no cloud.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<AiCapabilitiesCloud>,
+    /// The stream watchdog's AI chat read (plan 223 B2): `chat` is 1 when
+    /// this user may call `POST /api/ai/watchdog/chat`. Older servers omit
+    /// it: the desktop keeps its free phrase match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<AiCapabilitiesWatchdog>,
     pub generated_at: String,
     pub limits: AiCapabilitiesLimits,
     pub models: AiCapabilitiesModels,
@@ -6943,6 +7088,15 @@ pub struct AiCapabilities {
     pub readiness: AiCapabilitiesReadiness,
     pub transcription: AiCapabilitiesTranscription,
     pub workflow: AiCapabilitiesWorkflow,
+}
+
+/// `watchdog` from `GET /api/ai/capabilities` (plan 223 B2): `chat` is 1
+/// when this user may call `POST /api/ai/watchdog/chat`, 0 otherwise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesWatchdog {
+    #[serde(default)]
+    pub chat: u32,
 }
 
 /// `buddy` from `GET /api/ai/capabilities` (plan 209 S19): `act` is 1 when
@@ -6961,6 +7115,53 @@ impl AiCapabilities {
     }
 }
 
+/// `plan` from `GET /api/ai/capabilities` (plan 185 D2). Every field defaults
+/// so a partial block never breaks the load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesPlan {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `cloud` from `GET /api/ai/capabilities` and the whole answer of
+/// `GET /api/cloud/allowance` (plan 185 wire shape). Every field defaults and
+/// every `Option` skips `null`, so a partial block never breaks the load and
+/// the desktop's own copy never writes a `null` the strict renderer schema
+/// would refuse ([[videorc-serde-null-contract-trap]]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCloud {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub seconds_per_month: u64,
+    #[serde(default)]
+    pub seconds_used: u64,
+    #[serde(default)]
+    pub overage_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+    #[serde(default)]
+    pub talk_shows: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests_on_stage: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_retention_days: Option<u32>,
+}
+
+impl AiCapabilitiesCloud {
+    /// Seconds left this month before the allowance is used up (never below
+    /// zero: overage is recorded, not subtracted; plan 185 D6, plan 184 D18).
+    pub fn seconds_remaining(&self) -> u64 {
+        self.seconds_per_month.saturating_sub(self.seconds_used)
+    }
+}
+
 /// `cohost` from `GET /api/ai/capabilities` (plan 164): every field
 /// defaults so a partial block never breaks the load.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -6974,6 +7175,11 @@ pub struct AiCapabilitiesCohost {
     /// Older servers omit it: the AI never writes greetings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub greet: Option<u32>,
+    /// Plan 225 D10: the memory route (`/api/ai/cohost/memory`) version; 1
+    /// when it is on, 0 when switched off or Buddy is off for the user.
+    /// Older servers omit it: queued memory passes wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<AiCapabilitiesAvatar>,
     /// Pet creation (plan 168, Phase F): on, and this month's creations.
@@ -8248,6 +8454,78 @@ mod tests {
             .pointer(pointer)
             .unwrap_or_else(|| panic!("shared protocol fixture is missing {pointer}"))
             .clone()
+    }
+
+    // Plan 185 T4: the `plan` and `cloud` blocks ride the capabilities answer
+    // as optional blocks. The shared fixture is the authoritative Max example;
+    // the TypeScript side validates the same JSON.
+    #[test]
+    fn shared_high_risk_contract_fixture_parses_the_plan_and_cloud_blocks() {
+        let wire = shared_high_risk_contract_fixture_value("/accountPlans/capabilitiesMax");
+        let capabilities: AiCapabilities = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            capabilities.entitlement.tier, "premium",
+            "Max stays tier premium (D2)"
+        );
+        let plan = capabilities.plan.expect("plan block");
+        assert_eq!(plan.id, "max");
+        assert_eq!(plan.name, "Max");
+        assert_eq!(EntitlementPlan::parse(&plan.id), Some(EntitlementPlan::Max));
+        let cloud = capabilities.cloud.expect("cloud block");
+        assert!(cloud.enabled && cloud.talk_shows);
+        assert_eq!(cloud.seconds_per_month, 360_000);
+        assert_eq!(cloud.seconds_used, 133_200);
+        assert_eq!(cloud.seconds_remaining(), 226_800);
+        assert_eq!(cloud.reset_at.as_deref(), Some("2026-11-01T00:00:00Z"));
+        assert_eq!(cloud.guests_on_stage, Some(5));
+        assert_eq!(cloud.room_size, Some(10));
+        assert_eq!(cloud.recording_retention_days, Some(30));
+
+        // The Premium block (and `GET /api/cloud/allowance`) is the same shape
+        // with the talk-show limits absent.
+        let premium: AiCapabilitiesCloud = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/accountPlans/cloudPremium"),
+        )
+        .unwrap();
+        assert!(premium.enabled && !premium.talk_shows);
+        assert_eq!(premium.seconds_remaining(), 34_800);
+        assert_eq!(premium.guests_on_stage, None);
+        // Absent options never serialize as `null` (the serde-null trap).
+        let value = serde_json::to_value(&premium).unwrap();
+        assert!(value.get("guestsOnStage").is_none());
+        assert!(value.get("roomSize").is_none());
+        assert!(value.get("recordingRetentionDays").is_none());
+
+        // Unknown plan ids read as "no plan" instead of failing the load.
+        assert_eq!(EntitlementPlan::parse("enterprise"), None);
+        let mut future = shared_high_risk_contract_fixture_value("/accountPlans/capabilitiesMax");
+        future["plan"]["id"] = serde_json::Value::String("enterprise".to_string());
+        future["cloud"]["newField"] = serde_json::Value::Bool(true);
+        let parsed: AiCapabilities = serde_json::from_value(future).unwrap();
+        assert_eq!(
+            parsed.plan.as_ref().map(|plan| plan.id.as_str()),
+            Some("enterprise")
+        );
+        assert!(parsed.cloud.is_some());
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_keeps_the_entitlement_plan_optional() {
+        let max = shared_high_risk_contract_fixture_value("/accountPlans/entitlementsMax");
+        let snapshot: EntitlementsSnapshot = serde_json::from_value(max.clone()).unwrap();
+        assert_eq!(snapshot.tier, EntitlementTier::Premium);
+        assert_eq!(snapshot.plan, Some(EntitlementPlan::Max));
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), max);
+
+        let basic = shared_high_risk_contract_fixture_value("/accountPlans/entitlementsBasic");
+        let snapshot: EntitlementsSnapshot = serde_json::from_value(basic.clone()).unwrap();
+        assert_eq!(snapshot.plan, None);
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert!(
+            value.get("plan").is_none(),
+            "no plan must mean no key, never null"
+        );
+        assert_eq!(value, basic);
     }
 
     #[test]

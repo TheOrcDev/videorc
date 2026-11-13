@@ -10,6 +10,7 @@ import {
   type CameraExtensionState
 } from './camera-extension'
 import { runVirtualCameraAction } from './virtual-camera-action'
+import { WatchdogNotifyLedger, watchdogNotifyDecision } from './watchdog-notify'
 import { runLinuxLoadModule } from './virtual-camera-linux-setup'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
@@ -65,6 +66,8 @@ import {
   nativeImage,
   nativeTheme,
   net,
+  Notification,
+  powerMonitor,
   powerSaveBlocker,
   protocol,
   safeStorage,
@@ -273,6 +276,7 @@ import type {
   StarterSoundFile
 } from '../shared/sound-commands'
 import { BUDDY_ACT_RESULT_TIMEOUT_MS, type CohostActAnswer } from '../shared/buddy-act'
+import { COMMUNITY_RELAY_TIMEOUT_MS } from '../shared/community-relay'
 import type {
   ChatCommandPostResult,
   ChatCommandReplyFailed,
@@ -615,7 +619,27 @@ import {
   sanitizedChildProcessEnvironment,
   scrubReleaseAuthorityEnvironment
 } from './release-authority-env'
-import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
+import { rendererSecurityRegistry, secureIpcHandle, sendElectronEvent } from './secure-ipc'
+import { setTalkShowDisplaySourceResolver } from './web-contents-security'
+
+/** Plan 224 C-G4: the grant as the renderer sends it, or null. */
+function talkShowMediaGrantFromIpc(
+  value: unknown
+): { video: boolean; screenSourceId: string | null } | null {
+  if (typeof value !== 'object' || value === null) return null
+  const { video, screenSourceId } = value as { video?: unknown; screenSourceId?: unknown }
+  if (typeof video !== 'boolean') return null
+  if (screenSourceId !== null && screenSourceId !== undefined) {
+    if (
+      typeof screenSourceId !== 'string' ||
+      screenSourceId.length > 256 ||
+      !/^(screen|window):[0-9]+:[0-9]+$/.test(screenSourceId)
+    ) {
+      return null
+    }
+  }
+  return { video, screenSourceId: typeof screenSourceId === 'string' ? screenSourceId : null }
+}
 import type { ElectronEventChannel, ElectronIpcEventMap } from '../shared/electron-ipc-contract'
 import {
   installRendererSessionPermissions,
@@ -971,6 +995,9 @@ type CommentsSmokeCommandFixture =
       reason: string
     }
 let commentsSmokeCommandFixture: CommentsSmokeCommandFixture | null = null
+// Plan 225 C4: the comments probe answers the person card's relay from a
+// fixture, keyed by method. Only a smoke command sets it.
+let commentsSmokeCommunityFixture: Record<string, unknown> | null = null
 let commentsSmokeCommandTrace: Record<string, unknown> | null = null
 let commentsSmokeSnapshotOverride = false
 // Once a smoke seeds viewers or co-host state, the idle main renderer's pushes
@@ -1290,6 +1317,21 @@ startLocalCrashReporter(app.getPath('userData'), {
 const remoteDebugPortOverride = process.env.VIDEORC_REMOTE_DEBUG_PORT?.trim()
 if (remoteDebugPortOverride) {
   app.commandLine.appendSwitch('remote-debugging-port', remoteDebugPortOverride)
+}
+// Plan 224 S-G1: the talk-show smoke gives the renderer Chromium's fake
+// camera and microphone, fed from a y4m and a wav, so the host publishes a
+// known colour and tone with no device and no macOS camera grant. Development
+// and packaged test builds only (refusePackagedTestHooks above drops both).
+const fakeMediaVideo = process.env.VIDEORC_SMOKE_FAKE_MEDIA_VIDEO?.trim()
+const fakeMediaAudio = process.env.VIDEORC_SMOKE_FAKE_MEDIA_AUDIO?.trim()
+if (fakeMediaVideo || fakeMediaAudio) {
+  app.commandLine.appendSwitch('use-fake-device-for-media-stream')
+  if (fakeMediaVideo) {
+    app.commandLine.appendSwitch('use-file-for-fake-video-capture', fakeMediaVideo)
+  }
+  if (fakeMediaAudio) {
+    app.commandLine.appendSwitch('use-file-for-fake-audio-capture', fakeMediaAudio)
+  }
 }
 if (process.env.VIDEORC_SMOKE_DISABLE_ELECTRON_GPU === '1') {
   app.commandLine.appendSwitch('disable-gpu')
@@ -13467,6 +13509,163 @@ async function runSmokePreviewMotionCommand(
     throw new Error('Invalid Chat smoke command fixture.')
   }
 
+  // Plan 225 C4: answer the person card's calls from a fixture (null clears).
+  if (command === 'comments-window-community-fixture') {
+    const answers = params.answers
+    commentsSmokeCommunityFixture =
+      answers && typeof answers === 'object' ? (answers as Record<string, unknown>) : null
+    return { methods: Object.keys(commentsSmokeCommunityFixture ?? {}) }
+  }
+
+  // Plan 225 C4: the community surfaces' real geometry. `inspect` reads the
+  // arrival chips, "Welcome back" and the link cards; `open` opens a row's
+  // person card by a real right-click (or ⋯) and measures it; `close` sends
+  // Escape; `pane` picks the Chat or Buddy pane; `click-chip` clicks a chip
+  // with a real mouse click (it must act as the row: on stream).
+  if (command === 'comments-window-person-card') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return { ok: false, reason: 'Chat window is not open.' }
+    }
+    const run = (script: string): Promise<unknown> =>
+      window.webContents.executeJavaScript(script, true)
+    const click = async (
+      point: { x: number; y: number },
+      button: 'left' | 'right' = 'left'
+    ): Promise<void> => {
+      window.focus()
+      for (const type of ['mouseDown', 'mouseUp'] as const) {
+        window.webContents.sendInputEvent({ type, x: point.x, y: point.y, button, clickCount: 1 })
+      }
+    }
+    const action = typeof params.action === 'string' ? params.action : 'inspect'
+    if (action === 'pane') {
+      const pane = params.pane === 'buddy' ? 'Buddy' : 'Chat'
+      const point = (await run(`(() => {
+        const button = Array.from(document.querySelectorAll('[role="tab"], [role="radio"], button'))
+          .find((candidate) => candidate.textContent?.trim().startsWith(${jsonForInlineScript(pane)}) && candidate.getBoundingClientRect().width > 0 && (candidate.getAttribute('role') === 'tab' || candidate.closest('[data-slot="pane-tabs-narrow"]')));
+        if (!button) return null;
+        const box = button.getBoundingClientRect();
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+      })()`)) as { x: number; y: number } | null
+      if (point) await click(point)
+      await delay(250)
+      return { ok: point !== null, pane }
+    }
+    if (action === 'close') {
+      for (const type of ['keyDown', 'keyUp'] as const) {
+        window.webContents.sendInputEvent({ type, keyCode: 'Escape' })
+      }
+      await delay(300)
+      const open = await run(
+        `Boolean(document.querySelector('[data-testid="person-card-popover"], [data-testid="person-card-dialog"], [data-testid="comment-person-menu"]'))`
+      )
+      return { ok: true, closed: open === false }
+    }
+    const messageId = typeof params.messageId === 'string' ? params.messageId : ''
+    if (action === 'click-chip') {
+      const point = (await run(`(() => {
+        const row = Array.from(document.querySelectorAll('[data-message-id]'))
+          .find((candidate) => candidate.getAttribute('data-message-id') === ${jsonForInlineScript(messageId)});
+        const chip = row?.querySelector('[data-testid="comment-arrival"]');
+        if (!chip) return null;
+        chip.scrollIntoView({ block: 'center' });
+        const box = chip.getBoundingClientRect();
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), phase: row.getAttribute('data-highlight-phase') };
+      })()`)) as { x: number; y: number; phase: string } | null
+      if (!point) return { ok: false, reason: 'No chip in that row.' }
+      await click(point)
+      return { ok: true, before: point.phase }
+    }
+    if (action === 'open') {
+      const via = params.via === 'menu' ? 'menu' : 'context'
+      const target = (await run(`(() => {
+        const row = Array.from(document.querySelectorAll('[data-message-id]'))
+          .find((candidate) => candidate.getAttribute('data-message-id') === ${jsonForInlineScript(messageId)});
+        if (!row) return null;
+        row.scrollIntoView({ block: 'center' });
+        const part = ${jsonForInlineScript(via)} === 'menu'
+          ? row.querySelector('[data-slot="kebab-menu-trigger"], button[aria-label^="Actions for"]')
+          : row.querySelector('[id$="-author"]') ?? row;
+        if (!part) return null;
+        const box = part.getBoundingClientRect();
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+      })()`)) as { x: number; y: number } | null
+      if (!target) return { ok: false, reason: 'No such row.' }
+      await click(target, via === 'menu' ? 'left' : 'right')
+      await delay(300)
+      const menu = (await run(`(() => {
+        const items = Array.from(document.querySelectorAll('[data-testid="comment-person-menu"] [data-slot="context-menu-item"], [role="menu"] [role="menuitem"]'));
+        const about = items.find((item) => item.textContent?.trim().startsWith('About '));
+        if (!about) return { items: items.map((item) => item.textContent?.trim()) };
+        const box = about.getBoundingClientRect();
+        return { items: items.map((item) => item.textContent?.trim()), x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+      })()`)) as { items: string[]; x?: number; y?: number }
+      if (menu.x === undefined || menu.y === undefined) {
+        return { ok: false, reason: 'No About item.', menu }
+      }
+      await click({ x: menu.x, y: menu.y })
+      let card: unknown = null
+      for (let attempt = 0; attempt < 30 && !card; attempt += 1) {
+        await delay(100)
+        card = await run(`(() => {
+          const popup = document.querySelector('[data-testid="person-card-popover"], [data-testid="person-card-dialog"]');
+          const body = popup?.querySelector('[data-slot="person-card"]');
+          if (!popup || !body) return null;
+          const box = popup.getBoundingClientRect();
+          const inWindow = (rect) => rect.left >= -0.5 && rect.top >= -0.5 && rect.right <= window.innerWidth + 0.5 && rect.bottom <= window.innerHeight + 0.5;
+          // A card taller than the room scrolls: a control below its fold is
+          // still reachable, as long as it sits inside the card's width.
+          const scrolls = [popup, ...popup.querySelectorAll('*')].some((element) => element.scrollHeight > element.clientHeight + 1 && ['auto', 'scroll'].includes(getComputedStyle(element).overflowY));
+          const controls = Array.from(popup.querySelectorAll('button, textarea')).filter((element) => element.getBoundingClientRect().width > 0).map((element) => {
+            const rect = element.getBoundingClientRect();
+            return { text: element.textContent?.trim() || element.getAttribute('aria-label') || element.tagName, inside: (inWindow(rect) || scrolls) && rect.left >= box.left - 0.5 && rect.right <= box.right + 0.5 };
+          });
+          return {
+            surface: popup.getAttribute('data-testid') === 'person-card-dialog' ? 'dialog' : 'popover',
+            box: { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height },
+            window: { width: window.innerWidth, height: window.innerHeight },
+            inWindow: inWindow(box),
+            scrolls,
+            overflow: body.scrollWidth > body.clientWidth + 1,
+            controls,
+            text: body.innerText
+          };
+        })()`)
+      }
+      return { ok: Boolean(card), menu: menu.items, card }
+    }
+    // inspect
+    return run(`(() => {
+      const inWindow = (rect) => rect.width > 0 && rect.left >= -0.5 && rect.right <= window.innerWidth + 0.5;
+      const chips = Array.from(document.querySelectorAll('[data-message-id] [data-testid="comment-arrival"]')).map((chip) => {
+        const row = chip.closest('[data-message-id]');
+        const rect = chip.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        return {
+          messageId: row.getAttribute('data-message-id'),
+          kind: chip.getAttribute('data-arrival'),
+          text: chip.textContent?.trim(),
+          inside: inWindow(rect) && rect.right <= rowRect.right + 0.5,
+          inRowButton: Boolean(chip.closest('[data-message-id] > button'))
+        };
+      });
+      const welcomeBack = Array.from(document.querySelectorAll('[data-slot="cohost-welcome-back-row"]')).filter((row) => row.getBoundingClientRect().width > 0).map((row) => {
+        const wave = row.querySelector('[data-testid="cohost-welcome-back-wave"]');
+        return {
+          personId: row.getAttribute('data-person-id'),
+          text: row.textContent?.trim(),
+          waveInside: wave ? inWindow(wave.getBoundingClientRect()) : false
+        };
+      });
+      const linkCards = Array.from(document.querySelectorAll('[data-testid="link-made-card"]')).filter((card) => card.getBoundingClientRect().width > 0).map((card) => ({
+        title: card.querySelector('[data-slot="buddy-card-title"]')?.textContent?.trim(),
+        buttonsInside: Array.from(card.querySelectorAll('button')).every((button) => inWindow(button.getBoundingClientRect()))
+      }));
+      return { ok: true, chips, welcomeBack, linkCards, documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 1 };
+    })()`)
+  }
+
   if (command === 'comments-window-command-trace') {
     return {
       pendingCount: commentsCommandBroker.pendingCount,
@@ -13619,11 +13818,20 @@ async function runSmokePreviewMotionCommand(
         true
       )) as { x: number; y: number } | null
       if (!item) return { copied: false, reason: 'Copy link is not in an open menu.' }
+      // The evidence behind a refused copy (plan 225 C4 met one): whether
+      // the document had focus, whether the menu survived the click, and
+      // the renderer's own `[copy]` line.
+      const consoleLines: string[] = []
+      const onConsole = (details: { message: string }): void => {
+        if (details.message.includes('[copy]')) consoleLines.push(details.message)
+      }
+      window.webContents.on('console-message', onConsole)
       const previous = clipboard.readText()
       const marker = `videorc-probe-${randomUUID()}`
       clipboard.writeText(marker)
       try {
         window.focus()
+        const focused = await window.webContents.executeJavaScript('document.hasFocus()', true)
         for (const type of ['mouseDown', 'mouseUp'] as const) {
           window.webContents.sendInputEvent({
             type,
@@ -13638,8 +13846,19 @@ async function runSmokePreviewMotionCommand(
           await new Promise((resolve) => setTimeout(resolve, 50))
           text = clipboard.readText()
         }
-        return { copied: text !== marker, text: text === marker ? null : text }
+        const menuOpen = await window.webContents.executeJavaScript(
+          `Boolean(document.querySelector('[data-testid="comment-link-menu"]'))`,
+          true
+        )
+        return {
+          copied: text !== marker,
+          text: text === marker ? null : text,
+          focused,
+          menuOpen,
+          console: consoleLines
+        }
       } finally {
+        window.webContents.off('console-message', onConsole)
         clipboard.writeText(previous)
       }
     }
@@ -16477,6 +16696,38 @@ async function pickFilePath(): Promise<ResourceSelection | null> {
   return path ? issueResourceCapability(path, 'input-file') : null
 }
 
+// Plan 225 D12: Community → Settings → Export… picks the folder the export
+// goes into, and Import… one export file. Both come back as single-use
+// capabilities, like every other picker; the backend consumes them.
+async function pickCommunityExportDirectory(): Promise<ResourceSelection | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Export community',
+    buttonLabel: 'Export here',
+    properties: ['openDirectory', 'createDirectory']
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled) return null
+  const path = result.filePaths[0]
+  return path ? issueResourceCapability(path, 'output-directory') : null
+}
+
+async function pickCommunityImportFile(): Promise<ResourceSelection | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Import community',
+    buttonLabel: 'Import',
+    filters: [{ name: 'Videorc community export', extensions: ['json'] }],
+    properties: ['openFile']
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled) return null
+  const path = result.filePaths[0]
+  return path ? issueResourceCapability(path, 'input-file') : null
+}
+
 // --- Managed asset serving (videorc-asset://) ---------------------------------
 // The renderer cannot load raw file:// paths for imported assets: subresource
 // file loads are blocked from the dev server's http origin, which made every
@@ -17513,6 +17764,10 @@ function installApplicationMenu(): void {
 }
 
 app.whenReady().then(async () => {
+  // Plan 223 A7: Windows shows a notification only for an app with an
+  // AppUserModelID; the installer's shortcut carries electron-builder's
+  // appId, and a dev run has no shortcut, so set it here either way.
+  if (process.platform === 'win32') app.setAppUserModelId('dev.theorcdev.videorc')
   if (!hasSingleInstanceLock) {
     return
   }
@@ -17715,6 +17970,8 @@ app.whenReady().then(async () => {
   secureIpcHandle('banners:pick-image', () => pickBannerImage())
   secureIpcHandle('banners:pick-html', () => pickBannerHtml())
   secureIpcHandle('sounds:pick-files', () => pickSoundFiles())
+  secureIpcHandle('community:pick-export-directory', () => pickCommunityExportDirectory())
+  secureIpcHandle('community:pick-import-file', () => pickCommunityImportFile())
   secureIpcHandle('sounds:starter-list', () => starterSounds())
   secureIpcHandle('sounds:starter-files', (_event, slugs) => starterSoundFiles(slugs))
   secureIpcHandle('system:pick-file', () => pickFilePath())
@@ -17773,6 +18030,46 @@ app.whenReady().then(async () => {
   secureIpcHandle('app:set-native-theme', (_event, theme: string) => applyNativeTheme(theme))
   secureIpcHandle('preview-window:open', () => openPreviewWindow())
   secureIpcHandle('preview-window:close', () => closePreviewWindow())
+  // Plan 224 C-G4: the host's screen share and camera grant. The sources
+  // list only while the room's grant is held; the grant itself is the
+  // registry's, keyed by the renderer that asked.
+  secureIpcHandle('talk-show:display-sources', async (event) => {
+    if (!rendererSecurityRegistry.talkShowMediaGrant(event.sender.id)?.video) {
+      return []
+    }
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 320, height: 180 },
+      fetchWindowIcons: false
+    })
+    return sources.map((source) => ({
+      id: source.id,
+      name: source.name,
+      kind: source.id.startsWith('screen:') ? ('screen' as const) : ('window' as const),
+      thumbnailDataUrl: source.thumbnail.isEmpty() ? null : source.thumbnail.toDataURL()
+    }))
+  })
+  secureIpcHandle('talk-show:media-grant', (event, grant: unknown) => {
+    const record = talkShowMediaGrantFromIpc(grant)
+    if (!record) {
+      return false
+    }
+    return rendererSecurityRegistry.setTalkShowMediaGrant(event.sender.id, record)
+  })
+  setTalkShowDisplaySourceResolver(async (request) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return null
+    const senderId = mainWindow.webContents.id
+    if (!request.frame || !rendererSecurityRegistry.documentTrusted(senderId, request.frame.url)) {
+      return null
+    }
+    const sourceId = rendererSecurityRegistry.takeTalkShowScreenSource(senderId)
+    if (!sourceId) return null
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 0, height: 0 }
+    })
+    return sources.find((source) => source.id === sourceId) ?? null
+  })
   secureIpcHandle('preview-window:toggle', () => togglePreviewWindow())
   secureIpcHandle('preview-window:get-state', () => previewWindowState())
   secureIpcHandle(
@@ -18300,6 +18597,51 @@ app.whenReady().then(async () => {
       return accepted
     }
   )
+  // The stream watchdog (plan 223 A7): the system notification, the idle
+  // time for still-there, and a fix pressed in the Stream Manager's card.
+  const watchdogNotified = new WatchdogNotifyLedger()
+  secureIpcHandle('watchdog:notify', (event, notice) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    const now = Date.now()
+    const decision = watchdogNotifyDecision({
+      notice,
+      mainFocused: mainWindow.isFocused(),
+      enabled: true,
+      supported: Notification.isSupported(),
+      lastShownAt: watchdogNotified.lastShownAt(notice.alertId),
+      now
+    })
+    if (!decision.show) return false
+    watchdogNotified.mark(notice.alertId, now)
+    const notification = new Notification({
+      title: decision.title,
+      body: decision.body,
+      silent: true
+    })
+    notification.on('click', () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      sendElectronEvent(mainWindow.webContents, 'watchdog:focus', notice.alertId)
+    })
+    notification.on('failed', (_event, error) => {
+      safeConsole.warn(`[watchdog] system notification failed: ${error}`)
+    })
+    notification.show()
+    return true
+  })
+  secureIpcHandle('watchdog:idle', (event) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return 0
+    return powerMonitor.getSystemIdleTime()
+  })
+  secureIpcHandle('comments-window:watchdog-fix', (event, request) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id)
+      throw new Error('Only Stream Manager can ask for a watchdog fix here.')
+    if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+    sendElectronEvent(mainWindow.webContents, 'watchdog:fix-request', request)
+    return true
+  })
   secureIpcHandle('comments-window:marker-context-get', () => markerContext)
   secureIpcHandle('comments-window:marker-context-push', (event, context) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
@@ -18428,6 +18770,33 @@ app.whenReady().then(async () => {
     )
   })
   secureIpcHandle('comments-window:buddy-act-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
+  // The person card (plan 225 C2): the same relay. The MAIN renderer owns
+  // the backend socket and makes the allowlisted `cohost.community.*` call;
+  // the contract already refused any other method.
+  secureIpcHandle('comments-window:community', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can ask about a person here.'))
+    }
+    const fixture = commentsSmokeCommunityFixture
+    if (fixture) {
+      return command.method in fixture
+        ? Promise.resolve(fixture[command.method])
+        : Promise.reject(new Error('The probe has no answer for that.'))
+    }
+    return commentsCommandBroker.request<unknown>(
+      command.requestId,
+      () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:community-request', command)
+        return true
+      },
+      COMMUNITY_RELAY_TIMEOUT_MS
+    )
+  })
+  secureIpcHandle('comments-window:community-result-push', (event, resolution) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
     return commentsCommandBroker.resolve(resolution)
   })

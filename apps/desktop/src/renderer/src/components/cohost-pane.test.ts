@@ -533,3 +533,52 @@ describe('the one-time listening card (plan 068 D3)', () => {
     expect(renderPrompt(false, false)).toBe('')
   })
 })
+
+describe('Welcome back (plan 225 C3)', () => {
+  const ada = {
+    personId: 'p-ada',
+    authorKey: 'twitch:t1',
+    name: 'Ada',
+    platform: 'twitch' as const,
+    arrival: { streams: 14, regular: true, inARow: 5 },
+    firstSeenAt: '2026-08-22T11:58:00.000Z'
+  }
+
+  it('lists returning people under Say hi, each with its chip and a Wave button', () => {
+    const markup = renderPane({
+      state: state({
+        sayHi: [
+          {
+            authorKey: 'k',
+            name: 'Sam',
+            platform: 'kick',
+            firstSeenAt: '2026-08-22T11:59:00.000Z'
+          }
+        ],
+        welcomeBack: [ada]
+      }),
+      onWelcomeBackWave: () => undefined
+    })
+    expect(markup).toContain('>Welcome back<')
+    expect(markup.indexOf('data-slot="cohost-say-hi"')).toBeLessThan(
+      markup.indexOf('data-slot="cohost-welcome-back"')
+    )
+    expect(markup).toContain('data-person-id="p-ada"')
+    expect(markup).toContain('Regular · 14')
+    expect(markup).toContain('>Wave<')
+    expect(markup).not.toContain('Post to chat')
+    expect(renderPane({ state: state() })).not.toContain('cohost-welcome-back')
+  })
+
+  it('stays when Buddy Live is off or locked: welcomes are free (D6)', () => {
+    const withAda = state({ welcomeBack: [ada] })
+    expect(renderPane({ enabled: false, state: withAda })).toContain('>Welcome back<')
+    expect(
+      renderPane({
+        gate: { allowed: false, featureId: 'cohost', reason: 'Buddy Live is Premium.' } as never,
+        state: withAda
+      })
+    ).toContain('>Welcome back<')
+    expect(renderPane({ consented: false, state: withAda })).toContain('>Welcome back<')
+  })
+})

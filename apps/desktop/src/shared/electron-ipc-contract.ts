@@ -37,7 +37,8 @@ import type {
   PreviewWindowState,
   UpdateStatus,
   VideorcApi,
-  ViewerSample
+  ViewerSample,
+  WatchdogFixRequest
 } from './backend'
 import type { MarkerContext, MarkerRelayCommand } from './session-markers'
 import {
@@ -64,6 +65,7 @@ import {
   type BuddyActRelayCommand,
   type CohostActAnswer
 } from './buddy-act'
+import { COMMUNITY_RELAY_METHODS, type CommunityRelayCommand } from './community-relay'
 import { isSoundStarterSlug } from './sound-assets'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
@@ -98,6 +100,7 @@ import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-mod
 import {
   arraySchema,
   booleanSchema,
+  boundedJsonValueSchema,
   enumSchema,
   literalSchema,
   nullableSchema,
@@ -139,6 +142,9 @@ export const electronInvokeApiMethods = {
   'sounds:pick-files': 'pickSoundFiles',
   'sounds:starter-list': 'getStarterSounds',
   'sounds:starter-files': 'getStarterSoundFiles',
+  // Plan 225 D12: Community → Settings → Export… / Import…, as capabilities.
+  'community:pick-export-directory': 'pickCommunityExportDirectory',
+  'community:pick-import-file': 'pickCommunityImportFile',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
   'buddy-assets:remove': 'removeBuddyPersona',
@@ -177,6 +183,8 @@ export const electronInvokeApiMethods = {
   'preview-window:open': 'openPreviewWindow',
   'preview-window:close': 'closePreviewWindow',
   'preview-window:toggle': 'togglePreviewWindow',
+  'talk-show:display-sources': 'getTalkShowDisplaySources',
+  'talk-show:media-grant': 'setTalkShowMediaGrant',
   'preview-window:get-state': 'getPreviewWindowState',
   'preview-window:permission-required': 'reportPreviewPermissionRequired',
   'preview-window:set-always-on-top': 'setPreviewWindowAlwaysOnTop',
@@ -217,6 +225,9 @@ export const electronInvokeApiMethods = {
   'comments-window:marker-context-get': 'getMarkerContext',
   'comments-window:marker-context-push': 'pushMarkerContext',
   'comments-window:marker': 'markerFromCommentsWindow',
+  'comments-window:watchdog-fix': 'watchdogFixFromCommentsWindow',
+  'watchdog:notify': 'notifyWatchdog',
+  'watchdog:idle': 'getSystemIdleSeconds',
   'comments-window:marker-result-push': 'pushMarkerResult',
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
@@ -231,6 +242,9 @@ export const electronInvokeApiMethods = {
   // Plan 209 S20: `/buddy <words>`, relayed to Studio like `/sound`.
   'comments-window:buddy-act': 'buddyActFromCommentsWindow',
   'comments-window:buddy-act-result-push': 'pushBuddyActResult',
+  // Plan 225 C2: the person card's `cohost.community.*` calls, relayed to Studio.
+  'comments-window:community': 'communityFromCommentsWindow',
+  'comments-window:community-result-push': 'pushCommunityResult',
   // Plan 226 S4: chat commands, relayed like sounds: the enabled commands
   // and the replies that couldn't go out one way, the streamer's `!go` the other.
   'comments-window:chat-commands-get': 'getCommentsChatCommands',
@@ -351,12 +365,15 @@ export interface ElectronIpcEventMap {
   'comments-window:clear-request': CommentsClearCommand
   'comments-window:marker-context': MarkerContext | null
   'comments-window:marker-request': MarkerRelayCommand
+  'watchdog:focus': string
+  'watchdog:fix-request': WatchdogFixRequest
   'comments-window:clip-mark-request': ClipMarkCommand
   'comments-window:banners': BannerSummary[] | null
   'comments-window:banner-request': BannerRelayCommand
   'comments-window:sounds': SoundboardSummary | null
   'comments-window:sound-request': SoundRelayCommand
   'comments-window:buddy-act-request': BuddyActRelayCommand
+  'comments-window:community-request': CommunityRelayCommand
   'comments-window:chat-commands': ChatCommandsSummary | null
   'comments-window:chat-command-request': ChatCommandRelayCommand
   'comments-window:chat-command-failures': ChatCommandReplyFailed[]
@@ -411,12 +428,15 @@ export const electronEventChannels = [
   'comments-window:clear-request',
   'comments-window:marker-context',
   'comments-window:marker-request',
+  'watchdog:focus',
+  'watchdog:fix-request',
   'comments-window:clip-mark-request',
   'comments-window:banners',
   'comments-window:banner-request',
   'comments-window:sounds',
   'comments-window:sound-request',
   'comments-window:buddy-act-request',
+  'comments-window:community-request',
   'comments-window:chat-commands',
   'comments-window:chat-command-request',
   'comments-window:chat-command-failures',
@@ -1276,12 +1296,54 @@ const optionalGenerationArgs = runtimeSchema<unknown[]>(
 const optionalGenerationOnlyArgs = tupleSchema([optionalSchema(nonNegativeSafeIntegerSchema)])
 
 const noArgs = tupleSchema([])
+
+// The stream watchdog (plan 223).
+const watchdogFixKinds = [
+  'unmute',
+  'end-takeover',
+  'switch-scene',
+  'open-audio',
+  'open-health',
+  'open-livestream',
+  'reconnect-destination',
+  'open-platform-dashboard',
+  'show-brb'
+] as const
+const watchdogFixRequestSchema = objectSchema(
+  {
+    alertId: stringSchema({ minLength: 1, maxLength: 256 }),
+    kind: enumSchema(watchdogFixKinds),
+    url: optionalSchema(stringSchema({ minLength: 1, maxLength: 2048 }))
+  },
+  { allowUnknown: false }
+)
+const watchdogNoticeSchema = objectSchema(
+  {
+    alertId: stringSchema({ minLength: 1, maxLength: 256 }),
+    title: stringSchema({ minLength: 1, maxLength: 200 }),
+    body: stringSchema({ maxLength: 500 }),
+    critical: booleanSchema,
+    openSeconds: numberSchema({ min: 0 }),
+    reason: enumSchema(['opened', 'stayed-open', 'repeat'])
+  },
+  { allowUnknown: false }
+)
 /** A picked file as main hands it to the renderer: an opaque single-use
  * `input-file` capability and the name to show, never the path itself. */
 const inputFileSelectionSchema = objectSchema(
   {
     capabilityId: boundedIdentifier,
     kind: literalSchema('input-file'),
+    displayName: stringSchema({ maxLength: 32_768 })
+  },
+  { allowUnknown: false }
+)
+/** A picked folder the same way: an `output-directory` capability and its
+ * name, never the path (plan 225 D12, Export…). */
+const outputDirectorySelectionSchema = objectSchema(
+  {
+    capabilityId: boundedIdentifier,
+    kind: literalSchema('output-directory'),
     displayName: stringSchema({ maxLength: 32_768 })
   },
   { allowUnknown: false }
@@ -1559,6 +1621,40 @@ const buddyActResolutionSchema = unionSchema([
     soundStrict
   )
 ])
+// Plan 225 C2: the person card's relay. The method is allowlisted here; the
+// MAIN renderer's backend client validates the params and the result against
+// the strict backend contract, so these stay bounded JSON.
+const communityRelayValueSchema = boundedJsonValueSchema({
+  maxDepth: 12,
+  maxNodes: 20_000,
+  maxTotalStringLength: 512 * 1024
+})
+const communityRelayCommandSchema = objectSchema(
+  {
+    requestId: soundRequestIdSchema,
+    method: enumSchema(COMMUNITY_RELAY_METHODS),
+    params: boundedJsonValueSchema({
+      maxDepth: 4,
+      maxNodes: 64,
+      maxTotalStringLength: 4096
+    })
+  },
+  soundStrict
+) as RuntimeSchema<CommunityRelayCommand>
+const communityRelayResolutionSchema = unionSchema([
+  objectSchema(
+    { requestId: soundRequestIdSchema, ok: literalSchema(true), value: communityRelayValueSchema },
+    soundStrict
+  ),
+  objectSchema(
+    {
+      requestId: soundRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    soundStrict
+  )
+])
 const soundRelayCommandSchema = unionSchema([
   objectSchema(
     {
@@ -1712,6 +1808,16 @@ const specificRuntimeInvokeContracts = {
     tupleSchema([markerRelayCommandSchema]),
     markerRelayResultSchema
   ),
+  // The stream watchdog (plan 223): a fix pressed on the Stream Manager's
+  // card goes to the Studio, which runs it like a deck key; the system
+  // notification carries the alert's words only; the idle time feeds
+  // still-there.
+  'comments-window:watchdog-fix': invokeContract(
+    tupleSchema([watchdogFixRequestSchema]),
+    booleanSchema
+  ),
+  'watchdog:notify': invokeContract(tupleSchema([watchdogNoticeSchema]), booleanSchema),
+  'watchdog:idle': invokeContract(noArgs, numberSchema({ min: 0 })),
   'comments-window:marker-result-push': invokeContract(
     tupleSchema([markerRelayResolutionSchema]),
     booleanSchema
@@ -1753,6 +1859,14 @@ const specificRuntimeInvokeContracts = {
   ),
   'comments-window:buddy-act-result-push': invokeContract(
     tupleSchema([buddyActResolutionSchema]),
+    booleanSchema
+  ),
+  'comments-window:community': invokeContract(
+    tupleSchema([communityRelayCommandSchema]),
+    communityRelayValueSchema
+  ),
+  'comments-window:community-result-push': invokeContract(
+    tupleSchema([communityRelayResolutionSchema]),
     booleanSchema
   ),
   // Chat commands in the Stream Manager (plan 226 S4): the enabled commands
@@ -2048,6 +2162,13 @@ const specificRuntimeInvokeContracts = {
   'app:exit': invokeContract(tupleSchema([enumSchema(['quit', 'close'])]), undefinedSchema),
   // Plan 186: no arguments; null on cancel, else an input-file capability.
   'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
+  // Plan 225 D12: no arguments; null on cancel, else one capability of the
+  // right kind (a folder for Export…, a file for Import…), never a path.
+  'community:pick-export-directory': invokeContract(
+    noArgs,
+    nullableSchema(outputDirectorySelectionSchema)
+  ),
+  'community:pick-import-file': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
   // Plan 232: no arguments; null on cancel, else an input-file capability
   // (one .html file) or an input-directory one (a folder with index.html).
   'banners:pick-html': invokeContract(noArgs, nullableSchema(htmlOverlaySelectionSchema)),
@@ -2103,6 +2224,8 @@ export const boundedPassthroughElectronInvokeChannels = [
   'preview-window:open',
   'preview-window:close',
   'preview-window:toggle',
+  'talk-show:display-sources',
+  'talk-show:media-grant',
   'preview-window:get-state',
   'preview-window:permission-required',
   'preview-window:set-always-on-top',
@@ -2229,6 +2352,7 @@ const specificRuntimeEventSchemas = {
   'comments-window:sounds': soundboardSummaryOrNullSchema,
   'comments-window:sound-request': soundRelayCommandSchema,
   'comments-window:buddy-act-request': buddyActRelayCommandSchema,
+  'comments-window:community-request': communityRelayCommandSchema,
   'comments-window:chat-commands': chatCommandsSummarySchema,
   'comments-window:chat-command-request': chatCommandRelayCommandSchema,
   'comments-window:chat-command-failures': chatCommandFailuresSchema,
@@ -2274,6 +2398,8 @@ const specificRuntimeEventSchemas = {
   // Page Visibility API, so document.visibilityState reads 'visible' even when
   // the window is minimised or hidden.
   'window:visible': booleanSchema,
+  'watchdog:focus': stringSchema({ minLength: 1, maxLength: 256 }),
+  'watchdog:fix-request': watchdogFixRequestSchema,
   'app:front-changed': objectSchema(
     {
       bundleId: optionalSchema(nullableSchema(stringSchema({ maxLength: 1024 }))),

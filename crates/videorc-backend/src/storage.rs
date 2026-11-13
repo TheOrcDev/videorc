@@ -1818,6 +1818,20 @@ impl Database {
     /// Fake chat is an explicit test/smoke transport. Give it a real session
     /// row so inbound comments and outbound operations exercise the same
     /// SQLite foreign-key/persistence path as production sessions.
+    /// Whether the session row still exists (a deleted session takes its
+    /// queued work with it, plan 225 D10).
+    pub fn session_exists(&self, session_id: &str) -> Result<bool> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn ensure_fake_live_chat_session(&self, session_id: &str) -> Result<()> {
         if self
             .lock()?
@@ -4160,7 +4174,7 @@ impl Database {
                          author_name, author_avatar_url, author_badges_json, author_roles_json,
                          published_at, received_at, message_text, fragments_json, event_type,
                          amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                         author_affiliation_json, author_verified FROM live_chat_messages WHERE id = ?1",
+                         author_affiliation_json, author_verified, arrival_json FROM live_chat_messages WHERE id = ?1",
                         params![message.id], live_chat_message_from_row,
                     )?);
                     continue;
@@ -4172,8 +4186,8 @@ impl Database {
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
                     amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                    author_affiliation_json, author_verified
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                    author_affiliation_json, author_verified, arrival_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
                  ON CONFLICT(id) DO UPDATE SET
                     target_id = excluded.target_id,
                     author_id = excluded.author_id,
@@ -4193,7 +4207,8 @@ impl Database {
                     reply_json = excluded.reply_json,
                     first_message = excluded.first_message,
                     author_affiliation_json = excluded.author_affiliation_json,
-                    author_verified = excluded.author_verified",
+                    author_verified = excluded.author_verified,
+                    arrival_json = excluded.arrival_json",
                 params![
                     message.id,
                     message.session_id,
@@ -4226,6 +4241,11 @@ impl Database {
                         .map(serde_json::to_string)
                         .transpose()?,
                     message.author_verified.map(LiveChatAuthorVerified::as_str),
+                    message
+                        .arrival
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
                 ],
             )?;
             update_chat_totals(&transaction, message, owner.is_none())?;
@@ -4260,7 +4280,8 @@ impl Database {
         }))
     }
 
-    #[cfg(test)]
+    /// Every row of a session, oldest first (the memory pass reads a
+    /// stream's chat after it ends, plan 225 D10; tests read it back).
     pub fn list_live_chat_messages(&self, session_id: &str) -> Result<Vec<LiveChatMessage>> {
         let conn = self.lock()?;
         self.live_chat_messages_for_session_locked(&conn, session_id)
@@ -4326,7 +4347,7 @@ impl Database {
                         author_name, author_avatar_url, author_badges_json, author_roles_json,
                         published_at, received_at, message_text, fragments_json, event_type,
                         amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                        author_affiliation_json, author_verified
+                        author_affiliation_json, author_verified, arrival_json
                  FROM live_chat_messages
                  WHERE session_id = ?1
                    AND (received_at < ?2 OR (received_at = ?2 AND id < ?3))
@@ -4345,7 +4366,7 @@ impl Database {
                         author_name, author_avatar_url, author_badges_json, author_roles_json,
                         published_at, received_at, message_text, fragments_json, event_type,
                         amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                        author_affiliation_json, author_verified
+                        author_affiliation_json, author_verified, arrival_json
                  FROM live_chat_messages
                  WHERE session_id = ?1
                  ORDER BY received_at DESC, id DESC
@@ -4598,7 +4619,7 @@ impl Database {
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
                     amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                    author_affiliation_json, author_verified
+                    author_affiliation_json, author_verified, arrival_json
              FROM live_chat_messages WHERE id = ?1",
             params![id],
             live_chat_message_from_row,
@@ -6399,7 +6420,16 @@ impl Database {
     pub fn upsert_cohost_report(&self, report: &CohostSessionReport) -> Result<bool> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
-        let session_exists = transaction
+        let saved = Self::upsert_cohost_report_locked(&transaction, report)?;
+        transaction.commit()?;
+        Ok(saved)
+    }
+
+    pub(crate) fn upsert_cohost_report_locked(
+        conn: &Connection,
+        report: &CohostSessionReport,
+    ) -> Result<bool> {
+        let session_exists = conn
             .query_row(
                 "SELECT 1 FROM sessions WHERE id = ?1",
                 params![report.session_id],
@@ -6410,7 +6440,7 @@ impl Database {
         if !session_exists {
             return Ok(false);
         }
-        let stored: Option<String> = transaction
+        let stored: Option<String> = conn
             .query_row(
                 "SELECT report_json FROM cohost_reports WHERE session_id = ?1",
                 params![report.session_id],
@@ -6424,7 +6454,7 @@ impl Database {
             Some(existing) => existing.merged_with(report.clone()),
             None => report.clone(),
         };
-        transaction.execute(
+        conn.execute(
             "INSERT INTO cohost_reports (session_id, version, report_json, updated_at)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id) DO UPDATE SET
@@ -6438,7 +6468,6 @@ impl Database {
                 Utc::now().to_rfc3339(),
             ],
         )?;
-        transaction.commit()?;
         Ok(true)
     }
 
@@ -6980,7 +7009,7 @@ impl Database {
         Ok(draft)
     }
 
-    fn import_screen_image_with_optimizer<F>(
+    pub(crate) fn import_screen_image_with_optimizer<F>(
         &self,
         image_path: &str,
         optimize: F,
@@ -8615,6 +8644,15 @@ impl Database {
                  ON live_chat_messages(platform, author_id)",
             [],
         )?;
+        // Plan 225: a returning person's arrival facts, so History shows
+        // the chip; and the community store's own tables.
+        ensure_column(
+            &conn,
+            "live_chat_messages",
+            "arrival_json",
+            "arrival_json TEXT",
+        )?;
+        crate::community_store::create_community_schema(&conn)?;
         // Background MP4 finalization (instant-record P2). Never write into
         // `container` (the 0.9.55 "mp4" row bricked sessions.list).
         ensure_column(
@@ -8961,7 +8999,6 @@ impl Database {
         Ok(count.max(0) as u64)
     }
 
-    #[cfg(test)]
     fn live_chat_messages_for_session_locked(
         &self,
         conn: &Connection,
@@ -8972,7 +9009,7 @@ impl Database {
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
                     amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                    author_affiliation_json, author_verified
+                    author_affiliation_json, author_verified, arrival_json
              FROM live_chat_messages
              WHERE session_id = ?1
              ORDER BY received_at ASC, id ASC",
@@ -9661,6 +9698,26 @@ fn parse_live_chat_cursor(cursor: &str) -> Result<(&str, &str)> {
     Ok((received_at, id))
 }
 
+/// Every chat row of one session, oldest first, for the community backfill
+/// (plan 225 A3). The caller holds the lock.
+pub(crate) fn live_chat_messages_for_session_for_community(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<LiveChatMessage>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
+                author_name, author_avatar_url, author_badges_json, author_roles_json,
+                published_at, received_at, message_text, fragments_json, event_type,
+                amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
+                author_affiliation_json, author_verified, arrival_json
+         FROM live_chat_messages
+         WHERE session_id = ?1
+         ORDER BY received_at ASC, id ASC",
+    )?;
+    let rows = stmt.query_map(params![session_id], live_chat_message_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveChatMessage> {
     let platform_id: String = row.get(3)?;
     let author_badges_json: String = row.get(8)?;
@@ -9706,6 +9763,11 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
             .get::<_, Option<String>>(22)?
             .as_deref()
             .and_then(LiveChatAuthorVerified::from_stored),
+        // Plan 225: the arrival facts, when the row carried them. An
+        // unreadable stored value reads as none, never a load failure.
+        arrival: row
+            .get::<_, Option<String>>(23)?
+            .and_then(|json| serde_json::from_str(&json).ok()),
     };
     // Kick rows stored before plan 085 hold the raw `[emote:<id>:<name>]`
     // tokens and no fragments; a rehydrated session still shows the images.
@@ -11680,6 +11742,7 @@ mod tests {
             segments: 1,
             posts: Vec::new(),
             said: Vec::new(),
+            community: None,
             stream_title: Some("Rust night".to_string()),
             messages_seen: 10,
             shown_on_stream: 1,
@@ -12610,6 +12673,7 @@ mod tests {
             reply: None,
             first_message: false,
             first_in_session: false,
+            arrival: None,
             author_handle: None,
             author_affiliation: None,
             author_verified: None,

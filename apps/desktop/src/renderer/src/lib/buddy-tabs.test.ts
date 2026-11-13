@@ -40,10 +40,11 @@ const throwingStorage: Storage = {
 }
 
 describe('BUDDY_TABS (plan 150)', () => {
-  it('lists the five tabs in strip order', () => {
+  it('lists the six tabs in strip order (Community after Chat, plan 225 D12)', () => {
     expect(BUDDY_TABS.map((tab) => tab.id)).toEqual([
       'live',
       'chat',
+      'community',
       'voice',
       'reports',
       'clean-cut'
@@ -51,6 +52,7 @@ describe('BUDDY_TABS (plan 150)', () => {
     expect(BUDDY_TABS.map((tab) => tab.label)).toEqual([
       'Profile',
       'Chat',
+      'Community',
       'Voice',
       'Reports',
       'Clean cut'

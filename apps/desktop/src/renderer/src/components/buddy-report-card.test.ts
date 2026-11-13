@@ -166,9 +166,21 @@ async function render({
   report = { payload: payload(), loading: false, error: null } as Record<string, unknown>,
   sessions = SESSIONS,
   buddyOn = true,
-  name = 'Golmar'
+  name = 'Golmar',
+  premium = true
 } = {}): Promise<void> {
-  mocked.core = { sessions, cohostSettings: { enabled: buddyOn, persona: { name } } }
+  mocked.core = {
+    sessions,
+    cohostSettings: { enabled: buddyOn, persona: { name } },
+    cohostGate: premium
+      ? { allowed: true }
+      : {
+          allowed: false,
+          featureId: 'cohost',
+          reason: 'Buddy Live is part of Premium.',
+          upgradeUrl: 'https://videorc.com/premium'
+        }
+  }
   mocked.report = { reload, ...report }
   await act(async () => root.render(createElement(BuddyReportCard, { sessionId, onSessionChange })))
 }
@@ -595,5 +607,44 @@ describe('Reports tab layout (plan 150 S6)', () => {
     const lists = document.querySelector('[data-slot="buddy-report-lists"]') as HTMLElement
     expect(lists.children.length).toBeGreaterThan(0)
     expect(lists.children.length).toBeLessThanOrEqual(2)
+  })
+})
+
+describe('BuddyReportCard: the Community block (plan 225 D15, E2)', () => {
+  const community = {
+    regularsBack: 12,
+    regulars: [{ name: 'Ada', platform: 'twitch' as const, streams: 14 }],
+    newRegulars: 0,
+    comebacks: 2,
+    firstTimers: 5,
+    firstTimersStayed: 3,
+    linksMade: 0,
+    memoriesLearned: 0,
+    optOuts: 0
+  }
+
+  it('shows the stats row and the names, and the summary lock without Premium', async () => {
+    await render({
+      report: {
+        payload: payload({ report: { ...REPORT, community } }),
+        loading: false,
+        error: null
+      },
+      premium: false
+    })
+    const block = card().querySelector('[data-slot="buddy-report-community"]')
+    expect(block?.textContent).toContain('Community')
+    expect(block?.textContent).toContain('Regulars back')
+    expect(block?.textContent).toContain('First-timers stayed 40+ min')
+    expect(block?.textContent).toContain('Ada')
+    expect(block?.querySelector('[data-testid="buddy-report-community-lock"]')).not.toBeNull()
+    expect(block?.textContent).toContain(
+      'Buddy writes two sentences about your audience with Premium.'
+    )
+  })
+
+  it('leaves an older report unchanged', async () => {
+    await render()
+    expect(card().querySelector('[data-slot="buddy-report-community"]')).toBeNull()
   })
 })

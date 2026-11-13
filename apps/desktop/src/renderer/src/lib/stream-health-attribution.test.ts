@@ -354,6 +354,34 @@ describe('classifyStreamHealthAttribution', () => {
     ).toBe('healthy')
   })
 
+  // Plan 222 P6: through Videorc Cloud the one leg that overflows is this
+  // computer's upload to the node, so the words name the connection, never a
+  // platform or "Videorc Cloud could not receive".
+  it('names the connection when the cloud feed leg overflows, not the cloud', () => {
+    const nowMs = Date.parse('2026-11-08T10:00:30.000Z')
+    const input = healthyInput()
+    input.streamTargets = [
+      {
+        targetId: 'videorc-cloud-horizontal',
+        platform: 'custom',
+        label: 'Videorc Cloud',
+        state: 'live',
+        uplinkOverflows: 1,
+        uplinkOverflowAt: '2026-11-08T10:00:20.000Z'
+      }
+    ]
+    const attribution = classifyStreamHealthAttribution(
+      input.diagnosticStats,
+      input.streamHealth,
+      input.streamTargets,
+      NO_RECENT_DROPS,
+      nowMs
+    )
+    expect(attribution).toBe('uplink')
+    expect(liveProblemLabel(attribution)).toBe('Connection too slow')
+    expect(liveProblemLabel(attribution)).not.toMatch(/Videorc Cloud|receive/)
+  })
+
   it('never reads a bitrate below the configured one as delivery trouble', () => {
     // #981: a static screen encodes far below the configured rate on
     // purpose (777 of 6000 kbps in the report); delivery trouble is what

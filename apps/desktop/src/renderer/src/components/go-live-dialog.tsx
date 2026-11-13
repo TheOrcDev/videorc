@@ -101,7 +101,8 @@ export function GoLiveConfirmationDialog({
   onContinueWithoutCaptions,
   onResolveBlocker,
   onReconnect,
-  onRecheck
+  onRecheck,
+  throughCloud = false
 }: {
   open: boolean
   pending: boolean
@@ -125,6 +126,8 @@ export function GoLiveConfirmationDialog({
   onReconnect?: (platform: StreamPlatform) => void
   /** Runs the check again, after a Reconnect. */
   onRecheck?: () => void
+  /** Go Live goes through Videorc Cloud: its start says so (plan 184 C4). */
+  throughCloud?: boolean
 }): ReactElement {
   const {
     captureConfig,
@@ -512,7 +515,9 @@ export function GoLiveConfirmationDialog({
               onClick={onContinuePartial}
             >
               <LivestreamIcon data-icon="inline-start" weight="fill" />
-              {pending ? goLivePendingLabel(phase) : goLiveOnReadyLabel(partialSetup.readyLabels)}
+              {pending
+                ? goLivePendingLabel(phase, throughCloud)
+                : goLiveOnReadyLabel(partialSetup.readyLabels)}
               {pending ? null : (
                 <ShortcutKeys
                   accelerator={confirmAccelerator}
@@ -534,7 +539,7 @@ export function GoLiveConfirmationDialog({
               >
                 <LivestreamIcon data-icon="inline-start" weight="fill" />
                 {pending
-                  ? goLivePendingLabel(phase)
+                  ? goLivePendingLabel(phase, throughCloud)
                   : goLiveConfirmLabel(preflight?.destinations.length ?? 0)}
                 {pending ? null : (
                   <ShortcutKeys

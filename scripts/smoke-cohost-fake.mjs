@@ -196,7 +196,10 @@ try {
         VIDEORC_APP_DATA_DIR: appDataDir,
         VIDEORC_DATABASE_PATH: join(appDataDir, 'videorc.sqlite3'),
         VIDEORC_SECRETS_PATH: secretsPath,
-        VIDEORC_SMOKE_STATE_DIR: stateRoot
+        VIDEORC_SMOKE_STATE_DIR: stateRoot,
+        // Plan 225 B6: the second fake session is every fake author's 2nd
+        // stream; this debug-only seam makes it a milestone too.
+        VIDEORC_SMOKE_COMMUNITY_MILESTONE_STREAMS: '2'
       }
     }),
     stdio: ['ignore', 'pipe', 'pipe']
@@ -694,6 +697,7 @@ try {
       `${IDLE_PROOF_MS / 1000} s idle without a tick.`
   )
 
+  await runCommunityScenario({ ready, startedAt })
   await runConsentScenario({ ready, startedAt })
   await runSpotlightScenario({ ready, startedAt })
 } finally {
@@ -839,6 +843,20 @@ function waitForState(observed, predicate, label, deadlineMs = 60_000) {
   })
 }
 
+/** Poll `fetch` every 250 ms until `predicate` holds, or fail after `deadlineMs`. */
+async function waitFor(fetch, predicate, deadlineMs, label) {
+  const startedAt = Date.now()
+  let last
+  while (Date.now() - startedAt < deadlineMs) {
+    last = await fetch()
+    if (predicate(last)) return last
+    await sleep(250)
+  }
+  throw new Error(
+    `Timed out after ${deadlineMs}ms waiting for ${label}: ${JSON.stringify(last)?.slice(0, 400)}`
+  )
+}
+
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 }
@@ -871,7 +889,7 @@ function waitForBackendReady(child, deadlineMs) {
     })
     child.stderr.on('data', (chunk) => {
       for (const line of chunk.split(/\r?\n/)) {
-        if (/WARN|ERROR/.test(line)) console.log(`[backend stderr] ${line}`)
+        if (/WARN|ERROR|panic/.test(line)) console.log(`[backend stderr] ${line}`)
       }
     })
     child.on('error', (error) => finish(rejectReady, error))
@@ -886,6 +904,365 @@ function waitForBackendReady(child, deadlineMs) {
 // The debug idle-caption seam exercises consent without starting a second
 // recording. Real requests reach the local fakes; response barriers expose
 // admitted work before the preference changes, rather than relying on sleeps.
+// Plan 225 (Know your viewers), Phase B: a second fake session on the same
+// Twitch lane. Its authors chatted in the first session, so each one's first
+// row is an arrival (streams 2, in a row 2) the delivery path marks without
+// waiting on the store; in Suggest mode the welcomes are cards, the 2nd-stream
+// milestone (the debug seam above) carries the milestone card's facts and
+// never the message text; the store answers the community RPCs; and nothing
+// Buddy decided reached chat (the lane counts zero sends).
+async function runCommunityScenario({ ready, startedAt }) {
+  const phase = (label) =>
+    console.log(
+      `[cohost-smoke +${((Date.now() - startedAt) / 1000).toFixed(1)}s] community: ${label}`
+    )
+  const communitySessionId = `${sessionId}-community`
+  const events = collectEvents(backend)
+  // The capability read is main's (`account.refresh`): the admin connection.
+  const admin = await connectBackend(
+    { ...ready, token: ready.adminToken, adminToken: undefined },
+    timeoutMs
+  )
+  // The backend's `log` events ride the admin socket.
+  const adminEvents = collectEvents(admin)
+  try {
+    phase('settings: Suggest mode, so welcomes are cards')
+    const current = await request(backend, timeoutMs, 'cohost.settings.get', {})
+    expect(
+      current.community?.enabled === true && current.community.regularStreams === 3,
+      `The community block should be on by default: ${JSON.stringify(current.community)}`
+    )
+    const suggest = await request(backend, timeoutMs, 'cohost.settings.set', {
+      autoChat: { ...current.autoChat, talk: 'suggest' }
+    })
+    expect(suggest.autoChat.talk === 'suggest', 'Suggest mode did not apply.')
+    const before = await request(backend, timeoutMs, 'cohost.community.summary', {})
+    expect(
+      before.people >= 3 && before.streams >= 1,
+      `The first session should have filled the store: ${JSON.stringify(before)}`
+    )
+
+    // Plan 225 F3 to F5: the web now speaks tick v5 and the memory route,
+    // and the streamer turned "Buddy remembers" on. The capability read
+    // happens on `account.refresh`, so the next session starts on v5.
+    phase('capabilities: tick v5 and the memory route; Buddy remembers on')
+    fake.setCapabilities({ tick: 5, memory: 1 })
+    await request(admin, timeoutMs, 'account.refresh', {})
+    const remembering = await request(backend, timeoutMs, 'cohost.settings.set', {
+      community: { ...current.community, remember: true }
+    })
+    expect(
+      remembering.community?.remember === true,
+      `Buddy remembers did not switch on: ${JSON.stringify(remembering.community)}`
+    )
+
+    phase('liveChat.start: the same Twitch lane, every author back, plus a YouTube lane')
+    const lane = {
+      platform: 'twitch',
+      targetId: 'cohost-main',
+      count: 6,
+      intervalMs: 300,
+      send: 'sent'
+    }
+    // A YouTube lane chats too: its rows must never reach the memory pass.
+    const youtubeLane = {
+      platform: 'youtube',
+      targetId: 'cohost-memory-yt',
+      count: 4,
+      intervalMs: 300,
+      send: 'sent'
+    }
+    await request(backend, timeoutMs, 'liveChat.start', {
+      sessionId: communitySessionId,
+      destinations: [
+        { platform: lane.platform, targetId: lane.targetId, read: 'ready', write: 'ready' },
+        {
+          platform: youtubeLane.platform,
+          targetId: youtubeLane.targetId,
+          read: 'ready',
+          write: 'ready'
+        }
+      ],
+      fakes: [lane, youtubeLane]
+    })
+    await request(backend, timeoutMs, 'cohost.start', {
+      sessionId: communitySessionId,
+      consentToProcessChat: true,
+      streamTitle: STREAM_TITLE
+    })
+    const arrivalRow = await waitForEvent(
+      events,
+      'liveChat.message',
+      (message) =>
+        message.sessionId === communitySessionId &&
+        message.platform === 'twitch' &&
+        message.authorName === 'Test Viewer 0' &&
+        Boolean(message.arrival),
+      "Test Viewer 0's Twitch arrival row",
+      20_000
+    )
+    expect(
+      arrivalRow.arrival.streams === 2 &&
+        arrivalRow.arrival.inARow === 2 &&
+        arrivalRow.arrival.regular === false &&
+        arrivalRow.arrival.milestone?.kind === 'streams' &&
+        arrivalRow.arrival.milestone.value === 2 &&
+        !('awayDays' in arrivalRow.arrival) &&
+        !('platforms' in arrivalRow.arrival),
+      `The arrival should count the second stream and the milestone, with absent fields omitted: ${JSON.stringify(arrivalRow.arrival)}`
+    )
+    const laterRows = events.list.filter(
+      (entry) =>
+        entry.event === 'liveChat.message' &&
+        entry.payload.sessionId === communitySessionId &&
+        entry.payload.platform === 'twitch' &&
+        entry.payload.authorName === 'Test Viewer 0'
+    )
+    expect(
+      laterRows.filter((entry) => entry.payload.arrival).length <= 1,
+      'Only one row per person carries the arrival.'
+    )
+
+    phase('the milestone welcome is a card with the milestone facts')
+    const milestoneState = await waitForEvent(
+      events,
+      'cohost.state',
+      (state) =>
+        (state.utterances ?? []).some(
+          (utterance) =>
+            utterance.trigger.kind === 'greeting' &&
+            utterance.status === 'proposed' &&
+            utterance.milestone?.messageId === arrivalRow.id
+        ),
+      'the milestone welcome card for Test Viewer 0',
+      30_000
+    )
+    const milestone = milestoneState.utterances.find(
+      (utterance) => utterance.milestone?.messageId === arrivalRow.id
+    )
+    expect(
+      milestone.milestone.name === 'Test Viewer 0' &&
+        milestone.milestone.label === '2nd stream' &&
+        milestone.milestone.platform === 'twitch' &&
+        milestone.text.includes('2nd stream') &&
+        !milestone.text.includes(arrivalRow.messageText),
+      `The milestone card should name the person and the milestone, never the message: ${JSON.stringify(milestone)}`
+    )
+    expect(
+      (milestoneState.autoChatSends ?? 0) === 0,
+      `Nothing Buddy decided may reach chat on its own: ${JSON.stringify({ sends: milestoneState.autoChatSends })}`
+    )
+
+    phase('the community RPCs answer from the store')
+    const person = await request(backend, timeoutMs, 'cohost.community.person', {
+      platform: 'twitch',
+      authorId: arrivalRow.authorId
+    })
+    expect(
+      person.id &&
+        person.streams >= 2 &&
+        person.accounts.length === 1 &&
+        person.status === 'normal',
+      `cohost.community.person should know Test Viewer 0: ${JSON.stringify(person)}`
+    )
+    const page = await request(backend, timeoutMs, 'cohost.community.list', {
+      filter: 'everyone',
+      sort: 'streams',
+      limit: 10
+    })
+    expect(
+      page.people.some((row) => row.id === person.id && row.streams >= 2),
+      `cohost.community.list should list the person: ${JSON.stringify(page)}`
+    )
+    const unknown = await request(backend, timeoutMs, 'cohost.community.person', {
+      platform: 'kick',
+      authorId: 'never-chatted',
+      name: 'Stranger'
+    })
+    expect(
+      unknown.id === '' && unknown.streams === 0 && unknown.name === 'Stranger',
+      `An unknown account is a zero-count person, not an error: ${JSON.stringify(unknown)}`
+    )
+    const summary = await request(backend, timeoutMs, 'cohost.community.summary', {})
+    expect(
+      summary.streams >= 2 &&
+        summary.people >= 3 &&
+        ['idle', 'running', 'done'].includes(summary.backfill.state),
+      `The summary should count both streams: ${JSON.stringify(summary)}`
+    )
+
+    phase('tick v5: the arrival rides its row and the people behind the batch ride the request')
+    const v5 = await waitFor(
+      () =>
+        fake.state.requests.find(
+          (record) =>
+            record.body.sessionClientId === communitySessionId &&
+            record.body.promptVersion === 5 &&
+            record.status === 200 &&
+            (record.body.messages ?? []).some((message) => message.arrival)
+        ) ?? null,
+      (record) => record !== null,
+      30_000,
+      'a v5 tick carrying an arrival row'
+    )
+    const arrivalMessage = v5.body.messages.find((message) => message.arrival)
+    expect(
+      arrivalMessage.arrival.streams === 2 &&
+        arrivalMessage.arrival.regular === false &&
+        !('awayDays' in arrivalMessage.arrival),
+      `The tick's arrival should carry the facts, absent fields omitted: ${JSON.stringify(arrivalMessage.arrival)}`
+    )
+    // The tick's viewers may come from any chat platform (only the memory
+    // route leaves YouTube out); nobody has a memory yet.
+    expect(
+      Array.isArray(v5.body.viewers) &&
+        v5.body.viewers.some((viewer) => viewer.platform === 'twitch') &&
+        v5.body.viewers.every(
+          (viewer) =>
+            ['twitch', 'youtube'].includes(viewer.platform) &&
+            Array.isArray(viewer.memories) &&
+            viewer.memories.length === 0 &&
+            !('note' in viewer)
+        ),
+      `The tick's viewers should name the batch's people with no memories yet: ${JSON.stringify(v5.body.viewers)}`
+    )
+    expect(
+      fake.state.requests.every(
+        (record) => record.body.sessionClientId !== communitySessionId || record.status === 200
+      ),
+      `Every v5 tick must pass the fake's contract: ${JSON.stringify(fake.state.requests.filter((record) => record.status !== 200).map((record) => record.code))}`
+    )
+
+    // The checks above are event-driven and finish within a second of the
+    // start; the memory pass wants people who chatted twice, so the Twitch
+    // lane must have delivered all six rows (two per author) before the stop.
+    phase('the Twitch lane finishes: every author chatted twice')
+    await waitFor(
+      async () =>
+        events.list.filter(
+          (entry) =>
+            entry.event === 'liveChat.message' &&
+            entry.payload?.sessionId === communitySessionId &&
+            entry.payload?.platform === 'twitch'
+        ).length,
+      (count) => count >= lane.count,
+      20_000,
+      'the Twitch lane delivering every row'
+    )
+
+    phase('stop')
+    await request(backend, timeoutMs, 'cohost.stop', {})
+    await request(backend, timeoutMs, 'liveChat.stop', {})
+
+    phase('the memory pass: once, after the stream, never a YouTube message, applied to the store')
+    // The backend says what it did with the pass on its `log` events.
+    const communityLog = () =>
+      [...events.list, ...adminEvents.list]
+        .filter(
+          (entry) => entry.event === 'log' && /Community:|memory/.test(entry.payload?.message ?? '')
+        )
+        .map((entry) => `${entry.payload.level}: ${entry.payload.message}`)
+    let pass
+    try {
+      pass = await waitFor(
+        () => fake.state.memoryRequests[0] ?? null,
+        (record) => record !== null,
+        30_000,
+        'the memory pass request'
+      )
+    } catch (error) {
+      console.log(`[cohost-smoke] backend community log:\n  ${communityLog().join('\n  ')}`)
+      const after = await request(backend, timeoutMs, 'cohost.settings.get', {})
+      console.log(
+        `[cohost-smoke] community settings after the stop: ${JSON.stringify(after.community)}`
+      )
+      console.log(
+        `[cohost-smoke] last log events: ${JSON.stringify(
+          adminEvents.list
+            .filter((entry) => entry.event === 'log')
+            .slice(-12)
+            .map((entry) => entry.payload?.message)
+        )}`
+      )
+      throw error
+    }
+    console.log(`[cohost-smoke] backend community log:\n  ${communityLog().join('\n  ')}`)
+    const body = pass.body
+    expect(
+      pass.status === 200 &&
+        body.promptVersion === 1 &&
+        body.consentToProcessChat === true &&
+        body.sessionClientId === communitySessionId &&
+        typeof body.counts === 'object',
+      `The memory pass should be the route's shape: ${JSON.stringify({ status: pass.status, code: pass.code })}`
+    )
+    expect(
+      body.people.length >= 1 &&
+        body.people.every(
+          (person) =>
+            person.messages.length >= 2 &&
+            person.messages.every((message) => message.platform === 'twitch') &&
+            !person.platforms.includes('youtube')
+        ),
+      `The pass should carry the Twitch people who chatted twice and nothing from YouTube: ${JSON.stringify(body.people)}`
+    )
+    expect(
+      !JSON.stringify(body).includes('youtube') &&
+        !JSON.stringify(body).includes('cohost-memory-yt'),
+      'A YouTube message or account must never reach the memory route.'
+    )
+    expect(fake.state.memoryRequests.length === 1, 'One pass per stream.')
+    const rememberedPerson = await waitFor(
+      () =>
+        request(backend, timeoutMs, 'cohost.community.person', {
+          platform: 'twitch',
+          authorId: arrivalRow.authorId
+        }),
+      (found) => (found.memories ?? []).length === 1,
+      10_000,
+      "Test Viewer 0's memory from the pass"
+    )
+    expect(
+      rememberedPerson.memories[0].text.startsWith('Said: ') &&
+        rememberedPerson.memories[0].accountKey === `twitch:${arrivalRow.authorId}`,
+      `The memory should be the fake's line on the Twitch account: ${JSON.stringify(rememberedPerson.memories)}`
+    )
+    const remembered = await request(backend, timeoutMs, 'cohost.report.get', {
+      sessionId: communitySessionId
+    })
+    expect(
+      typeof remembered.report?.community?.summary === 'string' &&
+        remembered.report.community.summary.length > 0 &&
+        remembered.report.community.summary.length <= 280 &&
+        remembered.report.community.memoriesLearned >= 1,
+      `The report should carry the pass's summary and what was learned: ${JSON.stringify(remembered.report?.community)}`
+    )
+    const afterPass = await request(backend, timeoutMs, 'cohost.status', {})
+    expect(
+      (afterPass.autoChatSends ?? 0) === 0,
+      `Nothing of this may reach chat: ${JSON.stringify({ sends: afterPass.autoChatSends })}`
+    )
+
+    // Back to how the later scenarios expect the web: tick v3, no memory.
+    fake.setCapabilities({ tick: 3, memory: 0 })
+    await request(admin, timeoutMs, 'account.refresh', {})
+    await request(backend, timeoutMs, 'cohost.settings.set', {
+      autoChat: { ...current.autoChat, talk: current.autoChat.talk ?? 'bubble' },
+      community: { ...current.community, remember: false }
+    })
+    console.log(
+      `Community scenario PASS: an arrival on the first row only (streams 2, in a row 2, 2nd-stream milestone), ` +
+        `a proposed milestone card with the person's facts and no message text, zero sends, ` +
+        `person/list/summary answered from the store, a v5 tick with the arrival and the viewers, ` +
+        `and one memory pass after the stream (Twitch only, applied to the person and the report).`
+    )
+  } finally {
+    adminEvents.close()
+    admin.close()
+    events.close()
+  }
+}
+
 async function runConsentScenario({ ready, startedAt }) {
   const consentSessionId = `consent-${randomUUID()}`
   const events = collectEvents(backend)

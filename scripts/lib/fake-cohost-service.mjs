@@ -23,9 +23,26 @@ import { capabilitiesDocument } from './fake-transcript-service.mjs'
  */
 
 export const COHOST_PROMPT_VERSION = 3
-export const COHOST_PROMPT_VERSIONS = Object.freeze([1, 2, 3])
+export const COHOST_PROMPT_VERSIONS = Object.freeze([1, 2, 3, 4, 5])
 /** v3 request keys, all optional; a v1/v2 body must not carry them. */
 export const COHOST_TICK_V3_REQUEST_KEYS = Object.freeze(['openPromises', 'summary', 'transcript'])
+/** v4 request keys (plan 164): the persona and the banter intent, optional. */
+export const COHOST_TICK_V4_REQUEST_KEYS = Object.freeze(['intent', 'persona'])
+/** v5 request keys (plan 225 D10): the people behind the batch, optional;
+ * a message may carry `arrival`. A v4 body must not carry either. */
+export const COHOST_TICK_V5_REQUEST_KEYS = Object.freeze(['viewers'])
+export const COHOST_TICK_VIEWERS_CAP = 10
+export const COHOST_TICK_VIEWER_MEMORIES_CAP = 3
+/** Plan 225 D10: the memory pass after a stream, on the same origin. */
+export const COHOST_MEMORY_PATH = '/api/ai/cohost/memory'
+export const COHOST_MEMORY_PROMPT_VERSION = 1
+export const COHOST_MEMORY_PEOPLE_CAP = 15
+export const COHOST_MEMORY_MESSAGES_CAP = 20
+export const COHOST_MEMORY_MESSAGE_MAX_CHARS = 200
+export const COHOST_MEMORY_TEXT_MAX_CHARS = 100
+export const COHOST_MEMORY_SUMMARY_MAX_CHARS = 280
+/** The memory route takes a message from these only: a YouTube message is a 400. */
+const MEMORY_MESSAGE_PLATFORMS = new Set(['twitch', 'x', 'kick'])
 export const COHOST_TICK_TRANSCRIPT_MAX_CHARS = 1500
 export const COHOST_TICK_SUMMARY_MAX_CHARS = 600
 export const COHOST_TICK_OPEN_PROMISES_CAP = 20
@@ -125,13 +142,25 @@ export function validateCohostTickRequest(body) {
   // v2 adds the optional `rules`; a v1 body must not carry it. v3 adds the
   // optional transcript, summary and openPromises; a v1/v2 body must not.
   const v3 = body.promptVersion >= 3
+  const v4 = body.promptVersion >= 4
+  const v5 = body.promptVersion >= 5
   const keys = Object.keys(body)
     .filter((key) => !(key === 'rules' && body.promptVersion >= 2))
     .filter((key) => !(v3 && COHOST_TICK_V3_REQUEST_KEYS.includes(key)))
+    .filter((key) => !(v4 && COHOST_TICK_V4_REQUEST_KEYS.includes(key)))
+    .filter((key) => !(v5 && COHOST_TICK_V5_REQUEST_KEYS.includes(key)))
     .sort()
   if (v3) {
     const v3Failure = validateV3RequestExtras(body)
     if (v3Failure) return v3Failure
+  }
+  if (v4) {
+    const v4Failure = validateV4RequestExtras(body)
+    if (v4Failure) return v4Failure
+  }
+  if (v5) {
+    const v5Failure = validateV5RequestExtras(body)
+    if (v5Failure) return v5Failure
   }
   if (body.rules !== undefined && body.promptVersion >= 2) {
     const rulesOk =
@@ -203,7 +232,7 @@ export function validateCohostTickRequest(body) {
       return invalid('messages entries must be objects.')
     }
     const messageKeys = Object.keys(message).filter(
-      (key) => !COHOST_TICK_MESSAGE_KEYS.includes(key)
+      (key) => !COHOST_TICK_MESSAGE_KEYS.includes(key) && !(v5 && key === 'arrival')
     )
     if (messageKeys.length > 0) {
       return invalid(`message carries unexpected keys: ${messageKeys.join(',')}.`)
@@ -213,6 +242,10 @@ export function validateCohostTickRequest(body) {
       if (typeof message.firstMessage !== 'boolean') {
         return invalid('message.firstMessage must be a boolean when present.')
       }
+    }
+    if (message.arrival !== undefined) {
+      const arrivalFailure = validateArrival(message.arrival, 'message.arrival')
+      if (arrivalFailure) return arrivalFailure
     }
     if (typeof message.id !== 'string' || !message.id) {
       return invalid('message.id must be a non-empty string.')
@@ -241,6 +274,319 @@ export function validateCohostTickRequest(body) {
 
 function invalid(message) {
   return { status: 400, code: 'invalid-request', message }
+}
+
+/** Plan 164: the persona (null or a named character) and the banter intent. */
+function validateV4RequestExtras(body) {
+  if (body.persona !== undefined && body.persona !== null) {
+    const personaFailure = validatePersona(body.persona)
+    if (personaFailure) return personaFailure
+  }
+  if (body.intent !== undefined && body.intent !== 'tick' && body.intent !== 'banter') {
+    return invalid(`intent ${String(body.intent)} is not tick or banter.`)
+  }
+  return null
+}
+
+function validatePersona(persona) {
+  if (!persona || typeof persona !== 'object' || Array.isArray(persona)) {
+    return invalid('persona must be an object or null.')
+  }
+  const keys = Object.keys(persona).sort()
+  if (JSON.stringify(keys) !== JSON.stringify(['name', 'personality'])) {
+    return invalid(`persona carries unexpected keys: ${keys.join(',')}.`)
+  }
+  if (
+    typeof persona.name !== 'string' ||
+    persona.name !== persona.name.trim() ||
+    persona.name.length < 1 ||
+    persona.name.length > 24
+  ) {
+    return invalid('persona.name must be a trimmed string of 1-24 characters.')
+  }
+  if (typeof persona.personality !== 'string' || persona.personality.length > 1200) {
+    return invalid('persona.personality must be a string of at most 1200 characters.')
+  }
+  return null
+}
+
+/** Plan 225 D10: `arrival` on a message or a greet item: regular, streams, awayDays?. */
+function validateArrival(arrival, where) {
+  if (!arrival || typeof arrival !== 'object' || Array.isArray(arrival)) {
+    return invalid(`${where} must be an object when present.`)
+  }
+  const keys = Object.keys(arrival).filter(
+    (key) => !['regular', 'streams', 'awayDays'].includes(key)
+  )
+  if (keys.length > 0) return invalid(`${where} carries unexpected keys: ${keys.join(',')}.`)
+  if (typeof arrival.regular !== 'boolean') return invalid(`${where}.regular must be a boolean.`)
+  if (!Number.isInteger(arrival.streams) || arrival.streams < 0) {
+    return invalid(`${where}.streams must be a non-negative integer.`)
+  }
+  if (
+    arrival.awayDays !== undefined &&
+    (!Number.isInteger(arrival.awayDays) || arrival.awayDays < 0)
+  ) {
+    return invalid(`${where}.awayDays must be a non-negative integer when present.`)
+  }
+  return null
+}
+
+/** Plan 225 D10: the people behind the batch, at most 10, read-only context. */
+function validateV5RequestExtras(body) {
+  if (body.viewers === undefined) return null
+  if (!Array.isArray(body.viewers) || body.viewers.length > COHOST_TICK_VIEWERS_CAP) {
+    return invalid(`viewers must be an array of at most ${COHOST_TICK_VIEWERS_CAP}.`)
+  }
+  for (const viewer of body.viewers) {
+    if (!viewer || typeof viewer !== 'object') return invalid('viewers entries must be objects.')
+    const keys = Object.keys(viewer).filter(
+      (key) => !['name', 'platform', 'regular', 'streams', 'memories', 'note'].includes(key)
+    )
+    if (keys.length > 0) return invalid(`viewer carries unexpected keys: ${keys.join(',')}.`)
+    if (typeof viewer.name !== 'string' || !viewer.name || viewer.name.length > 160) {
+      return invalid('viewer.name must be a string of 1-160 characters.')
+    }
+    if (!PLATFORMS.has(viewer.platform)) {
+      return invalid(`viewer.platform ${String(viewer.platform)} is not a chat platform.`)
+    }
+    if (typeof viewer.regular !== 'boolean') return invalid('viewer.regular must be a boolean.')
+    if (!Number.isInteger(viewer.streams) || viewer.streams < 0) {
+      return invalid('viewer.streams must be a non-negative integer.')
+    }
+    if (
+      !Array.isArray(viewer.memories) ||
+      viewer.memories.length > COHOST_TICK_VIEWER_MEMORIES_CAP ||
+      viewer.memories.some(
+        (memory) =>
+          typeof memory !== 'string' || !memory || memory.length > COHOST_MEMORY_TEXT_MAX_CHARS
+      )
+    ) {
+      return invalid(
+        `viewer.memories must be at most ${COHOST_TICK_VIEWER_MEMORIES_CAP} strings of 1-${COHOST_MEMORY_TEXT_MAX_CHARS} characters.`
+      )
+    }
+    if (
+      viewer.note !== undefined &&
+      (typeof viewer.note !== 'string' || viewer.note.length > 300)
+    ) {
+      return invalid('viewer.note must be a string of at most 300 characters when present.')
+    }
+  }
+  return null
+}
+
+/**
+ * Plan 225 D10: the memory pass's request against the route's strict zod
+ * shape. A YouTube message is refused (never dropped): the desktop must
+ * never send one. Returns an error envelope or null.
+ */
+export function validateCohostMemoryRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return invalid('Request body must be a JSON object.')
+  }
+  if (body.consentToProcessChat !== true) {
+    return {
+      status: 403,
+      code: 'consent-required',
+      message: 'Chat processing consent is required.'
+    }
+  }
+  if (body.promptVersion !== COHOST_MEMORY_PROMPT_VERSION) {
+    return {
+      status: 400,
+      code: 'prompt-version-unsupported',
+      message: `promptVersion ${String(body.promptVersion)} is not supported.`
+    }
+  }
+  const keys = Object.keys(body).sort()
+  const expected = [
+    'clientVersion',
+    'consentToProcessChat',
+    'counts',
+    'people',
+    'persona',
+    'promptVersion',
+    'sessionClientId',
+    'streamTitle'
+  ]
+  if (JSON.stringify(keys) !== JSON.stringify(expected)) {
+    return invalid(`Memory request keys do not match the contract: ${keys.join(',')}.`)
+  }
+  if (typeof body.clientVersion !== 'string' || !body.clientVersion) {
+    return invalid('clientVersion must be a non-empty string.')
+  }
+  if (typeof body.sessionClientId !== 'string' || !body.sessionClientId) {
+    return invalid('sessionClientId must be a non-empty string.')
+  }
+  if (body.persona !== null) {
+    const personaFailure = validatePersona(body.persona)
+    if (personaFailure) return personaFailure
+  }
+  if (
+    body.streamTitle !== null &&
+    (typeof body.streamTitle !== 'string' || body.streamTitle.length > 300)
+  ) {
+    return invalid('streamTitle must be a string of at most 300 characters or null.')
+  }
+  const counts = body.counts
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) {
+    return invalid('counts must be an object.')
+  }
+  const countKeys = Object.keys(counts).sort()
+  if (
+    JSON.stringify(countKeys) !==
+    JSON.stringify(['comebacks', 'firstTimers', 'firstTimersStayed', 'regularsBack'])
+  ) {
+    return invalid(`counts carries unexpected keys: ${countKeys.join(',')}.`)
+  }
+  for (const key of countKeys) {
+    if (!Number.isInteger(counts[key]) || counts[key] < 0) {
+      return invalid(`counts.${key} must be a non-negative integer.`)
+    }
+  }
+  if (
+    !Array.isArray(body.people) ||
+    body.people.length < 1 ||
+    body.people.length > COHOST_MEMORY_PEOPLE_CAP
+  ) {
+    return invalid(`people must be an array of 1-${COHOST_MEMORY_PEOPLE_CAP}.`)
+  }
+  const refs = new Set()
+  for (const person of body.people) {
+    if (!person || typeof person !== 'object') return invalid('people entries must be objects.')
+    const personKeys = Object.keys(person).filter(
+      (key) =>
+        ![
+          'ref',
+          'name',
+          'platforms',
+          'regular',
+          'streams',
+          'messages',
+          'memories',
+          'note'
+        ].includes(key)
+    )
+    if (personKeys.length > 0)
+      return invalid(`person carries unexpected keys: ${personKeys.join(',')}.`)
+    if (
+      typeof person.ref !== 'string' ||
+      !person.ref ||
+      person.ref.length > 80 ||
+      refs.has(person.ref)
+    ) {
+      return invalid('person.ref must be a unique string of 1-80 characters.')
+    }
+    refs.add(person.ref)
+    if (typeof person.name !== 'string' || person.name.length > 120) {
+      return invalid('person.name must be a string of at most 120 characters.')
+    }
+    if (
+      !Array.isArray(person.platforms) ||
+      person.platforms.length < 1 ||
+      person.platforms.length > 4 ||
+      person.platforms.some((platform) => !PLATFORMS.has(platform))
+    ) {
+      return invalid('person.platforms must be 1-4 chat platforms.')
+    }
+    if (typeof person.regular !== 'boolean') return invalid('person.regular must be a boolean.')
+    if (!Number.isInteger(person.streams) || person.streams < 0) {
+      return invalid('person.streams must be a non-negative integer.')
+    }
+    if (
+      !Array.isArray(person.messages) ||
+      person.messages.length < 1 ||
+      person.messages.length > COHOST_MEMORY_MESSAGES_CAP
+    ) {
+      return invalid(`person.messages must be 1-${COHOST_MEMORY_MESSAGES_CAP} messages.`)
+    }
+    for (const message of person.messages) {
+      if (!message || typeof message !== 'object')
+        return invalid('messages entries must be objects.')
+      const messageKeys = Object.keys(message).sort()
+      if (JSON.stringify(messageKeys) !== JSON.stringify(['at', 'platform', 'text'])) {
+        return invalid(`message carries unexpected keys: ${messageKeys.join(',')}.`)
+      }
+      if (typeof message.at !== 'string' || Number.isNaN(Date.parse(message.at))) {
+        return invalid('message.at must be an ISO-8601 timestamp.')
+      }
+      if (!MEMORY_MESSAGE_PLATFORMS.has(message.platform)) {
+        return invalid(
+          `message.platform ${String(message.platform)} is not twitch, x or kick: a YouTube message is never accepted.`
+        )
+      }
+      if (
+        typeof message.text !== 'string' ||
+        message.text.length < 1 ||
+        message.text.length > COHOST_MEMORY_MESSAGE_MAX_CHARS
+      ) {
+        return invalid(`message.text must be 1-${COHOST_MEMORY_MESSAGE_MAX_CHARS} characters.`)
+      }
+    }
+    if (person.memories !== undefined) {
+      if (!Array.isArray(person.memories) || person.memories.length > 8) {
+        return invalid('person.memories must be at most 8 when present.')
+      }
+      const ids = new Set()
+      for (const memory of person.memories) {
+        if (
+          !memory ||
+          typeof memory.id !== 'string' ||
+          !memory.id ||
+          memory.id.length > 80 ||
+          ids.has(memory.id) ||
+          typeof memory.text !== 'string' ||
+          !memory.text ||
+          memory.text.length > COHOST_MEMORY_TEXT_MAX_CHARS
+        ) {
+          return invalid(
+            'person.memories entries must carry a unique id and 1-100 characters of text.'
+          )
+        }
+        ids.add(memory.id)
+      }
+    }
+    if (
+      person.note !== undefined &&
+      (typeof person.note !== 'string' || person.note.length > 300)
+    ) {
+      return invalid('person.note must be a string of at most 300 characters when present.')
+    }
+  }
+  return null
+}
+
+/**
+ * Deterministic memory pass (pure): every person learns one memory, "Said:"
+ * plus their newest message, on that message's platform; the summary reads
+ * the counts back. Nothing is updated or removed.
+ */
+export function planCohostMemory(body) {
+  const people = body.people.map((person) => {
+    const newest = person.messages[person.messages.length - 1]
+    return {
+      ref: person.ref,
+      add: [
+        {
+          text: `Said: ${newest.text}`.slice(0, COHOST_MEMORY_TEXT_MAX_CHARS),
+          platform: newest.platform
+        }
+      ],
+      update: [],
+      remove: []
+    }
+  })
+  const { regularsBack, firstTimers, firstTimersStayed, comebacks } = body.counts
+  const summary =
+    `${regularsBack} regulars came back and ${firstTimers} first-timers chatted, ` +
+    `${firstTimersStayed} of them staying a while. ${comebacks} came back after a break.`
+  return {
+    people,
+    summary: summary.slice(0, COHOST_MEMORY_SUMMARY_MAX_CHARS),
+    model: 'smoke/fake-cohost',
+    usage: { inputTokens: body.people.length * 20, outputTokens: 10, model: 'smoke/fake-cohost' }
+  }
 }
 
 /** The v3 extras the way `cohost.ts` checks them: the transcript is only
@@ -892,6 +1238,11 @@ export async function startFakeCohostService({
     actRequests: [],
     queuedActAnswers: [],
     capabilityRequests: 0,
+    // Plan 225 D10: the memory pass, and the `cohost` block the capabilities
+    // route serves once a smoke sets it (null: the route stays unknown).
+    memoryRequests: [],
+    queuedMemoryFailures: [],
+    capabilities: null,
     greetRequests: [],
     greetFailure: false
   }
@@ -922,6 +1273,47 @@ export async function startFakeCohostService({
     activeHolds.delete(hold)
   }
 
+  // Plan 225 D10: `POST /api/ai/cohost/memory`, recorded like a tick.
+  async function serveMemory(req, res) {
+    if (req.headers.authorization !== `Bearer ${smokeSessionToken}`) {
+      await drain(req)
+      state.unauthorized += 1
+      return json(res, 401, { error: { code: 'unauthorized', message: 'Smoke auth failed.' } })
+    }
+    let body
+    try {
+      body = JSON.parse(await readRequestBody(req))
+    } catch (error) {
+      return json(res, 400, {
+        error: { code: 'invalid-request', message: `Body is not JSON: ${error.message}` }
+      })
+    }
+    const record = { at: Date.now(), body, status: 200, code: null }
+    state.memoryRequests.push(record)
+    const failure = validateCohostMemoryRequest(body)
+    if (failure) {
+      record.status = failure.status
+      record.code = failure.code
+      return json(res, failure.status, { error: { code: failure.code, message: failure.message } })
+    }
+    const queued = state.queuedMemoryFailures.shift()
+    if (queued) {
+      record.status = queued.status
+      record.code = queued.code
+      const headers = {}
+      if (Number.isFinite(queued.retryAfterSeconds)) {
+        headers['retry-after'] = String(queued.retryAfterSeconds)
+      }
+      return json(
+        res,
+        queued.status,
+        { error: { code: queued.code, message: queued.message ?? `Scripted ${queued.code}.` } },
+        headers
+      )
+    }
+    return json(res, 200, planCohostMemory(body))
+  }
+
   const server = createServer(async (req, res) => {
     if (voiceGreetings && req.method === 'POST' && req.url === '/api/ai/cohost/greet') {
       if (req.headers.authorization !== `Bearer ${smokeSessionToken}`) {
@@ -947,13 +1339,16 @@ export async function startFakeCohostService({
     if (req.method === 'POST' && req.url === COHOST_SPOTLIGHT_PATH) {
       return serveSpotlight(req, res)
     }
+    if (req.method === 'POST' && req.url === COHOST_MEMORY_PATH) {
+      return serveMemory(req, res)
+    }
     if (req.method === 'POST' && req.url === BUDDY_ACT_PATH) {
       return serveBuddyAct(req, res)
     }
     // Only when a smoke opted in (`buddyAct`): every other smoke keeps its
     // own capabilities fake, and this route stays unknown for them.
     if (
-      state.buddyActOptIn &&
+      (state.buddyActOptIn || state.capabilities) &&
       req.method === 'GET' &&
       req.url?.split('?')[0] === AI_CAPABILITIES_PATH
     ) {
@@ -966,6 +1361,9 @@ export async function startFakeCohostService({
       const document = capabilitiesDocument({ monthlySecondsLimit: 72_000, remaining: 72_000 })
       if (state.buddyAct !== null) document.buddy = { act: state.buddyAct ? 1 : 0 }
       if (voiceGreetings) document.cohost = { greet: 1 }
+      // Plan 225 D10: the tick version and the memory route the web speaks.
+      if (state.capabilities)
+        document.cohost = { ...(document.cohost ?? {}), ...state.capabilities }
       return json(res, 200, document)
     }
     if (req.method !== 'POST' || req.url !== COHOST_TICK_PATH) {
@@ -1188,6 +1586,17 @@ export async function startFakeCohostService({
         throw new Error('queueFailure requires { status, code }.')
       }
       state.queuedFailures.push(failure)
+    },
+    // Plan 225 D10: the `cohost` block `GET /api/ai/capabilities` serves from
+    // now on (`{ tick: 5, memory: 1 }`), or null to make the route unknown again.
+    setCapabilities(cohost) {
+      state.capabilities = cohost && typeof cohost === 'object' ? { ...cohost } : null
+    },
+    queueMemoryFailure(failure) {
+      if (!failure || !Number.isInteger(failure.status) || typeof failure.code !== 'string') {
+        throw new Error('queueMemoryFailure requires { status, code }.')
+      }
+      state.queuedMemoryFailures.push(failure)
     },
     queueSpotlightFailure(failure) {
       if (

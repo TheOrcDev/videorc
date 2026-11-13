@@ -197,6 +197,7 @@ function AppShellContent(): ReactElement {
     runtimeInfo,
     entitlementTier,
     accountNeedsSignIn,
+    entitlementPlan,
     previewWindowOpen,
     togglePreviewWindow,
     notesWindowOpen,
@@ -576,6 +577,7 @@ function AppShellContent(): ReactElement {
           <Sidebar
             active={active}
             activeStudioPanel={isStudioPanel(active) ? active : null}
+            accountPlan={entitlementPlan}
             accountTier={entitlementTier}
             accountNeedsSignIn={accountNeedsSignIn}
             // A click on a row keeps the focus on the row; every other way to
