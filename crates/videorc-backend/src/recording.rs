@@ -28827,6 +28827,54 @@ mod cloud_seam_tests {
         );
     }
 
+    /// Plan 234 C4: a managed show's feed goes to LiveKit's RTMPS ingress.
+    /// `ingest_url_problem` takes that address as written, because it is
+    /// RTMPS to a DNS name (the wire contract's contradiction 9: nothing
+    /// had to change). Anything without TLS is still refused in a release
+    /// build, LiveKit's host or not, and the leg is `{serverUrl}/{streamKey}`
+    /// with the certificate checked, as for a node.
+    #[test]
+    fn a_livekit_ingress_is_accepted_as_the_feed_and_nothing_without_tls_is() {
+        use crate::cloud_show::ingest_url_problem;
+        const LIVEKIT: &str = "rtmps://videorc-abc123.rtmp.livekit.cloud/x";
+        for allowed in [
+            LIVEKIT,
+            "rtmps://videorc-abc123.rtmp.livekit.cloud:443/x",
+            "rtmps://ingress.eu.livekit.cloud/live",
+        ] {
+            assert_eq!(ingest_url_problem(allowed, false), None, "{allowed}");
+        }
+        for refused in [
+            "rtmp://videorc-abc123.rtmp.livekit.cloud/x",
+            "rtmp://videorc-abc123.rtmp.livekit.cloud:1935/x",
+            "http://videorc-abc123.rtmp.livekit.cloud/x",
+            "srt://videorc-abc123.rtmp.livekit.cloud:7885",
+            "videorc-abc123.rtmp.livekit.cloud/x",
+        ] {
+            assert!(ingest_url_problem(refused, false).is_some(), "{refused}");
+        }
+        let livekit = ShowIngest {
+            orientation: Horizontal,
+            server_url: LIVEKIT.to_string(),
+            stream_key: INGEST_KEY.to_string(),
+        };
+        let feed =
+            cloud_feed_target(&livekit, None, &roots()).expect("LiveKit's ingress is a feed");
+        assert_eq!(feed.url, format!("{LIVEKIT}/{INGEST_KEY}"));
+        assert_eq!(feed.tls_verification, Some(roots()));
+        assert!(!feed.redacted_url.contains("SECRET"));
+        assert_eq!(feed.target_id, "videorc-cloud-horizontal");
+        // Without TLS the leg is never built in a release build.
+        let plain = ShowIngest {
+            server_url: "rtmp://videorc-abc123.rtmp.livekit.cloud/x".to_string(),
+            ..livekit
+        };
+        assert_eq!(
+            cloud_feed_target(&plain, None, &roots()).is_ok(),
+            cfg!(debug_assertions)
+        );
+    }
+
     #[test]
     fn an_ip_ingest_cannot_be_checked_by_name_and_a_roots_path_must_be_plain() {
         use crate::cloud_show::ingest_url_problem;

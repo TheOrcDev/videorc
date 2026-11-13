@@ -11862,4 +11862,74 @@ mod tests {
         assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_abc".to_string()]);
         assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
     }
+
+    // --- Plan 234: the hold image on web control (C4) ----------------------------
+
+    // Wire section 2.4: the hold image goes through `PUT …/hold-image`, and
+    // the route takes a PNG of at most 2 MiB and 1,920 pixels a side, so an
+    // image over either is scaled before it leaves. Best effort, as today:
+    // one that cannot be read leaves the default card and never fails the
+    // start.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_shows_hold_image_is_fitted_before_it_leaves() {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed()));
+        web.set_state(managed_state("starting", json!([])));
+        // Wider than the route takes (and small, so the test stays quick).
+        let mut wide = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(2400, 30, image::Rgba([13, 13, 15, 255]))
+            .write_to(&mut wide, image::ImageFormat::Png)
+            .unwrap();
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                Some(engine.encode(wide.into_inner())),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Cloud(_)));
+        let sent = web.managed.lock().unwrap().hold_images.clone();
+        assert_eq!(sent.len(), 1);
+        let png = engine.decode(&sent[0]).unwrap();
+        assert!(png.len() <= 2 * 1024 * 1024);
+        let fitted = image::load_from_memory_with_format(&png, image::ImageFormat::Png).unwrap();
+        assert_eq!((fitted.width(), fitted.height()), (1920, 24));
+        // The show keeps the image it was given, for a later re-send.
+        assert!(
+            lock(&harness.context.slot)
+                .show
+                .as_ref()
+                .unwrap()
+                .hold_image_png_base64
+                .is_some()
+        );
+
+        // An image this computer cannot read: no request, and the show
+        // still starts with the default card.
+        let unreadable = harness_remembering(true, None);
+        let web = unreadable.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed()));
+        web.set_state(managed_state("starting", json!([])));
+        let outcome = unreadable
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                Some("iVBORw0KGgo=".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Cloud(_)));
+        assert!(web.managed.lock().unwrap().hold_images.is_empty());
+        assert_eq!(web.destination_bodies().len(), 1);
+    }
 }

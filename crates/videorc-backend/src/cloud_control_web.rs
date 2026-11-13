@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -62,6 +63,14 @@ const LEG_RESEND_SPACING: Duration = Duration::from_secs(30);
 const FEED_CLOCK_LOOK: Duration = Duration::from_secs(1);
 const CODE_SHOW_ENDED: &str = "cloud-show-ended";
 const CODE_CONTROL_MISMATCH: &str = "cloud-control-mismatch";
+/// Section 2.4: the hold-image route takes a PNG of at most this many
+/// bytes and this many pixels a side. A node takes up to 8 MiB; the desktop
+/// fits the image before it sends it here.
+pub(crate) const HOLD_IMAGE_MAX_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const HOLD_IMAGE_MAX_SIDE: u32 = 1920;
+/// Scaled below this side, the image is not worth showing: the default
+/// card stays.
+const HOLD_IMAGE_MIN_SIDE: u32 = 16;
 /// Section 6.4: what `cloud.return.set` answers on a show on web control.
 pub(crate) const RETURN_UNAVAILABLE_MESSAGE: &str =
     "The program return is not available on this show.";
@@ -293,6 +302,79 @@ fn refused_line(refused: &[RefusedDestination]) -> String {
         .join(", ")
 }
 
+// --- The hold image -------------------------------------------------------------
+
+fn hold_image_dimensions(png: &[u8]) -> Result<(u32, u32)> {
+    image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png)
+        .into_dimensions()
+        .context("The hold image is not a readable PNG.")
+}
+
+/// The hold image as the route takes it (section 2.4). A PNG already inside
+/// both limits goes as it is, byte for byte. A larger one is scaled down,
+/// keeping its shape: first to the side limit, then, while its PNG is still
+/// too many bytes, by the share it is over.
+pub(crate) fn fit_hold_image(png: Vec<u8>, max_side: u32, max_bytes: usize) -> Result<Vec<u8>> {
+    let (width, height) = hold_image_dimensions(&png)?;
+    let longest = width.max(height);
+    if longest <= max_side && png.len() <= max_bytes {
+        return Ok(png);
+    }
+    let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+        .context("The hold image did not decode.")?;
+    let mut side = longest.min(max_side);
+    loop {
+        let scaled;
+        let fitted = if side < longest {
+            scaled = decoded.resize(side, side, image::imageops::FilterType::CatmullRom);
+            &scaled
+        } else {
+            &decoded
+        };
+        let mut out = std::io::Cursor::new(Vec::new());
+        fitted
+            .write_to(&mut out, image::ImageFormat::Png)
+            .context("The hold image could not be re-encoded as PNG.")?;
+        let encoded = out.into_inner();
+        if encoded.len() <= max_bytes {
+            return Ok(encoded);
+        }
+        // A PNG's bytes follow its pixels closely enough: aim a tenth under
+        // the limit, and always shrink.
+        let share = (max_bytes as f64 / encoded.len() as f64).sqrt() * 0.9;
+        let next = ((f64::from(side) * share) as u32).min(side.saturating_sub(1));
+        if next < HOLD_IMAGE_MIN_SIDE {
+            bail!("The hold image does not fit in {max_bytes} bytes.");
+        }
+        side = next;
+    }
+}
+
+/// `fit_hold_image` around the base64 the show holds. An image that already
+/// fits is not touched; scaling one runs off the async threads.
+async fn fit_hold_image_base64(png_base64: &str) -> Result<String> {
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let png = engine
+        .decode(png_base64)
+        .context("The hold image is not base64.")?;
+    let (width, height) = hold_image_dimensions(&png)?;
+    if width.max(height) <= HOLD_IMAGE_MAX_SIDE && png.len() <= HOLD_IMAGE_MAX_BYTES {
+        return Ok(png_base64.to_string());
+    }
+    let before = png.len();
+    let fitted = tokio::task::spawn_blocking(move || {
+        fit_hold_image(png, HOLD_IMAGE_MAX_SIDE, HOLD_IMAGE_MAX_BYTES)
+    })
+    .await
+    .context("The hold image task stopped.")??;
+    tracing::info!(
+        "The hold image was scaled for Videorc Cloud: {width}x{height}, {before} bytes to {} bytes",
+        fitted.len()
+    );
+    Ok(engine.encode(fitted))
+}
+
 // --- Intents ----------------------------------------------------------------------
 
 /// An intent's answer, on its way.
@@ -372,6 +454,13 @@ async fn send_web_intent<W: CloudWebApi>(
             let Some(png) = frame.get("pngBase64").and_then(Value::as_str) else {
                 return Err("the hold image could not be read".to_string());
             };
+            // Best effort, as on the socket: an image that cannot be made
+            // to fit leaves the default card.
+            let png = match fit_hold_image_base64(png).await {
+                Ok(png) => png,
+                Err(error) => return Err(format!("{error:#}")),
+            };
+            let png = png.as_str();
             with_one_cloud_retry(|| web.set_hold_image(bearer, show_id, png))
                 .await
                 .map(|()| None)
@@ -1072,6 +1161,112 @@ mod tests {
         }
     }
 
+    fn png_of(image: &image::RgbaImage) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("a PNG encodes");
+        out.into_inner()
+    }
+
+    /// Pixels a PNG cannot compress: a small generator, no two alike.
+    fn noise(width: u32, height: u32) -> image::RgbaImage {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        image::RgbaImage::from_fn(width, height, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let bytes = seed.to_le_bytes();
+            image::Rgba([bytes[0], bytes[1], bytes[2], 255])
+        })
+    }
+
+    fn decoded(png: &[u8]) -> image::DynamicImage {
+        image::load_from_memory_with_format(png, image::ImageFormat::Png)
+            .expect("the fitted image is a PNG")
+    }
+
+    /// Section 2.4 (C4): the hold image is at most 2 MiB and 1,920 pixels a
+    /// side when it leaves. The limits are parameters here so the cases stay
+    /// small; the constants are pinned to the fixture below.
+    #[test]
+    fn the_hold_image_is_fitted_to_the_routes_limits() {
+        // Inside both limits: the same bytes.
+        let small = png_of(&image::RgbaImage::from_pixel(
+            48,
+            27,
+            image::Rgba([13, 13, 15, 255]),
+        ));
+        assert_eq!(fit_hold_image(small.clone(), 64, 4096).unwrap(), small);
+
+        // Too wide: scaled to the side limit, its shape kept.
+        let wide = png_of(&image::RgbaImage::from_pixel(
+            320,
+            180,
+            image::Rgba([200, 30, 30, 255]),
+        ));
+        let fitted = decoded(&fit_hold_image(wide, 64, 4096).unwrap());
+        assert_eq!((fitted.width(), fitted.height()), (64, 36));
+        assert_eq!(fitted.to_rgba8().get_pixel(10, 10).0, [200, 30, 30, 255]);
+        // Too tall is the same rule on the other side.
+        let tall = png_of(&image::RgbaImage::from_pixel(
+            90,
+            160,
+            image::Rgba([0, 0, 0, 255]),
+        ));
+        let fitted = decoded(&fit_hold_image(tall, 64, 4096).unwrap());
+        assert_eq!((fitted.width(), fitted.height()), (36, 64));
+
+        // Inside the side limit but too many bytes: scaled down until its
+        // PNG fits, still the same shape.
+        let heavy = png_of(&noise(64, 32));
+        assert!(heavy.len() > 4096, "{} bytes", heavy.len());
+        let fitted = fit_hold_image(heavy, 64, 4096).unwrap();
+        assert!(fitted.len() <= 4096, "{} bytes", fitted.len());
+        let fitted = decoded(&fitted);
+        assert!(fitted.width() < 64 && fitted.width() >= HOLD_IMAGE_MIN_SIDE);
+        assert!(fitted.width() > fitted.height());
+
+        // Both at once.
+        let fitted = fit_hold_image(png_of(&noise(200, 100)), 64, 4096).unwrap();
+        assert!(fitted.len() <= 4096);
+        assert!(decoded(&fitted).width() <= 64);
+
+        // Best effort: what cannot fit, or is no PNG, is an error the
+        // caller logs, and the default card stays.
+        assert!(fit_hold_image(png_of(&noise(64, 64)), 64, 200).is_err());
+        assert!(fit_hold_image(b"GIF89a not a png".to_vec(), 64, 4096).is_err());
+        assert!(fit_hold_image(Vec::new(), 64, 4096).is_err());
+    }
+
+    /// The same through the base64 the show holds: an image that fits is
+    /// the same string, and an oversized one leaves inside the real limits.
+    #[tokio::test]
+    async fn the_hold_image_leaves_as_base64_inside_the_real_limits() {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let small = engine.encode(png_of(&image::RgbaImage::from_pixel(
+            640,
+            360,
+            image::Rgba([13, 13, 15, 255]),
+        )));
+        assert_eq!(fit_hold_image_base64(&small).await.unwrap(), small);
+
+        let oversized = engine.encode(png_of(&image::RgbaImage::from_pixel(
+            2560,
+            1440,
+            image::Rgba([13, 13, 15, 255]),
+        )));
+        let fitted = fit_hold_image_base64(&oversized).await.unwrap();
+        let png = engine.decode(fitted).unwrap();
+        assert!(png.len() <= HOLD_IMAGE_MAX_BYTES);
+        let image = decoded(&png);
+        assert_eq!((image.width(), image.height()), (1920, 1080));
+
+        assert!(fit_hold_image_base64("not base64 !!").await.is_err());
+        assert!(fit_hold_image_base64("aGVsbG8=").await.is_err());
+    }
+
     /// `protocol-fixtures/cloud-managed-wire.json` is what the web copies.
     /// The desktop's constants are pinned to it here; a value that differs
     /// is a bug in the code, never a reason to edit the fixture alone.
@@ -1180,6 +1375,14 @@ mod tests {
             json!(crate::cloud_show::HOLD_MAX_CHOICES)
         );
         assert_eq!(fixture["return"]["message"], RETURN_UNAVAILABLE_MESSAGE);
+        assert_eq!(
+            fixture["limits"]["holdImageBytes"].as_u64(),
+            Some(HOLD_IMAGE_MAX_BYTES as u64)
+        );
+        assert_eq!(
+            fixture["limits"]["holdImageSidePixels"].as_u64(),
+            Some(u64::from(HOLD_IMAGE_MAX_SIDE))
+        );
 
         // Every leg state the web may send has a place in the desktop's leg
         // model; only a state this list does not hold reads as a warning.
