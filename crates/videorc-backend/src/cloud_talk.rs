@@ -37,9 +37,8 @@ use serde_json::{Value, json};
 
 use crate::cloud_show::{
     ACK_TIMEOUT, ActiveShow, CloudApiError, CloudShowContext, CloudShowRuntime, CloudStatus,
-    CloudWebApi, ControlConnector, CreateShowRequest, HandoverDestination, HelloFailure,
-    ShowOutputSpec, client_info, connect_and_hello, install_control_loop, lock, new_intent_id,
-    send_intent,
+    CloudWebApi, ControlConnector, ControlHandle, CreateShowRequest, HandoverDestination,
+    HelloFailure, ShowOutputSpec, client_info, install_control_loop, lock, new_intent_id,
 };
 
 /// `cloud.room.requests`: one event per new "wants to join" (plan 224).
@@ -1204,7 +1203,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             bail!("{problem}");
         }
         let (transport, welcome) =
-            match connect_and_hello(self.connector.as_ref(), &created.control).await {
+            match self.open_control(&bearer, &show_id, &created.control).await {
                 Ok(connected) => connected,
                 Err(failure) => {
                     let _ = self.web.end_show(&bearer, &show_id).await;
@@ -1536,7 +1535,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     async fn send_stage(&self, stage: &CloudStage) -> std::result::Result<(), String> {
         let tx = self.control_tx()?;
         let id = new_intent_id();
-        send_intent(&tx, stage.frame(&id), id, ACK_TIMEOUT)
+        tx.intent(stage.frame(&id), id, ACK_TIMEOUT)
             .await
             .map(|_| ())
     }
@@ -1561,11 +1560,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
         let id = new_intent_id();
         let frame = json!({ "t": "intent", "id": id, "kind": "return.set", "enabled": enabled });
-        send_intent(&tx, frame, id, ACK_TIMEOUT)
-            .await
-            .map_err(|problem| {
-                anyhow::anyhow!("Videorc Cloud did not set the return: {problem}")
-            })?;
+        tx.intent(frame, id, ACK_TIMEOUT).await.map_err(|problem| {
+            anyhow::anyhow!("Videorc Cloud did not set the return: {problem}")
+        })?;
         Ok(lock(&self.slot).status())
     }
 
@@ -1597,11 +1594,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         // A Go Live hand-over replaces the runner's legs (plan 222 review
         // M3): the list is every platform the host chose for this show.
         let frame = crate::cloud_show::destinations_set_frame(&id, &destinations, true);
-        send_intent(&tx, frame, id, ACK_TIMEOUT)
-            .await
-            .map_err(|problem| {
-                anyhow::anyhow!("Videorc Cloud did not take the destinations: {problem}")
-            })?;
+        tx.intent(frame, id, ACK_TIMEOUT).await.map_err(|problem| {
+            anyhow::anyhow!("Videorc Cloud did not take the destinations: {problem}")
+        })?;
         {
             let mut runtime = lock(&self.slot);
             if let Some(show) = runtime
@@ -1632,7 +1627,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
         let id = new_intent_id();
         let frame = json!({ "t": "intent", "id": id, "kind": "legs.end" });
-        match send_intent(&tx, frame, id, ACK_TIMEOUT).await {
+        match tx.intent(frame, id, ACK_TIMEOUT).await {
             Ok(_) => {
                 let mut runtime = lock(&self.slot);
                 if let Some(show) = runtime.show.as_mut() {
@@ -1684,7 +1679,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         if let Some(ttl) = ttl_seconds {
             frame["ttlSeconds"] = json!(ttl);
         }
-        send_intent(&tx, frame, id, ACK_TIMEOUT).await.map(|_| ())
+        tx.intent(frame, id, ACK_TIMEOUT).await.map(|_| ())
     }
 
     pub async fn clear_overlay(
@@ -1701,7 +1696,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             "slot": slot.as_str(),
             "orientation": orientation.as_str(),
         });
-        send_intent(&tx, frame, id, ACK_TIMEOUT).await.map(|_| ())
+        tx.intent(frame, id, ACK_TIMEOUT).await.map(|_| ())
     }
 
     /// The renderer's own room connection, for the status (and the watchdog).
@@ -1835,8 +1830,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             show.control.clone()
         };
-        let (transport, welcome) = match connect_and_hello(self.connector.as_ref(), &control).await
-        {
+        let (transport, welcome) = match self.open_control(bearer, show_id, &control).await {
             Ok(connected) => connected,
             Err(HelloFailure::NoSuchShow) => {
                 lock(&self.slot).clear_show(Some("show-gone".to_string()));
@@ -1873,18 +1867,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
         let id = new_intent_id();
         let frame = json!({ "t": "intent", "id": id, "kind": kind });
-        send_intent(&tx, frame, id, ACK_TIMEOUT)
+        tx.intent(frame, id, ACK_TIMEOUT)
             .await
             .map_err(|problem| anyhow::anyhow!("{failure}: {problem}"))?;
         Ok(lock(&self.slot).status())
     }
 
-    fn control_tx(
-        &self,
-    ) -> std::result::Result<
-        tokio::sync::mpsc::UnboundedSender<crate::cloud_show::ControlRequest>,
-        String,
-    > {
+    fn control_tx(&self) -> std::result::Result<ControlHandle, String> {
         lock(&self.slot)
             .control_tx
             .clone()
@@ -2027,7 +2016,7 @@ pub(crate) fn open_talk_show_for_tests(
     );
     talk.live = live;
     runtime.talk = Some(talk);
-    runtime.control_tx = Some(tx);
+    runtime.control_tx = Some(ControlHandle::Node(tx));
     rx
 }
 

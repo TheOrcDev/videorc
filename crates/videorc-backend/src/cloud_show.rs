@@ -1332,7 +1332,7 @@ pub struct CloudShowRuntime {
     pub(crate) message: Option<String>,
     /// Bumped with every new show or socket owner so a stale task stops.
     pub(crate) generation: u64,
-    pub(crate) control_tx: Option<mpsc::UnboundedSender<ControlRequest>>,
+    pub(crate) control_tx: Option<ControlHandle>,
     /// Plan 224: the room this desktop holds, beside `show`; cleared with
     /// it. Its token is the one secret in the runtime.
     pub(crate) talk: Option<TalkShowState>,
@@ -1932,7 +1932,7 @@ pub(crate) enum HelloFailure {
     Transport(String),
 }
 
-pub(crate) async fn connect_and_hello<C: ControlConnector>(
+async fn connect_and_hello<C: ControlConnector>(
     connector: &C,
     control: &ShowControl,
 ) -> std::result::Result<(C::Transport, RunnerState), HelloFailure> {
@@ -1975,16 +1975,141 @@ pub(crate) async fn connect_and_hello<C: ControlConnector>(
     }
 }
 
-/// Install a connected socket as the show's control channel and run its loop
-/// on its own task. Returns the request sender.
+// --- The control transport (plan 234 D2, C1) ---------------------------------
+//
+// One type between a show and whoever holds it, with one kind per way of
+// reaching them. A show does four things with it: connect or resume
+// (`CloudShowContext::open_control`), send an intent and get its answer
+// (`ControlHandle::intent`), receive states (`ControlLoop::run`, or
+// `ControlLink::next_state` on a transport no loop owns), and close
+// (`ControlLink::close`). The node socket is the first kind.
+
+/// A show's control transport, connected: past its first state.
+pub(crate) enum ControlLink<T: ControlTransport> {
+    /// The node's control socket, past `hello` and `welcome` (plan 184).
+    Node(T),
+}
+
+impl<T: ControlTransport> ControlLink<T> {
+    /// Where the slot sends this transport's intents. `tx` feeds the task
+    /// that runs the transport.
+    fn handle(&self, tx: mpsc::UnboundedSender<ControlRequest>) -> ControlHandle {
+        match self {
+            Self::Node(_) => ControlHandle::Node(tx),
+        }
+    }
+
+    /// The show's ingest from whoever holds the show, for a resume after a
+    /// relaunch. States that arrive first replace `latest`.
+    async fn fetch_ingest(
+        &mut self,
+        latest: &mut RunnerState,
+    ) -> std::result::Result<Vec<ShowIngest>, String> {
+        match self {
+            Self::Node(transport) => fetch_ingest_over(transport, latest).await,
+        }
+    }
+
+    /// The next state on a transport no loop owns (the test show's), or why
+    /// there is none. Whatever else the transport carries is dropped.
+    async fn next_state(&mut self) -> std::result::Result<RunnerState, String> {
+        match self {
+            Self::Node(transport) => loop {
+                match transport.recv().await {
+                    None | Some(ControlFrameIn::Closed { .. }) => {
+                        return Err("the control socket closed".to_string());
+                    }
+                    Some(ControlFrameIn::Text(text)) => {
+                        if let Ok(RunnerFrame::State { state } | RunnerFrame::Welcome { state }) =
+                            serde_json::from_str::<RunnerFrame>(&text)
+                        {
+                            return Ok(state);
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    /// The keep-alive of a transport no loop owns.
+    async fn ping(&mut self) {
+        match self {
+            Self::Node(transport) => {
+                let _ = transport.send(json!({ "t": "ping" })).await;
+            }
+        }
+    }
+
+    /// Ends the show on a transport no loop owns, and waits for the answer.
+    async fn end_show(&mut self) {
+        match self {
+            Self::Node(transport) => {
+                let id = new_intent_id();
+                if transport.send(intent_frame(&id, "show.end")).await.is_ok() {
+                    let _ = await_ack(transport, &id, END_ACK_TIMEOUT).await;
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn close(&mut self) {
+        match self {
+            Self::Node(transport) => transport.close().await,
+        }
+    }
+}
+
+/// A show's control transport as the slot holds it: where its intents go.
+#[derive(Clone)]
+pub(crate) enum ControlHandle {
+    /// To the socket's task, which writes the frame and delivers the
+    /// runner's ack.
+    Node(mpsc::UnboundedSender<ControlRequest>),
+}
+
+impl ControlHandle {
+    /// Send an intent and wait for its answer.
+    pub(crate) async fn intent(&self, frame: Value, id: String, timeout: Duration) -> AckResult {
+        match self {
+            Self::Node(tx) => send_intent(tx, frame, id, timeout).await,
+        }
+    }
+
+    /// Test support: both handles lead to the same transport.
+    #[cfg(test)]
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Node(tx), Self::Node(other)) => tx.same_channel(other),
+        }
+    }
+}
+
+impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
+    /// Connect or resume: the show's control transport and its first state.
+    /// `control` is the create's or `current`'s block. The node socket needs
+    /// neither the bearer nor the show id (its token names the show); they
+    /// are here for the kinds that do.
+    pub(crate) async fn open_control(
+        &self,
+        _bearer: &str,
+        _show_id: &str,
+        control: &ShowControl,
+    ) -> std::result::Result<(ControlLink<C::Transport>, RunnerState), HelloFailure> {
+        let (transport, welcome) = connect_and_hello(self.connector.as_ref(), control).await?;
+        Ok((ControlLink::Node(transport), welcome))
+    }
+}
+
+/// Install a connected transport as the show's control channel and run its
+/// loop on its own task. Returns the handle its intents go to.
 pub(crate) fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
     context: &CloudShowContext<W, C>,
     bearer: String,
     control: ShowControl,
     show_id: String,
-    transport: C::Transport,
+    transport: ControlLink<C::Transport>,
     welcome: RunnerState,
-) -> mpsc::UnboundedSender<ControlRequest> {
+) -> ControlHandle {
     match install_control_loop_inner(context, bearer, control, show_id, transport, welcome, None) {
         Ok(tx) => tx,
         Err(_) => unreachable!("an unguarded install is never refused"),
@@ -2002,10 +2127,10 @@ fn install_control_loop_unless_claimed<W: CloudWebApi, C: ControlConnector>(
     bearer: String,
     control: ShowControl,
     show_id: String,
-    transport: C::Transport,
+    transport: ControlLink<C::Transport>,
     welcome: RunnerState,
     generation: u64,
-) -> std::result::Result<mpsc::UnboundedSender<ControlRequest>, C::Transport> {
+) -> std::result::Result<ControlHandle, ControlLink<C::Transport>> {
     install_control_loop_inner(
         context,
         bearer,
@@ -2022,11 +2147,12 @@ fn install_control_loop_inner<W: CloudWebApi, C: ControlConnector>(
     bearer: String,
     control: ShowControl,
     show_id: String,
-    transport: C::Transport,
+    transport: ControlLink<C::Transport>,
     welcome: RunnerState,
     only_while_generation: Option<u64>,
-) -> std::result::Result<mpsc::UnboundedSender<ControlRequest>, C::Transport> {
+) -> std::result::Result<ControlHandle, ControlLink<C::Transport>> {
     let (tx, rx) = mpsc::unbounded_channel();
+    let tx = transport.handle(tx);
     let generation = {
         let mut runtime = lock(&context.slot);
         if let Some(expected) = only_while_generation {
@@ -2218,12 +2344,25 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
 
     async fn run(
         mut self,
-        mut transport: C::Transport,
+        transport: ControlLink<C::Transport>,
         mut rx: mpsc::UnboundedReceiver<ControlRequest>,
     ) {
+        let exit = match transport {
+            ControlLink::Node(socket) => self.run_node(socket, &mut rx).await,
+        };
+        self.finish(exit).await;
+    }
+
+    /// The node socket until the show leaves it: read and relay, and
+    /// reconnect whenever it drops.
+    async fn run_node(
+        &mut self,
+        mut transport: C::Transport,
+        rx: &mut mpsc::UnboundedReceiver<ControlRequest>,
+    ) -> LoopExit {
         let mut pending: HashMap<String, AckSender> = HashMap::new();
         let exit = loop {
-            match self.run_socket(&mut transport, &mut rx, &mut pending).await {
+            match self.run_socket(&mut transport, rx, &mut pending).await {
                 Ok(exit) => break exit,
                 Err(()) => {
                     // The socket dropped. Fail every waiting intent, show
@@ -2248,6 +2387,11 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             }
         };
         let _ = transport.close().await;
+        exit
+    }
+
+    /// What the loop's exit means for the slot, whatever the transport.
+    async fn finish(&self, exit: LoopExit) {
         match exit {
             LoopExit::Superseded => {}
             LoopExit::Ended(reason) => {
@@ -2733,7 +2877,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     }
 }
 
-pub(crate) async fn send_intent(
+async fn send_intent(
     tx: &mpsc::UnboundedSender<ControlRequest>,
     frame: Value,
     id: String,
@@ -2754,16 +2898,13 @@ pub(crate) async fn send_intent(
 
 /// `hold.image.set`, best effort: the runner draws its default card without
 /// one, so a refusal is a warning, never a failed start.
-async fn send_hold_image(
-    tx: &mpsc::UnboundedSender<ControlRequest>,
-    hold_image_png_base64: Option<String>,
-) {
+async fn send_hold_image(tx: &ControlHandle, hold_image_png_base64: Option<String>) {
     let Some(png) = hold_image_png_base64 else {
         return;
     };
     let id = new_intent_id();
     let frame = json!({ "t": "intent", "id": id, "kind": "hold.image.set", "pngBase64": png });
-    if let Err(problem) = send_intent(tx, frame, id, ACK_TIMEOUT).await {
+    if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
         tracing::warn!("Videorc Cloud did not take the hold image: {problem}");
     }
 }
@@ -3112,7 +3253,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         // Nothing is handed over until the node says welcome. A node that
         // cannot be reached has no keys, so direct is safe here (D11).
         let (transport, welcome) =
-            match connect_and_hello(self.connector.as_ref(), &created.control).await {
+            match self.open_control(&bearer, &show_id, &created.control).await {
                 Ok(connected) => connected,
                 Err(failure) => {
                     let _ = self.web.end_show(&bearer, &show_id).await;
@@ -3262,7 +3403,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// the start instead, because the runner may still hold the keys (C2).
     async fn hand_over(
         &self,
-        tx: &mpsc::UnboundedSender<ControlRequest>,
+        tx: &ControlHandle,
         bearer: &str,
         show_id: &str,
         destinations: &[HandoverDestination],
@@ -3272,15 +3413,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         // The hand-over replaces the runner's legs (M3): a held show that
         // still runs a platform the host switched off since ends that leg.
         let frame = destinations_set_frame(&id, destinations, true);
-        if let Err(problem) = send_intent(tx, frame, id, ACK_TIMEOUT).await {
+        if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
             let end_id = new_intent_id();
-            let _ = send_intent(
-                tx,
-                intent_frame(&end_id, "show.end"),
-                end_id,
-                END_ACK_TIMEOUT,
-            )
-            .await;
+            let _ = tx
+                .intent(intent_frame(&end_id, "show.end"), end_id, END_ACK_TIMEOUT)
+                .await;
             let _ = self.web.end_show(bearer, show_id).await;
             let gone = match self.web.current_show(bearer).await {
                 Ok(current) => current
@@ -3410,39 +3547,39 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 show.ingest.clone(),
             )
         };
-        let (mut transport, mut welcome) =
-            match connect_and_hello(self.connector.as_ref(), &control).await {
-                Ok(connected) => connected,
-                Err(HelloFailure::NoSuchShow) => {
-                    lock(&self.slot).clear_show(Some("show-gone".to_string()));
+        let (mut transport, mut welcome) = match self.open_control(bearer, show_id, &control).await
+        {
+            Ok(connected) => connected,
+            Err(HelloFailure::NoSuchShow) => {
+                lock(&self.slot).clear_show(Some("show-gone".to_string()));
+                self.hooks.emit_from(&self.slot);
+                return Ok(ResumeOutcome::ShowGone(show_id.to_string()));
+            }
+            Err(HelloFailure::BadToken) => {
+                bail!("Videorc Cloud refused the show token; try again.")
+            }
+            Err(HelloFailure::Transport(message)) => {
+                // Plan 222 review L4: a relaunched desktop has no socket
+                // loop to report the show lost from (D7), so the resume
+                // asks the lost route itself. The web probes the node
+                // and ends the show only when the node does not answer;
+                // then the show is gone and Go Live may start anew. Kept
+                // or unknown: the resume fails and the show stays
+                // resumable, never direct beside it.
+                if let Some(end_reason) = self.report_lost_on_resume(bearer, show_id).await {
+                    lock(&self.slot).clear_show(Some(end_reason));
                     self.hooks.emit_from(&self.slot);
                     return Ok(ResumeOutcome::ShowGone(show_id.to_string()));
                 }
-                Err(HelloFailure::BadToken) => {
-                    bail!("Videorc Cloud refused the show token; try again.")
-                }
-                Err(HelloFailure::Transport(message)) => {
-                    // Plan 222 review L4: a relaunched desktop has no socket
-                    // loop to report the show lost from (D7), so the resume
-                    // asks the lost route itself. The web probes the node
-                    // and ends the show only when the node does not answer;
-                    // then the show is gone and Go Live may start anew. Kept
-                    // or unknown: the resume fails and the show stays
-                    // resumable, never direct beside it.
-                    if let Some(end_reason) = self.report_lost_on_resume(bearer, show_id).await {
-                        lock(&self.slot).clear_show(Some(end_reason));
-                        self.hooks.emit_from(&self.slot);
-                        return Ok(ResumeOutcome::ShowGone(show_id.to_string()));
-                    }
-                    bail!("Videorc Cloud could not be reached to resume the show: {message}")
-                }
-            };
+                bail!("Videorc Cloud could not be reached to resume the show: {message}")
+            }
+        };
         // The web never stores ingest keys and this computer never persists
         // them, so after a relaunch the node hands the ingest back to the
         // show's owner over the authenticated socket (Wire shape: ingest.get).
         let ingest = match ingest.filter(|ingest| !ingest.is_empty()) {
             Some(ingest) => ingest,
-            None => match fetch_ingest_over(&mut transport, &mut welcome).await {
+            None => match transport.fetch_ingest(&mut welcome).await {
                 Ok(ingest) => ingest,
                 Err(problem) => {
                     transport.close().await;
@@ -3539,7 +3676,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let mut confirmed = false;
         if let Some(tx) = tx {
             let id = new_intent_id();
-            confirmed = send_intent(&tx, intent_frame(&id, "show.end"), id, END_ACK_TIMEOUT)
+            confirmed = tx
+                .intent(intent_frame(&id, "show.end"), id, END_ACK_TIMEOUT)
                 .await
                 .is_ok();
         }
@@ -3603,7 +3741,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let id = new_intent_id();
         // Never `replace`: the other legs keep running (M3).
         let frame = destinations_set_frame(&id, std::slice::from_ref(&destination), false);
-        if let Err(problem) = send_intent(&tx, frame, id, ACK_TIMEOUT).await {
+        if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
             bail!("Videorc Cloud did not take the reconnect: {problem}");
         }
         Ok(lock(&self.slot).status())
@@ -3686,7 +3824,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             runtime.bump_generation()
         };
         self.hooks.emit_from(&self.slot);
-        match connect_and_hello(self.connector.as_ref(), &control).await {
+        match self.open_control(bearer, &show.id, &control).await {
             Ok((transport, welcome)) => {
                 // L1: a Resume or Go Live that bound the show meanwhile owns
                 // the socket; this one closes instead of displacing it.
@@ -4255,7 +4393,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
         self.set_phase(CloudTestPhase::Connecting);
         let mut cancel = self.cancel.clone();
         let connected = tokio::select! {
-            connected = connect_and_hello(self.context.connector.as_ref(), &created.control) => connected,
+            connected = self.context.open_control(&self.bearer, &created.show.id, &created.control) => connected,
             _ = wait_canceled(&mut cancel) => return None,
         };
         let (mut transport, welcome) = match connected {
@@ -4333,28 +4471,22 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
                     }
                     None => break,
                 },
-                frame = transport.recv() => match frame {
-                    None | Some(ControlFrameIn::Closed { .. }) => {
-                        ended_by_runner.get_or_insert_with(|| "the control socket closed".to_string());
+                state = transport.next_state() => match state {
+                    Err(reason) => {
+                        ended_by_runner.get_or_insert(reason);
                         break;
                     }
-                    Some(ControlFrameIn::Text(text)) => {
-                        if let Ok(RunnerFrame::State { state } | RunnerFrame::Welcome { state }) =
-                            serde_json::from_str::<RunnerFrame>(&text)
-                        {
-                            observe(&state);
-                            if state.phase == "ended" {
-                                ended_by_runner = Some(
-                                    state.end_reason.clone().unwrap_or_else(|| "ended".to_string()),
-                                );
-                                break;
-                            }
+                    Ok(state) => {
+                        observe(&state);
+                        if state.phase == "ended" {
+                            ended_by_runner = Some(
+                                state.end_reason.clone().unwrap_or_else(|| "ended".to_string()),
+                            );
+                            break;
                         }
                     }
                 },
-                _ = ping.tick() => {
-                    let _ = transport.send(json!({ "t": "ping" })).await;
-                }
+                _ = ping.tick() => transport.ping().await,
                 _ = wait_canceled(&mut cancel) => {
                     canceled = true;
                     break;
@@ -4388,10 +4520,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
         pushes.shutdown().await;
 
         // 4. The show ends on the socket; the web's end follows in the caller.
-        let id = new_intent_id();
-        if transport.send(intent_frame(&id, "show.end")).await.is_ok() {
-            let _ = await_ack(&mut transport, &id, END_ACK_TIMEOUT).await;
-        }
+        transport.end_show().await;
         transport.close().await;
         if canceled {
             return None;
