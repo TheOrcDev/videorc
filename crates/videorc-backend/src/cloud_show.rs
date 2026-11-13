@@ -2251,8 +2251,19 @@ fn install_control_loop_unless_claimed<W: CloudWebApi, C: ControlConnector>(
         show_id,
         transport,
         welcome,
-        Some(generation),
+        Some(InstallOnlyWhile::Unclaimed(generation)),
     )
+}
+
+/// When a guarded install may still happen, checked under the one lock.
+enum InstallOnlyWhile {
+    /// The launch check's (L1): the slot's generation is still this one and
+    /// no session feeds the show.
+    Unclaimed(u64),
+    /// Plan 234: the slot's generation is still this one and the show still
+    /// has no control. A show on web control that a session feeds, whose
+    /// poll stopped at a refused sign-in, gets its poll back this way.
+    Uncontrolled(u64),
 }
 
 fn install_control_loop_inner<W: CloudWebApi, C: ControlConnector>(
@@ -2262,21 +2273,32 @@ fn install_control_loop_inner<W: CloudWebApi, C: ControlConnector>(
     show_id: String,
     transport: ControlLink<C::Transport, W>,
     welcome: RunnerState,
-    only_while_generation: Option<u64>,
+    only_while: Option<InstallOnlyWhile>,
 ) -> std::result::Result<ControlHandle, ControlLink<C::Transport, W>> {
     let (tx, rx) = mpsc::unbounded_channel();
     let tx = transport.handle(tx);
     let generation = {
         let mut runtime = lock(&context.slot);
-        if let Some(expected) = only_while_generation {
-            let claimed = runtime.generation != expected
-                || runtime
-                    .show
-                    .as_ref()
-                    .is_none_or(|show| show.record.id != show_id || show.session_id.is_some());
-            if claimed {
-                return Err(transport);
+        let claimed = match only_while {
+            None => false,
+            Some(InstallOnlyWhile::Unclaimed(expected)) => {
+                runtime.generation != expected
+                    || runtime
+                        .show
+                        .as_ref()
+                        .is_none_or(|show| show.record.id != show_id || show.session_id.is_some())
             }
+            Some(InstallOnlyWhile::Uncontrolled(expected)) => {
+                runtime.generation != expected
+                    || runtime.control_tx.is_some()
+                    || runtime
+                        .show
+                        .as_ref()
+                        .is_none_or(|show| show.record.id != show_id)
+            }
+        };
+        if claimed {
+            return Err(transport);
         }
         let generation = runtime.bump_generation();
         runtime.control_tx = Some(tx.clone());
@@ -3705,6 +3727,14 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 show.ingest.clone(),
             )
         };
+        // Plan 234: a show on a control transport this build does not know
+        // is neither gone nor lost. The resume fails before anything is
+        // asked or reported, and the show stays held.
+        if control.transport_kind() == ControlKind::Unknown {
+            bail!(
+                "This version of Videorc can't resume this Videorc Cloud show. Update Videorc, or end the show from videorc.com/live."
+            );
+        }
         let (mut transport, mut welcome) = match self.open_control(bearer, show_id, &control).await
         {
             Ok(connected) => connected,
@@ -3969,7 +3999,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let Some(control) = current.control else {
             bail!("Videorc Cloud reported a live show without a control token.");
         };
-        let generation = {
+        // `Err` carries the generation of a fed show whose poll starts again.
+        let generation = 'held: {
             let mut runtime = lock(&self.slot);
             if runtime
                 .show
@@ -3982,7 +4013,22 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 // re-run launch check (L4) may answer after a room opened,
                 // and replacing the show would supersede the room's socket
                 // and forget its handed-over destinations.
-                return Ok(runtime.status());
+                //
+                // Plan 234 (wire section 3, the 401 row): one thing it may
+                // still give that show is its poll back. A refused sign-in
+                // stopped the poll and left the show held; this is the
+                // launch check of the sign-in that followed.
+                let poll_stopped = runtime.talk.is_none()
+                    && runtime.control_tx.is_none()
+                    && control.transport_kind() == ControlKind::Web
+                    && runtime
+                        .show
+                        .as_ref()
+                        .is_some_and(|active| active.record.id == show.id);
+                if !poll_stopped {
+                    return Ok(runtime.status());
+                }
+                break 'held Err(runtime.generation);
             }
             runtime.failed = None;
             runtime.show = Some(ActiveShow {
@@ -3995,7 +4041,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 hold_image_png_base64: None,
                 resuming: false,
             });
-            runtime.bump_generation()
+            Ok(runtime.bump_generation())
+        };
+        let generation = match generation {
+            Ok(generation) => generation,
+            Err(held) => {
+                self.poll_fed_show_again(bearer, show.id, control, held)
+                    .await;
+                return Ok(lock(&self.slot).status());
+            }
         };
         self.hooks.emit_from(&self.slot);
         match self.open_control(bearer, &show.id, &control).await {
@@ -4026,6 +4080,38 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         }
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
+    }
+
+    /// Plan 234: the poll of a show on web control that a session still
+    /// feeds, started again with this sign-in. Nothing of the show changes:
+    /// its session, its destinations and its hand-over stay, and no
+    /// destination is sent. A poll that cannot start leaves the show as it
+    /// was; the next launch check tries again.
+    async fn poll_fed_show_again(
+        &self,
+        bearer: &str,
+        show_id: String,
+        control: ShowControl,
+        generation: u64,
+    ) {
+        let Ok((transport, first)) = self.open_control(bearer, &show_id, &control).await else {
+            // Unknown: the show stays held, and the next sign-in's launch
+            // check tries again.
+            lock(&self.slot).launch_checked = false;
+            return;
+        };
+        match install_control_loop_inner(
+            self,
+            bearer.to_string(),
+            control,
+            show_id,
+            transport,
+            first,
+            Some(InstallOnlyWhile::Uncontrolled(generation)),
+        ) {
+            Ok(_) => self.hooks.emit_from(&self.slot),
+            Err(mut transport) => transport.close().await,
+        }
     }
 
     /// `GET /api/cloud/allowance` for the Livestream page.
@@ -11429,5 +11515,351 @@ mod tests {
         assert!(runtime.talk.is_none());
         assert!(talk.context.web.polls().is_empty());
         assert_eq!(talk.context.connector.connects.load(Ordering::SeqCst), 0);
+    }
+
+    // --- Plan 234: resume and relaunch through `current` (C3) --------------------
+    //
+    // Wire sections 2.1 and 15: after a relaunch `GET current` hands back
+    // the control block and the ingest (LiveKit's list, never stored), the
+    // desktop feeds the same ingress, and no destination is sent while an
+    // egress is alive. They go again only when `destinationsSet` is false
+    // and this computer still holds them (D9).
+
+    /// A relaunched desktop whose launch check found the managed show: held,
+    /// resumable and polled, with the egress still pushing every platform.
+    async fn relaunched_with_a_managed_show(harness: &Harness) {
+        let web = &harness.context.web;
+        web.set_state(managed_state("hold", live_legs()));
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let status = harness.context.detect_current_show("bearer").await.unwrap();
+        let show = status.show.as_ref().expect("the show is held");
+        assert_eq!(show.id, "sh_abc");
+        assert!(show.resumable);
+        assert_eq!(status.phase, CloudPhase::Hold);
+        assert!(status.connected);
+        assert!(matches!(
+            lock(&harness.context.slot).control_tx,
+            Some(ControlHandle::Web(_))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_show_found_at_launch_is_resumed_through_current_with_no_destinations() {
+        let harness = harness(true);
+        relaunched_with_a_managed_show(&harness).await;
+        let web = harness.context.web.clone();
+        // The legs the egress holds are on the banner before any resume.
+        assert_eq!(lock(&harness.context.slot).status().legs.len(), 2);
+
+        // The Resume notice: `current` again, the same ingress, and nothing
+        // else. The egress keeps its legs and its keys (C5b).
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let handover = harness
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), None)
+            .await
+            .unwrap();
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(handover.ingest[0].server_url, LIVEKIT_INGEST);
+        assert_eq!(handover.ingest[0].stream_key, INGEST_KEY);
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.managed.lock().unwrap().hold_images.is_empty());
+        {
+            let status = lock(&harness.context.slot).status();
+            assert_eq!(status.phase, CloudPhase::Resuming);
+            assert_eq!(status.session_id.as_deref(), Some("session-2"));
+            assert!(!status.show.as_ref().unwrap().resumable);
+        }
+
+        // The feed reaches the ingress again and the page fades back.
+        web.set_state(managed_state("live", live_legs()));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+        // Nothing was handed over, yet the egress's legs carry the session:
+        // a down leg can still be seen (and the watchdog reads the program).
+        assert!(lock(&harness.context.slot).carries_session("session-2"));
+        {
+            let legs = harness.legs.lock().unwrap();
+            let (session, rows) = legs.last().expect("the legs reached the session");
+            assert_eq!(session, "session-2");
+            assert_eq!(rows.len(), 2);
+        }
+        assert!(web.destination_bodies().is_empty());
+        assert_eq!(web.create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        // This computer holds no address, so it cannot reconnect one, and
+        // says why.
+        let error = harness
+            .context
+            .reconnect_destination("youtube-main")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("go live again"), "{error}");
+
+        // With a hold image picked, that one request goes, and still no
+        // destination.
+        let picked = harness_remembering(true, None);
+        relaunched_with_a_managed_show(&picked).await;
+        let web = picked.context.web.clone();
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let png = tiny_png_base64();
+        picked
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), Some(png.clone()))
+            .await
+            .unwrap();
+        assert_eq!(web.managed.lock().unwrap().hold_images, vec![png]);
+        assert!(web.destination_bodies().is_empty());
+    }
+
+    // Wire section 2.1: `ingest` is LiveKit's list at that moment. When
+    // LiveKit does not answer it is omitted, nothing else can hand it back,
+    // and the resume fails with today's message. The show stays resumable.
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_whose_ingest_was_not_listed_fails_and_the_show_stays_resumable() {
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        web.set_state(managed_state("hold", live_legs()));
+        let unlisted = || CurrentShowResponse {
+            ingest: None,
+            ..managed_current("hold")
+        };
+        web.current.lock().unwrap().push_back(Ok(unlisted()));
+        harness.context.detect_current_show("bearer").await.unwrap();
+        web.current.lock().unwrap().push_back(Ok(unlisted()));
+        let error = harness
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), None)
+            .await
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains("could not hand back the show's ingest address"),
+            "{text}"
+        );
+        let status = lock(&harness.context.slot).status();
+        assert!(status.show.as_ref().unwrap().resumable);
+        assert_eq!(status.session_id, None);
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.end_calls.lock().unwrap().is_empty());
+        assert!(web.lost_calls.lock().unwrap().is_empty());
+    }
+
+    // D9: the egress dies on a show that was resumed after a relaunch.
+    // Nobody on this computer holds the keys, so nothing is sent and the
+    // rows say what to do.
+    #[tokio::test(start_paused = true)]
+    async fn a_resumed_managed_show_whose_egress_died_sends_nothing_and_says_so() {
+        let harness = harness(true);
+        relaunched_with_a_managed_show(&harness).await;
+        let web = harness.context.web.clone();
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        harness
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), None)
+            .await
+            .unwrap();
+        web.set_state(managed_state("live", live_legs()));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+
+        web.set_state(managed_state_without_egress(1));
+        wait_until(|| lock(&harness.context.slot).status().restart.is_some()).await;
+        let restart = lock(&harness.context.slot).status().restart.unwrap();
+        assert!(!restart.destinations_resent);
+        {
+            let legs = harness.legs.lock().unwrap();
+            let (session, rows) = legs.last().unwrap();
+            assert_eq!(session, "session-2");
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert_eq!(row.state, StreamTargetState::Failed);
+                assert_eq!(
+                    row.message.as_deref(),
+                    Some(
+                        "Videorc Cloud restarted your show. Stop, then go live again to reconnect."
+                    )
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(web.destination_bodies().is_empty());
+    }
+
+    // Go Live on the held show is a new broadcast by choice: it feeds the
+    // show that is live and hands its fresh destinations over with
+    // `replace`. No show is created.
+    #[tokio::test(start_paused = true)]
+    async fn go_live_on_a_held_managed_show_hands_its_destinations_over_and_creates_nothing() {
+        let harness = harness(true);
+        relaunched_with_a_managed_show(&harness).await;
+        let web = harness.context.web.clone();
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-2",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        let PrepareOutcome::Cloud(handover) = outcome else {
+            panic!("expected a cloud hand-over");
+        };
+        assert_eq!(handover.ingest[0].server_url, LIVEKIT_INGEST);
+        assert_eq!(web.create_calls.load(Ordering::SeqCst), 0);
+        let bodies = web.destination_bodies();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["replace"], true);
+        assert_eq!(bodies[0]["destinations"].as_array().unwrap().len(), 2);
+        let runtime = lock(&harness.context.slot);
+        let show = runtime.show.as_ref().unwrap();
+        assert!(show.handed_over);
+        assert_eq!(show.session_id.as_deref(), Some("session-2"));
+    }
+
+    // D9, with the keys still on this computer: videorc.com goes away and
+    // comes back. While the egress lived through it, nothing is sent. When
+    // it died meanwhile (`destinationsSet: false`), the whole list goes.
+    #[tokio::test(start_paused = true)]
+    async fn after_an_outage_the_list_goes_only_when_the_egress_died() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        let outage = || {
+            (0..3).map(|_| CloudApiError::Transport("videorc.com could not be reached".to_string()))
+        };
+
+        // 1. The egress lived: the first state back lists every leg.
+        web.fail_polls(outage());
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| !lock(&harness.context.slot).status().connected).await;
+        wait_until_within(15, || lock(&harness.context.slot).status().connected).await;
+        assert_eq!(web.destination_bodies().len(), 1);
+        assert_eq!(lock(&harness.context.slot).status().restart, None);
+
+        // 2. It died while nobody could ask.
+        web.fail_polls(outage());
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| !lock(&harness.context.slot).status().connected).await;
+        web.set_state(managed_state_without_egress(1));
+        wait_until_within(15, || web.destination_bodies().len() == 2).await;
+        let again = &web.destination_bodies()[1];
+        assert_eq!(again["destinations"].as_array().unwrap().len(), 2);
+        assert!(again.get("replace").is_none());
+        assert!(
+            lock(&harness.context.slot)
+                .status()
+                .restart
+                .is_some_and(|restart| restart.destinations_resent)
+        );
+    }
+
+    // Wire section 3, the 401 row, to its end: the sign-in that follows
+    // runs the launch check, and the show a session still feeds gets its
+    // poll back. Nothing of the show changes and nothing is sent.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_sign_in_gives_a_fed_managed_show_its_poll_back() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        web.fail_polls([CloudApiError::Unauthorized]);
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| lock(&harness.context.slot).control_tx.is_none()).await;
+        assert!(launch_check_due(&lock(&harness.context.slot), true));
+
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("live")));
+        let status = harness
+            .context
+            .detect_current_show("fresh-bearer")
+            .await
+            .unwrap();
+        assert!(status.connected);
+        assert_eq!(status.phase, CloudPhase::Live);
+        assert_eq!(status.session_id.as_deref(), Some("session-1"));
+        assert!(!launch_check_due(&lock(&harness.context.slot), true));
+        {
+            let runtime = lock(&harness.context.slot);
+            assert!(matches!(runtime.control_tx, Some(ControlHandle::Web(_))));
+            let show = runtime.show.as_ref().unwrap();
+            assert!(show.handed_over);
+            assert_eq!(show.destinations.len(), 2);
+        }
+        // It polls again: the next state arrives.
+        web.set_state(managed_state("hold", live_legs()));
+        wait_for_phase(&harness.context.slot, CloudPhase::Hold).await;
+        assert_eq!(web.destination_bodies().len(), 1, "nothing was re-sent");
+        // A second launch check changes nothing: the show has its control.
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let generation = lock(&harness.context.slot).generation;
+        harness
+            .context
+            .detect_current_show("fresh-bearer")
+            .await
+            .unwrap();
+        assert_eq!(lock(&harness.context.slot).generation, generation);
+    }
+
+    // A show `current` lists on a control transport this build does not
+    // know is held, never polled, never reported lost, and its resume says
+    // why. End still closes it.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_show_on_an_unknown_control_is_not_resumed_or_reported_lost() {
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        let unknown = || {
+            let mut current = managed_current("hold");
+            current.control.as_mut().unwrap().kind = Some("quic".to_string());
+            current
+        };
+        web.current.lock().unwrap().push_back(Ok(unknown()));
+        let status = harness.context.detect_current_show("bearer").await.unwrap();
+        assert!(status.show.as_ref().unwrap().resumable);
+        assert!(!status.connected);
+        web.current.lock().unwrap().push_back(Ok(unknown()));
+        let error = harness
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("can't resume"), "{error}");
+        assert!(web.lost_calls.lock().unwrap().is_empty());
+        assert!(web.polls().is_empty());
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(
+            lock(&harness.context.slot)
+                .status()
+                .show
+                .is_some_and(|show| show.resumable)
+        );
+        harness
+            .context
+            .end_current_show(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_abc".to_string()]);
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
     }
 }
