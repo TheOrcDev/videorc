@@ -1,8 +1,7 @@
 import type {
   ReplayBufferState,
   ReplaySaveFailedEvent,
-  ReplaySavedEvent,
-  ReplayStateEvent
+  ReplaySavedEvent
 } from '../../../shared/backend'
 import { formatTimecode } from '../../../shared/timecode'
 import type { BackendClient } from '@/backendClient'
@@ -56,16 +55,6 @@ export function formatBytes(bytes: number): string {
   const gb = bytes / 1_000_000_000
   if (gb >= 1) return `${gb.toFixed(gb >= 10 ? 0 : 1)} GB`
   return `${Math.max(1, Math.round(bytes / 1_000_000))} MB`
-}
-
-/**
- * The status bar chip while the ring holds frames: "Clip · 0:30" (what a
- * press saves right now), "Clips starting…" while it fills.
- */
-export function replayStatusBarLabel(ring: ReplayStateEvent): string | null {
-  if (ring.state === 'on') return `Clip · ${replayClock(ring.bufferedSeconds)}`
-  if (ring.state === 'starting') return 'Clips starting…'
-  return null
 }
 
 export function showClipSaved(event: ReplaySavedEvent): void {

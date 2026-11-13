@@ -9,7 +9,6 @@ import { PageErrorBoundary } from '@/components/page-error-boundary'
 import { PageLoading } from '@/components/page-loading'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
-import { StatusBarReplayState } from '@/components/status-bar-replay'
 import { StatusBarSessionState } from '@/components/status-bar-session'
 import { GoLiveDialogGate } from '@/components/go-live-dialog-gate'
 import {
@@ -658,12 +657,7 @@ function AppShellContent(): ReactElement {
             {/* State on the left, the shell's real shortcuts on the right:
                 keyboard-first, only quieter than the old footer bar. */}
             <StatusBar
-              leading={
-                <>
-                  <StatusBarSessionState recording={recording} wsStatus={wsStatus} />
-                  <StatusBarReplayState />
-                </>
-              }
+              leading={<StatusBarSessionState recording={recording} wsStatus={wsStatus} />}
             >
               <StatusBarHint
                 accelerator={shortcutAccelerator('search')}

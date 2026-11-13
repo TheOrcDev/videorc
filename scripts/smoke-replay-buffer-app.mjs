@@ -363,8 +363,7 @@ try {
     {
       code: `
         const state = document.querySelector('[data-slot="status-bar-state"]')?.textContent ?? '';
-        const replay = document.querySelector('[data-testid="status-bar-replay"]')?.textContent ?? '';
-        return { state, replay };
+        return { state };
       `
     },
     { timeoutMs }
@@ -372,9 +371,7 @@ try {
   if (/Recording|On air/.test(statusBar?.result?.state ?? '')) {
     fail(`the status bar calls the ring a session: ${JSON.stringify(statusBar.result)}`)
   }
-  log(
-    `armed: session ${ringOn.sessionId}, status bar "${statusBar?.result?.state}" / "${statusBar?.result?.replay}"`
-  )
+  log(`armed: session ${ringOn.sessionId}, status bar "${statusBar?.result?.state}"`)
 
   // 2. The ring fills to N by N + 10 s, and the disk bound holds from arming
   // until 30 s after it is full (15 prune passes past full; plan 199 keeps
