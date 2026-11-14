@@ -202,7 +202,7 @@ export function BuddyPersonaSection(): ReactElement | null {
         description={`${persona.name}'s name, personality, pictures and moves are deleted from this computer. Your greetings and chat settings stay.`}
         open={startOverOpen}
         testId="buddy-start-over"
-        title="Start over with a new Buddy?"
+        title="Start over with a new Sidekick?"
         onCancel={() => setStartOverOpen(false)}
         onConfirm={() => void startOver()}
       />
@@ -275,7 +275,7 @@ function BuddyNameField({
         className="text-base font-medium"
         id="buddy-name"
         maxLength={BUDDY_NAME_MAX_CHARS}
-        placeholder="Buddy"
+        placeholder="Sidekick"
         value={draft}
         onBlur={commit}
         onChange={(event) => {

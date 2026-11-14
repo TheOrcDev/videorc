@@ -1,3 +1,4 @@
+import { SettingsIcon } from '@/components/icons'
 import { createContext, type ComponentProps, type ReactElement, type ReactNode } from 'react'
 
 import {
@@ -113,6 +114,42 @@ export function LcdPanelAction({
       <span className="truncate">{children}</span>
       <LcdPixelChevron direction="right" />
     </button>
+  )
+}
+
+/**
+ * A screen's way to the page that owns it (plan 235 D4), the twin of the
+ * inspector's `OpenPageCog`: the Settings cog in the dim ink, lit on hover,
+ * named by its tooltip and its accessible name ("Open Sources").
+ */
+export function LcdPanelCog({
+  label,
+  onOpen
+}: {
+  label: string
+  onOpen: () => void
+}): ReactElement {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            aria-label={label}
+            className={cn(
+              LCD_VALUE_BUTTON,
+              'text-(--lcd-display-ink-dim) hover:text-(--lcd-display-lit)'
+            )}
+            data-testid="open-page-cog"
+            type="button"
+            onClick={onOpen}
+          />
+        }
+      >
+        {/* Bold, so its strokes match the screen's pixel type. */}
+        <SettingsIcon className="size-3.5 shrink-0" weight="bold" />
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   )
 }
 

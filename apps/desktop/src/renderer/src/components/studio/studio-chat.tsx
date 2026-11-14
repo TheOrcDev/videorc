@@ -97,6 +97,9 @@ export function StudioChatSection(): ReactElement {
   }
 
   return (
+    // No "Chat" title (plan 235 D3, the owner's call): the rows are plainly
+    // chat, and the list names itself "Chat messages". The header keeps the
+    // way to the Stream Manager and Hide.
     <PanelSection
       action={
         <>
@@ -132,7 +135,6 @@ export function StudioChatSection(): ReactElement {
         </>
       }
       data-testid="studio-chat"
-      title="Chat"
     >
       {notice ? (
         // Quiet when fine, specific when not (D9): the destination whose chat

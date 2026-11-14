@@ -213,7 +213,7 @@ const COMMAND_TAGS = new Set([
 const CAPITALIZED_NAMES = new Set([
   'Videorc',
   'Premium',
-  'Buddy',
+  'Sidekick',
   'Live',
   'Go',
   'Stream',
@@ -222,7 +222,9 @@ const CAPITALIZED_NAMES = new Set([
   'Sources',
   'Scene',
   'Assets',
+  // The sidebar group; its page is Destinations (plan 235 D6).
   'Livestream',
+  'Destinations',
   'Captions',
   'Output',
   'Library',
@@ -391,7 +393,7 @@ describe('renderer copy guards (plan 174)', SOURCE_SCAN_TIMEOUT, () => {
       'throw new Error(`Backend request "${method}" failed`)',
       'export const b = <Input placeholder="Search commands..." />',
       'export const c = <p>Allow it under Customize.</p>',
-      'export const d = <Button title="Open Recording">Open Livestream</Button>',
+      'export const d = <Button title="Open Recording">Open Destinations</Button>',
       "export const e = { label: 'X / Twitter', detail: 'Notes are off: VIDEORC_NOTES_WINDOW=0.' }"
     ].join('\n')
     expect(copyRuleOffenders('sample.tsx', source)).toEqual([

@@ -162,10 +162,10 @@ describe('comments destination status', () => {
   })
 })
 
-describe('Buddy in the strip (plan 174 S3.14a)', () => {
-  it("names chat destinations only: Buddy's status lives in its pane header", () => {
+describe('Sidekick in the strip (plan 174 S3.14a)', () => {
+  it("names chat destinations only: Sidekick's status lives in its pane header", () => {
     const markup = renderToStaticMarkup(createElement(CommentsDestinationStatus, { providers }))
-    expect(markup).not.toContain('Buddy')
+    expect(markup).not.toContain('Sidekick')
     expect(renderToStaticMarkup(createElement(CommentsDestinationStatus, { providers: [] }))).toBe(
       ''
     )

@@ -806,8 +806,8 @@ export function LibraryTab({
         confirmLabel={deletePending ? 'Deleting…' : `Move to ${trashName()}`}
         description={
           deleting.length === 1
-            ? `The video file goes to the ${trashName()}. Its Library entry, markers, Buddy report and chat history are deleted and can't be restored.`
-            : `The video files go to the ${trashName()}. Their Library entries, markers, Buddy reports and chat history are deleted and can't be restored.`
+            ? `The video file goes to the ${trashName()}. Its Library entry, markers, Sidekick report and chat history are deleted and can't be restored.`
+            : `The video files go to the ${trashName()}. Their Library entries, markers, Sidekick reports and chat history are deleted and can't be restored.`
         }
         open={deleting.length > 0}
         testId="library-delete"
@@ -1435,7 +1435,7 @@ function useSessionMenu({
             id: 'buddy-report',
             group: 'open',
             icon: BuddyIcon,
-            label: 'Buddy report',
+            label: 'Sidekick report',
             disabled: live,
             onSelect: onOpenBuddyReport
           }

@@ -103,7 +103,7 @@ called intro done, then stop", "Give me the file of my last recording".
 | `read_chat`         | Recent chat from every platform; it can wait up to 25 s for the next message  |
 | `list_destinations` | Your platforms: on or off, ready or why not, title and category               |
 | `list_recordings`   | The Library: takes, livestreams and clips, with their file paths              |
-| `get_recording`     | One take's files, markers, chat totals, peak viewers and Buddy's reports      |
+| `get_recording`     | One take's files, markers, chat totals, peak viewers and Sidekick's reports   |
 | `start_recording`   | Record, exactly like the Record button                                        |
 | `stop`              | Stop the recording or end the livestream, at once                             |
 | `save_clip`         | Save the last 30 or 60 seconds, like the Clip button                          |
@@ -126,23 +126,23 @@ called intro done, then stop", "Give me the file of my last recording".
 | `move_on_scene`     | Move or resize an item to where the Scene canvas's snaps would put it         |
 | `set_scene_item`    | Show or hide the camera or screen, its shape, and the overlays' output switch |
 
-Chat and Buddy, the next stream, settings and the Library:
+Chat and Sidekick, the next stream, settings and the Library:
 
-| Tool                  | What it does                                                                       |
-| --------------------- | ---------------------------------------------------------------------------------- |
-| `send_chat_message`   | Post in chat as you, on every chat that takes posts or the ones named              |
-| `remove_chat_message` | Remove a viewer's message; on YouTube it waits for your click on the card          |
-| `buddy_say`           | Buddy says a line in its bubble on the picture, never in chat; refused off the picture |
-| `set_buddy`           | Buddy Live on or off, how Buddy talks (off, bubble or suggest), and whether it is on stream |
-| `update_stream_info`  | The next stream's title, description, privacy and category, shared or per platform |
-| `set_destinations`    | Turn destinations on or off for the next stream                                    |
-| `schedule_stream`     | Schedule an upcoming livestream on YouTube or X                                    |
-| `get_settings`        | The settings agents may change, as they stand                                      |
-| `update_settings`     | Change those settings (resolution, frame rate, Clips, theme and a few more)        |
-| `rename_recording`    | Give a recording a new title                                                       |
-| `delete_recording`    | Move a recording's files to the Trash, where you can put them back                 |
-| `export_recording`    | Make the MP4 of a finished recording, like Export MP4 in the Library               |
-| `start_clean_cut`     | Start a Clean cut (Premium); its progress and transcript show in `get_recording`   |
+| Tool                  | What it does                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------- |
+| `send_chat_message`   | Post in chat as you, on every chat that takes posts or the ones named                             |
+| `remove_chat_message` | Remove a viewer's message; on YouTube it waits for your click on the card                         |
+| `buddy_say`           | Sidekick says a line in its bubble on the picture, never in chat; refused off the picture         |
+| `set_buddy`           | Sidekick Live on or off, how Sidekick talks (off, bubble or suggest), and whether it is on stream |
+| `update_stream_info`  | The next stream's title, description, privacy and category, shared or per platform                |
+| `set_destinations`    | Turn destinations on or off for the next stream                                                   |
+| `schedule_stream`     | Schedule an upcoming livestream on YouTube or X                                                   |
+| `get_settings`        | The settings agents may change, as they stand                                                     |
+| `update_settings`     | Change those settings (resolution, frame rate, Clips, theme and a few more)                       |
+| `rename_recording`    | Give a recording a new title                                                                      |
+| `delete_recording`    | Move a recording's files to the Trash, where you can put them back                                |
+| `export_recording`    | Make the MP4 of a finished recording, like Export MP4 in the Library                              |
+| `start_clean_cut`     | Start a Clean cut (Premium); its progress and transcript show in `get_recording`                  |
 
 Every action goes through the same code as the button you would press, so
 an agent can't start anything the Studio would refuse; it gets Videorc's own
@@ -151,9 +151,9 @@ sentence back instead ("Choose a screen or a camera first.").
 ### Seeing what agents do, and stopping them
 
 - **Activity** in Settings → Remote → Agents lists every call: when, which
-  agent, which tool and how it ended. Buddy's own tool use (Premium:
-  voice commands, "Buddy, …" sentences and `/buddy` in the Stream Manager,
-  docs/buddy-commands.md) is listed too, as "Buddy".
+  agent, which tool and how it ended. Sidekick's own tool use (Premium:
+  voice commands, "Sidekick, …" sentences and `/sidekick` in the Stream Manager,
+  docs/buddy-commands.md) is listed too, as "Sidekick".
 - **Notices.** Going live, ending the livestream or recording, posting in
   chat, removing a chat message, deleting a recording, and `notify`, show a
   notice in Videorc naming the agent ("Claude Desktop started the
@@ -170,7 +170,7 @@ sentence back instead ("Choose a screen or a camera first.").
   turns Agents off. ⌘K has "Stop agents" too. Anything an agent asked for
   that Videorc hasn't started yet is dropped, and a Go Live an agent started
   stops before it goes public (what it set up on a platform is cleaned up).
-  Buddy isn't an agent: Stop never cuts what you asked Buddy for.
+  Sidekick isn't an agent: Stop never cuts what you asked Sidekick for.
 - **Remove** an agent in the list to revoke its token for good. What that
   agent asked for and Videorc hasn't started is dropped the same way.
 
@@ -200,7 +200,7 @@ going live on your computer; only agents go live without the dialog
 `go_live` runs exactly what the Go Live dialog runs, without showing it: the
 same checks of your destinations, title, captions and plan, and the same
 start. When the dialog would hold you back, the agent gets the dialog's own
-words instead ("YouTube: Sign in to YouTube in Livestream → Setup, then go
+words instead ("YouTube: Sign in to YouTube in Destinations → Setup, then go
 live."). The agent may pass `allowPartial` to go live on the destinations
 that are ready (the dialog's "Go live without …") and `withoutCaptions` to
 skip captions that can't start (captions that can start stay on, as the
@@ -215,7 +215,7 @@ when Output's recording is on, as the dialog does.
 
 ### Arranging the picture
 
-"Move Buddy to the top left and the sponsor banner to the bottom left" are
+"Move Sidekick to the top left and the sponsor banner to the bottom left" are
 two `move_on_scene` calls. Each place is one of nine on a 3×3 grid (and the
 full frame for a banner) inside the same margins and safe area the Scene
 inspector's snaps use, so Top left from an agent is Top left from the
@@ -370,7 +370,7 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
   (epoch ms, when the agent stops waiting) and `generation`. Stop agents,
   Off and Remove send `agent.intent.cancel {generation, agentId?}`
   (renderer-only, listening sockets only; no `agentId` means every agent
-  but Buddy). The Studio's link (`lib/agent-studio-link.ts`) marks the
+  but Sidekick). The Studio's link (`lib/agent-studio-link.ts`) marks the
   intents it holds; the agents' lane drops a cancelled or late intent when
   its turn comes (`agentIntentDropReason`), and `go_live` checks the cancel
   right before it confirms and again after platform setup, cleaning up what
@@ -385,7 +385,7 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
   on stream, Clips) with the Studio's projection, which the renderer
   publishes through `agent.surface.publish {surface}` (`lib/agent-surface.ts`):
   scene and scenes, microphone, System audio, takeovers, sounds, the live
-  background, captions, Buddy, devices and the chosen ones, destinations'
+  background, captions, Sidekick, devices and the chosen ones, destinations'
   readiness, title and category, open windows, and the reasons Record or Go
   Live can't start. The projection is allowlisted field by field, deduped,
   debounced, published only while Agents is on, and read by the backend only
@@ -429,21 +429,21 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
 - **Last action.** Settings shows each agent's last action and its age.
   It lives in memory; after a restart `agents.status` seeds it from the
   agent's newest Activity row (looked up once per agent).
-- **Buddy** (plan 209 S18 to S20, `buddy_act.rs`) is a built-in caller of
+- **Sidekick** (plan 209 S18 to S20, `buddy_act.rs`) is a built-in caller of
   the same path: id `buddy`, never a registry agent, no token, no presence.
   Its calls are admitted only for catalog tools marked `buddy` (D15, checked
-  by the backend and again by `executeAgentIntent`), take Buddy's own rate
-  limit, and are logged as "Buddy". `edit_banner` is not Buddy's (it imports
+  by the backend and again by `executeAgentIntent`), take Sidekick's own rate
+  limit, and are logged as "Sidekick". `edit_banner` is not Sidekick's (it imports
   any image path). By voice, a planned `set_highlight` is the grammar's own
-  highlight (a comment Buddy flagged asks "Show it anyway?" first; typed, it
+  highlight (a comment Sidekick flagged asks "Show it anyway?" first; typed, it
   is refused in those words), a removal is the grammar's removal card, and
-  Buddy's removals keep its gates (Videorc's removal switch, Premium) on
-  the typed path too. Buddy's D14 questions take only "Buddy, yes": a bare
-  "yes" leaves the question open. A viewer whose name is Buddy's, or a single
+  Sidekick's removals keep its gates (Videorc's removal switch, Premium) on
+  the typed path too. Sidekick's D14 questions take only "Sidekick, yes": a bare
+  "yes" leaves the question open. A viewer whose name is Sidekick's, or a single
   everyday or command word, never pulls chat into a planner request. The Studio projection is published
-  while Agents is on or Buddy may act (Premium), because Buddy's planner
+  while Agents is on or Sidekick may act (Premium), because Sidekick's planner
   reads its scene and destination names. A tool marked `buddy` joins
-  Buddy's planner request on its own; check its D14 question
+  Sidekick's planner request on its own; check its D14 question
   (`buddy_act::spoken_confirm`) if it goes live or ends something. The wire
   is part F of docs/buddy-commands-contract.md, the desktop shapes part G.
 
@@ -471,7 +471,7 @@ remote keep their own allowlists, byte for byte (D19).
 | A stolen or old agent token                                                              | Per-agent tokens, stored hashed; Remove revokes one; Stop disconnects all; turning Agents off closes the listener                                                                                                                                                              |
 | A tool result leaks a secret                                                             | Results come from allowlisted projections (D9); the smoke scans every result for the seeded fake keys, OAuth tokens and all four credentials                                                                                                                                   |
 | A viewer's chat steers the agent                                                         | D18 marking and instructions; D11 notices; D12 Stop; Trash for deletes; YouTube's confirm                                                                                                                                                                                      |
-| A viewer's chat steers Buddy                                                             | The desktop enforces Buddy's subset (D15) and the D14 confirms; the wake word is required by voice, and a D14 yes must be "Buddy, yes"                                                                                                                                         |
+| A viewer's chat steers Sidekick                                                          | The desktop enforces Sidekick's subset (D15) and the D14 confirms; the wake word is required by voice, and a D14 yes must be "Sidekick, yes"                                                                                                                                   |
 | An agent floods actions                                                                  | Per agent: 20 actions per 10 s; chat posts 1 per 2 s and 20 a minute; removals 10 a minute (the existing cap); `go_live` once per 10 s; `stop` 5 per 10 s; `get_picture` once a second; a refused call gives its slot back. Agent calls don't use the remote debounce families |
 | The Agent role reaches other methods                                                     | The `/mcp` router is the only door, and it calls the catalog's executors only; `/ws` refuses agent tokens; tests in `backend_authority.rs`                                                                                                                                     |
 | The phone or Stream Deck gains power                                                     | D19's byte-identical allowlist test                                                                                                                                                                                                                                            |
@@ -500,7 +500,7 @@ cover every other tool: `go_live` without the dialog to a local FFmpeg RTMP
 sink (refused while a destination isn't ready, live with `allowPartial`),
 captions, backgrounds, `edit_banner`, Arrange against the editor's own snap
 functions and the picture's pixels, chat posts and removals on the fake
-providers (a YouTube removal waits for the card), Buddy, Prepare and the
+providers (a YouTube removal waits for the card), Sidekick, Prepare and the
 Library, whose delete moves into a Trash stand-in inside the run
 (`VIDEORC_SMOKE_TRASH_DIR`, dev builds with the smoke command server only).
 It goes live only to that local sink, never a real channel. It is part of
@@ -513,13 +513,13 @@ Studio tool and none besides) and `lib/agent-surface.test.ts`.
 
 ## Hide screen (plan 210 S8a)
 
-| Tool          | Arguments | Runs in | Buddy | On air | Result             |
-| ------------- | --------- | ------- | ----- | ------ | ------------------ |
-| `hide_screen` | none      | Studio  | yes   | yes    | `{ hidden: true }` |
+| Tool          | Arguments | Runs in | Sidekick | On air | Result             |
+| ------------- | --------- | ------- | -------- | ------ | ------------------ |
+| `hide_screen` | none      | Studio  | yes      | yes    | `{ hidden: true }` |
 
 The allowlisted result projects one boolean, never the reason, time,
 screen contents or capture identity. It uses the same Studio action as the
-streamer's key. There is no show tool: agents and Buddy may hide, but only
+streamer's key. There is no show tool: agents and Sidekick may hide, but only
 the streamer can show the screen again. The shared action refuses show
 and a toggle that would show from either caller with “Only you can show
 your screen again.” No raw privacy RPC is admitted on an agent socket.

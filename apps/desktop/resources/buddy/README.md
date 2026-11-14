@@ -1,4 +1,4 @@
-# Bundled Buddy pet packs
+# Bundled Sidekick pet packs
 
 Read-only pet packs shipped with the app (plan 168 D3): each `<name>/` folder
 here is the pack `bundled:<name>` (`manifest.json`, its sheets, `buddy.json`),
@@ -6,7 +6,7 @@ packaged as `buddy-assets/bundled` and passed to the backend as the second
 `VIDEORC_MANAGED_BUDDY_ROOTS` entry. Only our own art goes here, never a
 third-party pack.
 
-## `buddy/`: Buddy the Golem, alive (plan 172)
+## `buddy/`: Sidekick the Golem, alive (plan 172)
 
 The pack `bundled:buddy`: page-pet manifest v1, 40 frames of 640 px (25 gaze
 cells, 12 reactions, `talk-a`, `talk-b`, `wave`) in one 3200 × 5120

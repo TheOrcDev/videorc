@@ -60,7 +60,7 @@ export function buddyTestStatePlan(
     return {
       ...IDLE_PLAN,
       talking: true,
-      note: 'These moves have no talking drawings, so Buddy bobs while it talks.'
+      note: 'These moves have no talking drawings, so Sidekick bobs while it talks.'
     }
   }
   if (state === 'laugh') {
@@ -68,7 +68,7 @@ export function buddyTestStatePlan(
     return {
       ...IDLE_PLAN,
       react: 'laugh',
-      note: 'These moves have no laugh drawing, so Buddy hops instead.'
+      note: 'These moves have no laugh drawing, so Sidekick hops instead.'
     }
   }
   if (has('think')) return { ...IDLE_PLAN, pose: 'think' }

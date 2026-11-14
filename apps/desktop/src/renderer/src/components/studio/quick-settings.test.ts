@@ -92,8 +92,21 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
     expect(markup).not.toContain('Inputs')
     const [sources, captions] = markup.split('data-slot="panel-section"').slice(1)
-    expect(sources).toContain('>Sources</h2>')
-    expect(sources).toContain('>Open Sources</button>')
+    // Plan 235 D3: no title; the group keeps its name for screen readers.
+    expect(sources).not.toContain('<h2')
+    expect(sources).toMatch(
+      /aria-label="Sources"[^>]*role="group"|role="group"[^>]*aria-label="Sources"/
+    )
+    // Plan 235 D4: the way home is one cog, at the end of the Camera row.
+    const cogs = [...(sources ?? '').matchAll(/<button[^>]*aria-label="Open Sources"[^>]*>/g)]
+    expect(cogs).toHaveLength(1)
+    expect(cogs[0]?.[0]).toContain('data-testid="open-page-cog"')
+    const cameraRow = (sources ?? '').split('data-slot="inspector-row"')[2] ?? ''
+    expect(cameraRow).toContain('aria-label="Open Sources"')
+    expect(cameraRow.indexOf('aria-label="Open Sources"')).toBeGreaterThan(
+      cameraRow.indexOf('aria-label="Camera"')
+    )
+    expect(sources).not.toContain('>Open Sources</button>')
     expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera'])
     expect(captions).not.toContain('<h2')
     // Captions is a door to its page there (plan 174 S3.2, B-13), not a switch row.

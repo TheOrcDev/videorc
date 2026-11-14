@@ -182,10 +182,10 @@ describe('BuddyLiveSwitch (plan 174 S3.14a, D7)', () => {
       )
     )
 
-  it('is one labelled switch named Buddy Live', () => {
+  it('is one labelled switch named Sidekick Live', () => {
     const markup = render({ checked: true })
     expect(markup).toContain('data-slot="buddy-live-switch"')
-    expect(markup).toMatch(/<label[^>]*for="buddy-live-switch"[^>]*>Buddy Live<\/label>/)
+    expect(markup).toMatch(/<label[^>]*for="buddy-live-switch"[^>]*>Sidekick Live<\/label>/)
     expect(markup).toMatch(/role="switch"[^>]*aria-checked="true"/)
     // Base UI puts the id on the switch's hidden input, which the label points at.
     expect(markup).toMatch(/<input[^>]*id="buddy-live-switch"[^>]*type="checkbox"/)
@@ -193,10 +193,10 @@ describe('BuddyLiveSwitch (plan 174 S3.14a, D7)', () => {
   })
 
   it('says why it cannot move while it cannot, and is otherwise undescribed', () => {
-    const locked = render({ disabledReason: 'Buddy Live is part of Videorc Premium.' })
+    const locked = render({ disabledReason: 'Sidekick Live is part of Videorc Premium.' })
     expect(locked).toContain('disabled=""')
     expect(locked).toContain('data-slot="disabled-reason"')
-    expect(locked).toContain('Buddy Live is part of Videorc Premium.')
+    expect(locked).toContain('Sidekick Live is part of Videorc Premium.')
     expect(render()).not.toContain('data-slot="disabled-reason"')
   })
 })
@@ -217,7 +217,7 @@ describe('CohostListeningIndicator (plan 068)', () => {
     expect(markup).toContain('>Listening<')
     expect(markup).toContain('text-success')
     expect(markup).not.toContain('title=')
-    expect(markup).toContain('. Buddy hears your microphone as text.')
+    expect(markup).toContain('. Sidekick hears your microphone as text.')
   })
 
   it('says Starting to listen without a tone', () => {
@@ -231,12 +231,12 @@ describe('CohostListeningIndicator (plan 068)', () => {
     const markup = render({
       state: 'blocked',
       reasonCode: 'no-microphone',
-      message: 'Select a microphone so Buddy can hear you.'
+      message: 'Select a microphone so Sidekick can hear you.'
     })
     expect(markup).toContain('>Not listening: no microphone selected<')
     expect(markup).toContain('text-warning')
     expect(markup).not.toContain('title=')
-    expect(markup).toContain('. Select a microphone so Buddy can hear you.')
+    expect(markup).toContain('. Select a microphone so Sidekick can hear you.')
   })
 
   it('keeps only the microphone in a tight header', () => {
@@ -247,6 +247,6 @@ describe('CohostListeningIndicator (plan 068)', () => {
 
   it('adds the listening sentence to the status tooltip', () => {
     const markup = renderStatus({ state: listening({ listening: { state: 'on' } }) })
-    expect(markup).toContain('Buddy hears your microphone as text.')
+    expect(markup).toContain('Sidekick hears your microphone as text.')
   })
 })

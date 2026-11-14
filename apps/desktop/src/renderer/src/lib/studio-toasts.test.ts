@@ -109,7 +109,7 @@ describe('cohostStatusToast', () => {
     } as unknown as CohostState
     expect(cohostStatusToast(running, failed)).toEqual({
       kind: 'error',
-      title: 'Buddy stopped: Videorc Premium is required.',
+      title: 'Sidekick stopped: Videorc Premium is required.',
       action: 'view-premium'
     })
     expect(cohostStatusDetail(failed)).toBe('ai-gateway-error: denied')
@@ -122,7 +122,7 @@ describe('cohostStatusToast', () => {
     const stopped = { ...running, status: 'off', reason: 'signed-out' } as CohostState
     expect(cohostStatusToast(running, stopped)).toEqual({
       kind: 'message',
-      title: 'Buddy stopped. You signed out.',
+      title: 'Sidekick stopped. You signed out.',
       action: 'sign-in'
     })
     expect(cohostStatusToast(running, { ...running, status: 'off' } as CohostState)).toBeNull()
@@ -153,7 +153,7 @@ describe('showXBroadcastProblem', () => {
     await showXBroadcastProblem('chat', target, new Error('chat 401'))
     expect(toast.warning).toHaveBeenLastCalledWith(
       "X chat isn't connected for X",
-      expect.objectContaining({ action: expect.objectContaining({ label: 'Open Livestream' }) })
+      expect.objectContaining({ action: expect.objectContaining({ label: 'Open Destinations' }) })
     )
   })
 })
@@ -162,7 +162,7 @@ describe('showXBroadcastProblem', () => {
 // in to your Videorc account" as an X failure and was sent to Livestream,
 // where X looked fine; Sign in is the fix, so it is the action.
 describe('the Videorc sign-in toasts', () => {
-  it('names the account with Sign in as the fix, never Open Livestream', async () => {
+  it('names the account with Sign in as the fix, never Open Destinations', async () => {
     await showChatNeedsVideorcSignIn('X')
     expect(toast.warning).toHaveBeenLastCalledWith(
       'X chat needs your Videorc sign-in',

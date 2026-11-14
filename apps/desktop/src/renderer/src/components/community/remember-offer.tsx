@@ -34,7 +34,7 @@ export function RememberOffer({ regularsCame }: { regularsCame: boolean }): Reac
     setBusy(true)
     patchCohostSettings({ community: { ...settings, remember, rememberOffered: true } })
       .catch((error: unknown) =>
-        toastUserError(error, { action: 'save', object: 'Buddy remembers' }, { id: 'community' })
+        toastUserError(error, { action: 'save', object: 'Sidekick remembers' }, { id: 'community' })
       )
       .finally(() => setBusy(false))
   }

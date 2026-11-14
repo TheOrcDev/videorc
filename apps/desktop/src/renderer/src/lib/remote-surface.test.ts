@@ -1118,7 +1118,7 @@ it('projects saved scenes with only ids and names', async () => {
   }
 })
 
-it('projects Buddy Live as one boolean, off until the Studio says', async () => {
+it('projects Sidekick Live as one boolean, off until the Studio says', async () => {
   vi.useFakeTimers()
   try {
     const requests: unknown[] = []

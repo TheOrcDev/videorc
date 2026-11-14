@@ -973,12 +973,12 @@ fn buddy_pet_web_errors_read_as_plain_sentences() {
     assert_eq!(used.code, "pet-allowance-used");
     assert_eq!(
         used.message,
-        "This month's Buddy creations are used up. More on November 1."
+        "This month's Sidekick creations are used up. More on November 1."
     );
     let december = Utc.with_ymd_and_hms(2026, 12, 20, 9, 0, 0).unwrap();
     assert_eq!(
         pet_web_error(&api_error(429, "pet-allowance-used", None), december).message,
-        "This month's Buddy creations are used up. More on January 1."
+        "This month's Sidekick creations are used up. More on January 1."
     );
     let cases = [
         (503, "pet-image-model-unconfigured", BUDDY_PET_NOT_AVAILABLE),
@@ -1042,11 +1042,11 @@ fn buddy_pet_web_errors_read_as_plain_sentences() {
             "ai-gateway-error",
             "The image model failed. Try again.",
         ),
-        (401, "unauthorized", "Sign in again to create a Buddy."),
+        (401, "unauthorized", "Sign in again to create a Sidekick."),
         (
             403,
             "premium-required",
-            "Creating a Buddy requires Videorc Premium.",
+            "Creating a Sidekick requires Videorc Premium.",
         ),
         (
             403,
@@ -1089,7 +1089,7 @@ async fn buddy_pet_web_errors_reach_the_caller_and_the_events() {
     assert_eq!(used.code, "pet-allowance-used");
     assert!(
         used.message
-            .starts_with("This month's Buddy creations are used up. More on ")
+            .starts_with("This month's Sidekick creations are used up. More on ")
     );
     assert!(
         std::fs::read_dir(creations_dir(&root, &CohostPersona::default().id)).is_err(),

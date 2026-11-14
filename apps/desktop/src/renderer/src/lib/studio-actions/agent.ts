@@ -47,7 +47,7 @@ export type AgentToolExecutor = (
 /** What an agent reads when the Studio cannot run its call at all. */
 export const AGENT_INTENT_COPY = {
   unknownTool: "Videorc can't run that tool from the Studio.",
-  notBuddys: "Buddy can't use that tool.",
+  notBuddys: "Sidekick can't use that tool.",
   failed: 'Something went wrong in Videorc.',
   cancelled: 'Agents were stopped in Videorc, so that never ran.',
   late: 'Videorc was busy too long, so that never ran.'

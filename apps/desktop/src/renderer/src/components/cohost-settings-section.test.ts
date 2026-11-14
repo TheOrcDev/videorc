@@ -42,7 +42,7 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Buddy',
+      name: 'Sidekick',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -130,9 +130,9 @@ describe('Show on stream automatically', () => {
     // Plan 174 F-18: not "Show on stream", which is the question's own action.
     expect(document.body.textContent).toContain('Put comments on stream automatically')
     expect(document.body.textContent).toContain(
-      'What I talk about needs Buddy to hear you (or live captions).'
+      'What I talk about needs Sidekick to hear you (or live captions).'
     )
-    expect(document.body.textContent).toContain('nothing Buddy flagged is ever shown')
+    expect(document.body.textContent).toContain('nothing Sidekick flagged is ever shown')
     expect(option('Off').hasAttribute('data-checked')).toBe(true)
 
     await act(async () => option('What I talk about').click())
@@ -140,7 +140,7 @@ describe('Show on stream automatically', () => {
       autoHighlight: false,
       voiceHighlight: true
     })
-    await act(async () => option("What I talk about and Buddy's picks").click())
+    await act(async () => option("What I talk about and Sidekick's picks").click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
       autoHighlight: true,
       voiceHighlight: true
@@ -149,7 +149,7 @@ describe('Show on stream automatically', () => {
 
   it('shows a stored picks-only row as the third option and rewrites it on a click', async () => {
     await render(settings({ autoHighlight: true, voiceHighlight: false }))
-    const third = option("What I talk about and Buddy's picks")
+    const third = option("What I talk about and Sidekick's picks")
     expect(third.hasAttribute('data-checked')).toBe(true)
     await act(async () => third.click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
@@ -168,9 +168,9 @@ describe('Show on stream automatically', () => {
     await render(settings(), {
       allowed: false,
       featureId: 'live-cohost',
-      reason: 'Buddy requires Videorc Premium.'
+      reason: 'Sidekick requires Videorc Premium.'
     })
-    for (const label of ['Off', 'What I talk about', "What I talk about and Buddy's picks"]) {
+    for (const label of ['Off', 'What I talk about', "What I talk about and Sidekick's picks"]) {
       expect(option(label).disabled).toBe(true)
     }
   })
@@ -185,12 +185,12 @@ describe('Show on stream automatically', () => {
 
 // Plan 119 S2, plan 150: the settings live in the Buddy tab's Chat tab, where
 // Buddy Live's switch owns `enabled` and the Premium call to action.
-describe('under the Buddy tab', () => {
+describe('under the Sidekick tab', () => {
   it('splits into Replies and Moderation, with no Enable switch', async () => {
     await render(settings())
     expect(document.getElementById('cohost-enabled')).toBeNull()
-    expect(document.body.textContent).not.toContain('Enable Buddy')
-    expect(document.body.textContent).not.toContain('Buddy (alpha)')
+    expect(document.body.textContent).not.toContain('Enable Sidekick')
+    expect(document.body.textContent).not.toContain('Sidekick (alpha)')
     const titles = [...document.querySelectorAll('[data-slot="panel-section"] h2')].map(
       (heading) => heading.textContent
     )
@@ -201,7 +201,7 @@ describe('under the Buddy tab', () => {
     expect(replies.querySelector('#cohost-tone')).toBeTruthy()
     // "About you" lives under Name and personality now (plan 174 G-9).
     expect(replies.querySelector('#cohost-notes')).toBeNull()
-    expect(document.body.textContent).not.toContain('Buddy notes')
+    expect(document.body.textContent).not.toContain('Sidekick notes')
     expect(moderation.querySelector('#cohost-rule-new')).toBeTruthy()
     expect(moderation.querySelector('#cohost-sensitivity')).toBeTruthy()
     expect(moderation.querySelector('#cohost-show-on-stream')).toBeTruthy()
@@ -210,11 +210,11 @@ describe('under the Buddy tab', () => {
     expect(moderation.querySelector('#cohost-listen')).toBeNull()
   })
 
-  it('leaves the Premium call to action to Buddy Live: a Basic account sees it disabled', async () => {
+  it('leaves the Premium call to action to Sidekick Live: a Basic account sees it disabled', async () => {
     await render(settings(), {
       allowed: false,
       featureId: 'live-cohost',
-      reason: 'Buddy requires Videorc Premium.',
+      reason: 'Sidekick requires Videorc Premium.',
       upgradeUrl: 'https://www.videorc.com/premium'
     })
     expect(document.body.textContent).not.toContain('View Premium')
@@ -223,7 +223,7 @@ describe('under the Buddy tab', () => {
   })
 })
 
-describe('Buddy hears you while you are live (plan 068)', () => {
+describe('Sidekick hears you while you are live (plan 068)', () => {
   function listenSwitch(): HTMLElement {
     // The id is on Base UI's hidden input, which the label points at; the
     // label names the switch.
@@ -237,7 +237,7 @@ describe('Buddy hears you while you are live (plan 068)', () => {
 
   it('is a switch bound to the listen setting', async () => {
     await render(settings())
-    expect(document.body.textContent).toContain("Buddy hears you while you're live")
+    expect(document.body.textContent).toContain("Sidekick hears you while you're live")
     expect(listenSwitch().hasAttribute('data-unchecked')).toBe(true)
     await act(async () => listenSwitch().click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({ listen: true })
@@ -341,7 +341,9 @@ describe('grouped cards (plan 168 Phase 0)', () => {
     await act(async () => (document.getElementById('cohost-listen') as HTMLButtonElement).click())
     // Plan 174 S2.4: mapped copy under the listen card, never the raw backend
     // sentence and never an unpadded row in the card.
-    expect(document.body.textContent).toContain(`Couldn't save Buddy settings. ${UNKNOWN_REASON}`)
+    expect(document.body.textContent).toContain(
+      `Couldn't save Sidekick settings. ${UNKNOWN_REASON}`
+    )
     expect(document.body.textContent).not.toContain('Could not reach the backend.')
     const cards = [...document.querySelectorAll<HTMLElement>('[data-variant="grouped"]')]
     // Listen (Live tab), Replies and Moderation (Chat tab).

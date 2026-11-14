@@ -76,7 +76,7 @@ describe('buddyLibraryView (plan 170 D16)', () => {
   it('groups the official five and mine, newest first, with the active one marked', () => {
     const view = buddyLibraryView({ library: library(), persona: null })
     expect(view.official.map((card) => card.name)).toEqual([
-      'Buddy',
+      'Sidekick',
       'Golmar',
       'Nib',
       'Captain Barnacle',
@@ -117,7 +117,7 @@ describe('buddyLibraryView (plan 170 D16)', () => {
     expect(view.official.find((card) => card.active)?.name).toBe('Golmar')
   })
 
-  it('names the Buddy picked on videorc.com when sync would not apply it', () => {
+  it('names the Sidekick picked on videorc.com when sync would not apply it', () => {
     expect(
       buddyLibraryView({
         library: library({ activeAvatarId: null, serverActiveAvatarId: OLDER }),
@@ -160,7 +160,7 @@ describe('buddyLibraryView (plan 170 D16)', () => {
     ).toBe('Could not reach Videorc.')
   })
 
-  it('says Alive for Buddies that move and offers Make it Alive for the rest (plan 172 D12)', () => {
+  it('says Alive for Sidekicks that move and offers Make it Alive for the rest (plan 172 D12)', () => {
     const states = ['bundled', 'downloaded', 'available', 'none'] as const
     const view = buddyLibraryView({
       library: library({
@@ -201,7 +201,7 @@ describe('buddyLibraryView (plan 170 D16)', () => {
     expect(
       buddyLibraryBusyLine(
         library({ busy: { kind: 'alive-download', avatarId: 'official:orc' } }),
-        'Buddy'
+        'Sidekick'
       )
     ).toBe("Downloading Golmar's moves.")
     expect(
@@ -218,10 +218,10 @@ describe('buddyLibraryView (plan 170 D16)', () => {
   })
 
   it("names the quiet off state in the backend's words", () => {
-    expect(BUDDY_LIBRARY_UNAVAILABLE).toBe('The Buddy library is not available right now.')
+    expect(BUDDY_LIBRARY_UNAVAILABLE).toBe('The Sidekick library is not available right now.')
   })
 
-  it('offers Save to my library only for a Buddy made here, signed in, when the web keeps it', () => {
+  it('offers Save to my library only for a Sidekick made here, signed in, when the web keeps it', () => {
     const own = {
       name: ' Mossback ',
       images: { idle: 'default/idle-0a0a0a0a.png' }
@@ -260,7 +260,7 @@ describe('buddyLibraryView (plan 170 D16)', () => {
 })
 
 describe('the first-launch invitation (plan 170 D16)', () => {
-  it('shows only for the untouched default Buddy, until dismissed', () => {
+  it('shows only for the untouched default Sidekick, until dismissed', () => {
     const base = { library: { activeAvatarId: 'official:golem' }, dismissed: false }
     expect(buddyInvitationVisible({ ...base, persona: { source: 'default' } })).toBe(true)
     expect(
@@ -398,7 +398,7 @@ describe('step 4 lines (plan 170 D15; the gate itself is buddy-create-gate.ts)',
   it('says why a create made nothing, in the gate words when the web named one', () => {
     expect(buddyCreateFailureLine(null)).toBeNull()
     expect(buddyCreateFailureLine({ code: 'buddy-library-full' }, 30)).toBe(
-      'Your library is full (30 Buddies). Delete one to make room.'
+      'Your library is full (30 Sidekicks). Delete one to make room.'
     )
     expect(buddyCreateFailureLine({ code: 'quota-exhausted' })).toBe(
       "You've used today's images. You get more tomorrow."

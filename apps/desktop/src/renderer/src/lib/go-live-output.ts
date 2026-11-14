@@ -238,7 +238,7 @@ const GO_LIVE_CPU_COMPOSITOR_DEFAULT: VideoPreset = 'tutorial-720p30'
 
 /**
  * Nobody picked a stream quality: the shipped default (`tutorial-1080p30`;
- * a pick in Livestream saves a `stream-safe-*` preset) and no destination
+ * a pick in Destinations saves a `stream-safe-*` preset) and no destination
  * with its own quality.
  */
 export function streamQualityUntouched(streaming: StreamingSettings): boolean {
@@ -547,6 +547,6 @@ export function goLiveStepDownDescription(
   advice: Extract<SoftwareStreamAdvice, { kind: 'step-down' }>
 ): string {
   return advice.reason === 'go-live-headroom'
-    ? `Going live takes about twice the work of a recording on this computer, so this session streams at ${outputLabel(advice.video)}. Pick ${outputLabel(advice.requested)} in Livestream → Output quality to stream at it anyway.`
+    ? `Going live takes about twice the work of a recording on this computer, so this session streams at ${outputLabel(advice.video)}. Pick ${outputLabel(advice.requested)} in Destinations → Output quality to stream at it anyway.`
     : `This computer can't encode ${outputLabel(advice.requested)} in real time, so this session uses the largest output that held steady in its performance check.`
 }

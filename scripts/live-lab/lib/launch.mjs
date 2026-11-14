@@ -80,6 +80,8 @@ export function buildLaunchEnv({ dirs, config, scenario }) {
     // Lab runs use a fresh profile each time; sharing usage stats would count
     // every run as a new install that went live (crates/videorc-backend/src/usage_stats.rs).
     VIDEORC_USAGE_STATS: '0',
+    // Plan 237: lab streams never email the account a stream report.
+    VIDEORC_STREAM_REPORT_EMAIL: '0',
     VIDEORC_BACKEND_LOG_MAX_BYTES: String(BACKEND_LOG_MAX_BYTES),
     VIDEORC_BACKEND_LOG_MAX_FILES: String(BACKEND_LOG_MAX_FILES)
   }

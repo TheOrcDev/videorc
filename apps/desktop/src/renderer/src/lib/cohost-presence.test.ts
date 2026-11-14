@@ -52,7 +52,7 @@ describe('cohostPresenceView', () => {
     expect(view.dots).toBe(false)
     expect(view.pulse).toBe(false)
     expect(view.openCount).toBe(0)
-    expect(view.tooltipLines[0]).toContain('Buddy is off')
+    expect(view.tooltipLines[0]).toContain('Sidekick is off')
   })
 
   it('treats a null state exactly like the off shape', () => {
@@ -99,7 +99,7 @@ describe('cohostPresenceView', () => {
       cohostStatusLabel(listening()),
       cohostStatusLabel(listening({ status: 'error', reason: 'network' }))
     ]) {
-      expect(label).not.toMatch(/^Buddy/)
+      expect(label).not.toMatch(/^Sidekick/)
     }
   })
 
@@ -152,7 +152,7 @@ describe('cohostPresenceView', () => {
         retryAt: '2026-08-24T12:00:05.000Z',
         detail: {
           code: 'ai-gateway-error',
-          message: 'The Buddy tick failed on every configured model.',
+          message: 'The Sidekick tick failed on every configured model.',
           status: 502
         }
       }),
@@ -165,7 +165,7 @@ describe('cohostPresenceView', () => {
     expect(view.dots).toBe(false)
     expect(view.tooltipLines).toContain('next try in ~5s')
     expect(view.tooltipLines).toContain(
-      'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
+      'ai-gateway-error (HTTP 502): The Sidekick tick failed on every configured model.'
     )
     expect(cohostEmptyStateCopy(view, null)).toContain('trying again')
   })
@@ -245,7 +245,7 @@ describe('cohostEmptyStateCopy', () => {
     )
     const off = offCohostState()
     expect(cohostEmptyStateCopy(cohostPresenceView(off, NOW), off)).toBe(
-      'Questions from chat will appear here once Buddy is reading chat again.'
+      'Questions from chat will appear here once Sidekick is reading chat again.'
     )
   })
 })

@@ -179,12 +179,14 @@ export type TransformPatch = { x?: number; y?: number; width?: number; height?: 
  * describe the picture the stage shows), as the frame patch the backend
  * stores: each present field back through the scene background's stage
  * margin (`sceneFrameRect`), which is affine per axis, so a partial patch
- * maps field by field. No margin, or a camera, leaves the patch as it is.
+ * maps field by field. No margin, or a source that is not on the stage (a
+ * camera, unless the scene stages it: plan 235), leaves the patch as it is.
  */
 export function pictureEditToFrame(
   patch: TransformPatch,
   kind: SceneSourceKind,
-  stageMargin: number
+  stageMargin: number,
+  cameraOnStage = false
 ): TransformPatch {
   const frame = sceneFrameRect(
     {
@@ -194,7 +196,8 @@ export function pictureEditToFrame(
       height: patch.height ?? 0
     },
     kind,
-    stageMargin
+    stageMargin,
+    cameraOnStage
   )
   const result: TransformPatch = {}
   for (const key of TRANSFORM_FIELD_IDS)
@@ -217,16 +220,22 @@ export function pictureEditFramePatch(
   frame: StageRect,
   kind: SceneSourceKind,
   stageMargin: number,
-  canvas: PixelSize
+  canvas: PixelSize,
+  cameraOnStage = false
 ): TransformPatch {
-  const staged = sceneStageRect(frame, kind, stageMargin)
+  const staged = sceneStageRect(frame, kind, stageMargin, cameraOnStage)
   const boxIsFrame = TRANSFORM_FIELD_IDS.every(
     (key) =>
       Math.abs(box[key] - staged[key]) *
         (key === 'x' || key === 'width' ? canvas.width : canvas.height) <=
       1
   )
-  return pictureEditToFrame(boxIsFrame ? patch : { ...box, ...patch }, kind, stageMargin)
+  return pictureEditToFrame(
+    boxIsFrame ? patch : { ...box, ...patch },
+    kind,
+    stageMargin,
+    cameraOnStage
+  )
 }
 
 /**

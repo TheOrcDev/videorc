@@ -1,6 +1,6 @@
 # page-pet
 
-Videorc's living Buddy (plan 168) adopts the pet pack format of
+Videorc's living Sidekick (plan 168) adopts the pet pack format of
 [page-pet](https://github.com/gvastethecreator/page-pet-skill) and ports
 parts of its runtime and build scripts. Read at commit `0b6a0ef`.
 

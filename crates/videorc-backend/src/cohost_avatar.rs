@@ -272,7 +272,7 @@ impl AvatarShared {
         if slot.is_some() {
             return Err(CohostAvatarRefusal::new(
                 COHOST_AVATAR_BUSY,
-                "Your Buddy's look is already being made. Wait for it to finish.",
+                "Your Sidekick's look is already being made. Wait for it to finish.",
             ));
         }
         let id = self.next_job.fetch_add(1, Ordering::Relaxed);
@@ -346,7 +346,7 @@ impl AvatarEnv {
         self.root.clone().ok_or_else(|| {
             CohostAvatarRefusal::new(
                 COHOST_AVATAR_ROOT_UNCONFIGURED,
-                "The Buddy's image folder is not configured.",
+                "The Sidekick's image folder is not configured.",
             )
         })
     }
@@ -357,13 +357,13 @@ impl AvatarEnv {
         if !self.premium {
             return Err(CohostAvatarRefusal::new(
                 "premium-required",
-                "Making your Buddy's look requires Videorc Premium.",
+                "Making your Sidekick's look requires Videorc Premium.",
             ));
         }
         let Some(token) = self.token.clone() else {
             return Err(CohostAvatarRefusal::new(
                 "signed-out",
-                "Sign in to make your Buddy's look.",
+                "Sign in to make your Sidekick's look.",
             ));
         };
         let Some(api) = self.api.clone() else {
@@ -802,9 +802,9 @@ pub(crate) fn tile_error(error: &CohostApiError) -> CohostAvatarErrorDetail {
         | "cohost-disabled"
         | "ai-gateway-not-configured"
         | "buddy-storage-unconfigured" => COHOST_AVATAR_UNAVAILABLE_HINT.to_string(),
-        "buddy-not-found" => "That Buddy is not in your library any more.".to_string(),
-        "unauthorized" => "Sign in again to make your Buddy's look.".to_string(),
-        "premium-required" => "Making your Buddy's look requires Videorc Premium.".to_string(),
+        "buddy-not-found" => "That Sidekick is not in your library any more.".to_string(),
+        "unauthorized" => "Sign in again to make your Sidekick's look.".to_string(),
+        "premium-required" => "Making your Sidekick's look requires Videorc Premium.".to_string(),
         "ai-user-disabled" => "Cloud AI is turned off for this account.".to_string(),
         "avatar-timeout" | "timeout" => "The model took too long. Try again.".to_string(),
         "network" => "Could not reach Videorc. Check your connection and try again.".to_string(),
@@ -902,7 +902,7 @@ async fn create_in(
     if description.is_none() && inspiration.is_none() {
         return Err(CohostAvatarRefusal::new(
             COHOST_AVATAR_INVALID,
-            "Describe your Buddy or add a picture first.",
+            "Describe your Sidekick or add a picture first.",
         ));
     }
     let root = env.root()?;
@@ -1478,7 +1478,7 @@ async fn keep_in(
     if next.id != persona.id {
         return Err(CohostAvatarRefusal::new(
             COHOST_AVATAR_INVALID,
-            "Your Buddy changed while its look was kept.",
+            "Your Sidekick changed while its look was kept.",
         ));
     }
     let mut images = CohostPersonaImages::default();
@@ -1520,7 +1520,7 @@ async fn keep_in(
     .map_err(|error| {
         CohostAvatarRefusal::new(
             error.code(),
-            format!("The pictures were kept, but your Buddy could not be saved: {error}"),
+            format!("The pictures were kept, but your Sidekick could not be saved: {error}"),
         )
     })?;
     // The persona wears the new pictures: the earlier ones (an older look,

@@ -43,7 +43,7 @@ describe('askBuddy', () => {
     await expect(
       askBuddy(fake.client, 'switch to BRB', { consent: true, entitled: false, actId: 'a1' })
     ).resolves.toEqual({ actId: 'a1', status: 'unavailable', message: BUDDY_PREMIUM_REQUIRED })
-    expect(BUDDY_PREMIUM_REQUIRED).toBe('Buddy requires Videorc Premium.')
+    expect(BUDDY_PREMIUM_REQUIRED).toBe('Sidekick requires Videorc Premium.')
     expect(fake.calls).toEqual([])
   })
 
@@ -54,7 +54,7 @@ describe('askBuddy', () => {
         fake.emit({ actId: 'someone-else', status: 'done', message: 'Not mine.' })
         fake.emit({ actId, status: 'done', message: 'Switched to BRB. Pressed Drum roll.' })
       })
-      return { actId, status: 'working', message: 'Asking Buddy…' }
+      return { actId, status: 'working', message: 'Asking Sidekick…' }
     })
     const answer = await askBuddy(fake.client, 'switch to BRB and play the drum roll', {
       consent: true,
@@ -83,7 +83,7 @@ describe('askBuddy', () => {
     const fake = fakeClient(({ actId }) => ({
       actId,
       status: 'unavailable',
-      message: "Buddy can't take requests right now."
+      message: "Sidekick can't take requests right now."
     }))
     await expect(
       askBuddy(fake.client, 'go live', { consent: false, entitled: true, actId: 'a3' })
@@ -93,7 +93,7 @@ describe('askBuddy', () => {
     )
   })
 
-  it('says Buddy did not answer when no result arrives', async () => {
+  it('says Sidekick did not answer when no result arrives', async () => {
     vi.useFakeTimers()
     try {
       const fake = fakeClient(({ actId }) => ({ actId, status: 'working', message: '…' }))
@@ -116,11 +116,11 @@ describe('askBuddy', () => {
 })
 
 describe('startBuddyActRelay', () => {
-  it("answers the Stream Manager with Buddy's final words", async () => {
+  it("answers the Stream Manager with Sidekick's final words", async () => {
     const fake = fakeClient(({ actId }) => ({
       actId,
       status: 'refused',
-      message: "Buddy can't use notify."
+      message: "Sidekick can't use notify."
     }))
     const pushed: CommentsCommandResolution<CohostActAnswer>[] = []
     let onRequest: ((command: BuddyActRelayCommand) => void) | null = null
@@ -146,7 +146,7 @@ describe('startBuddyActRelay', () => {
     expect(pushed[0]).toMatchObject({
       requestId: 'r1',
       ok: true,
-      value: { status: 'refused', message: "Buddy can't use notify." }
+      value: { status: 'refused', message: "Sidekick can't use notify." }
     })
     stop()
     expect(onRequest).toBeNull()

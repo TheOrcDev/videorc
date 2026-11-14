@@ -396,8 +396,8 @@ export function SessionMarkersDialog({
               <EmptyHeader>
                 <EmptyTitle>No markers yet</EmptyTitle>
                 <EmptyDescription>
-                  While you record, type /marker and a title in Stream Manager, or say “Buddy, make
-                  a marker here for” and the title.
+                  While you record, type /marker and a title in Stream Manager, or say “Sidekick,
+                  make a marker here for” and the title.
                 </EmptyDescription>
               </EmptyHeader>
             </Empty>

@@ -128,7 +128,7 @@ describe('Library delete confirm', () => {
     const dialog = byTestId('library-delete-dialog')
     expect(dialog?.textContent).toMatch(/Move this recording to the (Trash|Recycle Bin)\?/)
     expect(dialog?.textContent).toMatch(
-      /The video file goes to the (Trash|Recycle Bin)\. Its Library entry, markers, Buddy report and chat history are deleted and can't be restored\./
+      /The video file goes to the (Trash|Recycle Bin)\. Its Library entry, markers, Sidekick report and chat history are deleted and can't be restored\./
     )
     expect(dialog?.textContent).not.toContain('Icon')
     expect(byTestId('library-delete-confirm')?.textContent).toMatch(/^Move to (Trash|Recycle Bin)$/)

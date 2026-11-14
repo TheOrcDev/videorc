@@ -375,7 +375,7 @@ export function GoLiveConfirmationDialog({
                 </GroupedList>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  No destination is on. Turn one on in Livestream → Setup.
+                  No destination is on. Turn one on in Destinations → Setup.
                 </p>
               )}
             </section>
@@ -777,7 +777,7 @@ export function GoLiveDestinationRow({
     >
       <ListRow
         className="h-auto min-h-10 py-1.5"
-        // How it connects, in the Livestream page's words: the account it
+        // How it connects, in the Destinations page's words: the account it
         // signs in with, or its stream key (plan 174 S2.2, D-7).
         context={oauth ? (destination.accountLabel ?? 'Sign in') : 'Stream key'}
         icon={<PlatformGlyph platform={destination.platform} />}
@@ -845,7 +845,7 @@ export function GoLiveDestinationRow({
   )
 }
 
-/** A destination left out of this livestream (B-8): it stays on in Livestream. */
+/** A destination left out of this livestream (B-8): it stays on in Destinations. */
 export function GoLiveExcludedRow({
   target,
   pending,

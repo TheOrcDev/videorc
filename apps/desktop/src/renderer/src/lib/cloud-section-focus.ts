@@ -1,11 +1,11 @@
-// Plan 222 U1: "Open Livestream" on the "Videorc Cloud is on" notice asks
-// the Livestream page's Videorc Cloud section to scroll into view. No
+// Plan 222 U1: "Open Destinations" on the "Videorc Cloud is on" notice asks
+// the Destinations page's Videorc Cloud section to scroll into view. No
 // imports: the section imports this, and anything heavier pulls the app
-// shell into the Livestream page's import graph (a cycle the dev server's
+// shell into the Destinations page's import graph (a cycle the dev server's
 // ESM turns into "Cannot access 'lazy' before initialization").
 
 /**
- * The notice's action asks the Livestream page to bring its Videorc Cloud
+ * The notice's action asks the Destinations page to bring its Videorc Cloud
  * section into view: a flag the section takes when it mounts, and an event
  * for a page that is already open.
  */

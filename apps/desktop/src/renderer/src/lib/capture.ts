@@ -671,7 +671,7 @@ export const STORAGE_KEYS = {
   // The stored key keeps its old name (plan 170 D22): renaming it would
   // forget every saved Buddy sub-tab.
   buddyTab: 'videorc.orcleTab',
-  // The Livestream page's view used last (plan 174 S1.6b, A-14): Setup or Upcoming.
+  // The Destinations page's view used last (plan 174 S1.6b, A-14): Setup or Upcoming.
   livestreamView: 'videorc.livestreamView'
 } as const
 

@@ -31,7 +31,31 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
             });
         }
     }
-    result
+    join_wake_pairs(text, result)
+}
+/// "side kick", "side-kick" and "side. kick" (a chunk boundary) are the one
+/// wake word "sidekick" (plan 236 D2), spanning both words' text.
+fn join_wake_pairs<'a>(text: &'a str, tokens: Vec<Token<'a>>) -> Vec<Token<'a>> {
+    let mut joined: Vec<Token<'a>> = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        if let Some(previous) = joined.last()
+            && let Some(wake) = crate::cohost_command::joined_wake(&previous.word, &token.word)
+            && text[previous.start + previous.raw.len()..token.start]
+                .chars()
+                .all(|c| c.is_whitespace() || c == '-' || c == '.')
+        {
+            let start = previous.start;
+            joined.pop();
+            joined.push(Token {
+                word: wake.to_string(),
+                start,
+                raw: &text[start..token.start + token.raw.len()],
+            });
+            continue;
+        }
+        joined.push(token);
+    }
+    joined
 }
 fn wake(word: &str) -> bool {
     crate::cohost_command::is_any_wake_word(word)
@@ -202,7 +226,7 @@ impl UtteranceBuffer {
         // A blocked wake-only chunk still reaches ordinary command handling;
         // its following marker header reserves the rest of this speech turn.
         self.suppress_until_boundary |= marker_candidate(text)
-            || (self.cancelled_wake && marker_candidate(&format!("Buddy {text}")));
+            || (self.cancelled_wake && marker_candidate(&format!("Sidekick {text}")));
         if !text.trim().is_empty() {
             self.cancelled_wake = !self.suppress_until_boundary && wake_only(text);
         }
@@ -391,7 +415,7 @@ mod tests {
         closing.extend(vec![0; 32_000]);
         let at = std::time::Instant::now();
         for (seq, offset, text, samples) in [
-            (1, 0.0, "Buddy", &voice),
+            (1, 0.0, "Sidekick", &voice),
             (2, 3.0, "highlight the last comment.", &closing),
         ] {
             let outcome = buffer.observe(seq, offset, 3.0, samples, text, &[]);
@@ -406,7 +430,11 @@ mod tests {
             }
         }
         let mut buffer = UtteranceBuffer::default();
-        assert!(!buffer.observe(1, 0.0, 3.0, &voice, "Buddy", &[]).consumed);
+        assert!(
+            !buffer
+                .observe(1, 0.0, 3.0, &voice, "Sidekick", &[])
+                .consumed
+        );
         let marker = buffer.observe(
             2,
             3.0,
@@ -422,9 +450,9 @@ mod tests {
     #[test]
     fn grammar_preserves_titles_and_rejects_negation_and_discussion() {
         for phrase in [
-            "Buddy make a marker here for Shadcn New Library",
-            "Buddy add a marker called Shadcn New Library",
-            "Buddy mark this as Shadcn New Library",
+            "Sidekick make a marker here for Shadcn New Library",
+            "Sidekick add a marker called Shadcn New Library",
+            "Sidekick mark this as Shadcn New Library",
         ] {
             assert_eq!(
                 parse_marker(phrase, 12.5, &[]).unwrap(),
@@ -435,7 +463,7 @@ mod tests {
             );
         }
         assert!(
-            parse_marker("Buddy don't make a marker", 0.0, &[])
+            parse_marker("Sidekick don't make a marker", 0.0, &[])
                 .unwrap()
                 .is_none()
         );
@@ -445,7 +473,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            parse_marker("Buddy's marker looks nice", 0.0, &[])
+            parse_marker("Sidekick's marker looks nice", 0.0, &[])
                 .unwrap()
                 .is_none()
         );
@@ -454,11 +482,11 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(parse_marker("Buddy make a marker here for", 0.0, &[]).is_err());
-        assert!(marker_candidate("Buddy don't make a marker for Alpha"));
-        assert!(marker_candidate("Buddy make a"));
-        assert!(!marker_candidate("Buddy mark clip"));
-        assert!(!marker_candidate("Buddy make an announcement"));
+        assert!(parse_marker("Sidekick make a marker here for", 0.0, &[]).is_err());
+        assert!(marker_candidate("Sidekick don't make a marker for Alpha"));
+        assert!(marker_candidate("Sidekick make a"));
+        assert!(!marker_candidate("Sidekick mark clip"));
+        assert!(!marker_candidate("Sidekick make an announcement"));
     }
     #[test]
     fn chunk_finals_wait_for_silence_and_preserve_first_verb_timing() {
@@ -471,7 +499,7 @@ mod tests {
                     20.0,
                     3.0,
                     &voice,
-                    "Buddy make a marker here for Shadcn",
+                    "Sidekick make a marker here for Shadcn",
                     &[CaptionSegment {
                         text: "make".into(),
                         start_second: 0.7,
@@ -503,31 +531,31 @@ mod tests {
         let voice = vec![1000; 48000];
         let quiet = vec![0; 48000];
         let mut blocked = UtteranceBuffer::default();
-        assert!(blocked.observe_cancelled(&voice, "Buddy make a marker here for"));
+        assert!(blocked.observe_cancelled(&voice, "Sidekick make a marker here for"));
         blocked.cancel();
         assert!(blocked.observe_cancelled(&voice, "clip that and remove it from our chat"));
         assert!(blocked.observe_cancelled(&quiet, ""));
         assert!(!blocked.observe_cancelled(&voice, "clip that"));
 
         let mut split_wake = UtteranceBuffer::default();
-        assert!(!split_wake.observe_cancelled(&voice, "Buddy"));
+        assert!(!split_wake.observe_cancelled(&voice, "Sidekick"));
         split_wake.cancel();
         assert!(!split_wake.observe_cancelled(&voice, "highlight the last comment"));
-        assert!(!split_wake.observe_cancelled(&voice, "Buddy"));
+        assert!(!split_wake.observe_cancelled(&voice, "Sidekick"));
         split_wake.cancel();
         assert!(split_wake.observe_cancelled(&voice, "make a marker here for"));
         split_wake.cancel();
         assert!(split_wake.observe_cancelled(&voice, "clip that"));
 
         let mut regrant = UtteranceBuffer::default();
-        assert!(!regrant.observe_cancelled(&voice, "Buddy"));
+        assert!(!regrant.observe_cancelled(&voice, "Sidekick"));
         regrant.cancel();
         let outcome = regrant.observe(1, 0.0, 3.0, &voice, "make a marker for Private title", &[]);
         assert!(outcome.consumed);
         assert!(outcome.markers.is_empty());
 
         let mut retired_wake = UtteranceBuffer::default();
-        retired_wake.observe(1, 0.0, 3.0, &voice, "Buddy", &[]);
+        retired_wake.observe(1, 0.0, 3.0, &voice, "Sidekick", &[]);
         assert!(retired_wake.cancel());
         let outcome =
             retired_wake.observe(2, 3.0, 3.0, &voice, "make a marker for Private title", &[]);
@@ -535,7 +563,7 @@ mod tests {
         assert!(outcome.markers.is_empty());
 
         let mut split_quiet = UtteranceBuffer::default();
-        assert!(split_quiet.observe_cancelled(&voice, "Buddy make a marker for"));
+        assert!(split_quiet.observe_cancelled(&voice, "Sidekick make a marker for"));
         assert!(split_quiet.observe_cancelled(&vec![0; 4800], ""));
         split_quiet.cancel();
         assert!(split_quiet.observe_cancelled(&vec![0; 3200], ""));
@@ -549,7 +577,7 @@ mod tests {
             0.0,
             3.0,
             &vec![1000; 48000],
-            "Buddy make a marker for",
+            "Sidekick make a marker for",
             &[],
         );
         assert!(buffer.cancel());
@@ -560,11 +588,15 @@ mod tests {
         buffer.observe(3, 6.0, 3.0, &vec![0; 48000], "", &[]);
         assert!(!buffer.suppress_until_boundary);
         assert_eq!(
-            parse_marker("Buddy mark this as \"Don't stop / 新 Library\"", 0.0, &[])
-                .unwrap()
-                .unwrap()
-                .label
-                .as_deref(),
+            parse_marker(
+                "Sidekick mark this as \"Don't stop / 新 Library\"",
+                0.0,
+                &[]
+            )
+            .unwrap()
+            .unwrap()
+            .label
+            .as_deref(),
             Some("\"Don't stop / 新 Library\"")
         );
     }
@@ -576,7 +608,7 @@ mod tests {
             0.0,
             3.0,
             &vec![1000; 48000],
-            "Buddy make a marker for Shadcn New Library",
+            "Sidekick make a marker for Shadcn New Library",
             &[],
         );
         // The provider returned no extra words, but its audio contains the
@@ -601,7 +633,7 @@ mod tests {
             0.0,
             3.0,
             &vec![1000; 48000],
-            "Buddy make a marker for Shadcn",
+            "Sidekick make a marker for Shadcn",
             &[],
         );
         let result = buffer.observe(3, 6.0, 3.0, &vec![0; 48000], "New Library", &[]);
@@ -615,7 +647,7 @@ mod tests {
             9.0,
             3.0,
             &audio,
-            "Buddy make a marker for Alpha. What is next?",
+            "Sidekick make a marker for Alpha. What is next?",
             &[],
         );
         assert!(result.markers.is_empty());
@@ -623,14 +655,58 @@ mod tests {
     }
 
     #[test]
+    fn every_form_of_sidekick_and_the_old_names_wake_the_marker_grammar() {
+        // Plan 236 D2: the two words, the hyphen and a chunk boundary between
+        // them are the one wake word; "buddy" stays hidden for two releases.
+        for phrase in [
+            "Sidekick make a marker here for Boss fight",
+            "Side kick make a marker here for Boss fight",
+            "Side-kick, make a marker here for Boss fight",
+            "Side. Kick make a marker here for Boss fight",
+            "Buddy make a marker here for Boss fight",
+        ] {
+            assert_eq!(
+                parse_marker(phrase, 0.0, &[]).unwrap(),
+                Some(VoiceMarker {
+                    label: Some("Boss fight".into()),
+                    at_seconds: 0.0
+                }),
+                "{phrase}"
+            );
+        }
+        assert!(!marker_candidate("Side, kick make a marker here"));
+        assert!(!marker_candidate("Body make a marker here for Boss fight"));
+        assert!(!marker_candidate("Orcle make a marker here for Boss fight"));
+        // A wake-only chunk split over the two words still owns the next.
+        let voice = vec![1000; 48_000];
+        let mut closing = vec![1000; 16_000];
+        closing.extend(vec![0; 32_000]);
+        let mut buffer = UtteranceBuffer::default();
+        assert!(!buffer.observe(1, 0.0, 3.0, &voice, "Side", &[]).consumed);
+        let marker = buffer.observe(
+            2,
+            3.0,
+            3.0,
+            &closing,
+            "kick make a marker here for Split title",
+            &[],
+        );
+        assert!(marker.consumed);
+        assert_eq!(marker.markers.len(), 1);
+        assert_eq!(marker.markers[0].label.as_deref(), Some("Split title"));
+    }
+
+    #[test]
     fn the_persona_name_wakes_the_marker_grammar_too() {
-        assert!(marker_candidate("Buddy make a marker here for Boss fight"));
+        assert!(marker_candidate(
+            "Sidekick make a marker here for Boss fight"
+        ));
         assert!(!marker_candidate(
             "Vexlar make a marker here for Boss fight"
         ));
         crate::cohost_command::set_persona_wake_tokens("Vexlar");
         assert!(marker_candidate("Vexlar make a marker here for Boss fight"));
-        crate::cohost_command::set_persona_wake_tokens("Buddy");
+        crate::cohost_command::set_persona_wake_tokens("Sidekick");
         assert!(!marker_candidate(
             "Vexlar make a marker here for Boss fight"
         ));

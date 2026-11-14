@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "description": "Plan 216 B1: where a scene source's PICTURE lands inside its frame. Rust scene_geometry::scene_picture_rect_pixels and TS scenePictureRectPixels must both reproduce every case within 1 px; the compositor's own fit (source_fit) is the same arithmetic.",
+  "description": "Plan 216 B1: where a scene source's PICTURE lands inside its frame. Rust scene_geometry::scene_picture_rect_pixels and TS scenePictureRectPixels must both reproduce every case within 1 px; the compositor's own fit (source_fit) is the same arithmetic. Plan 235 (D9 a): a case's `scene` names the scene the source sits in (its source kinds, whether the camera is keyed, whether the scene is Freeform) and what the stage rule must answer for its camera (`cameraOnStage`: Rust camera_uses_background_stage, TS sceneCameraUsesBackgroundStage). A case without `scene` keeps the camera off the stage.",
   "cases": [
     {
       "name": "the streamer's MacBook display, Fit in a 16:9 frame",
@@ -107,7 +107,188 @@
       "stageMargin": 0.1
     },
     {
-      "name": "the camera never sits on the stage margin",
+      "name": "plan 235: a camera-only scene with a background puts the camera on the stage",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1
+      },
+      "kind": "camera",
+      "fit": "cover",
+      "source": {
+        "width": 1280,
+        "height": 720
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 192,
+        "y": 108,
+        "width": 1536,
+        "height": 864
+      },
+      "stageMargin": 0.1,
+      "scene": {
+        "sourceKinds": ["camera"],
+        "cameraOnStage": true
+      }
+    },
+    {
+      "name": "plan 235: Key out background keeps the camera full frame over the background",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1
+      },
+      "kind": "camera",
+      "fit": "cover",
+      "source": {
+        "width": 1280,
+        "height": 720
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "stageMargin": 0.1,
+      "scene": {
+        "sourceKinds": ["camera"],
+        "cameraKeyed": true,
+        "cameraOnStage": false
+      }
+    },
+    {
+      "name": "plan 235: Visibility 0 keeps the camera-only camera full frame",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1
+      },
+      "kind": "camera",
+      "fit": "cover",
+      "source": {
+        "width": 1280,
+        "height": 720
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "stageMargin": 0,
+      "scene": {
+        "sourceKinds": ["camera"],
+        "cameraOnStage": true
+      }
+    },
+    {
+      "name": "plan 235: Visibility 40 gives the camera-only camera a 60% stage",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1
+      },
+      "kind": "camera",
+      "fit": "cover",
+      "source": {
+        "width": 1280,
+        "height": 720
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 384,
+        "y": 216,
+        "width": 1152,
+        "height": 648
+      },
+      "stageMargin": 0.2,
+      "scene": {
+        "sourceKinds": ["camera"],
+        "cameraOnStage": true
+      }
+    },
+    {
+      "name": "plan 235: a vertical camera-only scene stages the camera too",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1
+      },
+      "kind": "camera",
+      "fit": "cover",
+      "source": {
+        "width": 1280,
+        "height": 720
+      },
+      "canvas": {
+        "width": 1080,
+        "height": 1920
+      },
+      "expected": {
+        "x": 108,
+        "y": 192,
+        "width": 864,
+        "height": 1536
+      },
+      "stageMargin": 0.1,
+      "scene": {
+        "sourceKinds": ["camera"],
+        "cameraOnStage": true
+      }
+    },
+    {
+      "name": "plan 235: a 4:3 camera on Fit is fitted inside the stage",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1
+      },
+      "kind": "camera",
+      "fit": "contain",
+      "source": {
+        "width": 640,
+        "height": 480
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 384,
+        "y": 108,
+        "width": 1152,
+        "height": 864
+      },
+      "stageMargin": 0.1,
+      "scene": {
+        "sourceKinds": ["camera"],
+        "cameraOnStage": true
+      }
+    },
+    {
+      "name": "plan 235: picture-in-picture leaves the camera where it is",
       "frame": {
         "x": 0.7,
         "y": 0.65,
@@ -130,7 +311,102 @@
         "width": 480,
         "height": 270
       },
-      "stageMargin": 0.1
+      "stageMargin": 0.1,
+      "scene": {
+        "sourceKinds": ["screen", "camera"],
+        "cameraOnStage": false
+      }
+    },
+    {
+      "name": "plan 235: side by side leaves the camera half at the canvas edge",
+      "frame": {
+        "x": 0.7,
+        "y": 0,
+        "width": 0.3,
+        "height": 1
+      },
+      "kind": "camera",
+      "fit": "cover",
+      "source": {
+        "width": 1280,
+        "height": 720
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 1344,
+        "y": 0,
+        "width": 576,
+        "height": 1080
+      },
+      "stageMargin": 0.1,
+      "scene": {
+        "sourceKinds": ["screen", "camera"],
+        "cameraOnStage": false
+      }
+    },
+    {
+      "name": "plan 235: a camera beside the test pattern is not camera-only",
+      "frame": {
+        "x": 0.7,
+        "y": 0.65,
+        "width": 0.25,
+        "height": 0.25
+      },
+      "kind": "camera",
+      "fit": "cover",
+      "source": {
+        "width": 1280,
+        "height": 720
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 1344,
+        "y": 702,
+        "width": 480,
+        "height": 270
+      },
+      "stageMargin": 0.1,
+      "scene": {
+        "sourceKinds": ["test-pattern", "camera"],
+        "cameraOnStage": false
+      }
+    },
+    {
+      "name": "plan 235: a Freeform camera keeps the streamer's own box",
+      "frame": {
+        "x": 0.1,
+        "y": 0.1,
+        "width": 0.5,
+        "height": 0.5
+      },
+      "kind": "camera",
+      "fit": "cover",
+      "source": {
+        "width": 1280,
+        "height": 720
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 192,
+        "y": 108,
+        "width": 960,
+        "height": 540
+      },
+      "stageMargin": 0.1,
+      "scene": {
+        "sourceKinds": ["camera"],
+        "freeform": true,
+        "cameraOnStage": false
+      }
     },
     {
       "name": "vertical Fit: a 16:9 screen in a 1080x1920 band",

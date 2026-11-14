@@ -396,7 +396,7 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
           ),
         'missing destination rows or honest sign-in availability'
       )
-      check(o.streamKeyAction === 'Open Livestream', 'missing stream-key action')
+      check(o.streamKeyAction === 'Open Destinations', 'missing stream-key action')
       skipped.push(
         'real OAuth sign-in: smoke observes availability; release-like build and owner account required'
       )
@@ -405,9 +405,9 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
       workspace()
       check(
         validRecord(['done']) && o.record.goal === 'stream',
-        'Open Livestream did not write done for Livestreams'
+        'Open Destinations did not write done for Livestreams'
       )
-      check(o.livestreamSetup === true, 'Open Livestream did not land on Livestream → Setup')
+      check(o.livestreamSetup === true, 'Open Destinations did not land on Destinations → Setup')
       break
     case 'skip-look':
       workspace()

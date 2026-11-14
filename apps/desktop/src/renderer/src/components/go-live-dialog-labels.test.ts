@@ -59,7 +59,7 @@ function destination(
 }
 
 describe('GoLiveDestinationRow (plan 174 S2.2)', () => {
-  it('says how a destination connects in the Livestream page words', () => {
+  it('says how a destination connects in the Destinations page words', () => {
     const signIn = renderToStaticMarkup(
       createElement(GoLiveDestinationRow, {
         view: { destination: destination(), ready: true, problem: null },

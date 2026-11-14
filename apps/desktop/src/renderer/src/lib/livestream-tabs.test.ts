@@ -9,7 +9,7 @@ import {
   writeLastLivestreamView
 } from './livestream-tabs'
 
-// Plan 174 S1.6b (A-14): Livestream reopens on the view used last.
+// Plan 174 S1.6b (A-14): Destinations reopens on the view used last.
 
 describe('livestream views', () => {
   it('lists Setup then Upcoming, and opens on Setup by default', () => {

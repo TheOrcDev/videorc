@@ -1,11 +1,11 @@
 import {
   type AppIcon,
   AssetsIcon,
+  BuddyPageIcon,
   CaptionsIcon,
   HealthIcon,
   LibraryIcon,
   LivestreamIcon,
-  BuddyIcon,
   OutputIcon,
   SceneIcon,
   SettingsIcon,
@@ -19,26 +19,23 @@ import { isLivestreamViewId } from '@/lib/livestream-tabs'
 import { migrateSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
 import type { FirstRunSetupRequest, WorkspaceNavigation } from '@/lib/workspace-navigation'
 
-// The Setup pages, listed under the sidebar's "Setup" label: one click away, but
-// they are FULL pages — studio content renders only on the Studio tab (user decision
-// 2026-06-09, overriding the earlier push-rail idea). Sources is the single home for
-// every capture device — screen/window, camera, AND microphone — so changing what
-// gets captured never requires hunting across pages (UI rewrite plan, 2026-06-10).
+// The panel pages: one click away, but they are FULL pages — studio content
+// renders only on the Studio tab (user decision 2026-06-09, overriding the
+// earlier push-rail idea). Sources is the single home for every capture device
+// — screen/window, camera, AND microphone — so changing what gets captured
+// never requires hunting across pages (UI rewrite plan, 2026-06-10). Most sit
+// under the sidebar's "Setup" label; Destinations (`live`) sits under
+// "Livestream" with Buddy (plan 235 D6), and stays a panel so
+// `openStudioPanel('live')` keeps working.
 export type StudioPanel = 'sources' | 'layouts' | 'assets' | 'live' | 'captions' | 'recording'
 
 // Full pages: they replace the workspace content area.
 export type WorkspaceTab = 'studio' | StudioPanel | 'library' | 'ai' | 'diagnostics' | 'settings'
 
-// Sidebar zones (plan 174 D8): the stage rows (Studio, Buddy), then Setup
-// (STUDIO_PANELS, the only labelled group), then Library; the 'system' rows
-// sit in a bottom block above the account row. Health has no row at all.
-export type WorkspaceTabGroup = 'stage' | 'library' | 'system'
-
 export type WorkspaceTabMeta = {
   id: WorkspaceTab
   label: string
   icon: AppIcon
-  group: WorkspaceTabGroup
 }
 
 export type StudioPanelMeta = {
@@ -50,47 +47,65 @@ export type StudioPanelMeta = {
   legacyTabId: string
 }
 
-// Buddy (plan 119) sits in the stage row, right under Studio. Its id is `ai`,
-// the id deep links, smokes, ⌘9 and the `data-videorc-tab-trigger` value
-// already use.
+// Buddy (plan 119) keeps the id `ai`, the id deep links, smokes and the
+// `data-videorc-tab-trigger` value already use. Its row wears a plain glyph,
+// `BuddyPageIcon` (plan 235 D7); the Buddy artwork stays on the Buddy page.
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
-  { id: 'studio', label: 'Studio', icon: StudioIcon, group: 'stage' },
-  { id: 'ai', label: BUDDY_TAB_LABEL, icon: BuddyIcon, group: 'stage' },
-  { id: 'library', label: 'Library', icon: LibraryIcon, group: 'library' },
-  { id: 'settings', label: 'Settings', icon: SettingsIcon, group: 'system' },
-  { id: 'diagnostics', label: 'Health', icon: HealthIcon, group: 'system' }
+  { id: 'studio', label: 'Studio', icon: StudioIcon },
+  { id: 'ai', label: BUDDY_TAB_LABEL, icon: BuddyPageIcon },
+  { id: 'library', label: 'Library', icon: LibraryIcon },
+  { id: 'settings', label: 'Settings', icon: SettingsIcon },
+  { id: 'diagnostics', label: 'Health', icon: HealthIcon }
 ]
 
-// Sidebar order mirrors the live workflow: pick sources, compose, go live, output.
-// There is no Audio page — the microphone and mixer live on Sources with every
-// other capture device. Labels renamed 2026-06-13 (ux-ia-refactor-plan); ids and
-// legacyTabId stay so smokes and deep links keep working.
+// The panel pages in sidebar order. There is no Audio page — the microphone and
+// mixer live on Sources with every other capture device. Labels renamed
+// 2026-06-13 (ux-ia-refactor-plan) and 2026-11-14 (plan 235 D6: Livestream →
+// Destinations); ids and legacyTabId stay so smokes and deep links keep working.
 export const STUDIO_PANELS: StudioPanelMeta[] = [
   { id: 'sources', label: 'Sources', icon: SourcesIcon, legacyTabId: 'sources' },
   { id: 'layouts', label: 'Scene', icon: SceneIcon, legacyTabId: 'layout' },
   { id: 'assets', label: 'Assets', icon: AssetsIcon, legacyTabId: 'assets' },
-  { id: 'live', label: 'Livestream', icon: LivestreamIcon, legacyTabId: 'streaming' },
   { id: 'captions', label: 'Captions', icon: CaptionsIcon, legacyTabId: 'captions' },
-  { id: 'recording', label: 'Output', icon: OutputIcon, legacyTabId: 'recording' }
+  { id: 'recording', label: 'Output', icon: OutputIcon, legacyTabId: 'recording' },
+  { id: 'live', label: 'Destinations', icon: LivestreamIcon, legacyTabId: 'streaming' }
 ]
 
-// Page shortcuts. Studio, the Setup pages and Library take ⌘1–⌘8 in sidebar
-// order. Buddy takes ⌘9, the key tab id `ai` has always had, although it sits
-// under Studio (plan 119): muscle memory and deep links outrank a strict
-// sidebar order.
-// Settings keeps the platform-standard ⌘,. Health intentionally has NO digit — it
-// stays reachable via ⌘K (and the account menu). The main process emits the raw
-// key ('1'–'9' or ',') and AppShell maps whatever is listed here.
+export type SidebarZoneId = 'stage' | 'setup' | 'livestream' | 'library' | 'system'
+
+export type SidebarZone = {
+  id: SidebarZoneId
+  /** A labelled group's `SectionLabel`; a zone of one row carries none. */
+  label?: string
+  pages: readonly WorkspaceTab[]
+}
+
+// The sidebar, top to bottom (plan 174 D8, plan 235 D6): Studio leads alone as
+// the chrome slab, then the two labelled groups, Setup and Livestream, then
+// Library. The 'system' rows sit in a bottom block above the account row.
+// Health has no row at all: the status bar's state is its door (D9).
+export const SIDEBAR_ZONES: readonly SidebarZone[] = [
+  { id: 'stage', pages: ['studio'] },
+  { id: 'setup', label: 'Setup', pages: ['sources', 'layouts', 'assets', 'captions', 'recording'] },
+  { id: 'livestream', label: 'Livestream', pages: ['live', 'ai'] },
+  { id: 'library', pages: ['library'] },
+  { id: 'system', pages: ['settings'] }
+]
+
+// Page shortcuts run down the sidebar, ⌘1–⌘9 (plan 235 D8). Settings keeps
+// the platform-standard ⌘,. Health intentionally has NO digit — it stays
+// reachable via ⌘K (and the account menu). The main process emits the raw key
+// ('1'–'9' or ',') and AppShell maps whatever is listed here.
 export const WORKSPACE_SHORTCUTS: { digit: string; tab: WorkspaceTab }[] = [
   { digit: '1', tab: 'studio' },
   { digit: '2', tab: 'sources' },
   { digit: '3', tab: 'layouts' },
   { digit: '4', tab: 'assets' },
-  { digit: '5', tab: 'live' },
-  { digit: '6', tab: 'captions' },
-  { digit: '7', tab: 'recording' },
-  { digit: '8', tab: 'library' },
-  { digit: '9', tab: 'ai' },
+  { digit: '5', tab: 'captions' },
+  { digit: '6', tab: 'recording' },
+  { digit: '7', tab: 'live' },
+  { digit: '8', tab: 'ai' },
+  { digit: '9', tab: 'library' },
   { digit: ',', tab: 'settings' }
 ]
 
@@ -98,25 +113,25 @@ export function shortcutDigitFor(tab: WorkspaceTab): string | undefined {
   return WORKSPACE_SHORTCUTS.find((entry) => entry.tab === tab)?.digit
 }
 
-const tabIdsIn = (group: WorkspaceTabGroup): WorkspaceTab[] =>
-  WORKSPACE_TABS.filter((tab) => tab.group === group).map((tab) => tab.id)
-
 /** Every page the sidebar shows, top to bottom (Health has no row). */
-const SIDEBAR_ORDER: WorkspaceTab[] = [
-  ...tabIdsIn('stage'),
-  ...STUDIO_PANELS.map((panel) => panel.id),
-  ...tabIdsIn('library'),
-  ...tabIdsIn('system').filter((tab) => tab !== 'diagnostics')
-]
+const SIDEBAR_ORDER: WorkspaceTab[] = SIDEBAR_ZONES.flatMap((zone) => zone.pages)
 
 /**
  * A page's position down the sidebar. The reveal cascade uses it so the
- * shortcut chips arrive top-to-bottom, regardless of which sidebar group a row
- * sits in and of its digit (Buddy's ⌘9 sits second).
+ * shortcut chips arrive top-to-bottom, whichever sidebar group a row sits in.
  */
 export function sidebarOrderFor(tab: WorkspaceTab): number {
   const index = SIDEBAR_ORDER.indexOf(tab)
   return index === -1 ? 0 : index
+}
+
+/** A page's name and icon, whichever table holds it. */
+export function workspacePageMeta(tab: WorkspaceTab): WorkspaceTabMeta {
+  const meta =
+    WORKSPACE_TABS.find((entry) => entry.id === tab) ??
+    STUDIO_PANELS.find((entry) => entry.id === tab)
+  if (!meta) throw new Error(`No workspace page ${tab}`)
+  return { id: meta.id, label: meta.label, icon: meta.icon }
 }
 
 export function workspaceTabLabel(tab: WorkspaceTab): string {

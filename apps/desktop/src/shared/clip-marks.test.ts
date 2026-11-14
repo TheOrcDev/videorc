@@ -49,14 +49,14 @@ describe('clip mark clock', () => {
 })
 
 describe('clip marked toast', () => {
-  it('points every saved mark at the stream report in Buddy (plan 119 S3)', () => {
-    expect(CLIP_MARK_IN_REPORT).toBe("It's in your stream report in Buddy.")
+  it('points every saved mark at the stream report in Sidekick (plan 119 S3)', () => {
+    expect(CLIP_MARK_IN_REPORT).toBe("It's in your stream report in Sidekick.")
     expect(
       clipMarkedToast({ sessionId: 's', atSeconds: 754.2, source: 'manual', saved: true })
     ).toEqual({
       kind: 'success',
       title: 'Clip marked at 12:34',
-      description: "It's in your stream report in Buddy."
+      description: "It's in your stream report in Sidekick."
     })
     expect(
       clipMarkedToast(
@@ -66,7 +66,7 @@ describe('clip marked toast', () => {
     ).toEqual({
       kind: 'success',
       title: 'Clip marked at 1:02:05',
-      description: "It's in your stream report in Buddy."
+      description: "It's in your stream report in Sidekick."
     })
   })
 

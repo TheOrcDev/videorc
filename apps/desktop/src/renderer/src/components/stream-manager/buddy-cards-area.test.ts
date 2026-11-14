@@ -44,15 +44,15 @@ describe('BuddyCardsArea (plan 174 S3.14c, H-20, H-21)', () => {
   })
 
   it('announces each card once, politely, and counts the cards waiting', async () => {
-    await render([{ id: 'r-1', label: "Buddy asks before removing Ada's message, 18s left" }])
+    await render([{ id: 'r-1', label: "Sidekick asks before removing Ada's message, 18s left" }])
     const region = container.querySelector('[data-slot="buddy-cards-announcement"]')
     expect(region?.getAttribute('aria-live')).toBe('polite')
     expect(region?.getAttribute('role')).toBe('status')
-    expect(announcement()).toBe("Buddy asks before removing Ada's message, 18s left")
+    expect(announcement()).toBe("Sidekick asks before removing Ada's message, 18s left")
     expect(container.querySelector('[data-slot="buddy-cards-waiting"]')).toBeNull()
     // The same card again says nothing new; a second card is announced alone.
     await render([
-      { id: 'r-1', label: "Buddy asks before removing Ada's message, 17s left" },
+      { id: 'r-1', label: "Sidekick asks before removing Ada's message, 17s left" },
       { id: 'u-1', label: 'Grum wants to post' }
     ])
     expect(announcement()).toBe('Grum wants to post')

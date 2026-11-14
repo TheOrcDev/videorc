@@ -81,7 +81,7 @@ type Connect = (
 
 /**
  * One platform: its mark, its name, connected or not, and the one button.
- * The wait for the browser is the Livestream page's own (`SignInPending`),
+ * The wait for the browser is the Destinations page's own (`SignInPending`),
  * and belongs to the account as it was at the click, so a sign-in that lands
  * ends it.
  */
@@ -130,7 +130,7 @@ function DestinationSetupRow({
       disabled={disabled}
       variant="outline"
       onClick={() => {
-        // YouTube's consent comes first, exactly as on the Livestream page.
+        // YouTube's consent comes first, exactly as on the Destinations page.
         if (platform === 'youtube') setConsentOpen(true)
         else startSignIn(platformConnectOptions(platform))
       }}
@@ -185,7 +185,7 @@ function DestinationSetupRow({
  * Both: sign in to YouTube, Twitch, Kick or X. A sign-in started here also
  * switches that destination to Sign in and turns it on (inside the cap), so
  * Go Live works after setup. Stream keys, TikTok, Instagram and Custom RTMP
- * open Livestream → Setup instead. A replay shows the accounts as they are
+ * open Destinations → Setup instead. A replay shows the accounts as they are
  * and turns nothing off.
  */
 export function DestinationsStep(): ReactElement {
@@ -258,10 +258,10 @@ export function DestinationsStep(): ReactElement {
         </GroupedList>
         <div className="flex items-center gap-3" data-first-run-stream-key="">
           <p className="min-w-0 flex-1 text-meta text-muted-foreground">
-            Using a stream key, TikTok or Instagram? Set it up in Livestream.
+            Using a stream key, TikTok or Instagram? Set it up in Destinations.
           </p>
           <Button disabled={frame.leaving} variant="outline" onClick={() => frame.leaveTo('live')}>
-            Open Livestream
+            Open Destinations
           </Button>
         </div>
       </div>

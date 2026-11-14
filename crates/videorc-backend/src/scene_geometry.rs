@@ -1,7 +1,7 @@
 use crate::protocol::{
     ArrangementMode, CameraAspect, CameraCorner, CameraFit, CameraShape, CameraSize,
     CameraTransform, CameraTransformMode, EffectiveSceneBackground, LayoutPreset, LayoutSettings,
-    SceneSourceKind, SceneTransform, SideBySideSplit,
+    Scene, SceneSourceKind, SceneTransform, SideBySideSplit,
 };
 
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
@@ -201,12 +201,46 @@ pub fn background_zoom_crop(background: Option<&EffectiveSceneBackground>) -> Sc
     }
 }
 
+/// The scene background's stage as one render path sees it for one scene:
+/// how far it sits in from the canvas edge, and whether the camera sits on it
+/// (plan 235, owner decision D9 a).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackgroundStage {
+    /// The inset per side, as a canvas fraction. Zero means no stage.
+    pub margin: f64,
+    /// Whether the scene's camera sits on the stage too
+    /// ([`scene_camera_uses_background_stage`]).
+    pub camera: bool,
+}
+
+impl BackgroundStage {
+    /// No stage: every source keeps its own transform.
+    pub const NONE: Self = Self {
+        margin: 0.0,
+        camera: false,
+    };
+
+    /// The stage for `scene` under `layout`. Pass a `margin` of zero unless
+    /// the background really renders, so a background that failed to load
+    /// never leaves a ring around the sources.
+    pub fn for_scene(scene: &Scene, layout: &LayoutSettings, margin: f64) -> Self {
+        Self {
+            margin,
+            camera: scene_camera_uses_background_stage(scene, layout),
+        }
+    }
+}
+
+/// A source's transform as the render paths draw it: mapped onto the scene
+/// background's stage when [`scene_source_uses_background_stage`] says the
+/// source sits on it, untouched otherwise.
 pub fn scene_source_render_transform(
     transform: &SceneTransform,
     source_kind: &SceneSourceKind,
-    stage_margin: f64,
+    stage: BackgroundStage,
 ) -> SceneTransform {
-    if stage_margin <= 0.0 || !scene_source_uses_background_stage(source_kind) {
+    let stage_margin = stage.margin;
+    if stage_margin <= 0.0 || !scene_source_uses_background_stage(source_kind, stage.camera) {
         return transform.clone();
     }
     let stage_scale = 1.0 - (stage_margin * 2.0);
@@ -222,11 +256,59 @@ pub fn scene_source_render_transform(
     }
 }
 
-pub fn scene_source_uses_background_stage(source_kind: &SceneSourceKind) -> bool {
-    matches!(
-        source_kind,
-        SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern
+/// The one rule for which sources sit on the scene background's stage (plan
+/// 235, owner decision D9 a). A screen, a window and the test pattern always
+/// do. The camera does only when the scene says so
+/// ([`scene_camera_uses_background_stage`]). Metal, CPU, D3D11 and the FFmpeg
+/// legacy graph all ask this through [`scene_source_render_transform`]; the
+/// TypeScript twin is `sceneSourceUsesBackgroundStage`.
+pub fn scene_source_uses_background_stage(
+    source_kind: &SceneSourceKind,
+    camera_on_stage: bool,
+) -> bool {
+    match source_kind {
+        SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern => true,
+        SceneSourceKind::Camera => camera_on_stage,
+    }
+}
+
+/// Whether this scene's camera sits on the background's stage (plan 235 D9
+/// a): the scene is camera-only, on either canvas, and the camera is not
+/// keyed. A background behind a full-frame camera was drawn and then covered,
+/// so the camera now gets the stage a shared screen gets. A keyed camera
+/// stays full frame over the background (the green screen case), a camera
+/// beside or over a screen keeps its place, and a Freeform scene's boxes are
+/// the streamer's own.
+pub fn scene_camera_uses_background_stage(scene: &Scene, layout: &LayoutSettings) -> bool {
+    camera_uses_background_stage(
+        scene.sources.iter().map(|source| &source.kind),
+        layout.arrangement_mode == ArrangementMode::Freeform,
+        camera_chroma_key(layout).is_some(),
     )
+}
+
+/// [`scene_camera_uses_background_stage`] on the facts alone, which is the
+/// form `protocol-fixtures/scene-picture-geometry.json` pins against the
+/// TypeScript twin (`sceneCameraUsesBackgroundStage`). Hidden sources count:
+/// hiding a screen must not move the camera.
+pub fn camera_uses_background_stage<'a>(
+    source_kinds: impl IntoIterator<Item = &'a SceneSourceKind>,
+    freeform: bool,
+    camera_keyed: bool,
+) -> bool {
+    if freeform || camera_keyed {
+        return false;
+    }
+    let mut has_camera = false;
+    for kind in source_kinds {
+        match kind {
+            SceneSourceKind::Camera => has_camera = true,
+            SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern => {
+                return false;
+            }
+        }
+    }
+    has_camera
 }
 
 /// A scene source's box in canvas pixels, uncut (plan 215 E1, D2): its true
@@ -315,11 +397,11 @@ pub fn scene_picture_rect_pixels(
     kind: &SceneSourceKind,
     fit: SceneFit,
     source_size: Option<(u32, u32)>,
-    stage_margin: f64,
+    stage: BackgroundStage,
     canvas_width: u32,
     canvas_height: u32,
 ) -> Option<SignedPixelRect> {
-    let staged = scene_source_render_transform(transform, kind, stage_margin);
+    let staged = scene_source_render_transform(transform, kind, stage);
     let rect = scene_source_rect_pixels(&staged, canvas_width, canvas_height)?;
     let Some((source_width, source_height)) = source_size else {
         return Some(rect);
@@ -347,7 +429,7 @@ pub fn scene_picture_rect(
     kind: &SceneSourceKind,
     fit: SceneFit,
     source_size: Option<(u32, u32)>,
-    stage_margin: f64,
+    stage: BackgroundStage,
     canvas_width: u32,
     canvas_height: u32,
 ) -> Option<CameraTransform> {
@@ -356,7 +438,7 @@ pub fn scene_picture_rect(
         kind,
         fit,
         source_size,
-        stage_margin,
+        stage,
         canvas_width,
         canvas_height,
     )?;
@@ -850,9 +932,174 @@ pub fn chroma_key_neighbourhood_rgb(
     sum.map(|total| f64::from(total) / 256.0)
 }
 
+/// Plan 233: how many halvings the keyed camera takes before it is drawn.
+///
+/// The owner's 4K camera in the 720×405 Large slot put 5.3 × 5.3 camera
+/// texels under every output pixel, and the key judged one bilinear tap of
+/// them per pixel: along the subject's outline a pixel flipped between kept
+/// and keyed out with every sub-texel movement, and left green specks in a
+/// new place every frame. The keyed picture is now built per camera texel,
+/// reduced by averaging 2^L × 2^L blocks (premultiplied), and drawn with one
+/// bilinear tap, which leaves a shrink under 2×. `L = floor(log2(camera px
+/// per drawn px))` on the axis with the SMALLER ratio, never below 0, so no
+/// axis is ever reduced past its drawn size. `source_*` is the camera window
+/// the draw reads (after its crop) in texels and `drawn_*` the box it fills
+/// in output pixels. The Metal compositor mirrors this (it also builds into
+/// the preview helper, which has no `scene_geometry`); a test pins the two.
+pub fn chroma_key_reduction_level(
+    source_width: f64,
+    source_height: f64,
+    drawn_width: f64,
+    drawn_height: f64,
+) -> u32 {
+    if !(source_width > 0.0 && source_height > 0.0 && drawn_width > 0.0 && drawn_height > 0.0) {
+        return 0;
+    }
+    let ratio = (source_width / drawn_width).min(source_height / drawn_height);
+    if ratio.is_nan() || ratio < 2.0 {
+        return 0;
+    }
+    (ratio.log2().floor() as u32).min(CHROMA_KEY_REDUCTION_LEVEL_MAX)
+}
+
+/// The deepest reduction (a 32 × 32 block): the Metal key pass loads one
+/// block plus its apron per thread into threadgroup memory, and nothing
+/// draws a camera 64 times smaller than it is. The Metal mirror pins it.
+pub const CHROMA_KEY_REDUCTION_LEVEL_MAX: u32 = 5;
+
+/// Speck cleanup: the key drops a tiny kept patch that the keyed-out screen
+/// surrounds on every side.
+///
+/// The owner's recording of 2026-11-14 had a teal dot ("a small hole") in the
+/// same place on the left of every frame, whatever the background. The raw
+/// camera has a blue mark on the green screen there, about 5 × 5 texels of a
+/// 4K frame (`(49,109,171)` on a `(35,128,52)` screen). Its judged colour
+/// sits far outside the cone, so the key kept it, and the edge despill turned
+/// it teal. Nothing the subject brings is that small and that alone: hair and
+/// the mic cable reach back to the subject, and the cleanup only removes
+/// patches enclosed by keyed-out screen. It never fills holes, so the screen
+/// between fingers stays see-through.
+///
+/// The rule works on CELLS of the keyed picture: a cell is kept when any of
+/// its texels has alpha above [`CHROMA_KEY_SPECK_KEPT_ALPHA`]. Around a cell,
+/// the RING is the cells exactly [`CHROMA_KEY_SPECK_RING`] cells away
+/// (Chebyshev distance); the WINDOW is the cells nearer than that. A cell
+/// whose ring holds no kept cell has an enclosed window: nothing kept inside
+/// can reach anything outside without crossing the ring. Every cell inside
+/// some enclosed window is dropped, so a patch goes whole or not at all. A
+/// patch up to ring × cell texels across always goes (12 texels of a 4K
+/// camera); up to (2 × ring − 1) cells when it sits well on the grid; never
+/// anything bigger.
+///
+/// The cell is a share of the camera frame, about [`CHROMA_KEY_SPECK_CELL_SHARE`]
+/// of its short side (4 texels of a 4K camera, 2 of a 1080p one), in keyed
+/// texels at the reduction level (at least 1), so the preview and the
+/// recording drop the same patches. Out past the frame counts as kept: what
+/// the frame's edge cuts may be part of something bigger, so a patch in the
+/// outermost cells always stays, and so does every picture under seven cells
+/// across. The Metal key pass mirrors all three constants; a compositor test
+/// pins them.
+pub const CHROMA_KEY_SPECK_CELL_SHARE: f64 = 1.0 / 540.0;
+pub const CHROMA_KEY_SPECK_RING: usize = 3;
+pub const CHROMA_KEY_SPECK_KEPT_ALPHA: f64 = 1.0 / 32.0;
+
+/// The speck cleanup's cell side in keyed texels for a `source_width` ×
+/// `source_height` camera keyed at `block` × `block` reduction: the share of
+/// the short side in camera texels over the block, rounded, at least 1.
+pub fn chroma_key_speck_cell(source_width: u32, source_height: u32, block: u32) -> usize {
+    let short_side = f64::from(source_width.min(source_height));
+    let camera_texels = short_side * CHROMA_KEY_SPECK_CELL_SHARE;
+    ((camera_texels / f64::from(block.max(1))).round() as usize).max(1)
+}
+
+/// Which keyed texels of a `width` × `height` keyed picture the speck
+/// cleanup drops ([`CHROMA_KEY_SPECK_CELL_SHARE`]), from each texel's alpha
+/// (`alpha_at(x, y)`, 0..=1) with cells of `cell` × `cell` texels. The CPU
+/// keyed plane uses it as is; the Metal key pass mirrors its three steps (kept
+/// cells, enclosed windows, dropped cells) in three small kernels.
+pub struct ChromaKeySpecks {
+    cell: usize,
+    cells_width: usize,
+    dropped: Vec<bool>,
+}
+
+impl ChromaKeySpecks {
+    pub fn find(
+        width: usize,
+        height: usize,
+        cell: usize,
+        alpha_at: impl Fn(usize, usize) -> f32,
+    ) -> Self {
+        let cell = cell.max(1);
+        let (cells_width, cells_height) = (width.div_ceil(cell), height.div_ceil(cell));
+        let threshold = CHROMA_KEY_SPECK_KEPT_ALPHA as f32;
+        let mut kept = vec![false; cells_width * cells_height];
+        for y in 0..height {
+            for x in 0..width {
+                if alpha_at(x, y) > threshold {
+                    kept[(y / cell) * cells_width + x / cell] = true;
+                }
+            }
+        }
+        let ring = CHROMA_KEY_SPECK_RING as isize;
+        let inside = |x: isize, y: isize| -> bool {
+            x >= 0 && y >= 0 && (x as usize) < cells_width && (y as usize) < cells_height
+        };
+        // Out past the frame is kept for the ring (it may hide more of the
+        // patch) and never an enclosed window.
+        let kept_at = |x: isize, y: isize| -> bool {
+            !inside(x, y) || kept[y as usize * cells_width + x as usize]
+        };
+        let mut enclosed = vec![false; cells_width * cells_height];
+        for cy in 0..cells_height as isize {
+            for cx in 0..cells_width as isize {
+                let ring_is_clear = (-ring..=ring).all(|dy| {
+                    let step = if dy.abs() == ring {
+                        1
+                    } else {
+                        (2 * ring) as usize
+                    };
+                    (-ring..=ring)
+                        .step_by(step)
+                        .all(|dx| !kept_at(cx + dx, cy + dy))
+                });
+                enclosed[cy as usize * cells_width + cx as usize] = ring_is_clear;
+            }
+        }
+        let reach = ring - 1;
+        let mut dropped = vec![false; cells_width * cells_height];
+        for cy in 0..cells_height as isize {
+            for cx in 0..cells_width as isize {
+                dropped[cy as usize * cells_width + cx as usize] = (-reach..=reach).any(|dy| {
+                    (-reach..=reach).any(|dx| {
+                        let (x, y) = (cx + dx, cy + dy);
+                        inside(x, y) && enclosed[y as usize * cells_width + x as usize]
+                    })
+                });
+            }
+        }
+        Self {
+            cell,
+            cells_width,
+            dropped,
+        }
+    }
+
+    /// Whether keyed texel (`x`, `y`) is dropped.
+    #[inline]
+    pub fn drops(&self, x: usize, y: usize) -> bool {
+        self.dropped[(y / self.cell) * self.cells_width + x / self.cell]
+    }
+}
+
 /// Spill suppression on kept pixels: pull the key channel down toward the
 /// other channels' max, scaled by `spill`. Only pixels where the key channel
 /// DOMINATES both others move, so neutral/yellow/cyan subject tones survive.
+///
+/// [`chroma_key_despill_rgb`] is the f64 form the keyed plane runs on a level
+/// texel's average colour (plan 233); this is the same rule for one 8-bit
+/// colour at the spec's strength, the tests' oracle.
+#[cfg(test)]
 pub fn chroma_key_despill(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     if spec.spill <= 0.0 {
         return (r, g, b);
@@ -871,6 +1118,97 @@ pub fn chroma_key_despill(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> (u8, u8,
         }
     }
     (r, g, b)
+}
+
+/// Plan 233 D1 a: despill near the edge.
+///
+/// Once the snow is gone, the green light the screen throws on the hair and
+/// the ears survives the key as a thin, steady green rim, and Spill removal
+/// 10 takes only a tenth of it off. So the despill is stronger next to the
+/// keyed-out area: its strength is the larger of Spill removal and
+/// `nearness × proximity`. Nearness ([`chroma_key_nearness`]) is how close
+/// the colour is to the key: 1 up to the cone's outer edge (max angle plus
+/// band), fading to 0 over [`CHROMA_KEY_EDGE_DESPILL_FADE_DEG`] past it,
+/// times the saturation eligibility the key uses. Proximity
+/// ([`chroma_key_edge_proximity`]) is how much of the keyed picture around
+/// the texel is keyed out, `clamp((1 − blurred alpha) × GAIN, 0, 1)`, with
+/// the alpha smoothed over the 5×5 binomial at the keyed texture's spacing
+/// (plan 229's kernel), so the reach is about two keyed texels: about two
+/// output pixels. Spill removal stays the floor everywhere, so a green or
+/// teal thing on the subject (a shirt logo, a mic's light ring) keeps its
+/// colour away from the edge. The Metal shader mirrors both constants.
+pub const CHROMA_KEY_EDGE_DESPILL_FADE_DEG: f64 = 30.0;
+pub const CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN: f64 = 6.0;
+
+/// The edge despill constants in shader order: `(fade_rad, proximity_gain)`,
+/// what the compositor test pins the Metal mirror to.
+#[cfg(test)]
+pub const CHROMA_KEY_EDGE_DESPILL_PARAMS: [f64; 2] = [
+    CHROMA_KEY_EDGE_DESPILL_FADE_DEG * std::f64::consts::PI / 180.0,
+    CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN,
+];
+
+/// How close a colour (0..=255 units, maybe fractional) is to the key, 0..=1
+/// (plan 233 D1 a): 1 inside the cone and its band, fading to 0 over
+/// [`CHROMA_KEY_EDGE_DESPILL_FADE_DEG`] past the band, times the saturation
+/// eligibility the key uses, so a grey is never near.
+pub fn chroma_key_nearness(spec: &ChromaKeySpec, rgb: [f64; 3]) -> f64 {
+    let Some((dir_cb, dir_cr)) = spec.key_direction() else {
+        return 0.0;
+    };
+    let (cb, cr, luma) = key_chroma_and_luma(rgb);
+    let saturation = (cb * cb + cr * cr).sqrt();
+    let (floor, ramp) = chroma_key_saturation_floor(luma);
+    if saturation <= floor {
+        return 0.0;
+    }
+    let cos_theta = ((cb * dir_cb + cr * dir_cr) / saturation).clamp(-1.0, 1.0);
+    let theta_deg = cos_theta.acos().to_degrees();
+    let outer_deg = spec.max_angle_deg + spec.band_deg;
+    let nearness = ((outer_deg + CHROMA_KEY_EDGE_DESPILL_FADE_DEG - theta_deg)
+        / CHROMA_KEY_EDGE_DESPILL_FADE_DEG)
+        .clamp(0.0, 1.0);
+    nearness * ((saturation - floor) / ramp).clamp(0.0, 1.0)
+}
+
+/// How close to the keyed-out area a keyed texel is, 0..=1, from the alpha
+/// around it (plan 233 D1 a): 0 where the picture around it is fully kept,
+/// 1 once a sixth of it is keyed out.
+pub fn chroma_key_edge_proximity(blurred_alpha: f64) -> f64 {
+    ((1.0 - blurred_alpha) * CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN).clamp(0.0, 1.0)
+}
+
+/// The despill strength of a kept colour (plan 233 D1 a): Spill removal as
+/// the floor, and nearness to the key times proximity to the keyed-out area.
+pub fn chroma_key_edge_despill_strength(
+    spec: &ChromaKeySpec,
+    rgb: [f64; 3],
+    proximity: f64,
+) -> f64 {
+    spec.spill.max(chroma_key_nearness(spec, rgb) * proximity)
+}
+
+/// [`chroma_key_despill`] for a colour in 0..=255 units that may be
+/// fractional (a level texel's average, plan 233) at `strength` in 0..=1:
+/// the key channel comes down toward the other two's max by that share,
+/// only where it dominates them. The Metal and D3D11 shaders mirror it.
+pub fn chroma_key_despill_rgb(spill_is_blue: bool, strength: f64, rgb: [f64; 3]) -> [f64; 3] {
+    if strength <= 0.0 {
+        return rgb;
+    }
+    let [r, g, b] = rgb;
+    if spill_is_blue {
+        let limit = r.max(g);
+        if b > limit {
+            return [r, g, b - strength * (b - limit)];
+        }
+    } else {
+        let limit = r.max(b);
+        if g > limit {
+            return [r, g - strength * (g - limit), b];
+        }
+    }
+    rgb
 }
 
 /// Mask geometry over a box that may hang off the canvas (plan 215 E2): the
@@ -1252,8 +1590,21 @@ mod tests {
             crop: Option<FixtureCrop>,
             #[serde(default)]
             stage_margin: f64,
+            /// The scene the source sits in (plan 235 D9 a). Without it the
+            /// camera is not on the stage.
+            scene: Option<FixtureScene>,
             canvas: FixtureSize,
             expected: FixtureRect,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FixtureScene {
+            source_kinds: Vec<SceneSourceKind>,
+            #[serde(default)]
+            camera_keyed: bool,
+            #[serde(default)]
+            freeform: bool,
+            camera_on_stage: bool,
         }
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -1267,7 +1618,30 @@ mod tests {
         .expect("protocol-fixtures/scene-picture-geometry.json is valid JSON");
         assert_eq!(fixture.schema_version, 1);
         assert!(fixture.cases.len() >= 12);
+        let scene_cases = fixture
+            .cases
+            .iter()
+            .filter(|case| case.scene.is_some())
+            .count();
+        assert!(scene_cases >= 7, "plan 235's stage cases: {scene_cases}");
         for case in fixture.cases {
+            let camera = case.scene.as_ref().is_some_and(|scene| {
+                let camera = camera_uses_background_stage(
+                    &scene.source_kinds,
+                    scene.freeform,
+                    scene.camera_keyed,
+                );
+                assert_eq!(
+                    camera, scene.camera_on_stage,
+                    "{}: whether the camera sits on the stage",
+                    case.name
+                );
+                camera
+            });
+            let stage = BackgroundStage {
+                margin: case.stage_margin,
+                camera,
+            };
             let crop = case.crop.unwrap_or(FixtureCrop {
                 crop_left: 0.0,
                 crop_top: 0.0,
@@ -1294,7 +1668,7 @@ mod tests {
                 &case.kind,
                 fit,
                 case.source.as_ref().map(|size| (size.width, size.height)),
-                case.stage_margin,
+                stage,
                 case.canvas.width,
                 case.canvas.height,
             )
@@ -1316,7 +1690,7 @@ mod tests {
                 &case.kind,
                 fit,
                 case.source.as_ref().map(|size| (size.width, size.height)),
-                case.stage_margin,
+                stage,
                 case.canvas.width,
                 case.canvas.height,
             )
@@ -1353,7 +1727,7 @@ mod tests {
             &SceneSourceKind::Screen,
             SceneFit::Contain,
             Some((2228, 1440)),
-            0.0,
+            BackgroundStage::NONE,
             2560,
             1440,
         )
@@ -1371,26 +1745,55 @@ mod tests {
                 Some((2560, 1440)),
             ),
         ] {
-            let rect =
-                scene_picture_rect_pixels(&frame, &kind, fit, size, 0.0, 2560, 1440).unwrap();
+            let rect = scene_picture_rect_pixels(
+                &frame,
+                &kind,
+                fit,
+                size,
+                BackgroundStage::NONE,
+                2560,
+                1440,
+            )
+            .unwrap();
             assert_eq!(
                 rect,
                 scene_source_rect_pixels(&frame, 2560, 1440).unwrap(),
                 "{kind:?} {fit:?}"
             );
         }
-        // A scene background's margin moves the screen's picture, never the camera's.
+        // A scene background's margin moves the screen's picture. The camera's
+        // moves only when the scene puts the camera on the stage (plan 235).
+        let screens = BackgroundStage {
+            margin: 0.1,
+            camera: false,
+        };
         let staged = scene_picture_rect_pixels(
             &frame,
             &SceneSourceKind::Screen,
             SceneFit::Contain,
             Some((2228, 1440)),
-            0.1,
+            screens,
             2560,
             1440,
         )
         .unwrap();
-        let expected = scene_source_render_transform(&frame, &SceneSourceKind::Screen, 0.1);
+        assert_eq!(
+            scene_source_render_transform(&frame, &SceneSourceKind::Camera, screens),
+            frame
+        );
+        let camera_staged = scene_source_render_transform(
+            &frame,
+            &SceneSourceKind::Camera,
+            BackgroundStage {
+                margin: 0.1,
+                camera: true,
+            },
+        );
+        assert_eq!(
+            camera_staged,
+            scene_source_render_transform(&frame, &SceneSourceKind::Screen, screens)
+        );
+        let expected = scene_source_render_transform(&frame, &SceneSourceKind::Screen, screens);
         let expected = contain_rect_pixels(
             2228.0,
             1440.0,
@@ -1758,6 +2161,257 @@ mod tests {
                 "{label} {rgb:?} must survive with defaults"
             );
         }
+    }
+
+    /// Plan 233: the level just above the drawn size, on the axis with the
+    /// smaller ratio, never below 0.
+    #[test]
+    fn chroma_key_reduction_level_is_the_power_of_two_just_above_the_slot() {
+        // The owner's 4K camera in the 720×405 Large slot: 5.3× → level 2.
+        assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 720.0, 405.0), 2);
+        // The same camera in the Preview's 480-wide slot: 8× exactly → 3.
+        assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 480.0, 270.0), 3);
+        // A 1080p camera in the Large slot: 2.67× → 1.
+        assert_eq!(chroma_key_reduction_level(1920.0, 1080.0, 720.0, 405.0), 1);
+        // 1:1, an upscale, or a shrink under 2× stay at level 0.
+        assert_eq!(
+            chroma_key_reduction_level(1920.0, 1080.0, 1920.0, 1080.0),
+            0
+        );
+        assert_eq!(chroma_key_reduction_level(1280.0, 720.0, 1920.0, 1080.0), 0);
+        assert_eq!(chroma_key_reduction_level(1920.0, 1080.0, 1000.0, 563.0), 0);
+        // The smaller ratio decides: 3.84× across, 5.3× down → 1.
+        assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 1000.0, 405.0), 1);
+        // The deepest level is 5, a 32 × 32 block.
+        assert_eq!(
+            chroma_key_reduction_level(3840.0, 2160.0, 10.0, 6.0),
+            CHROMA_KEY_REDUCTION_LEVEL_MAX
+        );
+        // Degenerate sizes never reduce.
+        assert_eq!(chroma_key_reduction_level(0.0, 2160.0, 720.0, 405.0), 0);
+        assert_eq!(chroma_key_reduction_level(3840.0, 2160.0, 0.0, 405.0), 0);
+        assert_eq!(
+            chroma_key_reduction_level(f64::NAN, 2160.0, 720.0, 405.0),
+            0
+        );
+    }
+
+    /// The speck cleanup's cell is about 1/540 of the camera's short side,
+    /// in keyed texels at the reduction level, never under one.
+    #[test]
+    fn chroma_key_speck_cell_is_a_share_of_the_short_side() {
+        assert_eq!(chroma_key_speck_cell(3840, 2160, 1), 4, "4K at 1:1");
+        assert_eq!(chroma_key_speck_cell(3840, 2160, 2), 2);
+        assert_eq!(
+            chroma_key_speck_cell(3840, 2160, 4),
+            1,
+            "4K in the Large slot"
+        );
+        assert_eq!(chroma_key_speck_cell(3840, 2160, 32), 1);
+        assert_eq!(chroma_key_speck_cell(1920, 1080, 1), 2, "1080p at 1:1");
+        assert_eq!(chroma_key_speck_cell(1280, 720, 1), 1);
+        assert_eq!(
+            chroma_key_speck_cell(1080, 1920, 1),
+            2,
+            "portrait: short side"
+        );
+        assert_eq!(chroma_key_speck_cell(0, 0, 0), 1);
+    }
+
+    /// A keyed picture as alpha rows, 0 = keyed out.
+    struct AlphaGrid {
+        width: usize,
+        alpha: Vec<f32>,
+    }
+
+    impl AlphaGrid {
+        fn new(width: usize, height: usize) -> Self {
+            Self {
+                width,
+                alpha: vec![0.0; width * height],
+            }
+        }
+
+        fn fill(&mut self, xs: std::ops::Range<usize>, ys: std::ops::Range<usize>, alpha: f32) {
+            for y in ys {
+                for x in xs.clone() {
+                    self.alpha[y * self.width + x] = alpha;
+                }
+            }
+        }
+
+        fn specks(&self, cell: usize) -> ChromaKeySpecks {
+            let height = self.alpha.len() / self.width;
+            ChromaKeySpecks::find(self.width, height, cell, |x, y| {
+                self.alpha[y * self.width + x]
+            })
+        }
+    }
+
+    fn dropped_in(
+        specks: &ChromaKeySpecks,
+        xs: std::ops::Range<usize>,
+        ys: std::ops::Range<usize>,
+    ) -> usize {
+        ys.flat_map(|y| xs.clone().map(move |x| (x, y)))
+            .filter(|&(x, y)| specks.drops(x, y))
+            .count()
+    }
+
+    /// The owner's speck (2026-11-14): a 5 × 5 patch alone on the screen
+    /// goes, and so do a 12 × 12 patch (ring × cell, the size that always
+    /// goes) and a speck one cell in from the frame's edge. The subject, a
+    /// blob bigger than a window, thin strands (straight and diagonal) that
+    /// reach back to the subject, a dot right next to the subject and a speck
+    /// the frame's edge cuts all stay.
+    #[test]
+    fn chroma_key_specks_drop_lone_patches_and_keep_what_reaches_the_subject() {
+        let (width, height, cell) = (160, 96, 4);
+        let mut grid = AlphaGrid::new(width, height);
+        grid.fill(112..160, 0..96, 1.0); // the subject
+        grid.fill(20..25, 60..65, 1.0); // the owner's speck
+        grid.fill(20..44, 8..32, 1.0); // a blob bigger than a window
+        grid.fill(70..82, 20..32, 0.8); // ring × cell across
+        grid.fill(0..3, 0..3, 1.0); // a speck the frame's corner cuts
+        grid.fill(5..8, 86..89, 1.0); // a speck one cell in from the edge
+        grid.fill(50..112, 80..81, 0.5); // a one-texel strand to the subject
+        for step in 0..30 {
+            grid.fill(111 - step..112 - step, 50 + step..51 + step, 1.0); // diagonal
+        }
+        grid.fill(108..110, 8..10, 1.0); // a dot two texels off the subject
+        let specks = grid.specks(cell);
+        assert_eq!(dropped_in(&specks, 20..25, 60..65), 25, "the owner's speck");
+        assert_eq!(dropped_in(&specks, 70..82, 20..32), 144, "ring × cell");
+        assert_eq!(dropped_in(&specks, 5..8, 86..89), 9, "one cell in");
+        assert_eq!(dropped_in(&specks, 0..3, 0..3), 0, "the corner speck");
+        assert_eq!(dropped_in(&specks, 112..160, 0..96), 0, "the subject");
+        assert_eq!(dropped_in(&specks, 20..44, 8..32), 0, "the blob");
+        assert_eq!(dropped_in(&specks, 50..112, 80..81), 0, "the strand");
+        for step in 0..30 {
+            assert!(
+                !specks.drops(111 - step, 50 + step),
+                "the diagonal strand at step {step}"
+            );
+        }
+        assert_eq!(
+            dropped_in(&specks, 108..110, 8..10),
+            0,
+            "the dot by the subject"
+        );
+    }
+
+    /// A patch goes whole or not at all: 16 texels across (4 cells) fit
+    /// one enclosed window and go whole even with the subject close on one
+    /// side; 24 across (6 cells) fit no window, and no part of them goes.
+    #[test]
+    fn chroma_key_specks_drop_a_patch_whole_or_not_at_all() {
+        let (width, height, cell) = (128, 64, 4);
+        let mut fits = AlphaGrid::new(width, height);
+        fits.fill(60..128, 0..64, 1.0);
+        fits.fill(40..56, 30..34, 1.0);
+        assert_eq!(dropped_in(&fits.specks(cell), 40..56, 30..34), 64);
+        let mut too_wide = AlphaGrid::new(width, height);
+        too_wide.fill(100..128, 0..64, 1.0);
+        too_wide.fill(40..64, 30..34, 1.0);
+        assert_eq!(dropped_in(&too_wide.specks(cell), 40..64, 30..34), 0);
+    }
+
+    /// Faint texels (alpha at or under 1/32) never keep a cell, so they never
+    /// shield a speck; a fully kept picture and one under seven cells across
+    /// (the old fixtures' tiny cameras) are left as they are.
+    #[test]
+    fn chroma_key_specks_ignore_faint_texels_and_flat_pictures() {
+        let mut grid = AlphaGrid::new(64, 64);
+        grid.fill(30..34, 30..34, 1.0);
+        // A faint row through the speck's ring (cell row 12 of 2-texel cells).
+        grid.fill(0..64, 24..25, CHROMA_KEY_SPECK_KEPT_ALPHA as f32);
+        assert_eq!(dropped_in(&grid.specks(2), 30..34, 30..34), 16);
+        let mut kept = AlphaGrid::new(64, 64);
+        kept.fill(0..64, 0..64, 1.0);
+        assert_eq!(dropped_in(&kept.specks(4), 0..64, 0..64), 0);
+        let mut tiny = AlphaGrid::new(6, 6);
+        tiny.fill(3..6, 0..6, 1.0);
+        assert_eq!(dropped_in(&tiny.specks(1), 0..6, 0..6), 0);
+    }
+
+    /// Plan 233 D1 a: nearness is 1 inside the cone and its band, fades out
+    /// over 30° past it and is 0 for a grey; proximity is 0 where the
+    /// picture around a texel is kept and 1 once a sixth is keyed out; the
+    /// strength never drops under Spill removal and reaches the nearness
+    /// only next to keyed-out texels.
+    #[test]
+    fn chroma_key_edge_despill_is_spill_removal_inside_and_nearness_at_the_edge() {
+        let spec = default_green_spec();
+        let screen = [30.0, 150.0, 40.0];
+        assert!(
+            (chroma_key_nearness(&spec, screen) - 1.0).abs() < 1e-9,
+            "the screen"
+        );
+        // The green-tinted subject tone of the compositor tests, 41° from
+        // the key: 12° past the cone's outer edge, about 0.6.
+        let tinted = [100.0, 115.0, 70.0];
+        let near = chroma_key_nearness(&spec, tinted);
+        assert!((0.5..0.7).contains(&near), "tinted subject: {near}");
+        // The teal logo, 57° from the key, has nearly faded out; a grey is
+        // never near.
+        assert!(
+            chroma_key_nearness(&spec, [0.0, 150.0, 150.0]) < 0.1,
+            "teal"
+        );
+        assert_eq!(
+            chroma_key_nearness(&spec, [128.0, 128.0, 128.0]),
+            0.0,
+            "grey"
+        );
+        assert_eq!(chroma_key_edge_proximity(1.0), 0.0);
+        assert!((chroma_key_edge_proximity(11.0 / 16.0) - 1.0).abs() < 1e-9);
+        assert!((chroma_key_edge_proximity(15.0 / 16.0) - 0.375).abs() < 1e-9);
+        assert_eq!(
+            chroma_key_edge_despill_strength(&spec, tinted, 0.0),
+            spec.spill,
+            "inside: Spill removal"
+        );
+        assert!(
+            (chroma_key_edge_despill_strength(&spec, tinted, 1.0) - near).abs() < 1e-9,
+            "at the edge: the nearness"
+        );
+        assert_eq!(
+            CHROMA_KEY_EDGE_DESPILL_PARAMS,
+            [CHROMA_KEY_EDGE_DESPILL_FADE_DEG.to_radians(), 6.0]
+        );
+    }
+
+    /// Plan 233: the f64 despill is the 8-bit despill on whole colours and
+    /// leaves a colour the key channel does not dominate alone.
+    #[test]
+    fn chroma_key_despill_rgb_matches_the_eight_bit_despill() {
+        let spec = default_green_spec();
+        for rgb in [
+            [100u8, 200, 80],
+            [60, 61, 10],
+            [0, 150, 150],
+            [200, 150, 120],
+        ] {
+            let (r, g, b) = chroma_key_despill(&spec, rgb[0], rgb[1], rgb[2]);
+            let reference =
+                chroma_key_despill_rgb(spec.spill_is_blue(), spec.spill, rgb.map(f64::from));
+            assert_eq!(
+                [r, g, b],
+                reference.map(|value| value.round() as u8),
+                "{rgb:?}"
+            );
+        }
+        // The teal logo: green never dominates blue, so it is untouched at
+        // any strength.
+        assert_eq!(
+            chroma_key_despill_rgb(false, 1.0, [0.0, 150.0, 150.0]),
+            [0.0, 150.0, 150.0]
+        );
+        // Full strength clamps green to the other channels' max.
+        assert_eq!(
+            chroma_key_despill_rgb(false, 1.0, [100.0, 200.0, 80.0]),
+            [100.0, 100.0, 80.0]
+        );
     }
 
     #[test]

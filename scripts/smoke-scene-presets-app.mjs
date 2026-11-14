@@ -132,7 +132,7 @@ const chooseCameraOff = async () => {
 const refreshDevices = () =>
   evaluate(`
   await openTab('sources');
-  // Scoped to the Sources page: Livestream → Upcoming has its own Refresh,
+  // Scoped to the Sources page: Destinations → Upcoming has its own Refresh,
   // which stays mounted (and may be throttled) once that page was visited.
   const sourcesPage = () => document.querySelector('[data-videorc-sources-page]') ?? document;
   const findRefresh = () =>

@@ -118,7 +118,7 @@ export function BuddyChatControls({
               one home (plan 174 D7). The tone rides the dot, the words say
               the state, and each chip is the way there. */}
           <div
-            aria-label="What Buddy says"
+            aria-label="What Sidekick says"
             className="flex min-w-0 flex-wrap items-center gap-1"
             data-slot="buddy-behaviour-chips"
             role="group"

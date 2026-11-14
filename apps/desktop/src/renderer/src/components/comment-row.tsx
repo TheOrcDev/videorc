@@ -292,7 +292,7 @@ function CohostMarks({
   if (spotlight) {
     // Pull-up (plan 060): private to the streamer, never on stream by itself.
     return (
-      <ChipHint hint="Buddy heard you talking about this message">
+      <ChipHint hint="Sidekick heard you talking about this message">
         <Badge data-testid="cohost-comment-spotlight" variant="outline">
           <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
           Talking about this
@@ -302,7 +302,7 @@ function CohostMarks({
   }
   if (!suggested) return null
   return (
-    <ChipHint hint="Buddy suggests showing this message on the stream">
+    <ChipHint hint="Sidekick suggests showing this message on the stream">
       <Badge data-testid="cohost-comment-suggested" variant="outline">
         <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
         Suggested
@@ -870,7 +870,7 @@ export function commentRowDescription(
     highlight.phase === 'live'
       ? 'Takes it off the stream'
       : suggested
-        ? 'Shows it on stream. Buddy suggests it'
+        ? 'Shows it on stream. Sidekick suggests it'
         : 'Shows it on stream'
   const outcomes = [highlightProblem(highlight), removalOutcomeLine(removal)].filter(Boolean)
   return outcomes.length > 0 ? `${action}. ${outcomes.join(' ')}` : action

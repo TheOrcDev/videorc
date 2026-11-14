@@ -487,7 +487,7 @@ export function voiceCommandStep({ id = 'voice-highlight', phraseId = 'highlight
         return skipped(ctx, id, 'destructive voice commands need params.allowDestructiveVoice')
       const buddy = ctx.observe.featureEvents('buddy-state').at(-1)
       if (!buddy || buddy.enabled === false || buddy.listening === false)
-        return skipped(ctx, id, 'Buddy is not listening in the lab profile')
+        return skipped(ctx, id, 'Sidekick is not listening in the lab profile')
       const played = await ctx.speech.play(phraseId)
       const sinceMs = Date.parse(played.playedAt)
       const expectKind = phrase.expect?.kind ?? 'highlight'

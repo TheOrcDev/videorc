@@ -38,7 +38,7 @@ export function chatCommandAddBlockedReason(state: {
 }
 
 /**
- * Livestream → Setup → Chat commands (plan 226 S3): a viewer types `!go` and
+ * Destinations → Setup → Chat commands (plan 226 S3): a viewer types `!go` and
  * Videorc answers as the streamer with the reply saved here. The `!commands`
  * switch, the commands A–Z (each with its own switch, a click to edit and ⋯
  * Edit… and Delete), and Add command…. Free, and editable while live: a

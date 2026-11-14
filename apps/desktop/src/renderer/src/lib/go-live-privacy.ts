@@ -188,7 +188,7 @@ export function goLivePrivacyConfirmCopy(
 
 /** What an agent's `go_live` reads when it would go live non-public unasked. */
 export const ALLOW_NON_PUBLIC_HINT =
-  'Pass allowNonPublic: true to go live anyway, or change Privacy in Livestream → Setup.'
+  'Pass allowNonPublic: true to go live anyway, or change Privacy in Destinations → Setup.'
 
 /** The agent's refusal: the dialog's own sentence, then how to go ahead. */
 export function headlessNonPublicRefusal(

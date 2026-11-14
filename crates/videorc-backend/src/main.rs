@@ -162,6 +162,8 @@ mod source_registry;
 mod source_status;
 mod state;
 mod storage;
+mod stream_report;
+mod stream_report_email;
 mod streaming;
 mod support_bundle;
 mod synthetic_diagnostic;
@@ -780,6 +782,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // Anonymous usage stats: one event per session start and stop, off the
     // recording path; on unless Settings → General → Privacy turned it off.
     usage_stats::spawn(&state);
+    // Plan 237: the stream report email a minute after each live stream,
+    // off the recording path; `VIDEORC_STREAM_REPORT_EMAIL=0` turns it off.
+    stream_report_email::spawn(&state);
     // Plan 187: the Discord go-live announcement (free, off until a webhook is set).
     discord_announce::spawn(&state);
     // Plan 225: the community store's retention prune (now and daily) and
@@ -6032,6 +6037,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "discord.webhook.save"
         | "discord.webhook.remove"
         | "discord.webhook.sendTest"
+        | "streamReport.email.set"
+        | "streamReport.email.sendLast"
         | "watchdog.alert.acknowledge"
         | "watchdog.alert.snooze"
         | "watchdog.settings.set"
@@ -6127,6 +6134,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.xCommentsReadiness"
         | "liveChat.emotes.get"
         | "usageStats.get"
+        | "streamReport.email.get"
         | "discord.announce.get"
         | "discord.links.preview"
         | "streamTargets.metadata.get"
@@ -13249,6 +13257,30 @@ async fn handle_text_message_with_role(
             }
         }
         "usageStats.get" => ServerResponse::ok(command.id, usage_stats::current_state(state)),
+        // Plan 237: the stream report email's switch and "Send the last one".
+        "streamReport.email.get" => {
+            ServerResponse::ok(command.id, stream_report_email::current_state(state).await)
+        }
+        "streamReport.email.set" => {
+            match serde_json::from_value::<stream_report_email::StreamReportEmailSetParams>(
+                command.params,
+            ) {
+                Ok(params) => match stream_report_email::set_enabled(state, params.enabled).await {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "stream-report-email-unavailable",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "streamReport.email.sendLast" => {
+            ServerResponse::ok(command.id, stream_report_email::send_last(state).await)
+        }
         "usageStats.set" => {
             match serde_json::from_value::<usage_stats::UsageStatsSetParams>(command.params) {
                 Ok(params) => match usage_stats::set_enabled(state, params.enabled).await {

@@ -75,7 +75,7 @@ const setTheme = async (theme) => {
     process.exit(1)
   }
 }
-// Pages by tab id. The Buddy tab (id `ai`, ⌘9; plan 119) doubles as a probe:
+// Pages by tab id. The Buddy tab (id `ai`, ⌘8; plan 119) doubles as a probe:
 // it must render Buddy Live's status (its Profile tab, id `live`), or the run
 // fails at the end. The profile under the output folder outlives a run and
 // the tab reopens on the sub-tab used last, so the probe selects Profile
@@ -108,7 +108,7 @@ const shoot = async (name, tag, size, theme) => {
   console.log(`${breaking.length === 0 ? 'ok  ' : 'BAD '} ${shot.file}${breaking.length ? ` (${breaking.length}: ${[...new Set(breaking.map((f) => f.kind))].join(', ')})` : ''}`)
 }
 // A page with a PageTabs strip (Settings, plan 064; Buddy, plan 150;
-// Livestream, plan 174): shoot each of its tabs. Triggers are found by the
+// Destinations, plan 174): shoot each of its tabs. Triggers are found by the
 // page's data attribute when it has one, else by the strip's tab role.
 const stripTabs = async (selector) => cmd('eval-js', {
   code: `return [...document.querySelectorAll(${JSON.stringify(selector)})].map((el, index) => ({ index, id: el.getAttribute('data-videorc-settings-tab') ?? el.getAttribute('data-videorc-buddy-tab') ?? el.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-') }))`

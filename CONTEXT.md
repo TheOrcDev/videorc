@@ -33,8 +33,9 @@ mid-sentence; everything else is sentence case.
 ### Going live and recording
 
 **Go Live**:
-The action that starts a livestream. The Studio button reads "Go Live…"
-because it opens a dialog; the dialog's title and its primary button read
+The action that starts a livestream. The Studio button reads "Go Live"
+(and its Retro LCD key), with no "…" although it opens a dialog: the owner's
+exception (plan 235 D2). The dialog's title and its primary button read
 "Go live"; ⌘K reads "Go live…".
 _Avoid_: Stream (as a button), Start streaming, Confirm Go Live
 
@@ -48,10 +49,21 @@ The state while a livestream runs, and only then.
 _Avoid_: Live (for a recording, a source or any running session), Streaming (as a state)
 
 **Livestream**:
-The page where destinations and stream details are set up. As a noun it is
-lowercase: the broadcast itself. "Stream" is its short form in running text
-("Your stream stopped").
+The broadcast itself; as a noun it is lowercase. "Stream" is its short form in
+running text ("Your stream stopped"). Capitalized, it names the sidebar group
+that holds Destinations and Buddy (plan 235 D6), and the Studio's Session row
+("Livestream · 4 destinations").
 _Avoid_: broadcast (except a platform's own object, like an X broadcast), live session
+
+**Stream report**:
+The email Videorc sends after a live stream (plan 237): watching at the
+peak and on average, and how many people chatted, platform by platform.
+Buddy's in-app summary stays "Buddy's report" (Buddy → Reports).
+_Avoid_: viewers reached, unique viewers, audience size, recap email
+
+**Watching**:
+A platform's count of people watching at the same moment.
+_Avoid_: viewers (for that count), subscribers, reach
 
 **Recording**:
 What Videorc writes to a file, and each item in Library.
@@ -86,7 +98,7 @@ in Library titled Clip).
 _Avoid_: replay, highlight (for the file)
 
 **On stream**:
-Shown in what viewers see: a chat message, a takeover, Buddy. The actions
+Shown in what viewers see: a chat message, a takeover, Sidekick. The actions
 are "Show on stream" and "Take off stream".
 _Avoid_: On air (for an item), live (for an item)
 
@@ -155,7 +167,7 @@ _Avoid_: screen, takeover screen
 An image the streamer places anywhere on the picture: a sponsor, their
 socials, a logo, a frame. Assets → Banners imports and manages them; the
 Scene page places them and shows or hides them ("Show", "Hide"). A banner
-stays over a takeover and under captions, Buddy and the highlight card.
+stays over a takeover and under captions, Sidekick and the highlight card.
 _Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
 name)
 
@@ -227,6 +239,13 @@ _Avoid_: virtual cam, vcam, webcam, virtual camera (in copy)
 
 ### Destinations and accounts
 
+**Destinations** (the page):
+Where destinations and stream details are set up, in the sidebar's Livestream
+group: Setup, Upcoming and Guests. It was the Livestream page until plan 235
+(2026-11-14); its id is still `live`, and ⌘K still finds it by "livestream" and
+"stream key". Quote its tabs as "Destinations → Setup".
+_Avoid_: Livestream (for the page), Connections, Channels, Streaming tab
+
 **Destination**:
 Where a livestream goes: a YouTube channel, a Twitch account, a Custom RTMP
 server.
@@ -268,7 +287,7 @@ _Avoid_: re-auth, re-authorize
 
 **Discord announcement**:
 The one message Videorc posts to each of the streamer's Discord channels when
-they go live, through the webhooks they pasted in Livestream → Setup → Discord
+they go live, through the webhooks they pasted in Destinations → Setup → Discord
 (one per server). It links each live destination and becomes "Was live" at
 the stop (plan 187).
 _Avoid_: notification, alert, ping (a ping is only the @here or @everyone it
@@ -291,10 +310,10 @@ look's scene picture plays the chosen live background inside it. Settings
 page it opened from and preserves the first-run record. Existing installs
 skip setup on update.
 _Avoid_: onboarding (in copy), Setup alone (also a sidebar group and a
-Livestream tab)
+Destinations tab)
 
 **Stream Manager**:
-The live dashboard window: chat, activity, Buddy and the stats bar.
+The live dashboard window: chat, activity, Sidekick and the stats bar.
 _Avoid_: Chat window, Comments window, comments (for chat)
 
 **Chat**:
@@ -313,8 +332,8 @@ _Avoid_: main screen, second screen, shared screen, chat screen
 **Chat command**:
 A `!name` a viewer types as the first word in chat (`!go`). Videorc answers
 as you with the reply you saved, starting with `@their name`, only in the
-chat they asked in; `!commands` lists them (plan 226). Edited in Setup →
-Livestream → Chat commands. Not the composer's `/` commands (`/marker`,
+chat they asked in; `!commands` lists them (plan 226). Edited in
+Destinations → Setup → Chat commands. Not the composer's `/` commands (`/marker`,
 `/clip`), which never reach chat.
 _Avoid_: bot command, slash command (for these), auto reply
 
@@ -335,7 +354,7 @@ _Avoid_: wallpaper, background (a scene has one), live background (it never
 moves), glass
 
 **Chrome controls**:
-The polished controls you touch: the chrome primary button (Go Live…,
+The polished controls you touch: the chrome primary button (Go Live,
 Continue, Save), the beads on switches and sliders, the plate on what is
 selected, and the red Record LED that lights while a recording or
 livestream runs. Panels, menus, dialogs and text stay flat.
@@ -371,32 +390,43 @@ What docs and the website call the way agents connect. In agent apps the
 server is named `videorc`.
 _Avoid_: Videorc API, MCP server (in the app's own copy)
 
-### Buddy and Premium
+### Sidekick and Premium
 
-**Buddy**:
-Videorc's AI companion on stream, with no article ("Buddy reads chat"), or the name
-the streamer gave it when the character speaks or acts ("Grum: 5 people
-asking…"). "Buddies" for more than one. "Golem" names only the stone golem
-creature, never the feature.
-_Avoid_: the Buddy, co-host, Orcle, pet, sidekick
+**Sidekick**:
+Videorc's AI companion on stream, with no article ("Sidekick reads chat"),
+or the name the streamer gave it when the character speaks or acts ("Grum: 5
+people asking…"). "Sidekicks" for more than one. Its default name is
+Sidekick, and it is the word that wakes it ("Sidekick, clip that"); speech
+to text also writes "side kick" or "side-kick", and all three wake it. It was
+called Buddy until plan 236, because speech to text heard "Buddy" as "body";
+"buddy" still wakes it, hidden, for two releases. Names a program reads keep
+`buddy` (`/api/buddy/*`, `cohost.buddy*`, `buddy_say`, saved values). "Golem"
+names only the stone golem creature, never the feature.
+_Avoid_: Buddy, buddy, co-host (in copy), the Sidekick, Orcle, pet
 
-**Buddy Live**:
-The switch that lets Buddy join a livestream.
-_Avoid_: Joins my streams, chat mode (for the on switch)
+**Sidekick Live**:
+The switch that lets Sidekick join a livestream.
+_Avoid_: Buddy Live, Joins my streams, chat mode (for the on switch)
 
 **{name} talks**:
-How Buddy talks on its own, named after the streamer's Buddy ("Golmar
-talks", else "Buddy talks"): Off, Bubble (in its bubble on stream, never in
-chat) or Suggest (a card; one click posts it to chat as you). Buddy never
-posts in your chat on its own. It never turns Buddy on or off; Buddy Live
-does. Plan 211.
+How Sidekick talks on its own, named after the streamer's Sidekick ("Golmar
+talks", else "Sidekick talks"): Off, Bubble (in its bubble on stream, never
+in chat) or Suggest (a card; one click posts it to chat as you). Sidekick
+never posts in your chat on its own. It never turns Sidekick on or off;
+Sidekick Live does. Plan 211.
 _Avoid_: Chat posting, chat mode, auto chat, Auto (gone since plan 211)
 
+**`/sidekick`**:
+The Stream Manager composer's command that asks Sidekick to do something
+("/sidekick switch to BRB"). `/buddy` still works, unlisted, for two
+releases.
+_Avoid_: /buddy (in copy)
+
 **Profile**:
-The Buddy page's first tab: Buddy Live and its status, My Buddies, the look,
-the personality and Cloud AI. The page is Buddy; its tabs are Profile, Chat,
-Voice, Reports and Clean cut.
-_Avoid_: the Buddy tab (for the first tab)
+The Sidekick page's first tab: Sidekick Live and its status, My Sidekicks,
+the look, the personality and Cloud AI. The page is Sidekick; its tabs are
+Profile, Chat, Voice, Reports and Clean cut.
+_Avoid_: the Sidekick tab (for the first tab)
 
 **Premium**:
 The paid plan. A locked feature says "{Feature} is part of Videorc Premium."
