@@ -504,7 +504,7 @@ try {
       }
       await success(slow)
       await noTemps()
-      h.web.hooks.failNext('segment', 2, 503)
+      h.web.hooks.failNext('segment', 3, 503)
       const failed = await terminal(await start())
       assert.equal(failed.payload.state ?? failed.payload.phase, 'failed')
       await noTemps()
@@ -516,7 +516,8 @@ try {
       // Two authenticated clients hit the same basename concurrently: two
       // recordings that started in the same minute (one recording is one job,
       // so a second start of the same row only names the running job). Fail
-      // the first segment of one, while preserving the other's completed file.
+      // the first segment of one (the downloader tries a segment three times),
+      // while preserving the other's completed file.
       const twin = h.web.hooks.addRecording({ showId: h.showId, startedAt: row.startedAt })
       await waitFor(
         async () => (await h.rpc('cloud.recordings.list')).recordings.some((r) => r.id === twin.id),
@@ -642,7 +643,7 @@ try {
       // A failed download says so and offers Try again.
       const broken = h.web.hooks.addRecording({ showId: h.showId })
       await listed(broken.id)
-      h.web.hooks.failNext('segment', 2, 503)
+      h.web.hooks.failNext('segment', 3, 503)
       assert.ok(await click(rowSelector(broken.id), 'Download'))
       await rowSays(broken.id, /Couldn.t download/, 'row shows the failure', 60000)
       assert.ok((await buttons(broken.id)).includes('Try again'))
