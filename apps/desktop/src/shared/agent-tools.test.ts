@@ -319,7 +319,7 @@ describe('the agent tool catalog (plan 209 S1)', () => {
   // answers `talk`; the old `chatMode` stays in the input schema (any value)
   // only so an agent holding the old schema reaches the Studio's sentence
   // instead of a schema error. `buddy_say` answers `{ bubble }` alone.
-  it('Buddy tools take talk, not a chat mode (plan 211 D12)', () => {
+  it('Sidekick tools take talk, not a chat mode (plan 211 D12)', () => {
     const talk = ['off', 'bubble', 'suggest']
     const setBuddy = agentTool('set_buddy')!
     const input = setBuddy.inputSchema as {

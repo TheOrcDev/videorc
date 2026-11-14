@@ -21,7 +21,7 @@ function webpSize(bytes: Buffer): { width: number; height: number } {
   return { width: bytes.readUIntLE(24, 3) + 1, height: bytes.readUIntLE(27, 3) + 1 }
 }
 
-describe('the Buddy emblem exports', () => {
+describe('the Sidekick emblem exports', () => {
   it.each([
     ['buddy-emblem-64.webp', 64],
     ['buddy-emblem-112.webp', 112]
@@ -72,8 +72,8 @@ describe('BuddyEmblem', () => {
   })
 
   it('names itself when given alt text', () => {
-    const html = markup({ alt: 'Buddy' })
-    expect(html).toContain('alt="Buddy"')
+    const html = markup({ alt: 'Sidekick' })
+    expect(html).toContain('alt="Sidekick"')
     expect(html).not.toContain('aria-hidden')
   })
 })

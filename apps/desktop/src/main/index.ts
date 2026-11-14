@@ -13604,7 +13604,7 @@ async function runSmokePreviewMotionCommand(
     }
     const action = typeof params.action === 'string' ? params.action : 'inspect'
     if (action === 'pane') {
-      const pane = params.pane === 'buddy' ? 'Buddy' : 'Chat'
+      const pane = params.pane === 'buddy' ? 'Sidekick' : 'Chat'
       const point = (await run(`(() => {
         const button = Array.from(document.querySelectorAll('[role="tab"], [role="radio"], button'))
           .find((candidate) => candidate.textContent?.trim().startsWith(${jsonForInlineScript(pane)}) && candidate.getBoundingClientRect().width > 0 && (candidate.getAttribute('role') === 'tab' || candidate.closest('[data-slot="pane-tabs-narrow"]')));

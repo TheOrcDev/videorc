@@ -257,7 +257,7 @@ let BuddyLiveToggle = (() => {
             if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
             __runInitializers(_classThis, _classExtraInitializers);
         }
-        renderTitle = (state, connected) => !connected ? 'Videorc\noffline' : buddyKeyLit(state) ? 'Buddy\nON' : 'Buddy';
+        renderTitle = (state, connected) => !connected ? 'Videorc\noffline' : buddyKeyLit(state) ? 'Sidekick\nON' : 'Sidekick';
         renderPressed(state) {
             return buddyKeyLit(state);
         }

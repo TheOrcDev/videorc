@@ -256,7 +256,7 @@ export function WatchdogSection(): ReactElement | null {
         ) : null}
         <SettingsRow
           data-testid="watchdog-ai-chat-read"
-          description="When the phrase list isn't sure, AI reads the last messages for a sound, picture or lag report. Buddy never posts about it."
+          description="When the phrase list isn't sure, AI reads the last messages for a sound, picture or lag report. Sidekick never posts about it."
           label="AI reads chat for problems"
         >
           <Switch

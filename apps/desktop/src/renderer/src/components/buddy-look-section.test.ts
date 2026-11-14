@@ -252,7 +252,7 @@ describe('BuddyLookSection (plan 169 D13, plan 170 D14)', () => {
       'Laugh',
       'Think'
     ])
-    expect(byTestId('buddy-look-keep')?.textContent).toContain('Use as my Buddy')
+    expect(byTestId('buddy-look-keep')?.textContent).toContain('Use as my Sidekick')
     expect(tiles()[1]!.querySelector('img')?.getAttribute('src')).toBe(
       `videorc-asset://buddy/default/drafts/${ID}/talk.png`
     )
@@ -330,7 +330,7 @@ describe('BuddyLookSection (plan 169 D13, plan 170 D14)', () => {
     expect(redos).toHaveLength(3)
     expect(redos.every((button) => button.disabled)).toBe(true)
     expect(document.querySelector('[data-slot="disabled-reason-text"]')?.textContent).toBe(
-      'Allow cloud AI to create a Buddy.'
+      'Allow cloud AI to create a Sidekick.'
     )
   })
 

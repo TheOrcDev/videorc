@@ -120,7 +120,7 @@ export function BuddyLiveSwitch({
       data-slot="buddy-live-switch"
     >
       <Label className="text-xs font-medium text-foreground" htmlFor={id}>
-        Buddy Live
+        Sidekick Live
       </Label>
       <DisabledReason reason={disabledReason}>
         <Switch

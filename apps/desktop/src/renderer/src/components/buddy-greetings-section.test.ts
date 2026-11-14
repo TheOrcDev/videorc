@@ -92,7 +92,7 @@ async function render(
       : {
           allowed: false,
           featureId: 'live-cohost',
-          reason: 'Buddy requires Videorc Premium.',
+          reason: 'Sidekick requires Videorc Premium.',
           upgradeUrl: 'https://www.videorc.com/premium'
         },
     patchCohostSettings
@@ -190,11 +190,11 @@ describe('Greetings editor (plan 164 S-D5)', () => {
     ])
   })
 
-  it('says what Buddy says, in Bubble and in Suggest, never what it posts as you (plan 211 S-C4)', async () => {
+  it('says what Sidekick says, in Bubble and in Suggest, never what it posts as you (plan 211 S-C4)', async () => {
     await render([])
     const description = document.body.textContent ?? ''
     expect(description).toContain(
-      'What Buddy says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, Buddy says it on stream; in Suggest, you post it.'
+      'What Sidekick says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, Sidekick says it on stream; in Suggest, you post it.'
     )
     expect(description).not.toContain('posts as you')
   })
@@ -514,7 +514,7 @@ describe('Write greetings with AI (plan 192 D3)', () => {
     return document.querySelector<HTMLElement>(`[role="switch"][aria-labelledby="${label?.id}"]`)!
   }
 
-  it("says it writes in Buddy's own voice, with your line as the example", async () => {
+  it("says it writes in Sidekick's own voice, with your line as the example", async () => {
     await render([])
     expect(document.querySelector('label[for="buddy-greetings-ai"]')?.textContent).toBe(
       'Write greetings with AI'

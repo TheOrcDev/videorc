@@ -234,7 +234,7 @@ class SystemAudioToggle extends VideorcAction<JsonObject> {
 @action({ UUID: 'com.videorc.streamdeck.buddy-live-toggle' })
 class BuddyLiveToggle extends VideorcAction<JsonObject> {
   protected renderTitle: TitleRenderer = (state, connected) =>
-    !connected ? 'Videorc\noffline' : buddyKeyLit(state) ? 'Buddy\nON' : 'Buddy'
+    !connected ? 'Videorc\noffline' : buddyKeyLit(state) ? 'Sidekick\nON' : 'Sidekick'
   protected override renderPressed(state: RemoteState | null): boolean {
     return buddyKeyLit(state)
   }

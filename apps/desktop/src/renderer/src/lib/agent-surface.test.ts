@@ -307,7 +307,7 @@ describe('AgentSurfacePublisher', () => {
     publisher.detach()
   })
 
-  it('also publishes while Buddy may use the tools, Agents off (plan 209 S19)', async () => {
+  it('also publishes while Sidekick may use the tools, Agents off (plan 209 S19)', async () => {
     const request = vi.fn(async () => ({ ok: true }) as never)
     const publisher = new AgentSurfacePublisher(store())
     publisher.attach({ request })

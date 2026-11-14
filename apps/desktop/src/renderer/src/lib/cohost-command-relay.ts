@@ -58,7 +58,7 @@ export function startCohostCommandRelay(options: CohostCommandRelayOptions): () 
           error:
             error instanceof Error && error.message.trim()
               ? error.message
-              : "Couldn't answer Buddy."
+              : "Couldn't answer Sidekick."
         })
       )
       .catch(() => undefined)

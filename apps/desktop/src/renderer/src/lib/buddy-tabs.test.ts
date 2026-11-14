@@ -127,7 +127,7 @@ describe('writeLastBuddyTab', () => {
 })
 
 describe('openBuddyTab', () => {
-  it('asks the shell to open Buddy on the tab, on the workspace navigation event', () => {
+  it('asks the shell to open Sidekick on the tab, on the workspace navigation event', () => {
     const target = new EventTarget()
     const opened: unknown[] = []
     target.addEventListener('videorc:navigate-workspace', (event) =>

@@ -424,7 +424,7 @@ export function BuddyPetPreview({
     playNow(player, pending)
   }, [active])
 
-  const name = label?.trim() || pack?.name || 'Buddy'
+  const name = label?.trim() || pack?.name || 'Sidekick'
   const status = error ? 'error' : pack ? 'ready' : 'loading'
   const showCanvas = drawn && pack !== null
   return (

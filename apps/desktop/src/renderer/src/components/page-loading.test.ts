@@ -32,7 +32,7 @@ describe('PageLoading', () => {
       expect(pageLoadingLabel(tab, false)).toBe(`Loading ${workspaceTabLabel(tab)}…`)
     }
     expect(pageLoadingLabel('assets', false)).toBe('Loading Assets…')
-    expect(pageLoadingLabel('ai', false)).toBe('Loading Buddy…')
+    expect(pageLoadingLabel('ai', false)).toBe('Loading Sidekick…')
   })
 
   it('keeps the boot copy for the window opening', () => {

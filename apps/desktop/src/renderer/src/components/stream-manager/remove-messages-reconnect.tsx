@@ -14,7 +14,7 @@ export function removeMessagesReconnectStarted(platform: ScopeReconnectPlatform)
   const name = CHAT_PLATFORM_LABELS[platform]
   return {
     title: `Approve the ${name} permission in your browser`,
-    description: `Buddy can remove messages once ${name} confirms.`,
+    description: `Sidekick can remove messages once ${name} confirms.`,
     platformName: name
   }
 }
@@ -35,7 +35,7 @@ export function RemoveMessagesReconnectRows({
   if (platforms.length === 0) return null
   return (
     <ul
-      aria-label="Permissions Buddy needs"
+      aria-label="Permissions Sidekick needs"
       className="flex shrink-0 flex-col divide-y divide-border border-b border-border"
       data-slot="remove-messages-reconnect"
     >

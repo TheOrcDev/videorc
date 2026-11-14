@@ -6184,7 +6184,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostEnableResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : "Couldn't change the Buddy setting."
+            error: error instanceof Error ? error.message : "Couldn't change the Sidekick setting."
           })
         })
     })
@@ -6296,7 +6296,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostActionResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Buddy action failed.'
+            error: error instanceof Error ? error.message : 'Sidekick action failed.'
           })
         })
     })

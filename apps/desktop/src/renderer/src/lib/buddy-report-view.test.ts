@@ -174,13 +174,15 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
   }
 }
 
-describe('Buddy report copy (plan 119 S3)', () => {
+describe('Sidekick report copy (plan 119 S3)', () => {
   it("says what the report holds in the website's words", () => {
     expect(BUDDY_REPORT_DESCRIPTION).toBe(
-      'Buddy saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
+      'Sidekick saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
     )
-    expect(BUDDY_REPORT_EMPTY).toBe('The report appears here after your first stream with Buddy.')
-    expect(BUDDY_REPORT_TURN_ON).toBe('Turn on Buddy to also catch questions.')
+    expect(BUDDY_REPORT_EMPTY).toBe(
+      'The report appears here after your first stream with Sidekick.'
+    )
+    expect(BUDDY_REPORT_TURN_ON).toBe('Turn on Sidekick to also catch questions.')
     for (const copy of [
       BUDDY_REPORT_DESCRIPTION,
       BUDDY_REPORT_EMPTY,
@@ -396,7 +398,7 @@ describe('report view', () => {
     expect(named.title).toBe('Friday stream')
   })
 
-  it('keeps moments and chat for a stream Buddy missed, and says how to catch questions', () => {
+  it('keeps moments and chat for a stream Sidekick missed, and says how to catch questions', () => {
     const view = buddyReportView({
       payload: payload({ report: null }),
       session: SESSION,
@@ -406,8 +408,8 @@ describe('report view', () => {
     if (view.kind !== 'buddy-off') return
     expect(view.title).toBe('Friday stream')
     expect(view.note).toEqual({
-      title: 'Buddy was off for this stream.',
-      hint: 'Turn on Buddy to also catch questions.'
+      title: 'Sidekick was off for this stream.',
+      hint: 'Turn on Sidekick to also catch questions.'
     })
     expect(view.stats).toEqual([])
     expect(view.missed).toEqual([])
@@ -426,7 +428,7 @@ describe('report view', () => {
   it('is empty before the first stream', () => {
     expect(buddyReportView({ payload: null, session: null, buddyOn: false })).toEqual({
       kind: 'empty',
-      message: 'The report appears here after your first stream with Buddy.'
+      message: 'The report appears here after your first stream with Sidekick.'
     })
   })
 
@@ -587,7 +589,7 @@ describe('report view', () => {
     ])
   })
 
-  it('lists what Buddy said on stream, oldest first, apart from what it posted (plan 211 D11)', () => {
+  it('lists what Sidekick said on stream, oldest first, apart from what it posted (plan 211 D11)', () => {
     const view = buddyReportView({
       payload: payload({
         report: report({
@@ -674,7 +676,7 @@ describe('report view', () => {
       sentence: "Greetings skipped: 46 came while Golmar wasn't on stream."
     })
     expect(reportGreetingSkips({ noBubble: 2, modeOff: 3 })?.sentence).toBe(
-      "Greetings skipped: 3 came while Buddy was set to Off, 2 came while Buddy wasn't on stream."
+      "Greetings skipped: 3 came while Sidekick was set to Off, 2 came while Sidekick wasn't on stream."
     )
     // Absent (an older report, or every greeting went out) or all zero: no line.
     expect(reportGreetingSkips(undefined)).toBeNull()
@@ -861,7 +863,7 @@ describe('the report Community block (plan 225 D15, E2)', () => {
     expect(view.community?.summary).toBeNull()
   })
 
-  it('a stream Buddy never joined still reads as Buddy-off, with its Community block', () => {
+  it('a stream Sidekick never joined still reads as Sidekick-off, with its Community block', () => {
     const view = buddyReportView({
       payload: payload({
         report: report({

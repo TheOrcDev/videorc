@@ -25,7 +25,7 @@ describe('buddyLiveSettingsPatch (plan 174 S3.14a, D7)', () => {
 })
 
 describe('cohostEnableRelayPatch (plan 174 S0.2, S3.14a)', () => {
-  it('turns Buddy on, with listening only when the command that turns it on names it', () => {
+  it('turns Sidekick on, with listening only when the command that turns it on names it', () => {
     expect(cohostEnableRelayPatch(off, { enabled: true, listen: true }, null)).toEqual({
       enabled: true,
       listen: true
@@ -40,7 +40,7 @@ describe('cohostEnableRelayPatch (plan 174 S0.2, S3.14a)', () => {
     })
   })
 
-  it('drops a later listen while Buddy already runs unless the listening card grants it', () => {
+  it('drops a later listen while Sidekick already runs unless the listening card grants it', () => {
     // No on-path grants the microphone by accident (the Phase 0 review).
     expect(cohostEnableRelayPatch(on, { enabled: true, listen: true }, null)).toEqual({})
     expect(cohostEnableRelayPatch(on, { enabled: true, listen: true }, autoChat)).toEqual({

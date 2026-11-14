@@ -130,7 +130,7 @@ describe('delete_recording and export_recording (plan 209 S15)', () => {
     ).toEqual({ ok: false, message: LIBRARY_TOOL_COPY.finalizing })
   })
 
-  it('carries the D11 notice for a delete, and keeps Library tools from Buddy (D15)', () => {
+  it('carries the D11 notice for a delete, and keeps Library tools from Sidekick (D15)', () => {
     expect(agentTool('delete_recording')!.onAir).toBe(true)
     for (const name of [
       'rename_recording',

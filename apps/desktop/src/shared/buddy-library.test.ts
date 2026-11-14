@@ -40,7 +40,7 @@ const catalogFixture = JSON.parse(
 
 const AVATAR = '7c9e6679-7425-40de-944b-e07fc1ee9a51'
 
-describe('the official Buddy catalog (plan 170 D10, D11)', () => {
+describe('the official Sidekick catalog (plan 170 D10, D11)', () => {
   it('equals protocol-fixtures/buddy-official-catalog.json, field for field', () => {
     expect(BUDDY_OFFICIAL_CATALOG_VERSION).toBe(catalogFixture.version)
     expect(BUDDY_OFFICIAL_CATALOG).toStrictEqual(catalogFixture.avatars)

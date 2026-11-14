@@ -59,7 +59,7 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
     {
       featureId: 'live-cohost',
       state: 'disabled',
-      reason: 'Buddy requires Videorc Premium.'
+      reason: 'Sidekick requires Videorc Premium.'
     }
   ],
   limits: {

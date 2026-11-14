@@ -89,15 +89,15 @@ function activeTab(slot: 'pane-tabs-narrow' | 'pane-tabs-wide'): string | null {
   return tab?.textContent?.trim().toLowerCase() ?? null
 }
 
-describe('StreamManager: a Buddy removal card comes forward (plan 140, S6)', () => {
-  it('brings the Buddy pane forward for a new card, then returns to where you were', async () => {
+describe('StreamManager: a Sidekick removal card comes forward (plan 140, S6)', () => {
+  it('brings the Sidekick pane forward for a new card, then returns to where you were', async () => {
     await render({ moderationOperations: [] })
     expect(activeTab('pane-tabs-narrow')).toBe('chat')
     expect(activeTab('pane-tabs-wide')).toBe('activity')
 
     await render({ moderationOperations: [pending] })
-    expect(activeTab('pane-tabs-narrow')).toBe('buddy')
-    expect(activeTab('pane-tabs-wide')).toBe('buddy')
+    expect(activeTab('pane-tabs-narrow')).toBe('sidekick')
+    expect(activeTab('pane-tabs-wide')).toBe('sidekick')
     expect(container.querySelector('[data-testid="removal-card"]')).toBeTruthy()
     // It never takes focus from wherever the streamer is typing.
     expect(document.activeElement).toBe(document.body)

@@ -35,9 +35,9 @@ export interface BuddyCreateGate {
 }
 
 // The Alive creator's lines, one family with the onboarding's (G-15).
-export const BUDDY_ALIVE_SIGNED_OUT = 'Sign in to create an Alive Buddy.'
-export const BUDDY_ALIVE_PREMIUM = 'Creating an Alive Buddy is part of Videorc Premium.'
-export const BUDDY_ALIVE_CONSENT_OFF = 'Allow cloud AI to create an Alive Buddy.'
+export const BUDDY_ALIVE_SIGNED_OUT = 'Sign in to create an Alive Sidekick.'
+export const BUDDY_ALIVE_PREMIUM = 'Creating an Alive Sidekick is part of Videorc Premium.'
+export const BUDDY_ALIVE_CONSENT_OFF = 'Allow cloud AI to create an Alive Sidekick.'
 export const BUDDY_ALIVE_NONE_LEFT = "This month's creations are used up."
 
 /** Nothing left this month: the creator's one gate for starting a new creation. */

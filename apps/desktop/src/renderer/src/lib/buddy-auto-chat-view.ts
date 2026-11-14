@@ -26,7 +26,7 @@ import { platformLabel } from '@/lib/platform-copy'
  * is always "Buddy", with no article.
  */
 export function buddyDisplayName(name: string | null | undefined): string {
-  return name?.trim() || 'Buddy'
+  return name?.trim() || 'Sidekick'
 }
 
 /**
@@ -34,7 +34,7 @@ export function buddyDisplayName(name: string | null | undefined): string {
  * was. True by structure: nothing Buddy does on its own reaches chat; only
  * the streamer's click on a Suggest card posts as them.
  */
-export const BUDDY_POSTS_PROMISE = 'Buddy never posts in your chat on its own.'
+export const BUDDY_POSTS_PROMISE = 'Sidekick never posts in your chat on its own.'
 
 /** How Buddy talks (plan 211 D1), from least reach to most. */
 export const BUDDY_TALK_MODES: readonly CohostTalkMode[] = ['off', 'bubble', 'suggest']
@@ -79,7 +79,7 @@ export const BUDDY_BEHAVIOUR_LABELS: Record<BuddyBehaviourId, string> = {
 }
 
 /** Where the behaviours are turned on and off: their one home (plan 174 D7). */
-export const BUDDY_BEHAVIOUR_HOME = 'Buddy → Chat'
+export const BUDDY_BEHAVIOUR_HOME = 'Sidekick → Chat'
 
 export interface BuddyBehaviourChip {
   id: BuddyBehaviourId
@@ -123,7 +123,7 @@ export function buddyPostingConsentTitle(name: string | null | undefined): strin
  * Suggest is the one way Buddy's words reach chat, and only by a click.
  */
 export function buddyPostingConsentSentence(name: string | null | undefined): string {
-  return `${buddyDisplayName(name)} posts to your chats as you, on the platforms you stream to, only when you click its card. You can read every message later in Buddy → Reports.`
+  return `${buddyDisplayName(name)} posts to your chats as you, on the platforms you stream to, only when you click its card. You can read every message later in Sidekick → Reports.`
 }
 
 /** Where the window remembers the one-time consent (like the nudge). */

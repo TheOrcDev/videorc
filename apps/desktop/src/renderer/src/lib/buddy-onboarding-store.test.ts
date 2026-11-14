@@ -60,7 +60,7 @@ describe('the onboarding draft store (plan 174 G-12, G-13)', () => {
     ).toBe(true)
   })
 
-  it('asks My Buddies to open the sheet with a fresh nonce each time (G-4)', () => {
+  it('asks My Sidekicks to open the sheet with a fresh nonce each time (G-4)', () => {
     expect(readBuddyOnboardingRequest()).toBeNull()
     requestBuddyOnboarding(2)
     expect(readBuddyOnboardingRequest()).toEqual({ nonce: 1, step: 2 })

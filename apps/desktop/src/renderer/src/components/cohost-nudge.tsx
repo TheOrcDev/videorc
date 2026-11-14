@@ -25,7 +25,7 @@ export function CohostNudge({
     >
       <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
       <span className="min-w-0 flex-1">
-        Buddy is off. It can group your chat&apos;s questions and draft replies.
+        Sidekick is off. It can group your chat&apos;s questions and draft replies.
       </span>
       <Button className="shrink-0" size="xs" type="button" variant="ghost" onClick={onTurnOn}>
         Turn on

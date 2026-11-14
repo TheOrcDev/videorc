@@ -147,7 +147,7 @@ describe('CommentRow', () => {
             })
           ),
           'false',
-          'Shows it on stream. Buddy suggests it'
+          'Shows it on stream. Sidekick suggests it'
         ]
       ] as const
       for (const [markup, pressed, description] of rows) {
@@ -572,7 +572,7 @@ describe('CommentRow outcome lines', () => {
   it("adds the row's outcome lines to the button's description", () => {
     expect(commentRowDescription({ phase: 'idle' }, null, false)).toBe('Shows it on stream')
     expect(commentRowDescription({ phase: 'idle' }, null, true)).toBe(
-      'Shows it on stream. Buddy suggests it'
+      'Shows it on stream. Sidekick suggests it'
     )
     expect(
       commentRowDescription({ phase: 'failed', reason: 'The stream is not live.' }, null, false)

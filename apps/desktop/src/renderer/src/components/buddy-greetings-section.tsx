@@ -128,7 +128,7 @@ export function BuddyGreetingsSection({
 
   return (
     <PanelSection
-      description="What Buddy says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, Buddy says it on stream; in Suggest, you post it."
+      description="What Sidekick says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, Sidekick says it on stream; in Suggest, you post it."
       title="Greetings"
     >
       {/* A settings row sits in a grouped card like every Settings row (plan

@@ -128,8 +128,8 @@ describe('the stage toolbar chips carry the state word (plan 205 S3)', () => {
   it('says the word after the name, quiet, and names it to a screen reader', async () => {
     await renderStage(stageProps())
     const buddy = chip('[data-videorc-stage-overlay-chip="buddy"]')
-    expect(buddy.textContent).toBe('BuddyStream only')
-    expect(buddy.getAttribute('aria-label')).toBe('Select Buddy, stream only')
+    expect(buddy.textContent).toBe('SidekickStream only')
+    expect(buddy.getAttribute('aria-label')).toBe('Select Sidekick, stream only')
     const badge = buddy.querySelector('[data-videorc-stage-chip-badge]')!
     expect(badge.getAttribute('data-videorc-stage-chip-badge')).toBe('stream only')
     // The muted tier: essential, so never text-subtle, and never a coloured word.

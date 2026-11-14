@@ -27,7 +27,7 @@ export interface ClipMarkedToast {
 }
 
 /** Where a saved mark shows up: the stream's report in the Buddy tab (plan 119 S3). */
-export const CLIP_MARK_IN_REPORT = "It's in your stream report in Buddy."
+export const CLIP_MARK_IN_REPORT = "It's in your stream report in Sidekick."
 
 /** The ring saved the last seconds as a clip (plan 181, redesign R4);
  * `saved` then says whether a recording also kept the mark. Mirrors

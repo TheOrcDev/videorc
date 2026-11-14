@@ -51,7 +51,7 @@ export function buddyOffOutputsNotice(input: BuddyOutputNoticeInput): BuddyOutpu
   if (!(input.enabled || bubble) || !input.onAir) return null
   if (typeof input.showOnStream !== 'boolean') return null
   if (input.showOnStream || input.showInRecording === true) return null
-  const name = input.name?.trim() || 'Buddy'
+  const name = input.name?.trim() || 'Sidekick'
   return {
     title: `${name} isn't on stream.`,
     detail: bubble

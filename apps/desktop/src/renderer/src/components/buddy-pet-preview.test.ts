@@ -307,7 +307,7 @@ describe('BuddyPetPreview (plan 168 S-D1)', () => {
       throw new Error('This pack is missing pet.webp. Import it again.')
     })
     const onError = vi.fn()
-    await render({ onError, placeholder: createElement('img', { alt: 'Buddy' }) })
+    await render({ onError, placeholder: createElement('img', { alt: 'Sidekick' }) })
     expect(onError).toHaveBeenCalledWith('This pack is missing pet.webp. Import it again.')
     expect(preview().dataset.status).toBe('error')
     // On hover and read aloud, never a native title (plan 174 S1.10).
