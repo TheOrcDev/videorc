@@ -17078,7 +17078,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void ensureNativePreviewCamera()
   }, [ensureNativePreviewCamera])
   const talkShowError = useCallback((error: unknown, action: string) => {
-    toastUserError(error, { action, object: 'the room' }, { id: CLOUD_TOAST_ID })
+    // `action` is the whole phrase ("join the room", "let the guest in").
+    toastUserError(error, { action }, { id: CLOUD_TOAST_ID })
   }, [])
   const talkShowCameraId = captureConfig.sources.cameraId ?? null
   const talkShowMicrophoneId = captureConfig.sources.microphoneId ?? null
