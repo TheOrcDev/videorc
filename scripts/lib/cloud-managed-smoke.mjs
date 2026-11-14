@@ -285,6 +285,10 @@ export async function managedHarness(kind, pass = 1) {
         } catch {}
       })
       await h.status((s) => s.entitled && s.settings?.enabled, 'managed entitlement')
+      // The dev app takes key focus at launch, and the Studio's Space key
+      // stops a session that is not live (a cloud show on hold): a key typed
+      // on this Mac stopped one pass. Nothing here needs focus.
+      await h.command('main-window-blur')
       // The Clips ring (plan 181) starts a buffer-only session whenever the
       // app is idle. This smoke starts sessions over its own socket, beside
       // the renderer, so a ring start races them (the renderer never races its
