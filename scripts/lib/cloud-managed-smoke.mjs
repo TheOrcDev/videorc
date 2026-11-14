@@ -178,9 +178,19 @@ export async function managedHarness(kind, pass = 1) {
   mkdirSync(env.TMPDIR)
   mkdirSync(env.VIDEORC_RECORDINGS_DIR)
   // Runtime-only synthetic sign-in. Never read or import the owner's credentials.
+  // A signed-in desktop keeps its account snapshot beside the token; without
+  // it the backend starts signed out (the Library then asks to sign in).
   writeFileSync(
     join(appData, 'videorc-secrets.json'),
-    JSON.stringify({ 'account:videorc:session': sessionToken }),
+    JSON.stringify({
+      'account:videorc:session': sessionToken,
+      'account:videorc:snapshot': JSON.stringify({
+        status: 'signed-in',
+        username: 'Smoke',
+        displayName: 'Smoke',
+        email: 'smoke@example.invalid'
+      })
+    }),
     { mode: 0o600 }
   )
   const h = {
@@ -240,9 +250,16 @@ export async function managedHarness(kind, pass = 1) {
       return requestSmokeCommand(smoke, command, params, { timeoutMs: 15000 })
     },
     // `account.refresh` is main's (the admin role): the renderer asks main for
-    // it over IPC, as the app's own account refresh does.
+    // it over IPC, as the app's own account refresh does. Main defers it while
+    // a session captures, so a sign-in is followed, as in the app, by the
+    // entitlement refresh, whose capability read re-runs the cloud launch check.
     async refreshAccount() {
       return h.eval('return await window.videorc.refreshAccount()')
+    },
+    async refreshSignIn() {
+      const account = await h.refreshAccount()
+      await h.rpc('entitlements.refresh')
+      return account
     },
     calls(route, after = 0) {
       return web.calls.filter((c) => c.route === route && c.atMs >= after)
