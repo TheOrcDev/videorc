@@ -1452,6 +1452,7 @@ pub struct CloudShowRuntime {
     pub(crate) generation: u64,
     pub(crate) destinations_generation: Arc<crate::cloud_control_web::DestinationGeneration>,
     pub(crate) control_tx: Option<ControlHandle>,
+    pub(crate) downloads: Arc<crate::cloud_control_web::RecordingDownloadJobs>,
     /// Plan 224: the room this desktop holds, beside `show`; cleared with
     /// it. Its token is the one secret in the runtime.
     pub(crate) talk: Option<TalkShowState>,
@@ -13066,12 +13067,18 @@ mod tests {
         //    here, an id that left the account is said, a signed-out
         //    desktop is refused, and an FFmpeg that is not there leaves no
         //    playlist behind.
+        let (_held, cancelled) = watch::channel(false);
         let download = |id: &'static str, bearer: Option<&'static str>| {
-            harness.context.download_cloud_recording(
+            harness.context.perform_cloud_recording_download(
                 bearer.map(str::to_string),
                 id,
                 "videorc-ffmpeg-that-is-not-here".to_string(),
                 folder.clone(),
+                crate::cloud_control_web::DownloadControl {
+                    job_id: uuid::Uuid::new_v4().to_string(),
+                    cancelled: cancelled.clone(),
+                    progress: Arc::new(|_, _| {}),
+                },
             )
         };
         let error = download("rec_node", Some("bearer")).await.unwrap_err();
@@ -13102,13 +13109,5 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
         let _ = std::fs::remove_dir_all(&folder);
-    }
-
-    /// `name` in the folder of `path`, as a string.
-    fn folder_name(path: &std::ffi::OsStr, name: &str) -> String {
-        std::path::Path::new(path)
-            .with_file_name(name)
-            .to_string_lossy()
-            .into_owned()
     }
 }

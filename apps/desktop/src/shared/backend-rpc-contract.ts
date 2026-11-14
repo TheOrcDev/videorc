@@ -124,6 +124,7 @@ import type {
   CloudGuestActParams,
   CloudGuestDecideParams,
   CloudRecordingDownload,
+  CloudRecordingDownloadEvent,
   CloudRecordingDownloadParams,
   CloudRecordingItem,
   CloudRecordingsList,
@@ -599,6 +600,7 @@ export interface BackendRpcMethodMap {
     CloudRecordingDownloadParams,
     CloudRecordingDownload
   >
+  'cloud.recordings.cancelDownload': BackendRpcDefinition<{ jobId: string }, { ok: true }>
   /** The Program monitor's feed (R-G5). */
   'cloud.return.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
   /** Go Live in a talk show (C-G6): the destinations go to the runner; no local leg. */
@@ -882,6 +884,7 @@ export interface BackendEventMap {
   'cloud.room.requests': CloudRoomRequest
   /** Plan 234 T3: an overlay for the host's renderer to send to the room. */
   'cloud.room.overlay': CloudRoomOverlayEvent
+  'cloud.recordings.download': CloudRecordingDownloadEvent
   /** Plan 223: the full alert list on every change. */
   'watchdog.alerts': WatchdogAlertsView
   'cohost.report.saved': CohostReportSavedEvent
@@ -6393,9 +6396,22 @@ const cloudRecordingDownloadParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRecordingDownloadParams>
 const cloudRecordingDownloadSchema = objectSchema(
-  { path: boundedPath },
+  { jobId: stringSchema({ minLength: 1, maxLength: 128 }) },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRecordingDownload>
+
+const cloudRecordingDownloadEventSchema = objectSchema(
+  {
+    jobId: stringSchema({ minLength: 1, maxLength: 128 }),
+    recordingId: stringSchema({ minLength: 1, maxLength: 128 }),
+    state: enumSchema(['running', 'done', 'failed', 'cancelled']),
+    doneSegments: optionalSchema(nonNegativeInteger),
+    totalSegments: optionalSchema(nonNegativeInteger),
+    path: optionalSchema(boundedPath),
+    error: optionalSchema(stringSchema({ maxLength: 4096 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingDownloadEvent>
 
 const runtimeContracts = {
   'session.sources.get': {
@@ -6861,6 +6877,13 @@ const runtimeContracts = {
     params: cloudRecordingDownloadParamsSchema,
     result: cloudRecordingDownloadSchema
   },
+  'cloud.recordings.cancelDownload': {
+    params: objectSchema(
+      { jobId: stringSchema({ minLength: 1, maxLength: 128 }) },
+      { allowUnknown: false }
+    ),
+    result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+  },
   'cloud.return.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.show.goLive': { params: cloudTalkGoLiveParamsSchema, result: cloudStatusSchema },
   'cloud.show.legs.end': { params: undefinedSchema, result: cloudStatusSchema },
@@ -7226,6 +7249,7 @@ const runtimeEventSchemas = {
   'cloud.state': cloudStatusSchema,
   'cloud.room.requests': cloudRoomRequestSchema,
   'cloud.room.overlay': cloudRoomOverlayEventSchema,
+  'cloud.recordings.download': cloudRecordingDownloadEventSchema,
   'watchdog.alerts': watchdogAlertsViewSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   'cohost.community.changed': communitySummarySchema,

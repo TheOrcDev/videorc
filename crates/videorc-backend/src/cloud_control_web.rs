@@ -38,7 +38,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::cloud_show::{
     AckResult, CloudApiError, CloudWebApi, ControlConnector, ControlKind, ControlLoop,
@@ -558,20 +558,219 @@ pub struct CloudRecordingsAnswer {
 /// `cloud.recordings.download { id, outputDirectory?, ffmpegPath? }`: the
 /// folder is Output's "Where recordings go", as a session start passes it.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecordingDownloadParams {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_directory: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg_path: Option<String>,
 }
 
-/// `cloud.recordings.download`'s answer: where the MP4 is.
+/// `cloud.recordings.download`'s immediate answer: the job to follow.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudRecordingDownload {
-    pub path: String,
+    pub job_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CancelRecordingDownloadParams {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadState {
+    Running,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingDownloadEvent {
+    pub job_id: String,
+    pub recording_id: String,
+    pub state: DownloadState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done_segments: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_segments: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub(crate) type DownloadEventHook = Arc<dyn Fn(RecordingDownloadEvent) + Send + Sync>;
+type DownloadProgress = Arc<dyn Fn(usize, usize) + Send + Sync>;
+
+pub(crate) struct DownloadControl {
+    pub(crate) job_id: String,
+    pub(crate) cancelled: watch::Receiver<bool>,
+    pub(crate) progress: DownloadProgress,
+}
+
+struct RunningDownload {
+    job_id: String,
+    cancel: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct DownloadJobsState {
+    closing: bool,
+    running: HashMap<String, RunningDownload>,
+}
+
+#[derive(Default)]
+pub(crate) struct RecordingDownloadJobs(std::sync::Mutex<DownloadJobsState>);
+
+impl RecordingDownloadJobs {
+    fn start<F, Fut>(
+        self: &Arc<Self>,
+        recording_id: String,
+        emit: DownloadEventHook,
+        work: F,
+    ) -> Result<CloudRecordingDownload>
+    where
+        F: FnOnce(DownloadControl) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<PathBuf>> + Send + 'static,
+    {
+        let mut jobs = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if jobs.closing {
+            bail!("Videorc is quitting.");
+        }
+        if let Some(job) = jobs.running.get(&recording_id) {
+            return Ok(CloudRecordingDownload {
+                job_id: job.job_id.clone(),
+            });
+        }
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let answer = CloudRecordingDownload {
+            job_id: job_id.clone(),
+        };
+        let (cancel, cancelled) = watch::channel(false);
+        let registry = self.clone();
+        let key = recording_id.clone();
+        let task_key = key.clone();
+        let task = tokio::spawn(async move {
+            use futures_util::FutureExt as _;
+            let event = RecordingDownloadEvent {
+                job_id,
+                recording_id,
+                state: DownloadState::Running,
+                done_segments: Some(0),
+                total_segments: None,
+                path: None,
+                error: None,
+            };
+            emit(event.clone());
+            let progress: DownloadProgress = {
+                let emit = emit.clone();
+                let event = event.clone();
+                let last = std::sync::Mutex::new(None::<std::time::Instant>);
+                Arc::new(move |done, total| {
+                    let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let now = std::time::Instant::now();
+                    if last.is_some_and(|at| now.duration_since(at) < Duration::from_millis(300)) {
+                        return;
+                    }
+                    *last = Some(now);
+                    emit(RecordingDownloadEvent {
+                        done_segments: Some(done),
+                        total_segments: Some(total),
+                        ..event.clone()
+                    });
+                })
+            };
+            let outcome = std::panic::AssertUnwindSafe(work(DownloadControl {
+                job_id: event.job_id.clone(),
+                cancelled: cancelled.clone(),
+                progress,
+            }))
+            .catch_unwind()
+            .await;
+            let (state, path, error) = match outcome {
+                Ok(Ok(path)) => (
+                    DownloadState::Done,
+                    Some(path.to_string_lossy().into_owned()),
+                    None,
+                ),
+                Ok(Err(_)) if *cancelled.borrow() => (DownloadState::Cancelled, None, None),
+                Ok(Err(error)) => (
+                    DownloadState::Failed,
+                    None,
+                    Some(error.to_string().chars().take(4096).collect()),
+                ),
+                Err(_) => (
+                    DownloadState::Failed,
+                    None,
+                    Some("The recording download stopped. Try again.".to_string()),
+                ),
+            };
+            emit(RecordingDownloadEvent {
+                state,
+                path,
+                error,
+                done_segments: None,
+                total_segments: None,
+                ..event
+            });
+            registry
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .running
+                .remove(&task_key);
+        });
+        jobs.running.insert(
+            key,
+            RunningDownload {
+                job_id: answer.job_id.clone(),
+                cancel,
+                task,
+            },
+        );
+        Ok(answer)
+    }
+
+    pub(crate) fn cancel(&self, job_id: &str) {
+        let jobs = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(job) = jobs.running.values().find(|job| job.job_id == job_id) {
+            let _ = job.cancel.send(true);
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        let jobs = {
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.closing = true;
+            state
+                .running
+                .drain()
+                .map(|(_, job)| job)
+                .collect::<Vec<_>>()
+        };
+        for job in &jobs {
+            let _ = job.cancel.send(true);
+        }
+        for job in jobs {
+            let _ = job.task.await;
+        }
+    }
 }
 
 /// What a remux run came to.
@@ -611,19 +810,58 @@ pub(crate) fn remux_args(playlist: &Path, output: &Path) -> Vec<OsString> {
 pub(crate) async fn run_ffmpeg_remux(
     ffmpeg: String,
     args: Vec<OsString>,
+    mut cancelled: watch::Receiver<bool>,
 ) -> std::io::Result<RemuxOutcome> {
-    let output = tokio::process::Command::new(ffmpeg)
+    use tokio::io::AsyncReadExt as _;
+    let mut child = tokio::process::Command::new(ffmpeg)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .output()
-        .await?;
-    Ok(RemuxOutcome {
-        success: output.status.success(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+        .spawn()?;
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let read = async move {
+        let mut tail = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            let n = stderr.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            tail.extend_from_slice(&chunk[..n]);
+            if tail.len() > 8192 {
+                tail.drain(..tail.len() - 8192);
+            }
+        }
+        Ok::<_, std::io::Error>(String::from_utf8_lossy(&tail).into_owned())
+    };
+    let outcome = {
+        let output = async {
+            let (status, stderr) = tokio::try_join!(child.wait(), read)?;
+            Ok(RemuxOutcome {
+                success: status.success(),
+                stderr,
+            })
+        };
+        tokio::select! {
+            outcome = output => Some(outcome),
+            _ = crate::cloud_show::wait_canceled(&mut cancelled) => None,
+        }
+    };
+    if let Some(outcome) = outcome {
+        return outcome;
+    }
+    // Drop the pipe reader before cancelling, so a failed kill or reap can
+    // never leave shutdown waiting indefinitely for a stderr EOF.
+    child.start_kill()?;
+    tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .map_err(std::io::Error::other)??;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        "Download cancelled.",
+    ))
 }
 
 /// `text` with every URL blanked: FFmpeg names what it could not open, and
@@ -801,30 +1039,35 @@ async fn fetch_recording_segments<W: CloudWebApi>(
     web: &W,
     segments: Vec<String>,
     folder: &Path,
+    progress: &DownloadProgress,
 ) -> Result<()> {
-    futures_util::stream::iter(
-        segments
-            .into_iter()
-            .enumerate()
-            .map(|(index, url)| async move {
-                let path = folder.join(segment_name(index));
-                for attempt in 0..3 {
-                    match web.recording_segment(&url, &path).await {
-                        Ok(()) => return Ok(()),
-                        Err(SegmentFetchError::Storage(error)) => {
-                            bail!("{}", storage_problem(&error))
-                        }
-                        Err(SegmentFetchError::Network) if attempt < 2 => {
-                            tokio::time::sleep(RETRY_DELAY).await
-                        }
-                        Err(SegmentFetchError::Network) => {
-                            bail!("Recording segment {index} could not be downloaded.")
-                        }
+    let total = segments.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    progress(0, total);
+    futures_util::stream::iter(segments.into_iter().enumerate().map(|(index, url)| {
+        let done = &done;
+        async move {
+            let path = folder.join(segment_name(index));
+            for attempt in 0..3 {
+                match web.recording_segment(&url, &path).await {
+                    Ok(()) => {
+                        progress(done.fetch_add(1, Ordering::SeqCst) + 1, total);
+                        return Ok(());
+                    }
+                    Err(SegmentFetchError::Storage(error)) => {
+                        bail!("{}", storage_problem(&error))
+                    }
+                    Err(SegmentFetchError::Network) if attempt < 2 => {
+                        tokio::time::sleep(RETRY_DELAY).await
+                    }
+                    Err(SegmentFetchError::Network) => {
+                        bail!("Recording segment {index} could not be downloaded.")
                     }
                 }
-                unreachable!()
-            }),
-    )
+            }
+            unreachable!()
+        }
+    }))
     .buffer_unordered(4)
     .try_collect::<Vec<_>>()
     .await?;
@@ -863,8 +1106,8 @@ impl OwnedDownloadFile {
         self.0.as_deref().expect("owned file")
     }
 
-    fn part(folder: &Path, name: &str) -> std::io::Result<Self> {
-        Self::create(folder.join(format!(".{name}.{}.part", uuid::Uuid::new_v4())))
+    fn part(folder: &Path, name: &str, job_id: &str) -> std::io::Result<Self> {
+        Self::create(folder.join(format!(".{name}.{job_id}.part")))
     }
 
     fn finish(mut self, folder: &Path, name: &str) -> std::io::Result<PathBuf> {
@@ -901,11 +1144,12 @@ impl Drop for OwnedDownloadFile {
 /// to a private temporary file, remuxed by `remux` (the app's FFmpeg; a
 /// stand-in under test), and the temporary file removed. Returns where the
 /// MP4 is. A failed remux leaves no half-written MP4 behind.
-pub(crate) async fn download_segments_recording<W, R, Fut>(
+async fn download_segments_recording_with_progress<W, R, Fut>(
     web: &W,
     bearer: &str,
     recording: &CloudRecordingItem,
     folder: &Path,
+    control: DownloadControl,
     remux: R,
 ) -> Result<PathBuf>
 where
@@ -913,10 +1157,16 @@ where
     R: FnOnce(Vec<OsString>) -> Fut,
     Fut: Future<Output = std::io::Result<RemuxOutcome>>,
 {
+    let DownloadControl {
+        job_id,
+        mut cancelled,
+        progress,
+    } = control;
     // The route's one retry (section 2): a storage hiccup answers 503.
-    let playlist = with_one_cloud_retry(|| web.recording_playlist(bearer, &recording.id))
-        .await
-        .map_err(|error| anyhow::anyhow!("{}", failure_line(&error)))?;
+    let playlist = tokio::select! {
+        answer = with_one_cloud_retry(|| web.recording_playlist(bearer, &recording.id)) => answer.map_err(|error| anyhow::anyhow!("{}", failure_line(&error)))?,
+        _ = crate::cloud_show::wait_canceled(&mut cancelled) => bail!("Download cancelled."),
+    };
     let (local_playlist, segments) = local_recording_playlist(&playlist)?;
     drop(playlist);
     tokio::fs::create_dir_all(folder)
@@ -924,12 +1174,15 @@ where
         .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
     let temporary = TemporaryRecordingDirectory::create()
         .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
-    fetch_recording_segments(web, segments, &temporary.0).await?;
+    tokio::select! {
+        answer = fetch_recording_segments(web, segments, &temporary.0, &progress) => answer?,
+        _ = crate::cloud_show::wait_canceled(&mut cancelled) => bail!("Download cancelled."),
+    }
     let playlist_path = temporary.0.join("index.m3u8");
     write_private_file(&playlist_path, local_playlist.as_bytes())
         .await
         .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
-    let part = OwnedDownloadFile::part(folder, &recording.file_name())
+    let part = OwnedDownloadFile::part(folder, &recording.file_name(), &job_id)
         .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
     let outcome = remux(remux_args(&playlist_path, part.path())).await;
     drop(temporary);
@@ -944,6 +1197,35 @@ where
             bail!("FFmpeg could not be started: {error}");
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn download_segments_recording<W, R, Fut>(
+    web: &W,
+    bearer: &str,
+    recording: &CloudRecordingItem,
+    folder: &Path,
+    remux: R,
+) -> Result<PathBuf>
+where
+    W: CloudWebApi,
+    R: FnOnce(Vec<OsString>) -> Fut,
+    Fut: Future<Output = std::io::Result<RemuxOutcome>>,
+{
+    let (_held, cancelled) = watch::channel(false);
+    download_segments_recording_with_progress(
+        web,
+        bearer,
+        recording,
+        folder,
+        DownloadControl {
+            job_id: uuid::Uuid::new_v4().to_string(),
+            cancelled,
+            progress: Arc::new(|_, _| {}),
+        },
+        remux,
+    )
+    .await
 }
 
 impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W, C> {
@@ -961,42 +1243,61 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
             .map_err(anyhow::Error::new)
     }
 
-    /// `cloud.recordings.download`: a managed recording as an MP4 in
-    /// `folder`. A node recording is an MP4 on videorc.com already.
-    pub async fn download_cloud_recording(
+    /// Admission does no network or remux work on the ordered command lane.
+    pub(crate) fn download_cloud_recording(
         &self,
         bearer: Option<String>,
         recording_id: &str,
         ffmpeg: String,
         folder: PathBuf,
+        emit: DownloadEventHook,
     ) -> Result<CloudRecordingDownload> {
+        if bearer.is_none() {
+            bail!("Sign in to download your cloud recordings.");
+        }
+        let context = self.clone();
+        let jobs = lock(&self.slot).downloads.clone();
+        let recording_id = recording_id.to_string();
+        jobs.start(recording_id.clone(), emit, move |control| async move {
+            context
+                .perform_cloud_recording_download(bearer, &recording_id, ffmpeg, folder, control)
+                .await
+        })
+    }
+
+    /// `cloud.recordings.download`: a managed recording as an MP4 in
+    /// `folder`. A node recording is an MP4 on videorc.com already.
+    pub(crate) async fn perform_cloud_recording_download(
+        &self,
+        bearer: Option<String>,
+        recording_id: &str,
+        ffmpeg: String,
+        folder: PathBuf,
+        mut control: DownloadControl,
+    ) -> Result<PathBuf> {
         let Some(bearer) = bearer else {
             bail!("Sign in to download your cloud recordings.");
         };
-        let recordings = self
-            .web
-            .list_recordings(&bearer)
-            .await
-            .map_err(anyhow::Error::new)?;
+        let recordings = tokio::select! {
+            result = self.web.list_recordings(&bearer) => result.map_err(anyhow::Error::new)?,
+            _ = crate::cloud_show::wait_canceled(&mut control.cancelled) => bail!("Download cancelled."),
+        };
         let Some(recording) = recordings.iter().find(|item| item.id == recording_id) else {
             bail!("That recording is not in your account any more.");
         };
         if !recording.is_segments() {
             bail!("This recording downloads from your account on videorc.com.");
         }
-        let path =
-            download_segments_recording(self.web.as_ref(), &bearer, recording, &folder, |args| {
-                run_ffmpeg_remux(ffmpeg, args)
-            })
-            .await?;
-        tracing::info!(
-            recording = %recording.id,
-            "The cloud recording was saved as {}",
-            path.display()
-        );
-        Ok(CloudRecordingDownload {
-            path: path.to_string_lossy().into_owned(),
-        })
+        let remux_cancel = control.cancelled.clone();
+        download_segments_recording_with_progress(
+            self.web.as_ref(),
+            &bearer,
+            recording,
+            &folder,
+            control,
+            |args| run_ffmpeg_remux(ffmpeg, args, remux_cancel),
+        )
+        .await
     }
 }
 
@@ -2192,19 +2493,86 @@ rtmps://h/app/key 'http://x.test/y'";
         }
     }
 
+    #[tokio::test]
+    async fn download_jobs_return_immediately_deduplicate_cancel_and_join_on_shutdown() {
+        let jobs = Arc::new(RecordingDownloadJobs::default());
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let emit: DownloadEventHook = {
+            let events = events.clone();
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        };
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let first = jobs
+            .start(
+                "rec_one".to_string(),
+                emit.clone(),
+                move |mut control| async move {
+                    started.send(()).unwrap();
+                    crate::cloud_show::wait_canceled(&mut control.cancelled).await;
+                    bail!("cancelled");
+                },
+            )
+            .unwrap();
+        let duplicate = jobs
+            .start("rec_one".to_string(), emit.clone(), |_| async {
+                panic!("duplicate job must never start");
+                #[allow(unreachable_code)]
+                Ok(PathBuf::new())
+            })
+            .unwrap();
+        assert_eq!(first, duplicate);
+        ready.await.unwrap();
+        jobs.cancel(&first.job_id);
+        // Shutdown owns the join even if cancellation was requested by RPC.
+        jobs.shutdown().await;
+        assert!(jobs.0.lock().unwrap().running.is_empty());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].state, DownloadState::Running);
+        assert_eq!(events[1].state, DownloadState::Cancelled);
+        let wire = serde_json::to_value(&events[1]).unwrap();
+        for absent in ["path", "error", "doneSegments", "totalSegments"] {
+            assert!(wire.get(absent).is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_a_remux_kills_and_reaps_its_owned_child() {
+        let (cancel, cancelled) = watch::channel(false);
+        cancel.send(true).unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_ffmpeg_remux(
+                "/bin/sleep".to_string(),
+                vec![OsString::from("60")],
+                cancelled,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.err().unwrap().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+    }
+
     #[test]
     fn colliding_downloads_only_remove_their_own_parts_and_claim_distinct_names() {
         let temporary = TemporaryRecordingDirectory::create().unwrap();
         let folder = &temporary.0;
-        let first = OwnedDownloadFile::part(folder, "take.mp4").unwrap();
-        let second = OwnedDownloadFile::part(folder, "take.mp4").unwrap();
+        let first =
+            OwnedDownloadFile::part(folder, "take.mp4", &uuid::Uuid::new_v4().to_string()).unwrap();
+        let second =
+            OwnedDownloadFile::part(folder, "take.mp4", &uuid::Uuid::new_v4().to_string()).unwrap();
         assert_ne!(first.path(), second.path());
         std::fs::write(first.path(), b"complete").unwrap();
         std::fs::write(second.path(), b"incomplete").unwrap();
         let saved = first.finish(folder, "take.mp4").unwrap();
         drop(second); // a failing concurrent remux
         assert_eq!(std::fs::read(&saved).unwrap(), b"complete");
-        let third = OwnedDownloadFile::part(folder, "take.mp4").unwrap();
+        let third =
+            OwnedDownloadFile::part(folder, "take.mp4", &uuid::Uuid::new_v4().to_string()).unwrap();
         std::fs::write(third.path(), b"another").unwrap();
         assert_eq!(
             third.finish(folder, "take.mp4").unwrap(),

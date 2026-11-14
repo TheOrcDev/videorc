@@ -938,6 +938,8 @@ async fn cleanup_process_owners_after_finalization(state: AppState) {
     }
     crate::remote_lan_server::stop(&state);
     crate::agent_mcp::shutdown(&state);
+    let cloud_downloads = cloud_show::lock(&state.cloud_show).downloads.clone();
+    cloud_downloads.shutdown().await;
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     state.clean_cut.interrupt_all_for_shutdown();
@@ -6014,12 +6016,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
         }),
 
-        // Plan 234 T3: `cloud.recordings.download` remuxes a managed
-        // recording's segments into an MP4, like a local remux.
         "session.remux_mp4"
         | "sessions.import"
-        | "repair.repair_file"
-        | "cloud.recordings.download" => Some(Mutation {
+        | "repair.repair_file" => Some(Mutation {
             max_execution_age: WEBSOCKET_MEDIA_MUTATION_MAX_EXECUTION_AGE,
         }),
 
@@ -6051,7 +6050,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.settings.set"
         | "watchdog.idle.report"
         | "cloud.show.reconnectDestination"
-        | "cloud.room.client.report" => Some(DEFAULT_MUTATION_POLICY),
+        | "cloud.room.client.report"
+        | "cloud.recordings.download"
+        | "cloud.recordings.cancelDownload" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start"
         | "cloud.show.resume"
@@ -12035,16 +12036,18 @@ async fn handle_text_message_with_role(
                 role,
                 state.smoke_rpc_enabled,
             );
+            let event_state = state.clone();
+            let emit: cloud_control_web::DownloadEventHook = std::sync::Arc::new(move |event| {
+                event_state.emit_event("cloud.recordings.download", event);
+            });
             match cloud_context(state) {
-                Some(context) => match context
-                    .download_cloud_recording(
-                        account::stored_session_token(),
-                        &params.id,
-                        ffmpeg_path,
-                        folder,
-                    )
-                    .await
-                {
+                Some(context) => match context.download_cloud_recording(
+                    account::stored_session_token(),
+                    &params.id,
+                    ffmpeg_path,
+                    folder,
+                    emit,
+                ) {
                     Ok(download) => ServerResponse::ok(command.id, download),
                     Err(error) => ServerResponse::error(
                         command.id,
@@ -12053,6 +12056,21 @@ async fn handle_text_message_with_role(
                     ),
                 },
                 None => cloud_unavailable(command.id),
+            }
+        }
+        "cloud.recordings.cancelDownload" => {
+            match serde_json::from_value::<cloud_control_web::CancelRecordingDownloadParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    cloud_show::lock(&state.cloud_show)
+                        .downloads
+                        .cancel(&params.job_id);
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
             }
         }
         "cloud.show.legs.end" => match cloud_context(state) {
@@ -19056,6 +19074,8 @@ mod tests {
             // Plan 209 S20: `/buddy` answers at once; the calls run on their
             // own task and report `cohost.act.result`.
             "cohost.act",
+            "cloud.recordings.download",
+            "cloud.recordings.cancelDownload",
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             assert_eq!(

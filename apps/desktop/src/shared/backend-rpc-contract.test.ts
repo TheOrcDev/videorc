@@ -4342,3 +4342,43 @@ describe('caption service outage contract', () => {
     ).toThrow()
   })
 })
+
+describe('cloud recording download jobs', () => {
+  it('validates short start and cancel RPCs and strict progress events', () => {
+    expect(validateBackendRpcResult('cloud.recordings.download', { jobId: 'job_one' })).toEqual({
+      jobId: 'job_one'
+    })
+    expect(
+      validateBackendRpcParams('cloud.recordings.cancelDownload', { jobId: 'job_one' })
+    ).toEqual({ jobId: 'job_one' })
+    expect(validateBackendRpcResult('cloud.recordings.cancelDownload', { ok: true })).toEqual({
+      ok: true
+    })
+    for (const state of ['running', 'done', 'failed', 'cancelled']) {
+      const event = { jobId: 'job_one', recordingId: 'rec_one', state }
+      expect(validateBackendEventPayload('cloud.recordings.download', event)).toEqual(event)
+    }
+    expect(() =>
+      validateBackendRpcResult('cloud.recordings.download', { path: '/tmp/old.mp4' })
+    ).toThrow()
+    for (const bad of [
+      { state: 'other' },
+      { path: null },
+      { doneSegments: -1 },
+      { doneSegments: 1.5 },
+      { url: 'https://storage.test/secret' }
+    ]) {
+      expect(() =>
+        validateBackendEventPayload('cloud.recordings.download', {
+          jobId: 'job_one',
+          recordingId: 'rec_one',
+          state: 'running',
+          ...bad
+        })
+      ).toThrow()
+    }
+    expect(() =>
+      validateBackendRpcParams('cloud.recordings.cancelDownload', { jobId: '' })
+    ).toThrow()
+  })
+})

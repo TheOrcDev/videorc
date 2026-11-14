@@ -5599,7 +5599,16 @@ export interface CloudRecordingDownloadParams {
   ffmpegPath?: string
 }
 export interface CloudRecordingDownload {
-  path: string
+  jobId: string
+}
+export interface CloudRecordingDownloadEvent {
+  jobId: string
+  recordingId: string
+  state: 'running' | 'done' | 'failed' | 'cancelled'
+  doneSegments?: number
+  totalSegments?: number
+  path?: string
+  error?: string
 }
 
 /** A guest the host let in, as videorc.com lists them. */
