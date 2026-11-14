@@ -3107,23 +3107,26 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     }
 
     fn mark_gone(&self, end_reason: &str, message: &str) {
-        {
-            let mut runtime = lock(&self.context.slot);
-            let fed_by_session = runtime.feeding_session().is_some();
-            runtime.show = None;
-            runtime.runner = None;
-            runtime.allowance_live_mark = None;
-            runtime.restart = None;
-            runtime.ending = false;
-            runtime.failed = Some(FailedShow {
-                end_reason: end_reason.to_string(),
-                message: message.to_string(),
-                direct_fallback: fed_by_session,
-            });
-            runtime.bump_generation();
-        }
+        mark_show_gone(&mut lock(&self.context.slot), end_reason, message);
         self.context.hooks.emit_from(&self.context.slot);
     }
+}
+
+/// The show is gone: forget it, and say so, with direct streaming offered
+/// when a session was feeding it. The caller emits.
+fn mark_show_gone(runtime: &mut CloudShowRuntime, end_reason: &str, message: &str) {
+    let fed_by_session = runtime.feeding_session().is_some();
+    runtime.show = None;
+    runtime.runner = None;
+    runtime.allowance_live_mark = None;
+    runtime.restart = None;
+    runtime.ending = false;
+    runtime.failed = Some(FailedShow {
+        end_reason: end_reason.to_string(),
+        message: message.to_string(),
+        direct_fallback: fed_by_session,
+    });
+    runtime.bump_generation();
 }
 
 async fn send_intent(
@@ -4070,6 +4073,32 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         // The web answered: the launch check is done for this sign-in (L4).
         lock(&self.slot).launch_checked = true;
         let Some(show) = current.show.filter(|show| show.status != "ended") else {
+            // Plan 234 (wire section 3, the 401 row): a show on web control
+            // whose poll a refused sign-in stopped, and that ended before
+            // this sign-in. No poll is left to see its end, so the web's
+            // answer settles it here, as a poll would have.
+            let held_without_poll = |runtime: &CloudShowRuntime| {
+                runtime.control_tx.is_none()
+                    && runtime
+                        .show
+                        .as_ref()
+                        .is_some_and(|held| held.control.transport_kind() == ControlKind::Web)
+            };
+            if held_without_poll(&lock(&self.slot)) {
+                self.forget_talk_show().await;
+                {
+                    let mut runtime = lock(&self.slot);
+                    if held_without_poll(&runtime) {
+                        mark_show_gone(
+                            &mut runtime,
+                            "show-gone",
+                            "Videorc Cloud no longer has this show.",
+                        );
+                    }
+                }
+                self.hooks.emit_from(&self.slot);
+                return Ok(lock(&self.slot).status());
+            }
             let forgot = {
                 let mut runtime = lock(&self.slot);
                 let forget = runtime.show.is_none() && runtime.remembered_show.is_some();
@@ -11988,6 +12017,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(lock(&harness.context.slot).generation, generation);
+    }
+
+    // Wire section 3, the 401 row, when the show ended meanwhile: the
+    // sign-in that follows finds no show, and that settles the held one.
+    // The session is offered direct streaming, as when a poll sees the end.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_sign_in_settles_a_fed_managed_show_that_ended_meanwhile() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        web.fail_polls([CloudApiError::Unauthorized]);
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| lock(&harness.context.slot).control_tx.is_none()).await;
+        assert!(lock(&harness.context.slot).show.is_some());
+
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse::default()));
+        let status = harness
+            .context
+            .detect_current_show("fresh-bearer")
+            .await
+            .unwrap();
+        assert!(status.show.is_none());
+        assert!(!status.connected);
+        assert!(status.direct_fallback_available);
+        assert!(!launch_check_due(&lock(&harness.context.slot), true));
+        assert!(lock(&harness.context.slot).show.is_none());
+        assert!(
+            web.destination_bodies().len() <= 1,
+            "nothing was sent to a gone show"
+        );
     }
 
     // A show `current` lists on a control transport this build does not
