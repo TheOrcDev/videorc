@@ -297,7 +297,7 @@ function CommentsWindowApp(): ReactElement {
     },
     []
   )
-  // ⋯ Chat commands…: main shows the main window on Livestream → Setup.
+  // ⋯ Chat commands…: main shows the main window on Destinations → Setup.
   const openChatCommands = useCallback((): void => {
     void window.videorc
       ?.openChatCommandsFromCommentsWindow?.({ requestId: crypto.randomUUID() })
@@ -802,7 +802,7 @@ function CommentsWindowApp(): ReactElement {
   }
 
   // Plan 213 J1: "Use Sign in" on a stream-key destination's chat row opens
-  // that destination in Livestream → Setup in the main window.
+  // that destination in Destinations → Setup in the main window.
   const openDestination = (targetId: string): void => {
     void window.videorc
       ?.openDestinationFromCommentsWindow?.({ requestId: crypto.randomUUID(), targetId })

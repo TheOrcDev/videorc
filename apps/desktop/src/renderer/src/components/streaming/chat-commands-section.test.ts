@@ -17,7 +17,7 @@ import {
 } from './chat-commands-section'
 import { chatCommandRoomLabel } from './chat-command-dialog'
 
-// Plan 226 S3: Livestream → Setup → Chat commands. The list and its
+// Plan 226 S3: Destinations → Setup → Chat commands. The list and its
 // switches, Add command… and Edit… in one dialog (the fixed `!`, the
 // counter, the X note, the preview), and Delete behind its question.
 

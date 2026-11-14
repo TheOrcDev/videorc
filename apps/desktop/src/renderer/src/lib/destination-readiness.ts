@@ -3,7 +3,7 @@ import { isStreamTargetReady, oauthUnavailableReason, streamServerUrlIssue } fro
 
 /**
  * Whether a destination has what it needs to go live, in the words the
- * Livestream page uses (plan 080 S5/S7). Signed-in destinations need a
+ * Destinations page uses (plan 080 S5/S7). Signed-in destinations need a
  * connected account; stream-key destinations need a saved key. The older
  * readiness count used the stored-key check for both, so a destination
  * connected by sign-in never counted as ready.

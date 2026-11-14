@@ -13,7 +13,7 @@ import { qrCodePath } from '@/lib/phone-remote-view'
 import { toastUserError } from '@/lib/user-error'
 import { VIDEORC_PREMIUM_URL, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
-// The Livestream page's Watchdog section (plan 223 D7): every check as a row
+// The Destinations page's Watchdog section (plan 223 D7): every check as a row
 // with its switch, "Alert me after" for the muted microphone, System
 // notifications, the phone (Premium: the link and QR to videorc.com/live and
 // the device count), and "AI reads chat for problems" (Premium, B2). Every

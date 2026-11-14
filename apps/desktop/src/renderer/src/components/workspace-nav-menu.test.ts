@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  STUDIO_PANELS,
+  SIDEBAR_ZONES,
   WORKSPACE_SHORTCUTS,
-  WORKSPACE_TABS,
   sidebarOrderFor,
   workspaceTabLabel,
   type WorkspaceTab
@@ -42,14 +41,24 @@ describe('the application menu mirrors workspace-nav', () => {
     }
   })
 
-  it('keeps sidebar order and its zones: the stage, Setup, then Library', () => {
+  it('keeps sidebar order and its zones: Studio, Setup, Livestream, then Library', () => {
     const order = MENU_PAGES.map((page) => sidebarOrderFor(tabFor(page.key)))
     expect(order).toEqual([...order].sort((left, right) => left - right))
-    expect(APP_MENU_PAGE_GROUPS.map((group) => group.map((page) => tabFor(page.key)))).toEqual([
-      WORKSPACE_TABS.filter((tab) => tab.group === 'stage').map((tab) => tab.id),
-      STUDIO_PANELS.map((panel) => panel.id),
-      WORKSPACE_TABS.filter((tab) => tab.group === 'library').map((tab) => tab.id)
+    // Plan 235 D8: the digits themselves run in order.
+    expect(MENU_PAGES.map((page) => page.key)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      '8',
+      '9'
     ])
+    expect(APP_MENU_PAGE_GROUPS.map((group) => group.map((page) => tabFor(page.key)))).toEqual(
+      SIDEBAR_ZONES.filter((zone) => zone.id !== 'system').map((zone) => [...zone.pages])
+    )
   })
 
   it('opens Settings on the ⌘, the shell maps', () => {

@@ -173,16 +173,6 @@ const GOLEM_ALLOWED: readonly Allowed[] = [
     reason: CREATURE_ART
   },
   {
-    file: 'src/components/sidebar.test.ts',
-    text: 'and the golem until there is one',
-    reason: CREATURE_ART
-  },
-  {
-    file: 'src/components/sidebar.tsx',
-    text: 'not the golem.',
-    reason: CREATURE_ART
-  },
-  {
     file: 'src/components/tabs/buddy-tab.test.ts',
     text: 'not the golem',
     reason: CREATURE_ART

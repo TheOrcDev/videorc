@@ -357,7 +357,7 @@ export interface StreamManagerProps {
    * permission, relayed to the main window. */
   onShowFollowNames?: () => void
   /** "Use Sign in" on a stream-key destination's chat row (plan 213 J1):
-   * the main window opens that destination in Livestream → Setup. */
+   * the main window opens that destination in Destinations → Setup. */
   onUseSignIn?: (targetId: string) => void
   /** "Sign in to Videorc" on a chat row the relay parked (plan 215 A3): the
    * main window starts the account sign-in. */

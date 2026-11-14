@@ -313,7 +313,7 @@ export function SessionPanel({ live = false, ...notices }: SessionPanelProps): R
             session fact, knowable without the Stream Manager; a recording
             has no chat for it to read. */}
         {live ? <CohostSessionRow /> : null}
-        {/* Plan 224 D16: the room's one row, which opens Livestream → Guests. */}
+        {/* Plan 224 D16: the room's one row, which opens Destinations → Guests. */}
         <GuestsSessionSlot />
         {/* Plan 209 D12: which agents are connected, with Stop. */}
         <AgentsSessionRow />
@@ -508,7 +508,7 @@ const dotClassName = (look: StudioLook): string =>
 /**
  * The destinations while on air (plan 174 S3.2, B-4): one quiet "3 of 3 on
  * air" row when every leg is live, else that count and one row per problem
- * ("Twitch · Stopped"), each a door to the Livestream page. Nothing until the
+ * ("Twitch · Stopped"), each a door to the Destinations page. Nothing until the
  * backend has reported the session's legs: never an unmeasured zero.
  */
 export function LiveDestinationRows({
@@ -566,7 +566,7 @@ export function LiveDestinationRows({
 }
 
 /**
- * One "Stream" fact from the same classifier the Livestream page uses (plan
+ * One "Stream" fact from the same classifier the Destinations page uses (plan
  * 174 S3.2, B-4): "Healthy" quietly, the earliest failing stage in a few
  * words when not. It opens Health, where the numbers behind it live.
  */

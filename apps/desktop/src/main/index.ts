@@ -18530,7 +18530,7 @@ app.whenReady().then(async () => {
     }
   )
   // Plan 213 J1: "Use Sign in" on a stream-key X destination's chat row opens
-  // that destination in Livestream → Setup. Main shows the window; the shell
+  // that destination in Destinations → Setup. Main shows the window; the shell
   // opens the card, and drops an id that is not a saved destination.
   secureIpcHandle(
     'comments-window:open-destination',
@@ -18554,7 +18554,7 @@ app.whenReady().then(async () => {
     }
   )
   // Plan 226 S4: ⋯ Chat commands… in the Stream Manager. Main shows the main
-  // window; the shell opens Livestream → Setup and scrolls to the section.
+  // window; the shell opens Destinations → Setup and scrolls to the section.
   secureIpcHandle(
     'comments-window:open-chat-commands',
     async (event, value: unknown): Promise<boolean> => {

@@ -66,7 +66,7 @@ midnight Pacific (09:00 CEST) and resumes on its own. The owner's lever is
 `pnpm smoke:youtube-quota` (fake API, part of `smoke:local-gates`); on a real account check:
 
 - [ ] While paused (set `youtube.pausedUntil` on the web, or wait for a real outage): the
-      Livestream page YouTube row, the Stream Manager status bar and the Comments destination
+      Destinations page YouTube row, the Stream Manager status bar and the Comments destination
       status all read "paused until <local time>", once, with no raw Google text and no toast
       storm; the stream and the other platforms keep going.
 - [ ] Stop during the pause: one toast, then Record starts immediately. Go Live offers "Use
@@ -118,7 +118,7 @@ the relay (`crates/videorc-backend/src/kick_chat.rs`, web side in
 `videorcweb/docs/kick-chat.md`). Requires a signed-in Videorc account and Kick connected over
 OAuth with `events:subscribe` and `chat:write`.
 
-- [ ] Connect Kick (Livestream → Setup); preflight reports Kick comments ready to read and send.
+- [ ] Connect Kick (Destinations → Setup); preflight reports Kick comments ready to read and send.
 - [ ] Go Live to Kick; the Kick provider goes from connecting to `Kick live chat connected.`
 - [ ] Post from a separate kick.com viewer account; the comment shows in Comments within ~2 s
       with the viewer's name, badges and avatar (the avatar renders, not a fallback initial).

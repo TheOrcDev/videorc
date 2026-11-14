@@ -208,7 +208,7 @@ const stateExpression = `(() => {
     soundMeter: !!document.querySelector('[aria-label="Microphone level"]'),
     destinationRows: Array.from(document.querySelectorAll('[data-first-run-destination]')).map(el => ({ platform: el.dataset.firstRunDestination, state: el.dataset.state, signIn: Array.from(el.querySelectorAll('button')).some(b => /Sign in…|Authorize X Live…/.test(b.textContent)), unavailable: el.textContent.includes("isn't available in this build"), text: el.textContent })),
     streamKeyAction: document.querySelector('[data-first-run-stream-key] button')?.textContent.trim(),
-    livestreamSetup: !!document.querySelector('[data-videorc-tab-trigger="streaming"][aria-current="page"]') && Array.from(document.querySelectorAll('[role="tablist"][aria-label="Livestream view"] [role="tab"]')).some(el => el.textContent.trim() === 'Setup' && el.hasAttribute('data-active')),
+    livestreamSetup: !!document.querySelector('[data-videorc-tab-trigger="streaming"][aria-current="page"]') && Array.from(document.querySelectorAll('[role="tablist"][aria-label="Destinations view"] [role="tab"]')).some(el => el.textContent.trim() === 'Setup' && el.hasAttribute('data-active')),
     theme: document.documentElement?.classList.contains('dark') ? 'dark' : 'light',
     studioDiagnostics: window.__videorcSmokeScenePresets?.state().diagnostics,
     configRaw, config: configRaw ? JSON.parse(configRaw) : null,
@@ -925,7 +925,7 @@ try {
     screenshots: allSteps.map((step) => themeShots.light.get(step))
   })
   await leave('[data-first-run-stream-key] button')
-  await check('livestream', await waitFor('Livestream Setup', (s) => s.livestreamSetup))
+  await check('livestream', await waitFor('Destinations Setup', (s) => s.livestreamSetup))
   await screenshot('livestream-setup')
 
   await startApp('skip-look')

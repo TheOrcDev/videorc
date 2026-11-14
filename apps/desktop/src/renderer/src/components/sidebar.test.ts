@@ -13,9 +13,6 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 vi.mock('@/components/account-menu', () => ({ AccountMenu: () => null }))
 vi.mock('@/components/theme-toggle', () => ({ ThemeToggle: () => null }))
 const updater = vi.hoisted(() => ({ status: { phase: 'idle' } as Record<string, unknown> }))
-// The Buddy row reads the persona for its picture (OwnBuddyIcon).
-const studio = vi.hoisted(() => ({ core: { cohostSettings: null } as Record<string, unknown> }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => studio.core }))
 vi.mock('@/hooks/use-updater', () => ({
   useUpdater: () => ({
     status: updater.status,
@@ -89,26 +86,37 @@ describe('sidebar top row', () => {
   })
 })
 
-describe('sidebar zones (plan 174 D8)', () => {
-  it('keeps Buddy second under Studio, then Setup and Library, with Settings at the bottom', () => {
+/** One row's markup, by its trigger id. */
+function rowOf(markup: string, trigger: string): string {
+  const pattern = new RegExp(
+    `<button[^>]*data-videorc-tab-trigger="${trigger}"[^>]*>.*?</button>`,
+    's'
+  )
+  return pattern.exec(markup)?.[0] ?? ''
+}
+
+describe('sidebar zones (plan 174 D8, plan 235 D6)', () => {
+  it('leads with Studio, then Setup, then Livestream (Destinations and Buddy) and Library, with Settings at the bottom', () => {
     const markup = renderSidebar()
+    // Page ids and legacy trigger ids never change: Destinations is `streaming`.
     expect(triggers(markup)).toEqual([
       'studio',
-      'ai',
       'sources',
       'layout',
       'assets',
-      'streaming',
       'captions',
       'recording',
+      'streaming',
+      'ai',
       'library',
       'settings'
     ])
-    // Only Setup is labelled; the single rows carry no group label.
+    // Two labelled groups; the single rows carry no group label.
     const labels = [...markup.matchAll(/data-slot="section-label"[^>]*>([^<]*)</g)].map(
       (match) => match[1]
     )
-    expect(labels).toEqual(['Setup'])
+    expect(labels).toEqual(['Setup', 'Livestream'])
+    expect(rowOf(markup, 'streaming')).toContain('>Destinations<')
     // Settings sits in the bottom block, after Library, above the account row.
     const bottom = markup.indexOf('data-testid="sidebar-bottom"')
     expect(bottom).toBeGreaterThan(markup.indexOf('data-videorc-tab-trigger="library"'))
@@ -116,21 +124,47 @@ describe('sidebar zones (plan 174 D8)', () => {
     expect(markup).not.toContain('data-videorc-tab-trigger="diagnostics"')
   })
 
-  it("wears the streamer's own Buddy on the Buddy row, and the golem until there is one", () => {
-    const buddyRow = (markup: string): string =>
-      /<button[^>]*data-videorc-tab-trigger="ai"[^>]*>.*?<\/button>/s.exec(markup)?.[0] ?? ''
-
-    studio.core = { cohostSettings: null }
-    expect(buddyRow(renderSidebar())).toMatch(/<image href="[^"]*buddy-emblem-64/)
-
-    studio.core = { cohostSettings: { persona: { images: { idle: 'p1/idle-0a1b2c3d.png' } } } }
-    const own = buddyRow(renderSidebar())
-    expect(own).toContain('<image href="videorc-asset://buddy/p1/idle-0a1b2c3d.png"')
-    expect(own).not.toContain('buddy-emblem-64')
-    studio.core = { cohostSettings: null }
+  // Plan 235 D8: the shortcuts run down the rows, ⌘1 to ⌘9.
+  it('puts ⌘1–⌘9 on the rows top to bottom', () => {
+    const markup = renderSidebar({ platform: 'darwin' })
+    const keys = [...markup.matchAll(/aria-keyshortcuts="Meta\+(\d)"/g)].map((match) => match[1])
+    expect(keys).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9'])
   })
 
-  it('shows the live dot and clock on the Studio row while a session runs', () => {
+  // Plan 235 D7: a plain glyph like its neighbours, never the Buddy artwork,
+  // whatever Buddy the streamer has.
+  it('draws the Buddy row with a plain glyph, filled while it is the page', () => {
+    const idle = rowOf(renderSidebar(), 'ai')
+    expect(idle).toContain('>Buddy<')
+    expect(idle).not.toContain('<image')
+    expect(idle).not.toContain('buddy-emblem')
+    expect(idle).not.toContain('aria-current')
+    const current = rowOf(renderSidebar({ active: 'ai' }), 'ai')
+    expect(current).toContain('aria-current="page"')
+    expect(current).toContain('chrome-plate')
+  })
+
+  // Plan 235 D5: the way home is the sidebar's big button.
+  it('draws Studio as a 40 px chrome slab on every page, its icon filled only on Studio', () => {
+    const onStudio = rowOf(renderSidebar(), 'studio')
+    const elsewhere = rowOf(renderSidebar({ active: 'library' }), 'studio')
+    for (const slab of [onStudio, elsewhere]) {
+      expect(slab).toMatch(/class="chrome-fill [^"]*\bh-10\b/)
+      expect(slab).toContain('data-testid="sidebar-studio-slab"')
+      expect(slab).not.toContain('chrome-plate')
+      expect(slab).not.toContain('chrome-led')
+    }
+    expect(onStudio).toContain('aria-current="page"')
+    expect(elsewhere).not.toContain('aria-current')
+    // The filled glyph and the regular one draw different paths.
+    expect(onStudio.replace(/aria-current="page" /, '')).not.toEqual(elsewhere)
+    // Its key chip takes the slab's ink, never the gray glass keycap's.
+    expect(onStudio).toMatch(/data-slot="kbd"/)
+    expect(onStudio).toContain('text-current')
+    expect(onStudio).not.toContain('text-muted-foreground')
+  })
+
+  it('shows the live dot and clock on the Studio slab while a session runs', () => {
     const startedAt = new Date(Date.now() - 65_000).toISOString()
     const live = renderSidebar({
       statusPulse: true,
@@ -139,15 +173,16 @@ describe('sidebar zones (plan 174 D8)', () => {
       live: true,
       sessionStartedAt: startedAt
     })
-    const studio = live.slice(
-      live.indexOf('data-videorc-tab-trigger="studio"'),
-      live.indexOf('data-videorc-tab-trigger="ai"')
-    )
+    const studio = rowOf(live, 'studio')
     expect(studio).toContain('data-testid="sidebar-session-clock"')
     expect(studio).toContain('data-tone="live"')
     expect(studio).toMatch(/1:0[4-6]</)
     // Hidden from assistive tech: the status bar already announces the state.
     expect(studio).toMatch(/aria-hidden="true"[^>]*data-testid="sidebar-session-clock"/)
+    // On the slab the time reads in the slab's ink, not the secondary gray.
+    const clockClass = /class="([^"]*)" data-testid="sidebar-session-clock"/.exec(studio)?.[1]
+    expect(clockClass).toBeDefined()
+    expect(clockClass).not.toContain('text-muted-foreground')
     expect(renderSidebar()).not.toContain('data-testid="sidebar-session-clock"')
   })
 })

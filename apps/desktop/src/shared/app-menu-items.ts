@@ -14,24 +14,24 @@ export interface AppMenuPage {
 }
 
 /**
- * The View menu's pages in sidebar order, one group per sidebar zone. Buddy
- * sits directly under Studio and keeps ⌘9 (owner call, plan 174 D8), so the
- * digits do not run in order.
+ * The View menu's pages in sidebar order, one group per sidebar zone: Studio,
+ * Setup, Livestream, then Library. The digits run down the sidebar (plan 235
+ * D8).
  */
 export const APP_MENU_PAGE_GROUPS: readonly (readonly AppMenuPage[])[] = [
-  [
-    { key: '1', label: 'Studio' },
-    { key: '9', label: 'Buddy' }
-  ],
+  [{ key: '1', label: 'Studio' }],
   [
     { key: '2', label: 'Sources' },
     { key: '3', label: 'Scene' },
     { key: '4', label: 'Assets' },
-    { key: '5', label: 'Livestream' },
-    { key: '6', label: 'Captions' },
-    { key: '7', label: 'Output' }
+    { key: '5', label: 'Captions' },
+    { key: '6', label: 'Output' }
   ],
-  [{ key: '8', label: 'Library' }]
+  [
+    { key: '7', label: 'Destinations' },
+    { key: '8', label: 'Buddy' }
+  ],
+  [{ key: '9', label: 'Library' }]
 ]
 
 export type AppMenuWindowId = 'preview' | 'notes' | 'stream-manager' | 'captions'

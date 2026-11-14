@@ -537,7 +537,7 @@ const STREAM_METADATA_PLATFORMS: [StreamPlatform; 4] = [
 ///
 /// A draft saved over the wire (or by an old smoke before it isolated its
 /// database) can carry an empty override list; it parses, so the loader's
-/// default fallback never fires and the Livestream page then has no
+/// default fallback never fires and the Destinations page then has no
 /// per-destination rows to draw. Existing rows and their order are kept;
 /// missing ones are appended in canonical order.
 pub fn normalize_stream_metadata_draft(draft: &mut StreamMetadataDraft) {

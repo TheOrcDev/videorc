@@ -24,8 +24,8 @@ export function connectionBlockedReason(wsStatus: WsStatus): string | null {
 export const START_BLOCKED_COPY = {
   sessionRunning: 'A recording or livestream is already running.',
   noOutput: 'Turn on Save local recording in Output, or go live.',
-  destinationSetup: 'Finish setting up your destination in Livestream before you go live.',
-  noDestination: 'Turn on a destination in Livestream before you go live.',
+  destinationSetup: 'Finish setting up your destination in Destinations before you go live.',
+  noDestination: 'Turn on a destination in Destinations before you go live.',
   checkingRecorder: 'Checking the recorder…',
   recorderMissing: "Videorc's recorder isn't available. Export a support bundle from Health."
 } as const

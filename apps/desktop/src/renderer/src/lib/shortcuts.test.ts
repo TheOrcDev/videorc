@@ -23,9 +23,14 @@ describe('SHORTCUTS registry', () => {
     ).toBe(WORKSPACE_SHORTCUTS.length)
   })
 
-  it('labels ⌘9 Buddy (plan 119)', () => {
+  // Plan 235 D6 and D8: the keys run down the sidebar.
+  it('labels ⌘7 Destinations and ⌘8 Buddy', () => {
+    expect(SHORTCUTS.find((entry) => entry.id === 'nav-live')).toMatchObject({
+      accelerators: ['CmdOrCtrl+7'],
+      label: 'Destinations'
+    })
     expect(SHORTCUTS.find((entry) => entry.id === 'nav-ai')).toMatchObject({
-      accelerators: ['CmdOrCtrl+9'],
+      accelerators: ['CmdOrCtrl+8'],
       label: 'Buddy'
     })
   })

@@ -24,7 +24,7 @@ import {
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import { toast } from '@/lib/toast'
 
-// One moderation kit for a guest (plan 224 D5, D14), shared by Livestream →
+// One moderation kit for a guest (plan 224 D5, D14), shared by Destinations →
 // Guests (C-G2) and the Show stage's backstage strip (C-G3): Rename…, the
 // host's mute hold, screen share per guest, Remove and Ban. Remove and Ban ask
 // first (a destructive action asks or can be undone); a Ban rotates the link,

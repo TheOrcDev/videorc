@@ -9,7 +9,7 @@ import { openLivestreamView } from '@/lib/livestream-tabs'
 
 /**
  * The Studio's one Guests row while the room is open (plan 224 D16): "Room
- * open · 2 backstage", and a click opens Livestream → Guests, the room's one
+ * open · 2 backstage", and a click opens Destinations → Guests, the room's one
  * home. Its own chunk: it loads with the room, never with the Studio.
  */
 export function GuestsSessionRow({ look = 'default' }: { look?: StudioLook }): ReactElement {

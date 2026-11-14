@@ -11,7 +11,7 @@ import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context
 
 import GuestsTab from './guests-tab'
 
-// Plan 224 C-G2: Livestream → Guests renders locked, empty, a request, two
+// Plan 224 C-G2: Destinations → Guests renders locked, empty, a request, two
 // guests and a full room, and its buttons reach the room's actions.
 
 const studio = vi.hoisted(() => ({
@@ -56,7 +56,7 @@ function html(status: CloudStatus | null): string {
   return renderToStaticMarkup(createElement(TooltipProvider, null, createElement(GuestsTab)))
 }
 
-describe('Livestream → Guests (C-G2)', () => {
+describe('Destinations → Guests (C-G2)', () => {
   it('locks behind Premium for a Basic account, every control off', () => {
     const page = html(talkStatus({ entitled: false, plan: undefined }))
     expect(page).toContain('Talk shows with guests come with Videorc Premium.')

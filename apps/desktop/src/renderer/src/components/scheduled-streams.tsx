@@ -387,7 +387,7 @@ export function ScheduledStreams(): ReactElement {
                 {`No ${scheduledProviderLabel(starting?.provider ?? 'youtube')} destination signs in as ${starting?.accountLabel ?? 'this account'}`}
               </AlertTitle>
               <AlertDescription>
-                In Livestream → Setup, set a destination to Sign in with this account, then come
+                In Destinations → Setup, set a destination to Sign in with this account, then come
                 back.
               </AlertDescription>
               <AlertAction>

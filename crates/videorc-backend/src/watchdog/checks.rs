@@ -768,7 +768,7 @@ impl Checks {
                         "Videorc can't reconnect {label} without a gap on the others. Keep going, or end the livestream and go live again."
                     ),
                 )
-                .fix(AlertFix::new(FixKind::OpenLivestream, "Open Livestream")),
+                .fix(AlertFix::new(FixKind::OpenLivestream, "Open Destinations")),
                 DestinationPhase::NotReceiving => AlertSpec::new(
                     AlertSeverity::Warning,
                     format!("{label} isn't receiving your stream"),
@@ -804,7 +804,7 @@ impl Checks {
                     format!("Reconnect {}", first.destination.label),
                 )
             } else {
-                AlertFix::new(FixKind::OpenLivestream, "Open Livestream")
+                AlertFix::new(FixKind::OpenLivestream, "Open Destinations")
             };
             let spec = AlertSpec::new(
                 AlertSeverity::Critical,
@@ -1358,7 +1358,7 @@ mod tests {
         );
         assert!(alert.fixes.is_empty(), "FFmpeg is already doing the work");
 
-        // A failed direct leg: the honest copy and Open Livestream (D8).
+        // A failed direct leg: the honest copy and Open Destinations (D8).
         let legs = [
             destination("youtube", DestinationPhase::Failed, start.now, false),
             destination("twitch", DestinationPhase::Live, start.now, false),

@@ -38,7 +38,7 @@ export interface FirstFrameSnapshot {
   /**
    * Plan 213 D: why the docked surface is hidden on purpose right now, from
    * the one dock predicate (`decideDockVisibility`): the Studio slot scrolled
-   * away or unmounted (Library, Livestream, Sources, Settings), a dialog over
+   * away or unmounted (Library, Destinations, Sources, Settings), a dialog over
    * it, the app window hidden, minimized or full screen. A hidden surface
    * presents nothing, so the chain reads as broken; it is not, and no heal
    * may fire. `null` while the surface shows, and always for a floating
