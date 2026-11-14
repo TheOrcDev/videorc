@@ -285,6 +285,21 @@ export async function managedHarness(kind, pass = 1) {
         } catch {}
       })
       await h.status((s) => s.entitled && s.settings?.enabled, 'managed entitlement')
+      // The Clips ring (plan 181) starts a buffer-only session whenever the
+      // app is idle. This smoke starts sessions over its own socket, beside
+      // the renderer, so a ring start races them (the renderer never races its
+      // own ring); off, as smoke:record-latency's bare baseline turns it off.
+      assert.equal(
+        await h.eval('return window.__videorcSmokeSetReplayBuffer?.(false) ?? null'),
+        true,
+        'the renderer has no clip buffer smoke hook'
+      )
+      await waitFor(
+        async () =>
+          (await h.rpc('replay.status'))?.state === 'off' &&
+          (await h.rpc('recording.status'))?.state === 'idle',
+        'the Clips ring off and the backend idle'
+      )
       for (const target of h.targets ?? []) {
         if (target.streamKeySecretRef) continue
         const saved = await h.rpc('streamTargets.manualKey.store', {
