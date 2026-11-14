@@ -3698,7 +3698,7 @@ pub(crate) async fn retire_marker_voice(state: &AppState) {
 pub(crate) async fn pause_marker_voice_for_service_flags(state: &AppState) {
     let listening = crate::cohost::CohostListening::blocked(
         "voice-disabled",
-        "Buddy voice commands are temporarily unavailable. Turn listening on again after the pause ends.",
+        "Sidekick voice commands are temporarily unavailable. Turn listening on again after the pause ends.",
     );
     {
         let mut coordinator = state.captions.lock().await;
@@ -3750,17 +3750,17 @@ pub(crate) async fn configure_marker_voice(
     } else if !crate::cohost::premium_entitled() {
         Some(CohostListening::blocked(
             "premium-required",
-            "Buddy voice markers require Videorc Premium.",
+            "Sidekick voice markers require Videorc Premium.",
         ))
     } else if crate::account::stored_session_token().is_none() {
         Some(CohostListening::blocked(
             "signed-out",
-            "Sign in to use Buddy voice markers.",
+            "Sign in to use Sidekick voice markers.",
         ))
     } else if !crate::service_flags::buddy_voice_commands_enabled(state) {
         Some(CohostListening::blocked(
             "voice-disabled",
-            "Buddy voice commands are temporarily unavailable.",
+            "Sidekick voice commands are temporarily unavailable.",
         ))
     } else {
         None
@@ -4424,7 +4424,7 @@ async fn start_listen_with_bearer_for_epoch(
         if coordinator.privacy_teardown_in_progress || coordinator.privacy_teardown_failed {
             return CohostListening::blocked(
                 "signing-out",
-                "Buddy can't listen while account sign-out cleans up private caption data.",
+                "Sidekick can't listen while account sign-out cleans up private caption data.",
             );
         }
     }
@@ -4460,24 +4460,27 @@ async fn start_listen_with_bearer_for_epoch(
         };
     }
     if !capture_active {
-        return CohostListening::blocked("no-capture", "Buddy hears you once a session is live.");
+        return CohostListening::blocked(
+            "no-capture",
+            "Sidekick hears you once a session is live.",
+        );
     }
     if !real_input_eligible && !caption_contract_idle_session_enabled() {
         return CohostListening::blocked(
             "no-microphone",
-            "Select a microphone so Buddy can hear you.",
+            "Select a microphone so Sidekick can hear you.",
         );
     }
     // Credentials are read only once a session could actually listen.
     let Some(bearer) = resolve_bearer() else {
-        return CohostListening::blocked("signed-out", "Sign in so Buddy can hear you.");
+        return CohostListening::blocked("signed-out", "Sign in so Sidekick can hear you.");
     };
     let client = match VideorcApiClient::new() {
         Ok(client) => client,
         Err(error) => {
             return CohostListening::blocked(
                 "service-unavailable",
-                format!("Buddy can't reach the transcription service: {error}"),
+                format!("Sidekick can't reach the transcription service: {error}"),
             );
         }
     };
@@ -5843,7 +5846,7 @@ async fn run_caption_session(mut session: CaptionSession) {
                 listen_epoch,
                 crate::cohost::CohostListening::blocked(
                     "no-capture",
-                    "Buddy hears you while a session is live.",
+                    "Sidekick hears you while a session is live.",
                 ),
             );
         }
@@ -7685,7 +7688,7 @@ async fn await_caption_chunk_upload(
 const CAPTIONS_SERVICE_UNAVAILABLE: &str =
     "Captions paused: Videorc AI is unavailable. They come back on their own.";
 const LISTEN_SERVICE_UNAVAILABLE: &str =
-    "Videorc AI is unavailable, so Buddy can't hear you right now.";
+    "Videorc AI is unavailable, so Sidekick can't hear you right now.";
 
 /// Five consecutive legacy 502s distinguish a sustained outage from a provider
 /// blip. A stable service code is authoritative immediately. Stay paused until

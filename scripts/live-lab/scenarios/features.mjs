@@ -118,13 +118,13 @@ export default defineScenario({
     ...singleCommentHighlightSteps(),
     {
       id: 'buddy-look',
-      title: 'Buddy',
+      title: 'Sidekick',
       deadlineMs: 10_000,
       async run(ctx) {
         await needsEyes(ctx, {
           id: 'buddy-reacts',
           question:
-            'Did Buddy react to the viewer message and the scripted speech (plans 164, 168, 172)?'
+            'Did Sidekick react to the viewer message and the scripted speech (plans 164, 168, 172)?'
         })
         return { recorded: true }
       }

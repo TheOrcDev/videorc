@@ -105,7 +105,7 @@ export function RemovalCards({
   if (!view.active) return null
   return (
     <div
-      aria-label="Removals Buddy is waiting on"
+      aria-label="Removals Sidekick is waiting on"
       className="flex shrink-0 flex-col gap-1.5 border-b border-border p-2"
       data-slot="removal-cards"
     >

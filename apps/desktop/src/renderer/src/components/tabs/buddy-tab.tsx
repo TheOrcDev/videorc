@@ -137,7 +137,7 @@ export function BuddyTab({
   return (
     <>
       <PageTabs
-        label="Buddy sections"
+        label="Sidekick sections"
         tabs={BUDDY_TABS}
         testId="buddy-tab"
         triggerAttribute="data-videorc-buddy-tab"
@@ -291,7 +291,7 @@ function BuddyProfileStatus(): ReactElement {
   const buddyName = buddyDisplayName(cohostSettings?.persona.name)
   const turnBuddyLive = (on: boolean): void => {
     void setBuddyLive(on).catch((error: unknown) =>
-      toastUserError(error, { action: on ? 'turn on' : 'turn off', object: 'Buddy Live' })
+      toastUserError(error, { action: on ? 'turn on' : 'turn off', object: 'Sidekick Live' })
     )
   }
 
@@ -359,8 +359,8 @@ function BuddyLiveSection(): ReactElement {
   return (
     <PanelSection
       action={<Badge variant="outline">Alpha</Badge>}
-      description={`Buddy reads your chat while you stream. ${BUDDY_POSTS_PROMISE}`}
-      title="Buddy Live"
+      description={`Sidekick reads your chat while you stream. ${BUDDY_POSTS_PROMISE}`}
+      title="Sidekick Live"
     >
       <CohostListenField locked={view.unlock !== null} />
     </PanelSection>
@@ -377,8 +377,8 @@ function BuddyLivePowers({
   onSelectTab: (tab: BuddyTabId) => void
 }): ReactElement {
   return (
-    <PanelSection title="What Buddy does">
-      <FieldGroup aria-label="What Buddy does" role="list" variant="grouped">
+    <PanelSection title="What Sidekick does">
+      <FieldGroup aria-label="What Sidekick does" role="list" variant="grouped">
         {BUDDY_LIVE_POWERS.map((power) => {
           const label = BUDDY_TABS.find((entry) => entry.id === power.tab)?.label ?? power.tab
           return (
@@ -457,7 +457,7 @@ function CloudAiSection(): ReactElement {
   const { aiConsent, setAiConsent } = useStudioCore()
   return (
     <PanelSection
-      description="What Buddy and Clean cut send to Videorc's cloud, and what is kept."
+      description="What Sidekick and Clean cut send to Videorc's cloud, and what is kept."
       title="Cloud AI"
     >
       <FieldGroup variant="grouped">
@@ -496,7 +496,7 @@ function BuddyTabConsentDialog(): ReactElement {
     void answerBuddyConsent(accepted).catch((error: unknown) =>
       toastUserError(
         error,
-        { action: 'turn on', object: 'Buddy Live' },
+        { action: 'turn on', object: 'Sidekick Live' },
         {
           id: 'buddy-live-consent',
           ...(accepted ? { action: { label: 'Retry', onClick: () => answer(true) } } : {})

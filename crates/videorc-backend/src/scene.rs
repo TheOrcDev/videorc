@@ -1725,6 +1725,72 @@ mod tests {
         assert!(camera.transform.y.abs() < 1e-9);
     }
 
+    /// Plan 235 D9 a: a background never changes where the scene STORES the
+    /// camera. The render paths move it onto the stage, and only while the
+    /// background really draws, so the stage rule is asked of the scene.
+    #[test]
+    fn camera_only_scene_with_a_background_stages_the_camera_at_render() {
+        use crate::scene_geometry::{
+            BackgroundStage, background_stage_margin, scene_camera_uses_background_stage,
+            scene_source_render_transform,
+        };
+        for preset in [LayoutPreset::CameraOnly, LayoutPreset::VerticalCameraOnly] {
+            let mut params = base_params();
+            params.layout.layout_preset = preset.clone();
+            params.background = Some(test_background("/managed/background.webp"));
+            let scene = scene_from_capture_config(params.clone());
+            assert_eq!(scene.sources.len(), 1, "{preset:?}");
+            let camera = &scene.sources[0];
+            assert_eq!(camera.kind, SceneSourceKind::Camera);
+            assert!(camera.transform.x.abs() < 1e-9, "{preset:?}");
+            assert!((camera.transform.width - 1.0).abs() < 1e-9, "{preset:?}");
+            assert!((camera.transform.height - 1.0).abs() < 1e-9, "{preset:?}");
+
+            assert!(scene_camera_uses_background_stage(&scene, &params.layout));
+            let margin = background_stage_margin(scene.background.as_ref());
+            let drawn = scene_source_render_transform(
+                &camera.transform,
+                &camera.kind,
+                BackgroundStage::for_scene(&scene, &params.layout, margin),
+            );
+            assert!((drawn.x - margin).abs() < 1e-9, "{preset:?}");
+            assert!((drawn.y - margin).abs() < 1e-9, "{preset:?}");
+            assert!((drawn.width - (1.0 - 2.0 * margin)).abs() < 1e-9);
+            assert!((drawn.height - (1.0 - 2.0 * margin)).abs() < 1e-9);
+            assert!(margin > 0.0, "the test background has a visible stage");
+
+            // Key out background: the camera stays full frame over it.
+            let mut keyed = params.layout.clone();
+            keyed.camera_chroma_key_enabled = true;
+            assert!(!scene_camera_uses_background_stage(&scene, &keyed));
+            // Freeform boxes are the streamer's own.
+            let mut freeform = params.clone();
+            freeform.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+            let freeform_scene = scene_from_capture_config(freeform.clone());
+            assert!(!scene_camera_uses_background_stage(
+                &freeform_scene,
+                &freeform.layout
+            ));
+        }
+        // A camera over or beside a screen keeps its place.
+        for preset in [
+            LayoutPreset::ScreenCamera,
+            LayoutPreset::SideBySide,
+            LayoutPreset::VerticalCameraTop,
+            LayoutPreset::VerticalScreenCamera,
+            LayoutPreset::ScreenOnly,
+        ] {
+            let mut params = base_params();
+            params.layout.layout_preset = preset.clone();
+            params.background = Some(test_background("/managed/background.webp"));
+            let scene = scene_from_capture_config(params.clone());
+            assert!(
+                !scene_camera_uses_background_stage(&scene, &params.layout),
+                "{preset:?}"
+            );
+        }
+    }
+
     #[test]
     fn side_by_side_scene_places_sources_in_regions() {
         let mut params = base_params();

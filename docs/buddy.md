@@ -1,68 +1,71 @@
-# Buddy
+# Sidekick
 
-Buddy is the companion you create for your streams (plan 119 as Orcle,
-renamed and made yours in plan 164, called Golem until plan 171). You name
+Sidekick is the companion you create for your streams (plan 119 as Orcle,
+renamed and made yours in plan 164, called Golem until plan 171 and Buddy
+until plan 236, because speech to text heard "Buddy" as "body"). You name
 it, give it a personality and its looks. It stands on your stream as an
 avatar with a comic bubble, reads your chat, hears you, and, when you turn
-the modes on, posts to your chats as you. There is no voice: Buddy talks
+the modes on, posts to your chats as you. There is no voice: Sidekick talks
 through its bubble.
 
-The code, wire and storage name is `cohost`. Everything a user reads says
-Buddy, or the name you gave it, never co-host and no longer Orcle or Golem.
+The code, wire and storage name is `cohost`, and names a program reads keep
+`buddy` (`/api/buddy/*`, `cohost.buddy*`, `buddy_say`, saved values, file
+names; plan 236 D1). Everything a user reads says Sidekick, or the name you
+gave it, never co-host and no longer Buddy, Orcle or Golem.
 The stone golem creature keeps its own words (plan 171 D2, D4): its official
 slug and id are `golem` and `official:golem`, its kind is "Golem", and its
-name is Buddy. Saved and wire values keep `orcle` (plan 170 D22): the
+name is Sidekick. Saved and wire values keep `orcle` (plan 170 D22): the
 moderation source `orcle-voice`, the service-flags `orcle` key and the
 `videorc.orcleTab` storage key.
 
-The Preview shows the program: Buddy appears whenever a running output
-carries it, or either switch is on while nothing runs. An off Buddy is never
-drawn, even while selected. That holds in every row: with Clips on and Buddy
+The Preview shows the program: Sidekick appears whenever a running output
+carries it, or either switch is on while nothing runs. An off Sidekick is never
+drawn, even while selected. That holds in every row: with Clips on and Sidekick
 "Show on stream" only, the Preview shows the pet while a saved clip does
 not, and during a split record + stream the Preview shows a stream-only
-Buddy the recording leaves out (the program leg,
+Sidekick the recording leaves out (the program leg,
 [overlays.md](overlays.md)). On Windows and Linux, where the Preview is
-the proof surface, Buddy is drawn there by the same rule, alive and with
+the proof surface, Sidekick is drawn there by the same rule, alive and with
 its bubble.
 
 ## The promise
 
-**Buddy never posts in your chat on its own.** (plan 211 D6). It talks in
+**Sidekick never posts in your chat on its own.** (plan 211 D6). It talks in
 its bubble on stream. A Suggest card posts only when you click it. It
 removes a comment only when you tell it to.
 
-Everything Buddy posts goes out **as you**, on your own account, on the
+Everything Sidekick posts goes out **as you**, on your own account, on the
 platforms you stream to (D3). There is no bot account.
 
 ## Where things live
 
-| Place                                                       | Job                                                                                                                                                                                                                                                                                                                         |
-| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Buddy page** (sidebar, second, directly under Studio, ⌘9) | Creates and sets up. **Profile**: the status row with Buddy Live and Open Stream Manager, My Buddies, name, personality, avatar (Still or Alive), reactions, motion, bubble style, listening, Cloud AI consent. **Chat**: Greetings, Answers, Banter and moderation. **Community** (plan 225): the people who chat, regulars, links, settings, Export… and Import…. **Voice**: voice commands. **Reports**. **Clean cut**. |
-| **Stream Manager** (⇧⌘J, the Buddy pane)                    | Operates live. Buddy Live, "{name} talks" (Off, Bubble, Suggest), Suggest cards, the Say box and reactions, the "{name} on stream" switch, questions, flags, "Welcome back" (the regulars who just arrived, with Wave) and the "Linked … Undo" card. Greetings, Answers and Banter show as read-only chips that open Buddy → Chat.                                                                                  |
-| **Scene page** (⌘3, the Live Scene canvas)                  | Places. Where Buddy sits on each orientation, and whether it is on the stream and in the recording. See [overlays.md](overlays.md).                                                                                                                                                                                         |
+| Place                                                          | Job                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Sidekick page** (sidebar, second, directly under Studio, ⌘9) | Creates and sets up. **Profile**: the status row with Sidekick Live and Open Stream Manager, My Sidekicks, name, personality, avatar (Still or Alive), reactions, motion, bubble style, listening, Cloud AI consent. **Chat**: Greetings, Answers, Banter and moderation. **Community** (plan 225): the people who chat, regulars, links, settings, Export… and Import…. **Voice**: voice commands. **Reports**. **Clean cut**. |
+| **Stream Manager** (⇧⌘J, the Sidekick pane)                    | Operates live. Sidekick Live, "{name} talks" (Off, Bubble, Suggest), Suggest cards, the Say box and reactions, the "{name} on stream" switch, questions, flags, "Welcome back" (the regulars who just arrived, with Wave) and the "Linked … Undo" card. Greetings, Answers and Banter show as read-only chips that open Sidekick → Chat.                                                                                        |
+| **Scene page** (⌘3, the Live Scene canvas)                     | Places. Where Sidekick sits on each orientation, and whether it is on the stream and in the recording. See [overlays.md](overlays.md).                                                                                                                                                                                                                                                                                          |
 
-Each control has one home. The Buddy page stays where it is, second in the
+Each control has one home. The Sidekick page stays where it is, second in the
 sidebar and directly under Studio, with Clean cut and every other feature in
-it: it shows what Premium does (owner call 2026-10-10). Buddy Live is the one
-switch shown twice, in Buddy → Profile's status row and in the Buddy pane's
+it: it shows what Premium does (owner call 2026-10-10). Sidekick Live is the one
+switch shown twice, in Sidekick → Profile's status row and in the Sidekick pane's
 header; both flip the same setting.
 
-## Creating your Buddy (Buddy → Profile)
+## Creating your Sidekick (Sidekick → Profile)
 
 - **Name** (1 to 24 characters). The creature's name is what it answers to in
   chat and in voice.
 - **Personality** (up to 1,200 characters), free text. Three example chips
   fill it. The personality rides every cloud tick with the name.
-- **A new look** (plan 170): **New Buddy…** in My Buddies (below) opens the
-  four-step onboarding, the same steps as on videorc.com/buddy/create:
+- **A new look** (plan 170): **New Sidekick…** in My Sidekicks (below) opens the
+  four-step onboarding, the same steps as on videorc.com/sidekick/create:
   _Meet your sidekick_ (a stream demo, the official five, what it does),
   _Describe it_ (words, a picture for inspiration such as a pet, a logo or a
   sketch, or both), _Give it a personality_ (name, personality, About you)
-  and _Create your Buddy_ (⌘↵, Premium + Cloud AI, 4 of the day's images).
+  and _Create your Sidekick_ (⌘↵, Premium + Cloud AI, 4 of the day's images).
   The web draws the idle character in the house look and talk, laugh and
   think as edits of it (plan 169), and saves the set to your Videorc
-  account. The set is a draft until **Use as my Buddy**; **Discard**
+  account. The set is a draft until **Use as my Sidekick**; **Discard**
   deletes it from the account, and **Redo** (R on a focused tile) remakes
   talk, laugh or think from the draft's idle (1 image). Every string comes
   from `docs/buddy-onboarding-copy.md`. The Avatar section's Still panel
@@ -80,12 +83,12 @@ its own idle never borrows them: its missing states show its own idle. The avata
 generation cap is the web's (24 a day); the image model is a web
 environment variable, never hardcoded in the desktop.
 
-## My Buddies: the library (plan 170)
+## My Sidekicks: the library (plan 170)
 
-My Buddies sits in Buddy → Profile, under the status row, and in your account on
-videorc.com (`/account/buddies`); both show the same library.
+My Sidekicks sits in Sidekick → Profile, under the status row, and in your account on
+videorc.com (`/account/sidekicks`); both show the same library.
 
-- **Official** (free, signed in or not, works offline): Buddy the Golem, Golmar
+- **Official** (free, signed in or not, works offline): Sidekick the Golem, Golmar
   the Orc, Nib the Goblin, Captain Barnacle the Pirate and Bolt the Robot.
   Their names, taglines and personalities are
   `protocol-fixtures/buddy-official-catalog.json`; their four poses ship
@@ -93,30 +96,30 @@ videorc.com (`/account/buddies`); both show the same library.
   and the generator in `assets/brand/buddy/`) and the backend bundles the
   same files for the stream. **Use** sets the pictures, name and
   personality and leaves your About you notes alone.
-- **Made by you** (signed in): every Buddy you create, here or on the web,
+- **Made by you** (signed in): every Sidekick you create, here or on the web,
   up to 30. **Use**, **Rename**, **Edit personality** (with About you),
   **Delete** and **Make it Alive**. Using one downloads its four poses and
-  sets the name, personality and, when it has one, About you as Buddy's
-  notes. Your edits to a linked Buddy's name, personality or notes go back
+  sets the name, personality and, when it has one, About you as Sidekick's
+  notes. Your edits to a linked Sidekick's name, personality or notes go back
   to the account about 2 s after you stop typing.
 - **Sync** (D12): the app reads the account's choice at launch, when My
-  Buddies opens, on window focus (at most once a minute) and from the
-  `videorc://buddy` link. A choice made on the web applies when Buddy is
-  linked to the library or is still the untouched default; a Buddy made only
+  Sidekicks opens, on window focus (at most once a minute) and from the
+  `videorc://buddy` link. A choice made on the web applies when Sidekick is
+  linked to the library or is still the untouched default; a Sidekick made only
   on this computer (an imported pack, a look kept while signed out) is never
-  overwritten, and My Buddies offers the web's choice with **Use** instead.
+  overwritten, and My Sidekicks offers the web's choice with **Use** instead.
   Nothing changes while a recording or stream is live: the choice waits for
   the session to end. Signed out, nothing syncs and the official five still
   work.
 - **videorc://buddy** (D18), from "Open in Videorc" on the web, focuses the
-  app, opens the Buddy page and syncs; `?alive=<id>` then uses that Buddy
+  app, opens the Sidekick page and syncs; `?alive=<id>` then uses that Sidekick
   and opens the Alive creator.
-- The first launch with the untouched default Buddy shows one line in My
-  Buddies: "Make this Buddy your own, or pick another." with **Start**.
+- The first launch with the untouched default Sidekick shows one line in My
+  Sidekicks: "Make this Sidekick your own, or pick another." with **Start**.
 
 ## Still and Alive (plan 168)
 
-The Avatar section of Buddy → Profile picks how Buddy looks:
+The Avatar section of Sidekick → Profile picks how Sidekick looks:
 
 - **Still** is the four state images above. It is free.
 - **Alive** is a pet pack: one transparent sprite atlas with 25 drawn look
@@ -133,7 +136,7 @@ window, reacts when you click it, blinks, breathes and falls asleep. Packs:
   (`manifest.json` plus its PNG or WebP sheets). Importing is free. Two-layer
   legacy packs and AVIF sheets are refused with the reason. Guards: 32 MB per
   file, 128 MB per pack, at most 64 frames, sheets up to 8192 px.
-- **Create** makes your own Alive Buddy from your reference picture (Premium,
+- **Create** makes your own Alive Sidekick from your reference picture (Premium,
   see below).
 - **Remove** deletes the worn pack and switches back to Still. The bundled
   pack cannot be removed.
@@ -160,7 +163,7 @@ Moderation flags never react on air.
 
 **Motion** (0 to 1, default 0.45) scales every bounce, squash and tilt; 0
 keeps the drawn poses and drops all movement. **Sleep after** (Never, 1, 3, 5
-or 10 minutes, default 3) puts Buddy to sleep with no chat, activity or
+or 10 minutes, default 3) puts Sidekick to sleep with no chat, activity or
 lines; anything wakes it with a surprised start. **Breathing** (on by
 default) is a slow squash between events so it never looks frozen.
 
@@ -173,12 +176,12 @@ looks up while an answer is on its way, cycles its talk frames while its
 bubble is up, blinks every few seconds and plays the reaction you mapped for
 each event. Each orientation computes its own gaze, so the pet looks toward
 the card wherever the card sits on that leg. The "nothing bounces" rule for
-scene and camera motion does not apply to Buddy: it is a character.
+scene and camera motion does not apply to Sidekick: it is a character.
 
-### Test your Buddy (plan 169)
+### Test your Sidekick (plan 169)
 
 **Test** under the preview (T while the Avatar section has focus) opens the
-Buddy big on a neutral stage, Still or Alive, to see each state as viewers
+Sidekick big on a neutral stage, Still or Alive, to see each state as viewers
 do:
 
 - **States** (1 to 4): Idle lives (blinks, breathes, sleeps); Talking runs
@@ -194,7 +197,7 @@ do:
 It is a sandbox in the window: nothing goes to the stream, chat, the backend
 or the settings.
 
-### Creating an Alive Buddy (Premium)
+### Creating an Alive Sidekick (Premium)
 
 **Create** opens the creator:
 
@@ -209,7 +212,7 @@ or the settings.
 4. **Review**: the 25 look directions in their grid with an arrow for the
    intended direction, the reactions below, and the live pet beside them.
    Mark each row "Looks right" or redo it. Saving needs every row marked.
-5. **Save**: name the pack; Buddy becomes Alive.
+5. **Save**: name the pack; Sidekick becomes Alive.
 
 Allowance: 3 creations per calendar month, each with 9 sheets and 6 redos;
 pilots are capped at 3 per creation and 6 a day. Abandoning at the pilot
@@ -218,28 +221,28 @@ computer.
 
 ## Free and Premium
 
-| Feature                                          | Needs                                  |
-| ------------------------------------------------ | -------------------------------------- |
-| Name, personality, uploaded images, bubble style | Nothing                                |
-| The official Buddies                             | Nothing                                |
-| Your Buddy library across the web and computers  | A Videorc account                      |
-| Buddy on stream and in the recording             | Nothing                                |
-| Greetings and welcomes (built-in or your lines)  | Nothing                                |
-| Greetings written by AI in Buddy's voice         | Premium + Cloud AI consent             |
-| The Say box in Stream Manager                    | Nothing                                |
-| Answers                                          | Premium + Cloud AI consent             |
-| Banter                                           | Premium + Cloud AI consent             |
-| Generated avatar images                          | Premium + Cloud AI consent + daily cap |
-| Alive: importing a pack, the pet on stream       | Nothing                                |
-| Alive: creating your own pet                     | Premium + Cloud AI consent + 3 a month |
-| Questions, flags, promises, voice commands       | Premium + Cloud AI consent (as before) |
-| Community: who comes back, regulars, chips, the person card, linking, the report's counts | Nothing (plan 225 D6) |
-| Buddy remembers (memories, welcomes and the audience summary with them) | Premium + Cloud AI consent + Buddy Live consent |
-| Community sync                                   | Premium (a later update)               |
+| Feature                                                                                   | Needs                                              |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Name, personality, uploaded images, bubble style                                          | Nothing                                            |
+| The official Sidekicks                                                                    | Nothing                                            |
+| Your Sidekick library across the web and computers                                        | A Videorc account                                  |
+| Sidekick on stream and in the recording                                                   | Nothing                                            |
+| Greetings and welcomes (built-in or your lines)                                           | Nothing                                            |
+| Greetings written by AI in Sidekick's voice                                               | Premium + Cloud AI consent                         |
+| The Say box in Stream Manager                                                             | Nothing                                            |
+| Answers                                                                                   | Premium + Cloud AI consent                         |
+| Banter                                                                                    | Premium + Cloud AI consent                         |
+| Generated avatar images                                                                   | Premium + Cloud AI consent + daily cap             |
+| Alive: importing a pack, the pet on stream                                                | Nothing                                            |
+| Alive: creating your own pet                                                              | Premium + Cloud AI consent + 3 a month             |
+| Questions, flags, promises, voice commands                                                | Premium + Cloud AI consent (as before)             |
+| Community: who comes back, regulars, chips, the person card, linking, the report's counts | Nothing (plan 225 D6)                              |
+| Sidekick remembers (memories, welcomes and the audience summary with them)                | Premium + Cloud AI consent + Sidekick Live consent |
+| Community sync                                                                            | Premium (a later update)                           |
 
 (D6, owner decision 2026-10-08; plan 225 D6, owner 2026-11-08.)
 
-## Buddy on stream
+## Sidekick on stream
 
 A Still avatar is an image per state; an Alive avatar is a pet pack (see
 above). Either way the comic bubble sits above its head, inside a rect you
@@ -249,49 +252,49 @@ place on the Live Scene canvas. Still states are `idle`, `talk`, `laugh` and
 - A bubble stays for `max(2.5 s, 60 ms × characters)`, capped at 10 s, wraps
   to at most four lines at the rect's width, and is always the light variant
   (the stream is not themed).
-- Buddy renders after captions and under the highlight card. The card is
+- Sidekick renders after captions and under the highlight card. The card is
   the most urgent thing on screen, so it wins an overlap (owner answer 7).
-- The Buddy item ships with **both output switches off** (opt-in). Turn on
-  "{name} on stream" in the footer of the Stream Manager's Buddy pane, or
+- The Sidekick item ships with **both output switches off** (opt-in). Turn on
+  "{name} on stream" in the footer of the Stream Manager's Sidekick pane, or
   "Show on stream" on the Scene page's canvas; "Show in recording" lives on
   the canvas. The avatar is visible whenever
   the item is on for that output, bubble or not (D19).
-- The Say box in the Buddy pane puts your own words in the bubble: ↵ talks,
+- The Say box in the Sidekick pane puts your own words in the bubble: ↵ talks,
   ⌘↵ laughs. It is bubble only in every mode; a Say never goes to chat. It
-  shows at once and replaces whatever is up; Buddy's own lines wait for it.
+  shows at once and replaces whatever is up; Sidekick's own lines wait for it.
 - Every session start clears the bubble; the avatar rides into the new video
   if its switch is on.
 
-## Buddy Live, how Buddy talks, and the consent
+## Sidekick Live, how Sidekick talks, and the consent
 
 Two separate controls (plan 174 D7):
 
-- **Buddy Live** is the on switch: whether Buddy joins your streams and reads
-  your chat. It sits in the status row that leads Buddy → Profile and in the
-  Buddy pane's header in Stream Manager; both flip the same setting
+- **Sidekick Live** is the on switch: whether Sidekick joins your streams and reads
+  your chat. It sits in the status row that leads Sidekick → Profile and in the
+  Sidekick pane's header in Stream Manager; both flip the same setting
   (`enabled`). It never names the microphone: listening is its own choice
-  (the listening card, and the Buddy Live section of Buddy → Profile).
-- **"{name} talks"** (`Off | Bubble | Suggest`, under the Buddy pane's
-  header; "Buddy talks" while it has no name) governs what Buddy says on its
+  (the listening card, and the Sidekick Live section of Sidekick → Profile).
+- **"{name} talks"** (`Off | Bubble | Suggest`, under the Sidekick pane's
+  header; "Sidekick talks" while it has no name) governs what Sidekick says on its
   own, with the chosen value's meaning as a line under it. It saves
-  `{autoChat}` alone, so it never turns Buddy or its microphone on (plan 174
+  `{autoChat}` alone, so it never turns Sidekick or its microphone on (plan 174
   S0.2). The order runs from least reach to most (plan 211 D1).
-  - **Off**: Buddy says nothing on its own.
-  - **Bubble** (the default): Greetings, Answers and Banter show in Buddy's
-    bubble on stream. Nothing goes to chat. Bubble speaks only while Buddy
+  - **Off**: Sidekick says nothing on its own.
+  - **Bubble** (the default): Greetings, Answers and Banter show in Sidekick's
+    bubble on stream. Nothing goes to chat. Bubble speaks only while Sidekick
     is on an output; off the picture a greeting is skipped (`no-bubble` in
     the report) and no AI call is spent (D9).
-  - **Suggest**: every line becomes a card in the Buddy pane; one click (or
+  - **Suggest**: every line becomes a card in the Sidekick pane; one click (or
     ↵ on the newest) posts it in chat as you, ⌫ dismisses it, and a card
     leaves on its own after 45 s. Nothing shows on stream before the click;
     the line bubbles when it lands.
-- **Greetings, Answers and Banter** have one home, Buddy → Chat. The Buddy
-  pane shows them as read-only chips, each a way to Buddy → Chat.
+- **Greetings, Answers and Banter** have one home, Sidekick → Chat. The Sidekick
+  pane shows them as read-only chips, each a way to Sidekick → Chat.
 
-Bubble asks nothing, because Buddy posts nothing as you. The first time
+Bubble asks nothing, because Sidekick posts nothing as you. The first time
 Suggest is chosen, the consent dialog asks "Let {name} post as you?" and
 says: "{name} posts to your chats as you, on the platforms you stream to,
-only when you click its card. You can read every message later in Buddy →
+only when you click its card. You can read every message later in Sidekick →
 Reports." The window remembers the consent (`videorc.buddyAutoChatConsent`).
 There is no Auto and no second confirm any more (plan 211 D5).
 
@@ -301,16 +304,16 @@ and saved Suggest stays Suggest. The backend keeps writing the legacy
 `autoChat.mode` for older apps (Bubble is written as `off`, never `auto`),
 and `autoChat.talk` is the one truth (D3).
 
-Where Cloud AI consent is missing, the Buddy pane says what consent covers
+Where Cloud AI consent is missing, the Sidekick pane says what consent covers
 and "Allow cloud AI…" opens the consent dialog; its Allow grants consent and
-turns Buddy Live on, and the listening card then asks about the microphone
+turns Sidekick Live on, and the listening card then asks about the microphone
 separately.
 
-Buddy's chat producer starts with the stream's live chat and stops with it.
-The status row on Buddy → Profile says where Buddy stands: Off; On ("Joins
+Sidekick's chat producer starts with the stream's live chat and stops with it.
+The status row on Sidekick → Profile says where Sidekick stands: Off; On ("Joins
 your next stream"); Reading chat while you're live; or Needs attention, with
 a plain reason (sign in, Premium, Cloud AI off, or a pause or error from the
-Buddy server).
+Sidekick server).
 
 ## The three behaviours
 
@@ -322,7 +325,7 @@ Buddy server).
   raids, watch streaks, Power-ups and redemptions. Every kind has a
   built-in line (`protocol-fixtures/buddy-builtin-greetings.json`), so
   Greetings works with no setup; an empty list never means silence. In
-  Buddy → Chat → Greetings a kind without your own line shows its built-in
+  Sidekick → Chat → Greetings a kind without your own line shows its built-in
   line marked Default: editing it saves your line, switching it off saves a
   switched-off line (a kind whose lines are all off posts nothing). Each
   line has a state (talk, laugh, think), an optional platform, and fields in
@@ -333,15 +336,15 @@ Buddy server).
   (Nightbot, StreamElements, ...), names with a link and old rows. The
   editor shows a live preview against a sample event, a warning when the
   text is over a platform's cap, and a warning for a brace nothing fills.
-- **Write greetings with AI** (Premium + Cloud AI, on by default): Buddy
+- **Write greetings with AI** (Premium + Cloud AI, on by default): Sidekick
   writes each greeting itself in its own voice (`POST /api/ai/cohost/greet`,
   3 s budget). The line is the example and the fallback: if the AI fails, is
   slow or is not allowed, the line goes out instead. The first AI greeting
-  of a stream may add that viewers can ask Buddy by name. Reports tag each
+  of a stream may add that viewers can ask Sidekick by name. Reports tag each
   greeting AI or Line.
 - **Answers** (Premium + Cloud AI, on by default since plan 192): when a
-  viewer asks Buddy by name (`@<name>` or the name in the message), the
-  drafted reply becomes a message. A question that doesn't name Buddy gets
+  viewer asks Sidekick by name (`@<name>` or the name in the message), the
+  drafted reply becomes a message. A question that doesn't name Sidekick gets
   a reply only when it has been open a minute, you haven't answered it, and
   your notes answer it (`fromNotes`); otherwise it stays a suggestion in the
   pane. At most one per cooldown (default 20 s, 1 to 3,600). Only while the
@@ -401,24 +404,28 @@ that has waited 20 s is dropped (counted `stale`). Your own Say line shows
 at once. Text over 200 characters is clipped at a word with "…". An answer
 in the bubble starts with "@{name}", so it is clear who it answers (D8).
 
-An approved card carries a Buddy-owned `operationId`: its echo in chat is
+An approved card carries a Sidekick-owned `operationId`: its echo in chat is
 still yours (the account is yours), but it never counts as "the streamer
 replied" (D10). Each send is written to the stream report as it lands, and
 each bubble line as it shows.
 
 ## Wake words
 
-Say "Buddy" first, or your Buddy's own name: "Buddy, highlight the comment
-from coders X", "Grum, put this one up". The name's words (lowercased,
-ASCII-folded, 3+ letters) all work, so "Grum the Goblin" answers to Grum and
-to Goblin; "buddy" always works. The old "Orcle" spellings stay as hidden
-aliases for one release (remove after 0.9.140); "oracle" and "orca" are
-gone. The commands are in [buddy-commands.md](buddy-commands.md).
+Say "Sidekick" first, or your Sidekick's own name: "Sidekick, highlight the
+comment from coders X", "Grum, put this one up". Speech to text also writes
+"side kick" or "side-kick", even split over two captions, and all of them
+work, as do "sidekicks" and "sidekick's" (plan 236 D2). The name's words
+(lowercased, ASCII-folded, 3+ letters) all work, so "Grum the Goblin" answers
+to Grum and to Goblin; "sidekick" always works. The old name "buddy" and its
+"bodhi" transcription still wake it, hidden, for two releases (the release
+after 0.26.1 removes them, and a test fails until it does). "body" never
+wakes it, and the Orcle spellings, "oracle" and "orca" are gone. The commands
+are in [buddy-commands.md](buddy-commands.md).
 
 ## Reports
 
-**When.** Buddy saves a report when its session ends: when the stream
-stops, or when you turn Buddy off. Turning it off and on again during
+**When.** Sidekick saves a report when its session ends: when the stream
+stops, or when you turn Sidekick off. Turning it off and on again during
 the same stream folds both parts into one report. If the app crashes
 mid-stream, that stream has no report. A stream where only greetings ran
 still has a report (posts only, `segments: 0`).
@@ -435,10 +442,10 @@ still has a report (posts only, `segments: 0`).
 - first-timers seen and greeted, by voice, in chat or by hand;
 - the alerts viewers raised, with the most viewers who said it at once;
 - recaps offered, drafted and dismissed;
-- **posts** (plan 164): every message Buddy sent as you, up to 200, with
+- **posts** (plan 164): every message Sidekick sent as you, up to 200, with
   the trigger (greeting, answer, banter, say), the text, the platforms and
   the result (sent, partial, failed). Reports → "Posted as you".
-- **said** (plan 211 D11): every line Buddy said in its bubble, automatic
+- **said** (plan 211 D11): every line Sidekick said in its bubble, automatic
   or from the Say box, up to 200, with the trigger and the text. Reports →
   "Said on stream". Omitted while empty, so older reports read unchanged.
 
@@ -447,15 +454,15 @@ session). It is deleted with the recording, and it is never sent to Videorc.
 It holds viewer names and question text, so it must never be added to the
 support bundle or to any upload.
 
-**Reading it.** Buddy → Reports shows the newest stream, with
-a switcher for recent ones. In Library, a stream's row menu has "Buddy
-report", which opens the tab on that session. A stream Buddy was off for
+**Reading it.** Sidekick → Reports shows the newest stream, with
+a switcher for recent ones. In Library, a stream's row menu has "Sidekick
+report", which opens the tab on that session. A stream Sidekick was off for
 still shows its moments and chat totals.
 
 ## Community: know your viewers across platforms (plan 225)
 
 **What.** Videorc counts who chats on your streams, on your computer, so
-chat shows your regulars and Buddy can welcome them. An **account** is one
+chat shows your regulars and Sidekick can welcome them. An **account** is one
 identity on one platform (YouTube, Twitch, Kick or X; a Custom RTMP row is
 never counted); a **person** owns one or more accounts, and every count is
 the person's over the union of their accounts. Per account Videorc keeps the
@@ -485,16 +492,16 @@ streams that reached one of the person's platforms.
   account was seen before. The row's ⋯ menu and a right-click open **About
   {name}**, the person card: the counts, the accounts and their platforms,
   "Same person as…", "Not the same" on a linked account ("Split off"),
-  "Mark as bot", "Forget {name}…", your note ("Only you see this. Buddy
-  never changes it.") and, with Premium, what Buddy remembers.
-- **Stream Manager → Buddy pane → "Welcome back"**: the regulars and
+  "Mark as bot", "Forget {name}…", your note ("Only you see this. Sidekick
+  never changes it.") and, with Premium, what Sidekick remembers.
+- **Stream Manager → Sidekick pane → "Welcome back"**: the regulars and
   comebacks who just arrived, 15 minutes at most, with **Wave** (the
   regular reaction on stream and, in Bubble mode, "Hey {name}!" in the
   bubble). A row leaves when you wave, when the bubble welcomed them, or
   when a Suggest welcome card is posted or dismissed. The "Linked {name}
   ({platform}) and {name} ({platform})" card with **Undo** stays 15 minutes
   after a `!link`.
-- **Buddy → Community**: "Your community" (how many people, from how many
+- **Sidekick → Community**: "Your community" (how many people, from how many
   streams, how many regulars), the people list (Everyone, Regulars, Linked,
   Bots; sorted by Streams, Last chat or Name; "Search people"), "Links that
   need you" (name matches Videorc suggests and `!link` words that were
@@ -502,8 +509,8 @@ streams that reached one of the person's platforms.
   Community settings and "Your data" (Export…, Import…, the channel line
   with Copy, "Forget everyone…"). The first open reads your past streams
   into the store ("Reading your past streams… 12 of 41").
-- **Buddy on stream.** A regular's arrival makes Buddy wave; in Bubble mode
-  the bubble says the regular, comeback or milestone welcome (Buddy → Chat →
+- **Sidekick on stream.** A regular's arrival makes Sidekick wave; in Bubble mode
+  the bubble says the regular, comeback or milestone welcome (Sidekick → Chat →
   Greetings → the welcome kinds). One wave per 20 seconds of regulars; every
   milestone its own moment. "Welcome regulars on stream" off makes every
   arrival the plain returning welcome. "Show milestone cards automatically"
@@ -557,15 +564,15 @@ again. "Forget {name}…" and "Forget everyone…" do the same for you;
 "Forget everyone" keeps the viewers' own tombstones. The report counts
 opt-outs and never names them.
 
-**Buddy remembers (Premium, D10, off by default).** Offered once after the
-first stream regulars came to ("Let Buddy remember what your regulars tell
+**Sidekick remembers (Premium, D10, off by default).** Offered once after the
+first stream regulars came to ("Let Sidekick remember what your regulars tell
 it?"). Once per stream, after it ends, the people who chatted at least
 twice off YouTube (at most 15, their newest 20 messages each) go to the
 memory route with their non-YouTube name, stream count and platforms, what
-Buddy already knows and your note; the answer adds, rewrites or forgets at
+Sidekick already knows and your note; the answer adds, rewrites or forgets at
 most two memories per person (eight in all), each on the account whose
 words taught it, and writes two sentences about your audience into the
-report. Memories ride a regular's arrival into Buddy's welcome and the tick
+report. Memories ride a regular's arrival into Sidekick's welcome and the tick
 for one delivery, never the wire. You see and delete every memory on the
 card ("Forget this memory?").
 
@@ -584,10 +591,10 @@ without a chip and logs once per session.
 
 ## Clip that
 
-Say "clip that" while Buddy hears you (or live captions are on), or
+Say "clip that" while Sidekick hears you (or live captions are on), or
 press Mark clip: in the Stream Manager, from a Stream Deck or the phone
 remote, or with the Mark clip shortcut from Settings → Shortcuts. The toast
-reads "Clip marked at 12:34. It's in your stream report in Buddy."
+reads "Clip marked at 12:34. It's in your stream report in Sidekick."
 
 Marks are saved only while Videorc records to a file. With Record off, the
 toast says the clip can't be saved.
@@ -596,49 +603,49 @@ The report shows them as **moments**: every mark, plus up to three chat peaks,
 each snapped to the transcript with an excerpt. Moments are worked out when
 the report is read and never stored. There is no clip file export.
 
-Session markers ("Buddy, make a marker here for [title]", or the free local
+Session markers ("Sidekick, make a marker here for [title]", or the free local
 `/marker [title]`) are covered in [session-markers.md](session-markers.md).
 
-## Where Buddy works live
+## Where Sidekick works live
 
-Live, Buddy works in the Stream Manager window (⇧⌘J), in its Buddy pane. At
-Wide (1,040 px and up) the pane is the Buddy tab of the right pane, beside
-Chat (Activity · Buddy); narrower, it is the third tab after Chat and
-Activity. ⌘J opens the Buddy tab and focuses its list. The pane is
+Live, Sidekick works in the Stream Manager window (⇧⌘J), in its Sidekick pane. At
+Wide (1,040 px and up) the pane is the Sidekick tab of the right pane, beside
+Chat (Activity · Sidekick); narrower, it is the third tab after Chat and
+Activity. ⌘J opens the Sidekick tab and focuses its list. The pane is
 keyboard-first: ↑ and ↓ move, R drafts a reply, H shows the question on
 stream, A marks it answered, ⌫ dismisses and ⇧⌫ removes a flagged message
-from chat. The header shows Buddy's identity (the living preview, the name,
+from chat. The header shows Sidekick's identity (the living preview, the name,
 the bubble while one is up), the Alpha tag, listening, the status and the
-Buddy Live switch; "{name} talks" sits under it; the footer holds the Say box,
-the reaction chips and the "{name} on stream" switch. Buddy → Profile's
+Sidekick Live switch; "{name} talks" sits under it; the footer holds the Say box,
+the reaction chips and the "{name} on stream" switch. Sidekick → Profile's
 status row has "Open Stream Manager" (⇧⌘J).
 
 ## Consent: Cloud AI
 
-Cloud AI has one home: the Cloud AI section of Buddy → Profile. It is the only
-place to revoke it. The consent dialogs (Buddy Live, Clean cut, Chat
+Cloud AI has one home: the Cloud AI section of Sidekick → Profile. It is the only
+place to revoke it. The consent dialogs (Sidekick Live, Clean cut, Chat
 posting in Stream Manager) can grant it too, and all write the same stored
 choice (`videorc.aiConsent`). There is no second consent store. A change
 applies to a stream that is already live.
 
 What Cloud AI covers (`CLOUD_AI_USES`, one list everywhere):
 
-- Buddy reads your live chat.
-- Buddy hears you while you're live: your microphone audio goes to Videorc's
+- Sidekick reads your live chat.
+- Sidekick hears you while you're live: your microphone audio goes to Videorc's
   cloud speech-to-text and comes back as text (even with live captions off).
-- Creating a Buddy: your description and any picture you add go to
+- Creating a Sidekick: your description and any picture you add go to
   Videorc's cloud AI, and the picture is used once and not kept. The
-  Buddies you create (their pictures, name, personality and About you) are
+  Sidekicks you create (their pictures, name, personality and About you) are
   kept in your Videorc account so you can use them on any computer, until
   you delete them or your account.
-- Buddy's lines: with Answers, Banter or AI greetings on, its lines are
-  drafted by Videorc's cloud AI. They show in Buddy's bubble on stream. In
+- Sidekick's lines: with Answers, Banter or AI greetings on, its lines are
+  drafted by Videorc's cloud AI. They show in Sidekick's bubble on stream. In
   Suggest, a line is posted on your own account only when you click its
   card.
-- Creating an Alive Buddy: your reference picture and its description go
+- Creating an Alive Sidekick: your reference picture and its description go
   to Videorc's cloud AI. Its moves are kept on this computer, and in your
-  Videorc account when the Buddy is in your library, until you remove them
-  or delete the Buddy or your account.
+  Videorc account when the Sidekick is in your library, until you remove them
+  or delete the Sidekick or your account.
 - Clean cut uploads a recording's audio, never the video, in short chunks
   for a word-by-word transcript, and sends its sentences to Videorc's cloud
   AI to find retakes. Neither is kept on Videorc servers after the job
@@ -662,7 +669,7 @@ Settings and live state:
 - `cohost.settings.get` and `cohost.settings.set`; a Stream Manager command
   saves `cohostEnableRelayPatch` (`lib/cohost-state.ts`): `enabled` only
   when it changes, `listen: true` only when the command names it with the
-  Buddy on, `autoChat` when it carries one. So a mode change from Off saves
+  Sidekick on, `autoChat` when it carries one. So a mode change from Off saves
   `{enabled: true, listen: true, autoChat: {...}}`, a behaviour switch
   `{autoChat: {...}}`, and Off `{enabled: false, autoChat: {mode: 'off'}}`.
 - The `cohost.state` event carries the live pane, plus `utterances[]`
@@ -736,11 +743,15 @@ cooldownSeconds}`. The mode is Off by default; Greetings (with AI and both
   same four files (`buddy_pet.rs`, `include_bytes!`); a persona with its own
   idle falls back to that idle for missing states, never to ours.
   `persona.source: 'default'` means "use it".
-- Wake words: `cohost_command::wake_words(name)` = `["buddy", <name tokens>,
-"orcle", "orkle", "orcel", "orkel", "orcl", "orcal"]`; the persona tokens
-  live in a process-wide slot set on every settings change.
+- Wake words: `cohost_command::WAKE_WORDS` = `["sidekick", "sidekicks",
+"buddy", "bodhi"]` plus the persona's name tokens, which live in a
+  process-wide slot set on every settings change. `joined_wake` turns "side
+  kick" and "side-kick" into "sidekick" before anything looks for a wake
+  word: inside one final, and across two finals within
+  `NAME_CARRY_MAX_GAP`; the marker grammar and the planner's comment check
+  join them the same way.
 
-Buddy on stream (Phase C):
+Sidekick on stream (Phase C):
 
 - The state machine is `crates/videorc-backend/src/buddy_overlay.rs`:
   `BuddyOverlayState {persona_id, state, bubble, generation}`, pure and
@@ -749,7 +760,7 @@ Buddy on stream (Phase C):
   appears, and `show_for_utterance(app, &utterance)` is the gate in front of
   it (D7/D18): a `sent` utterance bubbles as it lands, a `bubble-only` one
   and the Say box bubble at once, an answer on its way to chat may show
-  `think`, and nothing shows while Buddy's `showOnStream` and
+  `think`, and nothing shows while Sidekick's `showOnStream` and
   `showInRecording` are both off. `settle(app)` ends a `think` that never
   became a bubble; `clear(app)` runs at every session start.
 - RPCs: `cohost.buddy.status` (observation),
@@ -763,13 +774,13 @@ Buddy on stream (Phase C):
   into a BGRA atlas and drawn as one quad per leg by the CPU, Metal and
   D3D11 paths. The renderer pushes the bubble only.
 - The proof surface (Windows idle, Linux) has no compositor leg, so the
-  backend serves Buddy's layer on its own (plan 205 S9,
+  backend serves Sidekick's layer on its own (plan 205 S9,
   `preview_buddy_layer.rs`): `GET /preview/buddy/latest.bmp?token=&canvasWidth=&canvasHeight=`
   draws the sprite slot's `Preview` leg (its own atlas) and the bubble
   into one straight-alpha BGRA BMP, with its rect in canvas fractions in
   `x-videorc-layer-rect`. It answers `204` to an unchanged cursor, and
   `204` with `x-videorc-layer-empty: 1` while the program does not carry
-  Buddy. The Preview leg reads an output leg's frame clock while one has
+  Sidekick. The Preview leg reads an output leg's frame clock while one has
   drawn in the last 500 ms, so the pet animates in step with the legs.
   Main (`main/preview-surface-buddy.ts`) places it above the banners and
   polls it apart from the source pollers, so it never counts toward
@@ -803,7 +814,7 @@ Automatic chat (Phase D):
   engine-wide and follows the live-chat session, not the Premium tick
   session, because greetings are free. `off` produces nothing from any
   method; `bubble` never sends.
-- Every send is `live_chat::send_live_chat_message` with a Buddy-owned
+- Every send is `live_chat::send_live_chat_message` with a Sidekick-owned
   `operationId` registered on the lane; `live_chat.rs` skips
   `note_own_send_delivered` for it (no question closes, nobody is marked
   greeted) but still notes the echo.
@@ -839,7 +850,7 @@ The report:
 
 - `cohost.report.get {sessionId}` returns
   `{sessionId, report, moments, chat: {messages, byPlatform}}`. `report` is
-  `null` when Buddy left none for that session.
+  `null` when Sidekick left none for that session.
 - `cohost.report.latest` takes no params and returns the same payload for the
   newest session that has a report, else the newest streamed session, or
   `null` when there is neither.
@@ -861,7 +872,7 @@ Code:
   the generation; `moments.rs` ranks moments; `transcript.rs` parses the
   `.srt`; `storage.rs` owns `cohost_reports`.
 - Renderer: `components/tabs/buddy-tab.tsx` with `lib/buddy-tab-view.ts` and
-  `lib/buddy-tabs.ts` (sub-tabs Buddy, Chat, Voice, Reports, Clean cut);
+  `lib/buddy-tabs.ts` (sub-tabs Sidekick, Chat, Voice, Reports, Clean cut);
   `components/buddy-persona-section.tsx`, `buddy-greetings-section.tsx`,
   `buddy-bubble-sample.tsx`; `lib/buddy-auto-chat-view.ts` (the pure side of
   the editor and the mode control); `components/cohost-pane.tsx` and
@@ -871,11 +882,11 @@ Code:
 
 Checks:
 
-- `pnpm smoke:cohost-fake` runs Buddy against a fake server and asserts
+- `pnpm smoke:cohost-fake` runs Sidekick against a fake server and asserts
   the saved report's counts (it has no capabilities route, so the desktop
   sends v3 there).
-- `pnpm smoke:live-chat-fake-providers` ends with the Buddy scenarios (plan
-  211): in Bubble with Buddy on stream and no lines of the user's own, a
+- `pnpm smoke:live-chat-fake-providers` ends with the Sidekick scenarios (plan
+  211): in Bubble with Sidekick on stream and no lines of the user's own, a
   fake follow's built-in line and five first-time chatters across Twitch
   and Kick show as three bubble lines (the first welcome, a collapsed
   welcome for the burst, the follow), with zero sends, `said[]` in the
@@ -887,5 +898,5 @@ Checks:
   greeting engine, the throttle (a 50-follow burst: one now, one collapsed at
   +10 s, the rest deduped), the lane and the bubble state machine.
 - `node scripts/capture-ui-pages.mjs` captures every page and opens the
-  Buddy page by its id `ai`; `--theme=light` or `--theme=dark` switches the
+  Sidekick page by its id `ai`; `--theme=light` or `--theme=dark` switches the
   app first and adds the theme to every file name.

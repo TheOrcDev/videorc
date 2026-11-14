@@ -44,7 +44,7 @@ export {
 // destination chip and the detached Comments window cannot disagree.
 
 /** What Buddy does with chat, the half of the consent every Buddy user gets. */
-export const COHOST_CHAT_CONSENT_SENTENCE = "Buddy reads your live chat with Videorc's cloud AI."
+export const COHOST_CHAT_CONSENT_SENTENCE = "Sidekick reads your live chat with Videorc's cloud AI."
 
 /**
  * What listening sends, in one wording on every surface (plan 174 F-26): the
@@ -57,7 +57,7 @@ const MIC_KEPT =
   "Videorc servers don't keep it. The transcript is saved with your recording on this computer."
 
 /** The listening line of the one list of cloud uses (`CLOUD_AI_USES`). */
-export const BUDDY_HEARS_YOU_USE = `Buddy hears you while you're live: ${MIC_TO_TEXT}.`
+export const BUDDY_HEARS_YOU_USE = `Sidekick hears you while you're live: ${MIC_TO_TEXT}.`
 
 /** The pane's one-time "Buddy can hear you" card, under its title. */
 export const COHOST_LISTEN_DISCLOSURE = `${MIC_TO_TEXT.charAt(0).toUpperCase()}${MIC_TO_TEXT.slice(1)}. ${MIC_KEPT}`
@@ -761,11 +761,11 @@ export function cohostListeningView(
       return {
         state: 'starting',
         label: 'Starting to listen',
-        detail: 'Buddy is starting to hear your microphone.'
+        detail: 'Sidekick is starting to hear your microphone.'
       }
     case 'on': {
       const allowance = cohostListenAllowanceLabel(listening)
-      const heard = 'Buddy hears your microphone as text.'
+      const heard = 'Sidekick hears your microphone as text.'
       return {
         state: 'on',
         label: 'Listening',
@@ -779,7 +779,7 @@ export function cohostListeningView(
       return {
         state: 'blocked',
         label: reason ? `Not listening: ${reason}` : 'Not listening',
-        detail: listening.message?.trim() || "Buddy can't hear you right now."
+        detail: listening.message?.trim() || "Sidekick can't hear you right now."
       }
     }
     default:

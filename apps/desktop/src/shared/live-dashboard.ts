@@ -296,7 +296,7 @@ const CLOUD_PHASES: ReadonlySet<string> = new Set<LiveDashboardCloudPhase>([
 /**
  * The cloud show as it carries `sessionId` (plan 184 C7), or null: a status
  * for another session, for none, or with the cloud off carries nothing. The
- * Studio's Session section and the Livestream page read the same view the
+ * Studio's Session section and the Destinations page read the same view the
  * Stream Manager's dashboard keeps.
  */
 export function dashboardCloudFromStatus(

@@ -133,7 +133,7 @@ describe('Stream Manager status bar', () => {
         { platform: 'twitch', metric: 'followers', capability: 'available', audienceScopes: false }
       ]
     })
-    expect(title).toContain('Reconnect Twitch from Activity or Livestream → Setup')
+    expect(title).toContain('Reconnect Twitch from Activity or Destinations → Setup')
   })
 
   it('keeps every control reachable: inline from 640 px, ⋯ below it', () => {

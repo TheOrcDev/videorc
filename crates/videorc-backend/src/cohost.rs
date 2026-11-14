@@ -519,7 +519,12 @@ pub const COHOST_GREETING_TEXT_MAX_CHARS: usize = 200;
 const COHOST_PERSONA_IMAGE_PATH_MAX_CHARS: usize = 256;
 /// The persona a fresh install has: the bundled default pack under this id.
 pub const COHOST_DEFAULT_PERSONA_ID: &str = "default";
-pub const COHOST_DEFAULT_PERSONA_NAME: &str = "Buddy";
+/// Plan 236 D3: "Sidekick", which speech to text spells right where it
+/// heard "Buddy" as "body".
+pub const COHOST_DEFAULT_PERSONA_NAME: &str = "Sidekick";
+/// The default name before plan 236, which the one-time settings migration
+/// renames (`migrate_cohost_settings`).
+const COHOST_OLD_DEFAULT_PERSONA_NAME: &str = "Buddy";
 
 /// The avatar's state images (plan 164 D16). `idle` is required on stream;
 /// the others fall back to it when missing.
@@ -1047,7 +1052,7 @@ pub(crate) fn validate_persona(persona: &CohostPersona) -> Result<CohostPersona,
     let mut valid = persona.clone();
     valid.name = persona.name.trim().to_string();
     if valid.name.is_empty() {
-        return Err("The Buddy needs a name.".to_string());
+        return Err("The Sidekick needs a name.".to_string());
     }
     if utf16_len(&valid.name) > COHOST_PERSONA_NAME_MAX_CHARS {
         return Err(format!(
@@ -1330,6 +1335,58 @@ fn normalize_rules(rules: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Sibling row versioning the one-time migrations of `cohostSettings`, so the
+/// strict wire shape never carries bookkeeping (like `overlayLayoutMigration`).
+const COHOST_SETTINGS_MIGRATION_KEY: &str = "cohostSettingsMigration";
+/// Version 1 (plan 236 D3): a persona named exactly "Buddy" is "Sidekick".
+const COHOST_SETTINGS_MIGRATION_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+struct CohostSettingsMigration {
+    version: u32,
+}
+
+/// The one-time settings migrations, run once at startup before anything
+/// reads the persona (plan 236 D3). Version 1 renames a persona named exactly
+/// "Buddy", the old default, to "Sidekick"; any other name ("Buddy Bot",
+/// "buddy") is the streamer's choice and stays. The version row is written
+/// only once the renamed settings are saved, so a failed save tries again on
+/// the next launch, and a later load changes nothing, even after the
+/// streamer names it "Buddy" again.
+pub fn migrate_cohost_settings(database: &Database, settings: CohostSettings) -> CohostSettings {
+    let done = match database.load_setting::<CohostSettingsMigration>(COHOST_SETTINGS_MIGRATION_KEY)
+    {
+        Ok(migration) => migration.unwrap_or_default().version,
+        Err(error) => {
+            tracing::warn!("Could not read the Buddy settings migration; skipping it: {error:#}");
+            return settings;
+        }
+    };
+    if done >= COHOST_SETTINGS_MIGRATION_VERSION {
+        return settings;
+    }
+    let mut next = settings;
+    if next.persona.name == COHOST_OLD_DEFAULT_PERSONA_NAME {
+        next.persona.name = COHOST_DEFAULT_PERSONA_NAME.to_string();
+        if let Err(error) = database.save_setting(COHOST_SETTINGS_KEY, &next) {
+            tracing::warn!("Could not rename the Buddy persona to Sidekick: {error:#}");
+            next.persona.name = COHOST_OLD_DEFAULT_PERSONA_NAME.to_string();
+            return next;
+        }
+        tracing::info!("Renamed the persona Buddy to Sidekick (plan 236 D3).");
+    }
+    if let Err(error) = database.save_setting(
+        COHOST_SETTINGS_MIGRATION_KEY,
+        &CohostSettingsMigration {
+            version: COHOST_SETTINGS_MIGRATION_VERSION,
+        },
+    ) {
+        tracing::warn!("Could not remember the Buddy settings migration: {error:#}");
+    }
+    next
+}
+
 pub fn load_cohost_settings(database: &Database) -> CohostSettings {
     match database.load_setting::<CohostSettings>(COHOST_SETTINGS_KEY) {
         Ok(Some(settings)) => settings.normalized(),
@@ -1574,7 +1631,7 @@ impl CohostCommandError {
     fn not_pending() -> Self {
         Self {
             code: "not-pending",
-            message: "No Buddy command is waiting for that answer.".to_string(),
+            message: "No Sidekick command is waiting for that answer.".to_string(),
         }
     }
 }
@@ -1827,19 +1884,19 @@ impl CohostState {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CohostError {
-    #[error("Buddy is turned off in Settings.")]
+    #[error("Sidekick is turned off in Settings.")]
     Disabled,
     /// Plan 140 S1: Buddy is Premium only, enforced here and not just by the
     /// renderer's `liveCohostGate`.
-    #[error("Buddy requires Videorc Premium.")]
+    #[error("Sidekick requires Videorc Premium.")]
     PremiumRequired,
-    #[error("Buddy needs the active live chat session; sessionId did not match.")]
+    #[error("Sidekick needs the active live chat session; sessionId did not match.")]
     SessionMismatch,
     #[error("sessionId and the question, message, promise or author id are required.")]
     InvalidParams,
-    #[error("Buddy has nothing to recap yet: no summary has arrived this session.")]
+    #[error("Sidekick has nothing to recap yet: no summary has arrived this session.")]
     NoSummary,
-    #[error("Could not persist Buddy settings: {0}")]
+    #[error("Could not persist Sidekick settings: {0}")]
     Storage(String),
     /// Plan 164 S-A2: the persona on a settings patch is out of bounds.
     #[error("{0}")]
@@ -1849,7 +1906,9 @@ pub enum CohostError {
     InvalidAutoChat(String),
     /// Plan 164 D4, plan 211 D2: a card was approved while Buddy is not on
     /// Suggest, the one mode whose cards post.
-    #[error("Buddy isn't on Suggest, so it has no card to post. Choose Suggest in Stream Manager.")]
+    #[error(
+        "Sidekick isn't on Suggest, so it has no card to post. Choose Suggest in Stream Manager."
+    )]
     AutoChatOff,
     /// Plan 164 S-D2: the card to approve is gone, answered or expired.
     #[error("{0}")]
@@ -2746,7 +2805,7 @@ const COMMAND_PARSE_MAX_PAUSE: Duration = Duration::from_secs(24 * 60 * 60);
 
 const COMMAND_VOICE_PAUSED: &str = "Voice commands are paused by Videorc.";
 const COMMAND_SIGNED_OUT: &str = "Cancelled because you signed out.";
-const COMMAND_STOPPED_LISTENING: &str = "Cancelled because Buddy stopped listening.";
+const COMMAND_STOPPED_LISTENING: &str = "Cancelled because Sidekick stopped listening.";
 
 /// What a voice command's card waits for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4616,9 +4675,9 @@ impl CohostSession {
         let nothing = || {
             CommandResolution::NotFound(
                 match intent {
-                    CommandIntent::Remove => "Buddy couldn't find a comment to remove.",
+                    CommandIntent::Remove => "Sidekick couldn't find a comment to remove.",
                     CommandIntent::Highlight | CommandIntent::Clear => {
-                        "Buddy couldn't find a comment to show."
+                        "Sidekick couldn't find a comment to show."
                     }
                 }
                 .to_string(),
@@ -4634,9 +4693,9 @@ impl CohostSession {
                 }
                 eligible.truncate(COMMAND_CANDIDATES_CAP);
                 match eligible.len() {
-                    0 => {
-                        CommandResolution::NotFound("Buddy couldn't find that comment.".to_string())
-                    }
+                    0 => CommandResolution::NotFound(
+                        "Sidekick couldn't find that comment.".to_string(),
+                    ),
                     1 => CommandResolution::One(eligible.remove(0)),
                     _ => CommandResolution::Several(eligible),
                 }
@@ -4662,7 +4721,7 @@ impl CohostSession {
                     }
                 },
                 CommandTarget::None => CommandResolution::NotFound(
-                    "Buddy couldn't tell which comment you mean.".to_string(),
+                    "Sidekick couldn't tell which comment you mean.".to_string(),
                 ),
             },
         }
@@ -4682,7 +4741,7 @@ impl CohostSession {
     ) -> CommandResolution {
         let not_found = || {
             CommandResolution::NotFound(format!(
-                "Buddy couldn't find a comment from {}.",
+                "Sidekick couldn't find a comment from {}.",
                 spoken.trim()
             ))
         };
@@ -4839,7 +4898,7 @@ impl CohostSession {
                 let recent = self.newest_command_messages(COMMAND_CANDIDATES_CAP);
                 if recent.is_empty() {
                     CommandResolution::NotFound(
-                        "Buddy couldn't find a comment to remove.".to_string(),
+                        "Sidekick couldn't find a comment to remove.".to_string(),
                     )
                 } else {
                     CommandResolution::Several(recent)
@@ -5094,8 +5153,8 @@ impl CohostSession {
             record.pending = CommandPending::HighlightConfirm;
             record.wire.status = CohostCommandStatus::Confirm;
             record.wire.message = match command_flag_label(kind) {
-                Some(label) => format!("Buddy flagged this ({label}). Show it anyway?"),
-                None => "Buddy flagged this. Show it anyway?".to_string(),
+                Some(label) => format!("Sidekick flagged this ({label}). Show it anyway?"),
+                None => "Sidekick flagged this. Show it anyway?".to_string(),
             };
             record.wire.expires_at = Some(expires_at.clone());
             record.wire.at = ctx.now_iso();
@@ -5474,7 +5533,7 @@ impl CohostSession {
         if let Some(message) = command_gate(ctx, None) {
             record.finish(CohostCommandStatus::Unavailable, message, &now_iso);
         } else {
-            let message = format!("Buddy didn't catch that: '{}'.", record.wire.heard);
+            let message = format!("Sidekick didn't catch that: '{}'.", record.wire.heard);
             record.finish(CohostCommandStatus::NotFound, message, &now_iso);
             self.report.commands.not_found += 1;
         }
@@ -5663,7 +5722,7 @@ impl CohostSession {
             }
             CommandPending::ActConfirm => match record.act.take() {
                 Some(act) => act.with_results(crate::buddy_act::halt_words(act.waiting_tool()).1),
-                None => "No answer, so Buddy did nothing more.".to_string(),
+                None => "No answer, so Sidekick did nothing more.".to_string(),
             },
             CommandPending::None
             | CommandPending::Requesting
@@ -6961,9 +7020,9 @@ impl CohostEngine {
         })?;
         Some(match command_flag_label(flag.kind) {
             Some(label) => format!(
-                "Buddy flagged this ({label}). Show it from the Stream Manager if you still want it."
+                "Sidekick flagged this ({label}). Show it from the Stream Manager if you still want it."
             ),
-            None => "Buddy flagged this. Show it from the Stream Manager if you still want it."
+            None => "Sidekick flagged this. Show it from the Stream Manager if you still want it."
                 .to_string(),
         })
     }
@@ -9240,7 +9299,7 @@ async fn run_voice_greeting_with<C, F>(
         (!crate::overlay_layout::load_overlay_layout(&state.database)
             .buddy
             .show_on_stream)
-            .then(|| "Buddy isn't on stream, so it can't show the bubble.".to_string())
+            .then(|| "Sidekick isn't on stream, so it can't show the bubble.".to_string())
     });
     if let Some(message) = refusal {
         record_instant_command(
@@ -9381,13 +9440,13 @@ async fn run_voice_greeting_with<C, F>(
             (!crate::overlay_layout::load_overlay_layout(&state.database)
                 .buddy
                 .show_on_stream)
-                .then(|| "Buddy isn't on stream, so it can't show the bubble.".to_string())
+                .then(|| "Sidekick isn't on stream, so it can't show the bubble.".to_string())
         });
         let (status, message) = refusal.map_or_else(
             || {
                 (
                     CohostCommandStatus::Done,
-                    "Buddy said hello in its bubble.".to_string(),
+                    "Sidekick said hello in its bubble.".to_string(),
                 )
             },
             |message| (CohostCommandStatus::Unavailable, message),
@@ -9607,7 +9666,7 @@ async fn run_remember_command(
                         }),
                         None => Err((
                             CohostCommandStatus::NotFound,
-                            format!("Buddy doesn't know {name} yet."),
+                            format!("Sidekick doesn't know {name} yet."),
                         )),
                     }
                 }
@@ -9689,7 +9748,7 @@ async fn buddy_presence_outcome(state: &AppState, show: bool) -> (CohostCommandS
             );
             (
                 CohostCommandStatus::Refused,
-                format!("Buddy couldn't put {name} on stream: {error}."),
+                format!("Sidekick couldn't put {name} on stream: {error}."),
             )
         }
     }
@@ -9758,7 +9817,7 @@ async fn banner_command_outcome(
             tracing::warn!("Buddy could not read the banners for a voice command: {error:#}");
             return (
                 CohostCommandStatus::Refused,
-                "Buddy couldn't read your banners.".to_string(),
+                "Sidekick couldn't read your banners.".to_string(),
             );
         }
     };
@@ -9779,7 +9838,7 @@ async fn banner_command_outcome(
         BannerNameMatch::Several(names) => Err(which(names)),
         BannerNameMatch::None => Err((
             CohostCommandStatus::NotFound,
-            format!("Buddy couldn't find a banner named '{spoken}'."),
+            format!("Sidekick couldn't find a banner named '{spoken}'."),
         )),
     };
     match command.kind {
@@ -9875,7 +9934,7 @@ async fn banner_command_outcome(
         | CommandKind::Wave
         | CommandKind::Remember => (
             CohostCommandStatus::NotFound,
-            "Buddy didn't catch that.".to_string(),
+            "Sidekick didn't catch that.".to_string(),
         ),
     }
 }
@@ -10492,7 +10551,7 @@ pub async fn act_typed(
         .await;
         task_state.emit_event(act::ACT_RESULT_EVENT, result);
     });
-    answer(CohostActStatus::Working, "Asking Buddy…")
+    answer(CohostActStatus::Working, "Asking Sidekick…")
 }
 
 async fn typed_act_outcome(
@@ -11074,7 +11133,7 @@ pub(crate) async fn purge_speech_for_sign_out(state: &AppState) {
         {
             session.listening = Some(CohostListening::blocked(
                 "signed-out",
-                "Sign in so Buddy can hear you.",
+                "Sign in so Sidekick can hear you.",
             ));
         }
         // Plan 140 S3: the closed card waits for nothing any more.
@@ -11153,7 +11212,7 @@ async fn start_listen_if_wanted(state: &AppState, session_id: &str, consent: boo
     } else if !consent {
         CohostListening::blocked(
             "consent-required",
-            "Buddy can hear you once cloud AI consent is on.",
+            "Sidekick can hear you once cloud AI consent is on.",
         )
     } else {
         crate::captions::start_listen_for_cohost(state, session_id).await
@@ -13360,7 +13419,7 @@ mod tests {
                 &mut engine,
                 t,
                 version,
-                CohostApiError::timeout("Buddy did not answer within 3 s."),
+                CohostApiError::timeout("Sidekick did not answer within 3 s."),
             );
             assert_eq!(outcome.lane_off_for, None);
             t += secs(3);
@@ -15807,7 +15866,7 @@ mod tests {
             Err(server_error(
                 502,
                 "ai-gateway-error",
-                "The Buddy tick failed on every configured model."
+                "The Sidekick tick failed on every configured model."
             )),
             start + secs(2),
             "t1"
@@ -15819,7 +15878,7 @@ mod tests {
             snapshot.detail,
             Some(CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Buddy tick failed on every configured model.".to_string(),
+                message: "The Sidekick tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
@@ -15853,7 +15912,9 @@ mod tests {
         assert!(engine.apply_tick_result(
             generation,
             0,
-            Err(CohostApiError::timeout("Buddy did not answer within 12 s.")),
+            Err(CohostApiError::timeout(
+                "Sidekick did not answer within 12 s."
+            )),
             start + secs(42),
             "t3"
         ));
@@ -15863,7 +15924,7 @@ mod tests {
             snapshot.detail,
             Some(CohostErrorDetail {
                 code: "timeout".to_string(),
-                message: "Buddy did not answer within 12 s.".to_string(),
+                message: "Sidekick did not answer within 12 s.".to_string(),
                 status: None,
             })
         );
@@ -16231,7 +16292,7 @@ mod tests {
         );
         assert_eq!(
             validate_persona(&persona("   ", "")).unwrap_err(),
-            "The Buddy needs a name."
+            "The Sidekick needs a name."
         );
         assert!(validate_persona(&persona(&"n".repeat(25), "")).is_err());
         assert!(validate_persona(&persona("Grum", &"p".repeat(1201))).is_err());
@@ -16375,6 +16436,78 @@ mod tests {
         }))
         .unwrap_err();
         assert!(unknown.to_string().contains("hype-train"), "{unknown}");
+    }
+
+    #[test]
+    fn the_persona_named_exactly_buddy_becomes_sidekick_once() {
+        let named = |name: &str| {
+            let mut settings = CohostSettings::default();
+            settings.persona.name = name.to_string();
+            settings
+        };
+        let migration = |database: &Database| {
+            database
+                .load_setting::<CohostSettingsMigration>(COHOST_SETTINGS_MIGRATION_KEY)
+                .unwrap()
+        };
+        // Plan 236 D3: exactly "Buddy", the old default, becomes "Sidekick",
+        // saved, and nothing else about the persona changes.
+        let database = Database::open_in_memory_for_tests();
+        let mut saved = named("Buddy");
+        saved.persona.library_avatar_id = Some("official:golem".to_string());
+        database.save_setting(COHOST_SETTINGS_KEY, &saved).unwrap();
+        let migrated = migrate_cohost_settings(&database, load_cohost_settings(&database));
+        assert_eq!(migrated.persona.name, "Sidekick");
+        assert_eq!(load_cohost_settings(&database), migrated);
+        let mut expected = saved.clone();
+        expected.persona.name = "Sidekick".to_string();
+        assert_eq!(migrated, expected);
+        assert_eq!(
+            migration(&database),
+            Some(CohostSettingsMigration { version: 1 })
+        );
+        // It runs once: a second load changes nothing, even after the
+        // streamer names it "Buddy" again by hand.
+        assert_eq!(
+            migrate_cohost_settings(&database, load_cohost_settings(&database)),
+            migrated
+        );
+        database
+            .save_setting(COHOST_SETTINGS_KEY, &named("Buddy"))
+            .unwrap();
+        let again = migrate_cohost_settings(&database, load_cohost_settings(&database));
+        assert_eq!(again.persona.name, "Buddy");
+        assert_eq!(load_cohost_settings(&database).persona.name, "Buddy");
+        // Any other name is the streamer's choice and stays.
+        for name in ["Buddy Bot", "buddy", "BUDDY", "My Buddy", "Grum"] {
+            let database = Database::open_in_memory_for_tests();
+            database
+                .save_setting(COHOST_SETTINGS_KEY, &named(name))
+                .unwrap();
+            let kept = migrate_cohost_settings(&database, load_cohost_settings(&database));
+            assert_eq!(kept.persona.name, name);
+            assert_eq!(load_cohost_settings(&database).persona.name, name);
+            assert_eq!(
+                migration(&database),
+                Some(CohostSettingsMigration { version: 1 })
+            );
+        }
+        // A fresh install has no settings row and already says Sidekick:
+        // only the version is written.
+        let database = Database::open_in_memory_for_tests();
+        let fresh = migrate_cohost_settings(&database, load_cohost_settings(&database));
+        assert_eq!(fresh.persona.name, COHOST_DEFAULT_PERSONA_NAME);
+        assert_eq!(fresh.persona.name, "Sidekick");
+        assert_eq!(
+            database
+                .load_setting::<CohostSettings>(COHOST_SETTINGS_KEY)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            migration(&database),
+            Some(CohostSettingsMigration { version: 1 })
+        );
     }
 
     #[test]
@@ -17355,7 +17488,7 @@ mod tests {
             revoked.listening,
             Some(CohostListening::blocked(
                 "consent-required",
-                "Buddy can hear you once cloud AI consent is on."
+                "Sidekick can hear you once cloud AI consent is on."
             ))
         );
         assert!(!crate::captions::listen_wanted_for_test(&state).await);
@@ -18388,7 +18521,7 @@ mod tests {
             engine.start_session("session-1".to_string(), true, None, Instant::now());
             engine.session.as_mut().unwrap().listening = Some(CohostListening::blocked(
                 "signed-out",
-                "Sign in so Buddy can hear you.",
+                "Sign in so Sidekick can hear you.",
             ));
         }
         let mut events = state.events.subscribe();
@@ -18989,7 +19122,7 @@ mod tests {
             .expect_err("a Basic account cannot start Buddy");
         assert_eq!(refused, CohostError::PremiumRequired);
         assert_eq!(refused.code(), "premium-required");
-        assert_eq!(refused.to_string(), "Buddy requires Videorc Premium.");
+        assert_eq!(refused.to_string(), "Sidekick requires Videorc Premium.");
         assert_eq!(cohost_status(&state).await, CohostState::off());
         // Nothing was published: the renderer keeps its locked Buddy card.
         assert!(events.try_recv().is_err());
@@ -19537,7 +19670,7 @@ mod tests {
             heard: "buddy highlight coders x".to_string(),
             kind: CohostCommandKind::Highlight,
             status: CohostCommandStatus::NotFound,
-            message: "Buddy couldn't find a comment from coders x.".to_string(),
+            message: "Sidekick couldn't find a comment from coders x.".to_string(),
             target: None,
             candidates: Vec::new(),
             operation_id: None,
@@ -19552,7 +19685,7 @@ mod tests {
                 "heard": "buddy highlight coders x",
                 "kind": "highlight",
                 "status": "not-found",
-                "message": "Buddy couldn't find a comment from coders x.",
+                "message": "Sidekick couldn't find a comment from coders x.",
                 "at": "2026-10-04T12:00:00Z"
             })
         );
@@ -19606,7 +19739,7 @@ mod tests {
         assert_eq!(
             session.resolve_command_name("old timer", false, now),
             CommandResolution::NotFound(
-                "Buddy couldn't find a comment from old timer.".to_string()
+                "Sidekick couldn't find a comment from old timer.".to_string()
             )
         );
         assert_eq!(
@@ -19793,7 +19926,9 @@ mod tests {
             assert_eq!(session.highlight_deixis(now), None);
             assert_eq!(
                 session.resolve_removal_deixis(Some(owner.id.as_str()), now, chrono::Utc::now()),
-                CommandResolution::NotFound("Buddy couldn't find a comment to remove.".to_string())
+                CommandResolution::NotFound(
+                    "Sidekick couldn't find a comment to remove.".to_string()
+                )
             );
         }
         // An id handed in from elsewhere (S8) gets the same rules.
@@ -19814,7 +19949,7 @@ mod tests {
             .unwrap();
         let command = current_command(&engine);
         assert_eq!(command.status, CohostCommandStatus::NotFound);
-        assert_eq!(command.message, "Buddy couldn't find that comment.");
+        assert_eq!(command.message, "Sidekick couldn't find that comment.");
         assert!(engine.snapshot().auto_highlight.is_none());
     }
 
@@ -19923,7 +20058,7 @@ mod tests {
         assert_eq!(card.kind, CohostCommandKind::Highlight);
         assert_eq!(
             card.message,
-            "Buddy flagged this (harassment). Show it anyway?"
+            "Sidekick flagged this (harassment). Show it anyway?"
         );
         assert!(card.expires_at.is_some() && card.operation_id.is_none());
         assert!(
@@ -20317,7 +20452,7 @@ mod tests {
             })
             .collect();
         let (mut engine, scope) = command_engine(now, &rows);
-        let hidden = "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Buddy remove messages.";
+        let hidden = "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Sidekick remove messages.";
         let outcomes = [
             (
                 ModerationPhase::Removed,
@@ -20840,7 +20975,7 @@ mod tests {
         run_new_command(&state, &scope, resolved_removal(&rows[0].id), false).await;
         let refused = state_command(&state).await;
         assert_eq!(refused.status, CohostCommandStatus::Unavailable);
-        assert_eq!(refused.message, "Buddy requires Videorc Premium.");
+        assert_eq!(refused.message, "Sidekick requires Videorc Premium.");
         assert!(no_operations(&state));
 
         // Removing paused by Videorc: the same, with its own line.
@@ -20864,7 +20999,7 @@ mod tests {
         run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
         let premium = state_command(&state).await;
         assert_eq!(premium.status, CohostCommandStatus::Unavailable);
-        assert_eq!(premium.message, "Buddy requires Videorc Premium.");
+        assert_eq!(premium.message, "Sidekick requires Videorc Premium.");
         crate::live_chat_moderation::set_premium_check_for_tests(&state, Arc::new(|| true)).await;
 
         // The rate limit: ten removals a minute, then a plain refusal.
@@ -21231,7 +21366,7 @@ mod tests {
         );
         assert_eq!(
             unheard.message,
-            "Buddy didn't catch that: 'what is the weather'."
+            "Sidekick didn't catch that: 'what is the weather'."
         );
         assert_eq!(state_counts(&state).await.not_found, 1);
         // Never without the wake word.
@@ -21607,7 +21742,7 @@ mod tests {
         .await;
         assert_eq!(
             state_command(&state).await.message,
-            "Buddy isn't on stream, so it can't show the bubble."
+            "Sidekick isn't on stream, so it can't show the bubble."
         );
         assert!(crate::buddy_overlay::status(&state).await.bubble.is_none());
         run_voice_greeting_with(&state, &scope, voice_greeting(), false, |_| async {
@@ -21773,7 +21908,7 @@ mod tests {
             (
                 CohostCommandKind::ShowBuddy,
                 CohostCommandStatus::Done,
-                "Buddy is on stream."
+                "Sidekick is on stream."
             )
         );
         assert_eq!(shown.heard, "buddy show up");
@@ -21810,7 +21945,7 @@ mod tests {
         .await;
         assert_eq!(
             state_command(&state).await.message,
-            "Buddy is already on stream."
+            "Sidekick is already on stream."
         );
         assert!(layout(&state).show_on_stream);
 
@@ -21832,7 +21967,7 @@ mod tests {
             (
                 CohostCommandKind::HideBuddy,
                 CohostCommandStatus::Done,
-                "Buddy is off the stream."
+                "Sidekick is off the stream."
             )
         );
         assert!(!layout(&state).show_on_stream);
@@ -21963,7 +22098,7 @@ mod tests {
         .await;
         assert_eq!(
             state_command(&state).await.message,
-            "Buddy couldn't find a banner named 'rainbow'."
+            "Sidekick couldn't find a banner named 'rainbow'."
         );
         assert_eq!(state_counts(&state).await.not_found, 2);
         // The cap of four: a fifth show is refused with the RPC's sentence.
@@ -22276,7 +22411,7 @@ mod tests {
             (
                 CohostCommandKind::Unknown,
                 CohostCommandStatus::NotFound,
-                "Buddy didn't catch that: 'buddy pin the banner'."
+                "Sidekick didn't catch that: 'buddy pin the banner'."
             )
         );
     }
@@ -22771,7 +22906,7 @@ mod tests {
 
         // A timeout and an error envelope are "didn't catch that", never a retry.
         for error in [
-            CohostApiError::timeout("Buddy did not answer within 2 s."),
+            CohostApiError::timeout("Sidekick did not answer within 2 s."),
             crate::videorc_api::classify_cohost_failure(
                 504,
                 "judge-timeout",
@@ -22979,7 +23114,7 @@ mod tests {
         assert_eq!(
             prepared.request.persona,
             Some(CohostTickPersona {
-                name: "Buddy".to_string(),
+                name: "Sidekick".to_string(),
                 personality: String::new(),
             })
         );
@@ -23322,7 +23457,7 @@ mod tests {
         assert_eq!(
             engine.approve_utterance(&id, start),
             Err(CohostError::UtteranceUnavailable(
-                "That Buddy card was already answered."
+                "That Sidekick card was already answered."
             ))
         );
         let state = engine.snapshot();
@@ -23827,7 +23962,7 @@ mod tests {
         assert_eq!(
             pending.request.persona,
             Some(CohostTickPersona {
-                name: "Buddy".to_string(),
+                name: "Sidekick".to_string(),
                 personality: String::new(),
             })
         );
@@ -23997,7 +24132,9 @@ mod tests {
                 .unwrap()
         };
         run_greet(&state, pending, |_| async move {
-            Err(CohostApiError::timeout("Buddy did not answer within 3 s."))
+            Err(CohostApiError::timeout(
+                "Sidekick did not answer within 3 s.",
+            ))
         })
         .await;
         let snapshot = state.cohost.lock().await.snapshot();
@@ -24508,7 +24645,7 @@ mod tests {
             (
                 CohostCommandKind::Unknown,
                 CohostCommandStatus::NotFound,
-                "Buddy didn't catch that: 'buddy switch to brb'."
+                "Sidekick didn't catch that: 'buddy switch to brb'."
             )
         );
         assert!(buddy_rows(&state).is_empty());
@@ -24566,7 +24703,7 @@ mod tests {
         assert_eq!(card.status, CohostCommandStatus::Refused);
         assert_eq!(
             card.message,
-            "Buddy can't use open_window. Buddy can't use notify. Buddy has no tool called delete_everything."
+            "Sidekick can't use open_window. Sidekick can't use notify. Sidekick has no tool called delete_everything."
         );
         let rows = buddy_rows(&state);
         assert_eq!(rows.len(), 3);
@@ -24724,7 +24861,7 @@ mod tests {
             (
                 CohostCommandKind::Act,
                 CohostCommandStatus::Confirm,
-                "Go live? Say \"Buddy, yes\"."
+                "Go live? Say \"Sidekick, yes\"."
             )
         );
         assert!(card.expires_at.is_some());
@@ -24814,13 +24951,13 @@ mod tests {
             let mut engine = state.cohost.lock().await;
             let session = engine.command_session_mut(&scope).unwrap();
             let effects =
-                session.open_act_confirm(act, "End the livestream? Say \"Buddy, yes\".", &ctx);
+                session.open_act_confirm(act, "End the livestream? Say \"Sidekick, yes\".", &ctx);
             effects.expire_card.unwrap()
         };
         let card = state_command(&state).await;
         assert_eq!(
             card.message,
-            "Switched to BRB. End the livestream? Say \"Buddy, yes\"."
+            "Switched to BRB. End the livestream? Say \"Sidekick, yes\"."
         );
         let expired = {
             let mut engine = state.cohost.lock().await;
@@ -24921,7 +25058,7 @@ mod tests {
             (
                 CohostCommandKind::Highlight,
                 CohostCommandStatus::Confirm,
-                "Buddy flagged this (harassment). Show it anyway?"
+                "Sidekick flagged this (harassment). Show it anyway?"
             )
         );
         assert!(
@@ -24940,7 +25077,7 @@ mod tests {
         assert_eq!(
             typed.results,
             vec![
-                "Buddy flagged this (harassment). Show it from the Stream Manager if you still want it."
+                "Sidekick flagged this (harassment). Show it from the Stream Manager if you still want it."
                     .to_string()
             ]
         );
@@ -24979,7 +25116,7 @@ mod tests {
         let rows = buddy_rows(&state);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tool, "set_banner");
-        assert_eq!(rows[0].agent_name, "Buddy");
+        assert_eq!(rows[0].agent_name, "Sidekick");
         assert_eq!(rows[0].outcome, crate::storage::AgentActivityOutcome::Ok);
     }
 }

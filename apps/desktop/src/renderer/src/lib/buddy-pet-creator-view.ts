@@ -63,7 +63,7 @@ export function buddyPetSaveDescription(
   persona: Pick<CohostPersona, 'name' | 'libraryAvatarId'> | null,
   capabilities: Pick<AiCapabilities, 'cohost'> | null = null
 ): string {
-  const name = persona?.name.trim() || 'Buddy'
+  const name = persona?.name.trim() || 'Sidekick'
   const wears = `${name} wears them right away; switch back to Still any time.`
   const synced =
     isBuddyUserAvatarId(persona?.libraryAvatarId) &&

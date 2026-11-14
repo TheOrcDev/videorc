@@ -56,7 +56,7 @@ export function chatSignInRows(providers: readonly LiveChatProviderState[]): Cha
  * "X chat needs Sign in" over the Stream Manager's chat (plan 213 J1) and
  * "Sign in to Videorc to read X chat." (plan 215 A3): one quiet row per
  * destination, never a failure, each with the one button that brings chat.
- * "Use Sign in" opens that destination in Livestream → Setup; "Sign in to
+ * "Use Sign in" opens that destination in Destinations → Setup; "Sign in to
  * Videorc" starts the account sign-in in the main window. Nothing when none
  * needs it, and no button for a door this view cannot open.
  */

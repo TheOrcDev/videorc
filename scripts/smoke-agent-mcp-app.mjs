@@ -421,7 +421,7 @@ try {
   if (!health?.ffmpeg?.available) fail(health?.ffmpeg?.message ?? 'FFmpeg is unavailable')
 
   // B1's destinations: Custom RTMP streams to the local sink (its key stored
-  // like the Livestream page stores one), and Kick is on through an account
+  // like the Destinations page stores one), and Kick is on through an account
   // that was never connected: Go Live is allowed to open, and the dialog's
   // preflight finds Kick not ready ("Go live without Kick" is its way out).
   // Never a real channel.
@@ -1510,7 +1510,7 @@ try {
   const unseen = await call(bridge, 'buddy_say', { text: BUDDY_LINE })
   if (
     !unseen.isError ||
-    resultText(unseen) !== "Buddy isn't on the picture, so nobody would see it."
+    resultText(unseen) !== "Sidekick isn't on the picture, so nobody would see it."
   ) {
     fail(`buddy_say off the picture: ${JSON.stringify(unseen)}`)
   }

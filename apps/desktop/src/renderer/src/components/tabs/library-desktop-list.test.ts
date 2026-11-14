@@ -21,7 +21,9 @@ const mocked = vi.hoisted(() => ({
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   useStudioRecordingState: () => ({ recording: mocked.recording }),
-  useStudioRecording: () => ({ recording: mocked.recording })
+  useStudioRecording: () => ({ recording: mocked.recording }),
+  // Plan 234: the lazy Cloud recordings section asks for the backend client.
+  useStudioDiagnostics: () => ({ client: null })
 }))
 
 function session(id: string, overrides: Partial<SessionSummary> = {}): SessionSummary {

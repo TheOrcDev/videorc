@@ -46,7 +46,7 @@ describe('BuddyConsentDialog (plan 119 decision 3, plan 174 S0.2)', () => {
   it('names every cloud use and what is kept, under the emblem', async () => {
     await render(true, vi.fn())
     const text = dialog()?.textContent ?? ''
-    expect(text).toContain('Turn on Buddy Live?')
+    expect(text).toContain('Turn on Sidekick Live?')
     for (const use of CLOUD_AI_USES) expect(text).toContain(use)
     expect(text).toContain(CLOUD_AI_KEEPS)
     expect(dialog()?.querySelector('[data-slot="buddy-emblem"]')).toBeTruthy()

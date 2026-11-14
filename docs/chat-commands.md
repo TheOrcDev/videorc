@@ -6,7 +6,7 @@ saved, starting with their @name, in the chat they asked in (plan 226).
 
 ## Using it
 
-- **Set up** in Setup → Livestream → Chat commands. From the Stream
+- **Set up** in Destinations → Setup → Chat commands. From the Stream
   Manager: type `!` in the composer and pick "Edit chat commands…", or use
   the bar's **Commands** action (800 px and wider) or ⋯ → "Chat commands…"
   (below 640 px). Each command has:
@@ -50,7 +50,7 @@ saved, starting with their @name, in the chat they asked in (plan 226).
 - **Failures**: a reply that can't go out (no permission to post, the
   YouTube limit, a platform error) shows once in the Stream Manager:
   "!go couldn't answer on YouTube: …".
-- Buddy doesn't answer a message that starts with one of your commands.
+- Sidekick doesn't answer a message that starts with one of your commands.
 
 ## For developers
 

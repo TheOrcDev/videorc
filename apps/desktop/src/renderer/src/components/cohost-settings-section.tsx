@@ -50,7 +50,7 @@ export const COHOST_SHOW_ON_STREAM_MODES: readonly CohostShowOnStreamMode[] = [
 export const COHOST_SHOW_ON_STREAM_LABELS: Record<CohostShowOnStreamMode, string> = {
   off: 'Off',
   voice: 'What I talk about',
-  'voice-and-picks': "What I talk about and Buddy's picks"
+  'voice-and-picks': "What I talk about and Sidekick's picks"
 }
 
 export const COHOST_SHOW_ON_STREAM_PATCHES: Record<
@@ -93,7 +93,7 @@ function useCohostSettingsSave(lockedByTab = false): {
     setError(null)
     void patchCohostSettings(patch).catch((failure: unknown) =>
       setError(
-        inlineUserError(failure, { action: 'save', object: 'Buddy settings' }, 'buddy-settings')
+        inlineUserError(failure, { action: 'save', object: 'Sidekick settings' }, 'buddy-settings')
       )
     )
   }
@@ -133,7 +133,7 @@ export function CohostListenField({
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-0.5">
               <FieldLabel htmlFor="cohost-listen">
-                Buddy hears you while you&apos;re live
+                Sidekick hears you while you&apos;re live
               </FieldLabel>
               <p className="text-xs text-muted-foreground">{COHOST_LISTEN_CONSENT_SENTENCE}</p>
               <CohostListenAllowance />
@@ -171,7 +171,7 @@ export function BuddyRepliesSection({
   const saveAutoChat = (next: CohostAutoChat): void => save({ autoChat: next })
   return (
     <PanelSection
-      description={`How Buddy writes its replies. It answers from About you, under Name and personality on the ${buddyTabLabel('live')} tab. In Bubble, Buddy says them on stream; in Suggest, you post them.`}
+      description={`How Sidekick writes its replies. It answers from About you, under Name and personality on the ${buddyTabLabel('live')} tab. In Bubble, Sidekick says them on stream; in Suggest, you post them.`}
       title="Replies"
     >
       <FieldGroup variant="grouped">
@@ -179,7 +179,7 @@ export function BuddyRepliesSection({
             and cloud AI, like the rest of this tab. */}
         <CohostCooldownField
           cooldown={autoChat.answers.cooldownSeconds}
-          description="A reply when a viewer asks Buddy by name, or after a minute to a question your notes answer. At most one per cooldown."
+          description="A reply when a viewer asks Sidekick by name, or after a minute to a question your notes answer. At most one per cooldown."
           enabled={autoChat.answers.enabled}
           id="cohost-answers"
           label="Answers"
@@ -319,14 +319,14 @@ export function BuddyModerationSection({
   }
   return (
     <PanelSection
-      description={`What Buddy flags for you, and what it may put on stream. ${BUDDY_POSTS_PROMISE}`}
+      description={`What Sidekick flags for you, and what it may put on stream. ${BUDDY_POSTS_PROMISE}`}
       title="Moderation"
     >
       <FieldGroup variant="grouped">
         <Field>
           <FieldLabel htmlFor="cohost-rule-new">Chat rules</FieldLabel>
           <FieldDescription>
-            Plain-language rules Buddy flags for you, like “no spoilers” or “English only”.
+            Plain-language rules Sidekick flags for you, like “no spoilers” or “English only”.
           </FieldDescription>
           {rules.length > 0 ? (
             <ul aria-label="Chat rules" className="flex flex-col gap-1.5">
@@ -401,7 +401,7 @@ export function BuddyModerationSection({
         <Field>
           <FieldLabel>Flag sensitivity</FieldLabel>
           <FieldDescription>
-            How sure Buddy must be before a flag shows up. Relaxed shows only the clear cases,
+            How sure Sidekick must be before a flag shows up. Relaxed shows only the clear cases,
             Strict shows everything it noticed.
           </FieldDescription>
           <SegmentedControl
@@ -440,10 +440,10 @@ export function BuddyModerationSection({
             onValueChange={saveShowOnStream}
           />
           <FieldDescription className="flex flex-col gap-0.5">
-            <span>What I talk about needs Buddy to hear you (or live captions).</span>
+            <span>What I talk about needs Sidekick to hear you (or live captions).</span>
             <span>
-              Buddy&apos;s picks: at most one card every 45 seconds; nothing Buddy flagged is ever
-              shown.
+              Sidekick&apos;s picks: at most one card every 45 seconds; nothing Sidekick flagged is
+              ever shown.
             </span>
           </FieldDescription>
         </Field>

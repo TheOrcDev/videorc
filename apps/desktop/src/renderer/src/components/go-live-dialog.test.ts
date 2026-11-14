@@ -207,7 +207,7 @@ describe('Go Live output advice (plan 090)', () => {
     )
     expect(markup).toContain('Streaming at 720p · 30 fps')
     expect(markup).toContain('about twice the work of a recording')
-    expect(markup).toContain('Pick 1080p · 30 fps in Livestream')
+    expect(markup).toContain('Pick 1080p · 30 fps in Destinations')
     expect(markup).toContain('The recording uses it too.')
   })
 

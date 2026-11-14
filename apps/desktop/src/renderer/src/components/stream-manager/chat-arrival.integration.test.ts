@@ -346,9 +346,9 @@ it('counts a new open question identity when it replaces an equal-count question
     )
   }
   await render('q1')
-  expect(badge('Buddy')).toBe('0')
+  expect(badge('Sidekick')).toBe('0')
   await render('q2')
-  expect(badge('Buddy')).toBe('1')
+  expect(badge('Sidekick')).toBe('1')
 })
 
 it('keeps duplicate, tombstone, hydration and emote refreshes from manufacturing unread; resets on clear and session change', async () => {
@@ -513,7 +513,7 @@ describe('the chat stays on its newest message (owner, 2026-10-21)', () => {
     expect(paused()?.textContent).toBe('Latest')
   })
 
-  it('marks the message Buddy hears the streamer talk about without moving the list', async () => {
+  it('marks the message Sidekick hears the streamer talk about without moving the list', async () => {
     let snapshot = seed(2000)
     await renderChat(snapshot)
     const { viewport, box } = measure()
@@ -530,7 +530,7 @@ describe('the chat stays on its newest message (owner, 2026-10-21)', () => {
     expect(viewport.scrollTop).toBe(box.height)
   })
 
-  it("stops following for Buddy's jump to a message, with the way back", async () => {
+  it("stops following for Sidekick's jump to a message, with the way back", async () => {
     const snapshot = seed(2000)
     await renderChat(snapshot)
     measure()

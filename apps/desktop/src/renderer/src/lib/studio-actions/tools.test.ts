@@ -265,7 +265,7 @@ describe('the Studio agent tools (plan 209 S6)', () => {
   })
 })
 
-describe('app scene refusals for MCP and Buddy', () => {
+describe('app scene refusals for MCP and Sidekick', () => {
   it.each(['agent-1', 'buddy'])(
     'passes the typed refusal and plain words to %s',
     async (agentId) => {

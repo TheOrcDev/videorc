@@ -193,7 +193,7 @@ export function commandAvailabilityLines(
   ]
 }
 
-export const WAKE_WORD_LABEL = 'Commands need “Buddy” first'
+export const WAKE_WORD_LABEL = 'Commands need “Sidekick” first'
 export const WAKE_WORD_DESCRIPTION =
   'Off: “remove it from our chat” and “highlight the comment from coders X” also work without the name.'
 

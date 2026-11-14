@@ -144,22 +144,22 @@ describe('appMenuTemplate on macOS', () => {
     expect(actions.showPage).toHaveBeenCalledWith(',')
   })
 
-  it('lists the pages in sidebar order on their ⌘ digits, Buddy right under Studio', () => {
+  it('lists the pages in sidebar order, on ⌘ digits that run in order (plan 235 D8)', () => {
     const view = submenu(topLevel(appMenuTemplate(options())!, 'View'))
     const pages = view.filter((item) => /^CmdOrCtrl\+\d$/.test(String(item.accelerator ?? '')))
     expect(pages.map((item) => `${item.label} ${item.accelerator}`)).toEqual([
       'Studio CmdOrCtrl+1',
-      'Buddy CmdOrCtrl+9',
       'Sources CmdOrCtrl+2',
       'Scene CmdOrCtrl+3',
       'Assets CmdOrCtrl+4',
-      'Livestream CmdOrCtrl+5',
-      'Captions CmdOrCtrl+6',
-      'Output CmdOrCtrl+7',
-      'Library CmdOrCtrl+8'
+      'Captions CmdOrCtrl+5',
+      'Output CmdOrCtrl+6',
+      'Destinations CmdOrCtrl+7',
+      'Sidekick CmdOrCtrl+8',
+      'Library CmdOrCtrl+9'
     ])
-    click(pages.find((item) => item.label === 'Livestream'))
-    expect(actions.showPage).toHaveBeenCalledWith('5')
+    click(pages.find((item) => item.label === 'Destinations'))
+    expect(actions.showPage).toHaveBeenCalledWith('7')
     expect(view.at(-1)?.role).toBe('togglefullscreen')
   })
 

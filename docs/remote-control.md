@@ -72,7 +72,7 @@ in the Stream Deck app to see what the audience sees at a glance.
 | Go Live               | a session runs with streaming on                                     |
 | Mic                   | the mic is not muted                                                 |
 | System audio          | the session mixes system audio                                       |
-| Buddy                 | Buddy Live is on                                                     |
+| Sidekick              | Sidekick Live is on                                                  |
 | Layout                | its layout is on the picture                                         |
 | Scene                 | its saved scene is the active one                                    |
 | Takeover              | its own takeover shows                                               |
@@ -172,27 +172,27 @@ message? }`. Accepted intents produce a `remote.ack` event
 
 Intent params (`kind` + fields):
 
-| kind                                                     | fields                                   | effect                                                                                                                                                                                                                                                                   |
-| -------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `recordStart` / `recordStop` / `recordToggle`            | —                                        | start or stop recording (see [Starting and stopping](#starting-and-stopping))                                                                                                                                                                                            |
-| `streamStart` / `streamStop`                             | —                                        | go live or end the livestream; `streamStart` needs a ready destination                                                                                                                                                                                                   |
-| `micMute` / `micUnmute` / `micToggle`                    | —                                        | microphone mute                                                                                                                                                                                                                                                          |
-| `systemAudioOn` / `systemAudioOff` / `systemAudioToggle` | —                                        | system audio on/off (plan 069); refused while the device cannot run                                                                                                                                                                                                      |
-| `buddyLiveOn` / `buddyLiveOff` / `buddyLiveToggle`       | —                                        | turn Buddy Live on or off, with the same rules as the Stream Manager: on needs Premium and the Cloud AI consent, and a refused ack says why; off has no gate. While Buddy's settings load, all three are refused ("Loading your Buddy settings… Try again in a moment.") |
-| `sceneApply`                                             | `sceneId?`, `screenId?`, `layoutPreset?` | switch saved scene by id, or a built-in layout (at least one target required; `sceneId` takes precedence)                                                                                                                                                                |
-| `takeoverShow`                                           | `assetId`                                | show a takeover image (BRB etc.)                                                                                                                                                                                                                                         |
-| `takeoverHide`                                           | —                                        | hide the takeover                                                                                                                                                                                                                                                        |
-| `bannerShow`                                             | `bannerId`                               | show that banner (plan 186; explicit, idempotent)                                                                                                                                                                                                                        |
-| `bannerHide`                                             | `bannerId?`                              | hide that banner; without `bannerId`, hide every banner                                                                                                                                                                                                                  |
-| `bannerToggle`                                           | `bannerId`                               | show or hide that banner, from its `shown` in `describe` (for one deck key)                                                                                                                                                                                              |
-| `soundPlay`                                              | `soundId`                                | press that sound (plan 189): the sound's own mode decides, like its key in Studio                                                                                                                                                                                        |
-| `soundStop`                                              | `soundId?`                               | stop that sound; without `soundId`, stop every sound                                                                                                                                                                                                                     |
-| `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward (`comments` is the Stream Manager)                                                                                                                                                                                                                  |
-| `streamManagerScreenSwap`                                | `presentingScreen`, `monitorScreen`      | move the Stream Manager to the other of the two screens (display ids); from closed, minimized or a third screen it goes to the Monitor screen. Both ids are required, must differ and are at most 32 bytes. It never sets Hide from stream (plan 230)                    |
-| `streamManagerFrontOrClose`                              | —                                        | the same key held (plan 230): bring the Stream Manager to the front where it is, with the focus, or close it when it already has the focus. Shares the `streamManagerScreenSwap` debounce                                                                                |
-| `commentHighlight`                                       | `messageId`                              | put that live-chat comment on stream (explicit show, idempotent — never a toggle)                                                                                                                                                                                        |
-| `commentHighlightClear`                                  | —                                        | take the on-stream comment down                                                                                                                                                                                                                                          |
-| `clipMark`                                               | `seconds?`: `30`\|`60`                   | save a clip: the last 30 seconds (no `seconds`) or the last minute (`60`) whenever the ring holds frames, and a mark while recording; any other length is refused (plans 068, 181, 199)                                                                                  |
+| kind                                                     | fields                                   | effect                                                                                                                                                                                                                                                                            |
+| -------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `recordStart` / `recordStop` / `recordToggle`            | —                                        | start or stop recording (see [Starting and stopping](#starting-and-stopping))                                                                                                                                                                                                     |
+| `streamStart` / `streamStop`                             | —                                        | go live or end the livestream; `streamStart` needs a ready destination                                                                                                                                                                                                            |
+| `micMute` / `micUnmute` / `micToggle`                    | —                                        | microphone mute                                                                                                                                                                                                                                                                   |
+| `systemAudioOn` / `systemAudioOff` / `systemAudioToggle` | —                                        | system audio on/off (plan 069); refused while the device cannot run                                                                                                                                                                                                               |
+| `buddyLiveOn` / `buddyLiveOff` / `buddyLiveToggle`       | —                                        | turn Sidekick Live on or off, with the same rules as the Stream Manager: on needs Premium and the Cloud AI consent, and a refused ack says why; off has no gate. While Sidekick's settings load, all three are refused ("Loading your Sidekick settings… Try again in a moment.") |
+| `sceneApply`                                             | `sceneId?`, `screenId?`, `layoutPreset?` | switch saved scene by id, or a built-in layout (at least one target required; `sceneId` takes precedence)                                                                                                                                                                         |
+| `takeoverShow`                                           | `assetId`                                | show a takeover image (BRB etc.)                                                                                                                                                                                                                                                  |
+| `takeoverHide`                                           | —                                        | hide the takeover                                                                                                                                                                                                                                                                 |
+| `bannerShow`                                             | `bannerId`                               | show that banner (plan 186; explicit, idempotent)                                                                                                                                                                                                                                 |
+| `bannerHide`                                             | `bannerId?`                              | hide that banner; without `bannerId`, hide every banner                                                                                                                                                                                                                           |
+| `bannerToggle`                                           | `bannerId`                               | show or hide that banner, from its `shown` in `describe` (for one deck key)                                                                                                                                                                                                       |
+| `soundPlay`                                              | `soundId`                                | press that sound (plan 189): the sound's own mode decides, like its key in Studio                                                                                                                                                                                                 |
+| `soundStop`                                              | `soundId?`                               | stop that sound; without `soundId`, stop every sound                                                                                                                                                                                                                              |
+| `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward (`comments` is the Stream Manager)                                                                                                                                                                                                                           |
+| `streamManagerScreenSwap`                                | `presentingScreen`, `monitorScreen`      | move the Stream Manager to the other of the two screens (display ids); from closed, minimized or a third screen it goes to the Monitor screen. Both ids are required, must differ and are at most 32 bytes. It never sets Hide from stream (plan 230)                             |
+| `streamManagerFrontOrClose`                              | —                                        | the same key held (plan 230): bring the Stream Manager to the front where it is, with the focus, or close it when it already has the focus. Shares the `streamManagerScreenSwap` debounce                                                                                         |
+| `commentHighlight`                                       | `messageId`                              | put that live-chat comment on stream (explicit show, idempotent — never a toggle)                                                                                                                                                                                                 |
+| `commentHighlightClear`                                  | —                                        | take the on-stream comment down                                                                                                                                                                                                                                                   |
+| `clipMark`                                               | `seconds?`: `30`\|`60`                   | save a clip: the last 30 seconds (no `seconds`) or the last minute (`60`) whenever the ring holds frames, and a mark while recording; any other length is refused (plans 068, 181, 199)                                                                                           |
 
 ### Starting and stopping
 
@@ -225,9 +225,9 @@ layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable, sa
   that predates plan 069 omits both. While a session runs,
   `recordEnabled` and `streamEnabled` say what that session does (a Record
   take is `true`/`false` whatever Output says), until the stop completes;
-  while idle, they are the saved Output and Livestream settings. Apps up to
-  0.20.2 always send the saved settings. `buddyLive` is `true` while Buddy
-  Live is on, and `false` until Buddy's settings load. Apps up to 0.20.2
+  while idle, they are the saved Output and Destinations settings. Apps up to
+  0.20.2 always send the saved settings. `buddyLive` is `true` while Sidekick
+  Live is on, and `false` until Sidekick's settings load. Apps up to 0.20.2
   omit it. `streamManager` is `{ screenId, visible, hiddenFromStream }`:
   the display the Stream Manager sits on (`null` while closed), whether it
   shows (open and not minimized), and whether viewers really do not see it:
@@ -447,16 +447,16 @@ the tabs read Chat and Controls, the header reads ON AIR while a livestream
 runs, the on-stream badge reads "On stream", the clear key reads "Take off
 stream", and the stop key reads "End livestream".
 
-### Buddy Live on the phone (leak argument)
+### Sidekick Live on the phone (leak argument)
 
-The Stream Deck's Buddy key turns Buddy Live on or off. The phone shares the
+The Stream Deck's Sidekick key turns Sidekick Live on or off. The phone shares the
 remote allowlist, so a paired phone can do it too, though the phone page
-draws no Buddy key. What crosses the LAN socket is one boolean in
+draws no Sidekick key. What crosses the LAN socket is one boolean in
 `remote.state`, `buddyLive`, and what a paired phone can do is send
 `buddyLiveOn`, `buddyLiveOff` or `buddyLiveToggle` through the existing
 `remote.intent`:
 
-- `buddyLive` says only whether Buddy Live is on, that is whether Buddy
+- `buddyLive` says only whether Sidekick Live is on, that is whether Sidekick
   joins the streamer's streams and reads their chat. It carries no content.
 - No persona, name, avatar, chat, transcript, account or setting crosses
   the LAN. A refused turn-on acks with the desktop's own sentence, which
@@ -464,7 +464,7 @@ draws no Buddy key. What crosses the LAN socket is one boolean in
   nothing more.
 - No route is added to the LAN router and nothing is added to `LAN_EVENTS`.
 
-The worst a paired device can do is what the Buddy Live switch in the
+The worst a paired device can do is what the Sidekick Live switch in the
 Stream Manager does. Turning it on is the privacy-relevant direction, so it
 runs the same save as that switch and as the agents' `set_buddy`: it needs
 Premium and the Cloud AI consent, which only the streamer gives on the

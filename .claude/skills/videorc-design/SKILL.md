@@ -131,7 +131,7 @@ for the owner, not a design choice.
     - A member's chat row and a sub or membership in Activity is a
       `chrome-row-member` plate at half strength, with the member hue only
       as its 2px edge. Its Member chip is the `plate` Badge.
-    - One background per row: on stream, then paid, then the Buddy
+    - One background per row: on stream, then paid, then the Sidekick
       pull-up, then member. A member's Super Chat still reads as paid.
     - Static plates on the theme's solid: no motion, no blur. Screens take the class from
       `components/ui/chrome-row.ts`.
@@ -141,7 +141,7 @@ for the owner, not a design choice.
     deeper red at idle; the brand red from the click until the session
     ends, with its glow breathing while it runs. Starting and stopping stay
     lit and focusable and take no click; they never dim. It keeps one width
-    through every state's words. Go Live… is the chrome primary. Delete,
+    through every state's words. Go Live is the chrome primary. Delete,
     Remove and every other destructive action keep the quiet `destructive`
     tint, so lit red only ever means record or live.
 - **First-run setup paints Liquid Chrome** (2026-10-27, plans 203, 207 and 208).
@@ -155,18 +155,25 @@ for the owner, not a design choice.
   never inverted: it is the scene's own picture. The backdrop is opaque and
   covers the window; it is decoration and never carries text. Every other window rule stands.
 - **The toolbar holds only the page title** (2026-09-23). Record and Go
-  Live… sit at the top of the Studio inspector, and a page's own actions sit
+  Live sit at the top of the Studio inspector, with no state row above them
+  (2026-11-14, plan 235 D1: the status bar and the sidebar's Studio row carry
+  the state and the clock), and a page's own actions sit
   in its body.
-- **Buddy stays second in the sidebar, directly under Studio, on ⌘9**
-  (2026-10-10, plan 174 D6 and D8). It keeps Clean cut and every other
-  feature, because the page sells Premium. Never move it or a feature out of
-  it.
+- **Sidekick sits in the sidebar's Livestream group, under Destinations, on
+  ⌘8** (2026-11-14, plan 235 D6 and D8; from 2026-10-10 it sat second under
+  Studio on ⌘9, plan 174 D6 and D8). It keeps Clean cut and every other
+  feature, because the page sells Premium. Never move a feature out of it.
+- **The sidebar's way home is its big button, and its keys run in order**
+  (2026-11-14, plan 235 D5 and D8). Studio is a 40 px slab of the chrome
+  primary's metal on every page, never Record's red; ⌘1–⌘9 open the rows top
+  to bottom. Its page row for Sidekick wears a plain glyph, `BuddyPageIcon`
+  (Phosphor UserSound, D7), like every other row.
 - **A click on a live chat row puts the message on stream**, and a click on
   the live row takes it off (2026-10-10, D10; plans 055 and 151). There is no
   select-first step and no separate Show button.
 - **Chat stays on the newest message** (2026-10-21). Newest at the bottom,
   and the list follows it. Only the streamer's own scroll up (wheel, touch,
-  keys, the scrollbar) stops it; nothing the app does moves it: Buddy's
+  keys, the scrollbar) stops it; nothing the app does moves it: Sidekick's
   "Talking about this" marks a row and never scrolls to it, and rows that
   grow, highlights and removals keep it on the newest message
   (`hooks/use-chat-follow.ts`). While it is stopped, one chip ("12 new", or
@@ -181,13 +188,20 @@ for the owner, not a design choice.
   broadcast convention. Everywhere else the state is "On air".
 - **On macOS the brand lives in About and the Dock**, never in the sidebar
   (2026-09-23).
-- **The Buddy mark is the real artwork**, never a redrawn glyph (2026-10-04;
+- **The Sidekick mark is the real artwork**, never a redrawn glyph (2026-10-04;
   see [Icons](#icons)).
 - **The Studio has one Audio section** (2026-10-26, plan 201 D1).
   Microphone and System audio share one audiocn Mixer scale, each with its
   level and Gain. The System audio switch lives here; the Sources mirror
   keeps Screen and Camera. This replaces the 2026-10-02 call, "Studio keeps
   the Microphone section, no mixer" (plans 092 and 093).
+- **The Studio inspector's groups name themselves** (2026-11-14, plan 235
+  D3 and D4; the owner: "leave the takeover title, remove everything else").
+  Session, Audio, Sources and the on-air Chat show no title (each keeps its
+  name for screen readers); Takeover keeps its title, because its buttons
+  are only takeover names. A group's way to its page is one cog with its
+  tooltip: "Open Sources" at the end of the Camera row, "Open Assets" in
+  Takeover's header. Both looks.
 - **Retro LCD is an option, off by default** (2026-10-25, plan 197). Settings
   → General → Appearance → Retro LCD draws the Studio inspector on audiocn
   LCD screens (`components/lcd-panel.tsx`, `studio/retro-lcd-studio.tsx`)
@@ -366,18 +380,22 @@ Everything except ⌘K uses the desktop scale.
 - **Toolbar** (`Toolbar`, 40 px): the page title (14 px / 600, the window's
   `h1`) on the window's drag band, and nothing else (owner call,
   2026-09-23). Actions live with the content they act on. The Studio's
-  Record, Go Live… and the stop button ("Stop recording", or "End
-  livestream" while on air) and its clock sit at the top of the inspector,
-  right above Session; a page's own actions sit in its body (a filter bar, a
+  Record, Go Live and the stop button ("Stop recording", or "End
+  livestream" while on air) sit at the top of the inspector, with no state
+  row, right above Session; a page's own actions sit in its body (a filter bar, a
   section header, or the PageHeader row). The toolbar never scrolls; only
   `PaneBody` does.
-- **Sidebar** (plan 174 D8).
+- **Sidebar** (plan 174 D8, plan 235).
   - The top row holds the traffic lights and the ⌘K button.
-  - Studio leads, with a live dot and the clock while a recording or
-    livestream runs. Buddy sits directly under it on ⌘9 (owner call).
+  - Studio ⌘1 leads as a 40 px `chrome-fill` slab (the chrome primary's
+    metal: silver in dark, black chrome in light) with a 20 px icon, which
+    fills while Studio is the page you're on. The live dot and the clock
+    show on it while a recording or livestream runs, in the slab's ink.
   - "Setup" labels the pages you configure between sessions: Sources ⌘2,
-    Scene ⌘3, Assets ⌘4, Livestream ⌘5, Captions ⌘6, Output ⌘7. Library ⌘8
-    follows under no label: a group of one row carries none.
+    Scene ⌘3, Assets ⌘4, Captions ⌘5, Output ⌘6.
+  - "Livestream" labels Destinations ⌘7 (the page that was Livestream) and
+    Buddy ⌘8 (owner call). Library ⌘9 follows under no label: a group of
+    one row carries none. ⌘1–⌘9 run down the rows in order.
   - Settings (⌘,) sits in a bottom block above the account row. Health has
     no row: the status bar's state is its door (D9).
   - Section labels are `SectionLabel` (11 px / 600, tertiary). Rows are
@@ -395,7 +413,7 @@ Everything except ⌘K uses the desktop scale.
   nested section passes `headingLevel={3}`), a 12 px secondary description,
   a hairline between sections, and 16 px padding. No border, background,
   radius, or shadow.
-- **Pages with tabs** (Settings, plan 064; Buddy, plan 150; Livestream,
+- **Pages with tabs** (Settings, plan 064; Sidekick, plan 150; Destinations,
   plan 174): `PageTabs`, one segmented `TabsList` in a `PaneStrip` pinned
   under the toolbar (`border-b px-gutter py-2`). Only the region under it
   scrolls: the page spreads `PANE_OWNS_SCROLL`, so `PaneBody` stops
@@ -424,7 +442,7 @@ Everything except ⌘K uses the desktop scale.
   `ListRowButton` over itself. A fact row that jumps to the page owning its
   value is a `NavigableRow` (icon, label, value, chevron).
   Cards remain only for objects with a picture (scene thumbnails, takeovers,
-  Buddies, library items): `MediaCard`, 8 px radius, white 4% fill, a 1 px
+  Sidekicks, library items): `MediaCard`, 8 px radius, white 4% fill, a 1 px
   hairline, no shadow; `selected` is a brighter rim on the chrome plate,
   never a colour.
   Sources (plan 173) is the reference for rows that carry controls: one
@@ -468,7 +486,7 @@ Everything except ⌘K uses the desktop scale.
     (SegmentedControl `sm` is the same 24 px). Use it only where the control
     sits inside something denser than a page: an Alert's action; a row's
     trailing or hover actions (`ListRow`, `SourceItem`, chat, activity,
-    transcript and marker rows); a card's actions (`MediaCard`, the Buddy and
+    transcript and marker rows); a card's actions (`MediaCard`, the Sidekick and
     Stream Manager cards); the Stream Manager's panes and status bar; a
     small inline action under a field (Reset, Calibrate).
   - A compact control still takes a click across 28 × 28 px (plan 213 A4):
@@ -507,8 +525,8 @@ links home.
 
 - **Devices**: Sources is the home of every screen, window, camera,
   microphone and system audio source, with its gain and level. The Studio
-  inspector mirrors the few needed mid-session: the Sources section (Screen,
-  Camera, with Open Sources) and the Audio section: Microphone (picker,
+  inspector mirrors the few needed mid-session: the Sources group (Screen,
+  Camera, with the Open Sources cog) and the Audio group: Microphone (picker,
   level, Gain, mute and its hotkey) and System audio (switch, level, Gain),
   on one audiocn Mixer scale (plan 201 D1).
 - **Takeovers**: Assets → Takeovers manages them (import, rename, reorder,
@@ -523,16 +541,16 @@ links home.
   the password-manager switch and list). The control itself sits where the
   streamer is: Studio's Screen row in Sources (never the transport area),
   the Stream Manager status bar, ⌘K, `/hide` and `/show`, the Deck, the
-  phone and MCP's `hide_screen`. Agents and Buddy hide, never show. While
+  phone and MCP's `hide_screen`. Agents and Sidekick hide, never show. While
   hidden, the Screen row and the Stream Manager show a "Screen hidden" chip
   and nothing toasts.
 - **The local file**: Output ("Where recordings go", quality). Recordings
   themselves live in Library.
-- **Buddy**: the Buddy page (Profile, Chat, Voice, Reports, Clean cut)
-  creates and sets Buddy up; the Stream Manager's Buddy pane operates it
+- **Sidekick**: the Sidekick page (Profile, Chat, Voice, Reports, Clean cut)
+  creates and sets Sidekick up; the Stream Manager's Sidekick pane operates it
   live.
 - **Chat**: the Stream Manager is the full chat (filters, search, the
-  composer, ⋯ actions, removals, Buddy). With Chat in Studio on (Settings →
+  composer, ⋯ actions, removals, Sidekick). With Chat in Studio on (Settings →
   General → Chat, off by default; ⌘K mirrors it), the Studio inspector
   shows a Chat section under Session while on air (plan 204): a small
   avatar, the name, the words and the platform mark per row, a click that
@@ -547,7 +565,9 @@ links home.
 One verb pair on every surface (plan 174 D3; the table in
 `docs/ui-copy.md`, strings in `lib/go-live-copy.ts`):
 
-- The Studio buttons read "Record" and **"Go Live…"** (it opens a dialog).
+- The Studio buttons read "Record" and **"Go Live"**: it opens a dialog, and
+  still has no "…", the owner's exception (2026-11-14, plan 235 D2). Its
+  Retro LCD key reads the same.
 - The Go Live dialog's title and primary button read **"Go live"** ("Go
   live on 3 destinations" when it starts more than one).
 - Stopping a livestream is **"End livestream"**, with the line "Your
@@ -603,9 +623,9 @@ made it chat first: one thin stats bar and fewer words.
 - **Tiers by container query.** The body is `@container/stream-manager`,
   never JS resize state (`lib/stream-manager-layout.ts`):
   - Wide (1,040 px and up): the stats bar, then Chat beside a right pane
-    with Activity and Buddy tabs.
+    with Activity and Sidekick tabs.
   - Medium (640 to 1,039 px): the stats bar, then one pane behind
-    Chat / Activity / Buddy tabs.
+    Chat / Activity / Sidekick tabs.
   - Narrow (under 640 px, 320 minimum): the same, with the stats bar down to
     its main slots.
   - Every pane renders once; only its placement changes.
@@ -617,7 +637,7 @@ made it chat first: one thin stats bar and fewer words.
     only when something needs the streamer ("read-only", "reconnect to
     send"). The details open on hover and on focus.
   - Right, every action labelled: the window's hints ⌘F Search, ⌘L Write and
-    ⌘J Buddy (clickable; below 1,040 px the key alone, the word kept for
+    ⌘J Sidekick (clickable; below 1,040 px the key alone, the word kept for
     screen readers), then Keep on top (`PinWindowButton`), Highlight
     position (a menu), Mark clip (its icon and the words "Mark clip"),
     Clear (the word; it asks first, because it cannot be undone) and Open
@@ -664,7 +684,7 @@ made it chat first: one thin stats bar and fewer words.
     row takes it off (owner call, D10). Enter and Space do the same, and the
     row's accessible name carries the message. The ⋯ menu holds the rest.
   - A row paints at most one background, lowest to highest: a member's own
-    message `bg-member/8` (plan 154), Buddy's "Talking about this"
+    message `bg-member/8` (plan 154), Sidekick's "Talking about this"
     `bg-accent`, a paid message `bg-warning/10` with its ring; an on-stream
     row keeps its button fill. The Member chip stays on every tinted row and
     text stays monochrome.
@@ -687,13 +707,13 @@ made it chat first: one thin stats bar and fewer words.
   `ui/scroll-area.tsx` holds the rows itself, with no `display: table`
   wrapper (one let a long unbreakable row widen every row past the pane).
   Never reintroduce one per call site.
-- **The Buddy pane** has one header: Buddy's identity (the living preview at
+- **The Sidekick pane** has one header: Sidekick's identity (the living preview at
   32 px, the name, the bubble while one is up), the Alpha tag, listening,
-  the status and the **Buddy Live** switch. Under it, "{name} talks" is a
+  the status and the **Sidekick Live** switch. Under it, "{name} talks" is a
   `SegmentedControl` (Off · Bubble · Suggest, plan 211) with the chosen
-  value's meaning as a line; it never turns Buddy on, and nothing Buddy
+  value's meaning as a line; it never turns Sidekick on, and nothing Sidekick
   does on its own reaches chat. Greetings, Answers and Banter are
-  read-only summary chips that link to their one home, Buddy → Chat. The
+  read-only summary chips that link to their one home, Sidekick → Chat. The
   footer holds the Say box, the reaction chips and the "{name} on stream"
   switch. Every card that waits on the streamer is a `BuddyCard`.
 - **Proof.** `pnpm probe:comments-window` sweeps 320/480/640/800/1040/1280.
@@ -784,13 +804,14 @@ white label keeps 4.5:1 (`chrome-led.test.ts`). `data-lit` also adds a 12 px
 
 - **States.** A fill or Record lifts a little on hover and turns concave when
   pressed (the gradient flips and the drop goes). Disabled is the flat
-  colour at the Button's 50%, so a disabled Go Live… is a flat chrome slab.
+  colour at the Button's 50%, so a disabled Go Live is a flat chrome slab.
   Hover on a plated row or segment stays the flat `bg-accent`: the plate
   means selected.
 - **Who wears what.** Only the primitives:
-  - `chrome-fill`: `Button` `default` (the chrome primary: Go Live…,
+  - `chrome-fill`: `Button` `default` (the chrome primary: Go Live,
     Continue, Save), a checked `Checkbox`, the `Switch` track when on,
-    `Progress`, and the range of `Slider`, `ParameterSlider` and `Fader`;
+    `Progress`, the range of `Slider`, `ParameterSlider` and `Fader`, and
+    the sidebar's Studio slab (plan 235 D5);
   - `chrome-bead`: the `Switch` knob when off and every slider and fader
     thumb; `chrome-bead-ink`: the `Switch` knob on its chrome track;
   - `chrome-plate`: the active `SegmentedControl` segment, `Tabs` trigger,
@@ -918,18 +939,23 @@ registry is moved onto the utility there.
   terms, the build pipeline (`pnpm icons:build`), and the semantic audit.
   Copy never names an icon by its component name ("Trash", not
   `DeleteIcon`); the copy guard fails on it.
-- **The Buddy mark** (plan 164) is the owner's stone golem, always the
+- **The Sidekick mark** (plan 164) is the owner's stone golem, always the
   real artwork, never a redrawn glyph (the plan 149 owner call, 2026-10-04).
   The masters and their export commands live in `assets/brand/buddy/`.
+  - The Buddy page's row in the sidebar and in ⌘K's page list is the page,
+    not Buddy: it wears `BuddyPageIcon` (Phosphor UserSound), a plain glyph
+    like its neighbours, filled while it is the page you're on (plan 235
+    D7). The artwork stays on the Buddy page's intro, the consent dialog,
+    the Stream Manager's Buddy pane and chat rows.
   - `BuddyIcon` is the emblem at icon size: an `<svg>` wrapping the image,
     so `svg`-based slot styles size it like its neighbours. It is the one
     full-colour icon in the registry. `weight` and `currentColor` never
     change it, so a selected row keeps the same image.
   - `BuddyEmblem` is the emblem larger, at 32 px (`md`) or 56 px (`lg`)
-    tall: the Buddy page's intro line and the Buddy Live consent dialog.
+    tall: the Sidekick page's intro line and the Sidekick Live consent dialog.
   - It is never tinted or filtered, and one file serves both themes. Its
     colours are the art, not a status.
-  - The Videorc app icon stays the orc-head orb. The Buddy is not the app's
+  - The Videorc app icon stays the orc-head orb. The Sidekick is not the app's
     logo.
 
 ## Motion
@@ -1038,7 +1064,7 @@ Rows, forms and choices
 - `KebabMenu` (`components/kebab-menu.tsx`): `items label? busy? disabled? reveal? tabIndex?`,
   each item `id label icon? destructive? disabled? disabledReason? group? shortcut? onSelect`.
 - `BroadcastInfoFields` (`components/streaming/broadcast-info-fields.tsx`):
-  stream details one way everywhere (the Go Live dialog, Livestream →
+  stream details one way everywhere (the Go Live dialog, Destinations →
   Setup, the Schedule dialog), with one title rule, Privacy as a
   `SegmentedControl` and one Made for kids switch:
   `idPrefix value onChange disabled? titleRequired? privacyNote? madeForKidsNote? thumbnail? titleRef?`.
@@ -1072,10 +1098,10 @@ Shortcuts
 - `ShortcutTooltip` (`ui/shortcut-tooltip.tsx`): `label accelerator? platform?`
   around a control: its tooltip with the bound shortcut.
 
-Buddy
+Sidekick
 
 - `BuddyCard` (`components/stream-manager/buddy-card.tsx`): the one card
-  that waits on the streamer in the Buddy pane (a removal, a voice command's
+  that waits on the streamer in the Sidekick pane (a removal, a voice command's
   chooser or confirm, a proposed post):
   `label title testId icon? timer? busy? keys? primary? decline? onPrimary? onDecline?`.
   Primary first, then the decline; ↵ is the primary, and Esc, ⌫ or Delete
@@ -1170,10 +1196,14 @@ Videorc.
 - DON'T add a font, a component library, or a direct icon-package import.
 - DON'T ship an audio control with nothing behind it: no pan, solo, monitor
   or player volume until the backend can do it (plan 093).
-- DO call the companion **Buddy** in all copy (or the name the streamer gave
-  it), and **Buddies** for more than one (plan 171). Code and wire names stay
-  `cohost`; saved values keep `orcle` (plan 170 D22), like the moderation
-  source `orcle-voice`. "golem" names only the stone golem creature (plan 171
-  D4): its slug `golem`, its kind "Golem", its art masters and golem example
-  text; its name is Buddy. Guard tests fail on "Orcle" and on "Golem"
-  anywhere else in the renderer's sources and the docs.
+- DO call the companion **Sidekick** in all copy (or the name the streamer
+  gave it), and **Sidekicks** for more than one (plan 236; it was Buddy from
+  plan 171 until speech to text kept hearing "Buddy" as "body"). Code and
+  wire names stay `cohost` and `buddy` (`/api/buddy/*`, `cohost.buddy*`,
+  `buddy_say`, test ids, saved values); saved values keep `orcle` (plan 170
+  D22), like the moderation source `orcle-voice`.
+  "golem" names only the stone golem creature (plan 171 D4):
+  its slug `golem`, its kind "Golem", its art masters and golem example text;
+  its name is Sidekick. Guard tests fail on "Orcle" and on "Golem" anywhere
+  else in the renderer's sources and the docs, and on "Buddy" in any text a
+  person reads.

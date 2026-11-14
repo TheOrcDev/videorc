@@ -80,7 +80,7 @@ function renderSection(
   )
 }
 
-const OFF_LINE = "Off. Viewers don't see Buddy."
+const OFF_LINE = "Off. Viewers don't see Sidekick."
 
 // Plan 215 G (D5): the chat box is an overlay item like Highlight and
 // Captions, with the same two switches, off by default.
@@ -107,7 +107,7 @@ describe('the Chat item (plan 215 G)', () => {
 })
 
 describe('the overlay section (plan 205 S3, D4)', () => {
-  it('says an off Buddy goes nowhere, above its two switches', () => {
+  it('says an off Sidekick goes nowhere, above its two switches', () => {
     const markup = renderSection('buddy', { showOnStream: false, showInRecording: false })
     expect(OVERLAY_ITEM_OFF_LINES.buddy).toBe(OFF_LINE)
     // React escapes the apostrophe in markup.
@@ -122,7 +122,7 @@ describe('the overlay section (plan 205 S3, D4)', () => {
     for (const control of switches(markup)) expect(control).toContain('aria-checked="false"')
   })
 
-  it('says nothing while Buddy goes to either output, or for the other items', () => {
+  it('says nothing while Sidekick goes to either output, or for the other items', () => {
     // The owner's Buddy (stream only): drawn, and its chip says "Stream only".
     for (const layout of [
       { showOnStream: true, showInRecording: false },

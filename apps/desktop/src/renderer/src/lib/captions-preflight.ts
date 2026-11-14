@@ -61,7 +61,7 @@ export function captionSessionOutputReadiness(input: {
       ready: false,
       reason: 'one-stream-quality',
       description:
-        'Captions on a livestream you also record need one stream quality for every destination. Give your destinations the same quality in Livestream, or go live without captions this time.'
+        'Captions on a livestream you also record need one stream quality for every destination. Give your destinations the same quality in Destinations, or go live without captions this time.'
     }
   }
 

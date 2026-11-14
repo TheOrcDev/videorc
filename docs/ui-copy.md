@@ -26,12 +26,12 @@ app. Two checks hold them (see [Guards](#guards)).
 - Sentence case on every button, menu item, tab, title, label, toast and
   status word: "Save local recording", "Needs reconnect".
 - Capitalize only names:
-  - Videorc, Premium, Buddy (or the name the streamer gave it), Buddy Live;
-  - Go Live, as the action's name ("Go Live…", "Use for Go Live…"); the verb
+  - Videorc, Premium, Sidekick (or the name the streamer gave it), Sidekick Live;
+  - Go Live, as the action's name ("Go Live", "Use for Go Live…"); the verb
     in a sentence is lowercase ("Go live", "when you go live");
-  - pages and windows: Studio, Sources, Scene, Assets, Livestream, Captions,
-    Output, Library, Settings, Health, Stream Manager, Preview, Notes,
-    Captions reader;
+  - pages, sidebar groups and windows: Studio, Sources, Scene, Assets,
+    Captions, Output, Destinations, Buddy, Library, Settings, Health, Setup,
+    Livestream (the group), Stream Manager, Preview, Notes, Captions reader;
   - platforms and products: YouTube, Twitch, Kick, X, TikTok, Custom RTMP,
     OBS, macOS, Windows.
 - A status is a word, never a raw value: "Reconnecting", not "closed" or
@@ -41,11 +41,11 @@ app. Two checks hold them (see [Guards](#guards)).
 
 - One character, "…", never three dots ("...").
 - On a command that opens a further step asking for a choice or input:
-  "Import…", "Rename…", "Choose thumbnail…", "Edit…", "Go Live…", "Pair a
+  "Import…", "Rename…", "Choose thumbnail…", "Edit…", "Go live…" (⌘K), "Pair a
   phone…", "Run setup again…", "What's new…", "Sign in…" and "Authorize X
   Live…" (both open an account flow in the browser).
 - Not on a command that acts at once, or one that only opens a page or a
-  window: "Delete", "Open Output", "Open Stream Manager", "Open Livestream".
+  window: "Delete", "Open Output", "Open Stream Manager", "Open Destinations".
   "Set level for me" changes Gain at once, so it has no ellipsis either.
 - On every pending label: "Saving…", "Importing…", "Exporting…",
   "Applying…", "Opening preview…".
@@ -65,7 +65,7 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
 
 | Where                 | Copy                                                                            |
 | --------------------- | ------------------------------------------------------------------------------- |
-| Studio buttons        | "Record" (with ␣) and "Go Live…"                                                |
+| Studio buttons        | "Record" (with ␣) and "Go Live": no "…", the owner's exception (plan 235 D2)    |
 | Go Live dialog        | title "Go live"; primary "Go live" or "Go live on 3 destinations"               |
 | Not public on YouTube | "Go live unlisted?" with "Go live unlisted" and "Change privacy" (or Private)   |
 | Stopping while on air | "End livestream", with "Your recording stops too."                              |
@@ -83,7 +83,7 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
 - Delete destroys, Remove takes out of a list or off stream, Discard drops
   unsaved changes, Clear empties a field, a filter or a view.
 - Quote a control or a page exactly as it reads today, with "→" for a path:
-  "Livestream → Setup", "Settings → Shortcuts". Never point at a page, a tab
+  "Destinations → Setup", "Settings → Shortcuts". Never point at a page, a tab
   or a button that does not exist.
 - Scenes and Hide screen (plan 210) read the same everywhere: "New scene…"
   makes scenes for apps, a scene for an app says "{App} · front window",
@@ -104,23 +104,23 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
   - macOS 15 and later: "Allow Videorc Camera in System Settings → General
     → Login Items & Extensions → Camera Extensions."
 - Community (plan 225) reads the same everywhere. The tab is **Community**,
-  in Buddy after Chat. A viewer is a **person** with **accounts**; the
+  in Sidekick after Chat. A viewer is a **person** with **accounts**; the
   chip on the first row of their stream is "Regular · 14", "Back · 3 wk"
   (weeks under 8, then "Back · 3 mo") or the milestone label ("10th
   stream", "5 in a row", "One year"); "First chat" stays as it was. Say
   "in a row", never "streak" (Twitch's word), and "regular", never "VIP" or
   "loyal". The card is "About {name}", with "Same person as…", "Not the
   same" ("Split off"), "Mark as bot" / "Not a bot", "Forget {name}…" and
-  the note's line "Only you see this. Buddy never changes it." Links the
+  the note's line "Only you see this. Sidekick never changes it." Links the
   streamer settles are "Links that need you", with "Same person" and "Not
   the same"; a suggestion reads "Might be the same as {name} on
   {platform}"; a cancelled or hijacked word reads "A !link with {name} on
   {platform} needs you". The settings are "Remember my community",
   "Regular after", "Welcome regulars on stream", "Show milestone cards
-  automatically", "Buddy remembers" and "Community sync"; the data actions
+  automatically", "Sidekick remembers" and "Community sync"; the data actions
   are "Export…", "Import…" and "Forget everyone…" (the confirm "Forget
   everyone?"). The YouTube line is exactly "YouTube viewers are remembered
-  for 30 days after they chat (YouTube's rules)." Buddy's bubble lines for
+  for 30 days after they chat (YouTube's rules)." Sidekick's bubble lines for
   the viewers' commands are "Done, {name}. I've forgotten you.", "Welcome
   back to the list, {name}.", "Unlinked, {name}." and "Linked: {name} on
   {platform} and {name} on {platform}." (one name when both match); the
@@ -150,7 +150,7 @@ in readable strings:
 | diagnostics                                 | "Health", "support bundle"                                   |
 | Manual RTMP                                 | "Stream key"                                                 |
 | X / Twitter                                 | "X"                                                          |
-| Streaming tab, Recording → Output           | "Livestream", "Output"                                       |
+| Streaming tab, Recording → Output           | "Destinations", "Output"                                     |
 | Open Live, Open Recording, Customize        | the control's real label                                     |
 | Command Palette                             | "Search" (⌘K)                                                |
 | receive-only                                | "read-only"                                                  |
@@ -172,7 +172,7 @@ source change: the stage is the confirmation.
     import the image";
   - the description is whole sentences, with periods;
   - at most one action, named by its verb: "Show in Finder", "Retry",
-    "Open Livestream".
+    "Open Destinations".
 - Type by meaning; the type colors the icon only, never the toast:
   - error: it failed and needs you;
   - warning: it can't happen now, or it is degraded;
@@ -241,4 +241,7 @@ reorder and delete use the session lock; explain that scope beside them.
     "Import From OBS" fails; "Open Stream Manager" passes.
 - `pnpm lint` runs `scripts/check-em-dashes.mjs` (no em dash in app copy).
 - `renderer-buddy-name-guard.test.ts` keeps the companion's retired names
-  out of copy.
+  out of copy (plans 170 and 171, and "Buddy" since plan 236). The Buddy
+  check reads only what a person reads (JSX text and string literals): code
+  names stay `buddy`. The backend's words have the same check,
+  `the_backend_copy_says_sidekick_not_buddy` in `buddy_act.rs`.

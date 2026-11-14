@@ -72,7 +72,7 @@ const BUDDY_TOOLS = catalog.tools.filter((tool) => tool.buddy).map((tool) => too
 const smokeSessionToken = `buddy-act-smoke-${randomUUID()}`
 const chatSessionId = `buddy-act-smoke-${Date.now()}`
 const SOUND_NAME = 'Drum roll'
-const STOP_QUESTION = 'Stop the recording? Say "Buddy, yes".'
+const STOP_QUESTION = 'Stop the recording? Say "Sidekick, yes".'
 
 function fail(message) {
   throw new Error(`buddy-act smoke FAIL: ${message}`)
@@ -247,9 +247,10 @@ try {
   })
   log(`dev app up: synthetic source, "${SOUND_NAME}" imported, Stream Manager open`)
 
-  async function typeBuddy(sentence) {
-    const typed = await command('comments-window-submit-message', { text: `/buddy ${sentence}` })
-    if (!typed?.submitted) fail(`the composer did not take /buddy: ${JSON.stringify(typed)}`)
+  // Plan 236 D4: `/sidekick`, and `/buddy` as the silent alias (step 2).
+  async function typeBuddy(sentence, slash = '/sidekick') {
+    const typed = await command('comments-window-submit-message', { text: `${slash} ${sentence}` })
+    if (!typed?.submitted) fail(`the composer did not take ${slash}: ${JSON.stringify(typed)}`)
   }
 
   async function nextPlannerRequest(after, label) {
@@ -322,7 +323,7 @@ try {
         value: rows
       }
     })
-    if (rows.some((row) => row.agentName !== 'Buddy')) fail('an Activity row was not Buddy')
+    if (rows.some((row) => row.agentName !== 'Sidekick')) fail('an Activity row was not Sidekick')
     results.push('1 typed: switch_scene + play_sound by name, Buddy in Activity')
     log('step 1: /buddy switched the scene and pressed the drum roll')
   }
@@ -341,9 +342,9 @@ try {
         line: 'Opening your notes.'
       }
     })
-    await typeBuddy('open my notes and tell me something')
+    await typeBuddy('open my notes and tell me something', '/buddy')
     await nextPlannerRequest(before, 'the refusal step')
-    await composerSays("Buddy can't use open_window.", 'the refusal')
+    await composerSays("Sidekick can't use open_window.", 'the refusal')
     const notes = await command('notes-window-state')
     if (notes?.open) fail("the Notes window opened: a tool outside Buddy's subset ran")
     const refused = await waitUntil('three refusals in Activity as Buddy', async () => {
@@ -356,7 +357,7 @@ try {
         value: rows
       }
     })
-    results.push(`2 refused: ${refused.map((row) => row.tool).join(', ')} never ran`)
+    results.push(`2 refused (typed as /buddy): ${refused.map((row) => row.tool).join(', ')} never ran`)
     log("step 2: a planned tool outside Buddy's subset was refused")
   }
 
@@ -392,7 +393,7 @@ try {
       })
       // The rect moves before Buddy's answer comes back, and the composer
       // refuses the next /buddy until it does: wait for it, as steps 1-2 do.
-      await composerSays('Moved Buddy to the top left.', 'what Buddy did')
+      await composerSays('Moved Sidekick to the top left.', 'what Sidekick did')
       results.push(`3 move_on_scene: Buddy at ${JSON.stringify(rect)}`)
       log('step 3: /buddy moved Buddy to the top left')
     }
@@ -514,7 +515,7 @@ try {
             value: captionFake.state.audioAppends
           }))
           for (const [sentence, viewer, fallback] of [
-            ['Buddy, say hello to Jay in the chat.', 'Jay_99', false],
+            ['Sidekick, say hello to Jay in the chat.', 'Jay_99', false],
             ['Golmar, tell Mira welcome.', 'Mira', true]
           ]) {
             fakeCohost.state.greetFailure = fallback
@@ -567,7 +568,7 @@ try {
             String(event.payload.command.message).includes(STOP_QUESTION),
           30_000
         )
-        await say('Buddy, stop the recording.')
+        await say('Sidekick, stop the recording.')
         const record = await nextPlannerRequest(before, 'the spoken stop')
         if (record.body.state?.activity !== 'recording') {
           fail(`the planner state while recording: ${JSON.stringify(record.body.state)}`)
@@ -607,7 +608,7 @@ try {
         if (afterBareYes?.state !== 'recording' || afterBareYes?.sessionId !== captureSessionId) {
           fail(`a bare "Yes." stopped the recording: ${JSON.stringify(afterBareYes)}`)
         }
-        await say('Buddy, yes.')
+        await say('Sidekick, yes.')
         await stopped.promise
         const answered = (await finished.promise).payload
         const ending =
@@ -615,7 +616,7 @@ try {
             ? answered.command.message
             : 'the stop ended the session, Buddy stopped and the card went with it'
         results.push(
-          `4 voice: "${STOP_QUESTION}" held the recording through "Yes." until "Buddy, yes." (${ending})`
+          `4 voice: "${STOP_QUESTION}" held the recording through "Yes." until "Sidekick, yes." (${ending})`
         )
         log('step 4: a spoken stop waited for a spoken yes')
       } finally {

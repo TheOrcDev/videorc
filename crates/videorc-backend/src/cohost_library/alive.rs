@@ -570,7 +570,7 @@ async fn save_persona(
     .map_err(|error| {
         CohostAvatarErrorDetail::new_owned(
             error.code().to_string(),
-            format!("Your Buddy could not be saved: {error}"),
+            format!("Your Sidekick could not be saved: {error}"),
         )
     })
 }
@@ -1016,13 +1016,13 @@ pub async fn save_to_library(
     if active_avatar_id(&persona).is_some() || persona.library_avatar_id.is_some() {
         return Err(CohostLibraryRefusal::new(
             COHOST_LIBRARY_INVALID,
-            "This Buddy is already in a library.",
+            "This Sidekick is already in a library.",
         ));
     }
     if persona.images.idle.is_none() {
         return Err(CohostLibraryRefusal::new(
             COHOST_LIBRARY_INVALID,
-            "Your Buddy needs its idle picture to be saved to your library.",
+            "Your Sidekick needs its idle picture to be saved to your library.",
         ));
     }
     if state
@@ -1073,7 +1073,7 @@ fn persona_pose_files(
             None if avatar_state == CohostAvatarState::Idle => {
                 return Err(CohostAvatarErrorDetail::new(
                     COHOST_LIBRARY_INVALID,
-                    "Your Buddy's idle picture could not be read, so it was not saved to your library.",
+                    "Your Sidekick's idle picture could not be read, so it was not saved to your library.",
                 ));
             }
             None => {}
@@ -1131,7 +1131,7 @@ async fn run_import(state: &AppState) -> Result<(), CohostAvatarErrorDetail> {
         (!text.is_empty()).then_some(text)
     };
     let request = BuddyImportRequest {
-        name: library_name(&persona.name).unwrap_or_else(|| "Buddy".to_string()),
+        name: library_name(&persona.name).unwrap_or_else(|| "Sidekick".to_string()),
         personality: optional(&persona.personality, 1200),
         context: optional(&settings.notes, 4000),
         files: declared(&poses),

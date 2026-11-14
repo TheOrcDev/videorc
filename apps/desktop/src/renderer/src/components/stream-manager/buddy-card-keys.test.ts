@@ -9,7 +9,7 @@ function press(key: string): KeyboardEvent {
   return event
 }
 
-describe('Buddy card key precedence (plan 174 S3.14c, H-23)', () => {
+describe('Sidekick card key precedence (plan 174 S3.14c, H-23)', () => {
   it('answers a voice command first, then a removal, then a proposed post', () => {
     expect(BUDDY_CARD_PRECEDENCE).toEqual(['command', 'removal', 'utterance'])
     expect(buddyCardKeyTaker(['utterance', 'removal'])).toBe('removal')

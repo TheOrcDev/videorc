@@ -5,13 +5,13 @@ import { dirname, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-// The companion is Buddy in the README, the docs and the agent skills. Two
+// The companion is Sidekick in the README, the docs and the agent skills. Two
 // old names are guarded, each in any case and each with its own reasoned
 // allow-list; an entry that matches nothing fails too.
 //
 // - "Orcle" (plan 170, Phase R step 4) may stay only where an ORCLE_ALLOWED
 //   entry says why: a value that is saved or crosses the app/web line (D22),
-//   the hidden wake-word aliases until their removal after 0.9.140, or a
+//   a note that the Orcle wake-word aliases are gone (plan 236 D2), or a
 //   one-line note of the old name.
 // - "Golem" (plan 171 D9) may stay only where it names the stone golem
 //   creature, not the feature (D2, D4), or in a one-line note of the old
@@ -28,7 +28,7 @@ const HISTORY = /^docs\/(releases|acceptance)\//
 
 const MODERATION_SOURCE = 'the moderation source on the wire and in saved reports (D22)'
 const FLAGS_KEY = "the service-flags document's key, served by the web and read by older apps (D22)"
-const ALIASES = 'the hidden wake-word aliases, kept until after 0.9.140 (plan 164 D2)'
+const ALIASES = 'the Orcle wake-word aliases, removed in plan 236 D2; the docs say they are gone'
 const OLD_NAME = 'a one-line note that the companion was called Orcle, for readers of the changelog'
 const RULE = 'the D26 naming rule, which has to name the old spelling it keeps'
 
@@ -40,11 +40,11 @@ const ORCLE_ALLOWED = [
   },
   {
     file: 'docs/orcle-live.md',
-    text: 'Orcle is now the **Buddy**',
+    text: 'Orcle is now the **Sidekick**',
     reason: 'the stub plan 164 left so links from past plans still land'
   },
   { file: 'docs/buddy.md', text: '(plan 119 as Orcle,', reason: OLD_NAME },
-  { file: 'docs/buddy.md', text: 'no longer Orcle or Golem.', reason: OLD_NAME },
+  { file: 'docs/buddy.md', text: 'no longer Buddy, Orcle or Golem.', reason: OLD_NAME },
   { file: 'docs/buddy.md', text: 'keep `orcle`', reason: RULE },
   { file: 'docs/buddy.md', text: '`orcle-voice`', reason: MODERATION_SOURCE },
   { file: 'docs/buddy.md', text: 'service-flags `orcle` key', reason: FLAGS_KEY },
@@ -53,19 +53,17 @@ const ORCLE_ALLOWED = [
     text: '`videorc.orcleTab`',
     reason: 'the saved Buddy sub-tab key; renaming it forgets the tab (D22)'
   },
-  { file: 'docs/buddy.md', text: 'The old "Orcle" spellings', reason: ALIASES },
   {
     file: 'docs/buddy.md',
-    text: '"orcle", "orkle", "orcel", "orkel", "orcl", "orcal"',
+    text: 'the Orcle spellings, "oracle" and "orca" are gone',
     reason: ALIASES
   },
-  { file: 'docs/buddy-commands.md', text: 'The old name "Orcle"', reason: ALIASES },
   { file: 'docs/buddy-commands-contract.md', text: 'it said "Orcle"', reason: OLD_NAME },
   { file: 'docs/buddy-commands-contract.md', text: 'orcle-voice', reason: MODERATION_SOURCE },
   { file: 'docs/buddy-commands-contract.md', text: 'service-flags `orcle`', reason: FLAGS_KEY },
   { file: 'docs/buddy-commands-contract.md', text: 'top-level `orcle`', reason: FLAGS_KEY },
   { file: 'docs/buddy-commands-contract.md', text: '"orcle":', reason: FLAGS_KEY },
-  { file: 'docs/buddy-commands-contract.md', text: 'hidden Orcle aliases', reason: ALIASES },
+  { file: 'docs/buddy-commands-contract.md', text: 'the Orcle aliases are gone', reason: ALIASES },
   {
     file: '.claude/skills/videorc-design/SKILL.md',
     text: 'saved values keep `orcle`',
@@ -82,7 +80,7 @@ const COPY_DOC = 'docs/buddy-onboarding-copy.md'
 
 const GOLEM_ALLOWED = [
   { file: 'docs/buddy.md', text: 'called Golem until plan 171', reason: GOLEM_OLD_NAME },
-  { file: 'docs/buddy.md', text: 'no longer Orcle or Golem.', reason: GOLEM_OLD_NAME },
+  { file: 'docs/buddy.md', text: 'no longer Buddy, Orcle or Golem.', reason: GOLEM_OLD_NAME },
   {
     file: 'docs/buddy.md',
     text: 'The stone golem creature keeps its own words',
@@ -96,8 +94,8 @@ const GOLEM_ALLOWED = [
   { file: 'docs/buddy.md', text: "owner's stone golem", reason: STONE_GOLEM },
   {
     file: 'docs/buddy.md',
-    text: 'Buddy the Golem',
-    reason: 'the official stone golem: its name is Buddy, its kind stays Golem (D2)'
+    text: 'Sidekick the Golem',
+    reason: 'the official stone golem: its name is Sidekick (plan 236), its kind stays Golem (D2)'
   },
   {
     file: COPY_DOC,
@@ -206,7 +204,7 @@ test('README, docs and skills never say Orcle, outside the reasoned allow-list (
   for (const entry of ORCLE_ALLOWED) assert.ok(entry.reason.length > 20, entry.text)
 })
 
-test('README, docs and skills say Buddy, and "golem" only for the creature (plan 171 D9)', () => {
+test('README, docs and skills say Sidekick, and "golem" only for the creature (plan 171 D9)', () => {
   const { offenders, stale } = scanDocs(GOLEM_ALLOWED, golemHits)
   assert.deepEqual(offenders, [])
   assert.deepEqual(stale, [], 'an allow-list entry matches nothing')

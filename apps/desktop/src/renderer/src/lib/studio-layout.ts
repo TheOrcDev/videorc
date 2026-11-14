@@ -4,7 +4,7 @@
 // 960 px minimum, so a narrow window stacked the inspector under the preview
 // and Stop fell below the fold.
 //   Wide    ≥ 720 px of content: the preview column, and beside it the
-//           transport (status, clock, Record / Go Live… / Stop) on top of the
+//           transport (Record / Go Live / Stop) on top of the
 //           inspector. The 960 px window leaves about 750 px, so it is Wide.
 //   Narrow  < 720 px (a zoomed-in window): one column, with the transport row
 //           above the preview, pinned while the page scrolls.

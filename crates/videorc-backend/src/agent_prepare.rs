@@ -93,7 +93,7 @@ pub fn choose_account(
                 "No connected {label} account is called \"{}\".",
                 name.trim()
             ),
-            None => format!("Connect {label} in Videorc → Livestream first."),
+            None => format!("Connect {label} in Videorc → Destinations first."),
         })
 }
 
@@ -306,7 +306,7 @@ mod tests {
         );
         assert_eq!(
             choose_account(&one, StreamPlatform::X, None),
-            Err("Connect X in Videorc → Livestream first.".to_string())
+            Err("Connect X in Videorc → Destinations first.".to_string())
         );
         let two = vec![
             account(StreamPlatform::Youtube, "UC1", "Orc Dev"),

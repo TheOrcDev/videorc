@@ -7,7 +7,7 @@ import {
   GO_LIVE_LABEL,
   GO_LIVE_NO_DESTINATION_TITLE,
   GO_LIVE_SHORTCUT_LABEL,
-  OPEN_LIVESTREAM_LABEL,
+  OPEN_DESTINATIONS_LABEL,
   RECORD_LABEL,
   RECORD_SHORTCUT_LABEL,
   START_RECORDING_COMMAND,
@@ -20,7 +20,8 @@ import {
 // tables it. smoke:start-labels pins the same words from outside the app.
 describe('the going-live vocabulary (plan 174 D3)', () => {
   it('names the transport, ⌘K, the shortcuts and Upcoming the D3 way', () => {
-    expect([RECORD_LABEL, GO_LIVE_LABEL]).toEqual(['Record', 'Go Live…'])
+    // Plan 235 D2: the Studio button drops the "…"; ⌘K keeps it.
+    expect([RECORD_LABEL, GO_LIVE_LABEL]).toEqual(['Record', 'Go Live'])
     expect([START_RECORDING_COMMAND, GO_LIVE_COMMAND]).toEqual(['Start recording', 'Go live…'])
     expect([RECORD_SHORTCUT_LABEL, GO_LIVE_SHORTCUT_LABEL]).toEqual([
       'Record / stop recording',
@@ -32,7 +33,7 @@ describe('the going-live vocabulary (plan 174 D3)', () => {
 
   it('refuses a Go Live with no destination with one fix, and checks from the first click (S3.1)', () => {
     expect(GO_LIVE_NO_DESTINATION_TITLE).toBe('Set up a destination to go live')
-    expect(OPEN_LIVESTREAM_LABEL).toBe('Open Livestream')
+    expect(OPEN_DESTINATIONS_LABEL).toBe('Open Destinations')
     expect(GO_LIVE_CHECKING_LABEL).toBe('Checking…')
   })
 

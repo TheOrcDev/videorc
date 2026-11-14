@@ -1,0 +1,822 @@
+import assert from 'node:assert/strict'
+import { spawn, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, join } from 'node:path'
+import { createServer } from 'node:net'
+import { setTimeout as sleep } from 'node:timers/promises'
+import { launchDevApp, stopProcess } from './app-launcher.mjs'
+import { startRtmpTap } from './rtmp-tap.mjs'
+import {
+  holdCardStats,
+  evaluateHoldOnReceiver,
+  parsePtsTimes,
+  sortedGapStats
+} from './cloud-solo-gates.mjs'
+import { requestSmokeCommand } from './smoke-command-client.mjs'
+import { connectBackend, request } from '../smoke-recording-session.mjs'
+import {
+  startFakeCloudWebManaged,
+  managedWire as wire,
+  maskManagedUrls
+} from './fake-cloud-web-managed.mjs'
+
+// Kept together: the download fix lane can change this single contract binding.
+export const MANAGED_DOWNLOAD = Object.freeze({
+  start: 'cloud.recordings.download',
+  event: 'cloud.recordings.download',
+  cancel: 'cloud.recordings.cancelDownload'
+})
+export const OUTPUT = Object.freeze({
+  orientation: 'horizontal',
+  width: 1280,
+  height: 720,
+  fps: 30,
+  videoKbps: 4000
+})
+export const waitFor = async (fn, label, ms = 30000) => {
+  const deadline = Date.now() + ms
+  do {
+    const value = await fn()
+    if (value) return value
+    await sleep(100)
+  } while (Date.now() < deadline)
+  throw new Error(`Timed out: ${label}`)
+}
+export async function holdFor(fn, label, ms = 2000) {
+  const until = Date.now() + ms
+  do {
+    assert.ok(await fn(), label)
+    await sleep(100)
+  } while (Date.now() < until)
+}
+export function runMedia(command, args) {
+  const r = spawnSync(command, args, {
+    encoding: null,
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 30000
+  })
+  if (r.status !== 0)
+    throw new Error(
+      maskManagedUrls(`${basename(command)} failed: ${String(r.stderr ?? r.error).slice(-1500)}`)
+    )
+  return r.stdout
+}
+export function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = createServer()
+    s.once('error', reject)
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address()
+      s.close(() => resolve(port))
+    })
+  })
+}
+
+/** No build is performed here. The orchestrator must supply a built backend/app.
+ * Uses the maintained launcher, RPC and command clients, RTMP tap and receiver gates.
+ * A loopback media stand-in observes decoded feed frames; it does not claim to
+ * establish LiveKit egress behaviour (the D18 Docker stack is a separate gate).
+ */
+export async function managedHarness(kind, pass = 1) {
+  const root = mkdtempSync(
+    join(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir(), `videorc-managed-${kind}-${pass}-`)
+  )
+  const appData = join(root, 'profile'),
+    userData = join(root, 'electron'),
+    mediaDir = join(root, 'media')
+  for (const dir of [appData, userData, mediaDir]) mkdirSync(dir, { recursive: true })
+  const ffmpeg = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+  const ffprobe = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
+  const children = [],
+    events = [],
+    logs = [],
+    sockets = new Set(),
+    cleanups = []
+  const sessionToken = randomBytes(32).toString('base64url')
+  // A test root and a localhost leaf it signs. The leaf must not be a CA:
+  // rustls (the dev downloader) refuses a CA certificate as the server's own
+  // (CaUsedAsEndEntity), which a single self-signed certificate is.
+  const ca = join(root, 'local-ca.pem'),
+    caKey = join(root, 'local-ca-key.pem'),
+    csr = join(root, 'local-leaf.csr'),
+    leafExtensions = join(root, 'local-leaf.ext'),
+    cert = join(root, 'local-cert.pem'),
+    key = join(root, 'local-key.pem')
+  runMedia('openssl', [
+    'req',
+    '-x509',
+    '-newkey',
+    'rsa:2048',
+    '-nodes',
+    '-keyout',
+    caKey,
+    '-out',
+    ca,
+    '-days',
+    '1',
+    '-subj',
+    '/CN=Videorc managed smoke test root',
+    '-addext',
+    'basicConstraints=critical,CA:TRUE',
+    '-addext',
+    'keyUsage=critical,keyCertSign,cRLSign'
+  ])
+  runMedia('openssl', [
+    'req',
+    '-newkey',
+    'rsa:2048',
+    '-nodes',
+    '-keyout',
+    key,
+    '-out',
+    csr,
+    '-subj',
+    '/CN=localhost'
+  ])
+  writeFileSync(
+    leafExtensions,
+    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n'
+  )
+  runMedia('openssl', [
+    'x509',
+    '-req',
+    '-in',
+    csr,
+    '-CA',
+    ca,
+    '-CAkey',
+    caKey,
+    '-set_serial',
+    '1',
+    '-days',
+    '1',
+    '-extfile',
+    leafExtensions,
+    '-out',
+    cert
+  ])
+  const startChild = (name, cmd, args, options = {}) => {
+    const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], ...options })
+    children.push(child)
+    child.on('error', (e) => logs.push(`${name}: ${maskManagedUrls(e.message)}`))
+    child.stderr?.on('data', (b) => logs.push(maskManagedUrls(`${name}: ${b}`)))
+    return child
+  }
+  const ports = {
+    rtmps: await freePort(),
+    rtmp: await freePort(),
+    rtsp: await freePort(),
+    api: await freePort(),
+    proxy: await freePort(),
+    livekit: await freePort(),
+    livekitHost: await freePort(),
+    rtc: await freePort()
+  }
+  let closing
+  let web,
+    app,
+    backend,
+    smoke,
+    tap,
+    hostTap,
+    timer,
+    decode,
+    segmentBytes = Buffer.alloc(0),
+    activeShow
+  const feedKey = randomBytes(16).toString('hex')
+  // Each destination's key, by target id. The app never sends a key value in
+  // session.start: it stores it (streamTargets.manualKey.store) and passes the
+  // secret's ref, so the targets below carry refs only.
+  const targetKeys = new Map()
+  const feed = {
+    orientation: 'horizontal',
+    serverUrl: `rtmps://localhost:${ports.proxy}/live`,
+    streamKey: feedKey
+  }
+  const livekit =
+    kind === 'talk'
+      ? {
+          url: `ws://127.0.0.1:${ports.livekit}`,
+          // The desktop's own room address: through a tap the smoke can cut,
+          // as a host's network drops. Guests and the listener go direct.
+          hostUrl: `ws://127.0.0.1:${ports.livekitHost}`,
+          httpUrl: `http://127.0.0.1:${ports.livekit}`,
+          apiKey: randomBytes(12).toString('hex'),
+          apiSecret: randomBytes(32).toString('hex')
+        }
+      : undefined
+  const env = {
+    // The test root: the feed's FFmpeg and the dev recording downloader.
+    VIDEORC_CLOUD_FEED_CA_FILE: ca,
+    VIDEORC_SMOKE_SKIP_PREBUILD: '1',
+    VIDEORC_DISABLE_AUTO_PREVIEW: '1',
+    VIDEORC_SMOKE_COMMAND_SERVER: '1',
+    VIDEORC_SMOKE_OUTPUT_DIR: root,
+    VIDEORC_SMOKE_STATE_DIR: root,
+    VIDEORC_APP_DATA_DIR: appData,
+    VIDEORC_USER_DATA_DIR: userData,
+    VIDEORC_RECORDINGS_DIR: join(root, 'downloads'),
+    TMPDIR: join(root, 'download-temp')
+  }
+  mkdirSync(env.TMPDIR)
+  mkdirSync(env.VIDEORC_RECORDINGS_DIR)
+  // Runtime-only synthetic sign-in. Never read or import the owner's credentials.
+  // A signed-in desktop keeps its account snapshot beside the token; without
+  // it the backend starts signed out (the Library then asks to sign in).
+  writeFileSync(
+    join(appData, 'videorc-secrets.json'),
+    JSON.stringify({
+      'account:videorc:session': sessionToken,
+      'account:videorc:snapshot': JSON.stringify({
+        status: 'signed-in',
+        username: 'Smoke',
+        displayName: 'Smoke',
+        email: 'smoke@example.invalid'
+      })
+    }),
+    { mode: 0o600 }
+  )
+  const h = {
+    root,
+    appData,
+    ffmpeg,
+    ffprobe,
+    ports,
+    events,
+    logs,
+    env,
+    feed,
+    livekit,
+    get web() {
+      return web
+    },
+    get backend() {
+      return backend
+    },
+    get smoke() {
+      return smoke
+    },
+    async backendConnection() {
+      return connectBackend(app.connections['backend-ready'], 10000)
+    },
+    get showId() {
+      return activeShow
+    },
+    set showId(id) {
+      activeShow = id
+    },
+    feedFrames: [],
+    directConnections: [],
+    async rpc(method, params = {}, ms = 45000, connection = backend) {
+      return request(connection, ms, method, params)
+    },
+    async status(predicate, label, ms) {
+      return waitFor(
+        async () => {
+          const s = await h.rpc('cloud.status')
+          return predicate(s) && s
+        },
+        label,
+        ms
+      )
+    },
+    async eval(code, params = {}) {
+      const r = await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        { ...params, code },
+        { timeoutMs: 15000 }
+      )
+      // The page's own value, null included (never the reply around it).
+      return r && typeof r === 'object' && 'result' in r ? r.result : r
+    },
+    async command(command, params = {}) {
+      return requestSmokeCommand(smoke, command, params, { timeoutMs: 15000 })
+    },
+    // `account.refresh` is main's (the admin role): the renderer asks main for
+    // it over IPC, as the app's own account refresh does. Main defers it while
+    // a session captures, so a sign-in is followed, as in the app, by the
+    // entitlement refresh, whose capability read re-runs the cloud launch check.
+    async refreshAccount() {
+      return h.eval('return await window.videorc.refreshAccount()')
+    },
+    async refreshSignIn() {
+      const account = await h.refreshAccount()
+      await h.rpc('entitlements.refresh')
+      return account
+    },
+    calls(route, after = 0) {
+      return web.calls.filter((c) => c.route === route && c.atMs >= after)
+    },
+    async launch() {
+      app = await launchDevApp({
+        requiredMarkers: ['backend-ready', 'preview-motion-ready'],
+        timeoutMs: 180000,
+        env,
+        skipPrebuild: true,
+        onLine: (l) => logs.push(l)
+      })
+      backend = await connectBackend(app.connections['backend-ready'], 30000)
+      smoke = app.connections['preview-motion-ready']
+      backend.addEventListener('message', (e) => {
+        try {
+          const m = JSON.parse(e.data)
+          if (m.event) events.push({ ...m, atMs: Date.now() })
+        } catch {}
+      })
+      await h.status((s) => s.entitled && s.settings?.enabled, 'managed entitlement')
+      // The dev app takes key focus at launch, and the Studio's Space key
+      // stops a session that is not live (a cloud show on hold): a key typed
+      // on this Mac stopped one pass. Nothing here needs focus.
+      await h.command('main-window-blur')
+      // The Clips ring (plan 181) starts a buffer-only session whenever the
+      // app is idle. This smoke starts sessions over its own socket, beside
+      // the renderer, so a ring start races them (the renderer never races its
+      // own ring); off, as smoke:record-latency's bare baseline turns it off.
+      assert.equal(
+        await h.eval('return window.__videorcSmokeSetReplayBuffer?.(false) ?? null'),
+        true,
+        'the renderer has no clip buffer smoke hook'
+      )
+      await waitFor(
+        async () =>
+          (await h.rpc('replay.status'))?.state === 'off' &&
+          (await h.rpc('recording.status'))?.state === 'idle',
+        'the Clips ring off and the backend idle'
+      )
+      for (const target of h.targets ?? []) {
+        if (target.streamKeySecretRef) continue
+        const saved = await h.rpc('streamTargets.manualKey.store', {
+          targetId: target.id,
+          streamKey: targetKeys.get(target.id)
+        })
+        assert.ok(saved?.streamKeyPresent && saved.streamKeySecretRef, 'stream key stored')
+        target.streamKeySecretRef = saved.streamKeySecretRef
+        target.streamKeyPresent = true
+      }
+    },
+    async kill() {
+      backend?.close()
+      const pid = app?.process?.pid
+      if (pid) {
+        try {
+          process.kill(-pid, 'SIGKILL')
+        } catch (e) {
+          if (e.code !== 'ESRCH') throw e
+        }
+      }
+      await app?.stop()
+      app = null
+    },
+    async cut() {
+      await tap.close()
+      tap = null
+    },
+    async cutHostRoom() {
+      await hostTap?.close()
+      hostTap = null
+    },
+    async forwardHostRoom() {
+      hostTap = await startRtmpTap({ listenPort: ports.livekitHost, targetPort: ports.livekit })
+    },
+    async forward() {
+      tap = await startRtmpTap({ listenPort: ports.proxy, targetPort: ports.rtmps })
+    },
+    async assertNoControlSocket() {
+      // Exact owned backend PID only; no process-name scans. The room WebSocket
+      // is expected for talk; a media/runner control connection is not.
+      const pid = app.connections['backend-ready'].pid
+      assert.ok(pid, 'backend-ready must publish its owned PID for the socket audit')
+      const r = spawnSync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:ESTABLISHED'], {
+        encoding: 'utf8'
+      })
+      assert.ok(r.status === 0 || r.status === 1, 'lsof must inspect the owned backend')
+      const peers = (r.stdout ?? '').split('\n').filter((l) => l.includes('->'))
+      assert.ok(
+        peers.every((l) => /->(127\.0\.0\.1|\[::1\]|localhost):/.test(l)),
+        'managed backend opened a remote socket'
+      )
+      assert.equal(h.calls('create').at(-1)?.status, 201)
+      assert.deepEqual(web.upgrades, [], 'managed control must never upgrade to a socket')
+      assert.deepEqual(web.shows.get(activeShow).controlKind, wire.control.kinds[0])
+      // The fake supplies no socket endpoint or show token; inspect transport
+      // diagnostics too when the fix lane exposes one. Room WS is renderer-owned.
+      assert.equal(
+        logs.some((l) => /connecting.*runner.*socket|cloud control socket connected/i.test(l)),
+        false
+      )
+    },
+    async destinations(n = 2) {
+      const targets = []
+      for (let i = 0; i < n; i++) {
+        const port = await freePort()
+        targetKeys.set(`local-${i}`, randomBytes(16).toString('hex'))
+        const server = createServer((socket) => {
+          sockets.add(socket)
+          h.directConnections.push({ atMs: Date.now(), id: `local-${i}` })
+          socket.on('error', () => {})
+          socket.on('close', () => sockets.delete(socket))
+        })
+        await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
+        cleanups.push(() => new Promise((resolve) => server.close(resolve)))
+        targets.push({
+          id: `local-${i}`,
+          platform: 'custom',
+          label: `Local ${i + 1}`,
+          enabled: true,
+          serverUrl: `rtmp://127.0.0.1:${port}/live`,
+          urlMode: 'server-and-key',
+          streamKey: '',
+          streamKeyPresent: false,
+          authMode: 'manual-rtmp',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        })
+      }
+      h.targets = targets
+      return targets
+    },
+    streaming(targets = h.targets) {
+      return {
+        enabled: true,
+        mode: 'multi',
+        targets,
+        enabledTargetIds: targets.map((t) => t.id),
+        defaultOutputPreset: 'tutorial-720p30',
+        defaultBitrateKbps: 4000
+      }
+    },
+    async sessionParams(targets = h.targets) {
+      const auth = await h.command('authorize-smoke-resource', {
+        kind: 'output-directory',
+        path: root
+      })
+      return {
+        sources: { testPattern: true },
+        layout: {
+          layoutPreset: 'screen-camera',
+          cameraTransformMode: 'preset',
+          cameraTransform: null,
+          cameraCorner: 'bottom-right',
+          cameraSize: 'medium',
+          cameraShape: 'rectangle',
+          cameraMargin: 32,
+          cameraFit: 'fill',
+          cameraMirror: false,
+          cameraZoom: 100,
+          cameraOffsetX: 0,
+          cameraOffsetY: 0,
+          sideBySideSplit: '70-30',
+          sideBySideCameraSide: 'right'
+        },
+        output: {
+          recordEnabled: true,
+          streamEnabled: true,
+          outputDirectoryCapability: auth.capabilityId,
+          video: {
+            preset: 'tutorial-720p30',
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrateKbps: 4000
+          },
+          rtmp: {
+            preset: 'custom',
+            serverUrl: targets[0].serverUrl,
+            streamKey: ''
+          }
+        },
+        streaming: h.streaming(targets)
+      }
+    },
+    assertNoDirect(after = 0) {
+      assert.equal(
+        h.directConnections.filter((c) => c.atMs >= after).length,
+        0,
+        'cloud and direct must never publish together'
+      )
+    },
+    scanLeaks() {
+      // Each finding names the credential's kind and where it was found,
+      // never the value.
+      const secrets = [
+        ['the feed key', feedKey],
+        ...[...targetKeys].map(([id, key]) => [`${id}'s stream key`, key]),
+        ...web.tokens.map((token, i) => [`web token ${i + 1}`, token])
+      ]
+      const database = join(appData, 'videorc.sqlite3')
+      const { remembered, rest } = databaseTexts(database)
+      const texts = [
+        ['the app log', logs.join('\n')],
+        ['the backend events', JSON.stringify(events)],
+        ['the web calls', JSON.stringify(web.calls)],
+        // The database as rows (its files are pages, read below as rows).
+        ['the database', rest],
+        // Every other file of the profile but the secret store itself, where
+        // the app keeps the keys on purpose (the keychain's stand-in in dev).
+        ...[...readTree(appData), ...readTree(userData)]
+          .filter((p) => p !== join(appData, 'videorc-secrets.json') && !p.startsWith(database))
+          .map((p) => [p.slice(root.length + 1), readIfPresent(p)])
+      ]
+      const found = secrets.flatMap(([label, secret]) =>
+        texts.filter(([, text]) => text.includes(secret)).map(([where]) => `${label} in ${where}`)
+      )
+      assert.deepEqual(found, [], `a runtime media credential leaked: ${found.join('; ')}`)
+      // KNOWN RED, the same on origin/main (not plan 234): start_session saves
+      // its params as last_capture_session after hydrate_stream_key_secret_refs
+      // has put each destination's key back in. Named on every scan, never
+      // hidden; a key in any other row or file fails above.
+      const known = secrets
+        .filter(([, secret]) => remembered.includes(secret))
+        .map(([label]) => label)
+      if (known.length)
+        console.log(
+          `[managed ${kind}] KNOWN RED (origin/main too): app_settings.last_capture_session holds ${known.join(', ')} in plain text`
+        )
+      return { known }
+    },
+    async close() {
+      if (closing) return closing
+      closing = (async () => {
+        clearInterval(timer)
+        backend?.close()
+        // Every cleanup gets a turn, even when the app stop itself fails.
+        const results = await Promise.allSettled([
+          app?.stop(),
+          tap?.close(),
+          hostTap?.close(),
+          web?.close(),
+          ...children.map((child) => stopProcess(child)),
+          ...[...sockets].map((socket) => {
+            socket.destroy()
+            return Promise.resolve()
+          }),
+          ...cleanups.map((fn) => fn())
+        ])
+        app = null
+        const secrets = [
+          feedKey,
+          sessionToken,
+          ...targetKeys.values(),
+          ...(web?.tokens ?? []),
+          ...(livekit ? [livekit.apiKey, livekit.apiSecret] : [])
+        ]
+        let report = JSON.stringify(
+          {
+            calls: web?.calls,
+            events: maskManagedUrls(events),
+            logs: maskManagedUrls(logs),
+            feedFrames: h.feedFrames.map(({ atMs, card }) => ({ atMs, card })),
+            cleanup: results.map((r) => r.status)
+          },
+          null,
+          2
+        )
+        for (const secret of secrets)
+          if (secret) report = report.replaceAll(secret, '(credential withheld)')
+        writeFileSync(join(root, 'managed-report.json'), report)
+        const failures = results.filter((r) => r.status === 'rejected')
+        if (failures.length)
+          throw new AggregateError(
+            failures.map((r) => r.reason),
+            'Owned smoke process cleanup failed'
+          )
+      })()
+      return closing
+    }
+  }
+
+  try {
+    if (kind === 'talk') {
+      startChild('livekit', process.env.VIDEORC_SMOKE_LIVEKIT_PATH ?? 'livekit-server', [
+        '--dev',
+        '--bind',
+        '127.0.0.1',
+        '--config-body',
+        `port: ${ports.livekit}\nkeys:\n  ${livekit.apiKey}: ${livekit.apiSecret}\nrtc:\n  tcp_port: ${ports.rtc}\n  use_external_ip: false\nroom:\n  auto_create: true\n  empty_timeout: 600`
+      ])
+      await waitFor(async () => {
+        try {
+          return (await fetch(`${livekit.httpUrl}/`, { signal: AbortSignal.timeout(1000) })).ok
+        } catch {
+          return false
+        }
+      }, 'local LiveKit ready')
+      await h.forwardHostRoom()
+      const y4m = join(mediaDir, 'host.y4m'),
+        wav = join(mediaDir, 'host.wav'),
+        ts = join(mediaDir, 'segment.ts')
+      runMedia(ffmpeg, [
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        'testsrc2=s=1280x720:r=30',
+        '-t',
+        '2',
+        '-pix_fmt',
+        'yuv420p',
+        y4m
+      ])
+      runMedia(ffmpeg, [
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=440:sample_rate=48000',
+        '-t',
+        '4',
+        '-ac',
+        '1',
+        wav
+      ])
+      runMedia(ffmpeg, [
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        'testsrc2=s=320x180:r=30',
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=440:sample_rate=48000',
+        '-t',
+        '2',
+        '-c:v',
+        'libx264',
+        '-c:a',
+        'aac',
+        '-f',
+        'mpegts',
+        ts
+      ])
+      segmentBytes = readFileSync(ts)
+      env.VIDEORC_SMOKE_FAKE_MEDIA_VIDEO = y4m
+      env.VIDEORC_SMOKE_FAKE_MEDIA_AUDIO = wav
+    } else {
+      // MediaMTX is the maintained solo smoke's local TLS RTMP receiver. No
+      // runner checkout or remote platform is involved in this transport test.
+      const config = join(root, 'mediamtx.yml')
+      writeFileSync(
+        config,
+        `logLevel: warn\nrtmp: yes\nrtmpAddress: 127.0.0.1:${ports.rtmp}\nrtmpEncryption: optional\nrtmpsAddress: 127.0.0.1:${ports.rtmps}\nrtmpServerCert: ${cert}\nrtmpServerKey: ${key}\nrtsp: yes\nrtspAddress: 127.0.0.1:${ports.rtsp}\nrtspTransports: [tcp]\nhls: no\nwebrtc: no\nsrt: no\napi: yes\napiAddress: 127.0.0.1:${ports.api}\npaths:\n  all_others:\n`
+      )
+      // MediaMTX writes auto.crt and auto.key into its working directory:
+      // the run's folder, never the checkout.
+      startChild('mediamtx', process.env.VIDEORC_SMOKE_MEDIAMTX_PATH ?? 'mediamtx', [config], {
+        cwd: root
+      })
+      await waitFor(async () => {
+        try {
+          return (await fetch(`http://127.0.0.1:${ports.api}/v3/paths/list`)).ok
+        } catch {
+          return false
+        }
+      }, 'local TLS receiver ready')
+      await h.forward()
+    }
+    web = await startFakeCloudWebManaged({
+      sessionToken,
+      // Main reports app.getVersion() to the backend, whatever the shell says.
+      buildVersion: JSON.parse(
+        readFileSync(new URL('../../apps/desktop/package.json', import.meta.url), 'utf8')
+      ).version,
+      ingest: [feed],
+      tls: { cert: readFileSync(cert), key: readFileSync(key) },
+      livekit,
+      segmentBytes
+    })
+    env.VIDEORC_API_BASE_URL = web.httpOrigin
+    let decoding = false
+    timer = setInterval(async () => {
+      if (!web || kind === 'talk' || decoding) return
+      const s = [...web.shows.values()].find((s) => !s.show.endedAt && s.ingest.length)
+      if (!s) return
+      const last = h.feedFrames.at(-1)
+      if (last && Date.now() - last.atMs > 1500) web.hooks.feed(s.show.id, false)
+      if (!decode || decode.exitCode !== null) {
+        decoding = true
+        try {
+          const paths = await (
+            await fetch(`http://127.0.0.1:${ports.api}/v3/paths/list`, {
+              signal: AbortSignal.timeout(1000)
+            })
+          ).json()
+          if (!paths.items?.some((p) => p.ready)) return
+          decode = startChild('feed-decode', ffmpeg, [
+            '-nostdin',
+            '-loglevel',
+            'error',
+            '-rtsp_transport',
+            'tcp',
+            '-i',
+            `rtsp://127.0.0.1:${ports.rtsp}/live/${feedKey}`,
+            '-an',
+            '-vf',
+            'scale=160:90',
+            '-pix_fmt',
+            'rgb24',
+            '-f',
+            'rawvideo',
+            'pipe:1'
+          ])
+          let pending = Buffer.alloc(0)
+          decode.stdout.on('data', (chunk) => {
+            pending = Buffer.concat([pending, chunk])
+            while (pending.length >= 160 * 90 * 3) {
+              const frame = Buffer.from(pending.subarray(0, 160 * 90 * 3))
+              pending = pending.subarray(160 * 90 * 3)
+              h.feedFrames.push({ atMs: Date.now(), card: holdCardStats(frame, 160, 90) })
+              web.hooks.feed(s.show.id, true)
+            }
+          })
+        } finally {
+          decoding = false
+        }
+      }
+    }, 100)
+    return h
+  } catch (error) {
+    await h.close()
+    throw error
+  }
+}
+// The profile's database as rows, through the sqlite3 CLI (it reads the
+// WAL): the remembered capture session's row, and every other row.
+function databaseTexts(database) {
+  if (!existsSync(database)) return { remembered: '', rest: '' }
+  const run = (args) => {
+    const r = spawnSync('sqlite3', ['-readonly', database, ...args], {
+      encoding: 'utf8',
+      maxBuffer: 256 * 1024 * 1024
+    })
+    assert.equal(r.status, 0, `sqlite3 could not read the profile database: ${r.stderr}`)
+    return r.stdout
+  }
+  const remembered = run(["select value_json from app_settings where key = 'last_capture_session'"])
+  const rest = run(['.dump'])
+    .split('\n')
+    .filter((line) => !line.startsWith("INSERT INTO app_settings VALUES('last_capture_session'"))
+    .join('\n')
+  return { remembered, rest }
+}
+// Regular files only. A live Electron profile holds dangling symlinks
+// (SingletonCookie, SingletonLock) and files that come and go mid-scan.
+export function readTree(root) {
+  if (!existsSync(root)) return []
+  return readdirSync(root).flatMap((name) => {
+    const p = join(root, name)
+    let stats
+    try {
+      stats = lstatSync(p)
+    } catch (error) {
+      if (error.code === 'ENOENT') return []
+      throw error
+    }
+    if (stats.isDirectory()) return readTree(p)
+    return stats.isFile() ? [p] : []
+  })
+}
+// The scan's own read, for files a live profile may remove under it.
+function readIfPresent(path) {
+  try {
+    return readFileSync(path).toString('latin1')
+  } catch (error) {
+    if (error.code === 'ENOENT') return ''
+    throw error
+  }
+}
+export function playable(h, path) {
+  const probe = JSON.parse(
+    runMedia(h.ffprobe, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', path])
+  )
+  assert.ok(probe.streams.some((s) => s.codec_type === 'video'))
+  assert.ok(probe.streams.some((s) => s.codec_type === 'audio'))
+  assert.ok(Number(probe.format.duration) > 0.5)
+  const pts = runMedia(h.ffprobe, [
+    '-v',
+    'error',
+    '-select_streams',
+    'v:0',
+    '-show_entries',
+    'packet=pts_time',
+    '-of',
+    'csv=p=0',
+    path
+  ]).toString()
+  assert.ok(sortedGapStats(parsePtsTimes(pts)).maxGapSeconds < 2)
+  return probe
+}
+// Export the maintained hold gate for the full-stack extension; a feed sink by
+// itself cannot prove that LiveKit's program page renders the hold card.
+export { evaluateHoldOnReceiver }

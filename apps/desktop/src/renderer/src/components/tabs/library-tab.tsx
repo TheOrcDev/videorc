@@ -154,6 +154,11 @@ import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-
 const SessionMarkersDialog = lazy(async () => ({
   default: (await import('@/components/session-markers-dialog')).SessionMarkersDialog
 }))
+// Plan 234: the account's cloud recordings, a section of its own that loads
+// with the Library page, never in the eager bundle.
+const LibraryCloudRecordings = lazy(async () => ({
+  default: (await import('@/components/tabs/library-cloud-recordings')).LibraryCloudRecordings
+}))
 
 /** The table's columns: select, name, scene, duration, size, file, actions. */
 const LIBRARY_COLUMNS =
@@ -746,6 +751,10 @@ export function LibraryTab({
         </div>
       )}
 
+      <Suspense fallback={null}>
+        <LibraryCloudRecordings />
+      </Suspense>
+
       {liveMarkerSession ? (
         <Suspense fallback={null}>
           <SessionMarkersDialog
@@ -806,8 +815,8 @@ export function LibraryTab({
         confirmLabel={deletePending ? 'Deleting…' : `Move to ${trashName()}`}
         description={
           deleting.length === 1
-            ? `The video file goes to the ${trashName()}. Its Library entry, markers, Buddy report and chat history are deleted and can't be restored.`
-            : `The video files go to the ${trashName()}. Their Library entries, markers, Buddy reports and chat history are deleted and can't be restored.`
+            ? `The video file goes to the ${trashName()}. Its Library entry, markers, Sidekick report and chat history are deleted and can't be restored.`
+            : `The video files go to the ${trashName()}. Their Library entries, markers, Sidekick reports and chat history are deleted and can't be restored.`
         }
         open={deleting.length > 0}
         testId="library-delete"
@@ -1435,7 +1444,7 @@ function useSessionMenu({
             id: 'buddy-report',
             group: 'open',
             icon: BuddyIcon,
-            label: 'Buddy report',
+            label: 'Sidekick report',
             disabled: live,
             onSelect: onOpenBuddyReport
           }

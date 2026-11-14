@@ -42,31 +42,31 @@ const BUILTIN_FIXTURE = JSON.parse(
   )
 ) as { version: number; lines: unknown[] }
 
-describe('Buddy in copy (plan 174 J2-20, F-26)', () => {
-  it("uses the streamer's name when the character acts, else Buddy", () => {
+describe('Sidekick in copy (plan 174 J2-20, F-26)', () => {
+  it("uses the streamer's name when the character acts, else Sidekick", () => {
     expect(buddyDisplayName('Grum')).toBe('Grum')
     expect(buddyDisplayName('  Nib  ')).toBe('Nib')
-    expect(buddyDisplayName('')).toBe('Buddy')
-    expect(buddyDisplayName(null)).toBe('Buddy')
+    expect(buddyDisplayName('')).toBe('Sidekick')
+    expect(buddyDisplayName(null)).toBe('Sidekick')
     expect(buddyPostingConsentTitle('Grum')).toBe('Let Grum post as you?')
     expect(buddyPostingConsentSentence('Grum')).toBe(
-      'Grum posts to your chats as you, on the platforms you stream to, only when you click its card. You can read every message later in Buddy → Reports.'
+      'Grum posts to your chats as you, on the platforms you stream to, only when you click its card. You can read every message later in Sidekick → Reports.'
     )
   })
 
-  it('never writes "the Buddy": the feature is Buddy, with no article', () => {
+  it('never writes "the Sidekick": the feature is Sidekick, with no article', () => {
     for (const line of [
       BUDDY_POSTS_PROMISE,
       buddyTalkLabel(null),
       ...BUDDY_TALK_MODES.map((talk) => buddyTalkHint(talk, null)),
       buddyPostingConsentSentence(null)
     ]) {
-      expect(line).not.toMatch(/\b[Tt]he Buddy\b/)
+      expect(line).not.toMatch(/\b[Tt]he Sidekick\b/)
     }
   })
 })
 
-describe('How Buddy talks and the behaviour chips (plan 174 S3.14a, D7, plan 211 D1)', () => {
+describe('How Sidekick talks and the behaviour chips (plan 174 S3.14a, D7, plan 211 D1)', () => {
   it('offers Off, Bubble and Suggest, from least reach to most, and Auto is gone', () => {
     expect(BUDDY_TALK_MODES).toEqual(['off', 'bubble', 'suggest'])
     expect(BUDDY_TALK_MODES.map((talk) => BUDDY_TALK_LABELS[talk])).toEqual([
@@ -77,10 +77,10 @@ describe('How Buddy talks and the behaviour chips (plan 174 S3.14a, D7, plan 211
     expect(Object.keys(BUDDY_TALK_LABELS)).not.toContain('auto')
   })
 
-  it("names the control after the streamer's Buddy, else Buddy", () => {
+  it("names the control after the streamer's Sidekick, else Sidekick", () => {
     expect(buddyTalkLabel('Golmar')).toBe('Golmar talks')
-    expect(buddyTalkLabel('  ')).toBe('Buddy talks')
-    expect(buddyTalkLabel(null)).toBe('Buddy talks')
+    expect(buddyTalkLabel('  ')).toBe('Sidekick talks')
+    expect(buddyTalkLabel(null)).toBe('Sidekick talks')
   })
 
   it('says what each value means, and only Suggest ever reaches chat (plan 211 D1, D6)', () => {
@@ -92,13 +92,13 @@ describe('How Buddy talks and the behaviour chips (plan 174 S3.14a, D7, plan 211
       'Each message is a card here; one click posts it to chat as you.'
     )
     expect(buddyTalkHint('bubble', null)).toBe(
-      'Buddy talks on stream in its bubble. Nothing goes to chat.'
+      'Sidekick talks on stream in its bubble. Nothing goes to chat.'
     )
     // Off never means Buddy Live off: that is its own switch.
     for (const talk of BUDDY_TALK_MODES) {
-      expect(buddyTalkHint(talk, null)).not.toContain('Buddy Live')
+      expect(buddyTalkHint(talk, null)).not.toContain('Sidekick Live')
     }
-    expect(BUDDY_POSTS_PROMISE).toBe('Buddy never posts in your chat on its own.')
+    expect(BUDDY_POSTS_PROMISE).toBe('Sidekick never posts in your chat on its own.')
   })
 
   it('summarises each behaviour as a read-only chip that names its one home', () => {
@@ -115,9 +115,9 @@ describe('How Buddy talks and the behaviour chips (plan 174 S3.14a, D7, plan 211
       ['answers', 'Answers off', false],
       ['banter', 'Banter off', false]
     ])
-    expect(BUDDY_BEHAVIOUR_HOME).toBe('Buddy → Chat')
+    expect(BUDDY_BEHAVIOUR_HOME).toBe('Sidekick → Chat')
     for (const chip of chips) {
-      expect(chip.name).toBe(`${chip.text}. Change it in Buddy → Chat.`)
+      expect(chip.name).toBe(`${chip.text}. Change it in Sidekick → Chat.`)
     }
   })
 
@@ -132,11 +132,11 @@ describe('How Buddy talks and the behaviour chips (plan 174 S3.14a, D7, plan 211
       label: 'Greetings',
       on: true,
       text: 'Greetings on',
-      name: 'Greetings on. Change it in Buddy → Chat.'
+      name: 'Greetings on. Change it in Sidekick → Chat.'
     })
   })
 
-  it('says AI only when Buddy may write the greetings (plan 192 D3, D7)', () => {
+  it('says AI only when Sidekick may write the greetings (plan 192 D3, D7)', () => {
     const autoChat = (enabled: boolean, ai?: boolean) => ({
       greetings: { enabled, templates: [], ...(ai === undefined ? {} : { ai }) },
       answers: { enabled: true, cooldownSeconds: 20 },
@@ -148,7 +148,7 @@ describe('How Buddy talks and the behaviour chips (plan 174 S3.14a, D7, plan 211
     // An older backend omits the switch: on, like Rust's default.
     expect(greetingsText(autoChat(true), { aiGreetings: true })).toBe('Greetings on · AI')
     expect(buddyBehaviourChips(autoChat(true, true), { aiGreetings: true })[0]!.name).toBe(
-      'Greetings on · AI. Change it in Buddy → Chat.'
+      'Greetings on · AI. Change it in Sidekick → Chat.'
     )
     // Without Premium and cloud AI, the switch off, or Greetings off: no AI.
     expect(greetingsText(autoChat(true, true))).toBe('Greetings on')
@@ -390,7 +390,7 @@ describe('talk changes (plan 164 S-D6, plan 211 D5)', () => {
     expect(buddyModeChangeStep({ next: 'suggest', consented: true })).toBe('apply')
   })
 
-  it('applies Off and Bubble at once: Buddy posts nothing as you in either', () => {
+  it('applies Off and Bubble at once: Sidekick posts nothing as you in either', () => {
     for (const consented of [false, true]) {
       expect(buddyModeChangeStep({ next: 'off', consented })).toBe('apply')
       expect(buddyModeChangeStep({ next: 'bubble', consented })).toBe('apply')

@@ -31,7 +31,7 @@ const premium: EntitlementUiGate = { allowed: true }
 const basic: EntitlementUiGate = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Buddy requires Videorc Premium.',
+  reason: 'Sidekick requires Videorc Premium.',
   upgradeUrl: 'https://www.videorc.com/premium'
 }
 const petOn = (left: number): AiCapabilities =>
@@ -87,7 +87,7 @@ function settings(): CohostSettings {
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Buddy',
+      name: 'Sidekick',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -109,7 +109,7 @@ function settings(): CohostSettings {
 /** The built pack's manifest: every review cell on a 5-wide 128 px grid. */
 const MANIFEST = {
   version: 1,
-  name: 'Buddy',
+  name: 'Sidekick',
   neutral: 'gaze-2-2',
   frames: BUDDY_PET_REVIEW_ROWS.flatMap((row) => row.cells).map((id, index) => ({
     id,
@@ -257,7 +257,7 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
     const backend = fakeBackend(null)
     await render({ client: backend.client, gate: basic })
     const gate = byTestId('buddy-pet-gate')!
-    expect(gate.textContent).toContain('Creating an Alive Buddy is part of Videorc Premium.')
+    expect(gate.textContent).toContain('Creating an Alive Sidekick is part of Videorc Premium.')
     expect(gate.dataset.gate).toBe('premium')
     expect([...gate.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
       'View Premium'
@@ -309,7 +309,7 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
       await render({ client: backend.client })
       expect(byTestId('buddy-pet-step-reference')?.getAttribute('aria-current')).toBe('step')
       const persona = [...document.querySelectorAll('button')].find(
-        (button) => button.textContent === "My Buddy's picture"
+        (button) => button.textContent === "My Sidekick's picture"
       )
       expect(persona?.hasAttribute('data-checked')).toBe(true)
       // No Generate source any more: the look panel makes the character.
@@ -423,7 +423,7 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
     await click(byTestId('buddy-pet-save'))
     expect(backend.requestTyped).toHaveBeenCalledWith(
       'cohost.pet.save',
-      { buildId: BUILD, name: 'Buddy' },
+      { buildId: BUILD, name: 'Sidekick' },
       expect.anything()
     )
     // The provider takes the persona the backend made Alive; no toast, the

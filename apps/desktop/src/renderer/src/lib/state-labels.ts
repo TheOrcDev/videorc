@@ -81,7 +81,7 @@ const DESTINATION_STATE_LABELS: Record<StreamTargetState, string> = {
 }
 
 /**
- * One destination's state in a word, on the Livestream cards, the stream
+ * One destination's state in a word, on the Destinations cards, the stream
  * failure banner and the Stream Manager's health details (J2-4). A failed
  * destination is "Failed", never "Stopped"; one whose stream finished is
  * "Ended"; one that is streaming is "On air", never "Live".

@@ -72,9 +72,13 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
 // its rows, the QR code and the phone list stay out of the eager bundle.
 // Below the imports: the dev server turns `import { lazy }` into a const at
 // that line, so a use above it throws "Cannot access 'lazy' before
-// initialization" and the Livestream page shows its error panel.
+// initialization" and the Destinations page shows its error panel.
 const WatchdogSection = lazy(async () => ({
   default: (await import('./watchdog-section')).WatchdogSection
+}))
+// Plan 237: the stream report email's switch, loaded the same way.
+const StreamReportEmailSection = lazy(async () => ({
+  default: (await import('./stream-report-email-section')).StreamReportEmailSection
 }))
 
 // The Livestream right column (plan 080 S7). Owner, 2026-09-30: "Live stream
@@ -185,6 +189,9 @@ export function GoLivePanel({
       <CloudSection />
       <Suspense fallback={null}>
         <WatchdogSection />
+      </Suspense>
+      <Suspense fallback={null}>
+        <StreamReportEmailSection />
       </Suspense>
       <ReadyToGoLive
         cloud={cloud}

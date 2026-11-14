@@ -41,7 +41,7 @@ function command(patch: Partial<CohostCommand> = {}): CohostCommand {
 }
 
 describe('commandStripView (plan 140, S6 part B)', () => {
-  it('says what Buddy heard, then what it did', () => {
+  it('says what Sidekick heard, then what it did', () => {
     expect(commandStripView(command(), NOW)).toEqual({
       commandId: 'cmd-1',
       heard: 'Heard: “buddy highlight the comment from coders x”',
@@ -63,11 +63,11 @@ describe('commandStripView (plan 140, S6 part B)', () => {
         command({
           kind: 'unknown',
           status: 'not-found',
-          message: "Buddy didn't catch that: 'blorp'"
+          message: "Sidekick didn't catch that: 'blorp'"
         }),
         NOW
       )
-    ).toMatchObject({ quiet: true, message: "Buddy didn't catch that: 'blorp'" })
+    ).toMatchObject({ quiet: true, message: "Sidekick didn't catch that: 'blorp'" })
   })
 
   it('reads a banner command (plan 186 S11) like any finished command', () => {
@@ -158,15 +158,15 @@ describe('commandChooserView', () => {
 describe('commandConfirmView', () => {
   const flagged = command({
     status: 'confirm',
-    message: 'Buddy flagged this (harassment). Show it anyway?',
+    message: 'Sidekick flagged this (harassment). Show it anyway?',
     expiresAt: '2026-10-04T12:00:28Z'
   })
 
-  it('asks before showing a comment Buddy flagged', () => {
+  it('asks before showing a comment Sidekick flagged', () => {
     expect(commandConfirmView(flagged, NOW)).toEqual({
       commandId: 'cmd-1',
       kind: 'highlight',
-      title: 'Buddy flagged this (harassment). Show it anyway?',
+      title: 'Sidekick flagged this (harassment). Show it anyway?',
       target: { ...target, platformLabel: 'Twitch' },
       timer: 'Expires in 18s',
       busy: false
@@ -190,12 +190,12 @@ describe('commandConfirmView', () => {
   })
 })
 
-describe('Buddy asks before a planned call (plan 209 D14)', () => {
+describe('Sidekick asks before a planned call (plan 209 D14)', () => {
   const asking = command({
     kind: 'act',
     heard: 'buddy end the stream',
     status: 'confirm',
-    message: 'End the livestream? Say "Buddy, yes".',
+    message: 'End the livestream? Say "Sidekick, yes".',
     target: undefined,
     expiresAt: '2026-10-04T12:00:28Z'
   })
@@ -204,7 +204,7 @@ describe('Buddy asks before a planned call (plan 209 D14)', () => {
     expect(commandConfirmView(asking, NOW)).toEqual({
       commandId: 'cmd-1',
       kind: 'act',
-      title: 'End the livestream? Say "Buddy, yes".',
+      title: 'End the livestream? Say "Sidekick, yes".',
       target: null,
       timer: 'Expires in 18s',
       busy: false
@@ -221,7 +221,7 @@ describe('Buddy asks before a planned call (plan 209 D14)', () => {
   })
 })
 
-describe('the Buddy tab copy for voice commands', () => {
+describe('the Sidekick tab copy for voice commands', () => {
   it('names the kill switches only when paused', () => {
     expect(commandAvailabilityLines(undefined)).toEqual([])
     expect(commandAvailabilityLines({ voiceCommands: 'on', remove: 'on' })).toEqual([])
@@ -236,7 +236,7 @@ describe('the Buddy tab copy for voice commands', () => {
   })
 
   it('matches the web words, and the numbers follow the mode', () => {
-    expect(WAKE_WORD_LABEL).toBe('Commands need “Buddy” first')
+    expect(WAKE_WORD_LABEL).toBe('Commands need “Sidekick” first')
     expect(REMOVE_CONFIRM_LABELS).toEqual({
       confirm: 'Confirm first',
       countdown: '5-second countdown'

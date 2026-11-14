@@ -502,7 +502,7 @@ class StudioBackend {
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Buddy',
+      name: 'Sidekick',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -2418,7 +2418,7 @@ describe('real StudioProvider lifecycle', () => {
 
   // Plan 209 S11b (D22): an agent arranges the picture through the Studio's
   // own saves, landing where the Scene inspector's snaps would.
-  it('moves Buddy and a banner from an agent with the editor snaps, and reads them back', async () => {
+  it('moves Sidekick and a banner from an agent with the editor snaps, and reads them back', async () => {
     const { backend, latest } = await mountBannerProvider([testBanner('sponsor', 0)])
     await waitForObservation(() => latest().core.wsStatus === 'connected')
     // The agents' link listens only once its module has loaded; an intent
@@ -9696,7 +9696,7 @@ describe('real StudioProvider lifecycle', () => {
       expect(pushCaptionSnapshot.mock.calls[0]?.[0].lines).toEqual(latest().captions.captionLines)
     }, 15_000)
 
-    it('shows and expires a Buddy bubble without a new core value', async () => {
+    it('shows and expires a Sidekick bubble without a new core value', async () => {
       const { api, latest, emit } = await mountQuietProvider()
       const core = latest().core
       const pushCohostWindowState = vi.fn<VideorcApi['pushCohostWindowState']>(async () => {})
@@ -9718,7 +9718,7 @@ describe('real StudioProvider lifecycle', () => {
         state: 'idle',
         bubble: null
       })
-      expect(latest().core === core, 'a Buddy bubble published a new core value').toBe(true)
+      expect(latest().core === core, 'a Sidekick bubble published a new core value').toBe(true)
     }, 15_000)
 
     it("keeps the sessions array for a session the Library hasn't loaded, and still counts a loaded one", async () => {
@@ -10872,7 +10872,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 
-  it('applies cloud-AI preference flips to the same active Buddy session from backend replies', async () => {
+  it('applies cloud-AI preference flips to the same active Sidekick session from backend replies', async () => {
     const backend = new StudioBackend()
     backend.entitlements = premiumEntitlements
     backend.cohostSettings.listen = true
@@ -11094,7 +11094,7 @@ describe('real StudioProvider lifecycle', () => {
     }
   }
 
-  it('turns Buddy Live on only through the consent dialog, never the microphone with it', async () => {
+  it('turns Sidekick Live on only through the consent dialog, never the microphone with it', async () => {
     const { latest, settingsWrites } = await mountBuddyLiveProvider('0')
 
     await act(async () => latest()!.core.setBuddyLive(true))
@@ -11123,7 +11123,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 
-  it('changes nothing when the Buddy Live consent dialog is declined', async () => {
+  it('changes nothing when the Sidekick Live consent dialog is declined', async () => {
     const { latest, settingsWrites } = await mountBuddyLiveProvider('0')
 
     await act(async () => latest()!.core.setBuddyLive(true))
@@ -11137,7 +11137,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()!.core.cohostSettings?.enabled).toBe(false)
   }, 15_000)
 
-  it('turns Buddy Live on without a dialog once cloud AI is allowed', async () => {
+  it('turns Sidekick Live on without a dialog once cloud AI is allowed', async () => {
     const { latest, settingsWrites } = await mountBuddyLiveProvider('1')
 
     await act(async () => latest()!.core.setBuddyLive(true))
@@ -11146,7 +11146,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(settingsWrites()).toEqual([{ enabled: true }])
   }, 15_000)
 
-  it('revokes cloud AI without rewriting Buddy settings, and asks again on the next on', async () => {
+  it('revokes cloud AI without rewriting Sidekick settings, and asks again on the next on', async () => {
     const { latest, settingsWrites } = await mountBuddyLiveProvider('1')
     await act(async () => latest()!.core.setBuddyLive(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
@@ -11285,7 +11285,7 @@ describe('real StudioProvider lifecycle', () => {
   // Stop never starts a cloud job on its own: a streamed, recorded session
   // Buddy heard finalizes with its transcript, and only the cloud-AI
   // readiness reads go out.
-  it('starts no cloud job when a streamed recording Buddy heard finalizes', async () => {
+  it('starts no cloud job when a streamed recording Sidekick heard finalizes', async () => {
     // Cloud AI reads ready, so only a missing trigger keeps a job from going out.
     class CloudReadyBackend extends StudioBackend {
       override response(command: BackendCommand): unknown {
@@ -13670,7 +13670,7 @@ describe('real StudioProvider lifecycle', () => {
   // provider's two starts, and each is an explicit intent. Go Live… opens the
   // Go Live dialog and starts nothing on its own; Record starts a local take
   // at once. Neither writes the saved output mode: the Output page's "Save
-  // local recording" and the Livestream page's destinations stay as they are.
+  // local recording" and the Destinations page's destinations stay as they are.
   it('starts Go Live… and Record through the shared provider starts', async () => {
     const backend = new StudioBackend()
     enableYouTubeOauthForTest(backend)

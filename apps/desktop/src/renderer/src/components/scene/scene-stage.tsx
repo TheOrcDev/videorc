@@ -83,6 +83,7 @@ import {
   previewProofLayerFit
 } from '../../../../shared/native-preview-proof-geometry'
 import {
+  sceneCameraOnStage,
   sceneFrameRect,
   scenePictureRect,
   screenBoxIsPicture,
@@ -383,6 +384,9 @@ export function SceneStage({
       ? outputHeight
       : Math.max(1, Math.round((canvasWidth * stageH) / STAGE_W))
   const stageMargin = previewProofBackgroundStageMargin(background)
+  // Plan 235 (D9 a): the camera of an unkeyed camera-only scene sits on the
+  // background's stage, as the compositor draws it.
+  const cameraOnStage = sceneCameraOnStage(sources, layout)
   const sourceFit = (source: SceneSource): 'contain' | 'cover' =>
     layout ? previewProofLayerFit(source, layout) : 'cover'
   const sourceSize = (source: SceneSource): PixelSize | null => sourceSizes?.[source.id] ?? null
@@ -400,11 +404,12 @@ export function SceneStage({
       source: sourceSize(source),
       crop: crop ?? source.transform,
       stageMargin,
+      cameraOnStage,
       canvas: { width: canvasWidth, height: canvasHeight }
     })
   /** The frame a box on the stage commits as: back through the stage margin. */
   const frameOf = (source: SceneSource, picture: StageRect): StageRect =>
-    sceneFrameRect(picture, source.kind, stageMargin)
+    sceneFrameRect(picture, source.kind, stageMargin, cameraOnStage)
   /** The box follows the picture's shape (plan 216 D2): a Freeform screen
    * on Fit with a known size. Its aspect is forced in a resize, like a
    * shaped camera's, and crop is how its shape changes. */

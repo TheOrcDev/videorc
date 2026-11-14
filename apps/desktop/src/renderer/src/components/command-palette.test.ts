@@ -294,9 +294,16 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
 })
 
 describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
-  it('runs Session → Pages → Windows → Scenes → Buddy → Settings → Appearance', async () => {
+  it('runs Session → Pages → Windows → Scenes → Sidekick → Settings → Appearance', async () => {
     await render()
-    expect(headings()).toEqual(['Session', 'Pages', 'Windows', 'Buddy', 'Settings', 'Appearance'])
+    expect(headings()).toEqual([
+      'Session',
+      'Pages',
+      'Windows',
+      'Sidekick',
+      'Settings',
+      'Appearance'
+    ])
     mocked.core.savedScenes = [{ id: 's1', name: 'Talking head' }]
     await render()
     expect(headings()).toEqual([
@@ -304,7 +311,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Pages',
       'Windows',
       'Scenes',
-      'Buddy',
+      'Sidekick',
       'Settings',
       'Appearance'
     ])
@@ -315,14 +322,14 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await render()
     expect(groupValues('Pages')).toEqual([
       'Open Studio',
-      'Open Buddy',
       'Open Sources',
       'Open Scene',
       'Edit scene',
       'Open Assets',
-      'Open Livestream',
       'Open Captions',
       'Open Output',
+      'Open Destinations',
+      'Open Sidekick',
       'Open Library',
       'Open Settings',
       'Open Health',
@@ -342,8 +349,11 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await render()
     await search('layout')
     expect(values()).toContain('Open Scene')
-    await search('destinations')
-    expect(values()).toContain('Open Livestream')
+    // Plan 235 D6: the page's old name still finds it.
+    await search('livestream')
+    expect(values()).toContain('Open Destinations')
+    await search('stream key')
+    expect(values()).toContain('Open Destinations')
     await search('keyboard')
     expect(values()).toContain('Open Settings → Shortcuts')
     await search('support bundle')
@@ -493,7 +503,7 @@ describe('CommandPalette banners (plan 186 S7)', () => {
       'Windows',
       'Scenes',
       'Banners',
-      'Buddy',
+      'Sidekick',
       'Settings',
       'Appearance'
     ])

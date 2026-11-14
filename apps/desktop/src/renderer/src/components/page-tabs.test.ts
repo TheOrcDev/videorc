@@ -33,7 +33,7 @@ function render(value: 'setup' | 'upcoming', onValueChange = vi.fn()): typeof on
   act(() =>
     root.render(
       createElement(PageTabs<'setup' | 'upcoming'>, {
-        label: 'Livestream view',
+        label: 'Destinations view',
         tabs: TABS,
         testId: 'livestream-tabs',
         triggerAttribute: 'data-videorc-livestream-view',
@@ -57,7 +57,7 @@ describe('PageTabs', () => {
     const strip = tabs?.querySelector('[data-slot=pane-strip]')
     const scroll = tabs?.querySelector('[data-slot=page-tabs-scroll]')
     expect(strip?.querySelector('[role=tablist]')?.getAttribute('aria-label')).toBe(
-      'Livestream view'
+      'Destinations view'
     )
     expect(scroll?.className).toContain('overflow-y-auto')
     expect(scroll?.textContent).toBe('Destinations')

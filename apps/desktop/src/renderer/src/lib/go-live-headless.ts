@@ -76,7 +76,7 @@ export type HeadlessGoLiveOutcome =
 export const HEADLESS_GO_LIVE_COPY = {
   dialogOpen: 'The Go Live dialog is open in Videorc. Finish or cancel it there.',
   inFlight: 'Videorc is already going live.',
-  noDestination: 'No destination is on. Turn one on in Livestream → Setup.',
+  noDestination: 'No destination is on. Turn one on in Destinations → Setup.',
   draftLoading: 'Videorc is still loading your stream details. Try again in a moment.',
   captionsTitle: "Captions can't start",
   allowPartialHint: 'Pass allowPartial: true to go live on the ready ones.',
@@ -97,7 +97,7 @@ export type HeadlessExclusions =
  * every destination that is on and wasn't named. A name is a destination id
  * or a platform ("twitch" names every Twitch destination that is on). A name
  * that matches nothing, or a destination that is off, is refused: going live
- * never turns a destination on (that is a saved change in Livestream).
+ * never turns a destination on (that is a saved change in Destinations).
  */
 export function headlessExclusions(
   streaming: StreamingSettings,
@@ -113,7 +113,7 @@ export function headlessExclusions(
       if (!on.includes(byId)) {
         return {
           ok: false,
-          message: `${destinationLabel(byId.label)} is off. Turn it on in Livestream → Setup first.`
+          message: `${destinationLabel(byId.label)} is off. Turn it on in Destinations → Setup first.`
         }
       }
       named.add(byId.id)

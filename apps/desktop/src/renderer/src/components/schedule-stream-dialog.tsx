@@ -399,7 +399,7 @@ export function ScheduleStreamDialog({
                 {accounts.length === 0 ? (
                   // The select had nothing to choose and said nothing (D-11).
                   <FieldDescription>
-                    {`Sign in to ${providerLabel} in Livestream → Setup first.`}{' '}
+                    {`Sign in to ${providerLabel} in Destinations → Setup first.`}{' '}
                     <Button
                       className="h-auto p-0"
                       size="xs"

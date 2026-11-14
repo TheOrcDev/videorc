@@ -1,9 +1,16 @@
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import type { PreviewSupervisorState } from '@/lib/backend'
 
 import {
+  DetachedPreviewCard,
+  PREVIEW_CLOSED_COPY,
   PREVIEW_FALLBACK_LABEL,
+  PREVIEW_FLOATING_DETAIL,
+  PREVIEW_FLOATING_TITLE,
+  dockedSupervisorDisplay,
   previewDisabledCopy,
   previewFallbackLabel,
   previewPermissionPane,
@@ -208,8 +215,8 @@ describe('preview copy (plan 174 S2.3a, B-23)', () => {
     }
     const linux = previewSupervisorDisplay(true, linuxPreview, undefined, undefined, null, 'linux')
     expect(linux).toMatchObject({
-      title: 'Preview is open in its own window',
-      detail: 'Drag, resize or close it anytime.',
+      title: PREVIEW_FLOATING_TITLE,
+      detail: PREVIEW_FLOATING_DETAIL,
       tone: 'normal'
     })
     expect(`${linux.title} ${linux.detail}`).not.toMatch(/slower|compositor|surface|proof/i)
@@ -223,5 +230,98 @@ describe('preview copy (plan 174 S2.3a, B-23)', () => {
         tone: 'warn'
       })
     }
+  })
+})
+
+describe('the stage with no docked Preview (issue #1273)', () => {
+  const noop = (): void => {}
+
+  function card(overrides: Partial<Parameters<typeof DetachedPreviewCard>[0]> = {}): string {
+    return renderToStaticMarkup(
+      createElement(DetachedPreviewCard, {
+        previewWindowOpen: false,
+        previewWindowMode: 'floating',
+        previewSupervisor: supervisor('ok', 'closed'),
+        nativePreviewSurfaceEnabled: true,
+        alwaysOnTop: false,
+        aspect: { width: 1920, height: 1080 },
+        onAlwaysOnTopChange: noop,
+        onOpen: noop,
+        onOpenDocked: noop,
+        onOpenFloating: noop,
+        onClose: noop,
+        onStick: noop,
+        permissionAccess: null,
+        platform: 'win32',
+        ...overrides
+      })
+    )
+  }
+
+  it('says the closed Preview is closed and offers both places to open it', () => {
+    const html = card()
+    expect(html).toContain(PREVIEW_CLOSED_COPY.title)
+    expect(html).toContain(PREVIEW_CLOSED_COPY.detail)
+    expect(html).toMatch(/data-videorc-open-preview-window[^>]*>.*?Show here/)
+    expect(html).toMatch(/data-videorc-open-preview-floating[^>]*>.*?Open in its own window/)
+    expect(html).not.toContain('lives in its own window')
+  })
+
+  it('puts the Preview shortcut on the button for the remembered mode', () => {
+    const shortcutAfter = (html: string, marker: string): boolean => {
+      const start = html.indexOf(marker)
+      const end = html.indexOf('</button>', start)
+      return html.slice(start, end).includes('<kbd')
+    }
+    const floating = card({ previewWindowMode: 'floating' })
+    expect(shortcutAfter(floating, 'data-videorc-open-preview-floating')).toBe(true)
+    expect(shortcutAfter(floating, 'data-videorc-open-preview-window')).toBe(false)
+    const docked = card({ previewWindowMode: 'docked' })
+    expect(shortcutAfter(docked, 'data-videorc-open-preview-window')).toBe(true)
+    expect(shortcutAfter(docked, 'data-videorc-open-preview-floating')).toBe(false)
+  })
+
+  it('leads a floating Preview with Show here, the way back into the Studio', () => {
+    const html = card({
+      previewWindowOpen: true,
+      previewSupervisor: supervisor('ok', 'surface-live')
+    })
+    expect(html).toContain(PREVIEW_FLOATING_TITLE)
+    expect(html).toContain(PREVIEW_FLOATING_DETAIL)
+    const stick = html.indexOf('data-videorc-preview-stick')
+    const front = html.indexOf('data-videorc-preview-bring-to-front')
+    expect(stick).toBeGreaterThan(-1)
+    expect(front).toBeGreaterThan(stick)
+    expect(html.slice(stick, html.indexOf('</button>', stick))).toContain('Show here')
+    // The lead action is the chrome primary, not an outline beside it.
+    const stickTag = html.slice(html.lastIndexOf('<button', stick), html.indexOf('>', stick))
+    expect(stickTag).toContain('data-variant="default"')
+  })
+})
+
+describe('dockedSupervisorDisplay', () => {
+  it('never tells a docked slot the Preview is in its own window', () => {
+    for (const lifecycle of ['surface-live', 'open-no-surface'] as const) {
+      const display = dockedSupervisorDisplay(
+        previewSupervisorDisplay(
+          true,
+          supervisor('ok', lifecycle),
+          undefined,
+          undefined,
+          null,
+          'win32'
+        )
+      )
+      expect(display.title).not.toBe(PREVIEW_FLOATING_TITLE)
+      expect(`${display.title} ${display.detail}`).not.toMatch(/own window|Show it here/)
+    }
+  })
+
+  it('keeps every other state as stated', () => {
+    const failed = previewSupervisorDisplay(true, {
+      ...supervisor('ok', 'failed'),
+      lastError: 'The camera stopped.'
+    })
+    expect(dockedSupervisorDisplay(failed)).toEqual(failed)
   })
 })

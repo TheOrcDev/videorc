@@ -18,6 +18,7 @@ import {
 } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 import { configureWindowsD3d11RendererSourcesWhenListed } from './lib/windows-d3d11-preview-sources.mjs'
+import { readWindowsPowerSource, windowsBatteryPowerWarning } from './lib/windows-power-source.mjs'
 import {
   nativePreviewSurfaceStatusReady,
   previewWindowSurfaceReady,
@@ -120,6 +121,15 @@ const usePackagedWindowsScreen =
 // configured by a running session, so the gate drives the renderer's own
 // sources to the real screen + ScreenOnly through the packaged bridge.
 const usePackagedWindowsD3d11Sources = usePackagedWindowsScreen && windowsPreviewOptions.d3d11
+// #1042: a cadence or frame-count miss on battery names its cause.
+if (process.platform === 'win32') {
+  const powerSource = readWindowsPowerSource()
+  console.log(`Native-preview recording smoke host power: ${powerSource}`)
+  const batteryPowerWarning = windowsBatteryPowerWarning(powerSource)
+  if (batteryPowerWarning) {
+    console.warn(`Native-preview recording smoke WARNING: ${batteryPowerWarning}`)
+  }
+}
 // A recording keeps the idle proof-polling profile (the proof surface is the
 // production Preview): 40 ms, and a width cap that follows the surface,
 // floored at 640 and ceilinged at 1920 (native-preview-proof-polling.ts).

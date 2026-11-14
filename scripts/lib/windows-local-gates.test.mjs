@@ -71,6 +71,36 @@ describe('evaluateWindowsLocalGateHost', () => {
     )
   })
 
+  it('names battery power as a warning, never a blocker (#1042)', () => {
+    const onBattery = evaluateWindowsLocalGateHost({
+      platform: 'win32',
+      arch: 'x64',
+      release: '10.0.26100',
+      powerSource: 'battery'
+    })
+    assert.equal(onBattery.ok, true)
+    assert.deepEqual(onBattery.failures, [])
+    assert.equal(onBattery.powerSource, 'battery')
+    assert.equal(onBattery.warnings.length, 1)
+    assert.match(onBattery.warnings[0], /^on battery power: .*#1042/)
+
+    for (const powerSource of ['ac', 'unknown']) {
+      const host = evaluateWindowsLocalGateHost({
+        platform: 'win32',
+        arch: 'x64',
+        release: '10.0.26100',
+        powerSource
+      })
+      assert.equal(host.powerSource, powerSource)
+      assert.deepEqual(host.warnings, [])
+    }
+    assert.equal(
+      evaluateWindowsLocalGateHost({ platform: 'win32', arch: 'x64', release: '10.0.26100' })
+        .powerSource,
+      'unknown'
+    )
+  })
+
   it('cannot use the unsupported-host escape hatch for an unknown release build', () => {
     const result = evaluateWindowsLocalGateHost({
       allowUnsupportedBuild: true,
@@ -1144,6 +1174,23 @@ describe('buildWindowsLocalGateSteps', () => {
     assert.match(report, /smoke:recording-native-preview/)
     assert.match(report, /smoke:windows-live-audio-controls/)
     assert.match(report, /strict Windows support-bundle verification/)
+    assert.match(report, /\[info\] host power: unknown/)
+    assert.doesNotMatch(report, /\[warn\] host:/)
+  })
+
+  it('prints the host power source and the battery warning in the plan (#1042)', () => {
+    const report = formatWindowsLocalGatePlan({
+      host: evaluateWindowsLocalGateHost({
+        platform: 'win32',
+        arch: 'x64',
+        release: '10.0.26100',
+        powerSource: 'battery'
+      }),
+      steps: buildWindowsLocalGateSteps({ repoRoot: '/repo' })
+    })
+    assert.match(report, /\[ok\] host: Windows 11 x64 gate host/)
+    assert.match(report, /\[info\] host power: battery/)
+    assert.match(report, /\[warn\] host: on battery power: .*#1042/)
   })
 
   it('builds an acceptance manifest with host, evidence, and command state', () => {
@@ -1171,6 +1218,8 @@ describe('buildWindowsLocalGateSteps', () => {
     assert.equal(manifest.startedAt, '2026-07-08T12:00:00.000Z')
     assert.equal(manifest.host.ok, true)
     assert.equal(manifest.host.build, 22631)
+    assert.equal(manifest.host.powerSource, 'unknown')
+    assert.deepEqual(manifest.host.warnings, [])
     assert.equal(manifest.candidateIdentity, null)
     assert.equal(manifest.evidence.runManifest, windowsLocalGateManifestPath({ outputDir }))
     assert.deepEqual(manifest.evidence.supportBundleVerifierCommand, [

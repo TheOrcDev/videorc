@@ -95,7 +95,6 @@ vi.mock('@/lib/backend-audio-levels', async (importOriginal) => {
 })
 
 import { AudioSection } from '@/components/studio/audio-section'
-import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import { SourcesAudioMixer } from '@/components/sources/sources-audio-mixer'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { backendAudioLevels } from '@/lib/backend-audio-levels'
@@ -143,8 +142,7 @@ describe('production microphone meter demand', () => {
 
   async function render(
     consumer: typeof AudioSection | typeof SourcesAudioMixer | null,
-    enabled = true,
-    sliver = false
+    enabled = true
   ) {
     await act(async () => {
       root.render(
@@ -156,14 +154,7 @@ describe('production microphone meter demand', () => {
             children: createElement(
               TooltipProvider,
               null,
-              consumer ? createElement(consumer) : null,
-              sliver
-                ? createElement(SessionMicSliver, {
-                    sessionActive: true,
-                    deviceName: fixture.microphoneName,
-                    muted: false
-                  })
-                : null
+              consumer ? createElement(consumer) : null
             )
           })
         )
@@ -292,18 +283,6 @@ describe('production microphone meter demand', () => {
     await frames()
     expect(readMeter()).toBeGreaterThan(-30)
     expect(container.querySelector('[data-videorc-mic-monitor-state="monitoring"]')).not.toBeNull()
-  })
-
-  it('keeps another production visual consumer alive when the meter returns to backend levels', async () => {
-    fixture.sessionActive = true
-    await render(AudioSection, true, true)
-    expect(container.querySelector('[data-videorc-session-mic-sliver]')).not.toBeNull()
-    expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
-    await publishLevels(-6)
-    expect(environment.stopped).not.toHaveBeenCalled()
-    await render(AudioSection)
-    expect(environment.stopped).toHaveBeenCalledTimes(1)
-    expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
   })
 
   it('cancels a pending old device acquisition and attaches only the newly selected microphone', async () => {

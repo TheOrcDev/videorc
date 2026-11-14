@@ -1,7 +1,7 @@
 use crate::protocol::{
     ArrangementMode, CameraAspect, CameraCorner, CameraFit, CameraShape, CameraSize,
     CameraTransform, CameraTransformMode, EffectiveSceneBackground, LayoutPreset, LayoutSettings,
-    SceneSourceKind, SceneTransform, SideBySideSplit,
+    Scene, SceneSourceKind, SceneTransform, SideBySideSplit,
 };
 
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
@@ -201,12 +201,48 @@ pub fn background_zoom_crop(background: Option<&EffectiveSceneBackground>) -> Sc
     }
 }
 
+/// The scene background's stage as one render path sees it for one scene:
+/// how far it sits in from the canvas edge, and whether the camera sits on it
+/// (plan 235, owner decision D9 a).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackgroundStage {
+    /// The inset per side, as a canvas fraction. Zero means no stage.
+    pub margin: f64,
+    /// Whether the scene's camera sits on the stage too
+    /// ([`scene_camera_uses_background_stage`]).
+    pub camera: bool,
+}
+
+impl BackgroundStage {
+    /// No stage: every source keeps its own transform. Only the macOS and
+    /// Windows render paths use it outside tests.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    pub const NONE: Self = Self {
+        margin: 0.0,
+        camera: false,
+    };
+
+    /// The stage for `scene` under `layout`. Pass a `margin` of zero unless
+    /// the background really renders, so a background that failed to load
+    /// never leaves a ring around the sources.
+    pub fn for_scene(scene: &Scene, layout: &LayoutSettings, margin: f64) -> Self {
+        Self {
+            margin,
+            camera: scene_camera_uses_background_stage(scene, layout),
+        }
+    }
+}
+
+/// A source's transform as the render paths draw it: mapped onto the scene
+/// background's stage when [`scene_source_uses_background_stage`] says the
+/// source sits on it, untouched otherwise.
 pub fn scene_source_render_transform(
     transform: &SceneTransform,
     source_kind: &SceneSourceKind,
-    stage_margin: f64,
+    stage: BackgroundStage,
 ) -> SceneTransform {
-    if stage_margin <= 0.0 || !scene_source_uses_background_stage(source_kind) {
+    let stage_margin = stage.margin;
+    if stage_margin <= 0.0 || !scene_source_uses_background_stage(source_kind, stage.camera) {
         return transform.clone();
     }
     let stage_scale = 1.0 - (stage_margin * 2.0);
@@ -222,11 +258,59 @@ pub fn scene_source_render_transform(
     }
 }
 
-pub fn scene_source_uses_background_stage(source_kind: &SceneSourceKind) -> bool {
-    matches!(
-        source_kind,
-        SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern
+/// The one rule for which sources sit on the scene background's stage (plan
+/// 235, owner decision D9 a). A screen, a window and the test pattern always
+/// do. The camera does only when the scene says so
+/// ([`scene_camera_uses_background_stage`]). Metal, CPU, D3D11 and the FFmpeg
+/// legacy graph all ask this through [`scene_source_render_transform`]; the
+/// TypeScript twin is `sceneSourceUsesBackgroundStage`.
+pub fn scene_source_uses_background_stage(
+    source_kind: &SceneSourceKind,
+    camera_on_stage: bool,
+) -> bool {
+    match source_kind {
+        SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern => true,
+        SceneSourceKind::Camera => camera_on_stage,
+    }
+}
+
+/// Whether this scene's camera sits on the background's stage (plan 235 D9
+/// a): the scene is camera-only, on either canvas, and the camera is not
+/// keyed. A background behind a full-frame camera was drawn and then covered,
+/// so the camera now gets the stage a shared screen gets. A keyed camera
+/// stays full frame over the background (the green screen case), a camera
+/// beside or over a screen keeps its place, and a Freeform scene's boxes are
+/// the streamer's own.
+pub fn scene_camera_uses_background_stage(scene: &Scene, layout: &LayoutSettings) -> bool {
+    camera_uses_background_stage(
+        scene.sources.iter().map(|source| &source.kind),
+        layout.arrangement_mode == ArrangementMode::Freeform,
+        camera_chroma_key(layout).is_some(),
     )
+}
+
+/// [`scene_camera_uses_background_stage`] on the facts alone, which is the
+/// form `protocol-fixtures/scene-picture-geometry.json` pins against the
+/// TypeScript twin (`sceneCameraUsesBackgroundStage`). Hidden sources count:
+/// hiding a screen must not move the camera.
+pub fn camera_uses_background_stage<'a>(
+    source_kinds: impl IntoIterator<Item = &'a SceneSourceKind>,
+    freeform: bool,
+    camera_keyed: bool,
+) -> bool {
+    if freeform || camera_keyed {
+        return false;
+    }
+    let mut has_camera = false;
+    for kind in source_kinds {
+        match kind {
+            SceneSourceKind::Camera => has_camera = true,
+            SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern => {
+                return false;
+            }
+        }
+    }
+    has_camera
 }
 
 /// A scene source's box in canvas pixels, uncut (plan 215 E1, D2): its true
@@ -315,11 +399,11 @@ pub fn scene_picture_rect_pixels(
     kind: &SceneSourceKind,
     fit: SceneFit,
     source_size: Option<(u32, u32)>,
-    stage_margin: f64,
+    stage: BackgroundStage,
     canvas_width: u32,
     canvas_height: u32,
 ) -> Option<SignedPixelRect> {
-    let staged = scene_source_render_transform(transform, kind, stage_margin);
+    let staged = scene_source_render_transform(transform, kind, stage);
     let rect = scene_source_rect_pixels(&staged, canvas_width, canvas_height)?;
     let Some((source_width, source_height)) = source_size else {
         return Some(rect);
@@ -347,7 +431,7 @@ pub fn scene_picture_rect(
     kind: &SceneSourceKind,
     fit: SceneFit,
     source_size: Option<(u32, u32)>,
-    stage_margin: f64,
+    stage: BackgroundStage,
     canvas_width: u32,
     canvas_height: u32,
 ) -> Option<CameraTransform> {
@@ -356,7 +440,7 @@ pub fn scene_picture_rect(
         kind,
         fit,
         source_size,
-        stage_margin,
+        stage,
         canvas_width,
         canvas_height,
     )?;
@@ -1508,8 +1592,21 @@ mod tests {
             crop: Option<FixtureCrop>,
             #[serde(default)]
             stage_margin: f64,
+            /// The scene the source sits in (plan 235 D9 a). Without it the
+            /// camera is not on the stage.
+            scene: Option<FixtureScene>,
             canvas: FixtureSize,
             expected: FixtureRect,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FixtureScene {
+            source_kinds: Vec<SceneSourceKind>,
+            #[serde(default)]
+            camera_keyed: bool,
+            #[serde(default)]
+            freeform: bool,
+            camera_on_stage: bool,
         }
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -1523,7 +1620,30 @@ mod tests {
         .expect("protocol-fixtures/scene-picture-geometry.json is valid JSON");
         assert_eq!(fixture.schema_version, 1);
         assert!(fixture.cases.len() >= 12);
+        let scene_cases = fixture
+            .cases
+            .iter()
+            .filter(|case| case.scene.is_some())
+            .count();
+        assert!(scene_cases >= 7, "plan 235's stage cases: {scene_cases}");
         for case in fixture.cases {
+            let camera = case.scene.as_ref().is_some_and(|scene| {
+                let camera = camera_uses_background_stage(
+                    &scene.source_kinds,
+                    scene.freeform,
+                    scene.camera_keyed,
+                );
+                assert_eq!(
+                    camera, scene.camera_on_stage,
+                    "{}: whether the camera sits on the stage",
+                    case.name
+                );
+                camera
+            });
+            let stage = BackgroundStage {
+                margin: case.stage_margin,
+                camera,
+            };
             let crop = case.crop.unwrap_or(FixtureCrop {
                 crop_left: 0.0,
                 crop_top: 0.0,
@@ -1550,7 +1670,7 @@ mod tests {
                 &case.kind,
                 fit,
                 case.source.as_ref().map(|size| (size.width, size.height)),
-                case.stage_margin,
+                stage,
                 case.canvas.width,
                 case.canvas.height,
             )
@@ -1572,7 +1692,7 @@ mod tests {
                 &case.kind,
                 fit,
                 case.source.as_ref().map(|size| (size.width, size.height)),
-                case.stage_margin,
+                stage,
                 case.canvas.width,
                 case.canvas.height,
             )
@@ -1609,7 +1729,7 @@ mod tests {
             &SceneSourceKind::Screen,
             SceneFit::Contain,
             Some((2228, 1440)),
-            0.0,
+            BackgroundStage::NONE,
             2560,
             1440,
         )
@@ -1627,26 +1747,55 @@ mod tests {
                 Some((2560, 1440)),
             ),
         ] {
-            let rect =
-                scene_picture_rect_pixels(&frame, &kind, fit, size, 0.0, 2560, 1440).unwrap();
+            let rect = scene_picture_rect_pixels(
+                &frame,
+                &kind,
+                fit,
+                size,
+                BackgroundStage::NONE,
+                2560,
+                1440,
+            )
+            .unwrap();
             assert_eq!(
                 rect,
                 scene_source_rect_pixels(&frame, 2560, 1440).unwrap(),
                 "{kind:?} {fit:?}"
             );
         }
-        // A scene background's margin moves the screen's picture, never the camera's.
+        // A scene background's margin moves the screen's picture. The camera's
+        // moves only when the scene puts the camera on the stage (plan 235).
+        let screens = BackgroundStage {
+            margin: 0.1,
+            camera: false,
+        };
         let staged = scene_picture_rect_pixels(
             &frame,
             &SceneSourceKind::Screen,
             SceneFit::Contain,
             Some((2228, 1440)),
-            0.1,
+            screens,
             2560,
             1440,
         )
         .unwrap();
-        let expected = scene_source_render_transform(&frame, &SceneSourceKind::Screen, 0.1);
+        assert_eq!(
+            scene_source_render_transform(&frame, &SceneSourceKind::Camera, screens),
+            frame
+        );
+        let camera_staged = scene_source_render_transform(
+            &frame,
+            &SceneSourceKind::Camera,
+            BackgroundStage {
+                margin: 0.1,
+                camera: true,
+            },
+        );
+        assert_eq!(
+            camera_staged,
+            scene_source_render_transform(&frame, &SceneSourceKind::Screen, screens)
+        );
+        let expected = scene_source_render_transform(&frame, &SceneSourceKind::Screen, screens);
         let expected = contain_rect_pixels(
             2228.0,
             1440.0,

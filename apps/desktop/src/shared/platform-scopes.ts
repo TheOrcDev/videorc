@@ -161,8 +161,8 @@ export function removeMessagesReadiness(
 }
 
 /**
- * Platforms whose missing permission one reconnect grants, from Livestream
- * setup or the Stream Manager. YouTube never lacks one (its base scope covers
+ * Platforms whose missing permission one reconnect grants, from Destinations
+ * Setup or the Stream Manager. YouTube never lacks one (its base scope covers
  * deletes) and X authorizes through Authorize X Live instead.
  */
 export const SCOPE_RECONNECT_PLATFORMS = [
@@ -181,7 +181,7 @@ const SCOPE_RECONNECT_LABELS: Record<ScopeReconnectPlatform, string> = {
 
 /** The quiet sentence for a platform that can't remove messages until a reconnect. */
 export function removeMessagesReconnectCopy(platform: ScopeReconnectPlatform): string {
-  return `Reconnect ${SCOPE_RECONNECT_LABELS[platform]} to let Buddy remove messages.`
+  return `Reconnect ${SCOPE_RECONNECT_LABELS[platform]} to let Sidekick remove messages.`
 }
 
 /**

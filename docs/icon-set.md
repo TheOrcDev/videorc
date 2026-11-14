@@ -21,10 +21,19 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the glyphs sit outside the Nucleo count: six platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; the other three come from Phosphor) and `BuddyIcon`, Buddy's own mark (the owner's Buddy artwork since plan 164; plan 119 added the slot). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
+Today (plan 235, 2026-11-14): **95 semantic slots over 91 glyphs** in the shared registry. Eight of the glyphs sit outside the Nucleo count: seven platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; `TwitchIcon`, `TiktokIcon`, `InstagramIcon` and `FacebookIcon` come from Phosphor) and `BuddyIcon`, Sidekick's own mark (the owner's Sidekick artwork since plan 164; plan 119 added the slot). That leaves 83 inside the Nucleo count. The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
+
+Plan 235 (2026-11-14) added `BuddyPageIcon` (UserSound) for the Buddy
+page's row in the sidebar and in ⌘K's page list (D7, the owner's pick from
+twelve glyphs): a plain glyph like its neighbours, where the row had worn the
+Buddy artwork. The slot is named for the page, so renaming Buddy keeps it.
+`BuddyIcon` keeps the artwork everywhere Buddy itself shows. The count above
+also takes in three slots that came without one: `HiddenFromStreamIcon`
+(EyeClosed, plan 215 D6), `ChatCommandsIcon` (ChatCircleText, plan 226) and
+`CodeIcon` (Code, plan 232).
 
 Plan 206 (2026-10-27) added `FacebookIcon`, Phosphor's `FacebookLogo`: a
 seventh platform brand mark, outside the Nucleo count like the others.
@@ -33,7 +42,7 @@ Plan 210 S8b (2026-10-29) added `HiddenIcon` (EyeSlash) for Hide screen: the
 screen is hidden from viewers, a meaning no slot had (`PreviewIcon`'s eye opens
 the Preview window). It is one more glyph inside the Nucleo count.
 
-The Buddy page's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
+The Sidekick page's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
 a small picture opened larger to look at it, a meaning no slot had
 (`SearchIcon` finds, `PreviewIcon` opens the Preview window, `FrameIcon` is
 the output frame). That made **92 slots over 88 glyphs**.
@@ -82,8 +91,9 @@ lands**:
 
 1. **Count.** 100 is the hard ceiling. `pnpm icons:build` refuses to build a
    larger export rather than leaving the count to whoever last added a glyph.
-   At 86 glyphs the app has ~14 of headroom; the audit's divergences would
-   spend about 3 of it.
+   With 83 registry glyphs and the Stream Manager's seven inside the count,
+   the app has about 10 of headroom; the audit's divergences would spend
+   about 3 of it.
 
 2. **Where the SVGs may live.** Videorc's repository is public and AGPL, which
    grants everyone downstream the right to redistribute and modify everything
@@ -151,7 +161,7 @@ deliberately behaviour-free. These are the slots where the inherited glyph is
 | Slot                                         | Glyph today               | Verdict                                                                                                                                                                                                                                          |
 | -------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `SourcesIcon`                                | Monitor                   | **Change.** The Sources page owns screens, windows, cameras, microphones _and_ system audio; a monitor names one of them. Prefer a plug/input or layered-devices glyph.                                                                          |
-| `OutputIcon`                                 | Record (dot)              | **Change.** The Output page sets up the local file (where recordings go, quality; destinations live on Livestream); the record dot is the Record _action_ and must not be diluted. Prefer export/arrow-out or sliders. Splits from `RecordIcon`. |
+| `OutputIcon`                                 | Record (dot)              | **Change.** The Output page sets up the local file (where recordings go, quality; destinations live on Destinations); the record dot is the Record _action_ and must not be diluted. Prefer export/arrow-out or sliders. Splits from `RecordIcon`. |
 | `SourcesIcon`/`DisplayIcon`                  | Monitor (shared)          | **Split** once Sources gets its own glyph; `DisplayIcon` keeps the monitor.                                                                                                                                                                      |
 | `AssetsIcon`/`ImageIcon`                     | ImageSquare (shared)      | **Consider splitting.** Assets is a library of media, not one image — a stack/collection glyph would separate them.                                                                                                                              |
 | `StudioIcon`/`CameraIcon`                    | VideoCamera (shared)      | **Keep shared** unless the export offers a distinct "studio/stage" glyph worth the extra count.                                                                                                                                                  |
@@ -165,7 +175,7 @@ like-for-like glyph.
 
 ### Export shopping list
 
-The 90 slots are the authoritative list — read them straight out of
+The 95 slots are the authoritative list — read them straight out of
 `components/icons.tsx`, where each is grouped and documented. Export one SVG
 per slot name in kebab-case (`sources-icon.svg` → `SourcesIcon`), plus solid
 variants for the filled slots noted above.

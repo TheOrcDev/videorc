@@ -11,10 +11,10 @@ export const BUDDY_ONBOARDING_STEP_COUNT = 4
 
 /** The four step titles, in order (pinned by tests on both sides). */
 export const BUDDY_ONBOARDING_STEP_TITLES = [
-  'Meet your sidekick',
+  'Meet your Sidekick',
   'Describe it',
   'Give it a personality',
-  'Create your Buddy'
+  'Create your Sidekick'
 ] as const
 
 export const BUDDY_ONBOARDING_BUTTONS = {
@@ -66,7 +66,7 @@ export const BUDDY_ONBOARDING_STEP2 = {
 
 export const BUDDY_ONBOARDING_STEP3 = {
   nameLabel: 'Name',
-  namePlaceholder: 'Buddy',
+  namePlaceholder: 'Sidekick',
   nameHelp: '1 to 24 characters.',
   personalityLabel: 'Personality',
   personalityPlaceholder: 'Grumpy but kind. Calls viewers pebbles.',
@@ -74,7 +74,7 @@ export const BUDDY_ONBOARDING_STEP3 = {
   aboutLabel: 'About you (optional)',
   aboutPlaceholder:
     'I stream indie games on Tuesdays and Fridays at 8 pm. My shop is at example.com/shop.',
-  aboutHelp: "Buddy answers viewers' questions from this."
+  aboutHelp: "Sidekick answers viewers' questions from this."
 } as const
 
 export const BUDDY_ONBOARDING_STEP4 = {
@@ -83,11 +83,11 @@ export const BUDDY_ONBOARDING_STEP4 = {
   summaryPersonality: 'Personality',
   summaryAbout: 'About you',
   notSet: 'Not set',
-  primary: 'Create my Buddy',
+  primary: 'Create my Sidekick',
   working: 'Drawing the pictures. This takes one to three minutes.',
   poseLabels: { idle: 'Idle', talk: 'Talk', laugh: 'Laugh', think: 'Think' },
   done: 'Saved to your library.',
-  use: 'Use as my Buddy',
+  use: 'Use as my Sidekick',
   /** App only, after "Use as my Buddy" (plan 172 D12). */
   makeAlive: 'Make it Alive',
   redo: 'Redo',
@@ -96,18 +96,18 @@ export const BUDDY_ONBOARDING_STEP4 = {
 
 /** Step 4 and the library: why creating is not possible now, and its actions. */
 export const BUDDY_ONBOARDING_GATES = {
-  signedOut: 'Sign in to create a Buddy.',
+  signedOut: 'Sign in to create a Sidekick.',
   signIn: 'Sign in',
-  free: 'Creating your own Buddy is part of Videorc Premium.',
+  free: 'Creating your own Sidekick is part of Videorc Premium.',
   seePremium: 'View Premium',
   startFromOurs: 'Start from one of ours',
   allowanceUsed: "You've used today's images. You get more tomorrow.",
   failed: "Couldn't draw the pictures. Nothing was used from your allowance. Try again.",
-  cloudAiOff: 'Allow cloud AI to create a Buddy.'
+  cloudAiOff: 'Allow cloud AI to create a Sidekick.'
 } as const
 
 export const BUDDY_LIBRARY_COPY = {
-  title: 'My Buddies',
+  title: 'My Sidekicks',
   official: 'Official',
   mine: 'Made by you',
   active: 'Active',
@@ -117,12 +117,12 @@ export const BUDDY_LIBRARY_COPY = {
   delete: 'Delete',
   makeAlive: 'Make it Alive',
   /** Opens the onboarding, which asks for more: an ellipsis (docs/ui-copy.md). */
-  newBuddy: 'New Buddy…',
-  emptyMine: 'Buddies you create show up here, on videorc.com and in the app.',
+  newBuddy: 'New Sidekick…',
+  emptyMine: 'Sidekicks you create show up here, on videorc.com and in the app.',
   deleteBody: 'Its pictures are removed from your Videorc account.',
   cancel: 'Cancel',
-  signedOut: 'Sign in to see the Buddies you made on videorc.com.',
-  invitation: 'Make this Buddy your own, or pick another.',
+  signedOut: 'Sign in to see the Sidekicks you made on videorc.com.',
+  invitation: 'Make this Sidekick your own, or pick another.',
   invitationAction: 'Start',
   /** Plan 172 D12: the tag on a card whose Buddy moves. */
   alive: 'Alive',
@@ -144,7 +144,7 @@ export function buddyOnboardingAllowance(remaining: number): string {
 
 /** "Your library is full (30 Buddies). Delete one to make room." */
 export function buddyLibraryFullLine(limit: number): string {
-  return `Your library is full (${limit} Buddies). Delete one to make room.`
+  return `Your library is full (${limit} Sidekicks). Delete one to make room.`
 }
 
 /** "Delete Grum?" */

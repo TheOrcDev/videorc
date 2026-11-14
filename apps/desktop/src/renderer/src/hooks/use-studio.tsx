@@ -317,7 +317,7 @@ import {
   savedModeIntent,
   type SessionStartIntent
 } from '@/lib/session-start-intent'
-import { GO_LIVE_NO_DESTINATION_TITLE, OPEN_LIVESTREAM_LABEL } from '@/lib/go-live-copy'
+import { GO_LIVE_NO_DESTINATION_TITLE, OPEN_DESTINATIONS_LABEL } from '@/lib/go-live-copy'
 import { RECORDING_STOP_FINALIZE_OVERRUN_CODE } from '@/lib/studio-session-view'
 import {
   isYouTubeChannelAuthFailure,
@@ -795,11 +795,9 @@ function loadCaptionOverlay() {
 
 // Chat on stream (plan 215 G): the box's driver and painter, lazy, loaded the
 // first time a chat switch is on while live.
-/** Plan 222 U1, U5: the cloud's rarer notices load when one is due. */
+// Cloud actions and notices, including plan 234's managed-show warning,
+// load with the first cloud status or user action; the provider keeps the id.
 const loadCloudNotices = () => import('@/lib/cloud-notices')
-// The cloud's toast copy loads with the first cloud status (plan 184); the
-// eager provider keeps only the toast id.
-const loadCloudToasts = () => import('@/lib/cloud-toasts')
 // Plan 224 C-G4: the room controller mounts lazily under the provider.
 const TalkShowRoomHost = lazy(() => import('@/components/studio/talk-show-room-host'))
 
@@ -1034,7 +1032,7 @@ export function streamOutputTopologySplitRejected(
   return result.outputRoles.includes('stream') && result.effectiveBridgeOutput === 'raw-yuv420p'
 }
 
-// The technical reason (probe stage, HRESULT) stays in Livestream → Technical
+// The technical reason (probe stage, HRESULT) stays in Destinations → Technical
 // details; a toast only says what the user can do.
 export const STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON =
   "This computer can't encode the recording and the livestream separately. Use the same quality for every destination, set captions to burn into both or neither, or turn off recording, then go live."
@@ -1748,7 +1746,7 @@ export type StudioContextValue = {
   startSession: () => Promise<boolean>
   /**
    * The Studio transport's two starts, which ⌘K, the hotkeys and the remotes
-   * share (plan 174 S2.2 D3, S3.1 B-3). Record starts a local take; Go Live…
+   * share (plan 174 S2.2 D3, S3.1 B-3). Record starts a local take; Go Live
    * opens the Go Live dialog, and records too only when the Output page's
    * "Save local recording" is on. Neither writes the saved output mode. A
    * start that cannot run says why and resolves false; one that only opened
@@ -1932,7 +1930,7 @@ interface StudioDiagnosticsContextValue {
   watchdogAlerts: WatchdogAlert[]
   /** A card's buttons: the fix, Got it, Snooze (plan 223 A5). */
   watchdogAct: (action: WatchdogAction) => void
-  /** The backend socket, for the Livestream page's Watchdog section (its own RPCs, lazily). */
+  /** The backend socket, for the Destinations page's Watchdog section (its own RPCs, lazily). */
   client: BackendClient | null
 }
 
@@ -3240,7 +3238,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // A silently empty Comments feed must never be the only signal that chat
   // setup failed at go-live (2026-07-10: Twitch chat needed a reconnect and
   // the failure lived only in a backend warn log). Toast each broken
-  // destination once per session, with a jump to the Livestream tab.
+  // destination once per session, with a jump to the Destinations page.
   const chatSetupWarnedRef = useRef<{ sessionId?: string; warned: Set<string> }>({
     warned: new Set()
   })
@@ -3299,7 +3297,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       chatSetupWarnedRef.current.warned.add(warning.id)
       toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat isn't connected`, {
         description: warning.message,
-        action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
+        action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live') }
       })
     }
     // Plan 215 A3: a connector parked on the Videorc sign-in is not "isn't
@@ -5475,27 +5473,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // show the cloud lost while this computer fed it warns once, and so does a
   // runner restart (its platforms reconnect, or they could not), and so
   // does the hour before a show's 12-hour cap (D18). Nothing else
-  // here is news: the Livestream page and the Stream health stat show the rest.
+  // here is news: the Destinations page and the Stream health stat show the rest.
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
   const cloudStatusRef = useRef<CloudStatus | null>(null)
   const commitCloudStatus = useCallback((next: CloudStatus): void => {
     const previous = cloudStatusRef.current
     cloudStatusRef.current = next
     setCloudStatus(next)
-    void loadCloudToasts().then((words) => {
-      const fallback = words.cloudFallbackToast(previous, next)
-      if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
-      const lost = words.cloudLostToast(previous, next)
-      if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
-      const restarted = words.cloudRestartToast(previous, next)
-      if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
-      const cap = words.cloudShowCapToast(previous, next)
-      if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
-    })
-    // Plan 222 U5: past the month's hours is news, never a cut (D18); the
-    // words load only when a show runs past them.
-    if (next.allowancePast)
-      void loadCloudNotices().then((n) => n.toastCloudAllowancePast(previous, next))
+    void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
   }, [])
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
@@ -5679,48 +5664,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const setCloudSettings = useCallback(
     async (patch: CloudSettingsPatch): Promise<void> => {
       if (!client) return
-      try {
-        commitCloudStatus(await client.requestTyped('cloud.settings.set', patch))
-      } catch (error) {
-        toastUserError(
-          error,
-          { action: 'save', object: 'the Videorc Cloud setting' },
-          { id: CLOUD_TOAST_ID }
-        )
-      }
+      return (await loadCloudNotices()).setCloudSettings(client, patch, commitCloudStatus)
     },
     [client, commitCloudStatus]
   )
   const refreshCloudAllowance = useCallback(async (): Promise<void> => {
     if (!client) return
-    try {
-      commitCloudStatus(await client.requestTyped('cloud.allowance.refresh'))
-    } catch {
-      // The section keeps the hours it last had; signed out says so itself.
-    }
+    return (await loadCloudNotices()).refreshCloudAllowance(client, commitCloudStatus)
   }, [client, commitCloudStatus])
   const endCloudShow = useCallback(async (): Promise<void> => {
     if (!client) return
-    try {
-      commitCloudStatus(await client.requestTyped('cloud.show.end'))
-    } catch (error) {
-      toastUserError(
-        error,
-        { action: 'end', object: 'the stream on Videorc Cloud' },
-        { id: CLOUD_TOAST_ID }
-      )
-    }
+    return (await loadCloudNotices()).endCloudShow(client, commitCloudStatus)
   }, [client, commitCloudStatus])
   // The result is never a toast: the Livestream row shows it (C6b). Only a
   // refusal of the click itself reaches one, as a warning.
   const runCloudTest = useCallback(
     async (outputs: CloudTestOutput[]): Promise<void> => {
       if (!client) return
-      try {
-        commitCloudStatus(await client.requestTyped('cloud.selftest.run', { outputs }))
-      } catch (error) {
-        toastUserError(error, { action: 'test', object: 'Videorc Cloud' }, { id: CLOUD_TOAST_ID })
-      }
+      return (await loadCloudNotices()).runCloudTest(client, outputs, commitCloudStatus)
     },
     [client, commitCloudStatus]
   )
@@ -6184,7 +6145,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostEnableResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : "Couldn't change the Buddy setting."
+            error: error instanceof Error ? error.message : "Couldn't change the Sidekick setting."
           })
         })
     })
@@ -6296,7 +6257,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostActionResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Buddy action failed.'
+            error: error instanceof Error ? error.message : 'Sidekick action failed.'
           })
         })
     })
@@ -16081,14 +16042,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               const validation = validations.find((item) => item.platform === target.platform)
               if (!validation || !['valid', 'refreshed'].includes(validation.state)) {
                 unhealthy = target
-                unhealthyMessage = `Reconnect ${target.label} in Livestream → Setup, then go live.`
+                unhealthyMessage = `Reconnect ${target.label} in Destinations → Setup, then go live.`
                 break
               }
             }
             if (unhealthy) {
               throw new Error(
                 unhealthyMessage ??
-                  `Reconnect ${unhealthy.label} in Livestream → Setup, then go live.`
+                  `Reconnect ${unhealthy.label} in Destinations → Setup, then go live.`
               )
             }
           }
@@ -16781,7 +16742,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (intent.stream && !areEnabledStreamTargetsStartReady(captureConfigRef.current.streaming)) {
       toast.warning(GO_LIVE_NO_DESTINATION_TITLE, {
         id: 'go-live-no-destination',
-        action: { label: OPEN_LIVESTREAM_LABEL, onClick: () => openWorkspaceTab('live') }
+        action: { label: OPEN_DESTINATIONS_LABEL, onClick: () => openWorkspaceTab('live') }
       })
       return
     }
@@ -17078,7 +17039,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void ensureNativePreviewCamera()
   }, [ensureNativePreviewCamera])
   const talkShowError = useCallback((error: unknown, action: string) => {
-    toastUserError(error, { action, object: 'the room' }, { id: CLOUD_TOAST_ID })
+    // `action` is the whole phrase ("join the room", "let the guest in").
+    toastUserError(error, { action }, { id: CLOUD_TOAST_ID })
   }, [])
   const talkShowCameraId = captureConfig.sources.cameraId ?? null
   const talkShowMicrophoneId = captureConfig.sources.microphoneId ?? null
@@ -18674,7 +18636,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           toast.warning(`Save your ${label} stream key again`, {
             id: `stream-key-migration:${candidate.targetId}`,
             description:
-              'Paste it in Livestream → Setup so Videorc can store it securely. It works for now.'
+              'Paste it in Destinations → Setup so Videorc can store it securely. It works for now.'
           })
         }
       }

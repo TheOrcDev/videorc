@@ -146,7 +146,7 @@ Object.assign(observations, {
       state: 'not-connected',
       signIn: true
     })),
-    streamKeyAction: 'Open Livestream'
+    streamKeyAction: 'Open Destinations'
   },
   livestream: {
     ...workspace,

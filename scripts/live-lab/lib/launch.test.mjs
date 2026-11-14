@@ -52,6 +52,7 @@ test('the launch env turns on CDP, the journal and bounded logs, and turns auto-
   assert.equal(env.VIDEORC_METRICS_JOURNAL, '1')
   assert.equal(env.VIDEORC_DISABLE_AUTO_UPDATE, '1')
   assert.equal(env.VIDEORC_USAGE_STATS, '0')
+  assert.equal(env.VIDEORC_STREAM_REPORT_EMAIL, '0')
   assert.equal(env.VIDEORC_BACKEND_LOG_MAX_BYTES, String(50 * 1024 * 1024))
   assert.equal(env.VIDEORC_BACKEND_LOG_MAX_FILES, '10')
   assert.equal(env.VIDEORC_USER_DATA_DIR, dirs.userDataDir)

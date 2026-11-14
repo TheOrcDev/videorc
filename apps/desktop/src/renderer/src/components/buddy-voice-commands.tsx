@@ -180,7 +180,7 @@ export function BuddyVoiceCommands({
               </div>
             </Field>
             <Field>
-              <FieldLabel>Before Buddy removes a comment</FieldLabel>
+              <FieldLabel>Before Sidekick removes a comment</FieldLabel>
               <FieldDescription>
                 {REMOVE_CONFIRM_DESCRIPTIONS[removeConfirm]} {YOUTUBE_ALWAYS_CONFIRMS}
               </FieldDescription>

@@ -4,49 +4,49 @@
   "commands": [
     {
       "id": "highlight-last",
-      "text": "Buddy, show the last comment",
+      "text": "Sidekick, show the last comment",
       "parser": "cohost_command",
       "context": "plain",
       "expect": { "kind": "highlight", "target": "last", "question": false }
     },
     {
       "id": "highlight-last-question",
-      "text": "Hey Buddy, can you show the last question please?",
+      "text": "Hey Sidekick, can you show the last question please?",
       "parser": "cohost_command",
       "context": "plain",
       "expect": { "kind": "highlight", "target": "last", "question": true }
     },
     {
       "id": "highlight-this",
-      "text": "Buddy, put it on stream",
+      "text": "Sidekick, put it on stream",
       "parser": "cohost_command",
       "context": "plain",
       "expect": { "kind": "highlight", "target": "deixis", "question": false }
     },
     {
       "id": "clear-highlight",
-      "text": "Buddy, clear the highlight",
+      "text": "Sidekick, clear the highlight",
       "parser": "cohost_command",
       "context": "plain",
       "expect": { "kind": "clear", "target": "none", "question": false }
     },
     {
       "id": "clear-take-down",
-      "text": "Buddy, take it down",
+      "text": "Sidekick, take it down",
       "parser": "cohost_command",
       "context": "plain",
       "expect": { "kind": "clear", "target": "deixis", "question": false }
     },
     {
       "id": "clear-overlay",
-      "text": "Buddy, hide the overlay",
+      "text": "Sidekick, hide the overlay",
       "parser": "cohost_command",
       "context": "plain",
       "expect": { "kind": "clear", "target": "none", "question": false }
     },
     {
       "id": "remove-last",
-      "text": "Buddy, remove the last message from chat",
+      "text": "Sidekick, remove the last message from chat",
       "parser": "cohost_command",
       "context": "plain",
       "destructive": true,
@@ -68,7 +68,7 @@
     },
     {
       "id": "cancel-buddy",
-      "text": "Buddy, cancel",
+      "text": "Sidekick, cancel",
       "parser": "cohost_command",
       "context": "plain",
       "expect": { "kind": "cancel", "target": "none", "question": false }

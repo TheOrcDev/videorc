@@ -13,7 +13,7 @@ export const REMOTE_INTENT_COPY = {
   notRunning: "You're not recording or live.",
   didNotStop: "Couldn't stop. Check Studio on your computer.",
   toggleFailed: "That didn't work. Check Studio on your computer.",
-  streamNotSetUp: 'Use Go Live… on your computer first.',
+  streamNotSetUp: 'Use Go Live on your computer first.',
   streamDidNotStart: "The livestream didn't start. Finish going live on your computer.",
   microphone: "Couldn't change the microphone.",
   systemAudio: "System audio isn't available.",

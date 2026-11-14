@@ -103,13 +103,13 @@ function state(overrides: Partial<CohostState> = {}): CohostState {
 /** The 2026-08-23 incident envelope: web answered 502 `ai-gateway-error`. */
 const GATEWAY_502: CohostErrorDetail = {
   code: 'ai-gateway-error',
-  message: 'The Buddy tick failed on every configured model.',
+  message: 'The Sidekick tick failed on every configured model.',
   status: 502
 }
 
 const TIMEOUT: CohostErrorDetail = {
   code: 'timeout',
-  message: 'Buddy did not answer within 12 s.',
+  message: 'Sidekick did not answer within 12 s.',
   status: null
 }
 
@@ -187,10 +187,10 @@ describe('cohostErrorDetailText', () => {
     expect(cohostErrorDetailText(null)).toBeNull()
     expect(cohostErrorDetailText(undefined)).toBeNull()
     expect(cohostErrorDetailText(GATEWAY_502)).toBe(
-      'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
+      'ai-gateway-error (HTTP 502): The Sidekick tick failed on every configured model.'
     )
     // No HTTP status for a desktop-side failure.
-    expect(cohostErrorDetailText(TIMEOUT)).toBe('timeout: Buddy did not answer within 12 s.')
+    expect(cohostErrorDetailText(TIMEOUT)).toBe('timeout: Sidekick did not answer within 12 s.')
     expect(cohostErrorDetailText({ code: 'ai-gateway-error', message: '  ', status: 502 })).toBe(
       'ai-gateway-error (HTTP 502)'
     )
@@ -205,7 +205,7 @@ describe('cohostPaneMode', () => {
   const locked = {
     allowed: false as const,
     featureId: 'live-cohost' as const,
-    reason: 'Buddy requires Videorc Premium.',
+    reason: 'Sidekick requires Videorc Premium.',
     upgradeUrl: 'https://www.videorc.com/premium'
   }
 
@@ -224,7 +224,7 @@ describe('cohostPaneMode', () => {
     })
   })
 
-  it('hides itself when the streamer turned Buddy Live off: the header switch says so', () => {
+  it('hides itself when the streamer turned Sidekick Live off: the header switch says so', () => {
     // Plan 174 S3.14a: no pointer at the Chat control, which never turns Buddy on.
     expect(cohostPaneMode({ gate: { allowed: true }, consented: true, enabled: false })).toEqual({
       kind: 'disabled'
@@ -349,7 +349,7 @@ describe('cohostErrorToast', () => {
     expect(cohostErrorToast(state(), errored)).toEqual({
       reason: 'gateway-error',
       key: 'gateway-error:',
-      message: 'Buddy stopped: Videorc AI returned an error.'
+      message: 'Sidekick stopped: Videorc AI returned an error.'
     })
     expect(cohostErrorToast(errored, errored)).toBeNull()
   })
@@ -366,10 +366,10 @@ describe('cohostErrorToast', () => {
       reason: 'gateway-error',
       key: 'gateway-error:ai-gateway-error',
       message:
-        'Buddy stopped: Videorc AI returned an error (ai-gateway-error: The Buddy tick failed on every configured model).'
+        'Sidekick stopped: Videorc AI returned an error (ai-gateway-error: The Sidekick tick failed on every configured model).'
     })
     expect(cohostErrorToastMessage('network', TIMEOUT)).toBe(
-      'Buddy stopped: no connection to Videorc AI (timeout: Buddy did not answer within 12 s).'
+      'Sidekick stopped: no connection to Videorc AI (timeout: Sidekick did not answer within 12 s).'
     )
     // A code without a message still names itself; no detail keeps the base copy.
     expect(
@@ -378,12 +378,12 @@ describe('cohostErrorToast', () => {
         message: '',
         status: 502
       })
-    ).toBe('Buddy stopped: Videorc AI returned an error (ai-gateway-error).')
+    ).toBe('Sidekick stopped: Videorc AI returned an error (ai-gateway-error).')
     expect(cohostErrorToastMessage('gateway-error', null)).toBe(
-      'Buddy stopped: Videorc AI returned an error.'
+      'Sidekick stopped: Videorc AI returned an error.'
     )
     expect(cohostErrorToastMessage('gateway-error', undefined)).toBe(
-      'Buddy stopped: Videorc AI returned an error.'
+      'Sidekick stopped: Videorc AI returned an error.'
     )
   })
 
@@ -428,13 +428,13 @@ describe('cohostStoppedToast', () => {
   const stoppedForPremium = state({ sessionId: null, status: 'off', reason: 'premium-required' })
 
   it('says one plain line when the backend ends a running session', () => {
-    expect(cohostStoppedToast(state(), stoppedForPremium)).toBe('Buddy stopped. Premium ended.')
+    expect(cohostStoppedToast(state(), stoppedForPremium)).toBe('Sidekick stopped. Premium ended.')
     expect(
       cohostStoppedToast(
         state({ status: 'paused', reason: 'consent-required' }),
         state({ sessionId: null, status: 'off', reason: 'signed-out' })
       )
-    ).toBe('Buddy stopped. You signed out.')
+    ).toBe('Sidekick stopped. You signed out.')
     // It is never the error toast: an off state has no error key.
     expect(cohostErrorToast(state(), stoppedForPremium)).toBeNull()
   })
@@ -502,7 +502,7 @@ describe('cohostQuestionToast', () => {
       lastToastAtMs: null,
       nowMs: 1_000
     })
-    expect(raised?.message).toContain('Buddy:')
+    expect(raised?.message).toContain('Sidekick:')
     // The host's own key (not a Mac in this test): Ctrl+J, never a Mac glyph.
     expect(raised?.message).toContain('Ctrl+J')
     expect(raised?.atMs).toBe(1_000)
@@ -581,18 +581,18 @@ describe('cohostQuestionToast', () => {
   it('names how many people are asking', () => {
     expect(
       cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }), '⌘J')
-    ).toBe('Buddy: 5 people asking: What keyboard is that? · ⌘J')
+    ).toBe('Sidekick: 5 people asking: What keyboard is that? · ⌘J')
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), '⌘J')).toBe(
-      'Buddy: Ada is asking: What keyboard is that? · ⌘J'
+      'Sidekick: Ada is asking: What keyboard is that? · ⌘J'
     )
   })
 
-  it("speaks as the streamer's Buddy when the window knows its name (plan 174 J2-20)", () => {
+  it("speaks as the streamer's Sidekick when the window knows its name (plan 174 J2-20)", () => {
     expect(cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo'] }), '⌘J', 'Grum')).toBe(
       'Grum: 2 people asking: What keyboard is that? · ⌘J'
     )
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), '⌘J', '  ')).toBe(
-      'Buddy: Ada is asking: What keyboard is that? · ⌘J'
+      'Sidekick: Ada is asking: What keyboard is that? · ⌘J'
     )
     expect(
       cohostQuestionToast({
@@ -614,12 +614,12 @@ describe('cohostQuestionToast', () => {
 
   it('writes the shortcut the way the platform does (Ctrl+J on Windows)', () => {
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), 'Ctrl+J')).toBe(
-      'Buddy: Ada is asking: What keyboard is that? · Ctrl+J'
+      'Sidekick: Ada is asking: What keyboard is that? · Ctrl+J'
     )
     // Plan 174 H-22: by default, the platform every shortcut prints for (no
     // user agent regex); this test runs on a host that is not a Mac.
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
-      'Buddy: Ada is asking: What keyboard is that? · Ctrl+J'
+      'Sidekick: Ada is asking: What keyboard is that? · Ctrl+J'
     )
   })
 })
@@ -802,15 +802,15 @@ describe('listening (plan 068)', () => {
     expect(cohostListeningView({ state: 'on' })).toEqual({
       state: 'on',
       label: 'Listening',
-      detail: 'Buddy hears your microphone as text.'
+      detail: 'Sidekick hears your microphone as text.'
     })
     expect(cohostListeningView({ state: 'on', remainingSeconds: 7_200 })?.detail).toBe(
-      'Buddy hears your microphone as text. 2 h of listening left this month.'
+      'Sidekick hears your microphone as text. 2 h of listening left this month.'
     )
     expect(cohostListeningView({ state: 'starting' })).toEqual({
       state: 'starting',
       label: 'Starting to listen',
-      detail: 'Buddy is starting to hear your microphone.'
+      detail: 'Sidekick is starting to hear your microphone.'
     })
   })
 
@@ -834,10 +834,10 @@ describe('listening (plan 068)', () => {
     const blocked = cohostListeningView({
       state: 'blocked',
       reasonCode: 'no-microphone',
-      message: 'Select a microphone so Buddy can hear you.'
+      message: 'Select a microphone so Sidekick can hear you.'
     })
     expect(blocked?.state).toBe('blocked')
-    expect(blocked?.detail).toBe('Select a microphone so Buddy can hear you.')
+    expect(blocked?.detail).toBe('Select a microphone so Sidekick can hear you.')
   })
 
   it('reads an unknown or missing reason as a bare Not listening', () => {
@@ -849,7 +849,7 @@ describe('listening (plan 068)', () => {
       'Not listening'
     )
     expect(cohostListeningView({ state: 'blocked' })?.detail).toBe(
-      "Buddy can't hear you right now."
+      "Sidekick can't hear you right now."
     )
   })
 
@@ -892,7 +892,7 @@ describe('listening (plan 068)', () => {
     ).toBe('10 min of listening left this month.')
   })
 
-  it('offers the one-time card only to a Buddy user with listening off', () => {
+  it('offers the one-time card only to a Sidekick user with listening off', () => {
     const base = { enabled: true, listen: false, dismissed: false }
     expect(cohostListenPromptVisible(base)).toBe(true)
     expect(cohostListenPromptVisible({ ...base, enabled: false })).toBe(false)
@@ -941,7 +941,7 @@ describe('listening (plan 068)', () => {
       expect(sentence).not.toContain('never stored as audio')
     }
     expect(BUDDY_HEARS_YOU_USE).toBe(
-      "Buddy hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text."
+      "Sidekick hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text."
     )
   })
 })

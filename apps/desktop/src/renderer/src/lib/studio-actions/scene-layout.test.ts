@@ -249,7 +249,7 @@ describe("every place is the editor's own snap (plan 209 S11b, D22)", () => {
 })
 
 describe('sizes and the clamp (plan 209 S11b)', () => {
-  it('keeps Buddy square on the canvas and a banner its image shape', () => {
+  it('keeps Sidekick square on the canvas and a banner its image shape', () => {
     for (const orientation of ORIENTATIONS) {
       const current = DEFAULT_OVERLAY_LAYOUT.buddy[orientation]
       for (const size of ['small', 'large', 0.25] as const) {
@@ -313,7 +313,7 @@ describe('sizes and the clamp (plan 209 S11b)', () => {
     expect(wide).toMatchObject({ x: 0, w: 1 })
   })
 
-  it('keeps Buddy square and inside at every size, both ways', () => {
+  it('keeps Sidekick square and inside at every size, both ways', () => {
     for (const orientation of ORIENTATIONS) {
       const current = DEFAULT_OVERLAY_LAYOUT.buddy[orientation]
       for (const place of OVERLAY_PLACES) {
@@ -392,7 +392,7 @@ describe('sizes and the clamp (plan 209 S11b)', () => {
 })
 
 describe('move_on_scene (plan 209 S11b, D22)', () => {
-  it("moves Buddy to the top left on both orientations, with the editor's rects and the old ones", async () => {
+  it("moves Sidekick to the top left on both orientations, with the editor's rects and the old ones", async () => {
     const { arrange, context, state } = arranged()
     const outcome = await executeAgentIntent(
       call('move_on_scene', { item: 'buddy', place: 'top-left' }),
@@ -406,7 +406,7 @@ describe('move_on_scene (plan 209 S11b, D22)', () => {
     }
     expect(outcome).toMatchObject({
       ok: true,
-      message: 'Moved Buddy to the top left.',
+      message: 'Moved Sidekick to the top left.',
       result: {
         item: 'buddy',
         rects: {
@@ -597,7 +597,7 @@ describe('a move answers from what it saved, not a re-read (review fix #7)', () 
     return { arrange, context: { arrange } as unknown as StudioActionContext }
   }
 
-  it('lists what Buddy covers at its new place', async () => {
+  it('lists what Sidekick covers at its new place', async () => {
     // Buddy on stream, at the bottom right over the camera.
     const onStream = snapshot({
       overlayLayout: {
@@ -614,7 +614,7 @@ describe('a move answers from what it saved, not a re-read (review fix #7)', () 
     // A re-read would still see Buddy over the camera at the bottom right.
     expect(outcome).toMatchObject({
       ok: true,
-      message: 'Moved Buddy to the bottom left. Now covers: Highlight, Sponsor.',
+      message: 'Moved Sidekick to the bottom left. Now covers: Highlight, Sponsor.',
       result: {
         rects: { horizontal: toSceneRect(overlaySnapRect('buddy', 'horizontal', 'bottom-left')) },
         overlaps: [
@@ -741,8 +741,8 @@ describe('set_scene_item and get_scene_layout (plan 209 S11b)', () => {
       )
     ).toEqual({
       ok: true,
-      message: 'Buddy shows on stream. Buddy stays out of the recording.',
-      result: { item: 'buddy', name: 'Buddy', showOnStream: true, showInRecording: false }
+      message: 'Sidekick shows on stream. Sidekick stays out of the recording.',
+      result: { item: 'buddy', name: 'Sidekick', showOnStream: true, showInRecording: false }
     })
     expect(state().overlayLayout.buddy).toMatchObject({
       showOnStream: true,
@@ -794,7 +794,7 @@ describe('set_scene_item and get_scene_layout (plan 209 S11b)', () => {
       rects: { horizontal: { x: 0.7, y: 0.7, width: 0.28125, height: 0.28125 } }
     })
     expect(result.items[4]).toMatchObject({
-      name: 'Buddy',
+      name: 'Sidekick',
       showOnStream: false,
       rects: {
         horizontal: toSceneRect(DEFAULT_OVERLAY_LAYOUT.buddy.horizontal),

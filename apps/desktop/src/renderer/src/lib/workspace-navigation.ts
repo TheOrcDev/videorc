@@ -32,7 +32,7 @@ export type WorkspaceNavigation =
 export function openWorkspaceTab(tab: 'settings', settingsTab?: SettingsTabId): void
 /** Opens the Buddy page (id `ai`) on `buddyTab`, or on the tab used last. */
 export function openWorkspaceTab(tab: 'ai', buddyTab?: BuddyTabId): void
-/** Opens Livestream on `livestreamView` (Setup or Upcoming), or on the view used last. */
+/** Opens Destinations on `livestreamView` (Setup or Upcoming), or on the view used last. */
 export function openWorkspaceTab(tab: 'live', livestreamView?: LivestreamViewId): void
 /** Opens the Library, about `sessionId` when there is one. */
 export function openWorkspaceTab(tab: 'library', sessionId?: string): void

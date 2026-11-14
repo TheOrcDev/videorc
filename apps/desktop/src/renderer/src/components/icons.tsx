@@ -134,6 +134,7 @@ type _RegistryIconProps = _AssertIconProps<
     | 'TwitchLogo'
     | 'UploadSimple'
     | 'UserCircle'
+    | 'UserSound'
     | 'VideoCamera'
     | 'Warning'
     | 'WarningCircle'
@@ -148,8 +149,11 @@ type _RegistryIconProps = _AssertIconProps<
 /**
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
- * from the pre-audit set (see the audit table in the Nucleo plan). The Buddy
- * tab's slot is `BuddyIcon`, the Buddy emblem, below.
+ * from the pre-audit set (see the audit table in the Nucleo plan).
+ * `BuddyPageIcon` is the Buddy page's row in the sidebar and ⌘K's page list
+ * (plan 235 D7, the owner's pick): a plain glyph like its neighbours, a
+ * co-host that speaks. The slot is named for the page, so renaming Buddy keeps
+ * it. The Buddy artwork itself is `BuddyIcon`, below.
  */
 export {
   VideoCamera as StudioIcon,
@@ -157,6 +161,7 @@ export {
   SquaresFour as SceneIcon,
   ImageSquare as AssetsIcon,
   Broadcast as LivestreamIcon,
+  UserSound as BuddyPageIcon,
   ClosedCaptioning as CaptionsIcon,
   Record as OutputIcon,
   FilmReel as LibraryIcon,
@@ -389,8 +394,9 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
 /**
  * Buddy's mark (plans 149 and 164): the owner's stone golem, the full-colour
  * artwork in `assets/brand/buddy/`, at icon size. The owner's call: it appears
- * as its actual image everywhere, the sidebar, the Stream Manager, the Studio
- * session row, popovers and menus, never as a redrawn glyph.
+ * as its actual image wherever Buddy itself shows (the Stream Manager, the
+ * Studio session row, popovers and menus), never as a redrawn glyph. The
+ * sidebar's row is the page, so it wears `BuddyPageIcon` (plan 235 D7).
  *
  * It stays an `<svg>` so every slot that sizes and lays out icons through
  * `svg` selectors (`[&_svg]:size-4`, the Alert's `has-[>svg]` grid) treats it
@@ -402,9 +408,9 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
  * ignored, and `currentColor` never tints it: the red iris is the brand.
  *
  * `picture` swaps the golem for the streamer's own Buddy (its idle pose, a
- * managed URL from `buddyPictureUrl`): the slots that stand for *their* Buddy,
- * the Buddy page's sidebar row and its ⌘K entries, wear it through
- * `OwnBuddyIcon`. Null or absent keeps the golem.
+ * managed URL from `buddyPictureUrl`): the slots that stand for *their*
+ * Buddy, ⌘K's Buddy tab rows, wear it through `OwnBuddyIcon`. Null or absent
+ * keeps the golem.
  */
 export const BuddyIcon: ComponentType<AppIconProps & { picture?: string | null }> = ({
   size,
