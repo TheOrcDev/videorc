@@ -95,6 +95,9 @@ struct KeyParams {
     // CHROMA_KEY_EDGE_DESPILL_*: (fade_rad, proximity_gain, reserved,
     // reserved).
     float4 edge_despill;
+    // The speck cleanup, mirroring scene_geometry's CHROMA_KEY_SPECK_*:
+    // (cell in keyed texels, ring in cells, kept_alpha, reserved).
+    float4 speck;
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
@@ -290,6 +293,76 @@ kernel void k_key_reduce(texture2d<float, access::read> cam [[texture(0)]],
     }
     reduced.write(sum / max(count, 1.0), gid);
 }
+// The speck cleanup (scene_geometry::ChromaKeySpecks) between the two
+// passes, one thread per cell of speck.x x speck.x keyed texels. Step 1: a
+// cell is kept (1) when any of its texels has alpha above speck.z.
+kernel void k_speck_cover(texture2d<float, access::read> reduced [[texture(0)]],
+                          texture2d<float, access::write> cover [[texture(1)]],
+                          constant KeyParams& p [[buffer(0)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= cover.get_width() || gid.y >= cover.get_height()) {
+        return;
+    }
+    int cell = max(int(p.speck.x + 0.5), 1);
+    int2 size = int2(reduced.get_width(), reduced.get_height());
+    int2 origin = int2(gid) * cell;
+    float most = 0.0;
+    for (int j = 0; j < cell && origin.y + j < size.y; ++j) {
+        for (int i = 0; i < cell && origin.x + i < size.x; ++i) {
+            most = max(most, reduced.read(uint2(origin + int2(i, j))).a);
+        }
+    }
+    cover.write(float4(most > p.speck.z ? 1.0 : 0.0), gid);
+}
+// Step 2: a cell's window is enclosed (1) when no cell exactly speck.y cells
+// away (its ring) is kept. Out past the frame counts as kept.
+kernel void k_speck_ring(texture2d<float, access::read> cover [[texture(0)]],
+                         texture2d<float, access::write> enclosed [[texture(1)]],
+                         constant KeyParams& p [[buffer(0)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+    int2 size = int2(cover.get_width(), cover.get_height());
+    if (int(gid.x) >= size.x || int(gid.y) >= size.y) {
+        return;
+    }
+    int ring = max(int(p.speck.y + 0.5), 1);
+    bool clear = true;
+    for (int dy = -ring; dy <= ring && clear; ++dy) {
+        int step = (abs(dy) == ring) ? 1 : 2 * ring;
+        for (int dx = -ring; dx <= ring; dx += step) {
+            int2 at = int2(gid) + int2(dx, dy);
+            if (at.x < 0 || at.y < 0 || at.x >= size.x || at.y >= size.y
+                || cover.read(uint2(at)).r > 0.5) {
+                clear = false;
+                break;
+            }
+        }
+    }
+    enclosed.write(float4(clear ? 1.0 : 0.0), gid);
+}
+// Step 3: a cell is dropped (1) when it lies inside some enclosed window,
+// that is within speck.y - 1 cells of a cell whose ring is clear.
+kernel void k_speck_drop(texture2d<float, access::read> enclosed [[texture(0)]],
+                         texture2d<float, access::write> dropped [[texture(1)]],
+                         constant KeyParams& p [[buffer(0)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+    int2 size = int2(enclosed.get_width(), enclosed.get_height());
+    if (int(gid.x) >= size.x || int(gid.y) >= size.y) {
+        return;
+    }
+    int reach = max(int(p.speck.y + 0.5), 1) - 1;
+    bool drop = false;
+    for (int dy = -reach; dy <= reach && !drop; ++dy) {
+        for (int dx = -reach; dx <= reach; ++dx) {
+            int2 at = int2(gid) + int2(dx, dy);
+            if (at.x >= 0 && at.y >= 0 && at.x < size.x && at.y < size.y
+                && enclosed.read(uint2(at)).r > 0.5) {
+                drop = true;
+                break;
+            }
+        }
+    }
+    dropped.write(float4(drop ? 1.0 : 0.0), gid);
+}
 // scene_geometry::chroma_key_nearness in f32 (plan 233 D1 a): how close a
 // colour is to the key, 1 inside the cone and its band, fading to 0 over
 // edge_despill.x past the band, times the key's saturation eligibility.
@@ -319,13 +392,16 @@ static float key_nearness(float3 color, constant KeyParams& p) {
 // then the camera look. The despill is Spill removal, or more next to the
 // keyed-out area (D1 a): nearness to the key times how keyed-out the picture
 // around the texel is, the alpha over the 5x5 binomial at the keyed
-// texture's spacing (plan 229's nine taps), gained. Premultiplied in and out.
+// texture's spacing (plan 229's nine taps), gained. A texel in a dropped
+// speck cell (k_speck_drop) is keyed out. Premultiplied in and out.
 fragment float4 f_key_finish(VOut in [[stage_in]],
                              texture2d<float> keyed [[texture(0)]],
+                             texture2d<float> specks [[texture(1)]],
                              constant KeyParams& p [[buffer(0)]]) {
     constexpr sampler edge_samp(coord::normalized, address::clamp_to_edge, filter::linear);
     float4 texel = keyed.read(uint2(in.pos.xy));
-    if (texel.a <= 0.0) {
+    uint cell = uint(max(int(p.speck.x + 0.5), 1));
+    if (texel.a <= 0.0 || specks.read(uint2(in.pos.xy) / cell).r > 0.5) {
         return float4(0.0);
     }
     float3 color = texel.rgb / texel.a;
@@ -398,6 +474,9 @@ struct KeyParams {
     camera_look: [f32; 4],
     /// Plan 233 D1 a: (fade_rad, proximity_gain, reserved, reserved).
     edge_despill: [f32; 4],
+    /// The speck cleanup: (cell in keyed texels, ring in cells, kept_alpha,
+    /// reserved).
+    speck: [f32; 4],
 }
 
 /// Per-quad chroma key in shader units, converted once from
@@ -436,9 +515,14 @@ pub(crate) const CHROMA_KEY_NEIGHBOURHOOD_PARAMS: [f32; 4] = [1.2, 5.0 / 16.0, 0
 
 impl GpuChromaKey {
     /// The key pass's parameters for a camera keyed at a `block` × `block`
-    /// reduction (plan 233), with the camera look the pass applies after
-    /// the despill.
-    fn key_params(&self, block: u32, camera_look: Option<[f32; 3]>) -> KeyParams {
+    /// reduction (plan 233) with speck cells of `speck_cell` keyed texels,
+    /// with the camera look the pass applies after the despill.
+    fn key_params(
+        &self,
+        block: u32,
+        speck_cell: usize,
+        camera_look: Option<[f32; 3]>,
+    ) -> KeyParams {
         KeyParams {
             chroma_key: [1.0, self.key_dir_cb, self.key_dir_cr, self.max_angle_rad],
             chroma_key2: [
@@ -452,6 +536,12 @@ impl GpuChromaKey {
             chroma_key_neighbourhood: CHROMA_KEY_NEIGHBOURHOOD_PARAMS,
             camera_look: camera_look_params(camera_look),
             edge_despill: CHROMA_KEY_EDGE_DESPILL_PARAMS,
+            speck: [
+                speck_cell as f32,
+                CHROMA_KEY_SPECK_PARAMS[0],
+                CHROMA_KEY_SPECK_PARAMS[1],
+                0.0,
+            ],
         }
     }
 }
@@ -461,6 +551,23 @@ impl GpuChromaKey {
 /// reason as the floor, and pinned equal by the same compositor test.
 pub(crate) const CHROMA_KEY_EDGE_DESPILL_PARAMS: [f32; 4] =
     [30.0 * std::f32::consts::PI / 180.0, 6.0, 0.0, 0.0];
+
+/// Mirrors scene_geometry's CHROMA_KEY_SPECK_RING and
+/// CHROMA_KEY_SPECK_KEPT_ALPHA as `(ring_cells, kept_alpha)`: mirrored for the
+/// same reason as the floor, and pinned equal by the same compositor test.
+pub(crate) const CHROMA_KEY_SPECK_PARAMS: [f32; 2] = [3.0, 1.0 / 32.0];
+
+/// Mirrors `scene_geometry::chroma_key_speck_cell`: the speck cleanup's cell
+/// in keyed texels, 1/540 of the camera's short side over the block, rounded,
+/// at least 1. Pinned equal by the same compositor test.
+pub(crate) fn gpu_chroma_key_speck_cell(
+    source_width: usize,
+    source_height: usize,
+    block: usize,
+) -> usize {
+    let camera_texels = source_width.min(source_height) as f64 / 540.0;
+    ((camera_texels / block.max(1) as f64).round() as usize).max(1)
+}
 
 /// The shaders' camera look: brightness, contrast, saturation, enabled.
 fn camera_look_params(camera_look: Option<[f32; 3]>) -> [f32; 4] {
@@ -1168,6 +1275,9 @@ pub struct MetalSceneCompositor {
     /// pass 1 a compute kernel, pass 2 a full-quad render.
     key_reduce_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     key_finish_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// The speck cleanup's three kernels between the two passes:
+    /// `k_speck_cover`, `k_speck_ring`, `k_speck_drop`.
+    speck_pipelines: [Retained<ProtocolObject<dyn MTLComputePipelineState>>; 3],
     /// Plan 233: the keyed cameras' textures, per source slot.
     keyed_cameras: Vec<Option<KeyedCameraTexture>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
@@ -1247,6 +1357,10 @@ struct KeyedCameraTexture {
     reduced: Retained<MetalTexture>,
     /// Pass 2's target: what the quad draws.
     finished: Retained<MetalTexture>,
+    /// The speck cleanup's cell (keyed texels) and its three cell grids:
+    /// kept cells, enclosed windows, dropped cells (R8, one texel a cell).
+    speck_cell: usize,
+    speck_cells: [Retained<MetalTexture>; 3],
 }
 
 impl KeyedCameraTexture {
@@ -1661,6 +1775,11 @@ impl MetalSceneCompositor {
             MTLPixelFormat::BGRA8Unorm,
         )?;
         let key_reduce_pipeline = build_compute_pipeline(&device, &library, "k_key_reduce")?;
+        let speck_pipelines = [
+            build_compute_pipeline(&device, &library, "k_speck_cover")?,
+            build_compute_pipeline(&device, &library, "k_speck_ring")?,
+            build_compute_pipeline(&device, &library, "k_speck_drop")?,
+        ];
         let key_finish_pipeline = build_pipeline_from(
             &device,
             &library,
@@ -1687,6 +1806,7 @@ impl MetalSceneCompositor {
             blend_pipeline,
             key_reduce_pipeline,
             key_finish_pipeline,
+            speck_pipelines,
             keyed_cameras: Vec::new(),
             sampler,
             linear_sampler,
@@ -2232,15 +2352,26 @@ impl MetalSceneCompositor {
         let block = 1usize << level.min(31);
         let width = source.width.div_ceil(block).max(1);
         let height = source.height.div_ceil(block).max(1);
-        // Pass 1 is a compute kernel writing `reduced`; pass 2 renders into
-        // `finished`; the quad samples `finished`.
+        let speck_cell = gpu_chroma_key_speck_cell(source.width, source.height, block);
+        // Pass 1 is a compute kernel writing `reduced`; the speck kernels
+        // write their cell grids; pass 2 renders into `finished`; the quad
+        // samples `finished`.
         let usage = MTLTextureUsage::RenderTarget
             | MTLTextureUsage::ShaderRead
             | MTLTextureUsage::ShaderWrite;
-        let mut slot = match self.keyed_cameras[index]
-            .take()
-            .filter(|cached| cached.width == width && cached.height == height)
-        {
+        let make_speck_cells = || {
+            make_texture_with_format(
+                &self.device,
+                width.div_ceil(speck_cell),
+                height.div_ceil(speck_cell),
+                MTLPixelFormat::R8Unorm,
+                MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
+            )
+            .ok_or(())
+        };
+        let mut slot = match self.keyed_cameras[index].take().filter(|cached| {
+            cached.width == width && cached.height == height && cached.speck_cell == speck_cell
+        }) {
             Some(slot) => slot,
             None => KeyedCameraTexture {
                 content_key: None,
@@ -2267,6 +2398,12 @@ impl MetalSceneCompositor {
                     usage,
                 )
                 .ok_or(())?,
+                speck_cell,
+                speck_cells: [
+                    make_speck_cells()?,
+                    make_speck_cells()?,
+                    make_speck_cells()?,
+                ],
             },
         };
         let camera = match keyed_slot_id(source) {
@@ -2278,7 +2415,7 @@ impl MetalSceneCompositor {
                 .map(|cached| &*cached.texture),
         }
         .ok_or(())?;
-        let params = key.key_params(block as u32, source.camera_look);
+        let params = key.key_params(block as u32, speck_cell, source.camera_look);
         encode_key_reduce(
             command_buffer,
             &self.key_reduce_pipeline,
@@ -2287,11 +2424,18 @@ impl MetalSceneCompositor {
             &params,
             block,
         )?;
+        encode_speck_passes(
+            command_buffer,
+            &self.speck_pipelines,
+            &slot.reduced,
+            &slot.speck_cells,
+            &params,
+        )?;
         encode_key_pass(
             &self.device,
             command_buffer,
             &self.key_finish_pipeline,
-            &slot.reduced,
+            &[&slot.reduced, &slot.speck_cells[2]],
             &slot.finished,
             &params,
         )?;
@@ -3097,13 +3241,13 @@ fn make_texture_with_format(
     device.newTextureWithDescriptor(&descriptor)
 }
 
-/// Plan 233: one key pass, a full-quad draw of `pipeline` reading `input`
-/// into the whole of `target`.
+/// Plan 233: one key pass, a full-quad draw of `pipeline` reading `inputs`
+/// (fragment textures 0, 1, …) into the whole of `target`.
 fn encode_key_pass(
     device: &MetalDevice,
     command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
     pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-    input: &MetalTexture,
+    inputs: &[&MetalTexture],
     target: &MetalTexture,
     params: &KeyParams,
 ) -> Result<(), ()> {
@@ -3129,7 +3273,9 @@ fn encode_key_pass(
         let params_ptr = NonNull::new(std::ptr::from_ref(params) as *mut c_void)?;
         unsafe {
             encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
-            encoder.setFragmentTexture_atIndex(Some(input), 0);
+            for (slot, input) in inputs.iter().enumerate() {
+                encoder.setFragmentTexture_atIndex(Some(*input), slot);
+            }
             encoder.setFragmentBytes_length_atIndex(
                 params_ptr,
                 std::mem::size_of::<KeyParams>(),
@@ -3339,6 +3485,47 @@ fn encode_key_reduce(
     };
     encoder.endEncoding();
     encoded
+}
+
+/// The speck cleanup between the passes: `k_speck_cover` (pass 1's `reduced`
+/// into the kept cells), `k_speck_ring` (into the enclosed windows) and
+/// `k_speck_drop` (into the dropped cells), one thread per cell. One serial
+/// compute encoder, so each dispatch sees the one before it.
+fn encode_speck_passes(
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    pipelines: &[Retained<ProtocolObject<dyn MTLComputePipelineState>>; 3],
+    reduced: &MetalTexture,
+    cells: &[Retained<MetalTexture>; 3],
+    params: &KeyParams,
+) -> Result<(), ()> {
+    let Some(params_ptr) = NonNull::new(std::ptr::from_ref(params) as *mut c_void) else {
+        return Err(());
+    };
+    let encoder = command_buffer.computeCommandEncoder().ok_or(())?;
+    let inputs: [&MetalTexture; 3] = [reduced, &cells[0], &cells[1]];
+    let grid = MTLSize {
+        width: cells[0].width().div_ceil(8),
+        height: cells[0].height().div_ceil(8),
+        depth: 1,
+    };
+    for ((pipeline, input), output) in pipelines.iter().zip(inputs).zip(cells.iter()) {
+        encoder.setComputePipelineState(pipeline);
+        unsafe {
+            encoder.setTexture_atIndex(Some(input), 0);
+            encoder.setTexture_atIndex(Some(output), 1);
+            encoder.setBytes_length_atIndex(params_ptr, std::mem::size_of::<KeyParams>(), 0);
+        }
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(
+            grid,
+            MTLSize {
+                width: 8,
+                height: 8,
+                depth: 1,
+            },
+        );
+    }
+    encoder.endEncoding();
+    Ok(())
 }
 
 /// A pipeline of `v_main` and the fragment function `fragment` into
@@ -4024,7 +4211,13 @@ mod tests {
         assert_eq!(key_reduce_tile(1, 16), 4);
         assert_eq!(key_reduce_tile(8, 1024), 4);
         assert_eq!(key_reduce_tile(32, 1024), 1);
-        for pass in ["kernel void k_key_reduce(", "fragment float4 f_key_finish("] {
+        for pass in [
+            "kernel void k_key_reduce(",
+            "kernel void k_speck_cover(",
+            "kernel void k_speck_ring(",
+            "kernel void k_speck_drop(",
+            "fragment float4 f_key_finish(",
+        ] {
             assert!(SHADER_SOURCE.contains(pass), "{pass} missing");
         }
     }

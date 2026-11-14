@@ -885,6 +885,131 @@ pub fn chroma_key_reduction_level(
 /// draws a camera 64 times smaller than it is. The Metal mirror pins it.
 pub const CHROMA_KEY_REDUCTION_LEVEL_MAX: u32 = 5;
 
+/// Speck cleanup: the key drops a tiny kept patch that the keyed-out screen
+/// surrounds on every side.
+///
+/// The owner's recording of 2026-11-14 had a teal dot ("a small hole") in the
+/// same place on the left of every frame, whatever the background. The raw
+/// camera has a blue mark on the green screen there, about 5 × 5 texels of a
+/// 4K frame (`(49,109,171)` on a `(35,128,52)` screen). Its judged colour
+/// sits far outside the cone, so the key kept it, and the edge despill turned
+/// it teal. Nothing the subject brings is that small and that alone: hair and
+/// the mic cable reach back to the subject, and the cleanup only removes
+/// patches enclosed by keyed-out screen. It never fills holes, so the screen
+/// between fingers stays see-through.
+///
+/// The rule works on CELLS of the keyed picture: a cell is kept when any of
+/// its texels has alpha above [`CHROMA_KEY_SPECK_KEPT_ALPHA`]. Around a cell,
+/// the RING is the cells exactly [`CHROMA_KEY_SPECK_RING`] cells away
+/// (Chebyshev distance); the WINDOW is the cells nearer than that. A cell
+/// whose ring holds no kept cell has an enclosed window: nothing kept inside
+/// can reach anything outside without crossing the ring. Every cell inside
+/// some enclosed window is dropped, so a patch goes whole or not at all. A
+/// patch up to ring × cell texels across always goes (12 texels of a 4K
+/// camera); up to (2 × ring − 1) cells when it sits well on the grid; never
+/// anything bigger.
+///
+/// The cell is a share of the camera frame, about [`CHROMA_KEY_SPECK_CELL_SHARE`]
+/// of its short side (4 texels of a 4K camera, 2 of a 1080p one), in keyed
+/// texels at the reduction level (at least 1), so the preview and the
+/// recording drop the same patches. Out past the frame counts as kept: what
+/// the frame's edge cuts may be part of something bigger, so a patch in the
+/// outermost cells always stays, and so does every picture under seven cells
+/// across. The Metal key pass mirrors all three constants; a compositor test
+/// pins them.
+pub const CHROMA_KEY_SPECK_CELL_SHARE: f64 = 1.0 / 540.0;
+pub const CHROMA_KEY_SPECK_RING: usize = 3;
+pub const CHROMA_KEY_SPECK_KEPT_ALPHA: f64 = 1.0 / 32.0;
+
+/// The speck cleanup's cell side in keyed texels for a `source_width` ×
+/// `source_height` camera keyed at `block` × `block` reduction: the share of
+/// the short side in camera texels over the block, rounded, at least 1.
+pub fn chroma_key_speck_cell(source_width: u32, source_height: u32, block: u32) -> usize {
+    let short_side = f64::from(source_width.min(source_height));
+    let camera_texels = short_side * CHROMA_KEY_SPECK_CELL_SHARE;
+    ((camera_texels / f64::from(block.max(1))).round() as usize).max(1)
+}
+
+/// Which keyed texels of a `width` × `height` keyed picture the speck
+/// cleanup drops ([`CHROMA_KEY_SPECK_CELL_SHARE`]), from each texel's alpha
+/// (`alpha_at(x, y)`, 0..=1) with cells of `cell` × `cell` texels. The CPU
+/// keyed plane uses it as is; the Metal key pass mirrors its three steps (kept
+/// cells, enclosed windows, dropped cells) in three small kernels.
+pub struct ChromaKeySpecks {
+    cell: usize,
+    cells_width: usize,
+    dropped: Vec<bool>,
+}
+
+impl ChromaKeySpecks {
+    pub fn find(
+        width: usize,
+        height: usize,
+        cell: usize,
+        alpha_at: impl Fn(usize, usize) -> f32,
+    ) -> Self {
+        let cell = cell.max(1);
+        let (cells_width, cells_height) = (width.div_ceil(cell), height.div_ceil(cell));
+        let threshold = CHROMA_KEY_SPECK_KEPT_ALPHA as f32;
+        let mut kept = vec![false; cells_width * cells_height];
+        for y in 0..height {
+            for x in 0..width {
+                if alpha_at(x, y) > threshold {
+                    kept[(y / cell) * cells_width + x / cell] = true;
+                }
+            }
+        }
+        let ring = CHROMA_KEY_SPECK_RING as isize;
+        let inside = |x: isize, y: isize| -> bool {
+            x >= 0 && y >= 0 && (x as usize) < cells_width && (y as usize) < cells_height
+        };
+        // Out past the frame is kept for the ring (it may hide more of the
+        // patch) and never an enclosed window.
+        let kept_at = |x: isize, y: isize| -> bool {
+            !inside(x, y) || kept[y as usize * cells_width + x as usize]
+        };
+        let mut enclosed = vec![false; cells_width * cells_height];
+        for cy in 0..cells_height as isize {
+            for cx in 0..cells_width as isize {
+                let ring_is_clear = (-ring..=ring).all(|dy| {
+                    let step = if dy.abs() == ring {
+                        1
+                    } else {
+                        (2 * ring) as usize
+                    };
+                    (-ring..=ring)
+                        .step_by(step)
+                        .all(|dx| !kept_at(cx + dx, cy + dy))
+                });
+                enclosed[cy as usize * cells_width + cx as usize] = ring_is_clear;
+            }
+        }
+        let reach = ring - 1;
+        let mut dropped = vec![false; cells_width * cells_height];
+        for cy in 0..cells_height as isize {
+            for cx in 0..cells_width as isize {
+                dropped[cy as usize * cells_width + cx as usize] = (-reach..=reach).any(|dy| {
+                    (-reach..=reach).any(|dx| {
+                        let (x, y) = (cx + dx, cy + dy);
+                        inside(x, y) && enclosed[y as usize * cells_width + x as usize]
+                    })
+                });
+            }
+        }
+        Self {
+            cell,
+            cells_width,
+            dropped,
+        }
+    }
+
+    /// Whether keyed texel (`x`, `y`) is dropped.
+    #[inline]
+    pub fn drops(&self, x: usize, y: usize) -> bool {
+        self.dropped[(y / self.cell) * self.cells_width + x / self.cell]
+    }
+}
+
 /// Spill suppression on kept pixels: pull the key channel down toward the
 /// other channels' max, scaled by `spill`. Only pixels where the key channel
 /// DOMINATES both others move, so neutral/yellow/cyan subject tones survive.
@@ -1922,6 +2047,144 @@ mod tests {
             chroma_key_reduction_level(f64::NAN, 2160.0, 720.0, 405.0),
             0
         );
+    }
+
+    /// The speck cleanup's cell is about 1/540 of the camera's short side,
+    /// in keyed texels at the reduction level, never under one.
+    #[test]
+    fn chroma_key_speck_cell_is_a_share_of_the_short_side() {
+        assert_eq!(chroma_key_speck_cell(3840, 2160, 1), 4, "4K at 1:1");
+        assert_eq!(chroma_key_speck_cell(3840, 2160, 2), 2);
+        assert_eq!(
+            chroma_key_speck_cell(3840, 2160, 4),
+            1,
+            "4K in the Large slot"
+        );
+        assert_eq!(chroma_key_speck_cell(3840, 2160, 32), 1);
+        assert_eq!(chroma_key_speck_cell(1920, 1080, 1), 2, "1080p at 1:1");
+        assert_eq!(chroma_key_speck_cell(1280, 720, 1), 1);
+        assert_eq!(
+            chroma_key_speck_cell(1080, 1920, 1),
+            2,
+            "portrait: short side"
+        );
+        assert_eq!(chroma_key_speck_cell(0, 0, 0), 1);
+    }
+
+    /// A keyed picture as alpha rows, 0 = keyed out.
+    struct AlphaGrid {
+        width: usize,
+        alpha: Vec<f32>,
+    }
+
+    impl AlphaGrid {
+        fn new(width: usize, height: usize) -> Self {
+            Self {
+                width,
+                alpha: vec![0.0; width * height],
+            }
+        }
+
+        fn fill(&mut self, xs: std::ops::Range<usize>, ys: std::ops::Range<usize>, alpha: f32) {
+            for y in ys {
+                for x in xs.clone() {
+                    self.alpha[y * self.width + x] = alpha;
+                }
+            }
+        }
+
+        fn specks(&self, cell: usize) -> ChromaKeySpecks {
+            let height = self.alpha.len() / self.width;
+            ChromaKeySpecks::find(self.width, height, cell, |x, y| {
+                self.alpha[y * self.width + x]
+            })
+        }
+    }
+
+    fn dropped_in(
+        specks: &ChromaKeySpecks,
+        xs: std::ops::Range<usize>,
+        ys: std::ops::Range<usize>,
+    ) -> usize {
+        ys.flat_map(|y| xs.clone().map(move |x| (x, y)))
+            .filter(|&(x, y)| specks.drops(x, y))
+            .count()
+    }
+
+    /// The owner's speck (2026-11-14): a 5 × 5 patch alone on the screen
+    /// goes, and so do a 12 × 12 patch (ring × cell, the size that always
+    /// goes) and a speck one cell in from the frame's edge. The subject, a
+    /// blob bigger than a window, thin strands (straight and diagonal) that
+    /// reach back to the subject, a dot right next to the subject and a speck
+    /// the frame's edge cuts all stay.
+    #[test]
+    fn chroma_key_specks_drop_lone_patches_and_keep_what_reaches_the_subject() {
+        let (width, height, cell) = (160, 96, 4);
+        let mut grid = AlphaGrid::new(width, height);
+        grid.fill(112..160, 0..96, 1.0); // the subject
+        grid.fill(20..25, 60..65, 1.0); // the owner's speck
+        grid.fill(20..44, 8..32, 1.0); // a blob bigger than a window
+        grid.fill(70..82, 20..32, 0.8); // ring × cell across
+        grid.fill(0..3, 0..3, 1.0); // a speck the frame's corner cuts
+        grid.fill(5..8, 86..89, 1.0); // a speck one cell in from the edge
+        grid.fill(50..112, 80..81, 0.5); // a one-texel strand to the subject
+        for step in 0..30 {
+            grid.fill(111 - step..112 - step, 50 + step..51 + step, 1.0); // diagonal
+        }
+        grid.fill(108..110, 8..10, 1.0); // a dot two texels off the subject
+        let specks = grid.specks(cell);
+        assert_eq!(dropped_in(&specks, 20..25, 60..65), 25, "the owner's speck");
+        assert_eq!(dropped_in(&specks, 70..82, 20..32), 144, "ring × cell");
+        assert_eq!(dropped_in(&specks, 5..8, 86..89), 9, "one cell in");
+        assert_eq!(dropped_in(&specks, 0..3, 0..3), 0, "the corner speck");
+        assert_eq!(dropped_in(&specks, 112..160, 0..96), 0, "the subject");
+        assert_eq!(dropped_in(&specks, 20..44, 8..32), 0, "the blob");
+        assert_eq!(dropped_in(&specks, 50..112, 80..81), 0, "the strand");
+        for step in 0..30 {
+            assert!(
+                !specks.drops(111 - step, 50 + step),
+                "the diagonal strand at step {step}"
+            );
+        }
+        assert_eq!(
+            dropped_in(&specks, 108..110, 8..10),
+            0,
+            "the dot by the subject"
+        );
+    }
+
+    /// A patch goes whole or not at all: 16 texels across (4 cells) fit
+    /// one enclosed window and go whole even with the subject close on one
+    /// side; 24 across (6 cells) fit no window, and no part of them goes.
+    #[test]
+    fn chroma_key_specks_drop_a_patch_whole_or_not_at_all() {
+        let (width, height, cell) = (128, 64, 4);
+        let mut fits = AlphaGrid::new(width, height);
+        fits.fill(60..128, 0..64, 1.0);
+        fits.fill(40..56, 30..34, 1.0);
+        assert_eq!(dropped_in(&fits.specks(cell), 40..56, 30..34), 64);
+        let mut too_wide = AlphaGrid::new(width, height);
+        too_wide.fill(100..128, 0..64, 1.0);
+        too_wide.fill(40..64, 30..34, 1.0);
+        assert_eq!(dropped_in(&too_wide.specks(cell), 40..64, 30..34), 0);
+    }
+
+    /// Faint texels (alpha at or under 1/32) never keep a cell, so they never
+    /// shield a speck; a fully kept picture and one under seven cells across
+    /// (the old fixtures' tiny cameras) are left as they are.
+    #[test]
+    fn chroma_key_specks_ignore_faint_texels_and_flat_pictures() {
+        let mut grid = AlphaGrid::new(64, 64);
+        grid.fill(30..34, 30..34, 1.0);
+        // A faint row through the speck's ring (cell row 12 of 2-texel cells).
+        grid.fill(0..64, 24..25, CHROMA_KEY_SPECK_KEPT_ALPHA as f32);
+        assert_eq!(dropped_in(&grid.specks(2), 30..34, 30..34), 16);
+        let mut kept = AlphaGrid::new(64, 64);
+        kept.fill(0..64, 0..64, 1.0);
+        assert_eq!(dropped_in(&kept.specks(4), 0..64, 0..64), 0);
+        let mut tiny = AlphaGrid::new(6, 6);
+        tiny.fill(3..6, 0..6, 1.0);
+        assert_eq!(dropped_in(&tiny.specks(1), 0..6, 0..6), 0);
     }
 
     /// Plan 233 D1 a: nearness is 1 inside the cone and its band, fades out
