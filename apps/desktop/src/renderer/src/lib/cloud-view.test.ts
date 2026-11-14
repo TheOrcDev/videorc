@@ -81,10 +81,11 @@ describe('cloud copy (plan 184)', () => {
     expect(cloudFallbackMessage('cloud-show-limit')).toBe(
       "You've started this hour's Videorc Cloud shows. You're streaming directly from this computer for now."
     )
-    // Plan 222 D5 and D6: a quality the first nodes don't carry, and a
-    // remembered show the web could not be asked about.
+    // Plan 222 D5 and D6: a quality the cloud doesn't carry (1080p60 on a
+    // node, 1080p30 managed, plan 234 D12: true for both), and a remembered
+    // show the web could not be asked about.
     expect(cloudFallbackMessage('cloud-quality')).toBe(
-      "Videorc Cloud carries up to 1080p60 for now. You're streaming directly from this computer."
+      "Videorc Cloud can't carry this stream's quality yet. You're streaming directly from this computer."
     )
     expect(cloudFallbackMessage('cloud-unchecked')).toBe(
       "Videorc couldn't check your last cloud show. You're streaming directly from this computer."
@@ -97,26 +98,57 @@ describe('cloud copy (plan 184)', () => {
     expect(cloudLostToast(lost, lost)).toBeNull()
   })
 
-  it('warns once an hour before the 12-hour cap (D18)', () => {
+  it('warns once an hour before the 12-hour cap on a node (D18)', () => {
     const show = {
       id: 'sh_0123456789abcdefghijkl',
       nodeId: 'eu-hel-1',
+      // A node show's expiresAt is create + 12 h + the hold: not its end.
+      expiresAt: '2026-11-14T12:30:00.000Z',
       resumable: false
     }
+    const now = Date.parse('2026-11-14T12:10:00.000Z')
     const at = (liveSeconds: number, id = show.id) =>
       status({ phase: 'live', show: { ...show, id }, liveSeconds })
-    expect(cloudShowCapToast(null, at(10 * 3600))).toBeNull()
-    expect(cloudShowCapToast(at(39_599), at(39_600))).toBe(
-      'Your livestream ends in 60 min. A Videorc Cloud show runs 12 hours at most.'
+    expect(cloudShowCapToast(null, at(10 * 3600), now)).toBeNull()
+    expect(cloudShowCapToast(at(39_599), at(39_600), now)).toBe(
+      'Your livestream ends in 60 min. A Videorc Cloud show runs about 12 hours at most.'
     )
-    expect(cloudShowCapToast(at(39_600), at(40_000))).toBeNull()
+    expect(cloudShowCapToast(at(39_600), at(40_000), now)).toBeNull()
     // A relaunch that meets a show already past 11 hours says it once.
-    expect(cloudShowCapToast(null, at(42_000))).toBe(
-      'Your livestream ends in 20 min. A Videorc Cloud show runs 12 hours at most.'
+    expect(cloudShowCapToast(null, at(42_000), now)).toBe(
+      'Your livestream ends in 20 min. A Videorc Cloud show runs about 12 hours at most.'
     )
     // A new show is news again; no show, no warning.
     expect(cloudShowCapToast(at(40_000), at(40_000, 'sh_zzzzzzzzzzzzzzzzzzzzzz'))).not.toBeNull()
     expect(cloudShowCapToast(null, status({ liveSeconds: 40_000 }))).toBeNull()
+  })
+
+  it("counts down to a managed show's expiresAt, an hour before it, once (plan 234)", () => {
+    // The managed show ends 11 h 55 min after its create, which comes before
+    // the first frame: its on-air clock would overstate the time left.
+    const show = {
+      id: 'sh_managedcapwarning0001',
+      nodeId: 'livekit',
+      createdAt: '2026-11-14T00:00:00.000Z',
+      expiresAt: '2026-11-14T11:55:00.000Z',
+      resumable: false
+    }
+    const ends = Date.parse(show.expiresAt)
+    const at = (liveSeconds: number, id = show.id) =>
+      status({ phase: 'live', show: { ...show, id }, liveSeconds })
+    // On air 11 h already, but 2 h before the end: no warning yet.
+    expect(cloudShowCapToast(null, at(39_600), ends - 2 * 3_600_000)).toBeNull()
+    // An hour before the end, with an on-air clock that never reached 11 h.
+    expect(cloudShowCapToast(at(38_000), at(38_100), ends - 3_600_000)).toBe(
+      'Your livestream ends in 60 min. A Videorc Cloud show runs about 12 hours at most.'
+    )
+    expect(cloudShowCapToast(at(38_100), at(38_400), ends - 3_300_000)).toBeNull()
+    // Another managed show, met 20 min before its end, says it once too.
+    const other = at(40_000, 'sh_managedcapwarning0002')
+    expect(cloudShowCapToast(null, other, ends - 1_200_000)).toBe(
+      'Your livestream ends in 20 min. A Videorc Cloud show runs about 12 hours at most.'
+    )
+    expect(cloudShowCapToast(other, other, ends - 1_100_000)).toBeNull()
   })
 
   it('says a runner restart once, and again only if the platforms stay dark', () => {
