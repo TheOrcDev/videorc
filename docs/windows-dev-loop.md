@@ -147,8 +147,9 @@ pnpm smoke:soundboard     # ~1.5 min: idle, on air, with System audio
 
 Both run with no microphone (the Studio's None) and play a 1 kHz tone through
 the default output (a pre-armed PowerShell `Media.SoundPlayer`), so run them
-somewhere quiet: they record what the computer plays. Toggle-on gets 30 ms of
-Windows attach latency on top of the macOS gate until #1319 is fixed.
+somewhere quiet: they record what the computer plays. Toggle-on is held to the
+macOS gate: the loopback capture waits until it has audio 50 ms past its start
+before it joins the mix (#1319).
 
 Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):
