@@ -15,7 +15,6 @@ import {
   type TalkShowContextValue
 } from '@/lib/talk-show-context'
 import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-room'
-import { isManagedShow } from '@/lib/talk-show-managed'
 
 // The host's room, from the Studio's side (plan 224 C-G4). The backend owns
 // the show and the room's facts (`cloud.state`); this hook owns the renderer's
@@ -359,8 +358,11 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       setMonitor: async (enabled) => {
         // Plan 234 D6: a managed show has no return to subscribe to or to
         // ask for; its Program monitor draws the stage.
-        if (isManagedShow(cloudStatusRef.current)) return
-        clientRef.current?.setMonitor(enabled)
+        const status = cloudStatusRef.current
+        const roomClient = clientRef.current
+        const { isManagedShow } = await import('@/lib/talk-show-managed')
+        if (isManagedShow(status)) return
+        roomClient?.setMonitor(enabled)
         await call('cloud.return.set', { open: enabled }, 'show the Program monitor for').catch(
           () => {}
         )

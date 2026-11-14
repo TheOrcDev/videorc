@@ -1,17 +1,95 @@
 import type { BackendClient } from '@/backendClient'
 
-import type { CloudStatus } from './backend'
-import { CLOUD_TOAST_ID, formatCloudCountdown } from './cloud-toasts'
+import type { CloudSettingsPatch, CloudStatus, CloudTestOutput } from './backend'
+import {
+  CLOUD_TOAST_ID,
+  cloudFallbackToast,
+  cloudLostToast,
+  cloudRestartToast,
+  cloudShowCapToast,
+  formatCloudCountdown
+} from './cloud-toasts'
 import { requestCloudSectionFocus } from './cloud-section-focus'
 import { toast } from './toast'
+import { toastUserError } from './user-error'
 import { openWorkspaceTab } from './workspace-navigation'
 
-// Videorc Cloud's rarer notices (plan 222 U1, U5): the once-per-account
-// "Videorc Cloud is on" and the once-per-show "past this month's cloud
-// hours". The Studio provider imports this module only when one is due, so
-// none of it rides in the eager bundle (the renderer asset budget). The
-// focus request it makes lives in `cloud-section-focus.ts`, which the
-// Livestream section imports without this module's app-wide imports.
+// Videorc Cloud's notices and user actions: loaded with the first cloud
+// status or action, so the dispatch for plan 234's managed-show cap and
+// quality fallback stays beside its copy, outside the eager provider. The
+// focus request lives in `cloud-section-focus.ts`, which the Livestream
+// section imports without this module's app-wide imports.
+
+/** The provider's status notifications, in their shared toast's priority order. */
+export function toastCloudStatus(previous: CloudStatus | null, next: CloudStatus): void {
+  const fallback = cloudFallbackToast(previous, next)
+  if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
+  const lost = cloudLostToast(previous, next)
+  if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
+  const restarted = cloudRestartToast(previous, next)
+  if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
+  const cap = cloudShowCapToast(previous, next)
+  if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
+  // Plan 222 U5: past the month's hours is news, never a cut (D18).
+  if (next.allowancePast) toastCloudAllowancePast(previous, next)
+}
+
+type CommitCloudStatus = (status: CloudStatus) => void
+
+export async function setCloudSettings(
+  client: BackendClient,
+  patch: CloudSettingsPatch,
+  commit: CommitCloudStatus
+): Promise<void> {
+  try {
+    commit(await client.requestTyped('cloud.settings.set', patch))
+  } catch (error) {
+    toastUserError(
+      error,
+      { action: 'save', object: 'the Videorc Cloud setting' },
+      { id: CLOUD_TOAST_ID }
+    )
+  }
+}
+
+export async function refreshCloudAllowance(
+  client: BackendClient,
+  commit: CommitCloudStatus
+): Promise<void> {
+  try {
+    commit(await client.requestTyped('cloud.allowance.refresh'))
+  } catch {
+    // The section keeps the hours it last had; signed out says so itself.
+  }
+}
+
+export async function endCloudShow(
+  client: BackendClient,
+  commit: CommitCloudStatus
+): Promise<void> {
+  try {
+    commit(await client.requestTyped('cloud.show.end'))
+  } catch (error) {
+    toastUserError(
+      error,
+      { action: 'end', object: 'the stream on Videorc Cloud' },
+      { id: CLOUD_TOAST_ID }
+    )
+  }
+}
+
+/** The row shows the test result; only a refused click needs a warning. */
+export async function runCloudTest(
+  client: BackendClient,
+  outputs: CloudTestOutput[],
+  commit: CommitCloudStatus
+): Promise<void> {
+  try {
+    commit(await client.requestTyped('cloud.selftest.run', { outputs }))
+  } catch (error) {
+    toastUserError(error, { action: 'test', object: 'Videorc Cloud' }, { id: CLOUD_TOAST_ID })
+  }
+}
 
 /**
  * Plan 222 U5 (plan 184 D18): once per show, when it first runs past the

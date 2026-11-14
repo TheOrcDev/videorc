@@ -7,7 +7,6 @@ import {
   type TalkShowRoomControllerDeps
 } from '@/hooks/use-talk-show-room'
 import type { CloudStatus } from '@/lib/backend'
-import { noteCloudRecording } from '@/lib/cloud-recordings-watch'
 import type { TalkShowRoomSnapshot } from '@/lib/talk-show-room'
 
 // Plan 224 C-G4: the talk show's room controller, mounted lazily under the
@@ -42,7 +41,10 @@ export default function TalkShowRoomHost({
   const recordingActive = deps.cloudStatus?.recording?.active ?? false
   const recordingSince = deps.cloudStatus?.recording?.since
   useEffect(() => {
-    noteCloudRecording({ active: recordingActive, since: recordingSince })
+    const nowMs = Date.now()
+    void import('@/lib/cloud-recordings-watch').then((watch) =>
+      watch.noteCloudRecording({ active: recordingActive, since: recordingSince }, nowMs)
+    )
   }, [recordingActive, recordingSince])
 
   useEffect(() => {

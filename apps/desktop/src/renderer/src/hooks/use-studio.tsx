@@ -795,11 +795,9 @@ function loadCaptionOverlay() {
 
 // Chat on stream (plan 215 G): the box's driver and painter, lazy, loaded the
 // first time a chat switch is on while live.
-/** Plan 222 U1, U5: the cloud's rarer notices load when one is due. */
+// Cloud actions and notices, including plan 234's managed-show warning,
+// load with the first cloud status or user action; the provider keeps the id.
 const loadCloudNotices = () => import('@/lib/cloud-notices')
-// The cloud's toast copy loads with the first cloud status (plan 184); the
-// eager provider keeps only the toast id.
-const loadCloudToasts = () => import('@/lib/cloud-toasts')
 // Plan 224 C-G4: the room controller mounts lazily under the provider.
 const TalkShowRoomHost = lazy(() => import('@/components/studio/talk-show-room-host'))
 
@@ -5482,20 +5480,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const previous = cloudStatusRef.current
     cloudStatusRef.current = next
     setCloudStatus(next)
-    void loadCloudToasts().then((words) => {
-      const fallback = words.cloudFallbackToast(previous, next)
-      if (fallback) toast.warning(fallback, { id: CLOUD_TOAST_ID })
-      const lost = words.cloudLostToast(previous, next)
-      if (lost) toast.warning(lost, { id: CLOUD_TOAST_ID })
-      const restarted = words.cloudRestartToast(previous, next)
-      if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
-      const cap = words.cloudShowCapToast(previous, next)
-      if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
-    })
-    // Plan 222 U5: past the month's hours is news, never a cut (D18); the
-    // words load only when a show runs past them.
-    if (next.allowancePast)
-      void loadCloudNotices().then((n) => n.toastCloudAllowancePast(previous, next))
+    void loadCloudNotices().then((n) => n.toastCloudStatus(previous, next))
   }, [])
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
@@ -5679,48 +5664,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const setCloudSettings = useCallback(
     async (patch: CloudSettingsPatch): Promise<void> => {
       if (!client) return
-      try {
-        commitCloudStatus(await client.requestTyped('cloud.settings.set', patch))
-      } catch (error) {
-        toastUserError(
-          error,
-          { action: 'save', object: 'the Videorc Cloud setting' },
-          { id: CLOUD_TOAST_ID }
-        )
-      }
+      return (await loadCloudNotices()).setCloudSettings(client, patch, commitCloudStatus)
     },
     [client, commitCloudStatus]
   )
   const refreshCloudAllowance = useCallback(async (): Promise<void> => {
     if (!client) return
-    try {
-      commitCloudStatus(await client.requestTyped('cloud.allowance.refresh'))
-    } catch {
-      // The section keeps the hours it last had; signed out says so itself.
-    }
+    return (await loadCloudNotices()).refreshCloudAllowance(client, commitCloudStatus)
   }, [client, commitCloudStatus])
   const endCloudShow = useCallback(async (): Promise<void> => {
     if (!client) return
-    try {
-      commitCloudStatus(await client.requestTyped('cloud.show.end'))
-    } catch (error) {
-      toastUserError(
-        error,
-        { action: 'end', object: 'the stream on Videorc Cloud' },
-        { id: CLOUD_TOAST_ID }
-      )
-    }
+    return (await loadCloudNotices()).endCloudShow(client, commitCloudStatus)
   }, [client, commitCloudStatus])
   // The result is never a toast: the Livestream row shows it (C6b). Only a
   // refusal of the click itself reaches one, as a warning.
   const runCloudTest = useCallback(
     async (outputs: CloudTestOutput[]): Promise<void> => {
       if (!client) return
-      try {
-        commitCloudStatus(await client.requestTyped('cloud.selftest.run', { outputs }))
-      } catch (error) {
-        toastUserError(error, { action: 'test', object: 'Videorc Cloud' }, { id: CLOUD_TOAST_ID })
-      }
+      return (await loadCloudNotices()).runCloudTest(client, outputs, commitCloudStatus)
     },
     [client, commitCloudStatus]
   )
