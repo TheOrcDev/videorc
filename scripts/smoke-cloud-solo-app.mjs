@@ -91,7 +91,7 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //      stays empty while the test runs, the desktop's own show stays off,
 //      the receivers get nothing, and the node's usage report for the test
 //      is accepted and never metered. VIDEORC_CLOUD_SOLO_SHOTS_DIR=<dir> also
-//      captures the Livestream page's Test row idle, running, with the
+//      captures the Destinations page's Test row idle, running, with the
 //      result and after a test the network blocked, each in dark and in
 //      light (the by-eye check).
 //   8. A test show nobody ends (the desktop died mid-test) ends on the
@@ -2526,7 +2526,7 @@ function summarizeWeb(state) {
 // --- The by-eye check (C6b) ------------------------------------------------------
 
 /**
- * The Livestream page's Videorc Cloud section with the Test row, through CDP
+ * The Destinations page's Videorc Cloud section with the Test row, through CDP
  * like scripts/ui-theme-screens.mjs, the capture the compositor's own. A
  * fresh profile opens onboarding, so it is marked done and the renderer
  * reloads once, here, before the test. Each `capture(stage)` takes the row

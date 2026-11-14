@@ -36,7 +36,7 @@ const PRIVACY_OPTIONS: SegmentedControlOption<StreamPrivacy>[] = [
 
 /**
  * Stream details, one way everywhere (plan 174 S3.4, B-19 and D-21): the Go
- * Live dialog, Livestream → Setup and the Schedule dialog. One title rule
+ * Live dialog, Destinations → Setup and the Schedule dialog. One title rule
  * (a 100-character counter, no < or >, required only where it is about to go
  * live), one "Privacy" control (a SegmentedControl: three exclusive choices,
  * plan 174 S1.7) with what each choice means, one "Made for kids" switch, and

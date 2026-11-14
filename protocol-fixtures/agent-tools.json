@@ -1850,7 +1850,7 @@
     {
       "name": "set_destinations",
       "title": "Choose destinations",
-      "description": "Turn destinations on or off for the next livestream, like their switches in Videorc \u2192 Livestream. Use the ids list_destinations gives. Turning one on respects the plan's destination limit; nothing changes while a session runs.",
+      "description": "Turn destinations on or off for the next livestream, like their switches in Videorc \u2192 Destinations. Use the ids list_destinations gives. Turning one on respects the plan's destination limit; nothing changes while a session runs.",
       "inputSchema": {
         "type": "object",
         "properties": {

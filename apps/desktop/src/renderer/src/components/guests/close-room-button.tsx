@@ -13,7 +13,7 @@ import {
 /**
  * "Close the room" (plan 224 D17): it ends everything, so it asks first while
  * anyone is in the room or the show is live or recording; an empty room
- * closes at once. Livestream → Guests and the Show stage share it.
+ * closes at once. Destinations → Guests and the Show stage share it.
  */
 export function CloseRoomButton({
   size = 'default',

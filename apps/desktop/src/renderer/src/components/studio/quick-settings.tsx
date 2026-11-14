@@ -13,6 +13,7 @@ import { GroupedList } from '@/components/list-row'
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
+import { OpenPageCog } from '@/components/studio/open-page-cog'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
@@ -49,7 +50,7 @@ import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /**
  * The Studio inspector's mirrors of controls that own their own pages (SD2):
- * Sources (Screen and Camera, with Open Sources as the way home), then
+ * Sources (Screen and Camera, with the Open Sources cog as the way home), then
  * Captions and Chat on their own, because neither is a source (plan 174 S3.3,
  * B-15 and B-25; plan 213 B1). They edit the SAME captureConfig via the shared builders /
  * setters (one state). Device source edits use the shared session controller.
@@ -81,15 +82,12 @@ export function QuickSettings(): ReactElement {
 
   return (
     <>
-      <PanelSection
-        action={
-          <Button variant="ghost" onClick={() => openWorkspaceTab('sources')}>
-            Open Sources
-          </Button>
-        }
-        title="Sources"
-      >
-        <GroupedList>
+      {/* No "Sources" title (plan 235 D3): the rows name themselves, and the
+          group keeps its name for screen readers. The way to Sources is the
+          cog at the end of the Camera row (D4), the row that stays once
+          plan 231 moves Screen to the Scenes section. */}
+      <PanelSection>
+        <GroupedList aria-label="Sources" role="group">
           {/* SCREEN: one click straight to the list (owner, 2026-09-30); the
             searchable picker stays on Sources. */}
           <InspectorRow
@@ -138,6 +136,9 @@ export function QuickSettings(): ReactElement {
             icon={CameraIcon}
             label="Camera"
             status={<SourceSwitchStatus kind="camera" />}
+            trailing={
+              <OpenPageCog label="Open Sources" onOpen={() => openWorkspaceTab('sources')} />
+            }
           >
             <DevicePicker
               devices={cameras}
@@ -252,6 +253,7 @@ function InspectorRow({
   label,
   status,
   footer,
+  trailing,
   children
 }: {
   icon: AppIcon
@@ -260,6 +262,8 @@ function InspectorRow({
   status?: ReactNode
   /** The row's own line under its status (the Screen row's Hide screen). */
   footer?: ReactNode
+  /** A compact action at the row's right end, after its control (the Camera row's cog). */
+  trailing?: ReactNode
   children: ReactNode
 }): ReactElement {
   return (
@@ -268,6 +272,7 @@ function InspectorRow({
         <RowIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
         <span className="w-22 shrink-0 truncate text-sm text-muted-foreground">{label}</span>
         <div className="flex min-w-0 flex-1 justify-end">{children}</div>
+        {trailing ? <div className="flex shrink-0 items-center">{trailing}</div> : null}
       </div>
       {status ? (
         <div className="px-3 pb-2 pl-9.5 text-xs text-muted-foreground empty:hidden">{status}</div>

@@ -8,12 +8,25 @@
 // stream-only Buddy (the program leg), Buddy off, Buddy on again; a banner
 // imported (it shows), hidden, shown. Each phase must keep presenting and
 // must never report "conflicting scene content".
+//
+// On Windows (issue #1088) the Preview has two presenters: the Electron proof
+// surface (`electron-proof-surface`, the test-pattern scene's usual owner)
+// and the backend D3D11 presenter (`d3d11-shared-texture`). Whichever owns
+// the Preview at idle must keep it through every phase, without a presenter
+// fallback, and is judged by the same presented-frame rules. The backend
+// never composes a program leg there (`compositor.rs`: the proof surface and
+// the D3D11 session draw the program themselves, plan 205 S8/S9), so instead
+// of the program-leg bit each phase reads the proof surface's own drawn
+// layers (`preview-surface-sample`) and holds the Buddy and the banner to
+// what the program carries. While the D3D11 presenter owns the Preview no
+// page capture can see it, and that check is a named SKIP.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { writeBuddyPetFixturePack } from './lib/buddy-pet-fixture.mjs'
@@ -21,12 +34,29 @@ import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-assert.equal(process.platform, 'darwin', 'The native Preview smoke requires the macOS dev app')
+const isWindows = process.platform === 'win32'
+assert(
+  process.platform === 'darwin' || isWindows,
+  'The Preview overlay presentation smoke requires the macOS or Windows dev app'
+)
 delete process.env.ELECTRON_RUN_AS_NODE
 const outputDirectory = mkdtempSync(join(tmpdir(), 'videorc-preview-overlay-presentation-'))
 const userDataDir = join(outputDirectory, 'profile')
 mkdirSync(userDataDir)
-const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+const vendoredFfmpeg = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'vendor',
+  'ffmpeg',
+  'windows-x64',
+  'bin',
+  'ffmpeg.exe'
+)
+const ffmpegPath =
+  process.env.VIDEORC_SMOKE_FFMPEG_PATH ??
+  (isWindows && existsSync(vendoredFfmpeg) ? vendoredFfmpeg : 'ffmpeg')
+/** The transports a Windows Preview may be presented through. */
+const WINDOWS_PRESENTER_TRANSPORTS = new Set(['electron-proof-surface', 'd3d11-shared-texture'])
 const timeoutMs = 120_000
 const SAMPLE_MS = 250
 // A phase passes when the Preview presented at least this share of the
@@ -52,6 +82,8 @@ const layout = {
 }
 const logs = []
 const phases = []
+/** Windows: the transport that owned the Preview in the first phase. */
+let windowsTransport = null
 let launch, ws
 const rpc = (method, params = {}) => request(ws, timeoutMs, method, params)
 const command = (name, params = {}) =>
@@ -101,18 +133,25 @@ async function importBanner(path) {
 }
 
 /** Sample what main presents for `ms`, then assert the Preview kept up. */
-async function phase(label, ms, { programLeg }) {
+async function phase(label, ms, { programLeg, layers }) {
   const logMark = logs.length
   const samples = []
   const until = Date.now() + ms
   while (Date.now() < until) {
     const surface = await command('native-preview-surface-status')
     const compositor = await rpc('compositor.status')
+    // The backend's own surface record: the program leg composes only while
+    // it is a live surface (`compositor.rs`, `preview_surface_active`).
+    const backendSurface = await rpc('preview.surface.status').catch((error) => ({
+      state: `error: ${error.message}`
+    }))
     samples.push({
+      backendSurface: `${backendSurface?.state ?? 'none'}/${backendSurface?.transport ?? 'none'}`,
       at: Date.now(),
       presented: surface.presentedFrameId ?? null,
       transport: surface.transport,
       message: surface.message,
+      presenterFallback: surface.windowsD3d11Presenter?.fallbackReason ?? null,
       frames: compositor.framesRendered,
       programLeg: compositor.framePipeline?.previewProgramLeg === true
     })
@@ -137,6 +176,10 @@ async function phase(label, ms, { programLeg }) {
     longestStillMs,
     conflicts: conflicts.length,
     transports: [...new Set(samples.map((sample) => sample.transport))],
+    backendSurfaces: [...new Set(samples.map((sample) => sample.backendSurface))],
+    presenterFallbacks: [
+      ...new Set(samples.map((sample) => sample.presenterFallback).filter(Boolean))
+    ],
     // The bit is republished on the compositor's diagnostic window (about
     // 2 s), so the phase's last sample is the settled one.
     programLeg: samples.at(-1).programLeg,
@@ -145,6 +188,7 @@ async function phase(label, ms, { programLeg }) {
       .filter((line) => /\[preview-watch\] (healing|stalled)/.test(line))
       .map((line) => line.replace(/^.*\[preview-watch\]/, '[preview-watch]'))
   }
+  if (isWindows) result.surfaceLayers = await windowsSurfaceLayers(label, layers)
   phases.push(result)
   console.log(`[preview-overlay-presentation] ${JSON.stringify(result)}`)
   assert.equal(result.conflicts, 0, `${label}: main rejected frames as conflicting scene content`)
@@ -156,13 +200,78 @@ async function phase(label, ms, { programLeg }) {
     longestStillMs <= MAX_STILL_MS,
     `${label}: the Preview stood still for ${longestStillMs} ms`
   )
-  assert.deepEqual(
-    result.transports,
-    ['native-surface'],
-    `${label}: the Preview left the native surface`
-  )
+  if (isWindows) {
+    windowsTransport ??= result.transports[0]
+    assert(
+      WINDOWS_PRESENTER_TRANSPORTS.has(windowsTransport),
+      `${label}: the Preview is not on a Windows presenter (transport ${windowsTransport})`
+    )
+    assert.deepEqual(
+      result.transports,
+      [windowsTransport],
+      `${label}: the Preview left its presenter (${windowsTransport})`
+    )
+    assert.deepEqual(result.presenterFallbacks, [], `${label}: the D3D11 presenter fell back`)
+  } else {
+    assert.deepEqual(
+      result.transports,
+      ['native-surface'],
+      `${label}: the Preview left the native surface`
+    )
+  }
   assert.deepEqual(result.watchdog, [], `${label}: the presentation watchdog had to heal`)
-  assert.equal(result.programLeg, programLeg, `${label}: program leg expected ${programLeg}`)
+  if (isWindows) {
+    const { verdict, missing, extra, drawn } = result.surfaceLayers
+    if (verdict !== 'skip') {
+      assert.deepEqual(
+        { missing, extra },
+        { missing: [], extra: [] },
+        `${label}: the proof surface drew [${drawn.join(', ')}]`
+      )
+    }
+  } else {
+    assert.equal(result.programLeg, programLeg, `${label}: program leg expected ${programLeg}`)
+  }
+}
+
+/**
+ * Windows: the overlay layers the proof surface actually drew, against what
+ * the program carries (`layers`: kind -> expected). Retries for up to 3 s so a
+ * layer that is still loading its first frame is not read as missing.
+ */
+async function windowsSurfaceLayers(label, layers) {
+  const expected = Object.entries(layers)
+  const until = Date.now() + 3000
+  let read
+  do {
+    read = await command('preview-surface-sample', { rects: [{ x: 0, y: 0, w: 1, h: 1 }] })
+    if (read.hostKind === 'backend-d3d11-presenter' && read.proofWindowVisible === false) {
+      return {
+        verdict: 'skip',
+        reason: 'the backend D3D11 presenter shows the Preview; no page capture can read it',
+        drawn: [],
+        missing: [],
+        extra: []
+      }
+    }
+    const drawn = read.liveLayers ?? []
+    const missing = expected.filter(([kind, on]) => on && !drawn.includes(kind)).map(([k]) => k)
+    const extra = expected.filter(([kind, on]) => !on && drawn.includes(kind)).map(([k]) => k)
+    if (!read.error && missing.length === 0 && extra.length === 0) {
+      return { verdict: 'pass', drawn, sceneKinds: read.sceneKinds, missing, extra }
+    }
+    if (Date.now() >= until) {
+      return {
+        verdict: 'fail',
+        error: read.error ?? null,
+        drawn,
+        sceneKinds: read.sceneKinds,
+        missing: read.error ? expected.filter(([, on]) => on).map(([k]) => k) : missing,
+        extra
+      }
+    }
+    await sleep(200)
+  } while (true)
 }
 
 try {
@@ -257,15 +366,30 @@ try {
   await setBuddy(false)
   await sleep(2000)
 
-  await phase('idle, Buddy off', 6000, { programLeg: false })
+  await phase('idle, Buddy off', 6000, {
+    programLeg: false,
+    layers: { buddy: false, banner: false }
+  })
   await setBuddy(true)
-  await phase('idle, Buddy turned on', 8000, { programLeg: false })
+  await phase('idle, Buddy turned on', 8000, {
+    programLeg: false,
+    layers: { buddy: true, banner: false }
+  })
   await setClips(true)
-  await phase('Clips on, stream-only Buddy (program leg)', 10_000, { programLeg: true })
+  await phase('Clips on, stream-only Buddy (program leg)', 10_000, {
+    programLeg: true,
+    layers: { buddy: true, banner: false }
+  })
   await setBuddy(false)
-  await phase('Clips on, Buddy turned off', 8000, { programLeg: false })
+  await phase('Clips on, Buddy turned off', 8000, {
+    programLeg: false,
+    layers: { buddy: false, banner: false }
+  })
   await setBuddy(true)
-  await phase('Clips on, Buddy turned on again', 8000, { programLeg: true })
+  await phase('Clips on, Buddy turned on again', 8000, {
+    programLeg: true,
+    layers: { buddy: true, banner: false }
+  })
   const bannerPath = join(outputDirectory, 'banner.png')
   const png = spawnSync(ffmpegPath, [
     '-y',
@@ -282,11 +406,15 @@ try {
   assert.equal(png.status, 0, `could not create the banner fixture: ${png.stderr}`)
   const banner = await importBanner(bannerPath)
   assert.equal(banner.shown, true, 'an added banner shows (plan 205 D3)')
-  await phase('banner added', 6000, { programLeg: true })
+  await phase('banner added', 6000, { programLeg: true, layers: { buddy: true, banner: true } })
   await rpc('banners.hide', { id: banner.id })
-  await phase('banner hidden', 6000, { programLeg: true })
+  await phase('banner hidden', 6000, { programLeg: true, layers: { buddy: true, banner: false } })
   await rpc('banners.show', { id: banner.id })
-  await phase('banner shown again', 6000, { programLeg: true })
+  await phase('banner shown again', 6000, {
+    programLeg: true,
+    layers: { buddy: true, banner: true }
+  })
+  if (isWindows) console.log(`Windows Preview presenter: ${windowsTransport}`)
   console.log('preview-overlay-presentation: PASS')
 } catch (error) {
   console.error(error.stack)

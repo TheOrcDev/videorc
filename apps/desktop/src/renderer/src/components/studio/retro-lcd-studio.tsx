@@ -15,6 +15,7 @@ import {
   LCD_VALUE_BUTTON,
   LcdPanel,
   LcdPanelAction,
+  LcdPanelCog,
   LcdPanelHeader,
   LcdPanelKey,
   LcdPanelNavRow,
@@ -22,7 +23,6 @@ import {
   LcdPanelSwitch
 } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
-import { STATUS_TONE_CLASS } from '@/components/status-badge'
 import { AgentsSessionRow } from '@/components/studio/agents-session-row'
 import { MicLcdMeter } from '@/components/studio/mic-level-meter'
 import type { MicrophoneRowProps, SystemAudioRowProps } from '@/components/studio/audio-section'
@@ -36,8 +36,6 @@ import {
   GuestsSessionSlot,
   LiveDestinationRows,
   LiveStreamHealthRow,
-  SESSION_STATUS_ICONS,
-  SessionClock,
   SessionNotices,
   type BlockedJump,
   type SessionPanelProps,
@@ -61,15 +59,7 @@ import { MIC_SESSION_LEVEL_UNAVAILABLE_COPY } from '@/lib/mic-meter-input'
 import { screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { captionsStatusLabel, micSignalLabel, systemAudioIssueLabel } from '@/lib/state-labels'
-import {
-  STOP_FINALIZE_OVERRUN_ALERT,
-  sessionAlsoRecords,
-  sessionStatusGlyph,
-  sessionStatusLabel,
-  sessionStatusTone,
-  streamingSummary,
-  type SessionStatusView
-} from '@/lib/studio-session-view'
+import { STOP_FINALIZE_OVERRUN_ALERT, streamingSummary } from '@/lib/studio-session-view'
 import { systemAudioIssueCopy, type SystemAudioSwitchView } from '@/lib/system-audio'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -84,9 +74,10 @@ import { WINDOW_NAMES } from '../../../../shared/window-names'
 // `settings.retroLcdStudio` is on.
 
 /**
- * The transport on one screen: the session's state and, while it runs, the
- * clock; Record and Go Live (or Stop) as keys; and why a start is off. The
- * same props and handlers as `SessionTransport`.
+ * The transport on one screen: Record and Go Live (or Stop) as keys, and why a
+ * start is off. No state readout above the keys (plan 235 D1, as in the
+ * default look): the status bar and the sidebar's Studio row carry the state
+ * and the clock. The same props and handlers as `SessionTransport`.
  */
 export function RetroSessionTransport({
   active,
@@ -101,7 +92,6 @@ export function RetroSessionTransport({
   liveStreamBlockedReason,
   blockedReason = null,
   blockedJump = null,
-  status,
   onRecord,
   onLiveStream,
   onStop
@@ -116,16 +106,6 @@ export function RetroSessionTransport({
       data-slot="session-transport"
     >
       <LcdPanel>
-        <div
-          className="flex min-h-6 items-center justify-between gap-2 py-2"
-          data-slot="session-readout"
-        >
-          {status}
-          {active ? (
-            <SessionClock className="text-[1em] font-normal text-(--lcd-display-lit)" />
-          ) : null}
-        </div>
-        <LcdDisplaySeparator />
         <div className="flex flex-wrap gap-2 py-2">
           {active && !talkShowOutputs ? (
             <LcdPanelKey className="flex-1" disabled={!canStop} tone="record" onClick={onStop}>
@@ -226,55 +206,6 @@ function RetroBlockedReasonLine({
   )
 }
 
-/**
- * The session's state on the transport's screen: the state's icon (or a dot
- * while idle) in its tone, the words lit, and a lit Rec when Go Live also
- * records. The same words and live region as `SessionStatusPill`, which the
- * smokes read.
- */
-export function RetroSessionStatus({
-  recording,
-  wsStatus,
-  startBlocked = false
-}: {
-  recording: SessionStatusView
-  wsStatus: string
-  startBlocked?: boolean
-}): ReactElement {
-  const glyph = sessionStatusGlyph(recording, wsStatus)
-  const tone = sessionStatusTone(recording, wsStatus, { startBlocked })
-  const LeadingIcon = glyph ? SESSION_STATUS_ICONS[glyph] : null
-  return (
-    <>
-      <span
-        className={cn('inline-flex min-w-0 items-center gap-2', STATUS_TONE_CLASS[tone])}
-        data-slot="session-status"
-        data-tone={tone}
-      >
-        {LeadingIcon ? (
-          <LeadingIcon aria-hidden className="size-3.5 shrink-0 text-(--chip-tone)" weight="fill" />
-        ) : (
-          <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-(--chip-tone)" />
-        )}
-        <span
-          className="min-w-0 truncate text-(--lcd-display-lit)"
-          data-videorc-session-status
-          role="status"
-        >
-          {sessionStatusLabel(recording, wsStatus, { startBlocked })}
-        </span>
-      </span>
-      {wsStatus === 'connected' && sessionAlsoRecords(recording) ? (
-        <InfoTooltip content="Also recording a local file">
-          <span className="text-(--lcd-display-lit)" data-testid="session-also-recording">
-            Rec
-          </span>
-        </InfoTooltip>
-      ) : null}
-    </>
-  )
-}
-
 /** The Session facts on a screen, each going to its page; notices under it. */
 export function RetroSessionPanel({ live = false, ...notices }: SessionPanelProps): ReactElement {
   const { captureConfig } = useStudioCore()
@@ -282,8 +213,9 @@ export function RetroSessionPanel({ live = false, ...notices }: SessionPanelProp
   const outputSummary = useSessionOutputSummary(live)
   return (
     <PanelSection>
-      <LcdPanel>
-        <LcdPanelHeader title="Session" />
+      {/* No "Session" header (plan 235 D3): the rows name themselves, and the
+          screen keeps its name for screen readers. */}
+      <LcdPanel aria-label="Session">
         <LcdPanelNavRow
           label="Livestream"
           value={streamingSummary(captureConfig.streaming.targets)}
@@ -323,9 +255,15 @@ export function RetroAudioSectionView({
 }): ReactElement {
   return (
     <PanelSection>
+      {/* No "Audio" header (plan 235 D3): the Mixer's own name says it. */}
       <LcdPanel>
-        <LcdPanelHeader title="Audio" />
-        <Mixer aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>
+        <Mixer
+          aria-label="Audio"
+          aria-labelledby={undefined}
+          className="gap-0"
+          maxDb={0}
+          minDb={-60}
+        >
           <MixerChannels className="gap-0" scrollable={false}>
             <div data-slot="channel-strip">
               <RetroMicrophoneRows {...microphone} />
@@ -343,7 +281,10 @@ export function RetroAudioSectionView({
   )
 }
 
-/** A channel's title on the screen, lit, with its control on the right. */
+/**
+ * A channel's title on the screen, lit, with its control on the right. An h2:
+ * the screen has no "Audio" heading over it any more (plan 235 D3).
+ */
 function RetroChannelHeader({
   title,
   children
@@ -353,7 +294,7 @@ function RetroChannelHeader({
 }): ReactElement {
   return (
     <div className="flex min-h-8 min-w-0 items-center justify-between gap-4 py-1.5">
-      <h3 className="min-w-0 truncate font-normal text-(--lcd-display-lit)">{title}</h3>
+      <h2 className="min-w-0 truncate font-normal text-(--lcd-display-lit)">{title}</h2>
       <div className="flex min-w-0 shrink-0 items-center justify-end gap-3">{children}</div>
     </div>
   )
@@ -552,16 +493,10 @@ export function RetroQuickSettings(): ReactElement {
   } = useStudioSources()
   return (
     <>
+      {/* No "Sources" header (plan 235 D3); the way to Sources is the cog
+          at the end of the Camera row (D4), as in the default look. */}
       <PanelSection>
-        <LcdPanel>
-          <LcdPanelHeader
-            action={
-              <LcdPanelAction onClick={() => openWorkspaceTab('sources')}>
-                Open Sources
-              </LcdPanelAction>
-            }
-            title="Sources"
-          />
+        <LcdPanel aria-label="Sources">
           {/* F-015: the synthetic diagnostic source replaces the screen. */}
           <LcdDevicePicker
             devices={captureDevices}
@@ -595,6 +530,9 @@ export function RetroQuickSettings(): ReactElement {
             noneLabel="Off"
             selectedDevice={selectedCamera}
             selectedName={captureConfig.sources.cameraName}
+            trailing={
+              <LcdPanelCog label="Open Sources" onOpen={() => openWorkspaceTab('sources')} />
+            }
             value={captureConfig.sources.cameraId}
             onChange={(cameraId) =>
               void switchSourceDeviceLive(
@@ -749,8 +687,9 @@ export function RetroTakeoverSection(): ReactElement {
   return (
     <PanelSection>
       <LcdPanel>
+        {/* The one title left (plan 235 D3), with the cog to Assets (D4). */}
         <LcdPanelHeader
-          action={<LcdPanelAction onClick={() => setActive('assets')}>Open Assets</LcdPanelAction>}
+          action={<LcdPanelCog label="Open Assets" onOpen={() => setActive('assets')} />}
           title="Takeover"
         />
         {ready.length === 0 ? (

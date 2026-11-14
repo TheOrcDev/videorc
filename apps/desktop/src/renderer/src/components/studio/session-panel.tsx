@@ -5,8 +5,7 @@ import {
   ImageIcon,
   InfoIcon,
   LivestreamIcon,
-  BuddyIcon,
-  RecordIcon
+  BuddyIcon
 } from '@/components/icons'
 import {
   lazy,
@@ -21,21 +20,18 @@ import {
 import { LCD_STATUS_DOT, LcdPanelNavRow, type StudioLook } from '@/components/lcd-panel'
 import { CohostPresenceDot } from '@/components/cohost-status'
 import { AgentsSessionRow } from '@/components/studio/agents-session-row'
+import { OpenPageCog } from '@/components/studio/open-page-cog'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow, NavigableRowHintLines } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
-import { StatusBadge } from '@/components/status-badge'
 import { StatusDot } from '@/components/status-dot'
 import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
 import { RecordButton, type RecordButtonState } from '@/components/record-button'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav'
-import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import {
   useStudioChat,
   useStudioCloud,
@@ -64,23 +60,17 @@ import { shortcutAccelerator } from '@/lib/shortcuts'
 import {
   STOP_FINALIZE_OVERRUN_ALERT,
   cameraCaptureNotice,
-  sessionAlsoRecords,
-  sessionClockLabel,
-  sessionStatusGlyph,
-  sessionStatusLabel,
-  sessionStatusTone,
-  streamingSummary,
-  type SessionStatusGlyph,
-  type SessionStatusView
+  streamingSummary
 } from '@/lib/studio-session-view'
 import { connectionBlockedReason } from '@/lib/state-labels'
-import { cn } from '@/lib/utils'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /**
- * The session transport (plan 050 S12): status, clock, and Record / Go Live… /
- * Stop at the top of the Studio inspector, right above Session (owner call,
- * 2026-09-23: no buttons in the toolbar's top-right corner). The buttons
+ * The session transport (plan 050 S12): Record / Go Live / Stop at the top of
+ * the Studio inspector, right above Session (owner call, 2026-09-23: no
+ * buttons in the toolbar's top-right corner). No state row above them (plan
+ * 235 D1): the session's state and clock show in the status bar and on the
+ * sidebar's Studio row, and why a start is off shows under the buttons. The buttons
  * reuse the transport handlers StudioTab owns (no second session state
  * machine). Record shows its Space key, which lives on the Studio page (plan
  * 174 S0.1), not on this button. The words are D3's (lib/go-live-copy.ts).
@@ -103,7 +93,6 @@ export function SessionTransport({
   liveStreamBlockedReason,
   blockedReason = null,
   blockedJump = null,
-  status,
   onRecord,
   onLiveStream,
   onStop
@@ -117,7 +106,7 @@ export function SessionTransport({
   /** The stop overran its finalize window (plan 174 S3.1, B-16): explain Force stop. */
   stopOverrun?: boolean
   startRequestPending: boolean
-  /** The start in flight is a livestream, so Go Live… answers it and Record stays off. */
+  /** The start in flight is a livestream, so Go Live answers it and Record stays off. */
   startingLivestream?: boolean
   /** A stop is in flight: the button says "Stopping…", stays lit and keeps its focus. */
   stopRequestPending?: boolean
@@ -132,8 +121,6 @@ export function SessionTransport({
    */
   blockedReason?: string | null
   blockedJump?: BlockedJump | null
-  /** The session status chip (and the mic sliver that rides with it). */
-  status: ReactNode
   onRecord: () => void
   onLiveStream: () => void
   onStop: () => void
@@ -143,7 +130,7 @@ export function SessionTransport({
   const recordStopLabel = talkShowOutputs ? 'Stop recording' : stopLabel
   const liveActive = talkShowOutputs?.live === true
   const startsBusy = startRequestPending || goLivePending
-  // Record answers its own click, lit from the click; a Go Live… start,
+  // Record answers its own click, lit from the click; a Go Live start,
   // checks included, is Go Live's to answer, so Record is off for it.
   const recordStarting = startRequestPending && !goLivePending && !startingLivestream
   let recordState: RecordButtonState = 'idle'
@@ -164,13 +151,9 @@ export function SessionTransport({
       className="flex flex-col gap-3 border-b border-border p-gutter"
       data-slot="session-transport"
     >
-      <div className="flex min-h-6 items-center justify-between gap-2">
-        {status}
-        {active ? <SessionClock /> : null}
-      </div>
       <div className="flex gap-2">
         {/* D8 (plan 208): Record and the stop button are metallic red, lit
-            while the session runs; Go Live… is the chrome primary. Why a
+            while the session runs; Go Live is the chrome primary. Why a
             start is blocked shows on hover and on keyboard focus (plan 174
             S1.1, B-9): a disabled button never shows a title. */}
         <DisabledReason className="flex-1" reason={recordActive ? null : recordBlockedReason}>
@@ -275,70 +258,6 @@ function BlockedReasonLine({
   )
 }
 
-/** The pill's leading icon per state (plan 174 B-17): record, on air, trouble. */
-export const SESSION_STATUS_ICONS: Record<SessionStatusGlyph, AppIcon> = {
-  record: RecordIcon,
-  live: LivestreamIcon,
-  alert: AlertIcon
-}
-
-/**
- * The session status pill. An on-air session reads "On air" in the live
- * tone, and adds a quiet "Rec" when it also records: Go Live is record+stream,
- * which the backend reports as `recording` (plan 095 S5). Recording, on air
- * and trouble each lead with their own icon, and idle reads "Not ready" when
- * nothing can start (plan 174 B-17). A polite live region, so a state change
- * is announced. data hook: the backend-resilience and captions smokes read the
- * pill, never the Rec chip.
- */
-export function SessionStatusPill({
-  recording,
-  wsStatus,
-  startBlocked = false
-}: {
-  recording: SessionStatusView
-  wsStatus: string
-  /** Nothing can start right now; the Session section says why. */
-  startBlocked?: boolean
-}): ReactElement {
-  const glyph = sessionStatusGlyph(recording, wsStatus)
-  return (
-    <>
-      <span data-videorc-session-status role="status">
-        <StatusBadge
-          icon={glyph ? SESSION_STATUS_ICONS[glyph] : undefined}
-          tone={sessionStatusTone(recording, wsStatus, { startBlocked })}
-          value={sessionStatusLabel(recording, wsStatus, { startBlocked })}
-        />
-      </span>
-      {wsStatus === 'connected' && sessionAlsoRecords(recording) ? (
-        <InfoTooltip content="Also recording a local file">
-          <Badge data-testid="session-also-recording" variant="outline">
-            Rec
-          </Badge>
-        </InfoTooltip>
-      ) : null}
-    </>
-  )
-}
-
-/** Ticks from the session's start: running statuses carry no duration. */
-export function SessionClock({ className }: { className?: string }): ReactElement {
-  const { recording } = useStudioRecording()
-  const elapsedMs = useSessionElapsedMs(recording.startedAt)
-  return (
-    <span
-      className={cn(
-        'min-w-11 text-right text-sm font-medium text-foreground tabular-nums',
-        className
-      )}
-      data-slot="session-clock"
-    >
-      {sessionClockLabel(elapsedMs ?? recording.durationMs)}
-    </span>
-  )
-}
-
 /**
  * The Session inspector (SD1): the glanceable session facts as a grouped
  * label→value list, why a start is blocked, the last refused start, and a
@@ -368,8 +287,10 @@ export function SessionPanel({ live = false, ...notices }: SessionPanelProps): R
   const outputSummary = useSessionOutputSummary(live)
 
   return (
-    <PanelSection title="Session">
-      <GroupedList>
+    // No "Session" title (plan 235 D3): the rows name themselves, and the
+    // group keeps its name for screen readers.
+    <PanelSection>
+      <GroupedList aria-label="Session" role="group">
         <NavigableRow
           icon={LivestreamIcon}
           label="Livestream"
@@ -392,7 +313,7 @@ export function SessionPanel({ live = false, ...notices }: SessionPanelProps): R
             session fact, knowable without the Stream Manager; a recording
             has no chat for it to read. */}
         {live ? <CohostSessionRow /> : null}
-        {/* Plan 224 D16: the room's one row, which opens Livestream → Guests. */}
+        {/* Plan 224 D16: the room's one row, which opens Destinations → Guests. */}
         <GuestsSessionSlot />
         {/* Plan 209 D12: which agents are connected, with Stop. */}
         <AgentsSessionRow />
@@ -587,7 +508,7 @@ const dotClassName = (look: StudioLook): string =>
 /**
  * The destinations while on air (plan 174 S3.2, B-4): one quiet "3 of 3 on
  * air" row when every leg is live, else that count and one row per problem
- * ("Twitch · Stopped"), each a door to the Livestream page. Nothing until the
+ * ("Twitch · Stopped"), each a door to the Destinations page. Nothing until the
  * backend has reported the session's legs: never an unmeasured zero.
  */
 export function LiveDestinationRows({
@@ -645,7 +566,7 @@ export function LiveDestinationRows({
 }
 
 /**
- * One "Stream" fact from the same classifier the Livestream page uses (plan
+ * One "Stream" fact from the same classifier the Destinations page uses (plan
  * 174 S3.2, B-4): "Healthy" quietly, the earliest failing stage in a few
  * words when not. It opens Health, where the numbers behind it live.
  */
@@ -750,13 +671,12 @@ export function TakeoverSection(): ReactElement {
   const disconnected = disconnectedReason !== null
 
   return (
+    // The one inspector title left (plan 235 D3): the buttons are only
+    // takeover names ("Intro", "BRB"). Its way to Assets is the inspector's
+    // one cog (D4).
     <PanelSection
       title="Takeover"
-      action={
-        <Button variant="ghost" onClick={() => setActive('assets')}>
-          Open Assets
-        </Button>
-      }
+      action={<OpenPageCog label="Open Assets" onOpen={() => setActive('assets')} />}
     >
       {ready.length === 0 ? (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">

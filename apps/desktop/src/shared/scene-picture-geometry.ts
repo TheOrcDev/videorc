@@ -1,4 +1,4 @@
-import type { SceneSourceKind, SourceCrop } from './backend'
+import type { LayoutSettings, SceneSourceKind, SourceCrop } from './backend'
 
 /**
  * Where a scene source's PICTURE lands (plan 216 B1, owner decision D2).
@@ -6,7 +6,8 @@ import type { SceneSourceKind, SourceCrop } from './backend'
  * A source's transform is its FRAME: a box in canvas fractions. The
  * compositor fits the source's picture into that frame (Fit letterboxes it,
  * Fill crops it), after mapping a screen's frame onto the scene background's
- * stage margin. Until plan 216 nothing on the renderer side knew the picture:
+ * stage margin. The camera of a camera-only scene sits on that stage too
+ * (plan 235, owner decision D9 a; `sceneCameraOnStage`). Until plan 216 nothing on the renderer side knew the picture:
  * the Scene stage drew its box, handles and hit target on the frame, so a
  * MacBook display (1.547:1) Fit in a 16:9 frame had about 150 px of empty
  * space inside the handles on each side. This module is the one rule for the
@@ -53,6 +54,8 @@ export interface ScenePictureInput {
   crop?: Partial<SourceCrop> | null
   /** The scene background's stage margin per side (`previewProofBackgroundStageMargin`). */
   stageMargin?: number
+  /** Whether the scene's camera sits on the stage (`sceneCameraOnStage`). */
+  cameraOnStage?: boolean
   /** The output canvas in pixels: the fit rounds to pixels, as the compositor does. */
   canvas: PixelSize
 }
@@ -66,22 +69,99 @@ const finiteOrZero = (value: number): number => (Number.isFinite(value) ? value 
 const clamp = (value: number, low: number, high: number): number =>
   Math.min(Math.max(value, low), high)
 
-/** Mirrors Rust `scene_source_uses_background_stage`: the camera never sits on the stage. */
-export function sceneSourceUsesBackgroundStage(kind: SceneSourceKind): boolean {
-  return kind === 'screen' || kind === 'window' || kind === 'test-pattern'
+/**
+ * The one rule for which sources sit on the scene background's stage
+ * (mirrors Rust `scene_source_uses_background_stage`; plan 235, D9 a): a
+ * screen, a window and the test pattern always do, the camera only when the
+ * scene says so (`sceneCameraOnStage`).
+ */
+export function sceneSourceUsesBackgroundStage(
+  kind: SceneSourceKind,
+  cameraOnStage = false
+): boolean {
+  return kind === 'camera' ? cameraOnStage : true
+}
+
+/** The facts the camera's stage rule reads from a scene. */
+export interface SceneCameraStageFacts {
+  /** Every source's kind, hidden ones too: hiding a screen must not move the camera. */
+  sourceKinds: readonly SceneSourceKind[]
+  /** Key out background is on (`layout.cameraChromaKeyEnabled`). */
+  cameraKeyed?: boolean
+  /** The scene is Freeform: its boxes are the streamer's own. */
+  freeform?: boolean
+}
+
+/**
+ * Whether a scene's camera sits on the background's stage (mirrors Rust
+ * `camera_uses_background_stage`; plan 235, D9 a): the scene is camera-only,
+ * on either canvas, and the camera is not keyed. A keyed camera stays full
+ * frame over the background, a camera over or beside a screen keeps its
+ * place, and a Freeform scene is left alone.
+ */
+export function sceneCameraUsesBackgroundStage(facts: SceneCameraStageFacts): boolean {
+  if (facts.freeform || facts.cameraKeyed) return false
+  return (
+    facts.sourceKinds.includes('camera') && facts.sourceKinds.every((kind) => kind === 'camera')
+  )
+}
+
+/** `sceneCameraUsesBackgroundStage` for a scene's sources under its layout. */
+export function sceneCameraOnStage(
+  sources: readonly { kind: SceneSourceKind }[] | null | undefined,
+  layout: Pick<LayoutSettings, 'arrangementMode' | 'cameraChromaKeyEnabled'> | null | undefined
+): boolean {
+  if (!sources || !layout) return false
+  return sceneCameraUsesBackgroundStage({
+    sourceKinds: sources.map((source) => source.kind),
+    cameraKeyed: layout.cameraChromaKeyEnabled,
+    freeform: layout.arrangementMode === 'freeform'
+  })
+}
+
+const SCENE_SOURCE_KINDS: readonly string[] = ['screen', 'window', 'camera', 'test-pattern']
+
+/**
+ * The scene's own sources among a list that also carries the compositor's
+ * stand-ins (the background image, a takeover image): what the camera's
+ * stage rule counts, as Rust counts `scene.sources`.
+ */
+export function previewSurfaceSceneSources<T extends { kind: string }>(
+  sources: readonly T[]
+): (T & { kind: SceneSourceKind })[] {
+  return sources.filter((source): source is T & { kind: SceneSourceKind } =>
+    SCENE_SOURCE_KINDS.includes(source.kind)
+  )
+}
+
+/**
+ * The stage rule for a preview surface layer: a scene source asks
+ * `sceneSourceUsesBackgroundStage`; the takeover image stands in for a
+ * screen; the background, banners and the Buddy are placed against the canvas.
+ */
+export function previewSurfaceLayerUsesBackgroundStage(
+  kind: SceneSourceKind | 'screen-image' | 'background' | 'banner' | 'buddy',
+  cameraOnStage: boolean
+): boolean {
+  if (kind === 'screen-image') return true
+  if (kind === 'background' || kind === 'banner' || kind === 'buddy') return false
+  return sceneSourceUsesBackgroundStage(kind, cameraOnStage)
 }
 
 /**
  * A frame mapped onto the scene background's stage (Rust
  * `scene_source_render_transform`): where the compositor really draws the
- * box, in canvas fractions. No margin, or a camera, leaves the frame alone.
+ * box, in canvas fractions. No margin, or a source that is not on the stage,
+ * leaves the frame alone.
  */
 export function sceneStageRect(
   frame: FractionRect,
   kind: SceneSourceKind,
-  stageMargin = 0
+  stageMargin = 0,
+  cameraOnStage = false
 ): FractionRect {
-  if (!(stageMargin > 0) || !sceneSourceUsesBackgroundStage(kind)) return { ...frame }
+  if (!(stageMargin > 0) || !sceneSourceUsesBackgroundStage(kind, cameraOnStage))
+    return { ...frame }
   const scale = 1 - stageMargin * 2
   return {
     x: stageMargin + frame.x * scale,
@@ -95,9 +175,11 @@ export function sceneStageRect(
 export function sceneFrameRect(
   stageRect: FractionRect,
   kind: SceneSourceKind,
-  stageMargin = 0
+  stageMargin = 0,
+  cameraOnStage = false
 ): FractionRect {
-  if (!(stageMargin > 0) || !sceneSourceUsesBackgroundStage(kind)) return { ...stageRect }
+  if (!(stageMargin > 0) || !sceneSourceUsesBackgroundStage(kind, cameraOnStage))
+    return { ...stageRect }
   const scale = 1 - stageMargin * 2
   return {
     x: (stageRect.x - stageMargin) / scale,
@@ -169,7 +251,7 @@ function keptFraction(first: number | undefined, second: number | undefined): nu
  */
 export function scenePictureRectPixels(input: ScenePictureInput): PixelRect {
   const rect = sceneRectPixels(
-    sceneStageRect(input.frame, input.kind, input.stageMargin),
+    sceneStageRect(input.frame, input.kind, input.stageMargin, input.cameraOnStage),
     input.canvas
   )
   const source = input.source

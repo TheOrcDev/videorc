@@ -851,7 +851,7 @@ function streamTargetStatusBadge(state: NonNullable<StreamTargetSettings['status
 /**
  * The consent Google reviewed for YouTube sign-in: the API Services line, the
  * four policy links and the agreement checkbox, before the browser opens. Its
- * words never change outside a new review; the Livestream page and first-run
+ * words never change outside a new review; the Destinations page and first-run
  * setup (plan 207) share this one copy. The checkbox lives in the content,
  * which unmounts on close, so every open starts unticked.
  */

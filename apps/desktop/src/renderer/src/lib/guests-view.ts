@@ -9,7 +9,7 @@ import { plural } from '@/lib/format'
 import type { StatusTone } from '@/lib/status-word'
 import { effectiveStageLayout, showStageInput } from '@/lib/talk-show-layout'
 
-// What Livestream → Guests and the Show stage say about the room (plan 224
+// What Destinations → Guests and the Show stage say about the room (plan 224
 // C-G2, C-G3), derived from the backend's `CloudStatus.room`. Pure, so every
 // line of copy is a test. Copy rules (plan 224 "Words we use"): guest, never
 // participant; Let in and Decline; Bring on and Send backstage; the runner is

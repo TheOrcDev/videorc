@@ -2380,7 +2380,7 @@ const specificRuntimeEventSchemas = {
     { allowUnknown: false }
   ),
   // Plan 213 J1: the Stream Manager's "Use Sign in" opens that destination
-  // in Livestream → Setup.
+  // in Destinations → Setup.
   'livestream:open-destination': objectSchema(
     { targetId: stringSchema({ minLength: 1, maxLength: 128 }) },
     { allowUnknown: false }

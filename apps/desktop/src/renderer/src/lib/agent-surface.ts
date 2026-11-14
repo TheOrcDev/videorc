@@ -131,7 +131,7 @@ function destinationProjection(
       label,
       on: target.enabled,
       ready,
-      ...(ready ? {} : { reason: `Finish setting up ${label} in Livestream.` }),
+      ...(ready ? {} : { reason: `Finish setting up ${label} in Destinations.` }),
       ...(title ? { title } : {}),
       ...(category ? { category } : {})
     }

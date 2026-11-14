@@ -6,7 +6,7 @@ saved, starting with their @name, in the chat they asked in (plan 226).
 
 ## Using it
 
-- **Set up** in Setup → Livestream → Chat commands. From the Stream
+- **Set up** in Destinations → Setup → Chat commands. From the Stream
   Manager: type `!` in the composer and pick "Edit chat commands…", or use
   the bar's **Commands** action (800 px and wider) or ⋯ → "Chat commands…"
   (below 640 px). Each command has:

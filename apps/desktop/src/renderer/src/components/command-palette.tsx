@@ -52,13 +52,12 @@ import { studioChatOn } from '@/lib/studio-chat'
 import { toastUserError } from '@/lib/user-error'
 import { openFirstRunSetup } from '@/lib/workspace-navigation'
 import {
-  STUDIO_PANELS,
-  WORKSPACE_TABS,
+  SIDEBAR_ZONES,
   isStudioPanel,
   shortcutDigitFor,
   useWorkspaceNav,
-  type WorkspaceTab,
-  type WorkspaceTabGroup
+  workspacePageMeta,
+  type WorkspaceTab
 } from '@/components/workspace-nav'
 import { useAgents, useAgentsActions } from '@/hooks/use-agents'
 import { useEditScene } from '@/hooks/use-edit-scene'
@@ -98,7 +97,17 @@ export const PAGE_KEYWORDS: Readonly<Record<WorkspaceTab, readonly string[]>> = 
     'scene editor'
   ],
   assets: ['backgrounds', 'overlays', 'images', 'takeovers', 'banners', 'sounds', 'soundboard'],
-  live: ['destinations', 'stream key', 'youtube', 'twitch', 'kick', 'schedule', 'go live'],
+  // The page was Livestream until plan 235 D6: the old name still finds it.
+  live: [
+    'livestream',
+    'stream key',
+    'youtube',
+    'twitch',
+    'kick',
+    'schedule',
+    'go live',
+    'channels'
+  ],
   captions: ['subtitles', 'transcription'],
   recording: ['recording', 'quality', 'resolution', 'folder', 'file', 'storage'],
   library: ['recordings', 'clips', 'markers', 'history'],
@@ -123,11 +132,10 @@ const BUDDY_KEYWORDS: Readonly<Record<BuddyTabId, readonly string[]>> = {
   'clean-cut': ['edit', 'export', 'cut', 'recording']
 }
 
-const tabsIn = (group: WorkspaceTabGroup): typeof WORKSPACE_TABS =>
-  WORKSPACE_TABS.filter((tab) => tab.group === group)
-
 /** Every page in sidebar order, Health (no row) last. */
-const PAGES = [...tabsIn('stage'), ...STUDIO_PANELS, ...tabsIn('library'), ...tabsIn('system')]
+const PAGES = [...SIDEBAR_ZONES.flatMap((zone) => zone.pages), 'diagnostics' as const].map(
+  workspacePageMeta
+)
 
 /** A row's secondary context, after its title. */
 function Context({ children }: { children: ReactNode }): ReactElement {
@@ -371,7 +379,7 @@ export function CommandPalette({
         <CommandGroup heading="Pages">
           {PAGES.map((page) => {
             const digit = shortcutDigitFor(page.id)
-            const PageIcon = page.id === 'ai' ? OwnBuddyIcon : page.icon
+            const PageIcon = page.icon
             return (
               <Fragment key={page.id}>
                 <CommandItem
@@ -406,7 +414,7 @@ export function CommandPalette({
           >
             <LivestreamIcon className="size-4" />
             Upcoming events
-            <Context>Livestream</Context>
+            <Context>Destinations</Context>
           </CommandItem>
           {/* Plan 224 D16: the talk show's room and its invite link. */}
           {guestsVisible(cloudStatus) ? (
@@ -417,7 +425,7 @@ export function CommandPalette({
             >
               <AccountIcon className="size-4" />
               Guests
-              <Context>Livestream</Context>
+              <Context>Destinations</Context>
             </CommandItem>
           ) : null}
         </CommandGroup>

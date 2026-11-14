@@ -60,12 +60,19 @@ Binding. Follow them as written; a change that would undo one is a question
 for the owner, not a design choice.
 
 - **The toolbar holds only the page title** (2026-09-23). Record and Go
-  Live… sit at the top of the Studio inspector, and a page's own actions sit
+  Live sit at the top of the Studio inspector, with no state row above them
+  (2026-11-14, plan 235 D1: the status bar and the sidebar's Studio row carry
+  the state and the clock), and a page's own actions sit
   in its body.
-- **Buddy stays second in the sidebar, directly under Studio, on ⌘9**
-  (2026-10-10, plan 174 D6 and D8). It keeps Clean cut and every other
-  feature, because the page sells Premium. Never move it or a feature out of
-  it.
+- **Buddy sits in the sidebar's Livestream group, under Destinations, on
+  ⌘8** (2026-11-14, plan 235 D6 and D8; from 2026-10-10 it sat second under
+  Studio on ⌘9, plan 174 D6 and D8). It keeps Clean cut and every other
+  feature, because the page sells Premium. Never move a feature out of it.
+- **The sidebar's way home is its big button, and its keys run in order**
+  (2026-11-14, plan 235 D5 and D8). Studio is a 40 px slab of the chrome
+  primary's metal on every page, never Record's red; ⌘1–⌘9 open the rows top
+  to bottom. Its page row for Buddy wears a plain glyph, `BuddyPageIcon`
+  (Phosphor UserSound, D7), like every other row.
 - **A click on a live chat row puts the message on stream**, and a click on
   the live row takes it off (2026-10-10, D10; plans 055 and 151). There is no
   select-first step and no separate Show button.
@@ -231,18 +238,22 @@ Everything except ⌘K uses the desktop scale.
 - **Toolbar** (`Toolbar`, 40 px): the page title (14 px / 600, the window's
   `h1`) on the window's drag band, and nothing else (owner call,
   2026-09-23). Actions live with the content they act on. The Studio's
-  Record, Go Live… and the stop button ("Stop recording", or "End
-  livestream" while on air) and its clock sit at the top of the inspector,
-  right above Session; a page's own actions sit in its body (a filter bar, a
+  Record, Go Live and the stop button ("Stop recording", or "End
+  livestream" while on air) sit at the top of the inspector, with no state
+  row, right above Session; a page's own actions sit in its body (a filter bar, a
   section header, or the PageHeader row). The toolbar never scrolls; only
   `PaneBody` does.
-- **Sidebar** (plan 174 D8).
+- **Sidebar** (plan 174 D8, plan 235).
   - The top row holds the traffic lights and the ⌘K button.
-  - Studio leads, with a live dot and the clock while a recording or
-    livestream runs. Buddy sits directly under it on ⌘9 (owner call).
+  - Studio ⌘1 leads as a 40 px `chrome-fill` slab (the chrome primary's
+    metal: silver in dark, black chrome in light) with a 20 px icon, which
+    fills while Studio is the page you're on. The live dot and the clock
+    show on it while a recording or livestream runs, in the slab's ink.
   - "Setup" labels the pages you configure between sessions: Sources ⌘2,
-    Scene ⌘3, Assets ⌘4, Livestream ⌘5, Captions ⌘6, Output ⌘7. Library ⌘8
-    follows under no label: a group of one row carries none.
+    Scene ⌘3, Assets ⌘4, Captions ⌘5, Output ⌘6.
+  - "Livestream" labels Destinations ⌘7 (the page that was Livestream) and
+    Buddy ⌘8 (owner call). Library ⌘9 follows under no label: a group of
+    one row carries none. ⌘1–⌘9 run down the rows in order.
   - Settings (⌘,) sits in a bottom block above the account row. Health has
     no row: the status bar's state is its door (D9).
   - Section labels are `SectionLabel` (11 px / 600, tertiary). Rows are
@@ -260,7 +271,7 @@ Everything except ⌘K uses the desktop scale.
   nested section passes `headingLevel={3}`), a 12 px secondary description,
   a hairline between sections, and 16 px padding. No border, background,
   radius, or shadow.
-- **Pages with tabs** (Settings, plan 064; Buddy, plan 150; Livestream,
+- **Pages with tabs** (Settings, plan 064; Buddy, plan 150; Destinations,
   plan 174): `PageTabs`, one segmented `TabsList` in a `PaneStrip` pinned
   under the toolbar (`border-b px-gutter py-2`). Only the region under it
   scrolls: the page spreads `PANE_OWNS_SCROLL`, so `PaneBody` stops
@@ -349,8 +360,8 @@ links home.
 
 - **Devices**: Sources is the home of every screen, window, camera,
   microphone and system audio source, with its gain and level. The Studio
-  inspector mirrors the few needed mid-session: the Sources section (Screen,
-  Camera, System audio, with Open Sources) and the Microphone section
+  inspector mirrors the few needed mid-session: the Sources group (Screen,
+  Camera, System audio, with the Open Sources cog) and the Microphone group
   (picker, level, mute and its hotkey).
 - **Takeovers**: Assets → Takeovers manages them (import, rename, reorder,
   delete). Studio's Takeover section puts one on stream and takes it off.
@@ -370,7 +381,9 @@ links home.
 One verb pair on every surface (plan 174 D3; the table in
 `docs/ui-copy.md`, strings in `lib/go-live-copy.ts`):
 
-- The Studio buttons read "Record" and **"Go Live…"** (it opens a dialog).
+- The Studio buttons read "Record" and **"Go Live"**: it opens a dialog, and
+  still has no "…", the owner's exception (2026-11-14, plan 235 D2). Its
+  Retro LCD key reads the same.
 - The Go Live dialog's title and primary button read **"Go live"** ("Go
   live on 3 destinations" when it starts more than one).
 - Stopping a livestream is **"End livestream"**, with the line "Your
@@ -670,6 +683,11 @@ moved onto the utility.
 - **The Buddy mark** (plan 164) is the owner's stone golem, always the
   real artwork, never a redrawn glyph (the plan 149 owner call, 2026-10-04).
   The masters and their export commands live in `assets/brand/buddy/`.
+  - The Buddy page's row in the sidebar and in ⌘K's page list is the page,
+    not Buddy: it wears `BuddyPageIcon` (Phosphor UserSound), a plain glyph
+    like its neighbours, filled while it is the page you're on (plan 235
+    D7). The artwork stays on the Buddy page's intro, the consent dialog,
+    the Stream Manager's Buddy pane and chat rows.
   - `BuddyIcon` is the emblem at icon size: an `<svg>` wrapping the image,
     so `svg`-based slot styles size it like its neighbours. It is the one
     full-colour icon in the registry. `weight` and `currentColor` never
@@ -778,7 +796,7 @@ Rows, forms and choices
 - `KebabMenu` (`components/kebab-menu.tsx`): `items label? busy? disabled? reveal? tabIndex?`,
   each item `id label icon? destructive? disabled? disabledReason? group? shortcut? onSelect`.
 - `BroadcastInfoFields` (`components/streaming/broadcast-info-fields.tsx`):
-  stream details one way everywhere (the Go Live dialog, Livestream →
+  stream details one way everywhere (the Go Live dialog, Destinations →
   Setup, the Schedule dialog), with one title rule, Privacy as a
   `SegmentedControl` and one Made for kids switch:
   `idPrefix value onChange disabled? titleRequired? privacyNote? madeForKidsNote? thumbnail? titleRef?`.

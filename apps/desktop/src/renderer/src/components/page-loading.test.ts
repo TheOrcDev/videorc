@@ -22,7 +22,7 @@ describe('PageLoading', () => {
   it('names the page that is loading once the app is open', () => {
     const markup = renderToStaticMarkup(createElement(PageLoading, { tab: 'live', opening: false }))
 
-    expect(markup).toContain('Loading Livestream…')
+    expect(markup).toContain('Loading Destinations…')
     expect(markup).not.toContain('Opening Videorc')
     expect(markup).toContain('role="status"')
   })

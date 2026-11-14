@@ -30,7 +30,7 @@ type HostApi = {
 
 export interface ChatCommandsHostDeps {
   api: HostApi | undefined
-  /** Opens Livestream → Setup, where the section is. */
+  /** Opens Destinations → Setup, where the section is. */
   openSetup: () => void
 }
 

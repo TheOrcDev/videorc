@@ -70,7 +70,7 @@ export function useScheduledStreams() {
           })
         } catch {
           setError(
-            "Some events couldn't refresh. Showing what was last confirmed. Check the account in Livestream → Setup, then refresh."
+            "Some events couldn't refresh. Showing what was last confirmed. Check the account in Destinations → Setup, then refresh."
           )
         }
       }

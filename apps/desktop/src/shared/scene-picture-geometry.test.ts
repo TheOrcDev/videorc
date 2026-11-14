@@ -5,6 +5,10 @@ import { describe, expect, it } from 'vitest'
 import type { SceneSourceKind, SourceCrop } from './backend'
 import {
   containRectPixels,
+  previewSurfaceLayerUsesBackgroundStage,
+  previewSurfaceSceneSources,
+  sceneCameraOnStage,
+  sceneCameraUsesBackgroundStage,
   sceneFrameRect,
   scenePictureRect,
   scenePictureRectPixels,
@@ -25,6 +29,13 @@ interface PictureCase {
   source: PixelSize | null
   crop?: Partial<SourceCrop>
   stageMargin?: number
+  /** The scene the source sits in (plan 235 D9 a); absent keeps the camera off the stage. */
+  scene?: {
+    sourceKinds: SceneSourceKind[]
+    cameraKeyed?: boolean
+    freeform?: boolean
+    cameraOnStage: boolean
+  }
   canvas: PixelSize
   expected: PixelRect
 }
@@ -48,11 +59,19 @@ describe('scene picture geometry (plan 216 B1)', () => {
   it('reproduces every shared fixture case within a pixel', () => {
     expect(fixture.schemaVersion).toBe(1)
     expect(fixture.cases.length).toBeGreaterThanOrEqual(12)
+    expect(fixture.cases.filter((testCase) => testCase.scene).length).toBeGreaterThanOrEqual(7)
     for (const testCase of fixture.cases) {
-      const pixels = scenePictureRectPixels(testCase)
+      // Plan 235 (D9 a): the scene decides whether its camera is on the stage.
+      const cameraOnStage = testCase.scene ? sceneCameraUsesBackgroundStage(testCase.scene) : false
+      if (testCase.scene)
+        expect(cameraOnStage, `${testCase.name}: camera on stage`).toBe(
+          testCase.scene.cameraOnStage
+        )
+      const input = { ...testCase, cameraOnStage }
+      const pixels = scenePictureRectPixels(input)
       within(pixels, testCase.expected, 1, testCase.name)
       // The fraction form is the pixel form over the canvas.
-      const fraction = scenePictureRect(testCase)
+      const fraction = scenePictureRect(input)
       within(
         {
           x: fraction.x * testCase.canvas.width,
@@ -87,10 +106,52 @@ describe('scene picture geometry (plan 216 B1)', () => {
       for (const key of ['x', 'y', 'width', 'height'] as const)
         expect(back[key]).toBeCloseTo(frame[key], 12)
     }
-    // The camera never sits on the stage; no margin leaves every kind alone.
+    // A camera over or beside a screen is not on the stage; no margin leaves
+    // every kind alone.
     expect(sceneStageRect(frame, 'camera', 0.1)).toEqual(frame)
     expect(sceneFrameRect(frame, 'camera', 0.1)).toEqual(frame)
     expect(sceneStageRect(frame, 'screen', 0)).toEqual(frame)
+    // Plan 235 (D9 a): the camera of a camera-only scene maps like a screen.
+    const stagedCamera = sceneStageRect(frame, 'camera', 0.1, true)
+    expect(stagedCamera).toEqual(sceneStageRect(frame, 'screen', 0.1))
+    const cameraBack = sceneFrameRect(stagedCamera, 'camera', 0.1, true)
+    for (const key of ['x', 'y', 'width', 'height'] as const)
+      expect(cameraBack[key]).toBeCloseTo(frame[key], 12)
+    expect(sceneStageRect(frame, 'camera', 0, true)).toEqual(frame)
+  })
+
+  it('stages the camera only in an unkeyed camera-only scene (plan 235, D9 a)', () => {
+    const layout = { arrangementMode: 'preset', cameraChromaKeyEnabled: false } as const
+    const camera = [{ kind: 'camera' }] as const
+    expect(sceneCameraOnStage(camera, layout)).toBe(true)
+    // Key out background: the camera stays full frame over the background.
+    expect(sceneCameraOnStage(camera, { ...layout, cameraChromaKeyEnabled: true })).toBe(false)
+    // Freeform boxes are the streamer's own.
+    expect(sceneCameraOnStage(camera, { ...layout, arrangementMode: 'freeform' })).toBe(false)
+    // A camera over or beside a screen, a window or the test pattern stays put,
+    // and so does one whose screen is hidden: every source counts.
+    for (const kind of ['screen', 'window', 'test-pattern'] as const)
+      expect(sceneCameraOnStage([{ kind }, { kind: 'camera' }], layout)).toBe(false)
+    // No camera, no scene and no layout answer no.
+    expect(sceneCameraOnStage([{ kind: 'screen' }], layout)).toBe(false)
+    expect(sceneCameraOnStage([], layout)).toBe(false)
+    expect(sceneCameraOnStage(null, layout)).toBe(false)
+    expect(sceneCameraOnStage(camera, undefined)).toBe(false)
+  })
+
+  it('gives the preview surface the same rule, with its stand-in layers', () => {
+    // The compositor's status lists the background image beside the scene's
+    // sources: it is not a scene source, so a camera-only scene stays one.
+    const status = [{ kind: 'camera' }, { kind: 'background-image' }]
+    const layout = { arrangementMode: 'preset', cameraChromaKeyEnabled: false } as const
+    expect(previewSurfaceSceneSources(status)).toEqual([{ kind: 'camera' }])
+    expect(sceneCameraOnStage(previewSurfaceSceneSources(status), layout)).toBe(true)
+    for (const kind of ['screen', 'window', 'test-pattern', 'screen-image'] as const)
+      expect(previewSurfaceLayerUsesBackgroundStage(kind, false)).toBe(true)
+    expect(previewSurfaceLayerUsesBackgroundStage('camera', false)).toBe(false)
+    expect(previewSurfaceLayerUsesBackgroundStage('camera', true)).toBe(true)
+    for (const kind of ['background', 'banner', 'buddy'] as const)
+      expect(previewSurfaceLayerUsesBackgroundStage(kind, true)).toBe(false)
   })
 
   it('rounds a frame to canvas pixels like the backend, signed and uncut', () => {

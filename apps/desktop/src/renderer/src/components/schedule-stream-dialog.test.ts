@@ -263,7 +263,7 @@ describe('schedule form reasons (plan 174 S3.5b)', () => {
         })
       )
     })
-    expect(document.body.textContent).toContain('Sign in to YouTube in Livestream → Setup first.')
+    expect(document.body.textContent).toContain('Sign in to YouTube in Destinations → Setup first.')
     expect(
       [...document.querySelectorAll('button')].some((button) => button.textContent === 'Open Setup')
     ).toBe(true)

@@ -304,7 +304,7 @@ declare module './backend' {
     getChatCommandFailures: () => Promise<ChatCommandReplyFailed[]>
     pushChatCommandFailures: (failures: ChatCommandReplyFailed[]) => Promise<boolean>
     onChatCommandFailures: (callback: (failures: ChatCommandReplyFailed[]) => void) => () => void
-    /** ⋯ Chat commands…: main shows the main window, which opens Livestream →
+    /** ⋯ Chat commands…: main shows the main window, which opens Destinations →
      * Setup and scrolls to the section. */
     openChatCommandsFromCommentsWindow: (command: OpenChatCommandsCommand) => Promise<boolean>
     onOpenChatCommands: (callback: () => void) => () => void

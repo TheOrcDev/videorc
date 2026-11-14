@@ -61,7 +61,7 @@ async function systemNotificationsOn(client: BackendClient | null): Promise<bool
   }
 }
 
-/** The Livestream page saved new settings: forget the cached copy. */
+/** The Destinations page saved new settings: forget the cached copy. */
 export function noteWatchdogSettings(settings: WatchdogSettings): void {
   settingsCache = { at: Date.now(), settings }
 }

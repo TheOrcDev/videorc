@@ -368,7 +368,7 @@ function AppShellContent(): ReactElement {
     [selectSettingsTab, setActive]
   )
 
-  // Plan 174 S1.6b (A-14): Livestream reopens on the view used last, like
+  // Plan 174 S1.6b (A-14): Destinations reopens on the view used last, like
   // Settings; ⌘K's "Upcoming events" names its view before opening.
   const [livestreamView, setLivestreamView] = useState<LivestreamViewId>(readLastLivestreamView)
   const selectLivestreamView = useCallback((view: LivestreamViewId) => {
@@ -376,7 +376,7 @@ function AppShellContent(): ReactElement {
     writeLastLivestreamView(view)
   }, [])
   // Plan 213 J1: a destination the Stream Manager asked to open ("Use Sign
-  // in"); Livestream → Setup opens its card, then clears it.
+  // in"); Destinations → Setup opens its card, then clears it.
   const [destinationToOpen, setDestinationToOpen] = useState<string | null>(null)
   const clearDestinationToOpen = useCallback(() => setDestinationToOpen(null), [])
   const openLivestream = useCallback(
@@ -394,7 +394,7 @@ function AppShellContent(): ReactElement {
   // replay writes nothing and returns to the page it came from.
   const leaveFirstRunSetup = useCallback(
     ({ completion, openTab }: FirstRunLeave) => {
-      // "Open Livestream" (plan 207 D10) lands on Setup, where stream keys go.
+      // "Open Destinations" (plan 207 D10) lands on Setup, where stream keys go.
       if (openTab === 'live') selectLivestreamView('setup')
       if (replay) {
         setReplay(null)
@@ -503,7 +503,7 @@ function AppShellContent(): ReactElement {
   }, [openBuddy])
 
   // Plan 213 J1: "Use Sign in" in the Stream Manager opens that destination's
-  // connection in Livestream → Setup (main has shown the window).
+  // connection in Destinations → Setup (main has shown the window).
   useEffect(() => {
     const off = window.videorc?.onOpenDestination?.(({ targetId }) => {
       openLivestream('setup')

@@ -27,11 +27,11 @@ app. Two checks hold them (see [Guards](#guards)).
   status word: "Save local recording", "Needs reconnect".
 - Capitalize only names:
   - Videorc, Premium, Buddy (or the name the streamer gave it), Buddy Live;
-  - Go Live, as the action's name ("Go Live…", "Use for Go Live…"); the verb
+  - Go Live, as the action's name ("Go Live", "Use for Go Live…"); the verb
     in a sentence is lowercase ("Go live", "when you go live");
-  - pages and windows: Studio, Sources, Scene, Assets, Livestream, Captions,
-    Output, Library, Settings, Health, Stream Manager, Preview, Notes,
-    Captions reader;
+  - pages, sidebar groups and windows: Studio, Sources, Scene, Assets,
+    Captions, Output, Destinations, Buddy, Library, Settings, Health, Setup,
+    Livestream (the group), Stream Manager, Preview, Notes, Captions reader;
   - platforms and products: YouTube, Twitch, Kick, X, TikTok, Custom RTMP,
     OBS, macOS, Windows.
 - A status is a word, never a raw value: "Reconnecting", not "closed" or
@@ -41,11 +41,11 @@ app. Two checks hold them (see [Guards](#guards)).
 
 - One character, "…", never three dots ("...").
 - On a command that opens a further step asking for a choice or input:
-  "Import…", "Rename…", "Choose thumbnail…", "Edit…", "Go Live…", "Pair a
+  "Import…", "Rename…", "Choose thumbnail…", "Edit…", "Go live…" (⌘K), "Pair a
   phone…", "Run setup again…", "What's new…", "Sign in…" and "Authorize X
   Live…" (both open an account flow in the browser).
 - Not on a command that acts at once, or one that only opens a page or a
-  window: "Delete", "Open Output", "Open Stream Manager", "Open Livestream".
+  window: "Delete", "Open Output", "Open Stream Manager", "Open Destinations".
   "Set level for me" changes Gain at once, so it has no ellipsis either.
 - On every pending label: "Saving…", "Importing…", "Exporting…",
   "Applying…", "Opening preview…".
@@ -65,7 +65,7 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
 
 | Where                 | Copy                                                                            |
 | --------------------- | ------------------------------------------------------------------------------- |
-| Studio buttons        | "Record" (with ␣) and "Go Live…"                                                |
+| Studio buttons        | "Record" (with ␣) and "Go Live": no "…", the owner's exception (plan 235 D2)    |
 | Go Live dialog        | title "Go live"; primary "Go live" or "Go live on 3 destinations"               |
 | Not public on YouTube | "Go live unlisted?" with "Go live unlisted" and "Change privacy" (or Private)   |
 | Stopping while on air | "End livestream", with "Your recording stops too."                              |
@@ -83,7 +83,7 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
 - Delete destroys, Remove takes out of a list or off stream, Discard drops
   unsaved changes, Clear empties a field, a filter or a view.
 - Quote a control or a page exactly as it reads today, with "→" for a path:
-  "Livestream → Setup", "Settings → Shortcuts". Never point at a page, a tab
+  "Destinations → Setup", "Settings → Shortcuts". Never point at a page, a tab
   or a button that does not exist.
 - Scenes and Hide screen (plan 210) read the same everywhere: "New scene…"
   makes scenes for apps, a scene for an app says "{App} · front window",
@@ -150,7 +150,7 @@ in readable strings:
 | diagnostics                                 | "Health", "support bundle"                                   |
 | Manual RTMP                                 | "Stream key"                                                 |
 | X / Twitter                                 | "X"                                                          |
-| Streaming tab, Recording → Output           | "Livestream", "Output"                                       |
+| Streaming tab, Recording → Output           | "Destinations", "Output"                                     |
 | Open Live, Open Recording, Customize        | the control's real label                                     |
 | Command Palette                             | "Search" (⌘K)                                                |
 | receive-only                                | "read-only"                                                  |
@@ -172,7 +172,7 @@ source change: the stage is the confirmation.
     import the image";
   - the description is whole sentences, with periods;
   - at most one action, named by its verb: "Show in Finder", "Retry",
-    "Open Livestream".
+    "Open Destinations".
 - Type by meaning; the type colors the icon only, never the toast:
   - error: it failed and needs you;
   - warning: it can't happen now, or it is degraded;

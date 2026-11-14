@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { BuddyIcon } from './icons'
+import { BuddyPageIcon } from './icons'
 import {
+  SIDEBAR_ZONES,
   STUDIO_PANELS,
   WORKSPACE_SHORTCUTS,
   WORKSPACE_TABS,
@@ -9,24 +10,25 @@ import {
   isWorkspaceTab,
   shortcutDigitFor,
   sidebarOrderFor,
+  workspacePageMeta,
   workspaceTabLabel,
   workspaceWindowTitle,
   type WorkspaceTab
 } from './workspace-nav'
 
-// Captions is a first-class Setup page at ⌘6. Settings keeps ⌘,, while Health
+// Captions is a first-class Setup page at ⌘5. Settings keeps ⌘,, while Health
 // intentionally has no navigation key and stays reachable via ⌘K. These invariants
 // guard the IA so a later edit can't silently drop a page,
 // duplicate a shortcut, or rename a legacy trigger id that smokes/deep-links depend on.
 describe('workspace navigation', () => {
-  it('registers Assets as a Setup panel between Scene and Destinations', () => {
+  it('registers Assets as a Setup panel between Scene and Captions', () => {
     expect(STUDIO_PANELS.map((panel) => panel.id)).toEqual([
       'sources',
       'layouts',
       'assets',
-      'live',
       'captions',
-      'recording'
+      'recording',
+      'live'
     ])
 
     const assets = STUDIO_PANELS.find((panel) => panel.id === 'assets')
@@ -47,19 +49,24 @@ describe('workspace navigation', () => {
     })
   })
 
-  it('maps the workflow pages in sidebar order (Captions ⌘6, Settings ⌘,)', () => {
+  // Plan 235 D8: the digits run down the sidebar, ⌘1 to ⌘9.
+  it('maps the pages in sidebar order (Captions ⌘5, Destinations ⌘7, Settings ⌘,)', () => {
     expect(WORKSPACE_SHORTCUTS.map((entry) => [entry.digit, entry.tab])).toEqual([
       ['1', 'studio'],
       ['2', 'sources'],
       ['3', 'layouts'],
       ['4', 'assets'],
-      ['5', 'live'],
-      ['6', 'captions'],
-      ['7', 'recording'],
-      ['8', 'library'],
-      ['9', 'ai'],
+      ['5', 'captions'],
+      ['6', 'recording'],
+      ['7', 'live'],
+      ['8', 'ai'],
+      ['9', 'library'],
       [',', 'settings']
     ])
+    const digits = WORKSPACE_SHORTCUTS.filter((entry) => entry.digit !== ',')
+    expect(digits.map((entry) => sidebarOrderFor(entry.tab))).toEqual(
+      digits.map((_, index) => index)
+    )
   })
 
   it('puts Settings on ⌘, and never duplicates a key', () => {
@@ -86,29 +93,48 @@ describe('workspace navigation', () => {
     expect(WORKSPACE_SHORTCUTS).toHaveLength(reachable.length - noDigit.length)
   })
 
-  // Plan 119: Buddy sits right under Studio. Its id is `ai`, the id ⌘9, deep
-  // links, smokes and data-videorc-tab-trigger use.
-  it('shows Buddy under Studio in the stage row, on id ai and ⌘9', () => {
-    const buddy = WORKSPACE_TABS.find((tab) => tab.id === 'ai')
-    expect(buddy).toEqual({ id: 'ai', label: 'Buddy', icon: BuddyIcon, group: 'stage' })
-    expect(WORKSPACE_TABS.filter((tab) => tab.group === 'stage').map((tab) => tab.id)).toEqual([
-      'studio',
-      'ai'
+  // Plan 235 D6: Destinations (the page that was Livestream) and Buddy share
+  // the labelled Livestream group, under Setup. Ids, legacy trigger ids and
+  // deep links stay: Buddy is `ai`, Destinations is `live` (`streaming`).
+  it('groups Destinations and Buddy under Livestream, between Setup and Library', () => {
+    expect(SIDEBAR_ZONES.map((zone) => [zone.id, zone.label ?? null, zone.pages])).toEqual([
+      ['stage', null, ['studio']],
+      ['setup', 'Setup', ['sources', 'layouts', 'assets', 'captions', 'recording']],
+      ['livestream', 'Livestream', ['live', 'ai']],
+      ['library', null, ['library']],
+      ['system', null, ['settings']]
     ])
-    expect(shortcutDigitFor('ai')).toBe('9')
+    expect(workspaceTabLabel('live')).toBe('Destinations')
+    expect(STUDIO_PANELS.find((panel) => panel.id === 'live')?.legacyTabId).toBe('streaming')
+    expect(isStudioPanel('live')).toBe(true)
+    // Plan 235 D7: a plain glyph, named for the page.
+    expect(WORKSPACE_TABS.find((tab) => tab.id === 'ai')).toEqual({
+      id: 'ai',
+      label: 'Buddy',
+      icon: BuddyPageIcon
+    })
+    expect(shortcutDigitFor('ai')).toBe('8')
     expect(workspaceTabLabel('ai')).toBe('Buddy')
   })
 
-  it('cascades the shortcut chips down the sidebar, so Buddy (⌘9) arrives second', () => {
+  it('names each sidebar page once, and every page but Health has a row', () => {
+    const rows = SIDEBAR_ZONES.flatMap((zone) => zone.pages)
+    expect(new Set(rows).size).toBe(rows.length)
+    const pages = [...WORKSPACE_TABS.map((tab) => tab.id), ...STUDIO_PANELS.map((p) => p.id)]
+    expect([...rows].sort()).toEqual(pages.filter((tab) => tab !== 'diagnostics').sort())
+    expect(workspacePageMeta('live')).toMatchObject({ label: 'Destinations' })
+  })
+
+  it('cascades the shortcut chips down the sidebar, top to bottom', () => {
     const rows: WorkspaceTab[] = [
       'studio',
-      'ai',
       'sources',
       'layouts',
       'assets',
-      'live',
       'captions',
       'recording',
+      'live',
+      'ai',
       'library',
       'settings'
     ]
@@ -122,6 +148,7 @@ describe('workspace navigation', () => {
   it('titles the window after the page', () => {
     expect(workspaceWindowTitle('studio')).toBe('Studio – Videorc')
     expect(workspaceWindowTitle('recording')).toBe('Output – Videorc')
+    expect(workspaceWindowTitle('live')).toBe('Destinations – Videorc')
     expect(workspaceWindowTitle('diagnostics')).toBe('Health – Videorc')
     expect(workspaceWindowTitle('ai')).not.toContain('—')
   })

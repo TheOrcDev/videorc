@@ -13670,7 +13670,7 @@ describe('real StudioProvider lifecycle', () => {
   // provider's two starts, and each is an explicit intent. Go Live… opens the
   // Go Live dialog and starts nothing on its own; Record starts a local take
   // at once. Neither writes the saved output mode: the Output page's "Save
-  // local recording" and the Livestream page's destinations stay as they are.
+  // local recording" and the Destinations page's destinations stay as they are.
   it('starts Go Live… and Record through the shared provider starts', async () => {
     const backend = new StudioBackend()
     enableYouTubeOauthForTest(backend)
