@@ -76,6 +76,10 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
 const WatchdogSection = lazy(async () => ({
   default: (await import('./watchdog-section')).WatchdogSection
 }))
+// Plan 237: the stream report email's switch, loaded the same way.
+const StreamReportEmailSection = lazy(async () => ({
+  default: (await import('./stream-report-email-section')).StreamReportEmailSection
+}))
 
 // The Livestream right column (plan 080 S7). Owner, 2026-09-30: "Live stream
 // should be about connecting your accounts and not about reading some tech
@@ -185,6 +189,9 @@ export function GoLivePanel({
       <CloudSection />
       <Suspense fallback={null}>
         <WatchdogSection />
+      </Suspense>
+      <Suspense fallback={null}>
+        <StreamReportEmailSection />
       </Suspense>
       <ReadyToGoLive
         cloud={cloud}

@@ -2277,6 +2277,42 @@ export interface UsageStatsSetParams {
   enabled: boolean
 }
 
+/**
+ * `streamReport.email.get` / `.set` (plan 237): Livestream → After the stream,
+ * "Email me a report after each stream". The choice lives on the videorc.com
+ * account; the email's unsubscribe link writes the same one.
+ */
+export interface StreamReportEmailState {
+  signedIn: boolean
+  /** Where the report goes: the account's own address. */
+  email?: string
+  /** The account's choice; `null` when it could not be read (signed out,
+   * offline, or a videorc.com without the route). */
+  enabled: boolean | null
+  /** `VIDEORC_STREAM_REPORT_EMAIL=0` turned it off for this run. */
+  envDisabled: boolean
+}
+
+export interface StreamReportEmailSetParams {
+  enabled: boolean
+}
+
+export type StreamReportSendStatus =
+  | 'sent'
+  | 'already-sent'
+  | 'disabled'
+  | 'no-stream'
+  | 'signed-out'
+  | 'rate-limited'
+  | 'unavailable'
+  | 'failed'
+
+/** `streamReport.email.sendLast`: the latest live stream's report, now. */
+export interface StreamReportSendResult {
+  status: StreamReportSendStatus
+  email?: string
+}
+
 /** One `/dev/dri/renderD*` node as the Linux VAAPI policy saw it (Plan 052). */
 export type LinuxRenderNodeState = 'probed-ok' | 'rejected' | 'quarantined' | 'skipped'
 
