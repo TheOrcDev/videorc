@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { BackendClient } from '@/backendClient'
 import type {
+  CloudGuestAction,
   CloudRoomOpenParams,
   CloudRoomTokenAnswer,
   CloudStage,
@@ -48,11 +49,32 @@ export type TalkShowRoomControllerDeps = {
   hostShape: () => CloudStage['hostShape']
   /** Called once the room closed and the backend returned the camera (D6). */
   onCameraReturned: () => void
-  /** A refusal or a failure, in the Studio's words. */
+  /** A refusal or a failure, in the Studio's words. `action` is the whole
+   * phrase after "Couldn't" ("join the room", "mute the guest"). */
   onError: (error: unknown, action: string) => void
   /** The lifecycle probe's scripted room (DEV only): hides the Preview with
    * no LiveKit room behind it. */
   previewReplacedOverride: boolean
+}
+
+/** A guest action in the Studio's error words: "Couldn't {words}". */
+export function guestActionWords(action: CloudGuestAction): string {
+  switch (action) {
+    case 'mute':
+      return 'mute the guest'
+    case 'unmute':
+      return 'unmute the guest'
+    case 'remove':
+      return 'remove the guest'
+    case 'ban':
+      return 'ban the guest'
+    case 'rename':
+      return 'rename the guest'
+    case 'allow-screen-share':
+      return 'let the guest share their screen'
+    case 'disallow-screen-share':
+      return "stop the guest's screen share"
+  }
 }
 
 /**
@@ -100,6 +122,10 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const clientRef = useRef<TalkShowRoomClient | null>(null)
   const joiningRef = useRef<Promise<void> | null>(null)
   const audioHostRef = useRef<HTMLElement | null>(null)
+  // Set while the controller is unmounted. A join still loading the room
+  // client when the Studio goes away stops there: it never builds a client
+  // (or touches a document that may be gone) that nothing would disconnect.
+  const disposedRef = useRef(false)
   const roomPhase = cloudStatus?.room?.phase ?? 'closed'
   const roomOpen = roomPhase === 'open'
   const showId = cloudStatus?.show?.id ?? null
@@ -164,6 +190,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         // is open (the renderer's web permissions allow audio only).
         await window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: null })
         const { TalkShowRoomClient } = await loadRoomClient()
+        if (disposedRef.current) return
         if (!audioHostRef.current) {
           const host = document.createElement('div')
           host.setAttribute('data-talk-show-audio-host', '')
@@ -197,16 +224,17 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     void clientRef.current?.sendStage(stageRef.current)
   }, [roomOpen, stageKey])
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    disposedRef.current = false
+    return () => {
+      disposedRef.current = true
       const current = clientRef.current
       clientRef.current = null
       void current?.disconnect()
       audioHostRef.current?.remove()
       audioHostRef.current = null
-    },
-    []
-  )
+    }
+  }, [])
 
   const call = useCallback(
     async <
@@ -274,7 +302,11 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
           decision === 'let-in' ? 'let the guest in' : 'decline the guest'
         ),
       actOnGuest: async (guestId, action, name) =>
-        call('cloud.guest.act', { guestId, action, ...(name ? { name } : {}) }, action),
+        call(
+          'cloud.guest.act',
+          { guestId, action, ...(name ? { name } : {}) },
+          guestActionWords(action)
+        ),
       setStage,
       bringOn: async (identity) => {
         if (!stage) return
@@ -323,9 +355,11 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       },
       setMonitor: async (enabled) => {
         clientRef.current?.setMonitor(enabled)
-        await call('cloud.return.set', { open: enabled }, 'show the Program monitor for').catch(
-          () => {}
-        )
+        await call(
+          'cloud.return.set',
+          { open: enabled },
+          'show the Program monitor to the room'
+        ).catch(() => {})
       },
       setMicrophoneMuted: async (muted) => clientRef.current?.setMicrophoneMuted(muted),
       setCameraOff: async (off) => clientRef.current?.setCameraOff(off),
