@@ -1679,11 +1679,11 @@ impl CohostApiError {
     fn from_transport_within(error: reqwest::Error, timeout: std::time::Duration) -> Self {
         if error.is_timeout() {
             Self::timeout(format!(
-                "Buddy did not answer within {} s.",
+                "Sidekick did not answer within {} s.",
                 timeout.as_secs()
             ))
         } else {
-            Self::network(format!("Could not reach Buddy: {error}"))
+            Self::network(format!("Could not reach Sidekick: {error}"))
         }
     }
 }
@@ -2045,7 +2045,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Buddy's response: {error}"),
+                    format!("Could not read Sidekick's response: {error}"),
                 )
             });
         }
@@ -2172,7 +2172,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Buddy's spotlight response: {error}"),
+                    format!("Could not read Sidekick's spotlight response: {error}"),
                 )
             });
         }
@@ -2214,7 +2214,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Buddy's greet response: {error}"),
+                    format!("Could not read Sidekick's greet response: {error}"),
                 )
             });
         }
@@ -2258,7 +2258,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Buddy's memory response: {error}"),
+                    format!("Could not read Sidekick's memory response: {error}"),
                 )
             });
         }
@@ -2299,7 +2299,7 @@ impl VideorcApiClient {
                 kind: CohostApiErrorKind::InvalidRequest,
                 detail: CohostErrorDetail::new(
                     "invalid-request",
-                    format!("Buddy did not send the command: {problem}."),
+                    format!("Sidekick did not send the command: {problem}."),
                     None,
                 ),
             });
@@ -2322,7 +2322,7 @@ impl VideorcApiClient {
                 }
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Buddy's command response: {error}"),
+                    format!("Could not read Sidekick's command response: {error}"),
                 )
             });
         }
@@ -2353,7 +2353,7 @@ impl VideorcApiClient {
             kind: CohostApiErrorKind::InvalidRequest,
             detail: CohostErrorDetail::new(
                 "invalid-request",
-                format!("Buddy did not send the request: {problem}."),
+                format!("Sidekick did not send the request: {problem}."),
                 None,
             ),
         })?;
@@ -2375,7 +2375,7 @@ impl VideorcApiClient {
                 }
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Buddy's planner response: {error}"),
+                    format!("Could not read Sidekick's planner response: {error}"),
                 )
             });
         }
@@ -4650,21 +4650,21 @@ mod tests {
 
     #[test]
     fn cohost_desktop_side_failures_carry_their_own_detail_codes() {
-        let network = CohostApiError::network("Could not reach Buddy: dns");
+        let network = CohostApiError::network("Could not reach Sidekick: dns");
         assert_eq!(network.kind, CohostApiErrorKind::Network);
         assert_eq!(network.reason(), CohostReason::Network);
         assert_eq!(network.detail.code, COHOST_DETAIL_CODE_NETWORK);
         assert_eq!(network.detail.status, None);
 
-        let timeout = CohostApiError::timeout("Buddy did not answer within 12 s.");
+        let timeout = CohostApiError::timeout("Sidekick did not answer within 12 s.");
         assert_eq!(timeout.kind, CohostApiErrorKind::Network);
         assert_eq!(timeout.reason(), CohostReason::Network);
         assert_eq!(timeout.detail.code, COHOST_DETAIL_CODE_TIMEOUT);
         assert_eq!(timeout.detail.status, None);
-        assert_eq!(timeout.message(), "Buddy did not answer within 12 s.");
+        assert_eq!(timeout.message(), "Sidekick did not answer within 12 s.");
 
         let malformed =
-            CohostApiError::malformed_response(200, "Could not read Buddy's response: EOF");
+            CohostApiError::malformed_response(200, "Could not read Sidekick's response: EOF");
         assert_eq!(malformed.kind, CohostApiErrorKind::MalformedResponse);
         assert_eq!(malformed.reason(), CohostReason::GatewayError);
         assert_eq!(malformed.detail.code, COHOST_DETAIL_CODE_MALFORMED_RESPONSE);

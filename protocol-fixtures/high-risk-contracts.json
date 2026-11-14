@@ -167,7 +167,7 @@
           "state": "disabled",
           "reason": "Noise Cleanup requires Videorc Premium."
         },
-        { "featureId": "live-cohost", "state": "disabled", "reason": "Buddy requires Videorc Premium." }
+        { "featureId": "live-cohost", "state": "disabled", "reason": "Sidekick requires Videorc Premium." }
       ],
       "limits": {
         "recording": { "maxWidth": 3840, "maxHeight": 2160, "maxFps": 60 },
@@ -877,7 +877,7 @@
       "removeConfirm": "confirm",
       "persona": {
         "id": "default",
-        "name": "Buddy",
+        "name": "Sidekick",
         "personality": "",
         "bubbleStyle": "speech",
         "images": {},
@@ -975,7 +975,7 @@
       "reason": "gateway-error",
       "detail": {
         "code": "ai-gateway-error",
-        "message": "The Buddy tick failed on every configured model.",
+        "message": "The Sidekick tick failed on every configured model.",
         "status": 502
       },
       "questions": [],
@@ -996,7 +996,7 @@
       "reason": "network",
       "detail": {
         "code": "timeout",
-        "message": "Buddy did not answer within 12 s.",
+        "message": "Sidekick did not answer within 12 s.",
         "status": null
       },
       "questions": [],
@@ -1118,7 +1118,7 @@
       "listening": {
         "state": "blocked",
         "reasonCode": "listen-monthly-quota-exhausted",
-        "message": "Buddy's listening allowance for this month is used up.",
+        "message": "Sidekick's listening allowance for this month is used up.",
         "remainingSeconds": 0
       },
       "topic": "Mechanical keyboards",
@@ -1912,7 +1912,7 @@
     },
     "bundledSummary": {
       "packId": "bundled:buddy",
-      "name": "Buddy",
+      "name": "Sidekick",
       "cellSize": 640,
       "gazeCount": 25,
       "reactions": ["laugh"],
@@ -2174,7 +2174,7 @@
         {
           "id": "official:golem",
           "slug": "golem",
-          "name": "Buddy",
+          "name": "Sidekick",
           "kind": "Golem",
           "tagline": "The original. Steady as stone.",
           "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
@@ -2307,7 +2307,7 @@
         {
           "id": "official:golem",
           "slug": "golem",
-          "name": "Buddy",
+          "name": "Sidekick",
           "kind": "Golem",
           "tagline": "The original. Steady as stone.",
           "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",

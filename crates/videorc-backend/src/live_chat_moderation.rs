@@ -112,7 +112,7 @@ pub const HIDDEN_PROVIDER_TYPE: &str = "videorc.hidden";
 
 /// The kill switch's user-facing line (contract part D).
 pub const REMOVE_PAUSED_MESSAGE: &str = "Removing messages is paused by Videorc.";
-pub const PREMIUM_REQUIRED_MESSAGE: &str = "Buddy requires Videorc Premium.";
+pub const PREMIUM_REQUIRED_MESSAGE: &str = "Sidekick requires Videorc Premium.";
 
 /// Restart sweep outcomes (storage writes them; the renderer shows them).
 pub const RESTART_CANCELLED_OUTCOME: &str =
@@ -1020,7 +1020,7 @@ async fn run_execution(
             ),
             StreamPlatform::Youtube | StreamPlatform::Twitch | StreamPlatform::Kick => (
                 ModerationOutcomeCode::MissingScope,
-                format!("Reconnect {label} to let Buddy remove messages."),
+                format!("Reconnect {label} to let Sidekick remove messages."),
             ),
             _ => (
                 ModerationOutcomeCode::Unsupported,
@@ -1254,7 +1254,7 @@ async fn delete_once(
             let Some(credentials) = crate::x_live::x_livestream_credentials().ok().flatten() else {
                 return ProviderDeleteOutcome::CannotDelete {
                     code: ModerationOutcomeCode::MissingScope,
-                    reason: "Authorize X Live to let Buddy remove messages.".to_string(),
+                    reason: "Authorize X Live to let Sidekick remove messages.".to_string(),
                 };
             };
             crate::x_live::delete_broadcast_chat_message(
@@ -1286,7 +1286,7 @@ fn fake_scripted_delete(
         FakeChatDeleteBehavior::MissingScope => ProviderDeleteOutcome::CannotDelete {
             code: ModerationOutcomeCode::MissingScope,
             reason: format!(
-                "Reconnect {} to let Buddy remove messages.",
+                "Reconnect {} to let Sidekick remove messages.",
                 stream_platform_label(platform)
             ),
         },
@@ -1685,9 +1685,9 @@ mod tests {
         assert_eq!(
             hidden_outcome(
                 StreamPlatform::Twitch,
-                "Reconnect Twitch to let Buddy remove messages."
+                "Reconnect Twitch to let Sidekick remove messages."
             ),
-            "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Buddy remove messages."
+            "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Sidekick remove messages."
         );
     }
 
@@ -2430,7 +2430,7 @@ mod tests {
         assert_eq!(
             operation.outcome.as_deref(),
             Some(
-                "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Buddy remove messages."
+                "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Sidekick remove messages."
             )
         );
         assert_eq!(
@@ -2933,7 +2933,7 @@ mod tests {
             fake_scripted_delete(FakeChatDeleteBehavior::MissingScope, StreamPlatform::Kick),
             ProviderDeleteOutcome::CannotDelete {
                 code: ModerationOutcomeCode::MissingScope,
-                reason: "Reconnect Kick to let Buddy remove messages.".to_string(),
+                reason: "Reconnect Kick to let Sidekick remove messages.".to_string(),
             }
         );
     }

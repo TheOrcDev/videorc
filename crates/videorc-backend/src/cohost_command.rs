@@ -9,10 +9,12 @@
 //! command or nothing. Resolving names and acting is S3's
 //! (`cohost::dispatch_detected_command`).
 //!
-//! Grammar (plan 140 decisions 2 and 3; plan 164 D2). The wake word "buddy",
-//! or a word of the persona's own name (`wake_words`), starts a command;
-//! words before it are ignored. The old "Orcle" spellings stay as hidden
-//! aliases for one release. Two structured phrases work
+//! Grammar (plan 140 decisions 2 and 3; plan 164 D2; plan 236 D2). The wake
+//! word "sidekick" (also heard as "side kick" or "side-kick", joined into one
+//! word by the tokenizer, even across two finals), or a word of the persona's
+//! own name (`wake_words`), starts a command; words before it are ignored.
+//! The old name "buddy" and its "bodhi" transcription stay as hidden aliases
+//! for two releases (`LEGACY_WAKE_WORDS`). Two structured phrases work
 //! without the wake word unless `require_wake_word` is set: a removal that
 //! points at a message ("remove it from our chat", "delete that message",
 //! "this one is toxic, remove it") and a highlight by name with a comment noun
@@ -73,16 +75,25 @@ const HEARD_MAX_CHARS: usize = 140;
 
 // --- Vocabulary -----------------------------------------------------------------
 
-/// The wake word that always works (plan 164 D2; "buddy" since plan 171 D5),
-/// its "Bodhi" transcription, then the "Orcle" spellings speech models
-/// produce, kept as hidden aliases
-/// for one release (remove after 0.9.140). The weak "oracle"/"orca" entries
-/// are gone. "buddy" is an everyday word, so it only wakes the detector: a
-/// command still needs its phrase after it ("thanks buddy" is talk). The
-/// persona's own name is added per process by `set_persona_wake_tokens`.
-const WAKE_WORDS: &[&str] = &[
-    "buddy", "bodhi", "orcle", "orkle", "orcel", "orkel", "orcl", "orcal",
-];
+/// The wake word that always works (plan 236 D2: "sidekick", which speech to
+/// text spells right where it heard "Buddy" as "body"), its plural, then the
+/// old name "buddy" and its "Bodhi" transcription as hidden aliases. "side
+/// kick" and "side-kick" reach the detector as "sidekick" (`joined_wake`);
+/// "sidekick's" is "sidekick" with a possessive. "body" is never a wake word:
+/// it is an everyday word. Every wake word only wakes the detector: a command
+/// still needs its phrase after it ("thanks sidekick" is talk). The persona's
+/// own name is added per process by `set_persona_wake_tokens`.
+const WAKE_WORDS: &[&str] = &["sidekick", "sidekicks", "buddy", "bodhi"];
+/// The old names that still wake it for two releases after the rename (plan
+/// 236 D2). The release that removes them is pinned by
+/// `the_old_buddy_wake_words_go_after_their_last_release`.
+#[cfg(test)]
+const LEGACY_WAKE_WORDS: &[&str] = &["buddy", "bodhi"];
+/// The last release that still wakes on `LEGACY_WAKE_WORDS`: the app was at
+/// 0.25.2 when Sidekick replaced Buddy, so the first two releases that say
+/// Sidekick are at most this one. The test fails once the app passes it.
+#[cfg(test)]
+const LEGACY_WAKE_WORDS_LAST_RELEASE: (u32, u32, u32) = (0, 26, 1);
 /// The shortest name word that can wake the Buddy.
 const NAME_TOKEN_MIN_LETTERS: usize = 3;
 
@@ -115,24 +126,48 @@ fn fold_ascii(ch: char) -> Option<char> {
     folded.is_ascii_alphabetic().then_some(folded)
 }
 
+/// The one wake word two spoken words make (plan 236 D2): "side kick" and
+/// "side-kick" are "sidekick", "side kicks" is "sidekicks". Every reader of
+/// speech joins them before it looks for a wake word.
+pub(crate) fn joined_wake(first: &str, second: &str) -> Option<&'static str> {
+    if first != "side" {
+        return None;
+    }
+    match second {
+        "kick" => Some("sidekick"),
+        "kicks" => Some("sidekicks"),
+        _ => None,
+    }
+}
+
 /// The words of a persona name that wake the Buddy (plan 164 D2): split like
 /// chat names (camelCase, separators, digits dropped), lowercased and
 /// ASCII-folded, three letters or more, and never a wake word already.
 /// "Grum the Goblin" gives `["grum", "the", "goblin"]` minus "the" (a stop
 /// word), so "Grum, highlight the last comment" and "Goblin, take it down"
-/// both work.
+/// both work. "Side Kick" is the wake word in two words, so neither "side"
+/// nor "kick" becomes a wake word of its own.
 pub fn wake_name_tokens(persona_name: &str) -> Vec<String> {
+    let folded: Vec<String> = crate::cohost_ack::name_tokens(persona_name)
+        .iter()
+        .map(|token| token.chars().filter_map(fold_ascii).collect())
+        .collect();
     let mut tokens: Vec<String> = Vec::new();
-    for token in crate::cohost_ack::name_tokens(persona_name) {
-        let folded: String = token.chars().filter_map(fold_ascii).collect();
-        if folded.chars().count() < NAME_TOKEN_MIN_LETTERS
-            || is_stop_word(&folded)
-            || WAKE_WORDS.contains(&folded.as_str())
-            || tokens.contains(&folded)
+    for (index, token) in folded.iter().enumerate() {
+        let joins_previous = index > 0 && joined_wake(&folded[index - 1], token).is_some();
+        let joins_next = folded
+            .get(index + 1)
+            .is_some_and(|next| joined_wake(token, next).is_some());
+        if token.chars().count() < NAME_TOKEN_MIN_LETTERS
+            || is_stop_word(token)
+            || WAKE_WORDS.contains(&token.as_str())
+            || joins_previous
+            || joins_next
+            || tokens.contains(token)
         {
             continue;
         }
-        tokens.push(folded);
+        tokens.push(token.clone());
     }
     tokens
 }
@@ -664,9 +699,24 @@ impl CommandDetector {
         self.recent
             .retain(|(_, at)| now.saturating_duration_since(*at) <= COMMAND_DEDUPE);
         self.final_index += 1;
-        let words = tokenize(text, self.final_index, now, &mut self.next_ordinal);
+        let mut words = tokenize(text, self.final_index, now, &mut self.next_ordinal);
         if words.is_empty() {
             return None;
+        }
+        // Plan 236 D2: "side" closing one final and "kick" opening the next
+        // are the wake word when the two followed closely, the way a name
+        // carries (`NAME_CARRY_MAX_GAP`). A chunked final often closes with a
+        // period it never heard, so the first word's punctuation is ignored.
+        if let Some(previous) = self.words.last()
+            && previous.final_index + 1 == self.final_index
+            && !previous.possessive
+            && now.saturating_duration_since(previous.at) <= NAME_CARRY_MAX_GAP
+            && let Some(joined) = joined_wake(&previous.text, &words[0].text)
+        {
+            let sentence_start = previous.sentence_start;
+            self.words.pop();
+            words[0].text = joined.to_string();
+            words[0].sentence_start = sentence_start;
         }
         self.words.extend(words);
         let Detection {
@@ -784,7 +834,29 @@ fn tokenize(text: &str, final_index: u64, at: Instant, next_ordinal: &mut u64) -
         }
         sentence_start = sentence_end;
     }
+    join_wake_pairs(&mut words);
     words
+}
+
+/// "side kick" and "side-kick" inside one final become the one word
+/// "sidekick" (plan 236 D2), keeping where the first word stood in its
+/// sentence and the punctuation after the second. A comma between them
+/// ("side, kick") keeps two words.
+fn join_wake_pairs(words: &mut Vec<Word>) {
+    let mut index = 0;
+    while index + 1 < words.len() {
+        let first = &words[index];
+        if !first.pause_after
+            && !first.possessive
+            && let Some(joined) = joined_wake(&first.text, &words[index + 1].text)
+        {
+            let sentence_start = first.sentence_start;
+            words.remove(index);
+            words[index].text = joined.to_string();
+            words[index].sentence_start = sentence_start;
+        }
+        index += 1;
+    }
 }
 
 fn text_of(words: &[Word]) -> String {
@@ -2216,7 +2288,7 @@ fn detect_choice(newest: &[Word]) -> Option<(u8, String)> {
 mod tests {
     #[test]
     fn spoken_greeting_uses_the_local_bubble_command() {
-        let command = detect_one("Buddy, say hello to Jay in the chat.", &PLAIN).unwrap();
+        let command = detect_one("Sidekick, say hello to Jay in the chat.", &PLAIN).unwrap();
         assert_eq!(command.kind.label(), "greet");
         assert_eq!(command.target, name("jay"));
     }
@@ -2224,13 +2296,13 @@ mod tests {
     #[test]
     fn spoken_greeting_table_requires_an_address_and_a_named_greeting() {
         for text in [
-            "Buddy, say hello to Jay",
-            "buddy, say hi to Jay in the chat.",
-            "Buddy, tell Jay welcome.",
-            "Buddy, greet Jay!",
+            "Sidekick, say hello to Jay",
+            "sidekick, say hi to Jay in the chat.",
+            "Sidekick, tell Jay welcome.",
+            "Sidekick, greet Jay!",
             "Bodhi, say hello to Jay.",
-            "Hey Buddy, could you please say hello to Jay in chat?",
-            "Buddy, greet Jay please.",
+            "Hey Sidekick, could you please say hello to Jay in chat?",
+            "Sidekick, greet Jay please.",
         ] {
             for ctx in [&PLAIN, &WAKE_REQUIRED, &ANSWERING] {
                 let command = detect_one(text, ctx).unwrap_or_else(|| panic!("{text}"));
@@ -2243,18 +2315,18 @@ mod tests {
             "say hello to Jay",
             "say hello",
             "I said hello to Jay.",
-            "I told Buddy to say hello to Jay.",
-            "Buddy said hello to Jay.",
+            "I told Sidekick to say hello to Jay.",
+            "Sidekick said hello to Jay.",
             "Bodhi is saying hello to Jay.",
-            "My buddy says hello to Jay.",
+            "My sidekick says hello to Jay.",
         ] {
             assert!(detect_one(text, &PLAIN).is_none(), "{text}");
         }
         // Arbitrary speech and compound orders retain the planner path.
         for text in [
-            "Buddy, say the stream starts soon.",
-            "Buddy, tell Jay to delete the chat.",
-            "Buddy, greet Jay and Sam.",
+            "Sidekick, say the stream starts soon.",
+            "Sidekick, tell Jay to delete the chat.",
+            "Sidekick, greet Jay and Sam.",
         ] {
             assert_ne!(
                 detect_one(text, &PLAIN).map(|c| c.kind),
@@ -2313,12 +2385,12 @@ mod tests {
     fn community_phrases() {
         use CommandKind::{Greet, Highlight, Remember, Wave};
         for (text, kind) in [
-            ("Buddy, wave at Ada", Wave),
-            ("Buddy wave to ada", Wave),
-            ("Buddy, wave hello to Ada", Wave),
-            ("Buddy, say hi to Ada", Greet),
-            ("hey Buddy, say hello to ada please", Greet),
-            ("Buddy can you wave at Ada", Wave),
+            ("Sidekick, wave at Ada", Wave),
+            ("Sidekick wave to ada", Wave),
+            ("Sidekick, wave hello to Ada", Wave),
+            ("Sidekick, say hi to Ada", Greet),
+            ("hey Sidekick, say hello to ada please", Greet),
+            ("Sidekick can you wave at Ada", Wave),
         ] {
             let command = detect_one(text, &PLAIN).unwrap_or_else(|| panic!("{text}"));
             assert_eq!(command.kind, kind, "{text}");
@@ -2326,23 +2398,24 @@ mod tests {
             assert!(command.wake_word, "{text}");
             assert_eq!(command.note, None);
         }
-        let remember = detect_one("Buddy, remember that Bo got the job", &PLAIN).unwrap();
+        let remember = detect_one("Sidekick, remember that Bo got the job", &PLAIN).unwrap();
         assert_eq!(remember.kind, Remember);
         assert_eq!(remember.target, name("bo got the job"));
-        assert_eq!(remember.heard, "buddy remember that bo got the job");
-        let remember = detect_one("Buddy remember coders X likes Rust", &PLAIN).unwrap();
+        assert_eq!(remember.heard, "sidekick remember that bo got the job");
+        let remember = detect_one("Sidekick remember coders X likes Rust", &PLAIN).unwrap();
         assert_eq!(remember.kind, Remember);
         assert_eq!(remember.target, name("coders x likes rust"));
         // A name alone, or a bare cue, is still being said.
-        assert!(detect_one("Buddy, remember Bo", &PLAIN).is_none());
-        assert!(detect_one("Buddy, wave", &PLAIN).is_none());
+        assert!(detect_one("Sidekick, remember Bo", &PLAIN).is_none());
+        assert!(detect_one("Sidekick, wave", &PLAIN).is_none());
         // Thanks is nothing; a comment sentence keeps the comment grammar.
-        assert!(detect_one("thanks buddy", &PLAIN).is_none());
+        assert!(detect_one("thanks sidekick", &PLAIN).is_none());
         assert!(
-            detect_one("Thanks Buddy, that was great", &PLAIN)
+            detect_one("Thanks Sidekick, that was great", &PLAIN)
                 .is_none_or(|c| c.kind == CommandKind::Unknown)
         );
-        let highlight = detect_one("Buddy, highlight the comment from coders X", &PLAIN).unwrap();
+        let highlight =
+            detect_one("Sidekick, highlight the comment from coders X", &PLAIN).unwrap();
         assert_eq!(highlight.kind, Highlight);
         // The wake word is required.
         assert!(detect_one("wave at Ada", &PLAIN).is_none());
@@ -2358,19 +2431,19 @@ mod tests {
         let shows = [
             // The sentence the owner said on 2026-10-21, heard as a highlight
             // of a viewer called "something" before this grammar existed.
-            "Buddy, can you show up and do something on screen",
-            "Buddy show up",
-            "Buddy, come on screen",
-            "Buddy appear",
-            "Buddy, show yourself",
-            "Buddy get on stream",
-            "hey Buddy, pop up",
-            "Buddy, come on out",
-            "Buddy show your face",
-            "Buddy, jump in",
-            "Buddy, get in the picture",
-            "Buddy on screen",
-            "Okay Buddy, go ahead and show up",
+            "Sidekick, can you show up and do something on screen",
+            "Sidekick show up",
+            "Sidekick, come on screen",
+            "Sidekick appear",
+            "Sidekick, show yourself",
+            "Sidekick get on stream",
+            "hey Sidekick, pop up",
+            "Sidekick, come on out",
+            "Sidekick show your face",
+            "Sidekick, jump in",
+            "Sidekick, get in the picture",
+            "Sidekick on screen",
+            "Okay Sidekick, go ahead and show up",
         ];
         for text in shows {
             let command = detect_one(text, &PLAIN).unwrap_or_else(|| panic!("{text}"));
@@ -2379,16 +2452,16 @@ mod tests {
             assert!(command.wake_word, "{text}");
         }
         let hides = [
-            "Buddy hide",
-            "Buddy, go away",
-            "Buddy leave the screen",
-            "Buddy get off stream",
-            "Buddy, hide yourself",
-            "Buddy disappear",
-            "Buddy, come off the screen",
-            "Buddy off screen",
-            "Buddy, hide please",
-            "Buddy step out",
+            "Sidekick hide",
+            "Sidekick, go away",
+            "Sidekick leave the screen",
+            "Sidekick get off stream",
+            "Sidekick, hide yourself",
+            "Sidekick disappear",
+            "Sidekick, come off the screen",
+            "Sidekick off screen",
+            "Sidekick, hide please",
+            "Sidekick step out",
         ];
         for text in hides {
             let command = detect_one(text, &PLAIN).unwrap_or_else(|| panic!("{text}"));
@@ -2398,34 +2471,41 @@ mod tests {
         // What was heard stops at the cue: the words after it are not the
         // command's.
         assert_eq!(
-            detect_one("Buddy, can you show up and do something on screen", &PLAIN)
-                .unwrap()
-                .heard,
-            "buddy can you show up"
+            detect_one(
+                "Sidekick, can you show up and do something on screen",
+                &PLAIN
+            )
+            .unwrap()
+            .heard,
+            "sidekick can you show up"
         );
         // Comments keep their grammar: a possessive, "that", "the last", a
         // name marker or a comment noun is never about the Buddy.
         let comments = [
             (
-                "Buddy, show coders X's question",
+                "Sidekick, show coders X's question",
                 Highlight,
                 name("coders x"),
             ),
-            ("Buddy, show that comment", Highlight, Deixis),
-            ("Buddy show coders X on screen", Highlight, name("coders x")),
-            ("Buddy, put this one up", Highlight, Deixis),
-            ("Buddy, show the last comment", Highlight, Last),
+            ("Sidekick, show that comment", Highlight, Deixis),
             (
-                "Buddy, show up the comment from coders X",
+                "Sidekick show coders X on screen",
                 Highlight,
                 name("coders x"),
             ),
-            ("Buddy, hide the overlay", Clear, NoTarget),
-            ("Buddy, hide it", Clear, Deixis),
-            ("Buddy, take it down", Clear, Deixis),
+            ("Sidekick, put this one up", Highlight, Deixis),
+            ("Sidekick, show the last comment", Highlight, Last),
+            (
+                "Sidekick, show up the comment from coders X",
+                Highlight,
+                name("coders x"),
+            ),
+            ("Sidekick, hide the overlay", Clear, NoTarget),
+            ("Sidekick, hide it", Clear, Deixis),
+            ("Sidekick, take it down", Clear, Deixis),
             // A comment verb before the cue owns the sentence.
             (
-                "Buddy, highlight coders X and go on",
+                "Sidekick, highlight coders X and go on",
                 Highlight,
                 name("coders x"),
             ),
@@ -2436,25 +2516,27 @@ mod tests {
         }
         // Banners keep theirs.
         assert_eq!(
-            detect_one("Buddy, show up the sponsor banner", &PLAIN)
+            detect_one("Sidekick, show up the sponsor banner", &PLAIN)
                 .unwrap()
                 .kind,
             ShowBanner
         );
         assert_eq!(
-            detect_one("Buddy, hide the banners", &PLAIN).unwrap().kind,
+            detect_one("Sidekick, hide the banners", &PLAIN)
+                .unwrap()
+                .kind,
             HideBanners
         );
         // A farewell or a loose "leave" never sends the Buddy away: the
         // switch is saved, so it would be missing from the next stream too.
         for text in [
-            "Buddy, goodbye",
-            "Buddy, bye",
-            "Buddy, go home",
-            "Buddy, leave it",
-            "Buddy, leave a note for later",
-            "Buddy, calm down",
-            "Buddy, come",
+            "Sidekick, goodbye",
+            "Sidekick, bye",
+            "Sidekick, go home",
+            "Sidekick, leave it",
+            "Sidekick, leave a note for later",
+            "Sidekick, calm down",
+            "Sidekick, come",
         ] {
             let kind = detect_one(text, &PLAIN).map(|command| command.kind);
             assert!(
@@ -2466,23 +2548,23 @@ mod tests {
         assert!(detect_one("show up", &PLAIN).is_none());
         assert!(detect_one("go away", &PLAIN).is_none());
         // Buddy as a subject is not an address.
-        assert!(detect_one("Buddy is great, he always shows up", &PLAIN).is_none());
+        assert!(detect_one("Sidekick is great, he always shows up", &PLAIN).is_none());
         // The same request twice within the dedupe window is one command.
         let mut detector = CommandDetector::default();
         let now = Instant::now();
         assert!(
             detector
-                .observe_final("client", 1, "Buddy show up", now, &PLAIN)
+                .observe_final("client", 1, "Sidekick show up", now, &PLAIN)
                 .is_some()
         );
         assert!(
             detector
-                .observe_final("client", 2, "Buddy show up", now, &PLAIN)
+                .observe_final("client", 2, "Sidekick show up", now, &PLAIN)
                 .is_none()
         );
         assert_eq!(
             detector
-                .observe_final("client", 3, "Buddy go away", now, &PLAIN)
+                .observe_final("client", 3, "Sidekick go away", now, &PLAIN)
                 .map(|command| command.kind),
             Some(HideBuddy)
         );
@@ -2499,57 +2581,57 @@ mod tests {
         let cases = [
             // Highlight (decision 3).
             (
-                "Buddy, highlight the comment from coders X",
+                "Sidekick, highlight the comment from coders X",
                 &PLAIN,
                 hit(Highlight, name("coders x"), false, None),
             ),
             (
-                "Buddy, show coders X's question",
+                "Sidekick, show coders X's question",
                 &PLAIN,
                 hit(Highlight, name("coders x"), true, None),
             ),
             (
-                "Buddy, put this one up",
+                "Sidekick, put this one up",
                 &PLAIN,
                 hit(Highlight, Deixis, false, None),
             ),
             (
-                "Buddy, show the last comment",
+                "Sidekick, show the last comment",
                 &PLAIN,
                 hit(Highlight, Last, false, None),
             ),
             (
-                "Buddy highlight CodersX",
+                "Sidekick highlight CodersX",
                 &PLAIN,
                 hit(Highlight, name("codersx"), false, None),
             ),
             (
-                "Buddy, highlight the message from coders_x",
+                "Sidekick, highlight the message from coders_x",
                 &PLAIN,
                 hit(Highlight, name("coders x"), false, None),
             ),
             (
-                "Buddy, show what coders X asked",
+                "Sidekick, show what coders X asked",
                 &PLAIN,
                 hit(Highlight, name("coders x"), true, None),
             ),
             (
-                "Buddy, highlight that question",
+                "Sidekick, highlight that question",
                 &PLAIN,
                 hit(Highlight, Deixis, true, None),
             ),
             (
-                "Buddy, put it on stream",
+                "Sidekick, put it on stream",
                 &PLAIN,
                 hit(Highlight, Deixis, false, None),
             ),
             (
-                "Buddy, bring up the comment from dark knight 99",
+                "Sidekick, bring up the comment from dark knight 99",
                 &PLAIN,
                 hit(Highlight, name("dark knight 99"), false, None),
             ),
             (
-                "Hey Buddy, can you show the last question please?",
+                "Hey Sidekick, can you show the last question please?",
                 &PLAIN,
                 hit(Highlight, Last, true, None),
             ),
@@ -2558,18 +2640,12 @@ mod tests {
                 &PLAIN,
                 hit(Highlight, name("coders x"), false, None),
             ),
+            // The Orcle aliases are gone (plan 236 D2): no wake word, and
+            // neither verb is a structured phrase.
+            ("Orkle show me the latest comment", &PLAIN, None),
+            ("Orcel, pin coders x's message", &PLAIN, None),
             (
-                "Orkle show me the latest comment",
-                &PLAIN,
-                hit(Highlight, Last, false, None),
-            ),
-            (
-                "Orcel, pin coders x's message",
-                &PLAIN,
-                hit(Highlight, name("coders x"), false, None),
-            ),
-            (
-                "Buddy, show the question from Gamer_42",
+                "Sidekick, show the question from Gamer_42",
                 &PLAIN,
                 hit(Highlight, name("gamer 42"), true, None),
             ),
@@ -2585,56 +2661,60 @@ mod tests {
             ("highlight the comment from coders X", &WAKE_REQUIRED, None),
             // Clear (decision 3): the noun decides.
             (
-                "Buddy, take it down",
+                "Sidekick, take it down",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
             (
-                "Buddy, clear the highlight",
+                "Sidekick, clear the highlight",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             (
-                "Buddy, remove it from the screen",
+                "Sidekick, remove it from the screen",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
             (
-                "Buddy, take that off the stream",
+                "Sidekick, take that off the stream",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
-            ("Buddy, clear it", &PLAIN, hit(Clear, Deixis, false, None)),
             (
-                "Buddy, hide the overlay",
+                "Sidekick, clear it",
+                &PLAIN,
+                hit(Clear, Deixis, false, None),
+            ),
+            (
+                "Sidekick, hide the overlay",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             (
-                "Buddy, remove this from the stream",
+                "Sidekick, remove this from the stream",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
             (
-                "Buddy, dismiss the card",
+                "Sidekick, dismiss the card",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             (
-                "Buddy, take the highlight down",
+                "Sidekick, take the highlight down",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             ("remove it from the screen", &PLAIN, None),
             // A whole-chat clear is refused: Buddy did not catch that.
             (
-                "Buddy, clear the chat",
+                "Sidekick, clear the chat",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
             // Remove (decision 3): reasons become the audit reason.
             (
-                "Buddy, remove this one, it's toxic",
+                "Sidekick, remove this one, it's toxic",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("toxic")),
             ),
@@ -2644,7 +2724,7 @@ mod tests {
                 hit(Remove, Deixis, false, Some("toxic")),
             ),
             (
-                "Buddy, delete the comment from coders X",
+                "Sidekick, delete the comment from coders X",
                 &PLAIN,
                 hit(Remove, name("coders x"), false, None),
             ),
@@ -2659,47 +2739,47 @@ mod tests {
                 hit(Remove, Deixis, false, Some("spam")),
             ),
             (
-                "Buddy, get rid of this one",
+                "Sidekick, get rid of this one",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Buddy, remove the last message from chat",
+                "Sidekick, remove the last message from chat",
                 &PLAIN,
                 hit(Remove, Last, false, None),
             ),
             (
-                "Buddy, delete coders X's message",
+                "Sidekick, delete coders X's message",
                 &PLAIN,
                 hit(Remove, name("coders x"), false, None),
             ),
             (
-                "Buddy this one is toxic, remove it from our chat",
+                "Sidekick this one is toxic, remove it from our chat",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("toxic")),
             ),
             (
-                "That guy is a scammer. Buddy, remove his message.",
+                "That guy is a scammer. Sidekick, remove his message.",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("scam")),
             ),
             (
-                "Buddy, take it down from chat",
+                "Sidekick, take it down from chat",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Buddy, hide it from chat",
+                "Sidekick, hide it from chat",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Buddy, remove this one",
+                "Sidekick, remove this one",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Buddy, that comment is harassment, delete it",
+                "Sidekick, that comment is harassment, delete it",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("harassment")),
             ),
@@ -2717,7 +2797,7 @@ mod tests {
             ),
             ("remove it from our chat", &WAKE_REQUIRED, None),
             (
-                "Buddy, remove it from our chat",
+                "Sidekick, remove it from our chat",
                 &WAKE_REQUIRED,
                 hit(Remove, Deixis, false, None),
             ),
@@ -2784,18 +2864,18 @@ mod tests {
                 hit(Cancel, NoTarget, false, None),
             ),
             (
-                "Buddy, yes",
+                "Sidekick, yes",
                 &ANSWERING,
                 hit(Confirm, NoTarget, false, None),
             ),
             (
-                "Buddy, remove it",
+                "Sidekick, remove it",
                 &ANSWERING,
                 hit(Confirm, NoTarget, false, None),
             ),
             // A new command while a card is open is still a command.
             (
-                "Buddy, remove the comment from coders X",
+                "Sidekick, remove the comment from coders X",
                 &ANSWERING,
                 hit(Remove, name("coders x"), false, None),
             ),
@@ -2803,8 +2883,12 @@ mod tests {
             ("no", &PLAIN, None),
             // With the wake word an answer is always read; S3 ignores it
             // without an open card.
-            ("Buddy, cancel", &PLAIN, hit(Cancel, NoTarget, false, None)),
-            ("Buddy, stop", &PLAIN, hit(Cancel, NoTarget, false, None)),
+            (
+                "Sidekick, cancel",
+                &PLAIN,
+                hit(Cancel, NoTarget, false, None),
+            ),
+            ("Sidekick, stop", &PLAIN, hit(Cancel, NoTarget, false, None)),
             // Choices count only while a chooser is open.
             (
                 "the first one",
@@ -2824,7 +2908,7 @@ mod tests {
                 hit(Choose(2), NoTarget, false, None),
             ),
             (
-                "Buddy, the second one",
+                "Sidekick, the second one",
                 &CHOOSING,
                 hit(Choose(1), NoTarget, false, None),
             ),
@@ -2836,8 +2920,9 @@ mod tests {
             ),
             ("the first one", &PLAIN, None),
             ("one more thing before we start", &CHOOSING, None),
-            // Talking about Buddy, oracles and orcas. "oracle" and "orca" are
-            // real words, never wake words (plan 164 D2).
+            // Talking about the Sidekick, oracles and orcas. "oracle" and
+            // "orca" are real words, never wake words (plan 164 D2), and the
+            // Orcle aliases are gone (plan 236 D2). "body" is never one.
             ("Oracle database is slow", &PLAIN, None),
             ("Oracle, take it down", &PLAIN, None),
             ("Orca, take it down", &PLAIN, None),
@@ -2849,22 +2934,25 @@ mod tests {
                 hit(Remove, Deixis, false, None),
             ),
             ("the oracle said remove it from chat", &WAKE_REQUIRED, None),
-            ("Buddy is great tonight", &PLAIN, None),
-            ("I built Buddy", &PLAIN, None),
-            ("I built Buddy.", &PLAIN, None),
+            ("Sidekick is great tonight", &PLAIN, None),
+            ("I built Sidekick", &PLAIN, None),
+            ("I built Sidekick.", &PLAIN, None),
             ("the orcle integration is done", &PLAIN, None),
+            ("Orcle, take it down", &PLAIN, None),
+            ("Body, take it down", &PLAIN, None),
+            ("my body, highlight the last comment", &PLAIN, None),
             ("orca whales are cool", &PLAIN, None),
-            ("Buddy.", &PLAIN, None),
-            ("Buddy highlight", &PLAIN, None),
-            ("Buddy, can you do a backflip.", &PLAIN, None),
+            ("Sidekick.", &PLAIN, None),
+            ("Sidekick highlight", &PLAIN, None),
+            ("Sidekick, can you do a backflip.", &PLAIN, None),
             // Addressed, closed, and understood nothing.
             (
-                "Buddy, you are amazing.",
+                "Sidekick, you are amazing.",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
             (
-                "Buddy, ban him.",
+                "Sidekick, ban him.",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
@@ -2872,7 +2960,7 @@ mod tests {
             // another language, Buddy says it did not catch that.
             ("resalta el comentario de coders x", &PLAIN, None),
             (
-                "Buddy, resalta el comentario.",
+                "Sidekick, resalta el comentario.",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
@@ -2909,186 +2997,206 @@ mod tests {
         let cases = [
             // Show.
             (
-                "Buddy, show the sponsor banner",
+                "Sidekick, show the sponsor banner",
                 &PLAIN,
                 hit(ShowBanner, name("sponsor")),
             ),
             (
-                "Buddy, show sponsor banner",
+                "Sidekick, show sponsor banner",
                 &PLAIN,
                 hit(ShowBanner, name("sponsor")),
             ),
             (
-                "Buddy show the Sponsor banner.",
+                "Sidekick show the Sponsor banner.",
                 &PLAIN,
                 hit(ShowBanner, name("sponsor")),
             ),
             (
-                "Buddy, put up the sponsor banner",
+                "Sidekick, put up the sponsor banner",
                 &PLAIN,
                 hit(ShowBanner, name("sponsor")),
             ),
             (
-                "Buddy, put the sponsor banner up",
+                "Sidekick, put the sponsor banner up",
                 &PLAIN,
                 hit(ShowBanner, name("sponsor")),
             ),
             (
-                "Hey Buddy, can you please show me the follow me banner?",
+                "Hey Sidekick, can you please show me the follow me banner?",
                 &PLAIN,
                 hit(ShowBanner, name("follow me")),
             ),
             (
-                "Buddy, display the sale 50 banner",
+                "Sidekick, display the sale 50 banner",
                 &PLAIN,
                 hit(ShowBanner, name("sale 50")),
             ),
             (
-                "Buddy, bring up the logo banner now",
+                "Sidekick, bring up the logo banner now",
                 &PLAIN,
                 hit(ShowBanner, name("logo")),
             ),
-            ("Buddy, show the banner", &PLAIN, hit(ShowBanner, NoTarget)),
+            (
+                "Sidekick, show the banner",
+                &PLAIN,
+                hit(ShowBanner, NoTarget),
+            ),
             // A particle is the verb's only right after a verb that takes one.
             (
-                "Buddy, show the on air banner",
+                "Sidekick, show the on air banner",
                 &PLAIN,
                 hit(ShowBanner, name("on air")),
             ),
             (
-                "Buddy, put the on air banner up",
+                "Sidekick, put the on air banner up",
                 &PLAIN,
                 hit(ShowBanner, name("on air")),
             ),
             (
-                "Buddy, take down the on air banner",
+                "Sidekick, take down the on air banner",
                 &PLAIN,
                 hit(HideBanner, name("on air")),
             ),
             // Hide one.
             (
-                "Buddy, hide the sponsor banner",
+                "Sidekick, hide the sponsor banner",
                 &PLAIN,
                 hit(HideBanner, name("sponsor")),
             ),
             (
-                "Buddy, take down the sponsor banner",
+                "Sidekick, take down the sponsor banner",
                 &PLAIN,
                 hit(HideBanner, name("sponsor")),
             ),
             (
-                "Buddy, take the sponsor banner down",
+                "Sidekick, take the sponsor banner down",
                 &PLAIN,
                 hit(HideBanner, name("sponsor")),
             ),
             (
-                "Buddy, take the banner down",
+                "Sidekick, take the banner down",
                 &PLAIN,
                 hit(HideBanner, NoTarget),
             ),
             (
-                "Buddy, take the banner down.",
+                "Sidekick, take the banner down.",
                 &PLAIN,
                 hit(HideBanner, NoTarget),
             ),
             (
-                "Buddy, remove the sponsor banner",
+                "Sidekick, remove the sponsor banner",
                 &PLAIN,
                 hit(HideBanner, name("sponsor")),
             ),
             (
-                "Buddy, pull the logo banner down",
+                "Sidekick, pull the logo banner down",
                 &PLAIN,
                 hit(HideBanner, name("logo")),
             ),
-            ("Buddy, hide the banner", &PLAIN, hit(HideBanner, NoTarget)),
+            (
+                "Sidekick, hide the banner",
+                &PLAIN,
+                hit(HideBanner, NoTarget),
+            ),
             // Hide all.
             (
-                "Buddy, hide the banners",
+                "Sidekick, hide the banners",
                 &PLAIN,
                 hit(HideBanners, NoTarget),
             ),
             (
-                "Buddy, hide all banners",
+                "Sidekick, hide all banners",
                 &PLAIN,
                 hit(HideBanners, NoTarget),
             ),
             (
-                "Buddy, hide all the banners.",
+                "Sidekick, hide all the banners.",
                 &PLAIN,
                 hit(HideBanners, NoTarget),
             ),
             (
-                "Buddy, hide all of the banners",
+                "Sidekick, hide all of the banners",
                 &PLAIN,
                 hit(HideBanners, NoTarget),
             ),
             (
-                "Buddy, take the banners down",
+                "Sidekick, take the banners down",
                 &PLAIN,
                 hit(HideBanners, NoTarget),
             ),
             (
-                "Buddy, take all the banners down",
+                "Sidekick, take all the banners down",
                 &PLAIN,
                 hit(HideBanners, NoTarget),
             ),
             (
-                "Buddy, clear the banners",
+                "Sidekick, clear the banners",
                 &PLAIN,
                 hit(HideBanners, NoTarget),
             ),
             // Still being said: "take" needs "down", "put" needs "up".
-            ("Buddy, take the banner", &PLAIN, None),
-            ("Buddy, put the sponsor banner", &PLAIN, None),
+            ("Sidekick, take the banner", &PLAIN, None),
+            ("Sidekick, put the sponsor banner", &PLAIN, None),
             // Addressed, closed and not a banner command: didn't catch that,
             // never a highlight of a viewer called "banner".
-            ("Buddy, take the banner.", &PLAIN, hit(Unknown, NoTarget)),
-            ("Buddy, pin the banner.", &PLAIN, hit(Unknown, NoTarget)),
+            ("Sidekick, take the banner.", &PLAIN, hit(Unknown, NoTarget)),
+            ("Sidekick, pin the banner.", &PLAIN, hit(Unknown, NoTarget)),
             (
-                "Buddy, the banner looks great.",
+                "Sidekick, the banner looks great.",
                 &PLAIN,
                 hit(Unknown, NoTarget),
             ),
-            ("Buddy, show all banners.", &PLAIN, hit(Unknown, NoTarget)),
-            ("Buddy, ban the banner guy.", &PLAIN, hit(Unknown, NoTarget)),
+            (
+                "Sidekick, show all banners.",
+                &PLAIN,
+                hit(Unknown, NoTarget),
+            ),
+            (
+                "Sidekick, ban the banner guy.",
+                &PLAIN,
+                hit(Unknown, NoTarget),
+            ),
             // Not closed yet: nothing.
-            ("Buddy, the banner looks great", &PLAIN, None),
+            ("Sidekick, the banner looks great", &PLAIN, None),
             // Banner commands need the wake word, in every context.
             ("show the sponsor banner", &PLAIN, None),
             ("hide the banners", &PLAIN, None),
             ("take the banner down", &PLAIN, None),
             ("show the sponsor banner", &WAKE_REQUIRED, None),
             (
-                "Buddy, hide the banners",
+                "Sidekick, hide the banners",
                 &WAKE_REQUIRED,
                 hit(HideBanners, NoTarget),
             ),
             // A banner command is a new command while a card is open.
             (
-                "Buddy, hide the banners",
+                "Sidekick, hide the banners",
                 &ANSWERING,
                 hit(HideBanners, NoTarget),
             ),
             (
-                "Buddy, show the sponsor banner",
+                "Sidekick, show the sponsor banner",
                 &CHOOSING,
                 hit(ShowBanner, name("sponsor")),
             ),
             // Talk about banners.
             ("the sponsor banner is new", &PLAIN, None),
             ("I made a banner for the stream", &PLAIN, None),
-            ("Buddy is on the banner", &PLAIN, None),
+            ("Sidekick is on the banner", &PLAIN, None),
             // A later sentence that only mentions a banner leaves the command
             // alone; one the highlight grammar would read into it does not.
             (
-                "Buddy, highlight that comment. Nice banner.",
+                "Sidekick, highlight that comment. Nice banner.",
                 &PLAIN,
                 hit(Highlight, Deixis),
             ),
-            ("Buddy, show. Nice banner.", &PLAIN, hit(Unknown, NoTarget)),
             (
-                "Buddy, ok. Delete that banner, it's spam.",
+                "Sidekick, show. Nice banner.",
+                &PLAIN,
+                hit(Unknown, NoTarget),
+            ),
+            (
+                "Sidekick, ok. Delete that banner, it's spam.",
                 &PLAIN,
                 hit(Unknown, NoTarget),
             ),
@@ -3102,16 +3210,24 @@ mod tests {
                 Some((Remove, Deixis, false, Some("spam".to_string()))),
             ),
             // The highlight and clear grammar, unchanged (the collision cases).
-            ("Buddy, show that comment", &PLAIN, hit(Highlight, Deixis)),
-            ("Buddy, hide the highlight", &PLAIN, hit(Clear, NoTarget)),
-            ("Buddy, take it down", &PLAIN, hit(Clear, Deixis)),
-            ("Buddy, show this on stream", &PLAIN, hit(Highlight, Deixis)),
             (
-                "Buddy, take the highlight down",
+                "Sidekick, show that comment",
+                &PLAIN,
+                hit(Highlight, Deixis),
+            ),
+            ("Sidekick, hide the highlight", &PLAIN, hit(Clear, NoTarget)),
+            ("Sidekick, take it down", &PLAIN, hit(Clear, Deixis)),
+            (
+                "Sidekick, show this on stream",
+                &PLAIN,
+                hit(Highlight, Deixis),
+            ),
+            (
+                "Sidekick, take the highlight down",
                 &PLAIN,
                 hit(Clear, NoTarget),
             ),
-            ("Buddy, put this one up", &PLAIN, hit(Highlight, Deixis)),
+            ("Sidekick, put this one up", &PLAIN, hit(Highlight, Deixis)),
         ];
         for (text, ctx, expected) in cases {
             let found = detect_one(text, ctx);
@@ -3128,7 +3244,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let at = Instant::now();
         assert_eq!(
-            detector.observe_final("client", 1, "Buddy, take the sponsor", at, &PLAIN),
+            detector.observe_final("client", 1, "Sidekick, take the sponsor", at, &PLAIN),
             None
         );
         let second = detector
@@ -3144,7 +3260,7 @@ mod tests {
             shape(&second),
             (CommandKind::HideBanner, name("sponsor"), false, None)
         );
-        assert_eq!(second.heard, "buddy take the sponsor banner down");
+        assert_eq!(second.heard, "sidekick take the sponsor banner down");
         assert!(second.wake_word);
         // Closed by its sentence mark, the command is finished: a later final
         // does not report it again.
@@ -3156,12 +3272,12 @@ mod tests {
 
     #[test]
     fn heard_mentions_banner_reads_the_noun_only() {
-        assert!(heard_mentions_banner("buddy pin the banner"));
-        assert!(heard_mentions_banner("Buddy, the BANNERS."));
+        assert!(heard_mentions_banner("sidekick pin the banner"));
+        assert!(heard_mentions_banner("Sidekick, the BANNERS."));
         assert!(!heard_mentions_banner(
-            "buddy show what coders x just asked"
+            "sidekick show what coders x just asked"
         ));
-        assert!(!heard_mentions_banner("buddy highlight bannerking"));
+        assert!(!heard_mentions_banner("sidekick highlight bannerking"));
     }
 
     #[test]
@@ -3179,19 +3295,19 @@ mod tests {
         let bob = name("bob");
         let cases: [(&str, Option<(CommandKind, CommandTarget)>); 6] = [
             (
-                "Yes Buddy, delete the comment from bob",
+                "Yes Sidekick, delete the comment from bob",
                 Some((CommandKind::Remove, bob.clone())),
             ),
             (
-                "Yeah, Buddy, remove bob's comment",
+                "Yeah, Sidekick, remove bob's comment",
                 Some((CommandKind::Remove, bob.clone())),
             ),
             (
-                "Buddy, remove bob's comment. Buddy, yes.",
+                "Sidekick, remove bob's comment. Sidekick, yes.",
                 Some((CommandKind::Remove, bob.clone())),
             ),
             (
-                "Yes. Buddy, highlight the comment from bob.",
+                "Yes. Sidekick, highlight the comment from bob.",
                 Some((CommandKind::Highlight, bob.clone())),
             ),
             // A structured removal also wins over the answer around it.
@@ -3201,7 +3317,7 @@ mod tests {
             ),
             // A pure answer is still an answer.
             (
-                "Buddy, remove it",
+                "Sidekick, remove it",
                 Some((CommandKind::Confirm, CommandTarget::None)),
             ),
         ];
@@ -3233,22 +3349,30 @@ mod tests {
 
     #[test]
     fn heard_and_wake_word_describe_what_was_said() {
-        let command = detect_one("Buddy, highlight the comment from coders X!", &PLAIN).unwrap();
-        assert_eq!(command.heard, "buddy highlight the comment from coders x");
+        let command = detect_one("Sidekick, highlight the comment from coders X!", &PLAIN).unwrap();
+        assert_eq!(
+            command.heard,
+            "sidekick highlight the comment from coders x"
+        );
         assert!(command.wake_word);
         let command = detect_one("This one is toxic. Remove it from our chat.", &PLAIN).unwrap();
         assert_eq!(command.heard, "remove it from our chat");
         assert!(!command.wake_word);
-        // Plan 164 D2: the hidden alias still works for one release; a real
-        // word ("oracle") no longer does.
-        let command = detect_one("Orcle, take it down", &PLAIN).unwrap();
-        assert_eq!(command.heard, "orcle take it down");
+        // Plan 236 D2: the hidden old name still works for two releases;
+        // "Orcle" and a real word ("oracle") no longer do.
+        let command = detect_one("Buddy, take it down", &PLAIN).unwrap();
+        assert_eq!(command.heard, "buddy take it down");
         assert!(command.wake_word);
+        assert!(detect_one("Orcle, take it down", &PLAIN).is_none());
         assert!(detect_one("Oracle, take it down", &PLAIN).is_none());
-        let command = detect_one("Buddy, you are amazing.", &PLAIN).unwrap();
+        // The two-word form is heard as the one word it is.
+        let command = detect_one("Side kick, take it down", &PLAIN).unwrap();
+        assert_eq!(command.heard, "sidekick take it down");
+        assert!(command.wake_word);
+        let command = detect_one("Sidekick, you are amazing.", &PLAIN).unwrap();
         assert_eq!(command.heard, "you are amazing");
-        let command = detect_one("Buddy, yes", &ANSWERING).unwrap();
-        assert_eq!(command.heard, "buddy yes");
+        let command = detect_one("Sidekick, yes", &ANSWERING).unwrap();
+        assert_eq!(command.heard, "sidekick yes");
         assert!(command.wake_word);
         let command = detect_one("yes", &ANSWERING).unwrap();
         assert!(!command.wake_word);
@@ -3259,7 +3383,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         assert_eq!(
-            detector.observe_final("c", 1, "Buddy, highlight the comment", start, &PLAIN),
+            detector.observe_final("c", 1, "Sidekick, highlight the comment", start, &PLAIN),
             None
         );
         let found = detector
@@ -3273,7 +3397,7 @@ mod tests {
             .expect("the second final completes the command");
         assert_eq!(found.kind, CommandKind::Highlight);
         assert_eq!(found.target, name("coders x"));
-        assert_eq!(found.heard, "buddy highlight the comment from coders x");
+        assert_eq!(found.heard, "sidekick highlight the comment from coders x");
         assert!(found.wake_word);
         // A later final with other words never re-matches it.
         assert_eq!(
@@ -3296,7 +3420,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         let clear = detector
-            .observe_final("c", 1, "Buddy, clear the highlight.", start, &PLAIN)
+            .observe_final("c", 1, "Sidekick, clear the highlight.", start, &PLAIN)
             .expect("the clear");
         assert_eq!(clear.kind, CommandKind::Clear);
         let removal = detector
@@ -3317,7 +3441,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         assert!(
             detector
-                .observe_final("c", 1, "Buddy, clear the highlight.", start, &PLAIN)
+                .observe_final("c", 1, "Sidekick, clear the highlight.", start, &PLAIN)
                 .is_some()
         );
         assert_eq!(
@@ -3337,15 +3461,18 @@ mod tests {
         // One final, two sentences: the latest start wins, and the clear that
         // ended before "remove" does not swallow it.
         let command = detect_one(
-            "Buddy, clear the highlight. This one is toxic, remove it from our chat.",
+            "Sidekick, clear the highlight. This one is toxic, remove it from our chat.",
             &PLAIN,
         )
         .expect("a command");
         assert_eq!(command.kind, CommandKind::Remove);
         assert_eq!(command.target, CommandTarget::Deixis);
         // The wake word still owns a verb its own command reaches.
-        let owned = detect_one("Buddy, this one is toxic, remove it from our chat.", &PLAIN)
-            .expect("a command");
+        let owned = detect_one(
+            "Sidekick, this one is toxic, remove it from our chat.",
+            &PLAIN,
+        )
+        .expect("a command");
         assert_eq!(owned.kind, CommandKind::Remove);
         assert!(owned.wake_word);
     }
@@ -3381,7 +3508,7 @@ mod tests {
             .observe_final(
                 "c",
                 1,
-                "Buddy, highlight the comment from coders",
+                "Sidekick, highlight the comment from coders",
                 start,
                 &PLAIN,
             )
@@ -3406,7 +3533,7 @@ mod tests {
                 .observe_final(
                     "c",
                     1,
-                    "Buddy, highlight the comment from coders",
+                    "Sidekick, highlight the comment from coders",
                     start,
                     &PLAIN
                 )
@@ -3431,13 +3558,13 @@ mod tests {
         let start = Instant::now();
         assert!(
             detector
-                .observe_final("c", 1, "Buddy, take it down", start, &PLAIN)
+                .observe_final("c", 1, "Sidekick, take it down", start, &PLAIN)
                 .is_some()
         );
         // The same final again (a replayed completion) is ignored.
         assert!(
             detector
-                .observe_final("c", 1, "Buddy, take it down", start, &PLAIN)
+                .observe_final("c", 1, "Sidekick, take it down", start, &PLAIN)
                 .is_none()
         );
         // The same command within ten seconds is the same request.
@@ -3446,7 +3573,7 @@ mod tests {
                 .observe_final(
                     "c",
                     2,
-                    "Buddy, take it down",
+                    "Sidekick, take it down",
                     start + Duration::from_secs(5),
                     &PLAIN
                 )
@@ -3458,7 +3585,7 @@ mod tests {
                 .observe_final(
                     "c",
                     3,
-                    "Buddy, show the last comment",
+                    "Sidekick, show the last comment",
                     start + Duration::from_secs(6),
                     &PLAIN
                 )
@@ -3470,7 +3597,7 @@ mod tests {
                 .observe_final(
                     "c",
                     4,
-                    "Buddy, take it down",
+                    "Sidekick, take it down",
                     start + Duration::from_secs(11),
                     &PLAIN
                 )
@@ -3483,7 +3610,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         assert_eq!(
-            detector.observe_final("c", 1, "Buddy, highlight the comment", start, &PLAIN),
+            detector.observe_final("c", 1, "Sidekick, highlight the comment", start, &PLAIN),
             None
         );
         assert_eq!(
@@ -3547,7 +3674,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         assert_eq!(
-            detector.observe_final("c", 1, "Buddy, highlight the comment", start, &PLAIN),
+            detector.observe_final("c", 1, "Sidekick, highlight the comment", start, &PLAIN),
             None
         );
         detector.clear();
@@ -3566,7 +3693,7 @@ mod tests {
             detector.observe_final(
                 "c",
                 1,
-                "Buddy, take it down",
+                "Sidekick, take it down",
                 start + Duration::from_secs(4),
                 &PLAIN
             ),
@@ -3579,7 +3706,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         let unknown = detector
-            .observe_final("c", 1, "Buddy, you are amazing.", start, &PLAIN)
+            .observe_final("c", 1, "Sidekick, you are amazing.", start, &PLAIN)
             .expect("addressed and not understood");
         assert_eq!(unknown.kind, CommandKind::Unknown);
         assert_eq!(unknown.heard, "you are amazing");
@@ -3593,7 +3720,7 @@ mod tests {
             detector.observe_final(
                 "c",
                 3,
-                "Buddy, this one",
+                "Sidekick, this one",
                 start + Duration::from_secs(6),
                 &PLAIN
             ),
@@ -3605,7 +3732,7 @@ mod tests {
     fn words_normalise_case_punctuation_and_possessives() {
         let mut ordinal = 0;
         let words = tokenize(
-            "Hey Buddy, show CodersX's question! It's coders_x.",
+            "Hey Sidekick, show CodersX's question! It's coders_x.",
             1,
             Instant::now(),
             &mut ordinal,
@@ -3614,7 +3741,7 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "hey", "buddy", "show", "codersx", "question", "its", "coders", "x"
+                "hey", "sidekick", "show", "codersx", "question", "its", "coders", "x"
             ]
         );
         assert!(words[1].pause_after && !words[1].sentence_end);
@@ -3631,54 +3758,213 @@ mod tests {
     #[test]
     fn reasons_are_canonical_and_nearest_the_verb() {
         let command = detect_one(
-            "That was spam earlier. Anyway this one is hateful, Buddy remove it from chat",
+            "That was spam earlier. Anyway this one is hateful, Sidekick remove it from chat",
             &PLAIN,
         )
         .unwrap();
         assert_eq!(command.reason.as_deref(), Some("hate"));
-        let command = detect_one("Buddy, delete that message, he's a scammer", &PLAIN).unwrap();
+        let command = detect_one("Sidekick, delete that message, he's a scammer", &PLAIN).unwrap();
         assert_eq!(command.reason.as_deref(), Some("scam"));
         assert_eq!(
-            detect_one("Buddy, take it down", &PLAIN).unwrap().reason,
+            detect_one("Sidekick, take it down", &PLAIN).unwrap().reason,
             None
         );
     }
 
     #[test]
-    fn the_wake_words_are_buddy_the_persona_name_and_the_hidden_orcle_aliases() {
+    fn the_wake_words_are_sidekick_the_persona_name_and_the_hidden_old_names() {
         assert_eq!(
             wake_name_tokens("Grum the Goblin"),
             vec!["grum".to_string(), "goblin".to_string()]
         );
         // Lowercased, ASCII-folded, three letters or more, digits dropped,
         // never a duplicate of a wake word.
-        assert_eq!(wake_name_tokens("Bö Buddy99"), Vec::<String>::new());
+        assert_eq!(wake_name_tokens("Bö Sidekick99"), Vec::<String>::new());
         assert_eq!(wake_name_tokens("Bö Vexlar99"), vec!["vexlar".to_string()]);
         assert_eq!(wake_name_tokens("Zoë"), vec!["zoe".to_string()]);
+        assert_eq!(wake_name_tokens("Sidekick"), Vec::<String>::new());
         assert_eq!(wake_name_tokens("Buddy"), Vec::<String>::new());
         assert_eq!(wake_name_tokens("Al"), Vec::<String>::new());
-        // "buddy" always works; the "Orcle" spellings stay as hidden aliases
-        // for one release; the weak real words are gone.
-        assert_eq!(WAKE_WORDS[0], "buddy");
-        assert!(WAKE_WORDS.contains(&"orcle"));
-        assert!(WAKE_WORDS.contains(&"orkle"));
-        assert!(!WAKE_WORDS.contains(&"oracle"));
-        assert!(!WAKE_WORDS.contains(&"orca"));
+        // Plan 236 D2: "Side Kick" is the wake word in two words, so neither
+        // word wakes alone; "kick" in another name is that name's word.
+        assert_eq!(wake_name_tokens("Side Kick"), Vec::<String>::new());
+        assert_eq!(wake_name_tokens("SideKick"), Vec::<String>::new());
+        assert_eq!(
+            wake_name_tokens("Sidekick the Goblin"),
+            vec!["goblin".to_string()]
+        );
+        assert_eq!(
+            wake_name_tokens("Kick Master"),
+            vec!["kick".to_string(), "master".to_string()]
+        );
+        // "sidekick" always works; "buddy" and "bodhi" stay hidden for two
+        // releases; the Orcle spellings, the weak real words and "body" are
+        // never wake words.
+        assert_eq!(WAKE_WORDS[0], "sidekick");
+        for word in LEGACY_WAKE_WORDS {
+            assert!(WAKE_WORDS.contains(word), "{word}");
+        }
+        for gone in [
+            "orcle", "orkle", "orcel", "orkel", "orcl", "orcal", "oracle", "orca", "body",
+        ] {
+            assert!(!WAKE_WORDS.contains(&gone), "{gone}");
+        }
     }
 
     #[test]
-    fn buddy_and_the_persona_name_wake_the_detector_and_oracle_does_not() {
+    fn every_form_of_sidekick_wakes_the_detector() {
+        // Plan 236 D2: the word, the two words, the hyphen, the plural and
+        // the possessive all wake it, with the wake word required.
+        for text in [
+            "Sidekick, highlight the last comment",
+            "sidekick highlight the last comment",
+            "SIDEKICK, highlight the last comment",
+            "Side kick, highlight the last comment",
+            "side kick highlight the last comment",
+            "Side-kick, highlight the last comment",
+            "Hey side kick, highlight the last comment",
+            "Okay side-kick, highlight the last comment",
+            "Sidekicks, highlight the last comment",
+            "Sidekick's, highlight the last comment",
+        ] {
+            let command = detect_one(text, &WAKE_REQUIRED).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(command.kind, CommandKind::Highlight, "{text}");
+            assert!(command.wake_word, "{text}");
+        }
+        let mut ordinal = 0;
+        let words = tokenize(
+            "Sidekick's side-kick, side kick sidekicks side kicks.",
+            1,
+            Instant::now(),
+            &mut ordinal,
+        );
+        let texts: Vec<&str> = words.iter().map(|word| word.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["sidekick", "sidekick", "sidekick", "sidekicks", "sidekicks"]
+        );
+        assert!(words[0].possessive && words[0].sentence_start);
+        assert!(words[1].pause_after && !words[1].possessive);
+        assert!(words[4].sentence_end);
+        // A comma between the two keeps two words.
+        let words = tokenize("left side, kick it", 1, Instant::now(), &mut ordinal);
+        let texts: Vec<&str> = words.iter().map(|word| word.text.as_str()).collect();
+        assert_eq!(texts, ["left", "side", "kick", "it"]);
+    }
+
+    #[test]
+    fn talk_about_the_sidekick_is_not_a_command() {
+        // Plan 236 D2: like "buddy" before it, the word only wakes the
+        // detector; a sentence about the Sidekick commands nothing.
+        for text in [
+            "my sidekick is great",
+            "My sidekick is great.",
+            "my side kick is asleep",
+            "My side-kick is great.",
+            "I love my sidekick",
+            "the sidekick's bubble is cute",
+            "Sidekick is great tonight",
+            "thanks sidekick",
+            "Thanks, side kick.",
+            "left side, kick it off",
+        ] {
+            for ctx in [&PLAIN, &ANSWERING, &WAKE_REQUIRED] {
+                assert_eq!(
+                    detect_one(text, ctx).map(|command| command.kind),
+                    None,
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn side_kick_split_over_two_finals_wakes_within_the_name_carry_gap() {
+        let start = Instant::now();
+        // A chunked final closes on "side" (with a period it never heard)
+        // and the next opens on "kick": one wake word.
+        let mut detector = CommandDetector::default();
+        assert_eq!(
+            detector.observe_final("c", 1, "Okay side.", start, &WAKE_REQUIRED),
+            None
+        );
+        let found = detector
+            .observe_final(
+                "c",
+                2,
+                "Kick, highlight the last comment.",
+                start + Duration::from_secs(2),
+                &WAKE_REQUIRED,
+            )
+            .expect("side + kick across two finals is the wake word");
+        assert_eq!(found.kind, CommandKind::Highlight);
+        assert!(found.wake_word);
+        assert_eq!(found.heard, "sidekick highlight the last comment");
+        // At the start of a final, too.
+        let mut detector = CommandDetector::default();
+        assert_eq!(
+            detector.observe_final("c", 1, "Side", start, &WAKE_REQUIRED),
+            None
+        );
+        let found = detector
+            .observe_final(
+                "c",
+                2,
+                "kick take it down",
+                start + NAME_CARRY_MAX_GAP,
+                &WAKE_REQUIRED,
+            )
+            .expect("within the gap");
+        assert_eq!(found.kind, CommandKind::Clear);
+        // Past the gap, the two words stay two words.
+        let mut detector = CommandDetector::default();
+        assert_eq!(
+            detector.observe_final("c", 1, "Okay side", start, &WAKE_REQUIRED),
+            None
+        );
+        assert_eq!(
+            detector.observe_final(
+                "c",
+                2,
+                "kick, highlight the last comment.",
+                start + NAME_CARRY_MAX_GAP + Duration::from_secs(1),
+                &WAKE_REQUIRED,
+            ),
+            None
+        );
+        // A final between them keeps them apart.
+        let mut detector = CommandDetector::default();
+        assert_eq!(
+            detector.observe_final("c", 1, "Okay side", start, &WAKE_REQUIRED),
+            None
+        );
+        assert_eq!(
+            detector.observe_final("c", 2, "", start + Duration::from_secs(1), &WAKE_REQUIRED),
+            None
+        );
+        assert_eq!(
+            detector.observe_final(
+                "c",
+                3,
+                "kick, highlight the last comment.",
+                start + Duration::from_secs(2),
+                &WAKE_REQUIRED,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn sidekick_and_the_persona_name_wake_the_detector_and_oracle_does_not() {
         let highlight =
             |text: &str| detect_one(text, &PLAIN).map(|command| (command.kind, command.wake_word));
         assert_eq!(
-            highlight("Buddy, highlight the last comment"),
+            highlight("Sidekick, highlight the last comment"),
             Some((CommandKind::Highlight, true))
         );
-        // The hidden alias, one release more (plan 164 D2).
-        assert_eq!(
-            highlight("Orcle, highlight the last comment"),
-            Some((CommandKind::Highlight, true))
-        );
+        // The Orcle aliases are gone (plan 236 D2), and a real word never
+        // woke it.
+        assert_eq!(highlight("Orcle, highlight the last comment"), None);
         assert_eq!(highlight("Oracle, highlight the last comment"), None);
         // A name the persona does not have is talk.
         assert_eq!(highlight("Zarquon, highlight the last comment"), None);
@@ -3696,19 +3982,21 @@ mod tests {
         assert_eq!(heard.heard, "zarquon take it down");
         assert!(heard.wake_word);
         // A new name forgets the old one.
-        set_persona_wake_tokens("Buddy");
+        set_persona_wake_tokens("Sidekick");
         assert_eq!(highlight("Zarquon, highlight the last comment"), None);
     }
 
     #[test]
-    fn thanks_buddy_without_a_command_phrase_does_nothing() {
-        // Plan 171 D5: "buddy" is an everyday word. It only wakes the
-        // detector; a command still needs its structured phrase after it.
+    fn thanks_sidekick_without_a_command_phrase_does_nothing() {
+        // Plan 171 D5, plan 236 D2: a wake word only wakes the detector; a
+        // command still needs its structured phrase after it.
         for text in [
+            "thanks sidekick",
+            "Thanks, sidekick.",
+            "thanks sidekick!",
+            "Thanks sidekick",
             "thanks buddy",
             "Thanks, buddy.",
-            "thanks buddy!",
-            "Thanks buddy",
         ] {
             for ctx in [&PLAIN, &ANSWERING, &WAKE_REQUIRED] {
                 assert_eq!(
@@ -3720,9 +4008,47 @@ mod tests {
         }
         // The same word before a command phrase still wakes it.
         assert_eq!(
-            detect_one("Thanks. Buddy, highlight the last comment", &PLAIN)
+            detect_one("Thanks. Sidekick, highlight the last comment", &PLAIN)
                 .map(|command| command.kind),
             Some(CommandKind::Highlight)
+        );
+    }
+
+    /// The desktop app's version, without a pre-release tag.
+    fn app_version() -> (u32, u32, u32) {
+        let package: serde_json::Value =
+            serde_json::from_str(include_str!("../../../apps/desktop/package.json"))
+                .expect("apps/desktop/package.json is JSON");
+        let version = package["version"].as_str().expect("a version");
+        let core = version.split(['-', '+']).next().unwrap_or(version);
+        let parts: Vec<u32> = core
+            .split('.')
+            .map(|part| part.parse().expect("a numeric version part"))
+            .collect();
+        (parts[0], parts[1], parts[2])
+    }
+
+    #[test]
+    fn the_old_buddy_wake_words_go_after_their_last_release() {
+        // Plan 236 D2: "buddy" and "bodhi" still wake it, hidden, so a
+        // streamer's habit keeps working through the first two releases that
+        // say Sidekick. The release after 0.26.1 removes them: this test
+        // fails once the app's version passes it.
+        for text in [
+            "Buddy, highlight the last comment",
+            "Bodhi, highlight the last comment",
+            "Hey buddy, take it down",
+        ] {
+            let command = detect_one(text, &WAKE_REQUIRED).unwrap_or_else(|| panic!("{text}"));
+            assert!(command.wake_word, "{text}");
+        }
+        let (major, minor, patch) = LEGACY_WAKE_WORDS_LAST_RELEASE;
+        assert!(
+            app_version() <= LEGACY_WAKE_WORDS_LAST_RELEASE,
+            "Videorc {:?} is past {major}.{minor}.{patch}, the last release that wakes on \
+             {LEGACY_WAKE_WORDS:?} (plan 236 D2): remove them from WAKE_WORDS and the \
+             docs that name them, then delete this test",
+            app_version()
         );
     }
 }

@@ -787,7 +787,7 @@ pub fn parse_pack_id(pack_id: &str) -> Result<PackRef, PetError> {
     }
     Err(PetError::new(
         PetRule::PackId,
-        "The pack id is neither a pack of this Buddy nor a built-in pack.",
+        "The pack id is neither a pack of this Sidekick nor a built-in pack.",
     ))
 }
 
@@ -841,7 +841,7 @@ pub fn pack_dir(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result<Pa
     if !inside {
         return Err(PetError::new(
             PetRule::PackOutsideRoot,
-            "The pack folder is outside Videorc's Buddy storage.",
+            "The pack folder is outside Videorc's Sidekick storage.",
         ));
     }
     if !canonical.is_dir() {
@@ -1113,12 +1113,24 @@ pub struct BuddyPetSummary {
     pub has_talk: bool,
 }
 
+/// The name a person reads for a pack. The bundled default pack's manifest
+/// keeps "Buddy" (its bytes are hashed into the official catalog, plan 236),
+/// so it reads as the default name, "Sidekick".
+fn pack_display_name(pack_id: &str, manifest_name: &str) -> String {
+    if pack_id == crate::cohost_library::alive::BUDDY_DEFAULT_ALIVE_PACK_ID
+        && manifest_name == "Buddy"
+    {
+        return crate::cohost::COHOST_DEFAULT_PERSONA_NAME.to_string();
+    }
+    crate::cohost::truncate_utf16(manifest_name, BUDDY_PET_TEXT_MAX)
+        .trim_end()
+        .to_string()
+}
+
 pub fn summarize(pack_id: &str, manifest: &PetManifest, sidecar: &PetSidecar) -> BuddyPetSummary {
     BuddyPetSummary {
         pack_id: pack_id.to_string(),
-        name: crate::cohost::truncate_utf16(manifest.name.trim(), BUDDY_PET_TEXT_MAX)
-            .trim_end()
-            .to_string(),
+        name: pack_display_name(pack_id, manifest.name.trim()),
         cell_size: manifest
             .neutral_frame()
             .map(PetFrame::cell_size)
@@ -1546,9 +1558,11 @@ pub(crate) fn load_state_image(
             .iter()
             .any(|ext| file.ends_with(ext));
     if folder != persona_id || !file_ok {
-        return Err("is not one of this Buddy's images".to_string());
+        return Err("is not one of this Sidekick's images".to_string());
     }
-    let root = roots.first().ok_or("has no Buddy storage to load from")?;
+    let root = roots
+        .first()
+        .ok_or("has no Sidekick storage to load from")?;
     let dir = root.join(folder);
     if !crate::resource_authority::canonical_path_is_within(&dir.join(file), &roots[..1]) {
         return Err("is missing".to_string());
@@ -1634,7 +1648,7 @@ pub fn still_pack(
                     "The {} image {reason}; the {} shows instead.",
                     state.as_str(),
                     if state == CohostAvatarState::Idle {
-                        "default Buddy"
+                        "default Sidekick"
                     } else {
                         "idle image"
                     }
@@ -2369,13 +2383,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_bundled_pack_reads_as_sidekick_and_other_packs_keep_their_names() {
+        // Plan 236: the bundled manifest keeps "Buddy" (hashed into the
+        // official catalog); the name a person reads is the default name.
+        assert_eq!(pack_display_name("bundled:buddy", "Buddy"), "Sidekick");
+        assert_eq!(pack_display_name("bundled:buddy", "Grum"), "Grum");
+        assert_eq!(pack_display_name("pack-1", "Buddy"), "Buddy");
+        assert_eq!(pack_display_name("official:orc", "Golmar"), "Golmar");
+    }
+
+    #[test]
     fn buddy_still_pack_of_the_default_persona_shows_the_bundled_states() {
         let pack = still_pack(&crate::cohost::CohostPersona::default(), &[]).unwrap();
         assert_valid_still(&pack);
         assert_eq!(pack.pack_id, STILL_PACK_ID);
         assert_eq!(pack.sidecar.source, PetSource::Still);
         assert!(pack.notes.is_empty(), "{:?}", pack.notes);
-        assert_eq!(pack.manifest.name, "Buddy");
+        assert_eq!(pack.manifest.name, "Sidekick");
         assert_eq!(pack.manifest.neutral, "idle");
         // One gaze cell and three reactions, each on its own bundled cell:
         // the default Buddy talks, laughs and thinks with its own drawings.
