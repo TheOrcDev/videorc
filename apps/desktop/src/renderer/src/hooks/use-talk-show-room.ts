@@ -213,8 +213,12 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         const overlays = await loadOverlays()
         const status = cloudStatusRef.current
         if (!overlays.overlayIsForThisRoom(event, status, status?.room?.phase ?? 'closed')) return
-        await clientRef.current?.sendOverlay(event, (imageId) =>
-          overlays.fetchOverlayImage(overlays.overlayImageUrl(client.connection, imageId))
+        await clientRef.current?.sendOverlay(event, (imageId, signal) =>
+          overlays.fetchOverlayImage(
+            overlays.overlayImageUrl(client.connection, imageId),
+            undefined,
+            signal
+          )
         )
       })().catch((error: unknown) => {
         console.warn(

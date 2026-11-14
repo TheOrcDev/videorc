@@ -179,7 +179,7 @@ export class TalkShowRoomClient {
   #snapshot: TalkShowRoomSnapshot = IDLE_TALK_SHOW_ROOM
   #problem: string | null = null
   /** Overlays go one at a time, in the order they were handed over. */
-  #overlays: Promise<void> = Promise.resolve()
+  #overlays = new Map<string, AbortController>()
 
   constructor(deps: TalkShowRoomDeps) {
     this.#deps = deps
@@ -226,6 +226,8 @@ export class TalkShowRoomClient {
   /** Leave: the local tracks stop first (D13 for guests; the same here). */
   async disconnect(): Promise<void> {
     this.#closed = true
+    for (const pending of this.#overlays.values()) pending.abort()
+    this.#overlays.clear()
     this.#screenGeneration += 1
     this.#clearTimers()
     await this.#stopLocal()
@@ -321,30 +323,31 @@ export class TalkShowRoomClient {
     this.#publish()
   }
 
-  /**
-   * An overlay to a managed show's program page (plan 234 T3, wire contract
-   * 6.3), as a byte stream on this connection: the page takes one only from
-   * the host. In order, so a clear never overtakes its set. While the room
-   * is not connected nothing is sent; the backend hands what is up over
-   * again when this connection reports back.
-   */
-  sendOverlay(
+  /** Latest wins per slot and orientation. Hide cancels a pending set
+   * immediately and opens its own clear stream without waiting for it. */
+  async sendOverlay(
     event: CloudRoomOverlayEvent,
-    image: (imageId: string) => Promise<OverlayImage | null>
+    image: (imageId: string, signal?: AbortSignal) => Promise<OverlayImage | null>
   ): Promise<void> {
-    this.#overlays = this.#overlays.then(async () => {
-      const room = this.#room
-      if (this.#closed || !room || room.state !== ConnectionState.Connected) return
-      try {
-        const result = await sendOverlay(event, { publisher: room.localParticipant, image })
-        if (result === 'refused') {
-          console.warn('[talk-show] an overlay was not one the program page takes', event.slot)
-        }
-      } catch (error) {
-        console.warn('[talk-show] an overlay did not reach the room', messageOf(error))
-      }
-    })
-    return this.#overlays
+    const room = this.#room
+    if (this.#closed || !room || room.state !== ConnectionState.Connected) return
+    const key = `${event.showId}:${event.slot}:${event.orientation}`
+    this.#overlays.get(key)?.abort()
+    const controller = new AbortController()
+    this.#overlays.set(key, controller)
+    try {
+      const result = await sendOverlay(event, {
+        publisher: room.localParticipant,
+        image,
+        signal: controller.signal
+      })
+      if (result !== 'sent')
+        console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
+    } catch {
+      console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
+    } finally {
+      if (this.#overlays.get(key) === controller) this.#overlays.delete(key)
+    }
   }
 
   /** The Program monitor (D7): the runner's return, subscribed on demand. */

@@ -199,7 +199,7 @@ describe('sending an overlay to the room', () => {
     const room = publisher()
     const image = vi.fn(async () => png(4096))
     await expect(sendOverlay(card, { publisher: room.publisher, image })).resolves.toBe('sent')
-    expect(image).toHaveBeenCalledWith('image-card')
+    expect(image).toHaveBeenCalledWith('image-card', expect.any(AbortSignal))
     expect(room.sent).toHaveLength(1)
     const [stream] = room.sent
     expect(stream.topic).toBe('videorc.overlay.set')
@@ -316,5 +316,46 @@ describe('whose overlays these are', () => {
     await expect(
       fetchOverlayImage(url, async () => new Response(null, { status: 404 }))
     ).resolves.toBeNull()
+  })
+})
+
+describe('overlay deadlines', () => {
+  it('drops a stalled fetch and aborts its request after ten seconds', async () => {
+    vi.useFakeTimers()
+    try {
+      let signal: AbortSignal | undefined
+      const pending = fetchOverlayImage('http://127.0.0.1/image', async (_url, init) => {
+        signal = init?.signal ?? undefined
+        return new Promise<Response>(() => {})
+      })
+      const failed = expect(pending).rejects.toThrow('Overlay timed out')
+      await vi.advanceTimersByTimeAsync(10_000)
+      await failed
+      expect(signal?.aborted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['open', 'write', 'close'])('bounds a stalled stream %s', async (phase) => {
+    vi.useFakeTimers()
+    try {
+      const never = () => new Promise<void>(() => {})
+      const publisher: OverlayPublisher = {
+        streamBytes: async () => {
+          if (phase === 'open') await never()
+          return {
+            write: phase === 'write' ? never : async () => {},
+            close: phase === 'close' ? never : async () => {}
+          }
+        }
+      }
+      const pending = sendOverlay(card, { publisher, image: async () => png() })
+      const failed = expect(pending).rejects.toThrow('Overlay timed out')
+      await vi.advanceTimersByTimeAsync(5_000)
+      await failed
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

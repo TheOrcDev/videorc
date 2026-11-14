@@ -32,6 +32,34 @@ export const OVERLAY_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as c
 /** The clear body's own type; the page reads the bytes, not the type. */
 const OVERLAY_CLEAR_MIME_TYPE = 'application/json'
 
+// 2 MiB takes 64 s at 256 kbit/s. Allow 90 s for the upload,
+// with 5 s per 16 KiB write/open/close, and 10 s for the local image fetch.
+export const OVERLAY_FETCH_TIMEOUT_MS = 10_000
+export const OVERLAY_WRITE_TIMEOUT_MS = 5_000
+export const OVERLAY_UPLOAD_TIMEOUT_MS = 90_000
+const OVERLAY_CHUNK_BYTES = 16 * 1024
+
+async function overlayDeadline<T>(
+  work: () => Promise<T>,
+  signal: AbortSignal,
+  ms: number
+): Promise<T> {
+  if (signal.aborted) throw new Error('Overlay dropped')
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let abort: () => void = () => {}
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      abort = () => reject(new Error('Overlay dropped'))
+      signal.addEventListener('abort', abort, { once: true })
+      timer = setTimeout(() => reject(new Error('Overlay timed out')), ms)
+      work().then(resolve, reject)
+    })
+  } finally {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', abort)
+  }
+}
+
 export type OverlaySet = Extract<CloudRoomOverlayEvent, { op: 'set' }>
 export type OverlayClear = Extract<CloudRoomOverlayEvent, { op: 'clear' }>
 
@@ -94,12 +122,28 @@ export function overlayImageUrl(
 /** The bytes of an overlay that is still up; null once it came down. */
 export async function fetchOverlayImage(
   url: string,
-  fetcher: (url: string) => Promise<Response> = (target) => fetch(target, { cache: 'no-store' })
+  fetcher: (url: string, init?: RequestInit) => Promise<Response> = fetch,
+  signal?: AbortSignal
 ): Promise<OverlayImage | null> {
-  const response = await fetcher(url)
-  if (!response.ok) return null
-  const mimeType = (response.headers.get('content-type') ?? '').split(';')[0]?.trim() ?? ''
-  return { bytes: new Uint8Array(await response.arrayBuffer()), mimeType }
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) controller.abort()
+  try {
+    return await overlayDeadline(
+      async () => {
+        const response = await fetcher(url, { cache: 'no-store', signal: controller.signal })
+        if (!response.ok) return null
+        const mimeType = (response.headers.get('content-type') ?? '').split(';')[0]?.trim() ?? ''
+        return { bytes: new Uint8Array(await response.arrayBuffer()), mimeType }
+      },
+      controller.signal,
+      OVERLAY_FETCH_TIMEOUT_MS
+    )
+  } finally {
+    controller.abort()
+    signal?.removeEventListener('abort', abort)
+  }
 }
 
 /**
@@ -128,43 +172,65 @@ export type OverlaySendResult =
   /** The page would drop it (no bytes, over 2 MiB, or not an image it takes). */
   | 'refused'
 
-/** One hand-off to the room, as the byte stream of contract 6.3. */
+/** One hand-off. Cancellation stops further writes and withholds the
+ * trailer of an incomplete set; LiveKit's public writer has no abort API. */
 export async function sendOverlay(
   event: CloudRoomOverlayEvent,
   deps: {
     publisher: OverlayPublisher
-    image: (imageId: string) => Promise<OverlayImage | null>
+    image: (imageId: string, signal?: AbortSignal) => Promise<OverlayImage | null>
+    signal?: AbortSignal
   }
 ): Promise<OverlaySendResult> {
-  if (event.op === 'clear') {
-    const body = overlayClearBody(event)
-    const writer = await deps.publisher.streamBytes({
-      topic: OVERLAY_CLEAR_TOPIC,
-      mimeType: OVERLAY_CLEAR_MIME_TYPE,
-      totalSize: body.byteLength
-    })
-    await writer.write(body)
-    await writer.close()
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  deps.signal?.addEventListener('abort', abort, { once: true })
+  if (deps.signal?.aborted) controller.abort()
+  const timer = setTimeout(abort, OVERLAY_UPLOAD_TIMEOUT_MS)
+  const signal = controller.signal
+  const bounded = <T>(work: () => Promise<T>) =>
+    overlayDeadline(work, signal, OVERLAY_WRITE_TIMEOUT_MS)
+  try {
+    if (event.op === 'clear') {
+      const body = overlayClearBody(event)
+      const writer = await bounded(() =>
+        deps.publisher.streamBytes({
+          topic: OVERLAY_CLEAR_TOPIC,
+          mimeType: OVERLAY_CLEAR_MIME_TYPE,
+          totalSize: body.byteLength
+        })
+      )
+      await bounded(() => writer.write(body))
+      await bounded(() => writer.close())
+      return 'sent'
+    }
+    const image = await overlayDeadline(
+      () => deps.image(event.imageId, signal),
+      signal,
+      OVERLAY_FETCH_TIMEOUT_MS
+    )
+    if (!image) return 'gone'
+    const mimeType =
+      OVERLAY_MIME_TYPES.find((type) => type === event.mimeType) ??
+      OVERLAY_MIME_TYPES.find((type) => type === image.mimeType)
+    const size = image.bytes.byteLength
+    if (!mimeType || size === 0 || size > OVERLAY_MAX_BYTES) return 'refused'
+    const writer = await bounded(() =>
+      deps.publisher.streamBytes({
+        topic: OVERLAY_SET_TOPIC,
+        mimeType,
+        totalSize: size,
+        attributes: overlaySetAttributes(event)
+      })
+    )
+    for (let offset = 0; offset < size; offset += OVERLAY_CHUNK_BYTES) {
+      await bounded(() => writer.write(image.bytes.subarray(offset, offset + OVERLAY_CHUNK_BYTES)))
+    }
+    await bounded(() => writer.close())
     return 'sent'
+  } finally {
+    clearTimeout(timer)
+    controller.abort()
+    deps.signal?.removeEventListener('abort', abort)
   }
-  const image = await deps.image(event.imageId)
-  if (!image) return 'gone'
-  // The event's type first; the response's own when the event's is not one
-  // the page takes.
-  const mimeType =
-    OVERLAY_MIME_TYPES.find((type) => type === event.mimeType) ??
-    OVERLAY_MIME_TYPES.find((type) => type === image.mimeType)
-  const size = image.bytes.byteLength
-  if (!mimeType || size === 0 || size > OVERLAY_MAX_BYTES) return 'refused'
-  // `streamBytes`, never `sendFile`: a file carries no attributes, and the
-  // page drops a stream without them.
-  const writer = await deps.publisher.streamBytes({
-    topic: OVERLAY_SET_TOPIC,
-    mimeType,
-    totalSize: size,
-    attributes: overlaySetAttributes(event)
-  })
-  await writer.write(image.bytes)
-  await writer.close()
-  return 'sent'
 }

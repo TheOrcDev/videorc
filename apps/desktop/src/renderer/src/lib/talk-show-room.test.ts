@@ -324,12 +324,11 @@ describe('overlays to the program page (plan 234 T3)', () => {
   }
   const image = async () => ({ bytes: new Uint8Array(32), mimeType: 'image/png' })
 
-  it('streams a set and then its clear, in that order, with the contract attributes', async () => {
+  it('streams a completed set and then its clear with the contract attributes', async () => {
     const { room } = client()
     await room.connect()
-    // Handed over back to back: the clear waits for the set.
-    const sends = [room.sendOverlay(takeover, image), room.sendOverlay(clear, image)]
-    await Promise.all(sends)
+    await room.sendOverlay(takeover, image)
+    await room.sendOverlay(clear, image)
     const streams = latestRoom().streams
     expect(streams.map((stream) => stream.topic)).toEqual([
       'videorc.overlay.set',
@@ -348,6 +347,46 @@ describe('overlays to the program page (plan 234 T3)', () => {
     expect(streams[1].attributes).toBeUndefined()
     expect(streams.every((stream) => stream.closed)).toBe(true)
     await room.disconnect()
+  })
+
+  it('sends Hide immediately past a stalled set, without blocking another slot or orientation', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { room } = client()
+    await room.connect()
+    const stalled = room.sendOverlay(takeover, async () => new Promise(() => {}))
+    await room.sendOverlay({ ...takeover, orientation: 'v' }, image)
+    await room.sendOverlay({ ...takeover, slot: 'card' }, image)
+    await room.sendOverlay(clear, image)
+    await stalled
+    expect(latestRoom().streams.map((stream) => stream.topic)).toEqual([
+      'videorc.overlay.set',
+      'videorc.overlay.set',
+      'videorc.overlay.clear'
+    ])
+    expect(warning).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+    warning.mockRestore()
+  })
+
+  it('a newer set cancels an older fetch and never sends the late image', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { room } = client()
+    await room.connect()
+    let release: (value: Awaited<ReturnType<typeof image>>) => void = () => {}
+    const old = room.sendOverlay(
+      takeover,
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    await room.sendOverlay({ ...takeover, imageId: 'new' }, image)
+    release(await image())
+    await old
+    expect(latestRoom().streams).toHaveLength(1)
+    expect(warning).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+    warning.mockRestore()
   })
 
   it('sends nothing before the room is joined or after it is left', async () => {
