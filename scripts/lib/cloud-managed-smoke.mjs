@@ -297,7 +297,8 @@ export async function managedHarness(kind, pass = 1) {
         { ...params, code },
         { timeoutMs: 15000 }
       )
-      return r?.result ?? r
+      // The page's own value, null included (never the reply around it).
+      return r && typeof r === 'object' && 'result' in r ? r.result : r
     },
     async command(command, params = {}) {
       return requestSmokeCommand(smoke, command, params, { timeoutMs: 15000 })
