@@ -215,6 +215,10 @@ pub struct BackgroundStage {
 
 impl BackgroundStage {
     /// No stage: every source keeps its own transform.
+    /// Used on the macOS Metal compose path and the Windows direct D3D11
+    /// recording path, and in tests. Linux production code goes through
+    /// [`Self::for_scene`] only, so the constant is cfg'd out of those builds.
+    #[cfg(any(test, target_os = "macos", target_os = "windows"))]
     pub const NONE: Self = Self {
         margin: 0.0,
         camera: false,
@@ -1539,13 +1543,17 @@ fn normalize_crop_pair(first: f64, second: f64) -> (f64, f64) {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{SideBySideCameraSide, default_layout_settings};
+    use crate::protocol::{default_layout_settings, SideBySideCameraSide};
 
     fn layout() -> LayoutSettings {
         default_layout_settings()
