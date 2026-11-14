@@ -602,3 +602,36 @@ test('show limits and timers: capacity, no-feed, hold-limit, max-show, test expi
   const r = await call('create', { kind: 'solo', outputs: [output], client: { version: '0.26.0' } })
   assert.equal(r.status, w.errors.create.find((e) => e.code.endsWith('full')).status)
 })
+
+test('renderer smoke snippets parse without evaluating or launching the app', async () => {
+  const { createRequire } = await import('node:module')
+  const require = createRequire(new URL('../../apps/desktop/package.json', import.meta.url))
+  const ts = require('typescript')
+  const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor
+  for (const name of [
+    'smoke-cloud-solo-managed-app.mjs',
+    'smoke-cloud-talk-show-managed-app.mjs'
+  ]) {
+    const source = readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
+    const ast = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+    let snippets = 0
+    const visit = (node) => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'eval' &&
+        node.arguments[0] &&
+        ts.isStringLiteral(node.arguments[0])
+      ) {
+        assert.doesNotThrow(
+          () => new AsyncFunction('params', node.arguments[0].text),
+          `${name}: renderer snippet`
+        )
+        snippets++
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(ast)
+    if (name.includes('talk')) assert.ok(snippets > 4)
+  }
+})

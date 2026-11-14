@@ -592,7 +592,7 @@ export async function managedHarness(kind, pass = 1) {
             while (pending.length >= 160 * 90 * 3) {
               const frame = Buffer.from(pending.subarray(0, 160 * 90 * 3))
               pending = pending.subarray(160 * 90 * 3)
-              h.feedFrames.push({ atMs: Date.now(), card: holdCardStats(frame, 160, 90), frame })
+              h.feedFrames.push({ atMs: Date.now(), card: holdCardStats(frame, 160, 90) })
               web.hooks.feed(s.show.id, true)
             }
           })

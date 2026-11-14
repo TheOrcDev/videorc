@@ -319,7 +319,7 @@ try {
       await listener.leave(guests[0])
       await waitFor(async () => {
         const view = await h.eval(
-          'const p=document.querySelector("[data-testid=show-stage-program]"); return {source:p?.dataset.programSource,tiles:[...(p?.querySelectorAll("[data-stage-identity]")??[])].map(e=>e.dataset.stageIdentity),speaker:!!document.querySelector("[aria-label=\"Listen to the program\"]")}'
+          'const p=document.querySelector("[data-testid=show-stage-program]"); return {source:p?.dataset.programSource,tiles:[...(p?.querySelectorAll("[data-stage-identity]")??[])].map(e=>e.dataset.stageIdentity),speaker:[...document.querySelectorAll("button")].some(b=>b.getAttribute("aria-label")==="Listen to the program")}'
         )
         return (
           view.source === 'stage' &&
