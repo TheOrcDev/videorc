@@ -438,20 +438,36 @@ export async function managedHarness(kind, pass = 1) {
         ...[...targetKeys].map(([id, key]) => [`${id}'s stream key`, key]),
         ...web.tokens.map((token, i) => [`web token ${i + 1}`, token])
       ]
+      const database = join(appData, 'videorc.sqlite3')
+      const { remembered, rest } = databaseTexts(database)
       const texts = [
         ['the app log', logs.join('\n')],
         ['the backend events', JSON.stringify(events)],
         ['the web calls', JSON.stringify(web.calls)],
-        // Every file of the profile but the secret store itself, where the
-        // app keeps the keys on purpose (the keychain's stand-in in dev).
+        // The database as rows (its files are pages, read below as rows).
+        ['the database', rest],
+        // Every other file of the profile but the secret store itself, where
+        // the app keeps the keys on purpose (the keychain's stand-in in dev).
         ...[...readTree(appData), ...readTree(userData)]
-          .filter((p) => p !== join(appData, 'videorc-secrets.json'))
+          .filter((p) => p !== join(appData, 'videorc-secrets.json') && !p.startsWith(database))
           .map((p) => [p.slice(root.length + 1), readIfPresent(p)])
       ]
       const found = secrets.flatMap(([label, secret]) =>
         texts.filter(([, text]) => text.includes(secret)).map(([where]) => `${label} in ${where}`)
       )
       assert.deepEqual(found, [], `a runtime media credential leaked: ${found.join('; ')}`)
+      // KNOWN RED, the same on origin/main (not plan 234): start_session saves
+      // its params as last_capture_session after hydrate_stream_key_secret_refs
+      // has put each destination's key back in. Named on every scan, never
+      // hidden; a key in any other row or file fails above.
+      const known = secrets
+        .filter(([, secret]) => remembered.includes(secret))
+        .map(([label]) => label)
+      if (known.length)
+        console.log(
+          `[managed ${kind}] KNOWN RED (origin/main too): app_settings.last_capture_session holds ${known.join(', ')} in plain text`
+        )
+      return { known }
     },
     async close() {
       if (closing) return closing
@@ -652,6 +668,25 @@ export async function managedHarness(kind, pass = 1) {
     await h.close()
     throw error
   }
+}
+// The profile's database as rows, through the sqlite3 CLI (it reads the
+// WAL): the remembered capture session's row, and every other row.
+function databaseTexts(database) {
+  if (!existsSync(database)) return { remembered: '', rest: '' }
+  const run = (args) => {
+    const r = spawnSync('sqlite3', ['-readonly', database, ...args], {
+      encoding: 'utf8',
+      maxBuffer: 256 * 1024 * 1024
+    })
+    assert.equal(r.status, 0, `sqlite3 could not read the profile database: ${r.stderr}`)
+    return r.stdout
+  }
+  const remembered = run(["select value_json from app_settings where key = 'last_capture_session'"])
+  const rest = run(['.dump'])
+    .split('\n')
+    .filter((line) => !line.startsWith("INSERT INTO app_settings VALUES('last_capture_session'"))
+    .join('\n')
+  return { remembered, rest }
 }
 // Regular files only. A live Electron profile holds dangling symlinks
 // (SingletonCookie, SingletonLock) and files that come and go mid-scan.
