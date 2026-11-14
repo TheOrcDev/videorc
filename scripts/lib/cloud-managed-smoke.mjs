@@ -149,6 +149,10 @@ export async function managedHarness(kind, pass = 1) {
     segmentBytes = Buffer.alloc(0),
     activeShow
   const feedKey = randomBytes(16).toString('hex')
+  // Each destination's key, by target id. The app never sends a key value in
+  // session.start: it stores it (streamTargets.manualKey.store) and passes the
+  // secret's ref, so the targets below carry refs only.
+  const targetKeys = new Map()
   const feed = {
     orientation: 'horizontal',
     serverUrl: `rtmps://localhost:${ports.proxy}/live`,
@@ -281,6 +285,16 @@ export async function managedHarness(kind, pass = 1) {
         } catch {}
       })
       await h.status((s) => s.entitled && s.settings?.enabled, 'managed entitlement')
+      for (const target of h.targets ?? []) {
+        if (target.streamKeySecretRef) continue
+        const saved = await h.rpc('streamTargets.manualKey.store', {
+          targetId: target.id,
+          streamKey: targetKeys.get(target.id)
+        })
+        assert.ok(saved?.streamKeyPresent && saved.streamKeySecretRef, 'stream key stored')
+        target.streamKeySecretRef = saved.streamKeySecretRef
+        target.streamKeyPresent = true
+      }
     },
     async kill() {
       backend?.close()
@@ -329,8 +343,8 @@ export async function managedHarness(kind, pass = 1) {
     async destinations(n = 2) {
       const targets = []
       for (let i = 0; i < n; i++) {
-        const port = await freePort(),
-          streamKey = randomBytes(16).toString('hex')
+        const port = await freePort()
+        targetKeys.set(`local-${i}`, randomBytes(16).toString('hex'))
         const server = createServer((socket) => {
           sockets.add(socket)
           h.directConnections.push({ atMs: Date.now(), id: `local-${i}` })
@@ -346,8 +360,8 @@ export async function managedHarness(kind, pass = 1) {
           enabled: true,
           serverUrl: `rtmp://127.0.0.1:${port}/live`,
           urlMode: 'server-and-key',
-          streamKey,
-          streamKeyPresent: true,
+          streamKey: '',
+          streamKeyPresent: false,
           authMode: 'manual-rtmp',
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
@@ -403,7 +417,7 @@ export async function managedHarness(kind, pass = 1) {
           rtmp: {
             preset: 'custom',
             serverUrl: targets[0].serverUrl,
-            streamKey: targets[0].streamKey
+            streamKey: ''
           }
         },
         streaming: h.streaming(targets)
@@ -417,20 +431,27 @@ export async function managedHarness(kind, pass = 1) {
       )
     },
     scanLeaks() {
-      const secrets = [feedKey, ...(h.targets ?? []).map((t) => t.streamKey), ...web.tokens]
-      const texts = [
-        logs.join('\n'),
-        JSON.stringify(events),
-        JSON.stringify(web.calls),
-        ...readTree(appData).map(readIfPresent),
-        ...readTree(userData).map(readIfPresent)
+      // Each finding names the credential's kind and where it was found,
+      // never the value.
+      const secrets = [
+        ['the feed key', feedKey],
+        ...[...targetKeys].map(([id, key]) => [`${id}'s stream key`, key]),
+        ...web.tokens.map((token, i) => [`web token ${i + 1}`, token])
       ]
-      for (const secret of secrets)
-        assert.equal(
-          texts.some((t) => t.includes(secret)),
-          false,
-          'a runtime media credential leaked'
-        )
+      const texts = [
+        ['the app log', logs.join('\n')],
+        ['the backend events', JSON.stringify(events)],
+        ['the web calls', JSON.stringify(web.calls)],
+        // Every file of the profile but the secret store itself, where the
+        // app keeps the keys on purpose (the keychain's stand-in in dev).
+        ...[...readTree(appData), ...readTree(userData)]
+          .filter((p) => p !== join(appData, 'videorc-secrets.json'))
+          .map((p) => [p.slice(root.length + 1), readIfPresent(p)])
+      ]
+      const found = secrets.flatMap(([label, secret]) =>
+        texts.filter(([, text]) => text.includes(secret)).map(([where]) => `${label} in ${where}`)
+      )
+      assert.deepEqual(found, [], `a runtime media credential leaked: ${found.join('; ')}`)
     },
     async close() {
       if (closing) return closing
@@ -453,7 +474,7 @@ export async function managedHarness(kind, pass = 1) {
         const secrets = [
           feedKey,
           sessionToken,
-          ...(h.targets ?? []).map((t) => t.streamKey),
+          ...targetKeys.values(),
           ...(web?.tokens ?? []),
           ...(livekit ? [livekit.apiKey, livekit.apiSecret] : [])
         ]
