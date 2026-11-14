@@ -62,6 +62,9 @@ export async function managedRoomListener(h) {
             }
             window.received.push({
               atMs: Date.now(),
+              // Every room in this page registers the handlers: a stream to the
+              // whole room arrives once per room. The listener counts its own.
+              receiver: identity,
               topic,
               sender: sender.identity,
               attributes: reader.info.attributes ?? {},
@@ -116,11 +119,16 @@ export async function managedRoomListener(h) {
         ...extra
       })
     }
-    await joinPeer(`EG_${randomBytes(8).toString('hex')}`)
+    const listenerIdentity = `EG_${randomBytes(8).toString('hex')}`
+    await joinPeer(listenerIdentity)
     return {
       page,
       joinPeer,
-      records: () => page.evaluate(() => window.received),
+      records: () =>
+        page.evaluate(
+          (id) => window.received.filter((record) => record.receiver === id),
+          listenerIdentity
+        ),
       async screen(identity, on) {
         await page.evaluate(
           async ({ identity, on }) => {
