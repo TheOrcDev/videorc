@@ -42,7 +42,8 @@ import {
   CLOUD_RECORDING_POLL_MS,
   downloadsOnThisComputer,
   sortCloudRecordings,
-  type CloudDownloadView
+  type CloudDownloadView,
+  type CloudRecordingStop
 } from '@/lib/cloud-recordings-view'
 import { lastCloudRecordingStop, subscribeCloudRecordingStop } from '@/lib/cloud-recordings-watch'
 import { dayLabel, durationMsLabel } from '@/lib/format'
@@ -75,6 +76,19 @@ export function LibraryCloudRecordings(): ReactElement {
   const [pollTick, setPollTick] = useState(0)
   const downloads = useSyncExternalStore(subscribeCloudDownloads, cloudDownloads)
   const stop = useSyncExternalStore(subscribeCloudRecordingStop, lastCloudRecordingStop)
+  // The ids listed when a take stopped while this section was open: the take's
+  // own row is a new one (a take from a minute before may be listed already).
+  // A stop from before the section opened has none; any take then counts.
+  const [listedAtStop, setListedAtStop] = useState<{
+    stop: CloudRecordingStop | null
+    ids: ReadonlySet<string> | undefined
+  }>({ stop, ids: undefined })
+  if (listedAtStop.stop !== stop) {
+    setListedAtStop({
+      stop,
+      ids: recordings ? new Set(recordings.map((recording) => recording.id)) : undefined
+    })
+  }
   const mountedRef = useRef(true)
 
   useEffect(() => {
@@ -122,14 +136,14 @@ export function LibraryCloudRecordings(): ReactElement {
   // minutes, until the take's row is listed.
   useEffect(() => {
     if (!signedIn || !online || !client) return
-    if (!awaitingCloudRecording(stop, recordings, Date.now())) return
+    if (!awaitingCloudRecording(stop, recordings, Date.now(), listedAtStop.ids)) return
     const timer = window.setTimeout(() => {
       void refresh(true).finally(() => {
         if (mountedRef.current) setPollTick((tick) => tick + 1)
       })
     }, CLOUD_RECORDING_POLL_MS)
     return () => window.clearTimeout(timer)
-  }, [client, online, pollTick, recordings, refresh, signedIn, stop])
+  }, [client, listedAtStop, online, pollTick, recordings, refresh, signedIn, stop])
 
   const download = async (recordingId: string): Promise<void> => {
     if (!client) return

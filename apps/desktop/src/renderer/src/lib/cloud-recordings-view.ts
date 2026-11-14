@@ -101,15 +101,21 @@ const START_SLOP_MS = 60_000
 /** A cloud recording that stopped on this computer: when it started and stopped. */
 export type CloudRecordingStop = { sinceMs: number; stoppedAtMs: number }
 
-/** Whether the list still waits for the take that `stop` ended. */
+/**
+ * Whether the list still waits for the take that `stop` ended. `listedAtStop`
+ * holds the ids the list showed when the take stopped: a take from a minute
+ * before, inside the allowance and listed already, is not this one.
+ */
 export function awaitingCloudRecording(
   stop: CloudRecordingStop | null,
   recordings: readonly CloudRecordingItem[] | null,
-  nowMs: number
+  nowMs: number,
+  listedAtStop?: ReadonlySet<string>
 ): boolean {
   if (!stop || nowMs - stop.stoppedAtMs >= CLOUD_RECORDING_POLL_WINDOW_MS) return false
   if (!recordings) return true
   return !recordings.some((recording) => {
+    if (listedAtStop?.has(recording.id)) return false
     const started = Date.parse(recording.startedAt)
     return Number.isFinite(started) && started >= stop.sinceMs - START_SLOP_MS
   })

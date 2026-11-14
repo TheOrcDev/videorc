@@ -132,4 +132,20 @@ describe('after Stop recording on a cloud talk show', () => {
       false
     )
   })
+
+  it('keeps waiting past a take from a minute before that was already listed', () => {
+    // Plan 234 smoke: two takes inside the clock allowance. The first one's
+    // row, listed when the second stopped, is not the second take's row.
+    const stop = { sinceMs: since, stoppedAtMs: stoppedAt }
+    const earlier = item('earlier', { startedAt: '2026-11-14T11:59:30Z' })
+    const take = item('take', { startedAt: '2026-11-14T12:00:02Z' })
+    const listedAtStop = new Set(['earlier'])
+    expect(awaitingCloudRecording(stop, [earlier], stoppedAt + 5000, listedAtStop)).toBe(true)
+    expect(awaitingCloudRecording(stop, [earlier, take], stoppedAt + 10_000, listedAtStop)).toBe(
+      false
+    )
+    // Without a list from the stop (the Library opened later), any take in
+    // the window counts, as before.
+    expect(awaitingCloudRecording(stop, [earlier], stoppedAt + 5000)).toBe(false)
+  })
 })
