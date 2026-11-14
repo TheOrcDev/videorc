@@ -106,7 +106,7 @@ describe('Retro LCD transport (plan 197)', () => {
   it('draws Record with its Space key and Go Live as keys, and says why Go Live is off', () => {
     renderTransport(
       { state: 'idle' },
-      { active: false, blockedReason: 'Turn on a destination in Livestream before you go live.' }
+      { active: false, blockedReason: 'Turn on a destination in Destinations before you go live.' }
     )
     expect(container.querySelector('[data-videorc-session-status]')).toBeNull()
     const record = [...container.querySelectorAll('button')].find((button) =>
@@ -119,7 +119,7 @@ describe('Retro LCD transport (plan 197)', () => {
     expect(goLive?.hasAttribute('disabled')).toBe(true)
     // The reason is a sentence on the screen, never a title.
     expect(text('[data-slot=session-blocked-reason]')).toBe(
-      'Turn on a destination in Livestream before you go live.'
+      'Turn on a destination in Destinations before you go live.'
     )
     expect(
       container

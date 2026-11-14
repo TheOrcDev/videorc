@@ -1,7 +1,7 @@
 // What the Studio's Session section says while on air (plan 174 S3.2, B-4):
 // the destinations as one quiet fact when all is well and one row per
 // problem when not, and one Stream health fact from the same classifier the
-// Livestream page uses. Pure, so the derivations run under the node vitest
+// Destinations page uses. Pure, so the derivations run under the node vitest
 // runner; the words are the glossary's (destination, on air, Stopped).
 
 import type { StreamTargetRuntime, WatchdogAlert } from '@/lib/backend'

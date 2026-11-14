@@ -1,6 +1,6 @@
 // Plan 226: chat commands, kept outside React like the soundboard. The Studio
 // provider hands each backend connection to the host (chat-commands-host.ts),
-// which connects it here; Livestream → Setup → Chat commands reads and edits
+// which connects it here; Destinations → Setup → Chat commands reads and edits
 // through `use-chat-commands`. A lazy chunk: the eager bundle only imports
 // the host on connect.
 

@@ -15,7 +15,7 @@ import { formatBitrate } from './format-video'
 // "runner"; a Go Live that streamed directly says why once; nothing is said
 // when the cloud was never expected (the backend decides that, D11).
 //
-// Three modules, split by what loads them: this one is the Livestream page's
+// Three modules, split by what loads them: this one is the Destinations page's
 // section (C6) and Test cloud (C6b), and it loads with that page;
 // `cloud-show-view.ts` is the Resume notice, the Go Live step and the hold's
 // countdown; `cloud-toasts.ts` is the Studio provider's toasts, the only part
@@ -96,7 +96,7 @@ export type CloudSectionState =
   | { kind: 'unavailable'; reason: string }
   | { kind: 'available'; hours: string | null }
 
-/** What the Livestream page's Videorc Cloud section shows (C6). */
+/** What the Destinations page's Videorc Cloud section shows (C6). */
 export function cloudSectionState(status: CloudStatus | null): CloudSectionState | null {
   if (!status) return null
   if (!status.allowance?.enabled && !status.show && !status.room) return null

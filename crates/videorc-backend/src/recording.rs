@@ -118,10 +118,10 @@ use crate::repair::{
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
 use crate::scene_geometry::{
-    PixelRect, SceneFit, SceneMask, SignedPixelRect, background_stage_margin, camera_chroma_key,
-    camera_mask, circle_geometry, resolved_camera_transform, rounded_rect_geometry,
-    scaled_camera_box_size, scaled_camera_margin, scene_crop_from_transform, scene_source_fit,
-    scene_source_rect_pixels, scene_source_render_transform, side_by_side_widths,
+    BackgroundStage, PixelRect, SceneFit, SceneMask, SignedPixelRect, background_stage_margin,
+    camera_chroma_key, camera_mask, circle_geometry, resolved_camera_transform,
+    rounded_rect_geometry, scaled_camera_box_size, scaled_camera_margin, scene_crop_from_transform,
+    scene_source_fit, scene_source_rect_pixels, scene_source_render_transform, side_by_side_widths,
 };
 use crate::screen_capture::{
     is_windows_gdigrab_desktop_screen_id, parse_screencapturekit_display_id,
@@ -5957,8 +5957,11 @@ async fn start_session_with_timeline(
                 .iter()
                 .find(|source| source.visible && matches!(source.kind, SceneSourceKind::Camera))
                 .and_then(|source| {
-                    let transform =
-                        scene_source_render_transform(&source.transform, &source.kind, 0.0);
+                    let transform = scene_source_render_transform(
+                        &source.transform,
+                        &source.kind,
+                        BackgroundStage::NONE,
+                    );
                     // The video processor's destination rect is on-canvas
                     // only; a camera box that hangs off the canvas (plan
                     // 215 E2) keeps the D3D11 scene compositor, which clips.
@@ -24996,15 +24999,16 @@ fn scene_video_filter(
     let mut canvas_label = "scene_canvas0".to_string();
     let mut layer_index = 0usize;
     // Stage inset sized by the background's visibility setting (0 = full canvas).
-    let stage_margin = background_stage_margin(background);
+    // Which sources sit on it is the compositor's rule (plan 235 D9 a).
+    let stage =
+        BackgroundStage::for_scene(scene, &params.layout, background_stage_margin(background));
 
     for source in scene.sources.iter().filter(|source| source.visible) {
         let Some(input_index) = scene_source_input_index(&source.kind, capture, input_layout)
         else {
             continue;
         };
-        let transform =
-            scene_source_render_transform(&source.transform, &source.kind, stage_margin);
+        let transform = scene_source_render_transform(&source.transform, &source.kind, stage);
         let Some(rect) = scene_source_rect_pixels(&transform, width, height) else {
             continue;
         };
@@ -49215,6 +49219,90 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
         let prominent = filter_at(40.0);
         assert!(prominent.contains("scale=60:60:force_original_aspect_ratio=decrease"));
         assert!(prominent.contains("overlay=x=20:y=20"));
+    }
+
+    /// Plan 235 D9 a: the legacy FFmpeg graph asks the compositor's stage
+    /// rule. A camera-only scene with a background puts the camera on the
+    /// stage, on both canvases; Key out background, Visibility 0 and a
+    /// Freeform scene keep it where the scene stores it.
+    #[test]
+    fn camera_only_background_stages_the_camera_in_the_recording_graph() {
+        let filter_for = |preset: LayoutPreset, keyed: bool, freeform: bool, visibility: f64| {
+            let mut params = base_params(true, false);
+            params.output.video.width = 100;
+            params.output.video.height = 100;
+            params.layout.layout_preset = preset;
+            params.layout.camera_chroma_key_enabled = keyed;
+            if freeform {
+                params.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+            }
+            let mut scene = scene_with_sources(vec![scene_source(
+                "camera",
+                SceneSourceKind::Camera,
+                scene_transform(0.0, 0.0, 1.0, 1.0),
+                true,
+            )]);
+            scene.background = Some(EffectiveSceneBackground {
+                asset_id: "builtin-bg-01".to_string(),
+                managed_asset_path: "/Users/me/Application Support/Videorc/code-demo.webp"
+                    .to_string(),
+                fit: BackgroundFit::Fill,
+                scale: 100.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur_px: 0.0,
+                dim_percent: 0.0,
+                saturation_percent: 100.0,
+                vignette_percent: 0.0,
+                visibility_percent: visibility,
+                live: None,
+            });
+            params.scene = Some(scene);
+            recording_video_filter(
+                &CaptureInputs {
+                    video: VideoInput::MacScreen { index: 3 },
+                    camera_index: Some(0),
+                    microphone: None,
+                },
+                &InputLayout {
+                    video_input_index: 0,
+                    camera_input_index: Some(1),
+                    screen_overlay_input_index: None,
+                    audio_inputs: Vec::new(),
+                    microphone_graph_gain: false,
+                    microphone_is_linux_pulse: false,
+                },
+                &params,
+                false,
+            )
+        };
+        // The source layer's overlay, never the background's own
+        // (`overlay=x=0:y=0:shortest=0`).
+        let staged = "overlay=x=10:y=10:format=auto";
+        let full_frame = "overlay=x=0:y=0:format=auto";
+        for preset in [LayoutPreset::CameraOnly, LayoutPreset::VerticalCameraOnly] {
+            let filter = filter_for(preset.clone(), false, false, 20.0);
+            assert!(filter.contains("movie=filename="), "{preset:?}: {filter}");
+            assert!(filter.contains(staged), "{preset:?}: {filter}");
+            assert!(!filter.contains(full_frame), "{preset:?}: {filter}");
+
+            let keyed = filter_for(preset.clone(), true, false, 20.0);
+            assert!(keyed.contains(full_frame), "{preset:?} keyed: {keyed}");
+            assert!(!keyed.contains(staged), "{preset:?} keyed: {keyed}");
+
+            let invisible = filter_for(preset.clone(), false, false, 0.0);
+            assert!(invisible.contains(full_frame), "{preset:?}: {invisible}");
+
+            let freeform = filter_for(preset.clone(), false, true, 20.0);
+            assert!(freeform.contains(full_frame), "{preset:?}: {freeform}");
+
+            // Visibility 40: a 60% stage, 20% in.
+            let prominent = filter_for(preset, false, false, 40.0);
+            assert!(
+                prominent.contains("overlay=x=20:y=20:format=auto"),
+                "{prominent}"
+            );
+        }
     }
 
     #[test]

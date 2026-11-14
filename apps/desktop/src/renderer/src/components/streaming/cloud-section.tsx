@@ -30,7 +30,7 @@ import {
 import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 import { VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
 
-// The Livestream page's Videorc Cloud section (plan 184 C6). Stream settings
+// The Destinations page's Videorc Cloud section (plan 184 C6). Stream settings
 // live on this page, so the cloud's do too: the switch, the month's hours,
 // what viewers see if this computer drops, and for how long, plus Test
 // Videorc Cloud (C6b): 10 seconds of test video to a runner, with no
@@ -48,7 +48,7 @@ export function CloudSection(): ReactElement | null {
   const section = cloudSectionState(cloudStatus)
   const kind = section?.kind
 
-  // Plan 222 U1: "Open Livestream" on the "Videorc Cloud is on" notice
+  // Plan 222 U1: "Open Destinations" on the "Videorc Cloud is on" notice
   // brings this section into view, on mount or on an open page.
   useEffect(() => {
     const focus = (): void => {

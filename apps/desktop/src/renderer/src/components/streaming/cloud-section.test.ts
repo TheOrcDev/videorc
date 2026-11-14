@@ -11,7 +11,7 @@ import { cloudResumeNotice } from '@/lib/cloud-show-view'
 
 import { CloudSection } from './cloud-section'
 
-// Plan 184 C5 and C6: the Livestream page's Videorc Cloud section and the
+// Plan 184 C5 and C6: the Destinations page's Videorc Cloud section and the
 // Studio's Resume notice. Locked means disabled with one reason: a Basic
 // account sees the Premium sentence over the switched-off controls, a paid
 // account the cloud isn't on for yet sees why, and a running session locks

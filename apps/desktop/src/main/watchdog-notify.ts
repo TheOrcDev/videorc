@@ -22,7 +22,7 @@ export interface WatchdogNotifyInput {
   notice: WatchdogNotice
   /** The main window is focused: the card is on screen already. */
   mainFocused: boolean
-  /** The Livestream page's "System notifications" switch (D7). */
+  /** The Destinations page's "System notifications" switch (D7). */
   enabled: boolean
   /** `Notification.isSupported()`. */
   supported: boolean

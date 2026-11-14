@@ -110,10 +110,10 @@ export function cloudAllowancePastToast(
   }
 }
 
-/** Plan 222 U1: the once-per-account notice, with "Open Livestream". */
+/** Plan 222 U1: the once-per-account notice, with "Open Destinations". */
 export const CLOUD_ANNOUNCE_TOAST = {
   title: 'Videorc Cloud is on',
-  description: 'Your stream stays on air if this computer drops. Set it up in Livestream.'
+  description: 'Your stream stays on air if this computer drops. Set it up in Destinations.'
 } as const
 
 /** U5: the provider hands every status that runs past the hours here. */
@@ -132,7 +132,7 @@ export function announceCloud(client: BackendClient, commit: (status: CloudStatu
     id: CLOUD_TOAST_ID,
     description: CLOUD_ANNOUNCE_TOAST.description,
     action: {
-      label: 'Open Livestream',
+      label: 'Open Destinations',
       onClick: () => {
         requestCloudSectionFocus()
         openWorkspaceTab('live', 'setup')

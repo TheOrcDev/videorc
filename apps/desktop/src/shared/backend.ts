@@ -2277,6 +2277,42 @@ export interface UsageStatsSetParams {
   enabled: boolean
 }
 
+/**
+ * `streamReport.email.get` / `.set` (plan 237): Livestream → After the stream,
+ * "Email me a report after each stream". The choice lives on the videorc.com
+ * account; the email's unsubscribe link writes the same one.
+ */
+export interface StreamReportEmailState {
+  signedIn: boolean
+  /** Where the report goes: the account's own address. */
+  email?: string
+  /** The account's choice; `null` when it could not be read (signed out,
+   * offline, or a videorc.com without the route). */
+  enabled: boolean | null
+  /** `VIDEORC_STREAM_REPORT_EMAIL=0` turned it off for this run. */
+  envDisabled: boolean
+}
+
+export interface StreamReportEmailSetParams {
+  enabled: boolean
+}
+
+export type StreamReportSendStatus =
+  | 'sent'
+  | 'already-sent'
+  | 'disabled'
+  | 'no-stream'
+  | 'signed-out'
+  | 'rate-limited'
+  | 'unavailable'
+  | 'failed'
+
+/** `streamReport.email.sendLast`: the latest live stream's report, now. */
+export interface StreamReportSendResult {
+  status: StreamReportSendStatus
+  email?: string
+}
+
 /** One `/dev/dri/renderD*` node as the Linux VAAPI policy saw it (Plan 052). */
 export type LinuxRenderNodeState = 'probed-ok' | 'rejected' | 'quarantined' | 'skipped'
 
@@ -5454,7 +5490,7 @@ export interface CloudFeedStatus {
   kbps?: number
 }
 
-/** The Livestream page's section: the switch resolved, the choices beside the value. */
+/** The Destinations page's section: the switch resolved, the choices beside the value. */
 export interface CloudSettingsView {
   enabled: boolean
   holdMaxSeconds: number
@@ -6375,7 +6411,7 @@ export interface VideorcApi {
    * Buddy page on that tab through `buddy:deep-link`. Resolves once sent. */
   openBuddyTabFromCommentsWindow: (command: OpenBuddyTabCommand) => Promise<boolean>
   /** "Use Sign in" on a stream-key X destination's chat row (plan 213 J1):
-   * main shows the main window and opens that destination in Livestream →
+   * main shows the main window and opens that destination in Destinations →
    * Setup through `livestream:open-destination`. Resolves once sent. */
   openDestinationFromCommentsWindow: (command: OpenDestinationCommand) => Promise<boolean>
   /** "Sign in to Videorc" on a chat row that waits on it (plan 215 A3): main
@@ -6610,7 +6646,7 @@ export interface VideorcApi {
   ) => () => void
   /**
    * Plan 213 J1: the Stream Manager asked to open a destination's connection.
-   * Main has shown the window; the shell opens Livestream → Setup on it.
+   * Main has shown the window; the shell opens Destinations → Setup on it.
    */
   onOpenDestination: (callback: (navigation: { targetId: string }) => void) => () => void
   /**
@@ -9490,7 +9526,7 @@ export interface FollowerGain {
 /**
  * `youtube.quota` event (plan 094): the shared YouTube Data API quota breaker.
  * `pausedUntil` is present (RFC 3339) while every YouTube call is paused and
- * absent, never null, once they may resume. One state for the Livestream page,
+ * absent, never null, once they may resume. One state for the Destinations page,
  * the Stream Manager and the Comments destination status.
  */
 export interface YouTubeQuotaStatus {

@@ -210,6 +210,9 @@ import type {
   MetricsJournalState,
   UsageStatsSetParams,
   UsageStatsState,
+  StreamReportEmailSetParams,
+  StreamReportEmailState,
+  StreamReportSendResult,
   DiscordAnnounceSnapshot,
   DiscordAnnounceUpdateParams,
   AgentAcknowledged,
@@ -487,6 +490,9 @@ export interface BackendRpcMethodMap {
   >
   'usageStats.get': BackendRpcDefinition<undefined, UsageStatsState>
   'usageStats.set': BackendRpcDefinition<UsageStatsSetParams, UsageStatsState>
+  'streamReport.email.get': BackendRpcDefinition<undefined, StreamReportEmailState>
+  'streamReport.email.set': BackendRpcDefinition<StreamReportEmailSetParams, StreamReportEmailState>
+  'streamReport.email.sendLast': BackendRpcDefinition<undefined, StreamReportSendResult>
   // --- Discord go-live announcement (plan 187) ---
   'discord.announce.get': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
   'discord.announce.update': BackendRpcDefinition<
@@ -1276,6 +1282,36 @@ const usageStatsSetParamsSchema = objectSchema(
   { enabled: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<UsageStatsSetParams>
+// Plan 237: the stream report email.
+const streamReportEmailStateSchema = objectSchema(
+  {
+    signedIn: booleanSchema,
+    email: optionalSchema(stringSchema({ maxLength: 320 })),
+    enabled: nullableSchema(booleanSchema),
+    envDisabled: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<StreamReportEmailState>
+const streamReportEmailSetParamsSchema = objectSchema(
+  { enabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<StreamReportEmailSetParams>
+const streamReportSendResultSchema = objectSchema(
+  {
+    status: enumSchema([
+      'sent',
+      'already-sent',
+      'disabled',
+      'no-stream',
+      'signed-out',
+      'rate-limited',
+      'unavailable',
+      'failed'
+    ]),
+    email: optionalSchema(stringSchema({ maxLength: 320 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<StreamReportSendResult>
 const streamOutputTopologyProbeStateSchema = enumSchema([
   'not-required',
   'passed',
@@ -6636,6 +6672,15 @@ const runtimeContracts = {
   },
   'usageStats.get': { params: undefinedSchema, result: usageStatsStateSchema },
   'usageStats.set': { params: usageStatsSetParamsSchema, result: usageStatsStateSchema },
+  'streamReport.email.get': { params: undefinedSchema, result: streamReportEmailStateSchema },
+  'streamReport.email.set': {
+    params: streamReportEmailSetParamsSchema,
+    result: streamReportEmailStateSchema
+  },
+  'streamReport.email.sendLast': {
+    params: undefinedSchema,
+    result: streamReportSendResultSchema
+  },
   'discord.announce.get': { params: undefinedSchema, result: discordAnnounceSnapshotSchema },
   'discord.announce.update': {
     params: discordAnnounceUpdateParamsSchema,

@@ -7,7 +7,7 @@ import {
   GO_LIVE_LABEL,
   GO_LIVE_NO_DESTINATION_TITLE,
   GO_LIVE_SHORTCUT_LABEL,
-  OPEN_LIVESTREAM_LABEL,
+  OPEN_DESTINATIONS_LABEL,
   RECORD_LABEL,
   RECORD_SHORTCUT_LABEL,
   START_RECORDING_COMMAND,
@@ -33,7 +33,7 @@ describe('the going-live vocabulary (plan 174 D3)', () => {
 
   it('refuses a Go Live with no destination with one fix, and checks from the first click (S3.1)', () => {
     expect(GO_LIVE_NO_DESTINATION_TITLE).toBe('Set up a destination to go live')
-    expect(OPEN_LIVESTREAM_LABEL).toBe('Open Livestream')
+    expect(OPEN_DESTINATIONS_LABEL).toBe('Open Destinations')
     expect(GO_LIVE_CHECKING_LABEL).toBe('Checking…')
   })
 

@@ -521,7 +521,7 @@ export function mapObsSetup(
         report.push({
           verdict: 'approximated',
           subject: label,
-          note: 'Connect the account in Livestream instead. Signing in is safer than a pasted stream key.'
+          note: 'Connect the account in Destinations instead. Signing in is safer than a pasted stream key.'
         })
       } else if (setup.service.server) {
         const platformName = KEY_PLATFORM_NAMES[platform]
@@ -543,7 +543,7 @@ export function mapObsSetup(
         report.push({
           verdict: 'approximated',
           subject: label,
-          note: `OBS had no server URL. Set up ${KEY_PLATFORM_NAMES[platform]} with a stream key in Livestream.`
+          note: `OBS had no server URL. Set up ${KEY_PLATFORM_NAMES[platform]} with a stream key in Destinations.`
         })
       }
     }

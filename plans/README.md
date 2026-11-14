@@ -1,5 +1,20 @@
 # Implementation Plans
 
+- 2026-11-14: [Plan 237](237-stream-report-email.md), the owner's ask:
+  "report email after each stream that shows how many people we had live,
+  biggest concurrent number, from which platforms". BUILT 2026-11-14 with
+  the recommended answers (desktop and web PRs; web deploys first):
+  - A minute after a live stream ends, the account's email gets peak and
+    average watching, people who chatted, a watching-over-time chart, and
+    per platform: peak, average, chatted, messages, new followers. Plus
+    support, plan 225's community counts and the change since last stream.
+  - The desktop builds it from what it already saves (viewer samples, chat
+    totals, audience); videorc.com renders it through Resend and stores no
+    numbers. No viewer names. One switch beside Phone alerts.
+  - D3 decided (owner, 2026-11-14): YouTube's numbers are in the email,
+    with no switch. The next YouTube compliance report must tell Google
+    that stream statistics now go through videorc.com for this email (the
+    v1 reply says they stay on the computer).
 - 2026-11-14: [Plan 236](236-buddy-becomes-sidekick.md), the owner's call:
   Buddy becomes Sidekick everywhere, web included, because speech to text
   hears "Buddy" as "body" (captions and voice commands). EXECUTING
@@ -22,6 +37,7 @@
     background completely: only screen-like sources sit on the stage
     (`scene_geometry.rs:226`). The camera joins the stage when nothing else is
     on it and it is not keyed, on every render path (PR C).
+
 - 2026-11-13: [Plan 234](234-cloud-on-neon-and-livekit.md), the owner's
   ask: "plan out Neon + LiveKit managed media". BUILT 2026-11-14:
   Phase 0 run, gate G0 answered ("go all recommended and build it"),

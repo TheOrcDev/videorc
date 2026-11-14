@@ -36,7 +36,7 @@ export interface ChatCommandsView extends ChatCommandsSnapshot {
 }
 
 /**
- * Livestream → Setup → Chat commands (plan 226 S3): the list and the
+ * Destinations → Setup → Chat commands (plan 226 S3): the list and the
  * `!commands` switch from Studio's backend connection, kept current by
  * `chatCommands.changed`, and the mutations, each answered with the whole
  * state. A refusal the backend wrote in the editor's words goes under its

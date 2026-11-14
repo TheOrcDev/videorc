@@ -27,7 +27,7 @@ function target(overrides: Partial<StreamTargetSettings>): StreamTargetSettings 
 function input(overrides: Partial<AgentSurfaceInput> = {}): AgentSurfaceInput {
   return {
     recordBlockedReason: null,
-    liveStreamBlockedReason: 'Turn on a destination in Livestream.',
+    liveStreamBlockedReason: 'Turn on a destination in Destinations.',
     layoutPreset: 'screen-camera',
     layoutPresets: ['screen-camera', 'screen-only'],
     activeSavedSceneId: null,
@@ -160,11 +160,11 @@ describe('buildAgentSurface', () => {
         label: 'YouTube',
         on: false,
         ready: false,
-        reason: 'Finish setting up YouTube in Livestream.',
+        reason: 'Finish setting up YouTube in Destinations.',
         title: 'Building an MCP live'
       }
     ])
-    expect(surface.liveBlockedReason).toBe('Turn on a destination in Livestream.')
+    expect(surface.liveBlockedReason).toBe('Turn on a destination in Destinations.')
     expect(surface).not.toHaveProperty('recordBlockedReason')
     // Plan 209 S15: Clean cut needs the streamer's own Cloud AI consent.
     expect(surface.cloudAiConsent).toBe(false)

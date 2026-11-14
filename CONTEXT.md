@@ -49,10 +49,21 @@ The state while a livestream runs, and only then.
 _Avoid_: Live (for a recording, a source or any running session), Streaming (as a state)
 
 **Livestream**:
-The page where destinations and stream details are set up. As a noun it is
-lowercase: the broadcast itself. "Stream" is its short form in running text
-("Your stream stopped").
+The broadcast itself; as a noun it is lowercase. "Stream" is its short form in
+running text ("Your stream stopped"). Capitalized, it names the sidebar group
+that holds Destinations and Buddy (plan 235 D6), and the Studio's Session row
+("Livestream · 4 destinations").
 _Avoid_: broadcast (except a platform's own object, like an X broadcast), live session
+
+**Stream report**:
+The email Videorc sends after a live stream (plan 237): watching at the
+peak and on average, and how many people chatted, platform by platform.
+Buddy's in-app summary stays "Buddy's report" (Buddy → Reports).
+_Avoid_: viewers reached, unique viewers, audience size, recap email
+
+**Watching**:
+A platform's count of people watching at the same moment.
+_Avoid_: viewers (for that count), subscribers, reach
 
 **Recording**:
 What Videorc writes to a file, and each item in Library.
@@ -228,6 +239,13 @@ _Avoid_: virtual cam, vcam, webcam, virtual camera (in copy)
 
 ### Destinations and accounts
 
+**Destinations** (the page):
+Where destinations and stream details are set up, in the sidebar's Livestream
+group: Setup, Upcoming and Guests. It was the Livestream page until plan 235
+(2026-11-14); its id is still `live`, and ⌘K still finds it by "livestream" and
+"stream key". Quote its tabs as "Destinations → Setup".
+_Avoid_: Livestream (for the page), Connections, Channels, Streaming tab
+
 **Destination**:
 Where a livestream goes: a YouTube channel, a Twitch account, a Custom RTMP
 server.
@@ -269,7 +287,7 @@ _Avoid_: re-auth, re-authorize
 
 **Discord announcement**:
 The one message Videorc posts to each of the streamer's Discord channels when
-they go live, through the webhooks they pasted in Livestream → Setup → Discord
+they go live, through the webhooks they pasted in Destinations → Setup → Discord
 (one per server). It links each live destination and becomes "Was live" at
 the stop (plan 187).
 _Avoid_: notification, alert, ping (a ping is only the @here or @everyone it
@@ -292,7 +310,7 @@ look's scene picture plays the chosen live background inside it. Settings
 page it opened from and preserves the first-run record. Existing installs
 skip setup on update.
 _Avoid_: onboarding (in copy), Setup alone (also a sidebar group and a
-Livestream tab)
+Destinations tab)
 
 **Stream Manager**:
 The live dashboard window: chat, activity, Buddy and the stats bar.
@@ -314,8 +332,8 @@ _Avoid_: main screen, second screen, shared screen, chat screen
 **Chat command**:
 A `!name` a viewer types as the first word in chat (`!go`). Videorc answers
 as you with the reply you saved, starting with `@their name`, only in the
-chat they asked in; `!commands` lists them (plan 226). Edited in Setup →
-Livestream → Chat commands. Not the composer's `/` commands (`/marker`,
+chat they asked in; `!commands` lists them (plan 226). Edited in
+Destinations → Setup → Chat commands. Not the composer's `/` commands (`/marker`,
 `/clip`), which never reach chat.
 _Avoid_: bot command, slash command (for these), auto reply
 

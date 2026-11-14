@@ -200,7 +200,7 @@ going live on your computer; only agents go live without the dialog
 `go_live` runs exactly what the Go Live dialog runs, without showing it: the
 same checks of your destinations, title, captions and plan, and the same
 start. When the dialog would hold you back, the agent gets the dialog's own
-words instead ("YouTube: Sign in to YouTube in Livestream → Setup, then go
+words instead ("YouTube: Sign in to YouTube in Destinations → Setup, then go
 live."). The agent may pass `allowPartial` to go live on the destinations
 that are ready (the dialog's "Go live without …") and `withoutCaptions` to
 skip captions that can't start (captions that can start stay on, as the

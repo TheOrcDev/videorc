@@ -138,12 +138,12 @@ export function providerCapabilityTitle(
   }
   if (provider.platform === 'twitch' && entry?.audienceScopes === false) {
     lines.push(
-      'Follow alerts and the sub count need one more Twitch permission. Reconnect Twitch from Activity or Livestream → Setup.'
+      'Follow alerts and the sub count need one more Twitch permission. Reconnect Twitch from Activity or Destinations → Setup.'
     )
   }
   if (provider.platform === 'twitch' && entry?.bitsPointsScopes === false) {
     lines.push(
-      'Power-ups and channel points need one more Twitch permission. Reconnect Twitch from Activity or Livestream → Setup.'
+      'Power-ups and channel points need one more Twitch permission. Reconnect Twitch from Activity or Destinations → Setup.'
     )
   }
   return lines.filter(Boolean).join('\n')
@@ -353,7 +353,7 @@ export function StreamManagerStatusBar({
   onSound?: (action: SoundRelayAction) => unknown
   /** Plan 226 S4: Chat commands… (the bar's action from 800 px, the ⋯
    * menu below 640 px, the composer's bare `!` at every width) opens
-   * Livestream → Setup → Chat commands in the main window. */
+   * Destinations → Setup → Chat commands in the main window. */
   onOpenChatCommands?: () => void
   onOpenPreview?: () => void
   /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each

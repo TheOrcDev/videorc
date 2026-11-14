@@ -98,12 +98,12 @@ describe('go_live (plan 209 S10, D13)', () => {
     const refused = studioContext({
       goLive: vi.fn(async () => ({
         ok: false as const,
-        message: 'YouTube: Sign in to YouTube in Livestream → Setup, then go live.'
+        message: 'YouTube: Sign in to YouTube in Destinations → Setup, then go live.'
       }))
     })
     expect(await executeAgentIntent(call('go_live'), refused)).toEqual({
       ok: false,
-      message: 'YouTube: Sign in to YouTube in Livestream → Setup, then go live.'
+      message: 'YouTube: Sign in to YouTube in Destinations → Setup, then go live.'
     })
     const running = studioContext({ sessionActive: true, goLive: vi.fn() })
     expect(await executeAgentIntent(call('go_live'), running)).toEqual({

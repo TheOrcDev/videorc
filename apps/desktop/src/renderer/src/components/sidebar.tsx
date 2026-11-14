@@ -2,7 +2,6 @@ import { type AppIcon, SearchIcon, SyncIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 import { AccountMenu } from '@/components/account-menu'
-import { OwnBuddyIcon } from '@/components/own-buddy-icon'
 import { SectionLabel } from '@/components/section-label'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
@@ -21,10 +20,11 @@ import { shortcutChipProps } from '@/lib/shortcut-overlay'
 import { sessionClockLabel } from '@/lib/studio-session-view'
 import { updateChip } from '@/lib/update-ui'
 import {
+  SIDEBAR_ZONES,
   STUDIO_PANELS,
-  WORKSPACE_TABS,
   shortcutDigitFor,
   sidebarOrderFor,
+  workspacePageMeta,
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
@@ -41,7 +41,6 @@ function NavRow({
   platform,
   shortcutVisible,
   shortcutIndex,
-  trailing,
   onClick
 }: {
   icon: AppIcon
@@ -52,12 +51,9 @@ function NavRow({
   platform?: string
   shortcutVisible: boolean
   shortcutIndex: number
-  /** What the row shows at its end while the shortcut chips are hidden. */
-  trailing?: ReactNode
   onClick: () => void
 }): ReactElement {
   const chip = shortcutChipProps(shortcutVisible, shortcutIndex)
-  const trailingShown = Boolean(trailing) && !shortcutVisible
   return (
     <button
       type="button"
@@ -81,18 +77,77 @@ function NavRow({
         className={cn('size-4 shrink-0', isActive && 'text-primary')}
       />
       <span className="flex-1 truncate text-left">{label}</span>
-      {trailingShown ? trailing : null}
       {shortcutDigit ? (
         // Mounted whether or not it shows: reserving the width stops every
         // row from reflowing the instant ⌘ goes down. `aria-keyshortcuts` on
         // the button already tells assistive tech about the shortcut, so the
         // hidden chip is decoration and stays out of the accessibility tree.
-        // A row with a trailing clock lends the chip its slot while ⌘ is held.
+        <ShortcutKeys accelerator={`CmdOrCtrl+${shortcutDigit}`} platform={platform} {...chip} />
+      ) : null}
+    </button>
+  )
+}
+
+/**
+ * On the slab the gray glass keycap would read at about 1.5:1, so the chip
+ * takes the slab's own ink on a faint fill of it, as it does inside the
+ * chrome primary (`KBD_ON_FILLED_BUTTON` in ui/kbd.tsx). Important, so the
+ * keycap's own glass never wins on source order.
+ */
+const KBD_ON_SLAB = 'border-current/30! bg-current/10 bg-none! text-current shadow-none!'
+
+/**
+ * The Studio row (plan 235 D5): the way home, so it is the sidebar's big
+ * button. A 40 px slab of the chrome primary's metal (`chrome-fill`: polished
+ * silver in dark, black chrome in light) that it wears on every page; its
+ * icon fills while Studio is the page you're on. The shortcut chip and the
+ * session clock sit where a row keeps them, in the slab's ink. Red metal stays
+ * Record's and live's alone (plan 208 D8).
+ */
+function StudioNavButton({
+  icon: SlabIcon,
+  label,
+  isActive,
+  shortcutDigit,
+  platform,
+  shortcutVisible,
+  trailing,
+  onClick
+}: {
+  icon: AppIcon
+  label: string
+  isActive: boolean
+  shortcutDigit?: string
+  platform?: string
+  shortcutVisible: boolean
+  /** The session clock, shown while the shortcut chips are hidden. */
+  trailing?: ReactNode
+  onClick: () => void
+}): ReactElement {
+  const chip = shortcutChipProps(shortcutVisible, 0)
+  const trailingShown = Boolean(trailing) && !shortcutVisible
+  return (
+    <button
+      type="button"
+      aria-current={isActive ? 'page' : undefined}
+      aria-keyshortcuts={
+        shortcutDigit ? shortcutAriaKeys(`CmdOrCtrl+${shortcutDigit}`, platform) : undefined
+      }
+      data-videorc-tab-trigger="studio"
+      data-testid="sidebar-studio-slab"
+      onClick={onClick}
+      className="chrome-fill flex h-10 items-center gap-2.5 rounded-row px-2.5 text-sm font-medium"
+    >
+      <SlabIcon weight={isActive ? 'fill' : 'regular'} className="size-5 shrink-0" />
+      <span className="flex-1 truncate text-left">{label}</span>
+      {trailingShown ? trailing : null}
+      {shortcutDigit ? (
+        // The clock lends the chip its slot while ⌘ is held.
         <ShortcutKeys
           accelerator={`CmdOrCtrl+${shortcutDigit}`}
           platform={platform}
           {...chip}
-          className={cn(chip.className, trailingShown && 'hidden')}
+          className={cn(chip.className, KBD_ON_SLAB, trailingShown && 'hidden')}
         />
       ) : null}
     </button>
@@ -113,10 +168,11 @@ function SessionClock({
   tone: StatusDotTone
 }): ReactElement {
   const elapsedMs = useSessionElapsedMs(startedAt)
+  // It sits on the Studio slab, so it takes the slab's ink (plan 235 D5).
   return (
     <span
       aria-hidden
-      className="flex shrink-0 items-center gap-1.5 text-xs tabular-nums text-muted-foreground"
+      className="flex shrink-0 items-center gap-1.5 text-xs font-medium tabular-nums"
       data-testid="sidebar-session-clock"
     >
       <StatusDot pulse tone={tone} />
@@ -229,8 +285,6 @@ export function Sidebar({
   onOpenCommand: () => void
   platform?: string
 }): ReactElement {
-  const tabsIn = (group: string): typeof WORKSPACE_TABS =>
-    WORKSPACE_TABS.filter((tab) => tab.group === group)
   // Chips reveal while the command modifier is held — the shortcut layer
   // surfaces exactly when the user reaches for it (videorc-design keeps the
   // app keyboard-first; this keeps it quiet too).
@@ -239,25 +293,29 @@ export function Sidebar({
   const reducedMotion = useReducedMotion()
   const trafficLightGutter = useTrafficLightGutter()
 
-  const row = (
-    tab: { id: WorkspaceTab; label: string; icon: AppIcon },
-    trailing?: ReactNode
-  ): ReactElement => (
-    <NavRow
-      key={tab.id}
-      // The Buddy row wears the streamer's own Buddy, not the golem.
-      icon={tab.id === 'ai' ? OwnBuddyIcon : tab.icon}
-      label={tab.label}
-      isActive={active === tab.id}
-      triggerId={tab.id}
-      shortcutDigit={shortcutDigitFor(tab.id)}
-      shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
-      platform={platform}
-      shortcutVisible={shortcutVisible}
-      trailing={trailing}
-      onClick={() => onSelect(tab.id)}
-    />
-  )
+  const pageRow = (tab: WorkspaceTab): ReactElement => {
+    const page = workspacePageMeta(tab)
+    const panel = STUDIO_PANELS.find((entry) => entry.id === tab)
+    return (
+      <NavRow
+        key={tab}
+        icon={page.icon}
+        label={page.label}
+        isActive={panel ? activeStudioPanel === panel.id : active === tab}
+        // The panels keep their pre-rail trigger ids (`streaming` for
+        // Destinations), so smokes and automation keep working.
+        triggerId={panel?.legacyTabId ?? tab}
+        shortcutDigit={shortcutDigitFor(tab)}
+        shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab)}
+        platform={platform}
+        shortcutVisible={shortcutVisible}
+        onClick={() => (panel ? onSelectStudioPanel(panel.id) : onSelect(tab))}
+      />
+    )
+  }
+  const studio = workspacePageMeta('studio')
+  const zones = SIDEBAR_ZONES.filter((zone) => zone.id !== 'stage' && zone.id !== 'system')
+  const system = SIDEBAR_ZONES.find((zone) => zone.id === 'system')?.pages ?? []
 
   return (
     // The sidebar coat (plan 091, D3/D4): the delta that takes the body's
@@ -295,52 +353,44 @@ export function Sidebar({
         </ShortcutTooltip>
       </div>
 
-      {/* Three zones (plan 174 D8): the stage rows, Setup (the one labelled
-          group) and Library; Settings sits in a bottom block above the
-          account row. Buddy stays second, directly under Studio, on ⌘9
-          (owner call): it sells Premium. */}
+      {/* The zones (plan 174 D8, plan 235): Studio leads as the chrome slab,
+          then the two labelled groups, Setup and Livestream (Destinations and
+          Buddy, which keeps every feature: it sells Premium), then Library;
+          Settings sits in a bottom block above the account row. ⌘1–⌘9 run
+          down the rows in order. */}
       <nav
         aria-label="Primary"
         className="flex flex-1 flex-col gap-4 overflow-y-auto px-3 pt-1 pb-2"
       >
-        <div className="flex flex-col gap-0.5">
-          {tabsIn('stage').map((tab) =>
-            row(
-              tab,
-              tab.id === 'studio' && statusPulse ? (
-                <SessionClock startedAt={sessionStartedAt ?? undefined} tone={statusTone} />
-              ) : undefined
-            )
-          )}
-        </div>
+        <StudioNavButton
+          icon={studio.icon}
+          label={studio.label}
+          isActive={active === 'studio'}
+          shortcutDigit={shortcutDigitFor('studio')}
+          platform={platform}
+          shortcutVisible={shortcutVisible}
+          trailing={
+            statusPulse ? (
+              <SessionClock startedAt={sessionStartedAt ?? undefined} tone={statusTone} />
+            ) : undefined
+          }
+          onClick={() => onSelect('studio')}
+        />
 
-        <div className="flex flex-col gap-0.5">
-          <SectionLabel className="px-2.5 pb-1 leading-none">Setup</SectionLabel>
-          {STUDIO_PANELS.map((panel) => (
-            <NavRow
-              key={panel.id}
-              icon={panel.icon}
-              label={panel.label}
-              isActive={activeStudioPanel === panel.id}
-              triggerId={panel.legacyTabId}
-              shortcutDigit={shortcutDigitFor(panel.id)}
-              shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(panel.id)}
-              platform={platform}
-              shortcutVisible={shortcutVisible}
-              onClick={() => onSelectStudioPanel(panel.id)}
-            />
-          ))}
-        </div>
-
-        <div className="flex flex-col gap-0.5">{tabsIn('library').map((tab) => row(tab))}</div>
+        {zones.map((zone) => (
+          <div key={zone.id} className="flex flex-col gap-0.5" data-sidebar-zone={zone.id}>
+            {zone.label ? (
+              <SectionLabel className="px-2.5 pb-1 leading-none">{zone.label}</SectionLabel>
+            ) : null}
+            {zone.pages.map((tab) => pageRow(tab))}
+          </div>
+        ))}
 
         {/* Health (Diagnostics) is dev/forensic — kept out of the sidebar
             entirely. It stays reachable via ⌘K, the status bar and the account
             menu; the support-bundle export lives there. */}
         <div className="mt-auto flex flex-col gap-0.5" data-testid="sidebar-bottom">
-          {tabsIn('system')
-            .filter((tab) => tab.id !== 'diagnostics')
-            .map((tab) => row(tab))}
+          {system.map((tab) => pageRow(tab))}
         </div>
       </nav>
 

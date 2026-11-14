@@ -37,7 +37,7 @@ export interface FirstRunStepFrame {
   skip: () => void
   /** Goes straight to an earlier step that applies here ("Back to permissions"). */
   goTo: (step: FirstRunStep) => void
-  /** Finishes setup and opens another page than the usual one ("Open Livestream"). */
+  /** Finishes setup and opens another page than the usual one ("Open Destinations"). */
   leaveTo: (tab: WorkspaceTab) => void
 }
 

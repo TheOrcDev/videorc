@@ -317,7 +317,7 @@ import {
   savedModeIntent,
   type SessionStartIntent
 } from '@/lib/session-start-intent'
-import { GO_LIVE_NO_DESTINATION_TITLE, OPEN_LIVESTREAM_LABEL } from '@/lib/go-live-copy'
+import { GO_LIVE_NO_DESTINATION_TITLE, OPEN_DESTINATIONS_LABEL } from '@/lib/go-live-copy'
 import { RECORDING_STOP_FINALIZE_OVERRUN_CODE } from '@/lib/studio-session-view'
 import {
   isYouTubeChannelAuthFailure,
@@ -1032,7 +1032,7 @@ export function streamOutputTopologySplitRejected(
   return result.outputRoles.includes('stream') && result.effectiveBridgeOutput === 'raw-yuv420p'
 }
 
-// The technical reason (probe stage, HRESULT) stays in Livestream → Technical
+// The technical reason (probe stage, HRESULT) stays in Destinations → Technical
 // details; a toast only says what the user can do.
 export const STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON =
   "This computer can't encode the recording and the livestream separately. Use the same quality for every destination, set captions to burn into both or neither, or turn off recording, then go live."
@@ -1930,7 +1930,7 @@ interface StudioDiagnosticsContextValue {
   watchdogAlerts: WatchdogAlert[]
   /** A card's buttons: the fix, Got it, Snooze (plan 223 A5). */
   watchdogAct: (action: WatchdogAction) => void
-  /** The backend socket, for the Livestream page's Watchdog section (its own RPCs, lazily). */
+  /** The backend socket, for the Destinations page's Watchdog section (its own RPCs, lazily). */
   client: BackendClient | null
 }
 
@@ -3238,7 +3238,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // A silently empty Comments feed must never be the only signal that chat
   // setup failed at go-live (2026-07-10: Twitch chat needed a reconnect and
   // the failure lived only in a backend warn log). Toast each broken
-  // destination once per session, with a jump to the Livestream tab.
+  // destination once per session, with a jump to the Destinations page.
   const chatSetupWarnedRef = useRef<{ sessionId?: string; warned: Set<string> }>({
     warned: new Set()
   })
@@ -3297,7 +3297,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       chatSetupWarnedRef.current.warned.add(warning.id)
       toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat isn't connected`, {
         description: warning.message,
-        action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
+        action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live') }
       })
     }
     // Plan 215 A3: a connector parked on the Videorc sign-in is not "isn't
@@ -5473,7 +5473,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // show the cloud lost while this computer fed it warns once, and so does a
   // runner restart (its platforms reconnect, or they could not), and so
   // does the hour before a show's 12-hour cap (D18). Nothing else
-  // here is news: the Livestream page and the Stream health stat show the rest.
+  // here is news: the Destinations page and the Stream health stat show the rest.
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
   const cloudStatusRef = useRef<CloudStatus | null>(null)
   const commitCloudStatus = useCallback((next: CloudStatus): void => {
@@ -16042,14 +16042,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               const validation = validations.find((item) => item.platform === target.platform)
               if (!validation || !['valid', 'refreshed'].includes(validation.state)) {
                 unhealthy = target
-                unhealthyMessage = `Reconnect ${target.label} in Livestream → Setup, then go live.`
+                unhealthyMessage = `Reconnect ${target.label} in Destinations → Setup, then go live.`
                 break
               }
             }
             if (unhealthy) {
               throw new Error(
                 unhealthyMessage ??
-                  `Reconnect ${unhealthy.label} in Livestream → Setup, then go live.`
+                  `Reconnect ${unhealthy.label} in Destinations → Setup, then go live.`
               )
             }
           }
@@ -16742,7 +16742,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (intent.stream && !areEnabledStreamTargetsStartReady(captureConfigRef.current.streaming)) {
       toast.warning(GO_LIVE_NO_DESTINATION_TITLE, {
         id: 'go-live-no-destination',
-        action: { label: OPEN_LIVESTREAM_LABEL, onClick: () => openWorkspaceTab('live') }
+        action: { label: OPEN_DESTINATIONS_LABEL, onClick: () => openWorkspaceTab('live') }
       })
       return
     }
@@ -18635,7 +18635,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           toast.warning(`Save your ${label} stream key again`, {
             id: `stream-key-migration:${candidate.targetId}`,
             description:
-              'Paste it in Livestream → Setup so Videorc can store it securely. It works for now.'
+              'Paste it in Destinations → Setup so Videorc can store it securely. It works for now.'
           })
         }
       }

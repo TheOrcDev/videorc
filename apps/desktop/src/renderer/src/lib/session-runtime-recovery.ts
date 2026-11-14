@@ -76,7 +76,7 @@ export function showDiscordAnnounceFailure(snapshot: DiscordAnnounceSnapshot): v
   toast[failure.type](failure.title, {
     id: 'discord-announce-failure',
     description: failure.description,
-    action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live', 'setup') }
+    action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live', 'setup') }
   })
 }
 
@@ -427,8 +427,8 @@ export function showOAuthCallbackExhausted(): void {
   console.warn('[oauth] callback retries exhausted; kept unacknowledged')
   toast.error(`Couldn't finish connecting ${platformName}`, {
     id: oauthCallbackToastId(lastOAuthCallbackPlatform),
-    description: `Connect ${platformName} again from Livestream → Setup.`,
-    action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
+    description: `Connect ${platformName} again from Destinations → Setup.`,
+    action: { label: 'Open Destinations', onClick: () => openWorkspaceTab('live') }
   })
 }
 

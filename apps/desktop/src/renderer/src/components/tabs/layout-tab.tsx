@@ -128,6 +128,7 @@ import {
   previewProofLayerFit
 } from '../../../../shared/native-preview-proof-geometry'
 import {
+  sceneCameraOnStage,
   sceneFrameRect,
   scenePictureRect,
   screenBoxIsPicture,
@@ -460,6 +461,8 @@ export function LayoutTab(): ReactElement {
   // selected source's PICTURE, the box the stage shows, and every edit
   // commits the frame that box maps back to.
   const stageMargin = previewProofBackgroundStageMargin(scene?.background ?? null)
+  // Plan 235 (D9 a): the camera of an unkeyed camera-only scene is on the stage.
+  const cameraOnStage = sceneCameraOnStage(sceneSources, captureConfig.layout)
   const pictureBoxOf = (source: SceneSource): FractionRect =>
     scenePictureRect({
       frame: source.transform,
@@ -468,6 +471,7 @@ export function LayoutTab(): ReactElement {
       source: sourcePictureSize(source, sourcePictureSizes),
       crop: source.transform,
       stageMargin,
+      cameraOnStage,
       canvas: captureConfig.video
     })
   const boxIsPictureOf = (source: SceneSource): boolean =>
@@ -487,7 +491,8 @@ export function LayoutTab(): ReactElement {
           source.transform,
           source.kind,
           stageMargin,
-          captureConfig.video
+          captureConfig.video,
+          cameraOnStage
         )
       )
     )
@@ -633,7 +638,7 @@ export function LayoutTab(): ReactElement {
           )
         )
           return null
-        return sceneFrameRect(pictureBoxOf(source), source.kind, stageMargin)
+        return sceneFrameRect(pictureBoxOf(source), source.kind, stageMargin, cameraOnStage)
       })
     )
   }
@@ -1300,7 +1305,8 @@ export function LayoutTab(): ReactElement {
                             selectedSource.transform,
                             selectedSource.kind,
                             stageMargin,
-                            captureConfig.video
+                            captureConfig.video,
+                            cameraOnStage
                           )
                         })
                       )

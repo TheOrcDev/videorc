@@ -5,7 +5,7 @@ import { isCloudFeedTarget } from './live-session-view'
 
 import type { LiveDashboardCloud } from '../../../shared/live-dashboard'
 
-// The cloud show outside the Livestream page (plan 184 C4, C5 and C7): the Go
+// The cloud show outside the Destinations page (plan 184 C4, C5 and C7): the Go
 // Live dialog's cloud step, the Studio's Resume notice and the hold's
 // countdown in the Stream Manager. Its own module, so the eager Studio
 // provider never carries it: `cloud-toasts.ts` is all the provider says

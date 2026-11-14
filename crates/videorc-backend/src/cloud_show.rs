@@ -83,7 +83,7 @@ const CLOUD_ANNOUNCED_MAX: usize = 32;
 pub const CLOUD_STATE_EVENT: &str = "cloud.state";
 /// The label of the swapped target and of the physical cloud leg (C3).
 pub const CLOUD_TARGET_LABEL: &str = "Videorc Cloud";
-/// D12: a hold lasts 30 minutes by default; the Livestream page offers four.
+/// D12: a hold lasts 30 minutes by default; the Destinations page offers four.
 pub const DEFAULT_HOLD_MAX_SECONDS: u32 = 1800;
 pub const HOLD_MAX_CHOICES: [u32; 4] = [300, 900, 1800, 3600];
 /// D18: a show starts only with at least 5 minutes of the month left.
@@ -125,7 +125,7 @@ fn default_hold_max_seconds() -> u32 {
     DEFAULT_HOLD_MAX_SECONDS
 }
 
-/// The Livestream page's "Videorc Cloud" section, persisted in the backend
+/// The Destinations page's "Videorc Cloud" section, persisted in the backend
 /// settings table. Carries no key material by construction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -4200,7 +4200,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         }
     }
 
-    /// `GET /api/cloud/allowance` for the Livestream page.
+    /// `GET /api/cloud/allowance` for the Destinations page.
     pub async fn refresh_allowance(&self, bearer: &str) -> Result<CloudStatus> {
         let allowance = self
             .web
@@ -4245,7 +4245,7 @@ pub fn hold_image_png_base64(screen_path: &str) -> Result<String> {
 
 // --- Test cloud (C6b) ---------------------------------------------------------
 //
-// "Test Videorc Cloud" on the Livestream page: a 10-second private test
+// "Test Videorc Cloud" on the Destinations page: a 10-second private test
 // against a runner with no platforms, so a streamer learns before the show
 // whether the cloud works from this connection and whether the upload keeps
 // up with the stream quality. The web's `kind: "test"` show is capped at 30 s
@@ -8616,7 +8616,7 @@ mod tests {
         runtime.settings.enabled = Some(false);
         assert!(
             launch_check_due(&runtime, true),
-            "the Livestream page's switch off"
+            "the Destinations page's switch off"
         );
         runtime
             .entitlement

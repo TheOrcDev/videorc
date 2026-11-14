@@ -51,7 +51,7 @@ document changes nothing.
   (`YouTube service flags in effect (remote, fetched …): chat list, poll floor
 5000 ms, viewers every 120000 ms, daily budget 2500 units, no remote pause`)
   and to every streaming session's log as code `youtube-service-flags` (JSON).
-- A remote pause shows in the app exactly like a quota pause: the Livestream
+- A remote pause shows in the app exactly like a quota pause: the Destinations
   page YouTube row, the Stream Manager status bar and the Comments destination
   status read "paused until <local time>", Go Live offers the stream key, and
   chat, viewers and subscribers resume on their own when it lifts.

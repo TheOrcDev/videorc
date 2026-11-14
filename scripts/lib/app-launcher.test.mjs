@@ -56,6 +56,7 @@ const SMOKE_ENV_KEYS = [
   'VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED',
   'VIDEORC_DISABLE_BACKEND_REAP',
   'VIDEORC_USAGE_STATS',
+  'VIDEORC_STREAM_REPORT_EMAIL',
   'VIDEORC_SMOKE_SKIP_FIRST_RUN',
   'VIDEORC_SMOKE_PRINT_BACKEND_READY',
   'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
@@ -336,9 +337,22 @@ test('smokeAppEnv enables ledger reaping by default for isolated smoke launches'
 
     assert.equal(env.VIDEORC_DISABLE_BACKEND_REAP, '0')
     assert.equal(env.VIDEORC_USAGE_STATS, '0')
+    assert.equal(env.VIDEORC_STREAM_REPORT_EMAIL, '0')
     assert.equal(env.VIDEORC_SMOKE_PRINT_BACKEND_READY, '1')
     assert.equal(env.VIDEORC_APP_DATA_DIR, resolve(stateDir, 'app-data'))
     assert.equal(env.VIDEORC_USER_DATA_DIR, resolve(stateDir, 'user-data'))
+  })
+})
+
+test('smokeAppEnv sends no stream report email unless the run itself asks (plan 237)', () => {
+  withCleanSmokeEnv(() => {
+    const base = { VIDEORC_SMOKE_STATE_DIR: '/tmp/videorc-smoke-state' }
+    process.env.VIDEORC_STREAM_REPORT_EMAIL = '1'
+    assert.equal(smokeAppEnv(base).VIDEORC_STREAM_REPORT_EMAIL, '0', 'the shell does not count')
+    assert.equal(
+      smokeAppEnv({ ...base, VIDEORC_STREAM_REPORT_EMAIL: '1' }).VIDEORC_STREAM_REPORT_EMAIL,
+      '1'
+    )
   })
 })
 

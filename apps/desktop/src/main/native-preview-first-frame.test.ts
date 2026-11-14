@@ -719,7 +719,7 @@ describe('a Preview hold (plan 212)', () => {
 // Plan 213 D: a docked Preview the user hid on purpose (another page, the
 // slot scrolled away, a dialog over it) presents nothing, so the chain reads
 // as broken. The 0.18.0 field log stalled it every time (eight stalls, each
-// on Scene scrolled away, Library, Livestream, Sources, Settings or under
+// on Scene scrolled away, Library, Destinations, Sources, Settings or under
 // "End livestream?") and only recovered when Studio showed again. The
 // watchdog stands down while the dock predicate hides the surface, and
 // starts fresh when it shows, the way it does around a Preview hold.

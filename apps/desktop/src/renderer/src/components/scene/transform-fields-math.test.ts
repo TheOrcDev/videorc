@@ -165,7 +165,7 @@ describe('picture edits (plan 216 B5)', () => {
     expect(pixelReadout(picture, 2560, 1440)).toBe('2021 × 1306 px on 2560 × 1440')
   })
 
-  it('maps a picture edit back through the stage margin field by field, and leaves a camera alone', () => {
+  it('maps a picture edit back through the stage margin field by field, and leaves an unstaged camera alone', () => {
     // A 0.1 margin: the stage is 80% of the canvas, 10% in.
     expect(pictureEditToFrame({ x: 0.18 }, 'screen', 0.1)).toEqual({ x: 0.1 })
     expect(pictureEditToFrame({ width: 0.4, height: 0.48 }, 'window', 0.1)).toEqual({
@@ -181,6 +181,12 @@ describe('picture edits (plan 216 B5)', () => {
       height: 0.6
     })
     expect(pictureEditToFrame({ x: 0.18 }, 'camera', 0.1)).toEqual({ x: 0.18 })
+    // Plan 235 (D9 a): the camera of a camera-only scene is on the stage, so
+    // its edit goes back through the margin like a screen's.
+    expect(pictureEditToFrame({ x: 0.18, width: 0.4 }, 'camera', 0.1, true)).toEqual({
+      x: 0.1,
+      width: 0.5
+    })
     expect(pictureEditToFrame({ x: 0.18, width: 0.4 }, 'screen', 0)).toEqual({
       x: 0.18,
       width: 0.4
@@ -243,5 +249,9 @@ describe('pictureEditFramePatch (plan 216 B5)', () => {
     expect(pictureEditFramePatch({ width: 0.4 }, staged, frame, 'screen', 0.1, canvas)).toEqual({
       width: 0.5
     })
+    // The staged camera of a camera-only scene: the same field, the same way.
+    expect(
+      pictureEditFramePatch({ width: 0.4 }, staged, frame, 'camera', 0.1, canvas, true)
+    ).toEqual({ width: 0.5 })
   })
 })

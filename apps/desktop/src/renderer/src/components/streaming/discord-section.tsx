@@ -48,7 +48,7 @@ import {
 import { formatRelativeTime } from '@/lib/format-time'
 
 /**
- * Livestream → Setup → Discord (plan 187, issue #634): paste a webhook per
+ * Destinations → Setup → Discord (plan 187, issue #634): paste a webhook per
  * server, and every public Go Live posts to each of them under the
  * streamer's own name, with a link button per live destination. It stays
  * editable while live; changes apply to the next stream.

@@ -68,8 +68,8 @@ use crate::protocol::{
     SceneSource, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
-    CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS, ChromaKeySpec, ChromaKeySpecks, PixelRect, SceneCrop,
-    SceneFit, SceneMask, SceneMaskTester, SignedPixelRect, background_stage_margin,
+    BackgroundStage, CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS, ChromaKeySpec, ChromaKeySpecks, PixelRect,
+    SceneCrop, SceneFit, SceneMask, SceneMaskTester, SignedPixelRect, background_stage_margin,
     background_zoom_crop, camera_chroma_key, camera_mask, chroma_key_alpha_rgb,
     chroma_key_despill_rgb, chroma_key_edge_despill_strength, chroma_key_edge_proximity,
     chroma_key_reduction_level, chroma_key_speck_cell, contain_rect_pixels,
@@ -9024,6 +9024,11 @@ fn try_gpu_compose_with_chrome(
     } else {
         0.0
     };
+    // Which sources sit on that stage is one rule for every path (plan 235 D9
+    // a): screens always, the camera when the scene is camera-only and unkeyed.
+    let stage = scene.map_or(BackgroundStage::NONE, |scene| {
+        BackgroundStage::for_scene(scene, layout, stage_margin)
+    });
 
     if let Some(image) = inputs.active_image_source.and_then(|source| {
         source
@@ -9212,8 +9217,7 @@ fn try_gpu_compose_with_chrome(
                 && (source.device_id.is_some() || source.kind == SceneSourceKind::TestPattern)
         })
     {
-        let transform =
-            scene_source_render_transform(&source.transform, &source.kind, stage_margin);
+        let transform = scene_source_render_transform(&source.transform, &source.kind, stage);
         let rect = scene_source_rect_pixels(&transform, inputs.width, inputs.height)
             .ok_or("source rectangle is outside compositor bounds")?;
         let source_crop = scene_crop_from_transform(&transform);
@@ -11844,6 +11848,8 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
     } else {
         0.0
     };
+    // The same rule as the Metal path (plan 235 D9 a).
+    let stage = BackgroundStage::for_scene(scene, &snapshot.layout, stage_margin);
 
     if let Some((pixels, (image_width, image_height), format)) =
         active_image_source.and_then(cached_image_cpu_pixels)
@@ -11892,8 +11898,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         source.visible
             && (source.device_id.is_some() || source.kind == SceneSourceKind::TestPattern)
     }) {
-        let transform =
-            scene_source_render_transform(&source.transform, &source.kind, stage_margin);
+        let transform = scene_source_render_transform(&source.transform, &source.kind, stage);
         let Some(rect) = scene_source_rect_pixels(&transform, width, height) else {
             continue;
         };
@@ -24150,7 +24155,10 @@ mod tests {
                 crop_bottom: 0.0,
             },
             &SceneSourceKind::Screen,
-            0.0,
+            BackgroundStage {
+                margin: 0.0,
+                camera: false,
+            },
         );
         assert_close(full_frame.x, 0.0);
         assert_close(full_frame.width, 1.0);
@@ -24168,7 +24176,10 @@ mod tests {
                 crop_bottom: 0.0,
             },
             &SceneSourceKind::Screen,
-            0.20,
+            BackgroundStage {
+                margin: 0.20,
+                camera: false,
+            },
         );
         assert_close(small_stage.x, 0.20);
         assert_close(small_stage.width, 0.60);
@@ -24188,7 +24199,10 @@ mod tests {
                 crop_bottom: 0.0,
             },
             &SceneSourceKind::Screen,
-            0.10,
+            BackgroundStage {
+                margin: 0.10,
+                camera: false,
+            },
         );
 
         assert_close(full_frame.x, 0.10);
@@ -24208,13 +24222,51 @@ mod tests {
                 crop_bottom: 0.0,
             },
             &SceneSourceKind::Camera,
-            0.10,
+            BackgroundStage {
+                margin: 0.10,
+                camera: false,
+            },
         );
 
+        // A camera over or beside a screen keeps its own place.
         assert_close(camera.x, 0.75);
         assert_close(camera.y, 0.70);
         assert_close(camera.width, 0.20);
         assert_close(camera.height, 0.20);
+
+        // Plan 235 D9 a: the camera of an unkeyed camera-only scene sits on
+        // the stage a screen gets, and Visibility 0 keeps it full frame.
+        let full_frame_camera = SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        let staged_camera = scene_source_render_transform(
+            &full_frame_camera,
+            &SceneSourceKind::Camera,
+            BackgroundStage {
+                margin: 0.10,
+                camera: true,
+            },
+        );
+        assert_close(staged_camera.x, 0.10);
+        assert_close(staged_camera.y, 0.10);
+        assert_close(staged_camera.width, 0.80);
+        assert_close(staged_camera.height, 0.80);
+        let unstaged_camera = scene_source_render_transform(
+            &full_frame_camera,
+            &SceneSourceKind::Camera,
+            BackgroundStage {
+                margin: 0.0,
+                camera: true,
+            },
+        );
+        assert_eq!(unstaged_camera, full_frame_camera);
 
         let test_pattern = scene_source_render_transform(
             &SceneTransform {
@@ -24228,13 +24280,142 @@ mod tests {
                 crop_bottom: 0.0,
             },
             &SceneSourceKind::TestPattern,
-            0.10,
+            BackgroundStage {
+                margin: 0.10,
+                camera: false,
+            },
         );
 
         assert_close(test_pattern.x, 0.10);
         assert_close(test_pattern.y, 0.10);
         assert_close(test_pattern.width, 0.80);
         assert_close(test_pattern.height, 0.80);
+    }
+
+    /// Plan 235 D9 a: a camera-only scene with a background puts the camera
+    /// on the stage a screen gets, on both canvases, and the CPU and Metal
+    /// paths agree on it pixel for pixel. A keyed camera and Visibility 0
+    /// keep the camera full frame.
+    #[test]
+    fn camera_only_background_stages_the_camera_on_cpu_and_metal() {
+        #[cfg(target_os = "macos")]
+        let mut gpu = new_gpu_compositor(false);
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        let is_camera = |y: u8| y.abs_diff(blue_y) < y.abs_diff(red_y);
+        let background_image_source = CompositorImageSource {
+            image_path: "code-demo.webp".to_string(),
+            file_revision: None,
+            width: Some(2),
+            height: Some(2),
+            rgba: Some(Arc::new([255, 0, 0, 255].repeat(4))),
+            bgra: Some(Arc::new([0, 0, 255, 255].repeat(4))),
+            content_revision: 1,
+            state: "live".to_string(),
+            message: None,
+        };
+        for (preset, width, height) in [
+            (LayoutPreset::CameraOnly, 100u32, 100u32),
+            (LayoutPreset::VerticalCameraOnly, 50, 100),
+        ] {
+            for (keyed, visibility_percent, margin) in
+                [(false, 20.0, 0.10), (true, 20.0, 0.0), (false, 0.0, 0.0)]
+            {
+                let label = format!("{preset:?} keyed={keyed} visibility={visibility_percent}");
+                let mut snapshot = test_scene_snapshot(preset.clone(), None, Some("camera-1"));
+                snapshot.layout.camera_chroma_key_enabled = keyed;
+                snapshot.scene.as_mut().unwrap().background = Some(EffectiveSceneBackground {
+                    asset_id: "builtin-bg-01".to_string(),
+                    managed_asset_path: "/managed/code-demo.webp".to_string(),
+                    fit: BackgroundFit::Fill,
+                    scale: 100.0,
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    blur_px: 0.0,
+                    dim_percent: 0.0,
+                    saturation_percent: 100.0,
+                    vignette_percent: 0.0,
+                    visibility_percent,
+                    live: None,
+                });
+                let camera_frame = crate::frame_store::FrameHandle::pin_for_test(
+                    crate::frame_store::StoredFrame {
+                        storage: crate::frame_store::FrameStorage::untracked(),
+                        sequence: 1,
+                        width,
+                        height,
+                        pixel_format: PreviewCameraPixelFormat::Bgra8,
+                        metadata: (),
+                        // Blue, which the default green key leaves alone.
+                        bytes: [255, 0, 0, 255].repeat((width * height) as usize),
+                        source_iosurface: None,
+                        source_pixel_buffer: None,
+                        source_d3d11_texture: None,
+                        recycle_pool: None,
+                        captured_at: Instant::now(),
+                    },
+                );
+                let inputs = CompositorRenderInputs {
+                    sequence: 1,
+                    width,
+                    height,
+                    snapshot: Some(&snapshot),
+                    active_image_source: None,
+                    background_image_source: Some(&background_image_source),
+                    camera_frame: Some(&camera_frame),
+                    screen_frame: None,
+                    caption_overlay: None,
+                    highlight_overlay: None,
+                    chat_overlay: None,
+                    buddy_overlay: None,
+                    buddy_leg: None,
+                    banners: &[],
+                    live_background: None,
+                    shared_live_frame: None,
+                    shared_live_output: None,
+                };
+                let mut cpu = vec![0; raw_yuv420p_len(width, height)];
+                render_compositor_yuv420p_frame(inputs, &mut cpu);
+                let (left, top) = (
+                    (margin * f64::from(width)).round() as u32,
+                    (margin * f64::from(height)).round() as u32,
+                );
+                for y in 0..height {
+                    for x in 0..width {
+                        let on_stage =
+                            (left..width - left).contains(&x) && (top..height - top).contains(&y);
+                        assert_eq!(
+                            is_camera(y_at(&cpu, width, x, y)),
+                            on_stage,
+                            "{label}: CPU pixel ({x}, {y})"
+                        );
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(gpu) = gpu.as_mut() {
+                    let metal = try_gpu_compose(Some(gpu), &inputs, true)
+                        .expect("camera over a background composes on Metal")
+                        .yuv;
+                    for y in 0..height {
+                        for x in 0..width {
+                            let (cpu_y, metal_y) =
+                                (y_at(&cpu, width, x, y), y_at(&metal, width, x, y));
+                            assert_eq!(
+                                is_camera(metal_y),
+                                is_camera(cpu_y),
+                                "{label}: Metal and CPU disagree on who owns ({x}, {y})"
+                            );
+                            assert!(
+                                metal_y.abs_diff(cpu_y) <= 4,
+                                "{label}: ({x}, {y}) cpu Y {cpu_y} vs metal Y {metal_y}"
+                            );
+                        }
+                    }
+                } else {
+                    eprintln!("skipping Metal: no Metal device");
+                }
+            }
+        }
     }
 
     #[test]

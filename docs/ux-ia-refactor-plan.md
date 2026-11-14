@@ -15,11 +15,11 @@ only via ⌘K, sources diagnostics list unbounded
 > skill's "Where things live" (`.claude/skills/videorc-design/SKILL.md`)
 > keeps the current map.
 >
-> - **Sidebar**: Studio ⌘1, then Buddy ⌘9 directly under it (owner call
->   2026-10-10: the page sells Premium and keeps Clean cut, so it never
->   moves), then Setup (Sources ⌘2, Scene ⌘3, Assets ⌘4, Livestream ⌘5,
->   Captions ⌘6, Output ⌘7), Library ⌘8, and Settings ⌘, in a bottom block.
->   Health has no row: the status bar's state opens it.
+> - **Sidebar** (plan 235, 2026-11-14): Studio ⌘1 as the chrome slab, then
+>   Setup (Sources ⌘2, Scene ⌘3, Assets ⌘4, Captions ⌘5, Output ⌘6), then
+>   Livestream (Destinations ⌘7, Buddy ⌘8; Buddy keeps Clean cut and every
+>   feature, the page sells Premium), Library ⌘9, and Settings ⌘, in a
+>   bottom block. Health has no row: the status bar's state opens it.
 > - **Devices**: Sources is the home of every screen, window, camera,
 >   microphone and system audio source. Studio mirrors the few needed
 >   mid-session, editing the same state: its Sources section (Screen,
@@ -31,7 +31,8 @@ only via ⌘K, sources diagnostics list unbounded
 > - **Space** works only on the Studio page: Record when idle, Stop recording
 >   while recording, and the End livestream confirmation while live, with
 >   "Keep streaming" focused. It never starts Go Live (plan 174 D1).
-> - **Names**: Destinations became Livestream, Recording became Output, AI
+> - **Names**: Destinations became Livestream, and Destinations again in
+>   plan 235 (inside a Livestream group); Recording became Output, AI
 >   became Buddy, and the live chat rail became the Stream Manager window
 >   (⇧⌘J).
 > - **Chat in Studio** (2026-10-27, plan 204): the Studio has chat again,

@@ -2868,6 +2868,43 @@ describe('backend RPC contract', () => {
     )
   })
 
+  it('validates the stream report email switch and its send (plan 237)', () => {
+    const signedOut = { signedIn: false, enabled: null, envDisabled: false }
+    expect(validateBackendRpcResult('streamReport.email.get', signedOut)).toEqual(signedOut)
+    const on = { signedIn: true, email: 'ada@example.com', enabled: true, envDisabled: false }
+    expect(validateBackendRpcResult('streamReport.email.set', on)).toEqual(on)
+    expect(validateBackendRpcParams('streamReport.email.set', { enabled: false })).toEqual({
+      enabled: false
+    })
+    expect(() => validateBackendRpcParams('streamReport.email.set', {})).toThrow(
+      'streamReport.email.set'
+    )
+    expect(() =>
+      validateBackendRpcParams('streamReport.email.set', { enabled: true, email: 'eve@x.y' })
+    ).toThrow('streamReport.email.set')
+    // `enabled` is always present: null when unknown, never missing.
+    expect(() =>
+      validateBackendRpcResult('streamReport.email.get', { signedIn: true, envDisabled: false })
+    ).toThrow('streamReport.email.get')
+    for (const status of [
+      'sent',
+      'already-sent',
+      'disabled',
+      'no-stream',
+      'signed-out',
+      'rate-limited',
+      'unavailable',
+      'failed'
+    ] as const) {
+      expect(validateBackendRpcResult('streamReport.email.sendLast', { status })).toEqual({
+        status
+      })
+    }
+    expect(() =>
+      validateBackendRpcResult('streamReport.email.sendLast', { status: 'queued' })
+    ).toThrow('streamReport.email.sendLast')
+  })
+
   it('validates the 7TV emote switch, its status and its event (plan 089)', () => {
     const linked = {
       sevenTv: true,

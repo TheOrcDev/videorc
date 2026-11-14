@@ -3,7 +3,7 @@ import { STORAGE_KEYS } from '@/lib/capture'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 /**
- * The Livestream page's views (plan 174 S1.6b, A-14), in strip order, built
+ * The Destinations page's views (plan 174 S1.6b, A-14), in strip order, built
  * like Settings' tabs: Setup prepares the destinations and the stream
  * details, Upcoming lists scheduled streams, Guests holds the talk show's
  * room (plan 224 D16). Ids are stable: they are stored
@@ -49,7 +49,7 @@ function pageStorage(): Storage | null {
 }
 
 /**
- * The view Livestream opens on: the last one used on this device, else
+ * The view Destinations opens on: the last one used on this device, else
  * Setup. A convenience, so storage that is missing, holds an unknown id, or
  * throws falls back instead of breaking the page.
  */
@@ -71,12 +71,12 @@ export function writeLastLivestreamView(
   try {
     storage?.setItem(STORAGE_KEYS.livestreamView, view)
   } catch {
-    // Not remembering the view is harmless; Livestream opens on Setup next time.
+    // Not remembering the view is harmless; Destinations opens on Setup next time.
   }
 }
 
 /**
- * Opens the Livestream page (workspace id `live`) on `view` from outside
+ * Opens the Destinations page (workspace id `live`) on `view` from outside
  * React (⌘K, a toast action), through the typed workspace navigation.
  */
 export function openLivestreamView(view: LivestreamViewId): void {

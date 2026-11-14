@@ -47,7 +47,7 @@ import { VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
 import type { CloudRoomRequest } from '@/lib/backend'
 
 /**
- * Livestream → Guests (plan 224 C-G2, D16): the room, the invite link and who
+ * Destinations → Guests (plan 224 C-G2, D16): the room, the invite link and who
  * is in it. One home for Open the room, Close the room, the link and the door
  * switch; the stage itself (Bring on, Send backstage, the layout) is the Show
  * stage's backstage strip in the Studio (C-G3). Locked means disabled, with
