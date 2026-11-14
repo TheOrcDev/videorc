@@ -2652,17 +2652,28 @@ mod tests {
         // stopped the Linux worker under load, inside Pulse's 250 ms budget.
         let late = Duration::from_millis(130);
         let bytes: Vec<u8> = (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect();
-        let run = |protocol: CaptureProtocol, pair: ClockPair, records: Vec<String>| {
+        // `Some(delay)`: the PCM follows its record by `delay`. `None`: it
+        // arrives only once `assemble_pcm` has returned, so a refusal never
+        // depends on how long the host took to read the record.
+        let run = |protocol: CaptureProtocol,
+                   pair: ClockPair,
+                   records: Vec<String>,
+                   delay: Option<Duration>| {
             let (meta_tx, meta_rx) = mpsc::channel();
             for record in records {
                 meta_tx.send(record).unwrap();
             }
             drop(meta_tx);
             let (raw_tx, raw_rx) = mpsc::channel();
+            let (returned_tx, returned_rx) = mpsc::channel::<()>();
             let bytes = bytes.clone();
             let started = Instant::now();
             let sender = thread::spawn(move || {
-                thread::sleep(late);
+                match delay {
+                    Some(delay) => thread::sleep(delay),
+                    // Ends when `returned_tx` drops after `assemble_pcm`.
+                    None => while returned_rx.recv().is_ok() {},
+                }
                 let sent = Instant::now();
                 let _ = raw_tx.send(bytes);
                 sent
@@ -2678,6 +2689,7 @@ mod tests {
                 &AtomicBool::new(false),
                 &stats,
             );
+            drop(returned_tx);
             let arrived_after = sender.join().unwrap().saturating_duration_since(started);
             (result, out_rx.try_iter().collect::<Vec<_>>(), arrived_after)
         };
@@ -2697,6 +2709,7 @@ mod tests {
                 CaptureProtocol::Pulse,
                 ClockPair::sample().unwrap(),
                 vec![pcm(0, pts, 480)],
+                Some(late),
             );
             let host_overslept = arrived_after >= PULSE_MAX_CAPTURE_AGE;
             if !(host_overslept && result.is_err()) || attempts == 5 {
@@ -2712,11 +2725,15 @@ mod tests {
         );
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].samples, vec![0.25; 960]);
-        // macOS and Windows keep their 100 ms match budget.
+        // macOS and Windows keep their 100 ms match budget. Their PCM is held
+        // until the refusal: a 130 ms delay counted from before the record was
+        // read raced the budget, which starts at the read, and a loaded CI
+        // host that took over 30 ms to get there let the PCM in (#1349).
         let (result, frames, _) = run(
             CaptureProtocol::AvFoundation,
             pair(Instant::now()),
             vec![metadata(), pcm(0, 0, 480)],
+            None,
         );
         assert!(
             result

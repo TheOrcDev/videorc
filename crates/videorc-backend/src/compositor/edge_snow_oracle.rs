@@ -43,7 +43,10 @@ const BACKGROUND_GREY: u8 = 16;
 /// compositor renders, so the two paths' counts are not the same number.
 pub(super) const SHIPPED_CPU_OUTLINE_GREEN_PER_FRAME: f64 = 22.0;
 pub(super) const SHIPPED_CPU_OUTLINE_FLIPS_PER_FRAME: f64 = 58.0;
+// Read only by the Metal oracle, which is macOS-only.
+#[cfg(target_os = "macos")]
 pub(super) const SHIPPED_METAL_OUTLINE_GREEN_PER_FRAME: f64 = 30.0;
+#[cfg(target_os = "macos")]
 pub(super) const SHIPPED_METAL_OUTLINE_FLIPS_PER_FRAME: f64 = 59.0;
 /// The share of the shipped snow a path may keep (plan 233 S0).
 pub(super) const ALLOWED_SHARE_OF_SHIPPED: f64 = 0.10;
