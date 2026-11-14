@@ -36,6 +36,9 @@ const IDLE_SNAPSHOT = IDLE_TALK_SHOW_SNAPSHOT
 const loadRoomClient = () => import('@/lib/talk-show-room')
 const loadOverlays = () => import('@/lib/talk-show-overlays')
 
+/** The Studio supplies the object, "the room", when it builds the toast. */
+export const ROOM_JOIN_ERROR_ACTION = 'join'
+
 export type TalkShowRoomControllerDeps = {
   client: BackendClient | null
   cloudStatus: CloudStatus | null
@@ -186,7 +189,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         await roomClient.sendStage(stageRef.current)
         await roomClient.connect()
       } catch (error) {
-        onError(error, 'join the room')
+        onError(error, ROOM_JOIN_ERROR_ACTION)
         report('disconnected', error instanceof Error ? error.message : String(error))
       } finally {
         joiningRef.current = null
