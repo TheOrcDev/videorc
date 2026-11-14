@@ -54,6 +54,16 @@ lowercase: the broadcast itself. "Stream" is its short form in running text
 ("Your stream stopped").
 _Avoid_: broadcast (except a platform's own object, like an X broadcast), live session
 
+**Stream report**:
+The email Videorc sends after a live stream (plan 237): watching at the
+peak and on average, and how many people chatted, platform by platform.
+Buddy's in-app summary stays "Buddy's report" (Buddy → Reports).
+_Avoid_: viewers reached, unique viewers, audience size, recap email
+
+**Watching**:
+A platform's count of people watching at the same moment.
+_Avoid_: viewers (for that count), subscribers, reach
+
 **Recording**:
 What Videorc writes to a file, and each item in Library.
 _Avoid_: session (in copy), take, capture

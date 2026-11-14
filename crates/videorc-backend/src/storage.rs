@@ -8536,6 +8536,24 @@ impl Database {
                 report_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            -- Plan 237: one row per live session whose stream report email
+            -- is due, sent or given up. Holds no numbers: the report is built
+            -- from the session's own rows when it is sent. Deleting the
+            -- session deletes its pending report.
+            CREATE TABLE IF NOT EXISTS stream_report_emails (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                report_id TEXT NOT NULL,
+                platforms_json TEXT NOT NULL,
+                account_email TEXT NOT NULL,
+                status TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_stream_report_emails_status_due
+                ON stream_report_emails(status, due_at);
             ",
         )?;
         // Named timeline markers share ownership and deletion with clip marks.
