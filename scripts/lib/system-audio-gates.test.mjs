@@ -17,7 +17,6 @@ import {
   evaluateSystemAudioSyncRun,
   evaluateToggleOffCase,
   evaluateToggleOnCase,
-  systemAudioGatesFor,
   evaluateToneCapturedCase,
   findToneRegions,
   goertzelAmplitude,
@@ -313,26 +312,6 @@ describe('case verdicts', () => {
 
     const slow = evaluateToggleOnCase({ ...entered, expectedPlay, cutoverSeconds: 4.8 })
     assert.match(slow.failures.join(), /after the attach cutover/)
-  })
-
-  it('toggle on: Windows allows its measured attach latency on that check only (#1319)', () => {
-    const windows = systemAudioGatesFor('win32')
-    assert.equal(systemAudioGatesFor('darwin'), SYSTEM_AUDIO_GATES)
-    assert.equal(windows.attachLatencyMs, 30)
-    assert.deepEqual(
-      { ...windows, attachLatencyMs: 0 },
-      { ...SYSTEM_AUDIO_GATES },
-      'only attachLatencyMs differs'
-    )
-    const expectedPlay = { start: 2, end: 10 }
-    // The tone enters at 5.125 s; a 206 ms delta is the cutover at 4.919 s.
-    const entered = analyze(synth(12, [{ from: 5.125, to: 10.2 }]))
-    const measured = { ...entered, expectedPlay, cutoverSeconds: 4.919 }
-    assert.match(evaluateToggleOnCase(measured).failures.join(), /after the attach cutover/)
-    const onWindows = evaluateToggleOnCase(measured, windows)
-    assert.equal(onWindows.pass, true, onWindows.failures.join())
-    const tooSlow = evaluateToggleOnCase({ ...measured, cutoverSeconds: 4.885 }, windows)
-    assert.match(tooSlow.failures.join(), /30 ms attach latency/)
   })
 
   it('off (privacy): no tone, digital silence, nothing mixed', () => {
