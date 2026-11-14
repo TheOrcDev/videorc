@@ -96,11 +96,19 @@ async function run(pass) {
           'returned picture stays live',
           4000
         )
-        try {
-          assertManagedProgramHold(h, { holdMs, liveMs, endMs: Date.now() }, pass)
-        } catch (error) {
-          blockers.push(error.message)
-        }
+        // The card is drawn by the program page inside LiveKit's egress, which
+        // only the D18 Docker stack runs. Without its receiver snapshot this is a
+        // named SKIP on every pass, never a silent pass; with it, a failure blocks.
+        if (!process.env.VIDEORC_MANAGED_PROGRAM_RECORDING)
+          console.log(
+            `[managed solo ${pass}/${repeat}] SKIP program-receiver hold card and continuity: needs the D18 egress stack (VIDEORC_MANAGED_PROGRAM_RECORDING); a feed-only receiver cannot see the program page's card`
+          )
+        else
+          try {
+            assertManagedProgramHold(h, { holdMs, liveMs, endMs: Date.now() }, pass)
+          } catch (error) {
+            blockers.push(error.message)
+          }
       }
     )
     await step(
