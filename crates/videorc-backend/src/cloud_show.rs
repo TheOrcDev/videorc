@@ -29,6 +29,12 @@
 //!   page, on by default when entitled, and a Go Live that cannot use the
 //!   cloud streams directly and says why once (`fallback`).
 //!
+//! The show reaches whoever holds it through one control transport with two
+//! kinds (plan 234 D2): the node's control socket, and web control, HTTPS
+//! routes on videorc.com with a long-polled state, for a show whose media
+//! runs on LiveKit Cloud (`cloud_control_web.rs`). The create answer names
+//! the kind, and everything after `open_control` is the same show.
+//!
 //! The wire shape is plan 184's "Wire shape (Phase 1)". The RPC surface
 //! follows `remote_control.rs`: `cloud.status` (every role; remote roles get
 //! nothing else), `cloud.settings.set`, `cloud.allowance.refresh`,
@@ -48,11 +54,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::cloud_control_web::{
+    CloudRecordingItem, ControlRevAnswer, ControlStateAnswer, DestinationsAnswer, DestinationsBody,
+    DestinationsFailure, WebControl, WebIntents,
+};
 use crate::cloud_talk::{
-    CloudCameraHook, CloudRecordingStatus, CloudRequestHook, CloudRoomStatus, CreateShowRoom,
-    GuestActionAnswer, GuestActionBody, GuestDecision, GuestsAnswer, RoomPatch, RoomSettingsAnswer,
-    RoomTokenAnswer, RunnerRecordingState, RunnerRoomState, ShowInvite, ShowRoomAnswer, TalkLimits,
-    TalkShowState,
+    CloudCameraHook, CloudOverlayHook, CloudRecordingStatus, CloudRequestHook, CloudRoomStatus,
+    CreateShowRoom, GuestActionAnswer, GuestActionBody, GuestDecision, GuestsAnswer, RoomPatch,
+    RoomSettingsAnswer, RoomTokenAnswer, RunnerRecordingState, RunnerRoomState, ShowInvite,
+    ShowRoomAnswer, TalkLimits, TalkShowState,
 };
 use crate::protocol::{AiCapabilitiesCloud, EntitlementPlan};
 use crate::streaming::{
@@ -89,7 +99,7 @@ pub(crate) const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const END_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Reconnect backoff after the socket drops: the runner keeps the show, so
 /// patience costs nothing; the cap keeps a flapping network from hammering.
-const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 2, 4, 8, 15];
+pub(crate) const RECONNECT_BACKOFF_SECONDS: [u64; 5] = [1, 2, 4, 8, 15];
 /// Plan 222 D7 (L3): with the control socket gone, a feed leg down this long
 /// while the web still lists the show live is a lost show, reported to the
 /// web, which asks the node's health and ends the show `node-unreachable`
@@ -639,12 +649,17 @@ impl std::fmt::Debug for ShowIngest {
     }
 }
 
-/// The control socket address and the show token (`vcs1.…`).
+/// The control socket address and the show token (`vcs1.…`), or, with
+/// `kind: "web"`, two empty strings: a show on web control has neither
+/// (plan 234, `docs/cloud/managed-media-wire.md` section 1).
 #[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShowControl {
     pub url: String,
     pub token: String,
+    /// The control transport. Absent means the node socket.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 impl std::fmt::Debug for ShowControl {
@@ -652,7 +667,30 @@ impl std::fmt::Debug for ShowControl {
         f.debug_struct("ShowControl")
             .field("url", &self.url)
             .field("token", &"••••")
+            .field("kind", &self.kind)
             .finish()
+    }
+}
+
+/// How a show is controlled, from its `control.kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlKind {
+    /// No kind: the node's control socket.
+    Node,
+    /// `"web"`: HTTPS routes on videorc.com.
+    Web,
+    /// A transport this build does not know. A new show on one is ended and
+    /// streams directly (`cloud-node-unreachable`).
+    Unknown,
+}
+
+impl ShowControl {
+    pub(crate) fn transport_kind(&self) -> ControlKind {
+        match self.kind.as_deref() {
+            None => ControlKind::Node,
+            Some(crate::cloud_control_web::CONTROL_KIND_WEB) => ControlKind::Web,
+            Some(_) => ControlKind::Unknown,
+        }
     }
 }
 
@@ -738,6 +776,9 @@ pub enum CloudApiError {
     },
     /// Plan 224 (503): talk shows are off, or LiveKit is unreachable.
     RoomsUnavailable,
+    /// Plan 234 (422): an output is above what a managed show carries. The
+    /// desktop cannot know the provider before it creates, so the web says.
+    Quality,
     Transport(String),
     Other {
         status: u16,
@@ -765,6 +806,10 @@ impl std::fmt::Display for CloudApiError {
                 )
             }
             Self::RoomsUnavailable => write!(f, "Rooms aren't available right now."),
+            Self::Quality => write!(
+                f,
+                "This stream quality is above what Videorc Cloud carries for now."
+            ),
             Self::Transport(message) => write!(f, "Videorc Cloud could not be reached: {message}"),
             Self::Other {
                 status,
@@ -798,6 +843,7 @@ impl CloudApiError {
             }
             Self::GuestHoursUsedUp { .. } => Some(CloudFallbackReason::CloudGuestHoursUsedUp),
             Self::RoomsUnavailable => Some(CloudFallbackReason::CloudRoomsUnavailable),
+            Self::Quality => Some(CloudFallbackReason::CloudQuality),
             Self::Unauthorized
             | Self::ShowLive(_)
             | Self::TestLimit { .. }
@@ -826,6 +872,7 @@ pub fn classify_cloud_failure(
         (503, "cloud-node-unreachable") => CloudApiError::NodeUnreachable,
         (429, "cloud-guest-hours-used-up") => CloudApiError::GuestHoursUsedUp { reset_at },
         (503, "cloud-rooms-unavailable") => CloudApiError::RoomsUnavailable,
+        (422, "cloud-quality") => CloudApiError::Quality,
         _ => CloudApiError::Other {
             status,
             code: code.to_string(),
@@ -905,6 +952,72 @@ pub trait CloudWebApi: Send + Sync + 'static {
         guest_id: &str,
         body: &GuestActionBody,
     ) -> impl Future<Output = std::result::Result<GuestActionAnswer, CloudApiError>> + Send;
+    // --- Plan 234: web control (`docs/cloud/managed-media-wire.md`, section 2) ---
+    /// `GET …/state?since=<rev>`, long-polled: the socket's `welcome` and
+    /// `state`.
+    fn control_state(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        since: Option<u64>,
+    ) -> impl Future<Output = std::result::Result<ControlStateAnswer, CloudApiError>> + Send;
+    /// `PUT …/destinations`: the socket's `destinations.set`. The body
+    /// carries the stream keys and is never logged.
+    fn set_destinations(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &DestinationsBody,
+    ) -> impl Future<Output = std::result::Result<DestinationsAnswer, DestinationsFailure>> + Send;
+    /// `PUT …/hold-image`: the socket's `hold.image.set`.
+    fn set_hold_image(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        png_base64: &str,
+    ) -> impl Future<Output = std::result::Result<(), CloudApiError>> + Send;
+    /// `PUT …/stage`: the socket's `stage.set`. `stage` is the frame's
+    /// fields.
+    fn set_stage(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        stage: &Value,
+    ) -> impl Future<Output = std::result::Result<ControlRevAnswer, CloudApiError>> + Send;
+    /// `POST …/legs/end`: the socket's `legs.end`. The body carries the
+    /// addresses this computer holds and is never logged.
+    fn end_legs(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &DestinationsBody,
+    ) -> impl Future<Output = std::result::Result<ControlRevAnswer, CloudApiError>> + Send;
+    /// `POST …/recording`: the socket's `recording.start` and `.stop`.
+    fn set_recording(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        on: bool,
+    ) -> impl Future<Output = std::result::Result<ControlRevAnswer, CloudApiError>> + Send;
+    // --- Plan 234: cloud recordings (wire section 13.2) ---
+    /// `GET /api/cloud/recordings`: the account's recordings, without URLs.
+    fn list_recordings(
+        &self,
+        bearer: &str,
+    ) -> impl Future<Output = std::result::Result<Vec<CloudRecordingItem>, CloudApiError>> + Send;
+    /// `GET /api/cloud/recordings/:id/playlist`: a managed take's playlist.
+    /// Its segment lines are presigned URLs: a secret, never logged.
+    fn recording_playlist(
+        &self,
+        bearer: &str,
+        recording_id: &str,
+    ) -> impl Future<Output = std::result::Result<String, CloudApiError>> + Send;
+    /// A presigned segment, through the verified HTTP client, never FFmpeg.
+    fn recording_segment(
+        &self,
+        url: &str,
+        path: &std::path::Path,
+    ) -> impl Future<Output = std::result::Result<(), crate::cloud_control_web::SegmentFetchError>> + Send;
 }
 
 // --- Wire: the control socket -------------------------------------------------
@@ -1134,6 +1247,11 @@ pub struct RunnerLeg {
     pub since: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Plan 234 (web control, section 8.4): the web asks for this leg's
+    /// address again, because only this computer holds it. Never sent by a
+    /// runner, and never part of the status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resend: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1267,7 +1385,7 @@ pub(crate) fn now_rfc3339() -> String {
 
 /// An intent's ack: `Ok` carries the runner's optional `result` (only
 /// `ingest.get` has one today), `Err` the refusal or transport problem.
-type AckResult = std::result::Result<Option<Value>, String>;
+pub(crate) type AckResult = std::result::Result<Option<Value>, String>;
 type AckSender = oneshot::Sender<AckResult>;
 
 /// A request from the show's owner to the socket task.
@@ -1322,7 +1440,7 @@ pub(crate) struct FailedShow {
 pub struct CloudShowRuntime {
     pub settings: CloudSettings,
     pub entitlement: CloudEntitlement,
-    connected: bool,
+    pub(crate) connected: bool,
     ending: bool,
     pub(crate) show: Option<ActiveShow>,
     pub(crate) runner: Option<RunnerState>,
@@ -1332,7 +1450,9 @@ pub struct CloudShowRuntime {
     pub(crate) message: Option<String>,
     /// Bumped with every new show or socket owner so a stale task stops.
     pub(crate) generation: u64,
-    pub(crate) control_tx: Option<mpsc::UnboundedSender<ControlRequest>>,
+    pub(crate) destinations_generation: Arc<crate::cloud_control_web::DestinationGeneration>,
+    pub(crate) control_tx: Option<ControlHandle>,
+    pub(crate) downloads: Arc<crate::cloud_control_web::RecordingDownloadJobs>,
     /// Plan 224: the room this desktop holds, beside `show`; cleared with
     /// it. Its token is the one secret in the runtime.
     pub(crate) talk: Option<TalkShowState>,
@@ -1706,6 +1826,7 @@ impl CloudShowRuntime {
     }
 
     fn bump_generation(&mut self) -> u64 {
+        self.destinations_generation.invalidate();
         self.generation += 1;
         self.control_tx = None;
         self.connected = false;
@@ -1724,7 +1845,7 @@ impl CloudShowRuntime {
 
     /// Plan 222 D7: when the lost report is due, given the feed clock and
     /// the last report the web kept; `None` while the feed is up.
-    fn lost_report_due_at(&self) -> Option<tokio::time::Instant> {
+    pub(crate) fn lost_report_due_at(&self) -> Option<tokio::time::Instant> {
         self.feeding_session()?;
         let feed_due = self.feed_down_since? + LOST_SHOW_FEED_DOWN;
         Some(match self.lost_reported_at {
@@ -1835,6 +1956,9 @@ pub struct CloudHooks {
     pub camera: CloudCameraHook,
     /// Plan 224: `cloud.room.requests`, one per new "wants to join".
     pub request: CloudRequestHook,
+    /// Plan 234 T3: `cloud.room.overlay`, an overlay for the host's
+    /// renderer to send to the room. Web control only.
+    pub overlay: CloudOverlayHook,
 }
 
 impl CloudHooks {
@@ -1932,7 +2056,7 @@ pub(crate) enum HelloFailure {
     Transport(String),
 }
 
-pub(crate) async fn connect_and_hello<C: ControlConnector>(
+async fn connect_and_hello<C: ControlConnector>(
     connector: &C,
     control: &ShowControl,
 ) -> std::result::Result<(C::Transport, RunnerState), HelloFailure> {
@@ -1975,16 +2099,199 @@ pub(crate) async fn connect_and_hello<C: ControlConnector>(
     }
 }
 
-/// Install a connected socket as the show's control channel and run its loop
-/// on its own task. Returns the request sender.
+// --- The control transport (plan 234 D2, C1) ---------------------------------
+//
+// One type between a show and whoever holds it, with one kind per way of
+// reaching them. A show does four things with it: connect or resume
+// (`CloudShowContext::open_control`), send an intent and get its answer
+// (`ControlHandle::intent`), receive states (`ControlLoop::run`, or
+// `ControlLink::next_state` on a transport no loop owns), and close
+// (`ControlLink::close`). The node socket is the first kind; web control
+// (C2, `cloud_control_web.rs`) is the second.
+
+/// A show's control transport, connected: past its first state.
+pub(crate) enum ControlLink<T: ControlTransport, W: CloudWebApi> {
+    /// The node's control socket, past `hello` and `welcome` (plan 184).
+    Node(T),
+    /// Web control, past its first state poll (plan 234).
+    Web(WebControl<W>),
+}
+
+impl<T: ControlTransport, W: CloudWebApi> ControlLink<T, W> {
+    /// Where the slot sends this transport's intents. `tx` feeds the task
+    /// that runs the transport; on web control nothing is sent on it, and
+    /// the handle only keeps it open.
+    fn handle(&self, tx: mpsc::UnboundedSender<ControlRequest>) -> ControlHandle {
+        match self {
+            Self::Node(_) => ControlHandle::Node(tx),
+            Self::Web(web) => ControlHandle::Web(web.intents(tx)),
+        }
+    }
+
+    /// The show's ingest from whoever holds the show, for a resume after a
+    /// relaunch. States that arrive first replace `latest`.
+    async fn fetch_ingest(
+        &mut self,
+        latest: &mut RunnerState,
+    ) -> std::result::Result<Vec<ShowIngest>, String> {
+        match self {
+            Self::Node(transport) => fetch_ingest_over(transport, latest).await,
+            // `GET current` replaces `ingest.get`: it lists the ingest from
+            // LiveKit on every call, and a call it could not make leaves
+            // nothing else to ask.
+            Self::Web(_) => Err("videorc.com did not list the show's ingest".to_string()),
+        }
+    }
+
+    /// The next state on a transport no loop owns (the test show's), or why
+    /// there is none. Whatever else the transport carries is dropped.
+    async fn next_state(&mut self) -> std::result::Result<RunnerState, String> {
+        match self {
+            Self::Node(transport) => loop {
+                match transport.recv().await {
+                    None | Some(ControlFrameIn::Closed { .. }) => {
+                        return Err("the control socket closed".to_string());
+                    }
+                    Some(ControlFrameIn::Text(text)) => {
+                        if let Ok(RunnerFrame::State { state } | RunnerFrame::Welcome { state }) =
+                            serde_json::from_str::<RunnerFrame>(&text)
+                        {
+                            return Ok(state);
+                        }
+                    }
+                }
+            },
+            Self::Web(web) => web.next_state().await,
+        }
+    }
+
+    /// Whether `ping` keeps this transport alive. Web control has nothing
+    /// to keep open: each poll is its own request.
+    fn pings(&self) -> bool {
+        matches!(self, Self::Node(_))
+    }
+
+    /// The keep-alive of a transport no loop owns.
+    async fn ping(&mut self) {
+        match self {
+            Self::Node(transport) => {
+                let _ = transport.send(json!({ "t": "ping" })).await;
+            }
+            Self::Web(_) => {}
+        }
+    }
+
+    /// Ends the show on a transport no loop owns, and waits for the answer.
+    async fn end_show(&mut self) {
+        match self {
+            Self::Node(transport) => {
+                let id = new_intent_id();
+                if transport.send(intent_frame(&id, "show.end")).await.is_ok() {
+                    let _ = await_ack(transport, &id, END_ACK_TIMEOUT).await;
+                }
+            }
+            // `POST …/end` is the caller's, on either transport.
+            Self::Web(_) => {}
+        }
+    }
+
+    pub(crate) async fn close(&mut self) {
+        match self {
+            Self::Node(transport) => transport.close().await,
+            // Nothing is held open between polls.
+            Self::Web(_) => {}
+        }
+    }
+}
+
+/// A show's control transport as the slot holds it: where its intents go.
+#[derive(Clone)]
+pub(crate) enum ControlHandle {
+    /// To the socket's task, which writes the frame and delivers the
+    /// runner's ack.
+    Node(mpsc::UnboundedSender<ControlRequest>),
+    /// Web control: the intent is its own HTTPS call, and the route's
+    /// answer is its ack.
+    Web(WebIntents),
+}
+
+impl ControlHandle {
+    /// Send an intent and wait for its answer. `id` and `timeout` are the
+    /// socket's: an ack is matched by id and waited for that long. On web
+    /// control the request's own timeout bounds the call (a route may wait
+    /// on LiveKit longer than a runner takes to ack).
+    pub(crate) async fn intent(&self, frame: Value, id: String, timeout: Duration) -> AckResult {
+        match self {
+            Self::Node(tx) => send_intent(tx, frame, id, timeout).await,
+            Self::Web(intents) => intents.send(frame).await,
+        }
+    }
+
+    /// Test support: both handles lead to the same transport.
+    #[cfg(test)]
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Node(tx), Self::Node(other)) => tx.same_channel(other),
+            (Self::Web(intents), Self::Web(other)) => intents.same(other),
+            _ => false,
+        }
+    }
+}
+
+impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
+    pub(crate) fn destination_frame(&self, frame: Value) -> Value {
+        let runtime = lock(&self.slot);
+        if runtime
+            .show
+            .as_ref()
+            .is_some_and(|show| show.control.transport_kind() == ControlKind::Web)
+        {
+            runtime.destinations_generation.stamp(frame)
+        } else {
+            frame
+        }
+    }
+
+    /// Connect or resume: the show's control transport and its first state.
+    /// `control` is the create's or `current`'s block, and its kind picks
+    /// the transport. The node socket needs neither the bearer nor the show
+    /// id (its token names the show); web control is nothing else.
+    pub(crate) async fn open_control(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        control: &ShowControl,
+    ) -> std::result::Result<(ControlLink<C::Transport, W>, RunnerState), HelloFailure> {
+        match control.transport_kind() {
+            ControlKind::Node => {
+                let (transport, welcome) =
+                    connect_and_hello(self.connector.as_ref(), control).await?;
+                Ok((ControlLink::Node(transport), welcome))
+            }
+            ControlKind::Web => {
+                let destinations = lock(&self.slot).destinations_generation.clone();
+                let (web, first) =
+                    WebControl::open(self.web.clone(), bearer, show_id, destinations).await?;
+                Ok((ControlLink::Web(web), first))
+            }
+            ControlKind::Unknown => Err(HelloFailure::Transport(
+                "Videorc Cloud named a control transport this version of Videorc does not know"
+                    .to_string(),
+            )),
+        }
+    }
+}
+
+/// Install a connected transport as the show's control channel and run its
+/// loop on its own task. Returns the handle its intents go to.
 pub(crate) fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
     context: &CloudShowContext<W, C>,
     bearer: String,
     control: ShowControl,
     show_id: String,
-    transport: C::Transport,
+    transport: ControlLink<C::Transport, W>,
     welcome: RunnerState,
-) -> mpsc::UnboundedSender<ControlRequest> {
+) -> ControlHandle {
     match install_control_loop_inner(context, bearer, control, show_id, transport, welcome, None) {
         Ok(tx) => tx,
         Err(_) => unreachable!("an unguarded install is never refused"),
@@ -2002,10 +2309,10 @@ fn install_control_loop_unless_claimed<W: CloudWebApi, C: ControlConnector>(
     bearer: String,
     control: ShowControl,
     show_id: String,
-    transport: C::Transport,
+    transport: ControlLink<C::Transport, W>,
     welcome: RunnerState,
     generation: u64,
-) -> std::result::Result<mpsc::UnboundedSender<ControlRequest>, C::Transport> {
+) -> std::result::Result<ControlHandle, ControlLink<C::Transport, W>> {
     install_control_loop_inner(
         context,
         bearer,
@@ -2013,8 +2320,19 @@ fn install_control_loop_unless_claimed<W: CloudWebApi, C: ControlConnector>(
         show_id,
         transport,
         welcome,
-        Some(generation),
+        Some(InstallOnlyWhile::Unclaimed(generation)),
     )
+}
+
+/// When a guarded install may still happen, checked under the one lock.
+enum InstallOnlyWhile {
+    /// The launch check's (L1): the slot's generation is still this one and
+    /// no session feeds the show.
+    Unclaimed(u64),
+    /// Plan 234: the slot's generation is still this one and the show still
+    /// has no control. A show on web control that a session feeds, whose
+    /// poll stopped at a refused sign-in, gets its poll back this way.
+    Uncontrolled(u64),
 }
 
 fn install_control_loop_inner<W: CloudWebApi, C: ControlConnector>(
@@ -2022,22 +2340,34 @@ fn install_control_loop_inner<W: CloudWebApi, C: ControlConnector>(
     bearer: String,
     control: ShowControl,
     show_id: String,
-    transport: C::Transport,
+    transport: ControlLink<C::Transport, W>,
     welcome: RunnerState,
-    only_while_generation: Option<u64>,
-) -> std::result::Result<mpsc::UnboundedSender<ControlRequest>, C::Transport> {
+    only_while: Option<InstallOnlyWhile>,
+) -> std::result::Result<ControlHandle, ControlLink<C::Transport, W>> {
     let (tx, rx) = mpsc::unbounded_channel();
+    let tx = transport.handle(tx);
     let generation = {
         let mut runtime = lock(&context.slot);
-        if let Some(expected) = only_while_generation {
-            let claimed = runtime.generation != expected
-                || runtime
-                    .show
-                    .as_ref()
-                    .is_none_or(|show| show.record.id != show_id || show.session_id.is_some());
-            if claimed {
-                return Err(transport);
+        let claimed = match only_while {
+            None => false,
+            Some(InstallOnlyWhile::Unclaimed(expected)) => {
+                runtime.generation != expected
+                    || runtime
+                        .show
+                        .as_ref()
+                        .is_none_or(|show| show.record.id != show_id || show.session_id.is_some())
             }
+            Some(InstallOnlyWhile::Uncontrolled(expected)) => {
+                runtime.generation != expected
+                    || runtime.control_tx.is_some()
+                    || runtime
+                        .show
+                        .as_ref()
+                        .is_none_or(|show| show.record.id != show_id)
+            }
+        };
+        if claimed {
+            return Err(transport);
         }
         let generation = runtime.bump_generation();
         runtime.control_tx = Some(tx.clone());
@@ -2062,23 +2392,23 @@ fn install_control_loop_inner<W: CloudWebApi, C: ControlConnector>(
     Ok(tx)
 }
 
-struct ControlLoop<W: CloudWebApi, C: ControlConnector> {
-    context: CloudShowContext<W, C>,
-    bearer: String,
+pub(crate) struct ControlLoop<W: CloudWebApi, C: ControlConnector> {
+    pub(crate) context: CloudShowContext<W, C>,
+    pub(crate) bearer: String,
     control: ShowControl,
-    show_id: String,
-    generation: u64,
+    pub(crate) show_id: String,
+    pub(crate) generation: u64,
     /// A runner restart was already handled on this socket: re-send once.
-    restart_seen_on_socket: bool,
+    pub(crate) restart_seen_on_socket: bool,
     /// Destinations to send again on the current socket (a runner restart).
-    resend: Option<Vec<HandoverDestination>>,
+    pub(crate) resend: Option<(Vec<HandoverDestination>, u64)>,
     /// The hold image to send again on the current socket (a runner restart).
     resend_hold_image: Option<String>,
     /// The hold image went (or was queued) on this socket: at most once each.
     hold_image_sent_on_socket: bool,
     /// Plan 224: the runner reports no `stage.set` while this desktop holds
     /// a stage (a restart): send it again, once per socket.
-    resend_stage: bool,
+    pub(crate) resend_stage: bool,
 }
 
 /// A runner that restarted mid-show (plan 184 "When things break"). The
@@ -2183,9 +2513,13 @@ fn stopped_leg_rows(legs: &[RunnerLeg], end_reason: Option<&str>) -> Vec<StreamT
         .collect()
 }
 
-enum LoopExit {
+pub(crate) enum LoopExit {
     /// A newer owner took the show over.
     Superseded,
+    /// Web control (plan 234): videorc.com refused this computer's sign-in.
+    /// Polling stops and the show stays held; the next sign-in's launch
+    /// check finds it again.
+    SignedOut,
     /// The show is over, with the runner's or the web's reason.
     Ended(Option<String>),
     /// The web confirmed the show gone while the socket was down.
@@ -2204,7 +2538,7 @@ enum ReconnectRound<T> {
 }
 
 /// Sleeps until `deadline`; never wakes without one.
-async fn until(deadline: Option<tokio::time::Instant>) {
+pub(crate) async fn until(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending::<()>().await,
@@ -2212,18 +2546,32 @@ async fn until(deadline: Option<tokio::time::Instant>) {
 }
 
 impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
-    fn current(&self) -> bool {
+    pub(crate) fn current(&self) -> bool {
         lock(&self.context.slot).generation == self.generation
     }
 
     async fn run(
         mut self,
-        mut transport: C::Transport,
+        transport: ControlLink<C::Transport, W>,
         mut rx: mpsc::UnboundedReceiver<ControlRequest>,
     ) {
+        let exit = match transport {
+            ControlLink::Node(socket) => self.run_node(socket, &mut rx).await,
+            ControlLink::Web(web) => self.run_web(web, &mut rx).await,
+        };
+        self.finish(exit).await;
+    }
+
+    /// The node socket until the show leaves it: read and relay, and
+    /// reconnect whenever it drops.
+    async fn run_node(
+        &mut self,
+        mut transport: C::Transport,
+        rx: &mut mpsc::UnboundedReceiver<ControlRequest>,
+    ) -> LoopExit {
         let mut pending: HashMap<String, AckSender> = HashMap::new();
         let exit = loop {
-            match self.run_socket(&mut transport, &mut rx, &mut pending).await {
+            match self.run_socket(&mut transport, rx, &mut pending).await {
                 Ok(exit) => break exit,
                 Err(()) => {
                     // The socket dropped. Fail every waiting intent, show
@@ -2248,8 +2596,34 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             }
         };
         let _ = transport.close().await;
+        exit
+    }
+
+    /// What the loop's exit means for the slot, whatever the transport.
+    async fn finish(&self, exit: LoopExit) {
         match exit {
             LoopExit::Superseded => {}
+            LoopExit::SignedOut => {
+                let held = {
+                    let mut runtime = lock(&self.context.slot);
+                    let held = runtime.generation == self.generation;
+                    if held {
+                        // The show stays: only its control is gone, and the
+                        // next sign-in owes a launch check (L4).
+                        runtime.control_tx = None;
+                        runtime.connected = false;
+                        runtime.launch_checked = false;
+                    }
+                    held
+                };
+                if held {
+                    tracing::warn!(
+                        show = %self.show_id,
+                        "videorc.com refused this computer's sign-in; the Videorc Cloud show stays held until the next sign-in"
+                    );
+                    self.context.hooks.emit_from(&self.context.slot);
+                }
+            }
             LoopExit::Ended(reason) => {
                 if self.current() {
                     self.context.forget_talk_show().await;
@@ -2310,7 +2684,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             if !self.current() {
                 return Ok(LoopExit::Superseded);
             }
-            if let Some(destinations) = self.resend.take() {
+            if let Some((destinations, _generation)) = self.resend.take() {
                 self.send_destinations_again(transport, pending, &destinations)
                     .await?;
             }
@@ -2413,8 +2787,24 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     /// Reconnecting and the destinations go again, or, with no keys on this
     /// computer, the rows say so.
     fn absorb_state(&mut self, state: RunnerState) {
+        self.absorb_state_if(state, || true);
+    }
+
+    /// `absorb_state`, unless `fresh` says the state is not the show's any
+    /// more. Asked under the slot's lock, the one `handed_over` is set
+    /// under, so a state and a hand-over are never read in two orders (web
+    /// control, where a state and an intent's answer are two requests).
+    /// False when the state was dropped.
+    pub(crate) fn absorb_state_if(
+        &mut self,
+        state: RunnerState,
+        fresh: impl FnOnce() -> bool,
+    ) -> bool {
         let (session, legs) = {
             let mut runtime = lock(&self.context.slot);
+            if !fresh() {
+                return false;
+            }
             if state.phase == "live"
                 && let Some(show) = runtime.show.as_mut()
             {
@@ -2465,7 +2855,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     destinations_resent,
                 });
                 if let RunnerRestart::Resend(destinations) = restart {
-                    self.resend = Some(destinations);
+                    self.resend = Some((destinations, runtime.destinations_generation.current()));
                 }
                 restarted = true;
             }
@@ -2508,6 +2898,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             (self.context.hooks.legs)(&session_id, legs);
         }
         self.context.hooks.emit_from(&self.context.slot);
+        true
     }
 
     /// `destinations.set` again after a runner restart. The ack is awaited
@@ -2580,7 +2971,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             }
             let result = match round {
                 ReconnectRound::LostDue => {
-                    if let Some(exit) = self.report_lost_show().await {
+                    if let Some(exit) = self.report_lost_show(true).await {
                         return Err(exit);
                     }
                     // Kept, or unknown: the next round starts its backoff
@@ -2640,7 +3031,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     /// `Some(true)` when the web says the show is over or another show is
     /// current; `None` when the web could not be reached (unknown: keep the
     /// show, never go direct).
-    async fn confirm_show_gone(&self) -> Option<bool> {
+    pub(crate) async fn confirm_show_gone(&self) -> Option<bool> {
         match self.context.web.current_show(&self.bearer).await {
             Ok(current) => Some(
                 current
@@ -2658,7 +3049,9 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     /// direct only when the web ends it. A kept show (the node answered the
     /// web, or the web could not ask) and a report the web could not take
     /// both keep the show: the hold covers a feed that is the broken side.
-    async fn report_lost_show(&mut self) -> Option<LoopExit> {
+    /// `control_lost` is what the report says of the control: always true
+    /// from the socket's reconnect, the last poll's failure on web control.
+    pub(crate) async fn report_lost_show(&mut self, control_lost: bool) -> Option<LoopExit> {
         let now = tokio::time::Instant::now();
         let feed_down = lock(&self.context.slot).feed_down_for(now)?;
         {
@@ -2673,7 +3066,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         let report = LostShowReport {
             at: Some(now_rfc3339()),
             feed_failed_seconds: Some(feed_down.as_secs()),
-            control_lost: Some(true),
+            control_lost: Some(control_lost),
         };
         match self
             .context
@@ -2733,7 +3126,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     }
 }
 
-pub(crate) async fn send_intent(
+async fn send_intent(
     tx: &mpsc::UnboundedSender<ControlRequest>,
     frame: Value,
     id: String,
@@ -2754,16 +3147,13 @@ pub(crate) async fn send_intent(
 
 /// `hold.image.set`, best effort: the runner draws its default card without
 /// one, so a refusal is a warning, never a failed start.
-async fn send_hold_image(
-    tx: &mpsc::UnboundedSender<ControlRequest>,
-    hold_image_png_base64: Option<String>,
-) {
+async fn send_hold_image(tx: &ControlHandle, hold_image_png_base64: Option<String>) {
     let Some(png) = hold_image_png_base64 else {
         return;
     };
     let id = new_intent_id();
     let frame = json!({ "t": "intent", "id": id, "kind": "hold.image.set", "pngBase64": png });
-    if let Err(problem) = send_intent(tx, frame, id, ACK_TIMEOUT).await {
+    if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
         tracing::warn!("Videorc Cloud did not take the hold image: {problem}");
     }
 }
@@ -3112,7 +3502,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         // Nothing is handed over until the node says welcome. A node that
         // cannot be reached has no keys, so direct is safe here (D11).
         let (transport, welcome) =
-            match connect_and_hello(self.connector.as_ref(), &created.control).await {
+            match self.open_control(&bearer, &show_id, &created.control).await {
                 Ok(connected) => connected,
                 Err(failure) => {
                     let _ = self.web.end_show(&bearer, &show_id).await;
@@ -3262,7 +3652,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// the start instead, because the runner may still hold the keys (C2).
     async fn hand_over(
         &self,
-        tx: &mpsc::UnboundedSender<ControlRequest>,
+        tx: &ControlHandle,
         bearer: &str,
         show_id: &str,
         destinations: &[HandoverDestination],
@@ -3271,16 +3661,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let id = new_intent_id();
         // The hand-over replaces the runner's legs (M3): a held show that
         // still runs a platform the host switched off since ends that leg.
-        let frame = destinations_set_frame(&id, destinations, true);
-        if let Err(problem) = send_intent(tx, frame, id, ACK_TIMEOUT).await {
+        let frame = self.destination_frame(destinations_set_frame(&id, destinations, true));
+        if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
+            lock(&self.slot).destinations_generation.stop();
             let end_id = new_intent_id();
-            let _ = send_intent(
-                tx,
-                intent_frame(&end_id, "show.end"),
-                end_id,
-                END_ACK_TIMEOUT,
-            )
-            .await;
+            let _ = tx
+                .intent(intent_frame(&end_id, "show.end"), end_id, END_ACK_TIMEOUT)
+                .await;
             let _ = self.web.end_show(bearer, show_id).await;
             let gone = match self.web.current_show(bearer).await {
                 Ok(current) => current
@@ -3410,39 +3797,47 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 show.ingest.clone(),
             )
         };
-        let (mut transport, mut welcome) =
-            match connect_and_hello(self.connector.as_ref(), &control).await {
-                Ok(connected) => connected,
-                Err(HelloFailure::NoSuchShow) => {
-                    lock(&self.slot).clear_show(Some("show-gone".to_string()));
+        // Plan 234: a show on a control transport this build does not know
+        // is neither gone nor lost. The resume fails before anything is
+        // asked or reported, and the show stays held.
+        if control.transport_kind() == ControlKind::Unknown {
+            bail!(
+                "This version of Videorc can't resume this Videorc Cloud show. Update Videorc, or end the show from videorc.com/live."
+            );
+        }
+        let (mut transport, mut welcome) = match self.open_control(bearer, show_id, &control).await
+        {
+            Ok(connected) => connected,
+            Err(HelloFailure::NoSuchShow) => {
+                lock(&self.slot).clear_show(Some("show-gone".to_string()));
+                self.hooks.emit_from(&self.slot);
+                return Ok(ResumeOutcome::ShowGone(show_id.to_string()));
+            }
+            Err(HelloFailure::BadToken) => {
+                bail!("Videorc Cloud refused the show token; try again.")
+            }
+            Err(HelloFailure::Transport(message)) => {
+                // Plan 222 review L4: a relaunched desktop has no socket
+                // loop to report the show lost from (D7), so the resume
+                // asks the lost route itself. The web probes the node
+                // and ends the show only when the node does not answer;
+                // then the show is gone and Go Live may start anew. Kept
+                // or unknown: the resume fails and the show stays
+                // resumable, never direct beside it.
+                if let Some(end_reason) = self.report_lost_on_resume(bearer, show_id).await {
+                    lock(&self.slot).clear_show(Some(end_reason));
                     self.hooks.emit_from(&self.slot);
                     return Ok(ResumeOutcome::ShowGone(show_id.to_string()));
                 }
-                Err(HelloFailure::BadToken) => {
-                    bail!("Videorc Cloud refused the show token; try again.")
-                }
-                Err(HelloFailure::Transport(message)) => {
-                    // Plan 222 review L4: a relaunched desktop has no socket
-                    // loop to report the show lost from (D7), so the resume
-                    // asks the lost route itself. The web probes the node
-                    // and ends the show only when the node does not answer;
-                    // then the show is gone and Go Live may start anew. Kept
-                    // or unknown: the resume fails and the show stays
-                    // resumable, never direct beside it.
-                    if let Some(end_reason) = self.report_lost_on_resume(bearer, show_id).await {
-                        lock(&self.slot).clear_show(Some(end_reason));
-                        self.hooks.emit_from(&self.slot);
-                        return Ok(ResumeOutcome::ShowGone(show_id.to_string()));
-                    }
-                    bail!("Videorc Cloud could not be reached to resume the show: {message}")
-                }
-            };
+                bail!("Videorc Cloud could not be reached to resume the show: {message}")
+            }
+        };
         // The web never stores ingest keys and this computer never persists
         // them, so after a relaunch the node hands the ingest back to the
         // show's owner over the authenticated socket (Wire shape: ingest.get).
         let ingest = match ingest.filter(|ingest| !ingest.is_empty()) {
             Some(ingest) => ingest,
-            None => match fetch_ingest_over(&mut transport, &mut welcome).await {
+            None => match transport.fetch_ingest(&mut welcome).await {
                 Ok(ingest) => ingest,
                 Err(problem) => {
                     transport.close().await;
@@ -3526,25 +3921,55 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// (plan 222 review M1): the runner may still hold the platforms, so the
     /// next launch or Go Live asks the web about it before any direct leg.
     pub async fn end_current_show(&self, bearer: Option<String>) -> Result<CloudStatus> {
-        let (show_id, tx) = {
+        let deadline =
+            tokio::time::Instant::now() + crate::cloud_control_web::CONTROL_INTENT_BUDGET;
+        let (show_id, tx, on_web_control) = {
             let mut runtime = lock(&self.slot);
             runtime.failed = None;
-            let Some(show_id) = runtime.show.as_ref().map(|show| show.record.id.clone()) else {
+            let Some((show_id, on_web_control)) = runtime.show.as_ref().map(|show| {
+                (
+                    show.record.id.clone(),
+                    show.control.transport_kind() == ControlKind::Web,
+                )
+            }) else {
                 return Ok(runtime.status());
             };
+            runtime.destinations_generation.stop();
             runtime.ending = true;
-            (show_id, runtime.control_tx.clone())
+            (show_id, runtime.control_tx.clone(), on_web_control)
         };
         self.hooks.emit_from(&self.slot);
         let mut confirmed = false;
         if let Some(tx) = tx {
             let id = new_intent_id();
-            confirmed = send_intent(&tx, intent_frame(&id, "show.end"), id, END_ACK_TIMEOUT)
+            confirmed = tx
+                .intent(intent_frame(&id, "show.end"), id, END_ACK_TIMEOUT)
                 .await
                 .is_ok();
         }
         if let Some(bearer) = bearer {
-            match self.web.end_show(&bearer, &show_id).await {
+            let destinations = lock(&self.slot).destinations_generation.clone();
+            // On web control this request is the show's only end (the
+            // intent above sends nothing), so it gets the route's one retry
+            // (plan 234, wire section 2). On the socket it stays one try.
+            let ended = if on_web_control {
+                tokio::time::timeout_at(deadline, async {
+                    let _stopping = destinations.stopping().await;
+                    crate::cloud_control_web::with_one_cloud_retry_until(deadline, || {
+                        self.web.end_show(&bearer, &show_id)
+                    })
+                    .await
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    Err(CloudApiError::Transport(
+                        "The cloud request timed out.".to_string(),
+                    ))
+                })
+            } else {
+                self.web.end_show(&bearer, &show_id).await
+            };
+            match ended {
                 Ok(()) => confirmed = true,
                 Err(error) => tracing::info!(
                     "Videorc Cloud end request failed (the runner's end stands): {error}"
@@ -3575,7 +4000,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// (an upsert since C2: a running leg is untouched). Nothing else is
     /// sent, and no other platform notices.
     pub async fn reconnect_destination(&self, target_id: &str) -> Result<CloudStatus> {
-        let (tx, destination) = {
+        let id = new_intent_id();
+        let (tx, frame) = {
             let runtime = lock(&self.slot);
             let Some(show) = runtime.show.as_ref() else {
                 bail!("No cloud show is running.");
@@ -3598,12 +4024,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let Some(tx) = runtime.control_tx.clone() else {
                 bail!("Videorc Cloud is not connected right now.");
             };
-            (tx, destination)
+            let frame = destinations_set_frame(&id, std::slice::from_ref(&destination), false);
+            let frame = if matches!(tx, ControlHandle::Web(_)) {
+                runtime.destinations_generation.stamp(frame)
+            } else {
+                frame
+            };
+            (tx, frame)
         };
-        let id = new_intent_id();
-        // Never `replace`: the other legs keep running (M3).
-        let frame = destinations_set_frame(&id, std::slice::from_ref(&destination), false);
-        if let Err(problem) = send_intent(&tx, frame, id, ACK_TIMEOUT).await {
+        if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
             bail!("Videorc Cloud did not take the reconnect: {problem}");
         }
         Ok(lock(&self.slot).status())
@@ -3657,7 +4086,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let Some(control) = current.control else {
             bail!("Videorc Cloud reported a live show without a control token.");
         };
-        let generation = {
+        // `Err` carries the generation of a fed show whose poll starts again.
+        let generation = 'held: {
             let mut runtime = lock(&self.slot);
             if runtime
                 .show
@@ -3670,7 +4100,21 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 // re-run launch check (L4) may answer after a room opened,
                 // and replacing the show would supersede the room's socket
                 // and forget its handed-over destinations.
-                return Ok(runtime.status());
+                //
+                // Plan 234 (wire section 3, the 401 row): one thing it may
+                // still give that show is its poll back. A refused sign-in
+                // stopped the poll and left the show held; this is the
+                // launch check of the sign-in that followed.
+                let poll_stopped = runtime.control_tx.is_none()
+                    && control.transport_kind() == ControlKind::Web
+                    && runtime
+                        .show
+                        .as_ref()
+                        .is_some_and(|active| active.record.id == show.id);
+                if !poll_stopped {
+                    return Ok(runtime.status());
+                }
+                break 'held Err(runtime.generation);
             }
             runtime.failed = None;
             runtime.show = Some(ActiveShow {
@@ -3683,10 +4127,18 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 hold_image_png_base64: None,
                 resuming: false,
             });
-            runtime.bump_generation()
+            Ok(runtime.bump_generation())
+        };
+        let generation = match generation {
+            Ok(generation) => generation,
+            Err(held) => {
+                self.poll_fed_show_again(bearer, show.id, control, held)
+                    .await;
+                return Ok(lock(&self.slot).status());
+            }
         };
         self.hooks.emit_from(&self.slot);
-        match connect_and_hello(self.connector.as_ref(), &control).await {
+        match self.open_control(bearer, &show.id, &control).await {
             Ok((transport, welcome)) => {
                 // L1: a Resume or Go Live that bound the show meanwhile owns
                 // the socket; this one closes instead of displacing it.
@@ -3714,6 +4166,38 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         }
         self.hooks.emit_from(&self.slot);
         Ok(lock(&self.slot).status())
+    }
+
+    /// Plan 234: the poll of a show on web control that a session still
+    /// feeds, started again with this sign-in. Nothing of the show changes:
+    /// its session, its destinations and its hand-over stay, and no
+    /// destination is sent. A poll that cannot start leaves the show as it
+    /// was; the next launch check tries again.
+    async fn poll_fed_show_again(
+        &self,
+        bearer: &str,
+        show_id: String,
+        control: ShowControl,
+        generation: u64,
+    ) {
+        let Ok((transport, first)) = self.open_control(bearer, &show_id, &control).await else {
+            // Unknown: the show stays held, and the next sign-in's launch
+            // check tries again.
+            lock(&self.slot).launch_checked = false;
+            return;
+        };
+        match install_control_loop_inner(
+            self,
+            bearer.to_string(),
+            control,
+            show_id,
+            transport,
+            first,
+            Some(InstallOnlyWhile::Uncontrolled(generation)),
+        ) {
+            Ok(_) => self.hooks.emit_from(&self.slot),
+            Err(mut transport) => transport.close().await,
+        }
     }
 
     /// `GET /api/cloud/allowance` for the Livestream page.
@@ -3913,6 +4397,7 @@ fn test_result_from_api_error(
         // Plan 224: a test never creates a talk show; these never reach it.
         CloudApiError::GuestHoursUsedUp { reset_at } => (CloudTestReason::Failed, reset_at.clone()),
         CloudApiError::RoomsUnavailable
+        | CloudApiError::Quality
         | CloudApiError::Unauthorized
         | CloudApiError::Other { .. } => (CloudTestReason::Failed, None),
     };
@@ -4251,11 +4736,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
     }
 
     async fn run_show(&mut self, created: &CreateShowResponse) -> Option<CloudTestResult> {
-        // 2. The socket, so the runner's own view of the feed is the measure.
+        // 2. The control transport, so the show's own view of the feed is
+        //    the measure: the runner's on the socket, the ingress's state on
+        //    web control (plan 234 D16).
         self.set_phase(CloudTestPhase::Connecting);
         let mut cancel = self.cancel.clone();
         let connected = tokio::select! {
-            connected = connect_and_hello(self.context.connector.as_ref(), &created.control) => connected,
+            connected = self.context.open_control(&self.bearer, &created.show.id, &created.control) => connected,
             _ = wait_canceled(&mut cancel) => return None,
         };
         let (mut transport, welcome) = match connected {
@@ -4320,6 +4807,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
         let mut timed_out = false;
         let mut ping = tokio::time::interval(PING_INTERVAL);
         ping.tick().await;
+        // Only a socket is pinged. On web control the branch is off, so a
+        // tick never drops a state poll that is in flight.
+        let pings = transport.pings();
         let deadline = tokio::time::sleep(TEST_DEADLINE);
         tokio::pin!(deadline);
         loop {
@@ -4333,28 +4823,22 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
                     }
                     None => break,
                 },
-                frame = transport.recv() => match frame {
-                    None | Some(ControlFrameIn::Closed { .. }) => {
-                        ended_by_runner.get_or_insert_with(|| "the control socket closed".to_string());
+                state = transport.next_state() => match state {
+                    Err(reason) => {
+                        ended_by_runner.get_or_insert(reason);
                         break;
                     }
-                    Some(ControlFrameIn::Text(text)) => {
-                        if let Ok(RunnerFrame::State { state } | RunnerFrame::Welcome { state }) =
-                            serde_json::from_str::<RunnerFrame>(&text)
-                        {
-                            observe(&state);
-                            if state.phase == "ended" {
-                                ended_by_runner = Some(
-                                    state.end_reason.clone().unwrap_or_else(|| "ended".to_string()),
-                                );
-                                break;
-                            }
+                    Ok(state) => {
+                        observe(&state);
+                        if state.phase == "ended" {
+                            ended_by_runner = Some(
+                                state.end_reason.clone().unwrap_or_else(|| "ended".to_string()),
+                            );
+                            break;
                         }
                     }
                 },
-                _ = ping.tick() => {
-                    let _ = transport.send(json!({ "t": "ping" })).await;
-                }
+                _ = ping.tick(), if pings => transport.ping().await,
                 _ = wait_canceled(&mut cancel) => {
                     canceled = true;
                     break;
@@ -4387,11 +4871,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
         // Whatever is still pushing dies with its future (kill_on_drop).
         pushes.shutdown().await;
 
-        // 4. The show ends on the socket; the web's end follows in the caller.
-        let id = new_intent_id();
-        if transport.send(intent_frame(&id, "show.end")).await.is_ok() {
-            let _ = await_ack(&mut transport, &id, END_ACK_TIMEOUT).await;
-        }
+        // 4. The show ends on the socket; the web's end follows in the
+        //    caller, and on web control it is the only one.
+        transport.end_show().await;
         transport.close().await;
         if canceled {
             return None;
@@ -4502,6 +4984,7 @@ mod tests {
             control: ShowControl {
                 url: "wss://eu-hel-1.live.videorc.com:9443/v1/shows/sh_abc/control".to_string(),
                 token: TOKEN.to_string(),
+                kind: None,
             },
             allowance: Some(AiCapabilitiesCloud {
                 enabled: true,
@@ -4579,6 +5062,84 @@ mod tests {
         guests: StdMutex<VecDeque<GuestsAnswer>>,
         decisions: StdMutex<Vec<(String, GuestDecision)>>,
         actions: StdMutex<Vec<(String, GuestActionBody)>>,
+        // Plan 234: web control, the managed show this web holds.
+        managed: StdMutex<FakeManaged>,
+        managed_changed: tokio::sync::Notify,
+    }
+
+    /// Plan 234: the managed show as the fake web holds it (web control). A
+    /// state poll answers as the wire's section 3 says: at once unless
+    /// `since` is the current `rev`, then when the `rev` grows or the wait
+    /// runs out.
+    #[derive(Default)]
+    struct FakeManaged {
+        rev: u64,
+        /// The `state` object, as the web sends it.
+        state: Value,
+        /// Answers for the next polls, before the long-poll: the failure
+        /// rows of section 3.
+        poll_errors: VecDeque<CloudApiError>,
+        /// Every poll: its `since` and when it was asked.
+        polls: Vec<(Option<u64>, tokio::time::Instant)>,
+        /// Every `PUT …/destinations` body, in order.
+        destinations: Vec<Value>,
+        /// Answers for the next destinations calls; then `{ ok, rev }`.
+        destinations_answers: VecDeque<std::result::Result<Value, DestinationsFailure>>,
+        /// Every `PUT …/hold-image` PNG, base64, in order.
+        hold_images: Vec<String>,
+        /// Every `PUT …/stage` body, in order.
+        stages: Vec<Value>,
+        /// Every `POST …/legs/end` body, in order.
+        legs_ends: Vec<Value>,
+        /// Every `POST …/recording` `on`, in order.
+        recordings: Vec<bool>,
+        /// Answers for the next stage, legs/end and recording calls, in the
+        /// order they are made; then `{ ok, rev }`.
+        route_errors: VecDeque<CloudApiError>,
+        /// `GET /api/cloud/recordings`, as the web answers it.
+        recording_list: Value,
+        /// The playlist `GET …/recordings/:id/playlist` answers, by id.
+        playlists: HashMap<String, String>,
+        /// Every playlist asked for, by recording id.
+        playlist_calls: Vec<String>,
+    }
+
+    impl FakeManaged {
+        /// The next scripted refusal, else `{ ok, rev }` at the current `rev`.
+        fn route_answer(&mut self) -> std::result::Result<ControlRevAnswer, CloudApiError> {
+            match self.route_errors.pop_front() {
+                Some(error) => Err(error),
+                None => Ok(ControlRevAnswer {
+                    rev: Some(self.rev),
+                }),
+            }
+        }
+    }
+
+    impl FakeWeb {
+        /// The managed show's next state: the `rev` grows by one and every
+        /// waiting poll answers.
+        fn set_state(&self, state: Value) {
+            {
+                let mut managed = self.managed.lock().unwrap();
+                managed.rev += 1;
+                managed.state = state;
+            }
+            self.managed_changed.notify_waiters();
+        }
+
+        /// The next polls fail with these, in order.
+        fn fail_polls(&self, errors: impl IntoIterator<Item = CloudApiError>) {
+            self.managed.lock().unwrap().poll_errors.extend(errors);
+        }
+
+        fn destination_bodies(&self) -> Vec<Value> {
+            self.managed.lock().unwrap().destinations.clone()
+        }
+
+        fn polls(&self) -> Vec<(Option<u64>, tokio::time::Instant)> {
+            self.managed.lock().unwrap().polls.clone()
+        }
     }
 
     impl CloudWebApi for FakeWeb {
@@ -4768,6 +5329,148 @@ mod tests {
                 }),
             })
         }
+
+        async fn control_state(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            since: Option<u64>,
+        ) -> std::result::Result<ControlStateAnswer, CloudApiError> {
+            {
+                let mut managed = self.managed.lock().unwrap();
+                managed.polls.push((since, tokio::time::Instant::now()));
+                if let Some(error) = managed.poll_errors.pop_front() {
+                    return Err(error);
+                }
+            }
+            // The calm wait: 25 s.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+            loop {
+                let changed = self.managed_changed.notified();
+                tokio::pin!(changed);
+                {
+                    let managed = self.managed.lock().unwrap();
+                    if since != Some(managed.rev) || tokio::time::Instant::now() >= deadline {
+                        return Ok(serde_json::from_value(
+                            json!({ "rev": managed.rev, "state": managed.state }),
+                        )
+                        .expect("a state answer parses"));
+                    }
+                }
+                tokio::select! {
+                    _ = &mut changed => {}
+                    _ = tokio::time::sleep_until(deadline) => {}
+                }
+            }
+        }
+
+        async fn set_destinations(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            body: &DestinationsBody,
+        ) -> std::result::Result<DestinationsAnswer, DestinationsFailure> {
+            let mut managed = self.managed.lock().unwrap();
+            managed.destinations.push(body.as_json().clone());
+            match managed.destinations_answers.pop_front() {
+                Some(Ok(answer)) => {
+                    Ok(serde_json::from_value(answer).expect("a destinations answer parses"))
+                }
+                Some(Err(failure)) => Err(failure),
+                None => Ok(DestinationsAnswer {
+                    rev: Some(managed.rev),
+                    refused: Vec::new(),
+                }),
+            }
+        }
+
+        async fn set_hold_image(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            png_base64: &str,
+        ) -> std::result::Result<(), CloudApiError> {
+            self.managed
+                .lock()
+                .unwrap()
+                .hold_images
+                .push(png_base64.to_string());
+            Ok(())
+        }
+
+        async fn set_stage(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            stage: &Value,
+        ) -> std::result::Result<ControlRevAnswer, CloudApiError> {
+            let mut managed = self.managed.lock().unwrap();
+            managed.stages.push(stage.clone());
+            managed.route_answer()
+        }
+
+        async fn end_legs(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            body: &DestinationsBody,
+        ) -> std::result::Result<ControlRevAnswer, CloudApiError> {
+            let mut managed = self.managed.lock().unwrap();
+            managed.legs_ends.push(body.as_json().clone());
+            managed.route_answer()
+        }
+
+        async fn set_recording(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            on: bool,
+        ) -> std::result::Result<ControlRevAnswer, CloudApiError> {
+            let mut managed = self.managed.lock().unwrap();
+            managed.recordings.push(on);
+            managed.route_answer()
+        }
+
+        async fn list_recordings(
+            &self,
+            _bearer: &str,
+        ) -> std::result::Result<Vec<CloudRecordingItem>, CloudApiError> {
+            let list = self.managed.lock().unwrap().recording_list.clone();
+            let answer: crate::cloud_control_web::CloudRecordingsAnswer =
+                serde_json::from_value(list).map_err(|error| CloudApiError::Other {
+                    status: 200,
+                    code: "malformed-response".to_string(),
+                    message: error.to_string(),
+                })?;
+            Ok(answer.recordings)
+        }
+
+        async fn recording_playlist(
+            &self,
+            _bearer: &str,
+            recording_id: &str,
+        ) -> std::result::Result<String, CloudApiError> {
+            let mut managed = self.managed.lock().unwrap();
+            managed.playlist_calls.push(recording_id.to_string());
+            managed
+                .playlists
+                .get(recording_id)
+                .cloned()
+                .ok_or_else(|| CloudApiError::Other {
+                    status: 404,
+                    code: "cloud-recording-not-found".to_string(),
+                    message: String::new(),
+                })
+        }
+        async fn recording_segment(
+            &self,
+            _url: &str,
+            path: &std::path::Path,
+        ) -> std::result::Result<(), crate::cloud_control_web::SegmentFetchError> {
+            tokio::fs::write(path, b"segment")
+                .await
+                .map_err(crate::cloud_control_web::SegmentFetchError::Storage)
+        }
     }
 
     /// The node's end of one faked socket.
@@ -4886,6 +5589,8 @@ mod tests {
         camera_busy: Arc<std::sync::atomic::AtomicBool>,
         /// Plan 224: every `cloud.room.requests` event.
         requests: Arc<StdMutex<Vec<crate::cloud_talk::CloudRoomRequest>>>,
+        /// Plan 234 T3: every `cloud.room.overlay` event, in order.
+        overlays: Arc<StdMutex<Vec<crate::cloud_talk::CloudRoomOverlayEvent>>>,
     }
 
     fn harness(entitled: bool) -> Harness {
@@ -4900,6 +5605,7 @@ mod tests {
         let camera = Arc::new(StdMutex::new(Vec::new()));
         let camera_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let requests = Arc::new(StdMutex::new(Vec::new()));
+        let overlays = Arc::new(StdMutex::new(Vec::new()));
         let hooks = CloudHooks {
             emit: {
                 let emitted = emitted.clone();
@@ -4939,6 +5645,10 @@ mod tests {
                 let requests = requests.clone();
                 Arc::new(move |request| requests.lock().unwrap().push(request))
             },
+            overlay: {
+                let overlays = overlays.clone();
+                Arc::new(move |overlay| overlays.lock().unwrap().push(overlay))
+            },
         };
         let slot = new_cloud_show_slot_remembering(
             CloudSettings::default(),
@@ -4968,6 +5678,7 @@ mod tests {
             camera,
             camera_busy,
             requests,
+            overlays,
         }
     }
 
@@ -7403,6 +8114,7 @@ mod tests {
         let stale_control = ShowControl {
             url: "wss://eu-hel-1.live.videorc.com:9443/v1/shows/sh_old/control".to_string(),
             token: TOKEN.to_string(),
+            kind: None,
         };
         let web = &harness.context.web;
         web.create_queue
@@ -9928,5 +10640,2533 @@ mod tests {
             let json = serde_json::to_value(&status).unwrap();
             assert!(json["show"].get("kind").is_none(), "{json}");
         }
+    }
+
+    // --- Plan 234: web control (C2) ----------------------------------------------
+    //
+    // A managed show: the media runs on LiveKit Cloud, there is no node, and
+    // the show's control is HTTPS on videorc.com (`cloud_control_web.rs`).
+    // These replay the exchanges of `docs/cloud/managed-media-wire.md`
+    // against the fake web above. No socket ever opens.
+
+    /// LiveKit's RTMPS ingress as a managed create answers it.
+    const LIVEKIT_INGEST: &str = "rtmps://videorc-abc123.rtmp.livekit.cloud/x";
+
+    /// A managed create answer (wire section 1): web control, LiveKit's
+    /// ingress as the ingest, `nodeId: "livekit"`, no socket and no token.
+    fn created_managed() -> CreateShowResponse {
+        serde_json::from_value(json!({
+            "show": {
+                "id": "sh_abc", "status": "ready", "kind": "solo", "nodeId": "livekit",
+                "createdAt": "2026-11-13T20:00:00.000Z", "startedAt": null, "phaseSinceAt": null,
+                "lastSeenAt": null, "endedAt": null, "endReason": null,
+                "expiresAt": "2026-11-14T07:55:00.000Z", "holdMaxSeconds": 1800
+            },
+            "ingest": [{
+                "orientation": "horizontal", "serverUrl": LIVEKIT_INGEST, "streamKey": INGEST_KEY
+            }],
+            "control": { "kind": "web", "url": "", "token": "" },
+            "allowance": { "enabled": true, "secondsPerMonth": 36000, "secondsUsed": 1200 }
+        }))
+        .expect("a managed create answer parses")
+    }
+
+    /// What `GET current` lists for the managed show while it is open.
+    fn managed_current(status: &str) -> CurrentShowResponse {
+        let created = created_managed();
+        CurrentShowResponse {
+            show: Some(ShowRecord {
+                status: status.to_string(),
+                ..created.show
+            }),
+            control: Some(created.control),
+            ingest: Some(created.ingest),
+        }
+    }
+
+    fn managed_outputs() -> Vec<ShowOutputSpec> {
+        vec![ShowOutputSpec {
+            orientation: StreamOutputOrientation::Horizontal,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            video_kbps: 6000,
+            audio_kbps: 160,
+        }]
+    }
+
+    /// A managed show's `state` (wire section 3): an egress runs while it
+    /// has legs.
+    fn managed_state(phase: &str, legs: Value) -> Value {
+        let has_legs = legs.as_array().is_some_and(|legs| !legs.is_empty());
+        json!({
+            "phase": phase, "liveSeconds": 3,
+            "feeds": [{ "orientation": "horizontal", "connected": phase == "live" }],
+            "legs": legs, "destinationsSet": has_legs, "restarts": 0,
+            "holdImageSet": false, "desktopConnected": true
+        })
+    }
+
+    /// A managed show whose streaming egress ended by itself `restarts` times.
+    fn managed_state_without_egress(restarts: u32) -> Value {
+        let mut state = managed_state("live", json!([]));
+        state["restarts"] = json!(restarts);
+        state
+    }
+
+    fn web_error(status: u16, code: &str) -> CloudApiError {
+        CloudApiError::Other {
+            status,
+            code: code.to_string(),
+            message: String::new(),
+        }
+    }
+
+    /// A real PNG, small: what a picked takeover screen comes to.
+    fn tiny_png_base64() -> String {
+        use base64::Engine as _;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([13, 13, 15, 255]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    }
+
+    /// Go Live through a managed show, up to both legs live: the create,
+    /// the first state, the hand-over, then the page on air.
+    async fn managed_live_show(harness: &Harness) {
+        let web = &harness.context.web;
+        *web.create.lock().unwrap() = Some(Ok(created_managed()));
+        web.set_state(managed_state("starting", json!([])));
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Cloud(_)));
+        web.set_state(managed_state("live", live_legs()));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+    }
+
+    /// Wire section 1: `control.kind` picks the transport. No kind is the
+    /// node socket, `web` is web control, and anything else is a transport
+    /// this build does not know.
+    #[test]
+    fn the_create_answers_control_kind_picks_the_transport() {
+        let managed = created_managed();
+        assert_eq!(managed.control.transport_kind(), ControlKind::Web);
+        assert_eq!(managed.control.url, "");
+        assert_eq!(managed.show.node_id, "livekit");
+        assert_eq!(created().control.transport_kind(), ControlKind::Node);
+        let node: ShowControl =
+            serde_json::from_value(json!({ "url": "wss://node.test/control", "token": TOKEN }))
+                .unwrap();
+        assert_eq!(node.kind, None);
+        assert_eq!(node.transport_kind(), ControlKind::Node);
+        let unknown: ShowControl =
+            serde_json::from_value(json!({ "kind": "quic", "url": "", "token": TOKEN })).unwrap();
+        assert_eq!(unknown.transport_kind(), ControlKind::Unknown);
+        assert!(!format!("{unknown:?}").contains(TOKEN));
+        // The managed `current` answer of section 2.1 parses, with its ingest.
+        let current: CurrentShowResponse = serde_json::from_value(json!({
+            "show": { "id": "sh_abc", "status": "hold", "kind": "solo", "nodeId": "livekit" },
+            "control": { "kind": "web", "url": "", "token": "" },
+            "ingest": [{ "orientation": "horizontal", "serverUrl": LIVEKIT_INGEST, "streamKey": INGEST_KEY }]
+        }))
+        .unwrap();
+        assert_eq!(current.control.unwrap().transport_kind(), ControlKind::Web);
+        assert_eq!(current.ingest.unwrap()[0].server_url, LIVEKIT_INGEST);
+    }
+
+    // The whole solo show over web control: create, the first state, the
+    // hand-over as `PUT …/destinations`, the page on air, a hold and the
+    // return, and Stop. The status is what a node show's would be.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_show_goes_live_over_web_control_holds_returns_and_stops() {
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed()));
+        web.set_state(managed_state("starting", json!([])));
+        let png = tiny_png_base64();
+
+        // 1. The create answers `control.kind: "web"`. The first state is
+        //    asked without `since` (the socket's welcome), then the
+        //    destinations and the hold image go, each as its own request.
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                Some(png.clone()),
+            )
+            .await
+            .unwrap();
+        let PrepareOutcome::Cloud(handover) = outcome else {
+            panic!("expected a cloud hand-over");
+        };
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(handover.ingest[0].server_url, LIVEKIT_INGEST);
+        assert_eq!(handover.ingest[0].stream_key, INGEST_KEY);
+        assert_eq!(
+            harness.context.connector.connects.load(Ordering::SeqCst),
+            0,
+            "a managed show opens no socket"
+        );
+        {
+            let managed = web.managed.lock().unwrap();
+            assert_eq!(managed.polls[0].0, None, "the first state has no since");
+            assert_eq!(managed.destinations.len(), 1);
+            let body = &managed.destinations[0];
+            // The frame's fields and nothing of the frame itself.
+            assert_eq!(body["replace"], true, "the hand-over replaces (M3)");
+            assert_eq!(body["destinations"][0]["id"], "youtube-main");
+            assert_eq!(body["destinations"][0]["platform"], "youtube");
+            assert_eq!(body["destinations"][0]["label"], "YouTube");
+            assert_eq!(body["destinations"][0]["orientation"], "horizontal");
+            assert_eq!(
+                body["destinations"][0]["url"],
+                format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}")
+            );
+            assert_eq!(body["destinations"][1]["id"], "twitch-main");
+            for socket_only in ["t", "id", "kind"] {
+                assert!(body.get(socket_only).is_none(), "{socket_only} in {body}");
+            }
+            assert_eq!(managed.hold_images, vec![png.clone()]);
+        }
+        {
+            let status = lock(&harness.context.slot).status();
+            assert_eq!(status.phase, CloudPhase::Connecting);
+            assert_eq!(status.session_id.as_deref(), Some("session-1"));
+            let show = status.show.as_ref().unwrap();
+            assert_eq!(show.id, "sh_abc");
+            assert_eq!(show.node_id, "livekit");
+            assert!(!show.resumable);
+            assert!(status.connected);
+            assert_eq!(status.allowance.as_ref().unwrap().seconds_used, 1_200);
+        }
+        assert_eq!(
+            *harness.remembered.lock().unwrap(),
+            vec![Some("sh_abc".to_string())]
+        );
+
+        // 2. The page's first decoded frame: live, and the legs reach the
+        //    session's leg model. A feed without a reading has no kbps.
+        web.set_state(json!({
+            "phase": "live", "liveSeconds": 3,
+            "feeds": [{ "orientation": "horizontal", "connected": true }],
+            "legs": [
+                { "id": "youtube-main", "platform": "youtube", "label": "YouTube", "orientation": "horizontal",
+                  "state": "live", "since": "2026-11-13T20:00:07.000Z" },
+                { "id": "twitch-main", "platform": "twitch", "label": "Twitch", "orientation": "horizontal",
+                  "state": "connecting" }
+            ],
+            "destinationsSet": true, "restarts": 0, "holdImageSet": true, "desktopConnected": true,
+            "program": { "audioRmsDb": -23.5, "audioSilentSeconds": 0, "blackSeconds": 0 }
+        }));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+        {
+            let legs = harness.legs.lock().unwrap();
+            let (session, runtime) = legs.last().expect("legs reached the session");
+            assert_eq!(session, "session-1");
+            assert_eq!(runtime[0].target_id, "youtube-main");
+            assert_eq!(runtime[0].state, StreamTargetState::Live);
+            assert_eq!(runtime[1].state, StreamTargetState::Connecting);
+        }
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.feeds[0].kbps, None);
+        assert_eq!(status.live_seconds, Some(3));
+        assert_eq!(status.program.unwrap().audio_silent_seconds, Some(0));
+        assert_eq!(status.restart, None);
+        // The watchdog reads the program block, as on a node show.
+        assert!(
+            lock(&harness.context.slot)
+                .watchdog_signal("session-1")
+                .is_some()
+        );
+
+        // 3. The feed drops: the page holds, the legs stay up.
+        web.set_state(json!({
+            "phase": "hold", "liveSeconds": 40,
+            "hold": { "active": true, "since": "2026-11-13T20:20:34.000Z", "reason": "feed-lost", "remainingSeconds": 1741 },
+            "feeds": [{ "orientation": "horizontal", "connected": false }],
+            "legs": live_legs(),
+            "destinationsSet": true, "restarts": 0, "holdImageSet": true, "desktopConnected": true,
+            "program": { "audioRmsDb": -100.0, "audioSilentSeconds": 3, "blackSeconds": 0 }
+        }));
+        wait_for_phase(&harness.context.slot, CloudPhase::Hold).await;
+        let status = lock(&harness.context.slot).status();
+        let hold = status.hold.as_ref().unwrap();
+        assert_eq!(hold.remaining_seconds, Some(1741));
+        assert_eq!(hold.reason.as_deref(), Some("feed-lost"));
+        assert!(!status.direct_fallback_available);
+
+        // 4. The feed is back: the page fades back and says live.
+        web.set_state(managed_state("live", live_legs()));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+        assert_eq!(lock(&harness.context.slot).status().hold, None);
+        // Every poll after the first names the last `rev` it saw.
+        let polls = web.polls();
+        assert!(polls.len() >= 4, "{polls:?}");
+        let revs: Vec<u64> = polls[1..].iter().map(|(since, _)| since.unwrap()).collect();
+        assert!(revs.windows(2).all(|pair| pair[0] <= pair[1]), "{revs:?}");
+        // Nothing but the hand-over sent destinations.
+        assert_eq!(web.destination_bodies().len(), 1);
+
+        // 5. Stop: `POST …/end`, once, and Off. There is no `show.end`.
+        harness
+            .context
+            .on_session_stopped("session-1", Some("bearer".to_string()))
+            .await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Off);
+        assert_eq!(status.show, None);
+        assert_eq!(status.end_reason.as_deref(), Some("ended-by-host"));
+        assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_abc".to_string()]);
+        assert_eq!(
+            *harness.remembered.lock().unwrap(),
+            vec![Some("sh_abc".to_string()), None]
+        );
+        let phases: Vec<CloudPhase> = harness
+            .emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|status| status.phase)
+            .collect();
+        for phase in [
+            CloudPhase::Connecting,
+            CloudPhase::Live,
+            CloudPhase::Hold,
+            CloudPhase::Ending,
+        ] {
+            assert!(phases.contains(&phase), "{phase:?} in {phases:?}");
+        }
+        assert_eq!(phases.last(), Some(&CloudPhase::Off));
+        // The poll stopped with the show.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let polled = web.polls().len();
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(web.polls().len(), polled);
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+    }
+
+    // Wire section 15: one of several destinations dies. Its leg reads
+    // `failed` with the web's fixed message, and the watchdog's Reconnect is
+    // `PUT …/destinations` with that one id and no `replace`.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_leg_on_a_managed_show_is_reconnected_with_that_one_destination() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        web.set_state(managed_state(
+            "live",
+            json!([
+                { "id": "youtube-main", "platform": "youtube", "label": "YouTube", "orientation": "horizontal", "state": "live" },
+                { "id": "twitch-main", "platform": "twitch", "label": "Twitch", "orientation": "horizontal",
+                  "state": "failed", "error": "Could not connect to the platform." }
+            ]),
+        ));
+        wait_until(|| {
+            harness
+                .legs
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|(_, rows)| {
+                    rows.iter()
+                        .any(|row| row.state == StreamTargetState::Failed)
+                })
+        })
+        .await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Live);
+        assert_eq!(status.legs[0].state, StreamTargetState::Live);
+        assert_eq!(status.legs[1].state, StreamTargetState::Failed);
+        assert_eq!(
+            status.legs[1].message.as_deref(),
+            Some("Could not connect to the platform.")
+        );
+        // Nothing went by itself: a failed leg waits for the host.
+        assert_eq!(web.destination_bodies().len(), 1);
+
+        harness
+            .context
+            .reconnect_destination("twitch-main")
+            .await
+            .unwrap();
+        let bodies = web.destination_bodies();
+        assert_eq!(bodies.len(), 2);
+        let reconnect = &bodies[1];
+        assert_eq!(reconnect["destinations"].as_array().unwrap().len(), 1);
+        assert_eq!(reconnect["destinations"][0]["id"], "twitch-main");
+        assert_eq!(
+            reconnect["destinations"][0]["url"],
+            format!("rtmp://live.twitch.tv/app/{TWITCH_KEY}")
+        );
+        assert!(
+            reconnect.get("replace").is_none(),
+            "a reconnect never replaces: the other legs keep running"
+        );
+        // A target this show never had sends nothing.
+        assert!(harness.context.reconnect_destination("nope").await.is_err());
+        assert_eq!(web.destination_bodies().len(), 2);
+    }
+
+    // Wire section 8.4: a show's only stream dies and LiveKit reports
+    // nothing. The web flags the leg `resend`, and the desktop, which holds
+    // the address, sends that one destination again by itself: without
+    // `replace`, and at most once per leg in 30 s.
+    #[tokio::test(start_paused = true)]
+    async fn a_leg_that_asks_for_its_address_gets_it_again_once_in_thirty_seconds() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        let asking = |live_seconds: u64| {
+            let mut state = managed_state(
+                "live",
+                json!([
+                    { "id": "youtube-main", "platform": "youtube", "label": "YouTube", "orientation": "horizontal",
+                      "state": "reconnecting", "resend": true },
+                    { "id": "twitch-main", "platform": "twitch", "label": "Twitch", "orientation": "horizontal", "state": "live" },
+                    // A leg this computer holds no address for: the web's to give up on.
+                    { "id": "kick-main", "platform": "kick", "label": "Kick", "orientation": "horizontal",
+                      "state": "reconnecting", "resend": true }
+                ]),
+            );
+            state["liveSeconds"] = json!(live_seconds);
+            state
+        };
+        web.set_state(asking(10));
+        wait_until(|| web.destination_bodies().len() == 2).await;
+        let resend = &web.destination_bodies()[1];
+        assert_eq!(resend["destinations"].as_array().unwrap().len(), 1);
+        assert_eq!(resend["destinations"][0]["id"], "youtube-main");
+        assert_eq!(
+            resend["destinations"][0]["url"],
+            format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}")
+        );
+        assert!(resend.get("replace").is_none());
+        // The leg shows as reconnecting; `resend` never reaches the status.
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.legs[0].state, StreamTargetState::Reconnecting);
+        assert!(!serde_json::to_string(&status).unwrap().contains("resend"));
+
+        // Still asking a moment later, in a new state: not again yet.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        web.set_state(asking(20));
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(web.destination_bodies().len(), 2);
+
+        // Thirty seconds after the first, it goes again, once.
+        tokio::time::sleep(Duration::from_secs(16)).await;
+        web.set_state(asking(41));
+        wait_until(|| web.destination_bodies().len() == 3).await;
+        assert_eq!(
+            web.destination_bodies()[2]["destinations"][0]["id"],
+            "youtube-main"
+        );
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(web.destination_bodies().len(), 3);
+    }
+
+    // Wire section 15: the egress dies. The state shows no legs,
+    // `destinationsSet: false` and `restarts` up by one, and the desktop
+    // sends the whole list again without `replace`, as it does after a
+    // runner restart. The host reads "Videorc Cloud restarted your show".
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_show_whose_egress_died_gets_the_whole_list_again() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+
+        web.set_state(managed_state_without_egress(1));
+        wait_until(|| web.destination_bodies().len() == 2).await;
+        let again = &web.destination_bodies()[1];
+        assert_eq!(again["destinations"].as_array().unwrap().len(), 2);
+        assert_eq!(again["destinations"][0]["id"], "youtube-main");
+        assert_eq!(again["destinations"][1]["id"], "twitch-main");
+        assert!(again.get("replace").is_none(), "the upsert, never replace");
+        let restart = lock(&harness.context.slot).status().restart.unwrap();
+        assert!(restart.destinations_resent);
+        {
+            let legs = harness.legs.lock().unwrap();
+            let (_, rows) = legs.last().unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert_eq!(row.state, StreamTargetState::Reconnecting);
+                assert_eq!(
+                    row.message.as_deref(),
+                    Some("Videorc Cloud restarted your show.")
+                );
+            }
+        }
+        // The same state again (a poll's wait ran out) sends nothing more.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(web.destination_bodies().len(), 2);
+
+        // The new egress starts: the legs are back, and nothing is sent.
+        let mut back = managed_state("live", live_legs());
+        back["restarts"] = json!(1);
+        web.set_state(back);
+        wait_until(|| {
+            let legs = lock(&harness.context.slot).status().legs;
+            legs.len() == 2 && legs.iter().all(|leg| leg.state == StreamTargetState::Live)
+        })
+        .await;
+        assert_eq!(web.destination_bodies().len(), 2);
+
+        // It dies again: the list goes again.
+        web.set_state(managed_state_without_egress(2));
+        wait_until(|| web.destination_bodies().len() == 3).await;
+        let mut back = managed_state("live", live_legs());
+        back["restarts"] = json!(2);
+        web.set_state(back);
+        wait_until(|| {
+            let legs = lock(&harness.context.slot).status().legs;
+            legs.len() == 2 && legs.iter().all(|leg| leg.state == StreamTargetState::Live)
+        })
+        .await;
+        assert!(
+            lock(&harness.context.slot)
+                .status()
+                .restart
+                .is_some_and(|restart| restart.destinations_resent)
+        );
+
+        // A third time, and LiveKit refuses the new egress on both tries
+        // (the route's one retry, 1 s later): the restart is unrecovered.
+        let refusal = || DestinationsFailure {
+            error: web_error(503, "cloud-media-unavailable"),
+            refused: Vec::new(),
+        };
+        web.managed
+            .lock()
+            .unwrap()
+            .destinations_answers
+            .extend([Err(refusal()), Err(refusal())]);
+        web.set_state(managed_state_without_egress(3));
+        wait_until(|| {
+            lock(&harness.context.slot)
+                .status()
+                .restart
+                .is_some_and(|restart| !restart.destinations_resent)
+        })
+        .await;
+        assert_eq!(web.destination_bodies().len(), 5);
+        // Never direct beside a show the web still lists.
+        let status = lock(&harness.context.slot).status();
+        assert!(!status.direct_fallback_available);
+        assert_eq!(status.show.as_ref().unwrap().id, "sh_abc");
+    }
+
+    // A state and an intent's answer are two requests, so they can arrive
+    // in either order. A state the web built before the hand-over took
+    // effect, arriving after its answer, is dropped: it is not an egress
+    // that died, and nothing is sent again.
+    #[tokio::test(start_paused = true)]
+    async fn a_state_read_before_the_hand_over_is_not_a_restart() {
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed()));
+        web.set_state(managed_state("starting", json!([])));
+        // The hand-over's answer names the `rev` it produced: 3.
+        web.managed
+            .lock()
+            .unwrap()
+            .destinations_answers
+            .push_back(Ok(json!({ "ok": true, "rev": 3 })));
+        harness
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        // `rev` 2 was read before it: still no egress.
+        web.set_state(managed_state("starting", json!([])));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(lock(&harness.context.slot).status().restart, None);
+        assert_eq!(web.destination_bodies().len(), 1);
+        // `rev` 3 is the hand-over's own state, and it is taken.
+        web.set_state(managed_state(
+            "starting",
+            json!([
+                { "id": "youtube-main", "platform": "youtube", "label": "YouTube", "orientation": "horizontal", "state": "connecting" },
+                { "id": "twitch-main", "platform": "twitch", "label": "Twitch", "orientation": "horizontal", "state": "connecting" }
+            ]),
+        ));
+        wait_until(|| lock(&harness.context.slot).status().legs.len() == 2).await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.restart, None);
+        assert_eq!(status.legs[0].state, StreamTargetState::Connecting);
+        assert_eq!(web.destination_bodies().len(), 1);
+    }
+
+    // Wire section 3, the last row: a 5xx, a timeout or a network error.
+    // Back off 1, 2, 4, 8, then 15 s; from the second failure ask `current`
+    // after each one; unknown is never "gone". The status says not
+    // connected from the first failure, and connected at the next 200.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_poll_backs_off_and_unknown_is_never_gone() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        let asked_before = web.current_calls.load(Ordering::SeqCst);
+        web.fail_polls([
+            web_error(503, "cloud-media-unavailable"),
+            CloudApiError::Transport("timed out".to_string()),
+            web_error(500, "internal"),
+            CloudApiError::Transport("connection reset".to_string()),
+            web_error(502, "bad-gateway"),
+            CloudApiError::Full,
+        ]);
+        let first = web.polls().len();
+        // A new state releases the poll that is waiting; the next six fail.
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| !lock(&harness.context.slot).status().connected).await;
+        // Not connected, and nothing else: the show, its session and its
+        // legs stay, and direct never opens.
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Connecting);
+        assert!(!status.direct_fallback_available);
+        assert_eq!(status.session_id.as_deref(), Some("session-1"));
+        assert_eq!(status.legs.len(), 2);
+
+        wait_until_within(60, || lock(&harness.context.slot).status().connected).await;
+        let polls = web.polls();
+        let failed = &polls[first..first + 6];
+        let recovered = &polls[first + 6];
+        let gaps: Vec<u64> = polls[first..first + 7]
+            .windows(2)
+            .map(|pair| (pair[1].1 - pair[0].1).as_secs())
+            .collect();
+        assert_eq!(gaps, vec![1, 2, 4, 8, 15, 15]);
+        // The first failed poll still named the last `rev`; after a failure
+        // the next asks without one, which the web answers at once.
+        assert!(failed[0].0.is_some());
+        assert!(failed[1..].iter().all(|(since, _)| since.is_none()));
+        assert_eq!(recovered.0, None);
+        // `current` was asked after the second failure and each one after.
+        assert_eq!(web.current_calls.load(Ordering::SeqCst) - asked_before, 5);
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Live);
+        assert_eq!(status.show.as_ref().unwrap().id, "sh_abc");
+        assert_eq!(web.destination_bodies().len(), 1, "nothing was re-sent");
+        assert!(web.lost_calls.lock().unwrap().is_empty());
+    }
+
+    // Wire section 3, the 404 row: ask `current`. Listed there: back off
+    // and poll again. Gone there too: the show is gone, and only then may
+    // the session stream directly.
+    #[tokio::test(start_paused = true)]
+    async fn a_404_from_the_state_route_asks_current_before_the_show_is_gone() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("live")));
+        web.fail_polls([web_error(404, "cloud-show-not-found")]);
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| !lock(&harness.context.slot).status().connected).await;
+        wait_until_within(10, || lock(&harness.context.slot).status().connected).await;
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Live);
+        assert_eq!(web.current_calls.load(Ordering::SeqCst), 1);
+
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse::default()));
+        web.fail_polls([web_error(404, "cloud-show-not-found")]);
+        web.set_state(managed_state("live", live_legs()));
+        wait_for_phase(&harness.context.slot, CloudPhase::Failed).await;
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.end_reason.as_deref(), Some("show-gone"));
+        assert!(status.direct_fallback_available);
+        assert_eq!(status.show, None);
+    }
+
+    // Wire section 3: a 200 that says `phase: "ended"` and a 409
+    // `cloud-show-ended` are the same end. The platform rows stop with the
+    // reason, and nothing polls afterwards.
+    #[tokio::test(start_paused = true)]
+    async fn an_ended_managed_show_stops_the_rows_and_the_poll() {
+        let by_state = harness(true);
+        managed_live_show(&by_state).await;
+        let web = by_state.context.web.clone();
+        web.set_state(json!({
+            "phase": "ended", "endReason": "hold-limit", "liveSeconds": 1900, "feeds": [], "legs": []
+        }));
+        wait_for_phase(&by_state.context.slot, CloudPhase::Off).await;
+        let status = lock(&by_state.context.slot).status();
+        assert_eq!(status.end_reason.as_deref(), Some("hold-limit"));
+        assert_eq!(status.show, None);
+        {
+            let legs = by_state.legs.lock().unwrap();
+            let (_, rows) = legs.last().unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert_eq!(row.state, StreamTargetState::Stopped);
+                assert_eq!(
+                    row.message.as_deref(),
+                    Some("Videorc Cloud ended the show: the hold ran past its limit.")
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let polled = web.polls().len();
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(web.polls().len(), polled);
+        // Ended by the web: nothing is left to remember, and nobody calls
+        // `POST …/end` for it.
+        assert_eq!(by_state.remembered.lock().unwrap().last(), Some(&None));
+        assert!(web.end_calls.lock().unwrap().is_empty());
+
+        let by_refusal = harness(true);
+        managed_live_show(&by_refusal).await;
+        let web = by_refusal.context.web.clone();
+        web.fail_polls([web_error(409, "cloud-show-ended")]);
+        web.set_state(managed_state("live", live_legs()));
+        wait_for_phase(&by_refusal.context.slot, CloudPhase::Off).await;
+        let status = lock(&by_refusal.context.slot).status();
+        assert_eq!(status.show, None);
+        assert!(!status.direct_fallback_available);
+        assert_eq!(
+            by_refusal.legs.lock().unwrap().last().unwrap().1[0].state,
+            StreamTargetState::Stopped
+        );
+    }
+
+    // Wire section 3, the 401 row: stop polling. The show stays held, with
+    // its session, and the next sign-in owes a launch check. Stop still
+    // ends it through the web.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_sign_in_stops_the_poll_and_keeps_the_show() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        lock(&harness.context.slot).launch_checked = true;
+        web.fail_polls([CloudApiError::Unauthorized]);
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| lock(&harness.context.slot).control_tx.is_none()).await;
+        let status = lock(&harness.context.slot).status();
+        assert!(!status.connected);
+        assert_eq!(status.phase, CloudPhase::Connecting);
+        assert_eq!(status.show.as_ref().unwrap().id, "sh_abc");
+        assert_eq!(status.session_id.as_deref(), Some("session-1"));
+        assert!(!status.direct_fallback_available);
+        assert!(launch_check_due(&lock(&harness.context.slot), true));
+        let polled = web.polls().len();
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(web.polls().len(), polled, "polling stopped");
+        assert_eq!(web.current_calls.load(Ordering::SeqCst), 0);
+        // No control: a Reconnect says so and sends nothing.
+        assert!(
+            harness
+                .context
+                .reconnect_destination("twitch-main")
+                .await
+                .is_err()
+        );
+        assert_eq!(web.destination_bodies().len(), 1);
+        harness
+            .context
+            .on_session_stopped("session-1", Some("fresh-bearer".to_string()))
+            .await;
+        assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_abc".to_string()]);
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+    }
+
+    // Wire section 3, the 409 `cloud-control-mismatch` row: ask `current`
+    // and use the control it names. Web control named again: back off and
+    // poll. The node socket named: the show's control starts over on it,
+    // with its session and its hand-over untouched.
+    #[tokio::test(start_paused = true)]
+    async fn a_control_mismatch_follows_the_control_current_names() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("live")));
+        web.fail_polls([web_error(409, "cloud-control-mismatch")]);
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| !lock(&harness.context.slot).status().connected).await;
+        wait_until_within(10, || lock(&harness.context.slot).status().connected).await;
+        assert!(matches!(
+            lock(&harness.context.slot).control_tx,
+            Some(ControlHandle::Web(_))
+        ));
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+
+        let mut on_a_node = managed_current("live");
+        on_a_node.control = Some(created().control);
+        web.current.lock().unwrap().push_back(Ok(on_a_node));
+        web.fail_polls([web_error(409, "cloud-control-mismatch")]);
+        web.set_state(managed_state("live", live_legs()));
+        let mut server = harness.context.connector.accept().await;
+        let hello = server.next_frame().await;
+        assert_eq!(hello["t"], "hello");
+        assert_eq!(hello["token"], TOKEN);
+        server.send(welcome_with_legs("live"));
+        wait_until(|| {
+            matches!(
+                lock(&harness.context.slot).control_tx,
+                Some(ControlHandle::Node(_))
+            )
+        })
+        .await;
+        let runtime = lock(&harness.context.slot);
+        let show = runtime.show.as_ref().unwrap();
+        assert_eq!(show.control.transport_kind(), ControlKind::Node);
+        assert_eq!(show.session_id.as_deref(), Some("session-1"));
+        assert!(show.handed_over);
+        assert_eq!(show.destinations.len(), 2);
+        assert_eq!(runtime.status().phase, CloudPhase::Live);
+        assert_eq!(runtime.status().restart, None);
+    }
+
+    // Wire section 15: the desktop posts `lost` when its own feed leg has
+    // been down 20 s, whatever the last poll said, with `controlLost`
+    // saying whether that poll failed. Direct opens only when the web's
+    // answer says the show ended.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_shows_lost_feed_is_reported_whatever_the_poll_says() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        for _ in 0..40 {
+            web.current
+                .lock()
+                .unwrap()
+                .push_back(Ok(managed_current("hold")));
+        }
+
+        // The poll is healthy and the feed leg is down: reported at 20 s,
+        // and the web keeps the show (the room exists; the hold covers it).
+        web.lost
+            .lock()
+            .unwrap()
+            .push_back(Ok(lost_answer("hold", None)));
+        note_feed_leg(&harness.context.slot, "session-1", true);
+        tokio::time::sleep(Duration::from_secs(19)).await;
+        assert!(web.lost_calls.lock().unwrap().is_empty());
+        wait_until_within(5, || web.lost_calls.lock().unwrap().len() == 1).await;
+        {
+            let calls = web.lost_calls.lock().unwrap();
+            let (show_id, report) = &calls[0];
+            assert_eq!(show_id, "sh_abc");
+            assert_eq!(report.control_lost, Some(false));
+            assert_eq!(report.feed_failed_seconds, Some(20));
+        }
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Live);
+
+        // A minute later, with the poll failing too, the web ends it.
+        web.lost
+            .lock()
+            .unwrap()
+            .push_back(Ok(lost_answer("ended", Some("media-lost"))));
+        web.fail_polls((0..40).map(|_| web_error(503, "cloud-media-unavailable")));
+        web.set_state(managed_state("hold", live_legs()));
+        wait_until_within(90, || {
+            lock(&harness.context.slot).phase() == CloudPhase::Failed
+        })
+        .await;
+        let calls = web.lost_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].1.control_lost, Some(true));
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.end_reason.as_deref(), Some("media-lost"));
+        assert!(status.direct_fallback_available);
+    }
+
+    // Wire section 1: a create answer this build cannot follow never holds
+    // a show. An unknown `control.kind` ends the show and streams directly
+    // with `cloud-node-unreachable`; the web's 422 `cloud-quality` streams
+    // directly with the existing quality notice.
+    #[tokio::test(start_paused = true)]
+    async fn a_create_answer_this_build_cannot_follow_streams_directly() {
+        let unknown = harness(true);
+        let mut created = created_managed();
+        created.control.kind = Some("quic".to_string());
+        *unknown.context.web.create.lock().unwrap() = Some(Ok(created));
+        let outcome = unknown
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        let status = lock(&unknown.context.slot).status();
+        assert_eq!(
+            status.fallback.as_ref().unwrap().reason,
+            CloudFallbackReason::CloudNodeUnreachable
+        );
+        assert_eq!(status.show, None);
+        assert_eq!(
+            *unknown.context.web.end_calls.lock().unwrap(),
+            vec!["sh_abc".to_string()]
+        );
+        assert_eq!(unknown.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(unknown.context.web.polls().is_empty());
+        assert!(unknown.context.web.destination_bodies().is_empty());
+
+        let quality = harness(true);
+        *quality.context.web.create.lock().unwrap() = Some(Err(classify_cloud_failure(
+            422,
+            "cloud-quality",
+            "An output is above 1920x1080 at 30 fps.".to_string(),
+            None,
+            None,
+        )));
+        // 1080p60 passes this computer's own limit; only the web knows the
+        // show would be managed.
+        let outcome = quality
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                test_outputs(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        let status = lock(&quality.context.slot).status();
+        assert_eq!(
+            status.fallback.as_ref().unwrap().reason,
+            CloudFallbackReason::CloudQuality
+        );
+        assert_eq!(status.show, None);
+        assert_eq!(quality.context.web.create_calls.load(Ordering::SeqCst), 1);
+    }
+
+    // The stream-key rule on web control: a destination address crosses to
+    // videorc.com in the body of `PUT …/destinations` and nowhere else. Not
+    // the status, not the leg rows, not a `Debug`, and not an error, even
+    // when the web's refusal echoes the request in every field it has.
+    #[tokio::test(start_paused = true)]
+    async fn no_destination_address_leaves_the_destinations_body_on_web_control() {
+        let secrets = [YOUTUBE_KEY, TWITCH_KEY, INGEST_KEY];
+        let leaks = |text: &str| -> Vec<&str> {
+            secrets
+                .iter()
+                .copied()
+                .filter(|secret| text.contains(secret))
+                .collect()
+        };
+
+        // 1. A show that runs.
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        for status in harness.emitted.lock().unwrap().iter() {
+            let json = serde_json::to_string(status).unwrap();
+            assert!(
+                leaks(&json).is_empty(),
+                "cloud.state leaked {:?}",
+                leaks(&json)
+            );
+        }
+        for (_, legs) in harness.legs.lock().unwrap().iter() {
+            assert!(leaks(&serde_json::to_string(legs).unwrap()).is_empty());
+        }
+        let body =
+            DestinationsBody::from_frame(&destinations_set_frame("id", &destinations(), true))
+                .unwrap();
+        let debug = format!(
+            "{:?} {:?} {:?}",
+            body,
+            created_managed(),
+            lock(&harness.context.slot).show.as_ref().unwrap()
+        );
+        assert!(leaks(&debug).is_empty(), "Debug leaked {:?}", leaks(&debug));
+        // The keys rode the one body.
+        let sent = harness.context.web.destination_bodies();
+        assert_eq!(leaks(&sent[0].to_string()), vec![YOUTUBE_KEY, TWITCH_KEY]);
+        assert!(
+            harness
+                .context
+                .web
+                .managed
+                .lock()
+                .unwrap()
+                .hold_images
+                .is_empty()
+        );
+
+        // 2. A hand-over the web refuses, echoing the request.
+        let refused = harness_remembering(true, None);
+        let web = refused.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed()));
+        web.set_state(managed_state("starting", json!([])));
+        let youtube = format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}");
+        web.managed
+            .lock()
+            .unwrap()
+            .destinations_answers
+            .push_back(Err(DestinationsFailure {
+                error: CloudApiError::Other {
+                    status: 422,
+                    code: "cloud-destinations-refused".to_string(),
+                    message: format!("could not start {youtube}"),
+                },
+                refused: vec![crate::cloud_control_web::RefusedDestination {
+                    id: "youtube-main".to_string(),
+                    code: format!("destination-no-app {youtube} {TWITCH_KEY}"),
+                }],
+            }));
+        // The web confirms the refused show ended.
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse::default()));
+        let error = refused
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            leaks(&text).is_empty(),
+            "the error leaked {:?}: {text}",
+            leaks(&text)
+        );
+        assert!(!text.contains("a.rtmp.youtube.com"), "{text}");
+        assert!(text.contains("cloud-destinations-refused"), "{text}");
+        // Today's refused hand-over: the show is ended and forgotten.
+        assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_abc".to_string()]);
+        let status = lock(&refused.context.slot).status();
+        assert_eq!(status.phase, CloudPhase::Off);
+        assert_eq!(status.end_reason.as_deref(), Some("handover-failed"));
+        for status in refused.emitted.lock().unwrap().iter() {
+            assert!(leaks(&serde_json::to_string(status).unwrap()).is_empty());
+        }
+    }
+
+    // Wire section 6.4: a show on web control has no return picture.
+    // `cloud.return.set` sends nothing and answers the contract's line.
+    #[tokio::test(start_paused = true)]
+    async fn the_return_is_not_available_on_web_control() {
+        let solo = harness(true);
+        managed_live_show(&solo).await;
+        let error = solo.context.set_return(true).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The program return is not available on this show."
+        );
+        assert_eq!(solo.context.web.destination_bodies().len(), 1);
+    }
+
+    // --- Plan 234: resume and relaunch through `current` (C3) --------------------
+    //
+    // Wire sections 2.1 and 15: after a relaunch `GET current` hands back
+    // the control block and the ingest (LiveKit's list, never stored), the
+    // desktop feeds the same ingress, and no destination is sent while an
+    // egress is alive. They go again only when `destinationsSet` is false
+    // and this computer still holds them (D9).
+
+    /// A relaunched desktop whose launch check found the managed show: held,
+    /// resumable and polled, with the egress still pushing every platform.
+    async fn relaunched_with_a_managed_show(harness: &Harness) {
+        let web = &harness.context.web;
+        web.set_state(managed_state("hold", live_legs()));
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let status = harness.context.detect_current_show("bearer").await.unwrap();
+        let show = status.show.as_ref().expect("the show is held");
+        assert_eq!(show.id, "sh_abc");
+        assert!(show.resumable);
+        assert_eq!(status.phase, CloudPhase::Hold);
+        assert!(status.connected);
+        assert!(matches!(
+            lock(&harness.context.slot).control_tx,
+            Some(ControlHandle::Web(_))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_show_found_at_launch_is_resumed_through_current_with_no_destinations() {
+        let harness = harness(true);
+        relaunched_with_a_managed_show(&harness).await;
+        let web = harness.context.web.clone();
+        // The legs the egress holds are on the banner before any resume.
+        assert_eq!(lock(&harness.context.slot).status().legs.len(), 2);
+
+        // The Resume notice: `current` again, the same ingress, and nothing
+        // else. The egress keeps its legs and its keys (C5b).
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let handover = harness
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), None)
+            .await
+            .unwrap();
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(handover.ingest[0].server_url, LIVEKIT_INGEST);
+        assert_eq!(handover.ingest[0].stream_key, INGEST_KEY);
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.managed.lock().unwrap().hold_images.is_empty());
+        {
+            let status = lock(&harness.context.slot).status();
+            assert_eq!(status.phase, CloudPhase::Resuming);
+            assert_eq!(status.session_id.as_deref(), Some("session-2"));
+            assert!(!status.show.as_ref().unwrap().resumable);
+        }
+
+        // The feed reaches the ingress again and the page fades back.
+        web.set_state(managed_state("live", live_legs()));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+        // Nothing was handed over, yet the egress's legs carry the session:
+        // a down leg can still be seen (and the watchdog reads the program).
+        assert!(lock(&harness.context.slot).carries_session("session-2"));
+        {
+            let legs = harness.legs.lock().unwrap();
+            let (session, rows) = legs.last().expect("the legs reached the session");
+            assert_eq!(session, "session-2");
+            assert_eq!(rows.len(), 2);
+        }
+        assert!(web.destination_bodies().is_empty());
+        assert_eq!(web.create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        // This computer holds no address, so it cannot reconnect one, and
+        // says why.
+        let error = harness
+            .context
+            .reconnect_destination("youtube-main")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("go live again"), "{error}");
+
+        // With a hold image picked, that one request goes, and still no
+        // destination.
+        let picked = harness_remembering(true, None);
+        relaunched_with_a_managed_show(&picked).await;
+        let web = picked.context.web.clone();
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let png = tiny_png_base64();
+        picked
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), Some(png.clone()))
+            .await
+            .unwrap();
+        assert_eq!(web.managed.lock().unwrap().hold_images, vec![png]);
+        assert!(web.destination_bodies().is_empty());
+    }
+
+    // Wire section 2.1: `ingest` is LiveKit's list at that moment. When
+    // LiveKit does not answer it is omitted, nothing else can hand it back,
+    // and the resume fails with today's message. The show stays resumable.
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_whose_ingest_was_not_listed_fails_and_the_show_stays_resumable() {
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        web.set_state(managed_state("hold", live_legs()));
+        let unlisted = || CurrentShowResponse {
+            ingest: None,
+            ..managed_current("hold")
+        };
+        web.current.lock().unwrap().push_back(Ok(unlisted()));
+        harness.context.detect_current_show("bearer").await.unwrap();
+        web.current.lock().unwrap().push_back(Ok(unlisted()));
+        let error = harness
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), None)
+            .await
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains("could not hand back the show's ingest address"),
+            "{text}"
+        );
+        let status = lock(&harness.context.slot).status();
+        assert!(status.show.as_ref().unwrap().resumable);
+        assert_eq!(status.session_id, None);
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.end_calls.lock().unwrap().is_empty());
+        assert!(web.lost_calls.lock().unwrap().is_empty());
+    }
+
+    // D9: the egress dies on a show that was resumed after a relaunch.
+    // Nobody on this computer holds the keys, so nothing is sent and the
+    // rows say what to do.
+    #[tokio::test(start_paused = true)]
+    async fn a_resumed_managed_show_whose_egress_died_sends_nothing_and_says_so() {
+        let harness = harness(true);
+        relaunched_with_a_managed_show(&harness).await;
+        let web = harness.context.web.clone();
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        harness
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), None)
+            .await
+            .unwrap();
+        web.set_state(managed_state("live", live_legs()));
+        wait_for_phase(&harness.context.slot, CloudPhase::Live).await;
+
+        web.set_state(managed_state_without_egress(1));
+        wait_until(|| lock(&harness.context.slot).status().restart.is_some()).await;
+        let restart = lock(&harness.context.slot).status().restart.unwrap();
+        assert!(!restart.destinations_resent);
+        {
+            let legs = harness.legs.lock().unwrap();
+            let (session, rows) = legs.last().unwrap();
+            assert_eq!(session, "session-2");
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert_eq!(row.state, StreamTargetState::Failed);
+                assert_eq!(
+                    row.message.as_deref(),
+                    Some(
+                        "Videorc Cloud restarted your show. Stop, then go live again to reconnect."
+                    )
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(web.destination_bodies().is_empty());
+    }
+
+    // Go Live on the held show is a new broadcast by choice: it feeds the
+    // show that is live and hands its fresh destinations over with
+    // `replace`. No show is created.
+    #[tokio::test(start_paused = true)]
+    async fn go_live_on_a_held_managed_show_hands_its_destinations_over_and_creates_nothing() {
+        let harness = harness(true);
+        relaunched_with_a_managed_show(&harness).await;
+        let web = harness.context.web.clone();
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-2",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        let PrepareOutcome::Cloud(handover) = outcome else {
+            panic!("expected a cloud hand-over");
+        };
+        assert_eq!(handover.ingest[0].server_url, LIVEKIT_INGEST);
+        assert_eq!(web.create_calls.load(Ordering::SeqCst), 0);
+        let bodies = web.destination_bodies();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["replace"], true);
+        assert_eq!(bodies[0]["destinations"].as_array().unwrap().len(), 2);
+        let runtime = lock(&harness.context.slot);
+        let show = runtime.show.as_ref().unwrap();
+        assert!(show.handed_over);
+        assert_eq!(show.session_id.as_deref(), Some("session-2"));
+    }
+
+    // D9, with the keys still on this computer: videorc.com goes away and
+    // comes back. While the egress lived through it, nothing is sent. When
+    // it died meanwhile (`destinationsSet: false`), the whole list goes.
+    #[tokio::test(start_paused = true)]
+    async fn after_an_outage_the_list_goes_only_when_the_egress_died() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        let outage = || {
+            (0..3).map(|_| CloudApiError::Transport("videorc.com could not be reached".to_string()))
+        };
+
+        // 1. The egress lived: the first state back lists every leg.
+        web.fail_polls(outage());
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| !lock(&harness.context.slot).status().connected).await;
+        wait_until_within(15, || lock(&harness.context.slot).status().connected).await;
+        assert_eq!(web.destination_bodies().len(), 1);
+        assert_eq!(lock(&harness.context.slot).status().restart, None);
+
+        // 2. It died while nobody could ask.
+        web.fail_polls(outage());
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| !lock(&harness.context.slot).status().connected).await;
+        web.set_state(managed_state_without_egress(1));
+        wait_until_within(15, || web.destination_bodies().len() == 2).await;
+        let again = &web.destination_bodies()[1];
+        assert_eq!(again["destinations"].as_array().unwrap().len(), 2);
+        assert!(again.get("replace").is_none());
+        assert!(
+            lock(&harness.context.slot)
+                .status()
+                .restart
+                .is_some_and(|restart| restart.destinations_resent)
+        );
+    }
+
+    // Wire section 3, the 401 row, to its end: the sign-in that follows
+    // runs the launch check, and the show a session still feeds gets its
+    // poll back. Nothing of the show changes and nothing is sent.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_sign_in_gives_a_fed_managed_show_its_poll_back() {
+        let harness = harness(true);
+        managed_live_show(&harness).await;
+        let web = harness.context.web.clone();
+        web.fail_polls([CloudApiError::Unauthorized]);
+        web.set_state(managed_state("live", live_legs()));
+        wait_until(|| lock(&harness.context.slot).control_tx.is_none()).await;
+        assert!(launch_check_due(&lock(&harness.context.slot), true));
+
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("live")));
+        let status = harness
+            .context
+            .detect_current_show("fresh-bearer")
+            .await
+            .unwrap();
+        assert!(status.connected);
+        assert_eq!(status.phase, CloudPhase::Live);
+        assert_eq!(status.session_id.as_deref(), Some("session-1"));
+        assert!(!launch_check_due(&lock(&harness.context.slot), true));
+        {
+            let runtime = lock(&harness.context.slot);
+            assert!(matches!(runtime.control_tx, Some(ControlHandle::Web(_))));
+            let show = runtime.show.as_ref().unwrap();
+            assert!(show.handed_over);
+            assert_eq!(show.destinations.len(), 2);
+        }
+        // It polls again: the next state arrives.
+        web.set_state(managed_state("hold", live_legs()));
+        wait_for_phase(&harness.context.slot, CloudPhase::Hold).await;
+        assert_eq!(web.destination_bodies().len(), 1, "nothing was re-sent");
+        // A second launch check changes nothing: the show has its control.
+        web.current
+            .lock()
+            .unwrap()
+            .push_back(Ok(managed_current("hold")));
+        let generation = lock(&harness.context.slot).generation;
+        harness
+            .context
+            .detect_current_show("fresh-bearer")
+            .await
+            .unwrap();
+        assert_eq!(lock(&harness.context.slot).generation, generation);
+    }
+
+    // A show `current` lists on a control transport this build does not
+    // know is held, never polled, never reported lost, and its resume says
+    // why. End still closes it.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_show_on_an_unknown_control_is_not_resumed_or_reported_lost() {
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        let unknown = || {
+            let mut current = managed_current("hold");
+            current.control.as_mut().unwrap().kind = Some("quic".to_string());
+            current
+        };
+        web.current.lock().unwrap().push_back(Ok(unknown()));
+        let status = harness.context.detect_current_show("bearer").await.unwrap();
+        assert!(status.show.as_ref().unwrap().resumable);
+        assert!(!status.connected);
+        web.current.lock().unwrap().push_back(Ok(unknown()));
+        let error = harness
+            .context
+            .resume_session("session-2", Some("bearer".to_string()), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("can't resume"), "{error}");
+        assert!(web.lost_calls.lock().unwrap().is_empty());
+        assert!(web.polls().is_empty());
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(
+            lock(&harness.context.slot)
+                .status()
+                .show
+                .is_some_and(|show| show.resumable)
+        );
+        harness
+            .context
+            .end_current_show(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_abc".to_string()]);
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+    }
+
+    // --- Plan 234: the hold image on web control (C4) ----------------------------
+
+    // Wire section 2.4: the hold image goes through `PUT …/hold-image`, and
+    // the route takes a PNG of at most 2 MiB and 1,920 pixels a side, so an
+    // image over either is scaled before it leaves. Best effort, as today:
+    // one that cannot be read leaves the default card and never fails the
+    // start.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_shows_hold_image_is_fitted_before_it_leaves() {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed()));
+        web.set_state(managed_state("starting", json!([])));
+        // Wider than the route takes (and small, so the test stays quick).
+        let mut wide = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(2400, 30, image::Rgba([13, 13, 15, 255]))
+            .write_to(&mut wide, image::ImageFormat::Png)
+            .unwrap();
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                Some(engine.encode(wide.into_inner())),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Cloud(_)));
+        let sent = web.managed.lock().unwrap().hold_images.clone();
+        assert_eq!(sent.len(), 1);
+        let png = engine.decode(&sent[0]).unwrap();
+        assert!(png.len() <= 2 * 1024 * 1024);
+        let fitted = image::load_from_memory_with_format(&png, image::ImageFormat::Png).unwrap();
+        assert_eq!((fitted.width(), fitted.height()), (1920, 24));
+        // The show keeps the image it was given, for a later re-send.
+        assert!(
+            lock(&harness.context.slot)
+                .show
+                .as_ref()
+                .unwrap()
+                .hold_image_png_base64
+                .is_some()
+        );
+
+        // An image this computer cannot read: no request, and the show
+        // still starts with the default card.
+        let unreadable = harness_remembering(true, None);
+        let web = unreadable.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed()));
+        web.set_state(managed_state("starting", json!([])));
+        let outcome = unreadable
+            .context
+            .prepare_session(
+                "session-1",
+                Some("bearer".to_string()),
+                managed_outputs(),
+                destinations(),
+                Some("iVBORw0KGgo=".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Cloud(_)));
+        assert!(web.managed.lock().unwrap().hold_images.is_empty());
+        assert_eq!(web.destination_bodies().len(), 1);
+    }
+
+    // --- Plan 234: Test cloud against an ingress (C5) ----------------------------
+    //
+    // Wire section 13.1 (D16): a managed test show is a room and one ingress
+    // per output, with no egress. The desktop pushes its 10 s pattern to the
+    // ingress and reads the show's state by polling; `ingress_started`
+    // makes it live. It ends through `POST …/end` alone. The verdict rules
+    // are the node test's.
+
+    fn created_managed_test() -> CreateShowResponse {
+        let mut created = created_managed();
+        created.show.kind = "test".to_string();
+        created
+    }
+
+    /// A managed test show's state: a feed, and never a leg.
+    fn managed_test_state(phase: &str, kbps: Option<u64>) -> Value {
+        let mut feed = json!({ "orientation": "horizontal", "connected": phase == "live" });
+        if let Some(kbps) = kbps {
+            feed["kbps"] = json!(kbps);
+        }
+        json!({
+            "phase": phase, "liveSeconds": 1, "feeds": [feed], "legs": [],
+            "destinationsSet": false, "restarts": 0, "holdImageSet": false,
+            "desktopConnected": true
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_test_on_a_managed_show_polls_its_state_and_ends_through_the_web() {
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed_test()));
+        web.set_state(managed_test_state("starting", None));
+        let pusher = FakePusher::clean();
+        harness
+            .context
+            .start_test(Some("bearer".to_string()), test_outputs(), pusher.clone())
+            .unwrap();
+        wait_until(|| test_status(&harness.context.slot).phase == CloudTestPhase::Pushing).await;
+        assert_eq!(
+            pusher.pushes.lock().unwrap().as_slice(),
+            &[("horizontal".to_string(), 6000)]
+        );
+        // `ingress_started`: the feed is connected and the show is live.
+        // LiveKit reported no bitrate in Phase 0, so the feed has no kbps:
+        // unmeasured, never slow.
+        web.set_state(managed_test_state("live", None));
+        wait_until(|| !lock(&harness.context.slot).test_running()).await;
+
+        let test = test_status(&harness.context.slot);
+        assert_eq!(test.phase, CloudTestPhase::Done);
+        let result = test.result.unwrap();
+        assert!(result.ok, "{result:?}");
+        assert_eq!(result.reason, None);
+        assert!(result.time_to_live_ms.is_some());
+        assert_eq!(result.uploads.len(), 1);
+        assert_eq!(result.uploads[0].target_kbps, 6000);
+        assert_eq!(result.uploads[0].measured_kbps, None);
+        // The web saw a test create and its end. Nothing else: no socket,
+        // no destination, no hold image.
+        assert_eq!(
+            web.create_kinds.lock().unwrap().as_slice(),
+            &["test".to_string()]
+        );
+        assert_eq!(
+            web.end_calls.lock().unwrap().as_slice(),
+            &["sh_abc".to_string()]
+        );
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.managed.lock().unwrap().hold_images.is_empty());
+        // The first state was asked without `since`, the rest with one.
+        let polls = web.polls();
+        assert_eq!(polls[0].0, None);
+        assert!(polls.len() >= 2 && polls[1..].iter().all(|(since, _)| since.is_some()));
+        // It stopped polling with the test, and the Studio's slot never
+        // changed hands.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(web.polls().len(), polls.len());
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+        assert!(lock(&harness.context.slot).show.is_none());
+    }
+
+    // The verdict rules stay (D16): readings above 0 are kept and judged
+    // against the target, a poll that fails is asked again, and a show the
+    // web ends first is named.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_test_keeps_the_verdict_rules() {
+        // A slow upload, with one poll failing on the way.
+        let slow = harness(true);
+        let web = slow.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed_test()));
+        web.set_state(managed_test_state("starting", None));
+        slow.context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        wait_until(|| test_status(&slow.context.slot).phase == CloudTestPhase::Pushing).await;
+        web.fail_polls([web_error(503, "cloud-media-unavailable")]);
+        for kbps in [2100, 0, 2050, 2100] {
+            web.set_state(managed_test_state("live", Some(kbps)));
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+        wait_until(|| !lock(&slow.context.slot).test_running()).await;
+        let result = test_status(&slow.context.slot).result.unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.reason, Some(CloudTestReason::TooSlow));
+        assert_eq!(result.uploads[0].measured_kbps, Some(2100));
+        assert!(result.time_to_live_ms.is_some());
+
+        // The web ends the test show before the push is done (`max-show`).
+        let ended = harness_remembering(true, None);
+        let web = ended.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed_test()));
+        web.set_state(managed_test_state("starting", None));
+        ended
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::holding(),
+            )
+            .unwrap();
+        wait_until(|| test_status(&ended.context.slot).phase == CloudTestPhase::Pushing).await;
+        web.set_state(managed_test_state("live", None));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        web.set_state(json!({
+            "phase": "ended", "endReason": "max-show", "liveSeconds": 30, "feeds": [], "legs": []
+        }));
+        wait_until(|| !lock(&ended.context.slot).test_running()).await;
+        let result = test_status(&ended.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::Failed));
+        assert!(
+            result.message.as_deref().unwrap().contains("max-show"),
+            "{result:?}"
+        );
+
+        // A feed that never arrives: the state never says live.
+        let silent = harness_remembering(true, None);
+        let web = silent.context.web.clone();
+        *web.create.lock().unwrap() = Some(Ok(created_managed_test()));
+        web.set_state(managed_test_state("starting", None));
+        silent
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        wait_until(|| !lock(&silent.context.slot).test_running()).await;
+        let result = test_status(&silent.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::NoFeed));
+        assert_eq!(web.end_calls.lock().unwrap().len(), 1);
+
+        // A control this build does not know: the test cannot reach it, and
+        // the show it created is still ended.
+        let unknown = harness_remembering(true, None);
+        let web = unknown.context.web.clone();
+        let mut created = created_managed_test();
+        created.control.kind = Some("quic".to_string());
+        *web.create.lock().unwrap() = Some(Ok(created));
+        unknown
+            .context
+            .start_test(
+                Some("bearer".to_string()),
+                test_outputs(),
+                FakePusher::clean(),
+            )
+            .unwrap();
+        wait_until(|| !lock(&unknown.context.slot).test_running()).await;
+        let result = test_status(&unknown.context.slot).result.unwrap();
+        assert_eq!(result.reason, Some(CloudTestReason::CantReach));
+        assert_eq!(web.end_calls.lock().unwrap().len(), 1);
+        assert!(web.polls().is_empty());
+    }
+
+    // --- Plan 234: talk shows on web control (T3) --------------------------------
+    //
+    // A managed talk show has no ingress and no runner: host and guests join
+    // the room as today, the program page composes the stage from room
+    // metadata the web writes, and the desktop's intents are routes (wire
+    // sections 1, 2.3, 2.5, 2.6, 6.2, 6.3, 13.2). The overlays alone are not
+    // a route: the host's renderer sends them to the room.
+
+    /// A managed talk create answer (wire section 1, "Talk show"): no ingest,
+    /// no runner token, web control, and today's three blocks.
+    fn created_managed_talk() -> CreateShowResponse {
+        let mut created = created_talk();
+        created.show.node_id = "livekit".to_string();
+        created.control = created_managed().control;
+        created.ingest = Vec::new();
+        created
+    }
+
+    /// A managed talk show's `state` (wire section 6.2): the room exists,
+    /// the host is in it, and the return is never on.
+    fn managed_talk_state(legs: Value, stage_set: bool, page_joins: u32) -> Value {
+        let on_air = legs.as_array().is_some_and(|legs| !legs.is_empty());
+        json!({
+            "phase": "live", "liveSeconds": 3, "feeds": [], "legs": legs,
+            "destinationsSet": on_air, "restarts": 0, "holdImageSet": false,
+            "desktopConnected": true,
+            "room": {
+                "connected": true,
+                "participants": [
+                    { "identity": "host:sh_abc", "name": "Orc", "role": "host", "onStage": true,
+                      "video": true, "audio": true, "muted": false, "screen": false,
+                      "quality": "good", "sinceMs": 10 }
+                ],
+                "layout": "solo", "hostAway": false, "returnEnabled": false,
+                "stageSet": stage_set, "pageJoins": page_joins
+            }
+        })
+    }
+
+    /// Open the room of a managed talk show: the create, the first state,
+    /// the camera lent, and the poll running. No socket.
+    async fn managed_room(harness: &Harness) {
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        let web = &harness.context.web;
+        *web.create.lock().unwrap() = Some(Ok(created_managed_talk()));
+        web.set_state(managed_talk_state(json!([]), false, 0));
+        let status = harness
+            .context
+            .open_room(Some("bearer".to_string()), room_open_params(), false)
+            .await
+            .expect("the managed room opens");
+        let room = status.room.expect("a room in the status");
+        assert_eq!(room.phase, crate::cloud_talk::CloudRoomPhase::Open);
+        assert!(matches!(
+            lock(&harness.context.slot).control_tx,
+            Some(ControlHandle::Web(_))
+        ));
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+    }
+
+    fn stage_with_a_guest() -> crate::cloud_talk::CloudStage {
+        serde_json::from_value(json!({
+            "layout": "side-by-side",
+            "onStage": ["host:sh_abc", "g_0123456789abcdefghijkl"],
+            "hostShape": "rounded"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_managed_room_regains_control_after_sign_in_or_resume() {
+        for resume in [false, true] {
+            let harness = harness(true);
+            managed_room(&harness).await;
+            let web = harness.context.web.clone();
+            harness
+                .context
+                .talk_go_live(Some("bearer".to_string()), destinations(), vec![])
+                .await
+                .unwrap();
+            web.set_state(managed_talk_state(live_legs(), true, 1));
+            web.fail_polls([CloudApiError::Unauthorized]);
+            web.set_state(managed_talk_state(live_legs(), true, 1));
+            wait_until(|| lock(&harness.context.slot).control_tx.is_none()).await;
+            let mut current = managed_current("live");
+            current.show.as_mut().unwrap().kind = "talk".to_string();
+            web.current.lock().unwrap().push_back(Ok(current));
+            let before_camera = harness.camera.lock().unwrap().len();
+            let status = if resume {
+                harness
+                    .context
+                    .resume_room(Some("fresh-bearer".to_string()))
+                    .await
+                    .unwrap()
+            } else {
+                harness
+                    .context
+                    .detect_current_show("fresh-bearer")
+                    .await
+                    .unwrap()
+            };
+            assert!(status.connected);
+            assert!(status.room.is_some());
+            assert_eq!(
+                harness.camera.lock().unwrap().len(),
+                before_camera,
+                "the room keeps its camera"
+            );
+            assert_eq!(web.destination_bodies().len(), 1, "no destinations re-sent");
+            harness
+                .context
+                .set_stage(stage_with_a_guest())
+                .await
+                .unwrap();
+            harness.context.recording_start().await.unwrap();
+            harness.context.legs_end().await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_livestream_invalidates_single_and_full_destination_recovery_retries() {
+        for full_list in [false, true] {
+            let harness = harness(true);
+            managed_room(&harness).await;
+            let web = harness.context.web.clone();
+            harness
+                .context
+                .talk_go_live(Some("bearer".to_string()), destinations(), vec![])
+                .await
+                .unwrap();
+            web.set_state(managed_talk_state(live_legs(), true, 1));
+            wait_until(|| lock(&harness.context.slot).status().legs.len() == 2).await;
+            web.managed
+                .lock()
+                .unwrap()
+                .destinations_answers
+                .push_back(Err(DestinationsFailure {
+                    error: web_error(503, "cloud-media-unavailable"),
+                    refused: Vec::new(),
+                }));
+            let mut state = managed_talk_state(live_legs(), true, 1);
+            if full_list {
+                state["legs"] = json!([]);
+                state["destinationsSet"] = json!(false);
+                state["restarts"] = json!(1);
+            } else {
+                state["legs"][0]["resend"] = json!(true);
+            }
+            web.set_state(state);
+            // The failing first request is observed while virtual time is
+            // still inside the one-second retry gap.
+            wait_until(|| web.destination_bodies().len() == 2).await;
+            harness.context.legs_end().await.unwrap();
+            web.set_state(managed_talk_state(json!([]), true, 1));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert_eq!(
+                web.destination_bodies().len(),
+                2,
+                "no PUT follows End livestream, full_list={full_list}"
+            );
+            assert_eq!(web.managed.lock().unwrap().legs_ends.len(), 1);
+            assert!(
+                lock(&harness.context.slot)
+                    .show
+                    .as_ref()
+                    .unwrap()
+                    .destinations
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_talk_show_opens_sets_its_stage_goes_live_and_ends_the_livestream() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let web = harness.context.web.clone();
+        // The room is the show's: the camera was lent, nothing was fed, and
+        // the create asked for a talk show.
+        assert_eq!(
+            web.create_kinds.lock().unwrap().as_slice(),
+            &["talk".to_string()]
+        );
+        assert!(harness.camera.lock().unwrap()[0] == crate::cloud_talk::CameraHandover::Lend);
+        {
+            let status = lock(&harness.context.slot).status();
+            assert_eq!(status.show.as_ref().unwrap().node_id, "livekit");
+            assert_eq!(status.session_id, None);
+            let room = status.room.unwrap();
+            assert!(room.connected);
+            assert!(!room.return_enabled);
+            assert_eq!(room.participants.len(), 1);
+        }
+
+        // The stage: `PUT …/stage` with the frame's fields and nothing of
+        // the frame itself.
+        harness
+            .context
+            .set_stage(stage_with_a_guest())
+            .await
+            .unwrap();
+        assert_eq!(
+            web.managed.lock().unwrap().stages,
+            vec![json!({
+                "layout": "side-by-side",
+                "onStage": ["host:sh_abc", "g_0123456789abcdefghijkl"],
+                "hostShape": "rounded"
+            })]
+        );
+
+        // Go Live: the destinations, with `replace`, and no local session.
+        let status = harness
+            .context
+            .talk_go_live(
+                Some("bearer".to_string()),
+                destinations(),
+                vec!["youtube".to_string(), "twitch".to_string()],
+            )
+            .await
+            .unwrap();
+        assert!(status.room.as_ref().unwrap().live);
+        let bodies = web.destination_bodies();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["replace"], true);
+        assert_eq!(bodies[0]["destinations"].as_array().unwrap().len(), 2);
+        web.set_state(managed_talk_state(live_legs(), true, 1));
+        wait_until(|| lock(&harness.context.slot).status().legs.len() == 2).await;
+        // The web has the stage, so it is not sent again.
+        assert_eq!(web.managed.lock().unwrap().stages.len(), 1);
+
+        // End livestream: `POST …/legs/end` with the addresses this
+        // computer holds, cleared only after the answer. The room stays.
+        let status = harness.context.legs_end().await.unwrap();
+        assert_eq!(
+            web.managed.lock().unwrap().legs_ends,
+            vec![json!({ "destinations": [
+                { "id": "youtube-main", "url": format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}") },
+                { "id": "twitch-main", "url": format!("rtmp://live.twitch.tv/app/{TWITCH_KEY}") }
+            ] })]
+        );
+        let room = status.room.unwrap();
+        assert!(!room.live);
+        assert_eq!(room.phase, crate::cloud_talk::CloudRoomPhase::Open);
+        assert!(
+            lock(&harness.context.slot)
+                .show
+                .as_ref()
+                .unwrap()
+                .destinations
+                .is_empty()
+        );
+        // The state after it: no legs, and `destinationsSet` still true by
+        // the host's choice. Nothing is sent again.
+        let mut ended = managed_talk_state(json!([]), true, 1);
+        ended["destinationsSet"] = json!(true);
+        web.set_state(ended);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(web.destination_bodies().len(), 1);
+        assert_eq!(lock(&harness.context.slot).status().restart, None);
+
+        // A second End livestream has nothing to name, and the web's refusal
+        // reads as the runner's would.
+        web.managed
+            .lock()
+            .unwrap()
+            .route_errors
+            .push_back(web_error(409, "cloud-legs-end-solo"));
+        let error = harness.context.legs_end().await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Couldn't end the livestream: legs.end is for talk shows; a solo show ends with show.end. Try again, or close the room."
+        );
+        assert_eq!(web.managed.lock().unwrap().legs_ends[1], json!({}));
+
+        // Close the room: `POST …/end`, and the camera comes back.
+        harness
+            .context
+            .close_room(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_abc".to_string()]);
+        assert!(
+            harness.camera.lock().unwrap().last()
+                == Some(&crate::cloud_talk::CameraHandover::Return)
+        );
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+        // No key left the two bodies that carry them.
+        for status in harness.emitted.lock().unwrap().iter() {
+            let json = serde_json::to_string(status).unwrap();
+            assert!(!json.contains(YOUTUBE_KEY) && !json.contains(TWITCH_KEY));
+        }
+    }
+
+    // Wire section 2.6: Record is `POST …/recording`, and each refusal
+    // reads as the node path's does for the same case (the runner acks
+    // `recording.start` with its `problem`).
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_talk_shows_record_maps_each_refusal_to_the_nodes_words() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let web = harness.context.web.clone();
+        harness.context.recording_start().await.unwrap();
+        harness.context.recording_stop().await.unwrap();
+        assert_eq!(web.managed.lock().unwrap().recordings, vec![true, false]);
+
+        let refuse =
+            |error: CloudApiError| web.managed.lock().unwrap().route_errors.push_back(error);
+        refuse(web_error(409, "cloud-recording-no-target"));
+        assert_eq!(
+            harness
+                .context
+                .recording_start()
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not start the recording: no-target"
+        );
+        refuse(web_error(409, "cloud-recording-solo"));
+        assert_eq!(
+            harness
+                .context
+                .recording_start()
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not start the recording: the cloud recording is for talk shows"
+        );
+        refuse(web_error(409, "cloud-recording-on-air"));
+        assert_eq!(
+            harness
+                .context
+                .recording_stop()
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not stop the recording: the recording shares the livestream's output; end the livestream first"
+        );
+        // A 503 is tried once more, 1 s later, then said by its code.
+        let before = web.managed.lock().unwrap().recordings.len();
+        refuse(web_error(503, "cloud-media-unavailable"));
+        refuse(web_error(503, "cloud-media-unavailable"));
+        assert_eq!(
+            harness
+                .context
+                .recording_start()
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not start the recording: videorc.com answered 503 cloud-media-unavailable"
+        );
+        assert_eq!(web.managed.lock().unwrap().recordings.len(), before + 2);
+        refuse(CloudApiError::Full);
+        refuse(CloudApiError::Full);
+        assert!(
+            harness
+                .context
+                .recording_start()
+                .await
+                .unwrap_err()
+                .to_string()
+                .ends_with("Videorc Cloud is full right now.")
+        );
+        // The stage route's refusal is said by its code, never the web's words.
+        refuse(web_error(422, "invalid-stage"));
+        assert_eq!(
+            harness
+                .context
+                .set_stage(stage_with_a_guest())
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not take the stage: videorc.com answered 422 invalid-stage"
+        );
+        // The state's recording block reaches the status as a node's does.
+        let mut recording = managed_talk_state(json!([]), true, 0);
+        recording["recording"] = json!({
+            "active": true, "since": "2026-11-13T20:00:00.000Z", "seconds": 12, "bytes": 0,
+            "orientations": ["horizontal"]
+        });
+        web.set_state(recording);
+        wait_until(|| lock(&harness.context.slot).status().recording.is_some()).await;
+        assert!(
+            lock(&harness.context.slot)
+                .status()
+                .recording
+                .unwrap()
+                .active
+        );
+    }
+
+    fn overlay_png(width: u32, height: u32) -> String {
+        use base64::Engine as _;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(width, height, image::Rgba([200, 30, 30, 255]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    }
+
+    /// The `set` events since `from`, as (slot, orientation, ttl, image id).
+    fn overlay_sets(harness: &Harness, from: usize) -> Vec<(String, String, Option<u64>, String)> {
+        harness.overlays.lock().unwrap()[from..]
+            .iter()
+            .filter_map(|event| {
+                let json = serde_json::to_value(event).unwrap();
+                (json["op"] == "set").then(|| {
+                    (
+                        json["slot"].as_str().unwrap().to_string(),
+                        json["orientation"].as_str().unwrap().to_string(),
+                        json["ttlSeconds"].as_u64(),
+                        json["imageId"].as_str().unwrap().to_string(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    // Wire section 6.3: on a managed talk show an overlay is not an intent.
+    // The backend hands it to the host's renderer (one small event, the
+    // bytes by id), and hands the untimed ones over again when a program
+    // page joins or the renderer's room connection comes up. A card with a
+    // `ttl` is never sent twice, and a node show sends none of this.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_talk_shows_overlays_go_to_the_renderer_and_again_when_a_page_joins() {
+        use crate::cloud_talk::{CloudOverlayOrientation, CloudOverlayRect, CloudOverlaySlot};
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let web = harness.context.web.clone();
+        let context = &harness.context;
+        let card_rect = CloudOverlayRect {
+            x: 0.05,
+            y: 0.7,
+            w: 0.5,
+            h: 0.2,
+        };
+
+        // A comment card, ten seconds: one event, with the facts of 6.3 and
+        // no bytes. The bytes are there by its id.
+        context
+            .set_overlay(
+                CloudOverlaySlot::Card,
+                CloudOverlayOrientation::H,
+                &overlay_png(64, 16),
+                card_rect,
+                Some(10),
+            )
+            .await
+            .unwrap();
+        {
+            let events = harness.overlays.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            let event = serde_json::to_value(&events[0]).unwrap();
+            assert_eq!(event["op"], "set");
+            assert_eq!(event["showId"], "sh_abc");
+            assert_eq!(event["slot"], "card");
+            assert_eq!(event["orientation"], "h");
+            assert_eq!(
+                event["rect"],
+                json!({ "x": 0.05, "y": 0.7, "w": 0.5, "h": 0.2 })
+            );
+            assert_eq!(event["ttlSeconds"], 10);
+            assert_eq!(event["mimeType"], "image/png");
+            let image_id = event["imageId"].as_str().unwrap();
+            assert!(!image_id.is_empty());
+            assert_eq!(event.as_object().unwrap().len(), 8, "{event}");
+            let (mime, bytes) = lock(&context.slot)
+                .overlay_image(image_id)
+                .expect("the card's bytes are held");
+            assert_eq!(mime, "image/png");
+            assert!(bytes.starts_with(b"\x89PNG"));
+            assert!(lock(&context.slot).overlay_image("nope").is_none());
+        }
+
+        // A takeover, per output, untimed: no `ttlSeconds` key at all.
+        for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+            context
+                .set_overlay(
+                    CloudOverlaySlot::Takeover,
+                    orientation,
+                    &overlay_png(96, 54),
+                    CloudOverlayRect::FULL,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let takeover = overlay_sets(&harness, 1);
+        assert_eq!(takeover.len(), 2);
+        assert_eq!(takeover[0].0, "takeover");
+        assert_eq!(takeover[0].2, None);
+        let untimed = serde_json::to_value(&harness.overlays.lock().unwrap()[1]).unwrap();
+        assert!(untimed.get("ttlSeconds").is_none(), "{untimed}");
+        // Nothing of it was an intent: no route was called.
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.managed.lock().unwrap().stages.is_empty());
+
+        // A program page joins: the takeover goes again, by the same ids,
+        // and the card does not.
+        let sent = harness.overlays.lock().unwrap().len();
+        web.set_state(managed_talk_state(json!([]), false, 1));
+        wait_until(|| harness.overlays.lock().unwrap().len() == sent + 2).await;
+        assert_eq!(overlay_sets(&harness, sent), takeover);
+        // The same count again says nothing new.
+        web.set_state(managed_talk_state(json!([]), true, 1));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(harness.overlays.lock().unwrap().len(), sent + 2);
+
+        // The renderer's room connection comes up (a reconnect): again.
+        let sent = harness.overlays.lock().unwrap().len();
+        context.report_client(crate::cloud_talk::RoomClientReportParams {
+            state: crate::cloud_talk::CloudRoomClientState::Connected,
+            detail: None,
+        });
+        assert_eq!(overlay_sets(&harness, sent), takeover);
+        // Any other report sends nothing.
+        let sent = harness.overlays.lock().unwrap().len();
+        context.report_client(crate::cloud_talk::RoomClientReportParams {
+            state: crate::cloud_talk::CloudRoomClientState::Reconnecting,
+            detail: None,
+        });
+        assert_eq!(harness.overlays.lock().unwrap().len(), sent);
+
+        // The takeover comes down on one output: a clear, its bytes gone,
+        // and the next page to join gets the other output's alone.
+        context
+            .clear_overlay(CloudOverlaySlot::Takeover, CloudOverlayOrientation::H)
+            .await
+            .unwrap();
+        let cleared =
+            serde_json::to_value(harness.overlays.lock().unwrap().last().unwrap()).unwrap();
+        assert_eq!(
+            cleared,
+            json!({ "op": "clear", "showId": "sh_abc", "slot": "takeover", "orientation": "h" })
+        );
+        assert!(lock(&context.slot).overlay_image(&takeover[0].3).is_none());
+        let sent = harness.overlays.lock().unwrap().len();
+        web.set_state(managed_talk_state(json!([]), true, 2));
+        wait_until(|| harness.overlays.lock().unwrap().len() == sent + 1).await;
+        assert_eq!(overlay_sets(&harness, sent), vec![takeover[1].clone()]);
+
+        // An image over the page's 2 MiB: a full-frame picture with no
+        // transparency leaves as a JPEG at its own size.
+        use base64::Engine as _;
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let noise = image::RgbaImage::from_fn(1280, 720, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let bytes = seed.to_le_bytes();
+            image::Rgba([bytes[0], bytes[1], bytes[2], 255])
+        });
+        let mut heavy = std::io::Cursor::new(Vec::new());
+        noise.write_to(&mut heavy, image::ImageFormat::Png).unwrap();
+        let heavy = heavy.into_inner();
+        assert!(heavy.len() > crate::cloud_talk::OVERLAY_MAX_BYTES);
+        let sent = harness.overlays.lock().unwrap().len();
+        context
+            .set_overlay(
+                CloudOverlaySlot::Takeover,
+                CloudOverlayOrientation::H,
+                &base64::engine::general_purpose::STANDARD.encode(heavy),
+                CloudOverlayRect::FULL,
+                None,
+            )
+            .await
+            .unwrap();
+        let fitted = serde_json::to_value(&harness.overlays.lock().unwrap()[sent]).unwrap();
+        assert_eq!(fitted["mimeType"], "image/jpeg");
+        let (_, bytes) = lock(&context.slot)
+            .overlay_image(fitted["imageId"].as_str().unwrap())
+            .unwrap();
+        assert!(bytes.len() <= crate::cloud_talk::OVERLAY_MAX_BYTES);
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1280, 720));
+
+        // Closing the room drops what was up.
+        context
+            .close_room(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert!(lock(&context.slot).overlay_image(&takeover[1].3).is_none());
+
+        // A node talk show: the socket's frame, and no event at all.
+        let node = harness_remembering(true, None);
+        let mut runner =
+            crate::cloud_talk::open_talk_show_for_tests(&node.context.slot, "sh_talk", true);
+        let set = node.context.set_overlay(
+            CloudOverlaySlot::Takeover,
+            CloudOverlayOrientation::H,
+            "iVBORw0KGgo=",
+            CloudOverlayRect::FULL,
+            None,
+        );
+        let answer = async {
+            let intent = runner.recv().await.expect("the runner's intent");
+            intent.answer_for_tests(None)
+        };
+        let (sent, frame) = tokio::join!(set, answer);
+        sent.unwrap();
+        assert_eq!(frame["kind"], "overlay.set");
+        assert!(node.overlays.lock().unwrap().is_empty());
+    }
+
+    // A managed talk show after a relaunch (wire sections 2.1 and 6.2): the
+    // launch check holds it, Resume opens the room on web control with no
+    // destination sent, and a web that reports no stage while this desktop
+    // holds one gets it again.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_talk_show_is_resumed_and_its_stage_goes_again_when_the_web_lost_it() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        let web = harness.context.web.clone();
+        web.set_state(managed_talk_state(live_legs(), true, 1));
+        let held = || {
+            let created = created_managed_talk();
+            CurrentShowResponse {
+                show: Some(ShowRecord {
+                    status: "live".to_string(),
+                    ..created.show
+                }),
+                control: Some(created.control),
+                ingest: Some(Vec::new()),
+            }
+        };
+        web.current.lock().unwrap().push_back(Ok(held()));
+        let status = harness.context.detect_current_show("bearer").await.unwrap();
+        let show = status.show.as_ref().unwrap();
+        assert_eq!(show.kind.as_deref(), Some("talk"));
+        assert!(show.resumable);
+        assert!(status.room.is_none());
+
+        let status = harness
+            .context
+            .resume_room(Some("bearer".to_string()))
+            .await
+            .expect("the managed room resumes");
+        let room = status.room.expect("the room is open again");
+        assert_eq!(room.phase, crate::cloud_talk::CloudRoomPhase::Open);
+        // The egress still pushes: on air, with its legs, and nothing sent.
+        assert!(room.live);
+        assert_eq!(status.legs.len(), 2);
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.managed.lock().unwrap().stages.is_empty());
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(harness.camera.lock().unwrap()[0] == crate::cloud_talk::CameraHandover::Lend);
+
+        // The host sets a stage; the web has it.
+        harness
+            .context
+            .set_stage(stage_with_a_guest())
+            .await
+            .unwrap();
+        assert_eq!(web.managed.lock().unwrap().stages.len(), 1);
+        web.set_state(managed_talk_state(live_legs(), true, 1));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(web.managed.lock().unwrap().stages.len(), 1);
+        // The web reports no stage (its room was made again): it goes again.
+        web.set_state(managed_talk_state(live_legs(), false, 1));
+        wait_until(|| web.managed.lock().unwrap().stages.len() == 2).await;
+        let stages = web.managed.lock().unwrap().stages.clone();
+        assert_eq!(stages[0], stages[1]);
+        // The return stays off on this show, whatever the room.
+        let error = harness.context.set_return(true).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The program return is not available on this show."
+        );
+    }
+
+    // Wire section 13.2 (D10): a managed recording is segments and a
+    // playlist of presigned URLs. The desktop fetches the playlist, writes
+    // it to a private temporary file, remuxes with `-c copy`, and removes
+    // the file however the remux ends. No URL reaches an error or a log
+    // line, and nothing of the list's answer carries one to the renderer.
+    #[tokio::test]
+    async fn a_managed_recording_is_fetched_remuxed_and_its_playlist_removed() {
+        use crate::cloud_control_web::{
+            REMUX_PROTOCOL_WHITELIST, RemuxOutcome, download_segments_recording,
+        };
+        const SIGNATURE: &str = "X-Amz-Signature=presignedSECRETsignature";
+        let playlist = format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nhttps://storage.test/talk/u/sh_abc/h/tk_1/seg_00000.ts?{SIGNATURE}\n#EXT-X-ENDLIST\n"
+        );
+        let harness = harness(true);
+        let web = harness.context.web.clone();
+        {
+            let mut managed = web.managed.lock().unwrap();
+            managed.recording_list = json!({ "recordings": [
+                { "id": "rec_managed", "showId": "sh_abc", "orientation": "h",
+                  "startedAt": "2026-11-13T20:04:09.000Z", "expiresAt": "2026-12-13T20:04:09.000Z",
+                  "seconds": 1800, "bytes": 123456789, "format": "segments",
+                  "downloadUrl": "", "playlistUrl": format!("https://www.videorc.test/x?{SIGNATURE}") },
+                { "id": "rec_node", "showId": "sh_old", "orientation": "v",
+                  "startedAt": "2026-11-08T12:04:00.000Z", "expiresAt": "2026-12-08T12:04:00.000Z",
+                  "seconds": 600, "bytes": 1000, "format": "mp4",
+                  "downloadUrl": format!("https://www.videorc.test/d?{SIGNATURE}") }
+            ] });
+            managed
+                .playlists
+                .insert("rec_managed".to_string(), playlist.clone());
+            managed
+                .playlists
+                .insert("rec_html".to_string(), "<html>sign in</html>".to_string());
+        }
+        // The list: the facts, and no URL of any kind.
+        let recordings = harness
+            .context
+            .cloud_recordings(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(recordings.len(), 2);
+        assert_eq!(recordings[0].format.as_deref(), Some("segments"));
+        let listed = serde_json::to_string(&recordings).unwrap();
+        assert!(
+            !listed.contains("Url") && !listed.contains(SIGNATURE),
+            "{listed}"
+        );
+        assert_eq!(recordings[0].file_name(), "talk-2026-11-13-2004-h.mp4");
+        assert_eq!(recordings[1].file_name(), "talk-2026-11-08-1204-v.mp4");
+
+        let folder =
+            std::env::temp_dir().join(format!("videorc-recording-test-{}", uuid::Uuid::new_v4()));
+        let seen_playlist = Arc::new(StdMutex::new(None::<std::path::PathBuf>));
+
+        // 1. A remux that works.
+        let saved = {
+            let seen = seen_playlist.clone();
+            let expected = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment-000000.ts\n#EXT-X-ENDLIST\n".to_string();
+            download_segments_recording(
+                web.as_ref(),
+                "bearer",
+                &recordings[0],
+                &folder,
+                |args| async move {
+                    let args: Vec<String> = args
+                        .iter()
+                        .map(|arg| arg.to_string_lossy().into_owned())
+                        .collect();
+                    // Streams copied, HTTPS segments allowed from a local
+                    // playlist, nothing overwritten, and no URL in sight.
+                    assert_eq!(
+                        &args[..8],
+                        [
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-nostdin",
+                            "-y",
+                            "-protocol_whitelist",
+                            REMUX_PROTOCOL_WHITELIST,
+                            "-i"
+                        ]
+                    );
+                    assert_eq!(&args[9..13], ["-c", "copy", "-movflags", "+faststart"]);
+                    assert_eq!(&args[13..15], ["-f", "mp4"]);
+                    assert_eq!(args.len(), 16);
+                    assert!(args.iter().all(|arg| !arg.contains("://")), "{args:?}");
+                    let playlist_path = std::path::PathBuf::from(&args[8]);
+                    assert_eq!(std::fs::read_to_string(&playlist_path).unwrap(), expected);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt as _;
+                        let mode = std::fs::metadata(&playlist_path)
+                            .unwrap()
+                            .permissions()
+                            .mode();
+                        assert_eq!(mode & 0o777, 0o600, "only this user reads the playlist");
+                    }
+                    *seen.lock().unwrap() = Some(playlist_path);
+                    std::fs::write(args.last().unwrap(), b"mp4").unwrap();
+                    Ok(RemuxOutcome {
+                        success: true,
+                        stderr: String::new(),
+                    })
+                },
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(saved, folder.join("talk-2026-11-13-2004-h.mp4"));
+        assert_eq!(std::fs::read(&saved).unwrap(), b"mp4");
+        let temporary = seen_playlist.lock().unwrap().take().unwrap();
+        assert!(!temporary.exists(), "the playlist is removed on success");
+        assert_eq!(
+            web.managed.lock().unwrap().playlist_calls,
+            vec!["rec_managed".to_string()]
+        );
+
+        // 2. A remux that fails, and names a presigned URL as it does: the
+        //    playlist and the half-written MP4 are gone, and the error has
+        //    no URL in it. The name already taken is not overwritten.
+        let seen = seen_playlist.clone();
+        let error = download_segments_recording(
+            web.as_ref(),
+            "bearer",
+            &recordings[0],
+            &folder,
+            |args| async move {
+                *seen.lock().unwrap() = Some(std::path::PathBuf::from(&args[8]));
+                assert!(args.last().unwrap().to_string_lossy().ends_with(".part"));
+                std::fs::write(args.last().unwrap(), b"half").unwrap();
+                Ok(RemuxOutcome {
+                    success: false,
+                    stderr: format!(
+                        "[https @ 0x1] HTTP error 403 Forbidden\n[hls @ 0x2] Failed to open segment 0 of playlist 0: https://storage.test/talk/u/sh_abc/h/tk_1/seg_00000.ts?{SIGNATURE}\nError opening input files: Server returned 403 Forbidden (access denied)\n"
+                    ),
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("FFmpeg could not make the MP4"), "{text}");
+        assert!(text.contains("403 Forbidden"), "{text}");
+        assert!(
+            !text.contains(SIGNATURE) && !text.contains("storage.test"),
+            "{text}"
+        );
+        let temporary = seen_playlist.lock().unwrap().take().unwrap();
+        assert!(!temporary.exists(), "the playlist is removed on failure");
+        assert!(!folder.join("talk-2026-11-13-2004-h (2).mp4").exists());
+        assert_eq!(std::fs::read(&saved).unwrap(), b"mp4");
+
+        // 3. An answer that is not a playlist: nothing is written or run.
+        let html = crate::cloud_control_web::CloudRecordingItem {
+            id: "rec_html".to_string(),
+            ..recordings[0].clone()
+        };
+        let error = download_segments_recording(
+            web.as_ref(),
+            "bearer",
+            &html,
+            &folder,
+            |_args| async move {
+                Err::<RemuxOutcome, std::io::Error>(std::io::Error::other("nothing to remux"))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("playlist"), "{error}");
+
+        // 4. Through the RPC's own path: a node recording is not remuxed
+        //    here, an id that left the account is said, a signed-out
+        //    desktop is refused, and an FFmpeg that is not there leaves no
+        //    playlist behind.
+        let (_held, cancelled) = watch::channel(false);
+        let download = |id: &'static str, bearer: Option<&'static str>| {
+            harness.context.perform_cloud_recording_download(
+                bearer.map(str::to_string),
+                id,
+                "videorc-ffmpeg-that-is-not-here".to_string(),
+                folder.clone(),
+                crate::cloud_control_web::DownloadControl {
+                    job_id: uuid::Uuid::new_v4().to_string(),
+                    cancelled: cancelled.clone(),
+                    progress: Arc::new(|_, _| {}),
+                },
+            )
+        };
+        let error = download("rec_node", Some("bearer")).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "This recording downloads from your account on videorc.com."
+        );
+        assert!(download("rec_gone", Some("bearer")).await.is_err());
+        assert!(download("rec_managed", None).await.is_err());
+        let error = download("rec_managed", Some("bearer")).await.unwrap_err();
+        assert!(
+            error.to_string().contains("FFmpeg could not be started"),
+            "{error}"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("videorc-recording-")
+                    && entry.file_name().to_string_lossy().ends_with(".m3u8")
+            })
+            .filter(|entry| {
+                std::fs::read_to_string(entry.path()).is_ok_and(|text| text.contains(SIGNATURE))
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

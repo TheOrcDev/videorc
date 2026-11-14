@@ -34,9 +34,19 @@ import {
   type RemoteTrackPublication
 } from 'livekit-client'
 
-import type { CloudRoomClientState, CloudRoomQuality, CloudRoomTokenAnswer } from '@/lib/backend'
+import type {
+  CloudRoomClientState,
+  CloudRoomOverlayEvent,
+  CloudRoomQuality,
+  CloudRoomTokenAnswer
+} from '@/lib/backend'
 import { matchMicrophoneDeviceId } from '@/lib/mic-meter'
-import { RemoteAudioAttachments, isRunnerIdentity } from '@/lib/talk-show-room-audio'
+import { sendOverlay, type OverlayImage } from '@/lib/talk-show-overlays'
+import {
+  RemoteAudioAttachments,
+  isRecorderIdentity,
+  isRunnerIdentity
+} from '@/lib/talk-show-room-audio'
 
 export { isRunnerIdentity } from '@/lib/talk-show-room-audio'
 
@@ -168,6 +178,8 @@ export class TalkShowRoomClient {
   readonly #audio: RemoteAudioAttachments<HTMLMediaElement>
   #snapshot: TalkShowRoomSnapshot = IDLE_TALK_SHOW_ROOM
   #problem: string | null = null
+  /** Overlays go one at a time, in the order they were handed over. */
+  #overlays = new Map<string, AbortController>()
 
   constructor(deps: TalkShowRoomDeps) {
     this.#deps = deps
@@ -214,6 +226,8 @@ export class TalkShowRoomClient {
   /** Leave: the local tracks stop first (D13 for guests; the same here). */
   async disconnect(): Promise<void> {
     this.#closed = true
+    for (const pending of this.#overlays.values()) pending.abort()
+    this.#overlays.clear()
     this.#screenGeneration += 1
     this.#clearTimers()
     await this.#stopLocal()
@@ -309,6 +323,33 @@ export class TalkShowRoomClient {
     this.#publish()
   }
 
+  /** Latest wins per slot and orientation. Hide cancels a pending set
+   * immediately and opens its own clear stream without waiting for it. */
+  async sendOverlay(
+    event: CloudRoomOverlayEvent,
+    image: (imageId: string, signal?: AbortSignal) => Promise<OverlayImage | null>
+  ): Promise<void> {
+    const room = this.#room
+    if (this.#closed || !room || room.state !== ConnectionState.Connected) return
+    const key = `${event.showId}:${event.slot}:${event.orientation}`
+    this.#overlays.get(key)?.abort()
+    const controller = new AbortController()
+    this.#overlays.set(key, controller)
+    try {
+      const result = await sendOverlay(event, {
+        publisher: room.localParticipant,
+        image,
+        signal: controller.signal
+      })
+      if (result !== 'sent')
+        console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
+    } catch {
+      console.warn('[talk-show] overlay dropped', event.slot, event.orientation)
+    } finally {
+      if (this.#overlays.get(key) === controller) this.#overlays.delete(key)
+    }
+  }
+
   /** The Program monitor (D7): the runner's return, subscribed on demand. */
   setMonitor(enabled: boolean): void {
     this.#monitorEnabled = enabled
@@ -321,7 +362,7 @@ export class TalkShowRoomClient {
       .on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
         this.#applySubscriptions()
         // A guest who just joined needs the stage (data is not replayed).
-        if (!isRunnerIdentity(participant.identity)) {
+        if (!isRunnerIdentity(participant.identity) && !isRecorderIdentity(participant.identity)) {
           void this.sendStage(this.#lastStage)
         }
         this.#publish()
@@ -557,6 +598,8 @@ export class TalkShowRoomClient {
     let monitorAudio: MediaStreamTrack | null = null
     if (room) {
       for (const participant of room.remoteParticipants.values()) {
+        // LiveKit's recorder is nobody (plan 234).
+        if (isRecorderIdentity(participant.identity)) continue
         let video: MediaStreamTrack | null = null
         let audio: MediaStreamTrack | null = null
         let screen: MediaStreamTrack | null = null

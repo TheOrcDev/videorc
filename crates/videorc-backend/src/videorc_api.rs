@@ -27,6 +27,12 @@ pub(crate) const CLOUD_LOST_TIMEOUT: std::time::Duration = std::time::Duration::
 /// Plan 224: the guests list long-polls 25 s on the web; allow it and a margin.
 pub(crate) const CLOUD_GUESTS_POLL_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(35);
+/// Plan 234 (web control): the state route long-polls up to 25 s; the same
+/// room as the guests poll (`docs/cloud/managed-media-wire.md`, section 3).
+pub(crate) const CLOUD_STATE_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
+/// Plan 234 (web control): a route that acts on the show's media may wait on
+/// more than one LiveKit call, each given 8 s by the web. The create's room.
+pub(crate) const CLOUD_CONTROL_TIMEOUT: std::time::Duration = CLOUD_CREATE_TIMEOUT;
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Co-host ticks are synchronous and small, but the server fans one tick out
 /// across a model ladder: a slow-but-alive gateway needs headroom beyond the
@@ -1811,6 +1817,40 @@ fn shared_http() -> Result<reqwest::Client> {
     Ok(SHARED_HTTP.get_or_init(|| http).clone())
 }
 
+/// The downloader shares the feed's dev-only extra root. Production keeps
+/// normal rustls roots and never even reads the override environment variable.
+/// HTTPS-only also refuses redirects from a segment to plain HTTP.
+fn build_recording_http(
+    dev_build: bool,
+    read_ca_file: impl FnOnce() -> Option<String>,
+) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().https_only(true);
+    if dev_build {
+        let ca_file = read_ca_file();
+        if let Some(pem) = crate::recording::cloud_feed_extra_ca_pem(true, ca_file.as_deref())? {
+            for certificate in reqwest::Certificate::from_pem_bundle(&pem)
+                .context("The recording download test root is not a PEM certificate.")?
+            {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+    }
+    builder
+        .build()
+        .context("Could not build the recording download HTTP client.")
+}
+
+fn recording_http() -> Result<&'static reqwest::Client> {
+    static RECORDING_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = RECORDING_HTTP.get() {
+        return Ok(client);
+    }
+    let client = build_recording_http(cfg!(debug_assertions), || {
+        std::env::var(crate::recording::CLOUD_FEED_CA_FILE_ENV).ok()
+    })?;
+    Ok(RECORDING_HTTP.get_or_init(|| client))
+}
+
 /// A thin client over the Videorc web API.
 #[derive(Clone)]
 pub struct VideorcApiClient {
@@ -1986,19 +2026,76 @@ impl VideorcApiClient {
         path: &str,
         timeout: std::time::Duration,
     ) -> std::result::Result<T, crate::cloud_show::CloudApiError> {
-        use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
-        let response = request
-            .timeout(timeout)
-            .send()
+        self.cloud_json_or_body(request, path, timeout)
             .await
-            .map_err(|error| CloudApiError::Transport(format!("{path}: {error}")))?;
+            .map_err(|(error, _)| error)
+    }
+
+    /// `cloud_json`, with a failure's parsed body beside its error (`Null`
+    /// when there was none): one route's refusal carries a list (plan 234,
+    /// `PUT …/destinations`).
+    async fn cloud_json_or_body<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<T, (crate::cloud_show::CloudApiError, serde_json::Value)> {
+        use crate::cloud_show::CloudApiError;
+        let response = self.cloud_send(request, path, timeout).await?;
+        let status = response.status();
+        response.json().await.map_err(|error| {
+            (
+                CloudApiError::Other {
+                    status: status.as_u16(),
+                    code: "malformed-response".to_string(),
+                    message: format!("Could not read {path}: {error}"),
+                },
+                serde_json::Value::Null,
+            )
+        })
+    }
+
+    /// A cloud route whose answer is text, not JSON (plan 234: a recording's
+    /// playlist). Failures are the same envelope. The text is the caller's
+    /// alone: it is never logged here.
+    async fn cloud_text(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<String, crate::cloud_show::CloudApiError> {
+        use crate::cloud_show::CloudApiError;
+        let response = self
+            .cloud_send(request, path, timeout)
+            .await
+            .map_err(|(error, _)| error)?;
+        let status = response.status();
+        response.text().await.map_err(|error| CloudApiError::Other {
+            status: status.as_u16(),
+            code: "malformed-response".to_string(),
+            message: format!("Could not read {path}: {error}"),
+        })
+    }
+
+    /// One cloud request: the response of a 2xx, or the failure classified
+    /// from the `{ error: { code, message } }` envelope, with its body.
+    async fn cloud_send(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<reqwest::Response, (crate::cloud_show::CloudApiError, serde_json::Value)>
+    {
+        use crate::cloud_show::{CloudApiError, ShowRecord, classify_cloud_failure};
+        let response = request.timeout(timeout).send().await.map_err(|error| {
+            (
+                CloudApiError::Transport(format!("{path}: {error}")),
+                serde_json::Value::Null,
+            )
+        })?;
         let status = response.status();
         if status.is_success() {
-            return response.json().await.map_err(|error| CloudApiError::Other {
-                status: status.as_u16(),
-                code: "malformed-response".to_string(),
-                message: format!("Could not read {path}: {error}"),
-            });
+            return Ok(response);
         }
         let text = response.text().await.unwrap_or_default();
         let (code, message) = parse_error_envelope(&text);
@@ -2014,12 +2111,9 @@ impl VideorcApiClient {
             .or_else(|| body.pointer("/error/resetAt"))
             .and_then(|value| value.as_str())
             .map(str::to_string);
-        Err(classify_cloud_failure(
-            status.as_u16(),
-            &code,
-            message,
-            live_show,
-            reset_at,
+        Err((
+            classify_cloud_failure(status.as_u16(), &code, message, live_show, reset_at),
+            body,
         ))
     }
 
@@ -3704,6 +3798,209 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         )
         .await
     }
+
+    // --- Plan 234: web control (`docs/cloud/managed-media-wire.md`, section 2) ---
+
+    async fn control_state(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        since: Option<u64>,
+    ) -> std::result::Result<
+        crate::cloud_control_web::ControlStateAnswer,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::state_path(show_id);
+        let mut request = self.http.get(self.endpoint(&path)).bearer_auth(bearer);
+        if let Some(since) = since {
+            request = request.query(&[(crate::cloud_control_web::STATE_SINCE_QUERY, since)]);
+        }
+        // The web long-polls up to 25 s: wait that out.
+        self.cloud_json(request, &path, CLOUD_STATE_POLL_TIMEOUT)
+            .await
+    }
+
+    async fn set_destinations(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &crate::cloud_control_web::DestinationsBody,
+    ) -> std::result::Result<
+        crate::cloud_control_web::DestinationsAnswer,
+        crate::cloud_control_web::DestinationsFailure,
+    > {
+        let path = crate::cloud_control_web::destinations_path(show_id);
+        // The one request that carries the stream keys: in its body, over
+        // TLS to the configured base URL, and in nothing this client logs.
+        self.cloud_json_or_body(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body.as_json()),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+        .map_err(|(error, failure_body)| {
+            crate::cloud_control_web::DestinationsFailure::from_body(error, &failure_body)
+        })
+    }
+
+    async fn set_hold_image(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        png_base64: &str,
+    ) -> std::result::Result<(), crate::cloud_show::CloudApiError> {
+        let path = crate::cloud_control_web::hold_image_path(show_id);
+        self.cloud_json::<serde_json::Value>(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({ "pngBase64": png_base64 })),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn set_stage(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        stage: &serde_json::Value,
+    ) -> std::result::Result<
+        crate::cloud_control_web::ControlRevAnswer,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::stage_path(show_id);
+        self.cloud_json(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(stage),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn end_legs(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &crate::cloud_control_web::DestinationsBody,
+    ) -> std::result::Result<
+        crate::cloud_control_web::ControlRevAnswer,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::legs_end_path(show_id);
+        // Like the destinations: the addresses ride the body and nothing
+        // this client logs.
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body.as_json()),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn set_recording(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        on: bool,
+    ) -> std::result::Result<
+        crate::cloud_control_web::ControlRevAnswer,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::recording_path(show_id);
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({ "on": on })),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+    }
+
+    // --- Plan 234: cloud recordings (wire section 13.2) ---
+
+    async fn list_recordings(
+        &self,
+        bearer: &str,
+    ) -> std::result::Result<
+        Vec<crate::cloud_control_web::CloudRecordingItem>,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::RECORDINGS_PATH;
+        self.cloud_json::<crate::cloud_control_web::CloudRecordingsAnswer>(
+            self.http.get(self.endpoint(path)).bearer_auth(bearer),
+            path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map(|answer| answer.recordings)
+    }
+
+    async fn recording_playlist(
+        &self,
+        bearer: &str,
+        recording_id: &str,
+    ) -> std::result::Result<String, crate::cloud_show::CloudApiError> {
+        let path = crate::cloud_control_web::recording_playlist_path(recording_id);
+        // The answer's segment lines are presigned URLs: it goes to the
+        // caller and into nothing this client logs.
+        self.cloud_text(
+            self.http.get(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+    }
+    async fn recording_segment(
+        &self,
+        url: &str,
+        path: &std::path::Path,
+    ) -> std::result::Result<(), crate::cloud_control_web::SegmentFetchError> {
+        use crate::cloud_control_web::SegmentFetchError;
+        use tokio::io::AsyncWriteExt as _;
+        // Certificate AND hostname verification stay on, including with the
+        // feed's dev test root. No bearer is sent to storage.
+        let client = recording_http().map_err(|_| SegmentFetchError::Network)?;
+        let mut response = client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(90))
+            .send()
+            .await
+            .map_err(|_| SegmentFetchError::Network)?
+            .error_for_status()
+            .map_err(|_| SegmentFetchError::Network)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(path)
+            .await
+            .map_err(SegmentFetchError::Storage)?;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| SegmentFetchError::Network)?
+        {
+            file.write_all(&chunk)
+                .await
+                .map_err(SegmentFetchError::Storage)?;
+        }
+        file.flush().await.map_err(SegmentFetchError::Storage)
+    }
 }
 
 pub(crate) async fn read_error_code_and_message(response: reqwest::Response) -> (String, String) {
@@ -3794,6 +4091,49 @@ mod tests {
     use super::*;
 
     type SeenCommands = std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, serde_json::Value)>>>;
+
+    #[test]
+    fn release_recording_downloads_never_read_the_dev_ca_variable() {
+        build_recording_http(false, || {
+            panic!("a release downloader must not read VIDEORC_CLOUD_FEED_CA_FILE")
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recording_downloads_refuse_plain_http_with_or_without_the_dev_root() {
+        for dev_build in [false, true] {
+            let client = build_recording_http(dev_build, || None).unwrap();
+            let error = client
+                .get("http://127.0.0.1/segment.ts")
+                .send()
+                .await
+                .unwrap_err();
+            assert!(
+                error.is_builder(),
+                "HTTP is refused before a request, dev={dev_build}"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_recording_downloads_append_the_feeds_test_root() {
+        use base64::Engine as _;
+        let path =
+            std::env::temp_dir().join(format!("cloud-download-ca-{}.pem", uuid::Uuid::new_v4()));
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(webpki_root_certs::TLS_SERVER_ROOT_CERTS[0].as_ref());
+        std::fs::write(
+            &path,
+            format!("-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n"),
+        )
+        .unwrap();
+        build_recording_http(true, || Some(path.to_string_lossy().into_owned())).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(build_recording_http(true, || Some(path.to_string_lossy().into_owned())).is_err());
+        // An override naming an unreadable file is inert on the release path.
+        build_recording_http(false, || Some(path.to_string_lossy().into_owned())).unwrap();
+    }
 
     #[test]
     fn caption_service_unavailable_preserves_http_status_and_stable_code() {

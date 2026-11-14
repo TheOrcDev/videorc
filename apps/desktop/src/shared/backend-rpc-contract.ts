@@ -123,7 +123,13 @@ import type {
   CloudTestParams,
   CloudGuestActParams,
   CloudGuestDecideParams,
+  CloudRecordingDownload,
+  CloudRecordingDownloadEvent,
+  CloudRecordingDownloadParams,
+  CloudRecordingItem,
+  CloudRecordingsList,
   CloudRecordingStatus,
+  CloudRoomOverlayEvent,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
   CloudRoomRequest,
@@ -587,6 +593,14 @@ export interface BackendRpcMethodMap {
   /** Record in a talk show (D10). */
   'cloud.recording.start': BackendRpcDefinition<undefined, CloudStatus>
   'cloud.recording.stop': BackendRpcDefinition<undefined, CloudStatus>
+  /** Plan 234 T3: the account's cloud recordings, without URLs. */
+  'cloud.recordings.list': BackendRpcDefinition<undefined, CloudRecordingsList>
+  /** Plan 234 T3: a managed recording (segments) as an MP4 on this computer. */
+  'cloud.recordings.download': BackendRpcDefinition<
+    CloudRecordingDownloadParams,
+    CloudRecordingDownload
+  >
+  'cloud.recordings.cancelDownload': BackendRpcDefinition<{ jobId: string }, { ok: true }>
   /** The Program monitor's feed (R-G5). */
   'cloud.return.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
   /** Go Live in a talk show (C-G6): the destinations go to the runner; no local leg. */
@@ -868,6 +882,9 @@ export interface BackendEventMap {
   'cloud.state': CloudStatus
   /** Plan 224: one per new "wants to join", for the Studio's alert. */
   'cloud.room.requests': CloudRoomRequest
+  /** Plan 234 T3: an overlay for the host's renderer to send to the room. */
+  'cloud.room.overlay': CloudRoomOverlayEvent
+  'cloud.recordings.download': CloudRecordingDownloadEvent
   /** Plan 223: the full alert list on every change. */
   'watchdog.alerts': WatchdogAlertsView
   'cohost.report.saved': CohostReportSavedEvent
@@ -6316,6 +6333,86 @@ const cloudTalkGoLiveParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CloudTalkGoLiveParams>
 const cloudOpenFlagSchema = objectSchema({ open: booleanSchema }, { allowUnknown: false })
+// Plan 234 T3: the overlay hand-off. Small by contract: the bytes are never
+// in the event (`imageId` names them on the backend's HTTP server).
+const cloudOverlaySlotSchema = enumSchema(['card', 'takeover', 'hold'])
+const cloudOverlayOrientationSchema = enumSchema(['h', 'v'])
+const cloudRoomOverlayEventSchema = unionSchema([
+  objectSchema(
+    {
+      op: literalSchema('set'),
+      showId: stringSchema({ minLength: 1, maxLength: 64 }),
+      slot: cloudOverlaySlotSchema,
+      orientation: cloudOverlayOrientationSchema,
+      rect: objectSchema(
+        {
+          x: numberSchema({ min: 0, max: 1.0001 }),
+          y: numberSchema({ min: 0, max: 1.0001 }),
+          w: numberSchema({ min: 0, max: 1.0001 }),
+          h: numberSchema({ min: 0, max: 1.0001 })
+        },
+        { allowUnknown: false }
+      ),
+      ttlSeconds: optionalSchema(numberSchema({ integer: true, min: 1, max: 86_400 })),
+      mimeType: enumSchema(['image/png', 'image/jpeg', 'image/webp']),
+      imageId: stringSchema({ minLength: 1, maxLength: 64 })
+    },
+    { allowUnknown: false }
+  ),
+  objectSchema(
+    {
+      op: literalSchema('clear'),
+      showId: stringSchema({ minLength: 1, maxLength: 64 }),
+      slot: cloudOverlaySlotSchema,
+      orientation: cloudOverlayOrientationSchema
+    },
+    { allowUnknown: false }
+  )
+]) as RuntimeSchema<CloudRoomOverlayEvent>
+// Plan 234 T3: cloud recordings. No URL is part of either shape.
+const cloudRecordingItemSchema = objectSchema(
+  {
+    id: stringSchema({ minLength: 1, maxLength: 128 }),
+    showId: stringSchema({ maxLength: 64 }),
+    orientation: stringSchema({ maxLength: 16 }),
+    startedAt: stringSchema({ maxLength: 64 }),
+    expiresAt: stringSchema({ maxLength: 64 }),
+    seconds: numberSchema({ min: 0 }),
+    bytes: numberSchema({ min: 0 }),
+    format: optionalSchema(stringSchema({ maxLength: 32 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingItem>
+const cloudRecordingsListSchema = objectSchema(
+  { recordings: arraySchema(cloudRecordingItemSchema, { maxLength: 2000 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingsList>
+const cloudRecordingDownloadParamsSchema = objectSchema(
+  {
+    id: stringSchema({ minLength: 1, maxLength: 128 }),
+    outputDirectoryCapability: optionalSchema(boundedString),
+    outputDirectory: optionalSchema(boundedPath),
+    ffmpegPath: optionalSchema(boundedPath)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingDownloadParams>
+const cloudRecordingDownloadSchema = objectSchema(
+  { jobId: stringSchema({ minLength: 1, maxLength: 128 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingDownload>
+
+const cloudRecordingDownloadEventSchema = objectSchema(
+  {
+    jobId: stringSchema({ minLength: 1, maxLength: 128 }),
+    recordingId: stringSchema({ minLength: 1, maxLength: 128 }),
+    state: enumSchema(['running', 'done', 'failed', 'cancelled']),
+    doneSegments: optionalSchema(nonNegativeInteger),
+    totalSegments: optionalSchema(nonNegativeInteger),
+    path: optionalSchema(boundedPath),
+    error: optionalSchema(stringSchema({ maxLength: 4096 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingDownloadEvent>
 
 const runtimeContracts = {
   'session.sources.get': {
@@ -6776,6 +6873,18 @@ const runtimeContracts = {
   'cloud.stage.set': { params: cloudStageSchema, result: cloudStatusSchema },
   'cloud.recording.start': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.recording.stop': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.recordings.list': { params: undefinedSchema, result: cloudRecordingsListSchema },
+  'cloud.recordings.download': {
+    params: cloudRecordingDownloadParamsSchema,
+    result: cloudRecordingDownloadSchema
+  },
+  'cloud.recordings.cancelDownload': {
+    params: objectSchema(
+      { jobId: stringSchema({ minLength: 1, maxLength: 128 }) },
+      { allowUnknown: false }
+    ),
+    result: objectSchema({ ok: literalSchema(true) }, { allowUnknown: false })
+  },
   'cloud.return.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
   'cloud.show.goLive': { params: cloudTalkGoLiveParamsSchema, result: cloudStatusSchema },
   'cloud.show.legs.end': { params: undefinedSchema, result: cloudStatusSchema },
@@ -7140,6 +7249,8 @@ const runtimeEventSchemas = {
   'cohost.act.result': cohostActAnswerSchema,
   'cloud.state': cloudStatusSchema,
   'cloud.room.requests': cloudRoomRequestSchema,
+  'cloud.room.overlay': cloudRoomOverlayEventSchema,
+  'cloud.recordings.download': cloudRecordingDownloadEventSchema,
   'watchdog.alerts': watchdogAlertsViewSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   'cohost.community.changed': communitySummarySchema,

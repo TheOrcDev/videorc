@@ -52,6 +52,7 @@ import {
 import { openLivestreamView } from '@/lib/livestream-tabs'
 import type { TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowPerson } from '@/lib/talk-show-room'
+import { managedProgramStageInput, programMonitorView } from '@/lib/talk-show-managed'
 import { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
 import {
   planStage,
@@ -66,7 +67,8 @@ import { cn } from '@/lib/utils'
 // the Studio's Preview. The renderer draws the room's tracks with the
 // runner's own geometry, so the host acts on the picture the cloud sends,
 // 150 to 300 ms behind the room instead of the return's half second. Under
-// it: the layout, the screen share, the Program monitor (the return), "Ada
+// it: the layout, the screen share, the Program monitor (the return, or on a
+// managed show the stage as the program page draws it, plan 234 D6), "Ada
 // wants to join", and the backstage strip, the one home of Bring on and Send
 // backstage. Loaded only while the room is open.
 
@@ -86,14 +88,16 @@ export default function ShowStage(): ReactElement {
   const connected = talkShow.room.state === 'connected'
 
   // The Program monitor subscribes to the return while the stage is on
-  // screen and the room is joined (D7); it lets go when the stage goes.
+  // screen and the room is joined (D7); it lets go when the stage goes. A
+  // managed show has no return (plan 234 D6): nothing is asked for.
   const setMonitorRef = useRef(talkShow.setMonitor)
   setMonitorRef.current = talkShow.setMonitor
+  const hasReturn = programMonitorView(cloudStatus).source === 'return'
   useEffect(() => {
-    if (!connected) return
+    if (!connected || !hasReturn) return
     void setMonitorRef.current(true).catch(() => {})
     return () => void setMonitorRef.current(false).catch(() => {})
-  }, [connected])
+  }, [connected, hasReturn])
 
   return (
     <PanelSection
@@ -190,14 +194,17 @@ function tileTrack(
 function StageTileView({
   tile,
   participant,
-  talkShow
+  talkShow,
+  monitor = false
 }: {
   tile: StageTile
   participant: CloudRoomParticipant | undefined
   talkShow: TalkShowContextValue
+  /** In the Program monitor: the picture and its geometry, without words. */
+  monitor?: boolean
 }): ReactElement {
   const { track, cameraOff, name } = tileTrack(tile, talkShow)
-  const label = name || participant?.name || ''
+  const label = monitor ? '' : name || participant?.name || ''
   return (
     <div
       className="absolute overflow-hidden bg-inset"
@@ -210,7 +217,7 @@ function StageTileView({
         className={tile.kind === 'screen' ? 'object-contain' : 'object-cover'}
         track={track}
       />
-      {!track ? (
+      {!track && !monitor ? (
         <span className="absolute inset-0 flex items-center justify-center text-sm text-video-ground-muted">
           {cameraOff
             ? 'Camera off'
@@ -221,7 +228,7 @@ function StageTileView({
       ) : null}
       {participant?.away && tile.kind === 'person' ? (
         <span className="absolute inset-0 flex items-center justify-center bg-video-ground/60 text-sm font-medium text-video-ground-foreground">
-          Back in a moment
+          {monitor ? null : 'Back in a moment'}
         </span>
       ) : null}
       {tile.plate && label ? (
@@ -408,6 +415,11 @@ function ScreenShareButton({
  * half a second behind. Muted by default; its speaker plays the return so the
  * host can check the mix (their own voice comes back late: a check, not a
  * monitor).
+ *
+ * A managed show has no return (plan 234 D6). Its monitor keeps the frame,
+ * the label and the two waiting lines, and draws the Show stage as the
+ * program page reports it. The speaker is not shown: there is no return to
+ * listen to, and a control that plays nothing would lie.
  */
 function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
   const { cloudStatus } = useStudioCloud()
@@ -415,6 +427,7 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
   const audioRef = useRef<HTMLAudioElement>(null)
   const { video, audio } = talkShow.room.monitor
   const live = Boolean(cloudStatus?.room?.live || cloudStatus?.recording?.active)
+  const view = programMonitorView(cloudStatus)
 
   useEffect(() => {
     const element = audioRef.current
@@ -429,32 +442,65 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
   return (
     <div
       className="flex w-1/2 min-w-36 flex-col gap-1.5 self-end @min-[36rem]/show-stage:w-1/4"
+      data-program-source={view.source}
       data-testid="show-stage-program"
     >
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex min-h-6 items-center justify-between gap-2">
         <span className="text-label text-subtle">Program</span>
-        <Button
-          aria-label={listening ? 'Mute the program' : 'Listen to the program'}
-          aria-pressed={listening}
-          disabled={!audio}
-          size="icon-xs"
-          type="button"
-          variant="ghost"
-          onClick={() => setListening((value) => !value)}
-        >
-          {listening ? <SpeakerOnIcon /> : <SpeakerOffIcon />}
-        </Button>
-      </div>
-      <div className="relative aspect-video w-full overflow-hidden rounded-row bg-video-ground">
-        <TrackVideo className="object-contain" track={video} />
-        {!video ? (
-          <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-video-ground-muted">
-            {live ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
-          </span>
+        {view.source === 'return' ? (
+          <Button
+            aria-label={listening ? 'Mute the program' : 'Listen to the program'}
+            aria-pressed={listening}
+            disabled={!audio}
+            size="icon-xs"
+            type="button"
+            variant="ghost"
+            onClick={() => setListening((value) => !value)}
+          >
+            {listening ? <SpeakerOnIcon /> : <SpeakerOffIcon />}
+          </Button>
         ) : null}
       </div>
-      <audio muted={!listening} ref={audioRef} />
+      <div className="relative aspect-video w-full overflow-hidden rounded-row bg-video-ground [container-type:inline-size]">
+        {view.source === 'return' ? (
+          <>
+            <TrackVideo className="object-contain" track={video} />
+            {!video ? (
+              <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-video-ground-muted">
+                {live ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+              </span>
+            ) : null}
+          </>
+        ) : view.state === 'shown' ? (
+          <ProgramStage talkShow={talkShow} />
+        ) : (
+          <span className="absolute inset-0 flex items-center justify-center p-2 text-center text-xs text-video-ground-muted">
+            {view.state === 'waiting' ? 'Waiting for the program…' : PROGRAM_MONITOR_EMPTY}
+          </span>
+        )}
+      </div>
+      {view.source === 'return' ? <audio muted={!listening} ref={audioRef} /> : null}
     </div>
+  )
+}
+
+/** The Show stage inside the Program monitor: the same tiles, drawn small. */
+function ProgramStage({ talkShow }: { talkShow: TalkShowContextValue }): ReactElement {
+  const { cloudStatus } = useStudioCloud()
+  const room = cloudStatus?.room
+  const plan = planStage(STAGE_CANVAS, managedProgramStageInput(room))
+  return (
+    <>
+      {plan.tiles.map((tile) => (
+        <StageTileView
+          key={`${tile.kind}:${tile.identity}`}
+          monitor
+          participant={room?.participants?.find((entry) => entry.identity === tile.identity)}
+          talkShow={talkShow}
+          tile={tile}
+        />
+      ))}
+    </>
   )
 }
 

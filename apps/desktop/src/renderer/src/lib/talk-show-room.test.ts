@@ -24,10 +24,35 @@ const lk = vi.hoisted(() => {
     state = 'disconnected'
     connectedWith: { url: string; token: string } | null = null
     readonly remoteParticipants = new Map()
+    readonly streams: {
+      topic: string
+      mimeType: string
+      totalSize: number
+      attributes?: Record<string, string>
+      bytes: number
+      closed: boolean
+    }[] = []
     readonly localParticipant = {
       publishTrack: vi.fn(async () => {}),
       unpublishTrack: async () => {},
-      publishData: async () => {}
+      publishData: async () => {},
+      streamBytes: async (options: {
+        topic: string
+        mimeType: string
+        totalSize: number
+        attributes?: Record<string, string>
+      }) => {
+        const stream = { ...options, bytes: 0, closed: false }
+        this.streams.push(stream)
+        return {
+          write: async (chunk: Uint8Array) => {
+            stream.bytes += chunk.byteLength
+          },
+          close: async () => {
+            stream.closed = true
+          }
+        }
+      }
     }
     constructor() {
       FakeRoom.rooms.push(this)
@@ -231,4 +256,146 @@ it('stops a screen acquired after Close without publishing it', async () => {
   await sharing
   expect(track.stop).toHaveBeenCalledOnce()
   expect(room.snapshot.local.screen).toBeNull()
+})
+
+// Plan 234 T3: a managed show's program page joins the room as LiveKit's
+// recorder (`EG_…`). It is not a person: it is never listed, and its joining
+// does not send the guests' stage message again.
+describe("LiveKit's recorder in the room (plan 234 T3)", () => {
+  const participant = (identity: string, name: string) => ({
+    identity,
+    name,
+    trackPublications: new Map(),
+    connectionQuality: 'good'
+  })
+
+  it('is never listed among the people, and a guest still is', async () => {
+    const { room } = client()
+    await room.connect()
+    const recorder = participant('EG_a1B2c3D4e5F6', '')
+    const ada = participant('g_ada', 'Ada')
+    latestRoom().remoteParticipants.set(recorder.identity, recorder)
+    latestRoom().emit('ParticipantConnected', recorder)
+    expect(room.snapshot.people).toEqual([])
+    latestRoom().remoteParticipants.set(ada.identity, ada)
+    latestRoom().emit('ParticipantConnected', ada)
+    expect(room.snapshot.people.map((person) => person.identity)).toEqual(['g_ada'])
+    await room.disconnect()
+  })
+
+  it('gets no stage message when it joins; a guest who joins does', async () => {
+    const { room } = client()
+    await room.connect()
+    await room.sendStage(['host:sh_talk'])
+    const publishData = vi.fn(async () => {})
+    latestRoom().localParticipant.publishData = publishData
+    const recorder = participant('EG_a1B2c3D4e5F6', '')
+    latestRoom().remoteParticipants.set(recorder.identity, recorder)
+    latestRoom().emit('ParticipantConnected', recorder)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(publishData).not.toHaveBeenCalled()
+    const ada = participant('g_ada', 'Ada')
+    latestRoom().remoteParticipants.set(ada.identity, ada)
+    latestRoom().emit('ParticipantConnected', ada)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(publishData).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+  })
+})
+
+// Plan 234 T3 (wire contract 6.3): a managed show's overlays leave on the
+// host's own room connection, in the order they were handed over, and never
+// while the room is not connected.
+describe('overlays to the program page (plan 234 T3)', () => {
+  const takeover = {
+    op: 'set' as const,
+    showId: 'sh_talk',
+    slot: 'takeover' as const,
+    orientation: 'h' as const,
+    rect: { x: 0, y: 0, w: 1, h: 1 },
+    mimeType: 'image/png',
+    imageId: 'image-1'
+  }
+  const clear = {
+    op: 'clear' as const,
+    showId: 'sh_talk',
+    slot: 'takeover' as const,
+    orientation: 'h' as const
+  }
+  const image = async () => ({ bytes: new Uint8Array(32), mimeType: 'image/png' })
+
+  it('streams a completed set and then its clear with the contract attributes', async () => {
+    const { room } = client()
+    await room.connect()
+    await room.sendOverlay(takeover, image)
+    await room.sendOverlay(clear, image)
+    const streams = latestRoom().streams
+    expect(streams.map((stream) => stream.topic)).toEqual([
+      'videorc.overlay.set',
+      'videorc.overlay.clear'
+    ])
+    expect(streams[0].attributes).toEqual({
+      v: '1',
+      slot: 'takeover',
+      o: 'h',
+      x: '0.000000',
+      y: '0.000000',
+      w: '1.000000',
+      h: '1.000000'
+    })
+    expect(streams[0].bytes).toBe(32)
+    expect(streams[1].attributes).toBeUndefined()
+    expect(streams.every((stream) => stream.closed)).toBe(true)
+    await room.disconnect()
+  })
+
+  it('sends Hide immediately past a stalled set, without blocking another slot or orientation', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { room } = client()
+    await room.connect()
+    const stalled = room.sendOverlay(takeover, async () => new Promise(() => {}))
+    await room.sendOverlay({ ...takeover, orientation: 'v' }, image)
+    await room.sendOverlay({ ...takeover, slot: 'card' }, image)
+    await room.sendOverlay(clear, image)
+    await stalled
+    expect(latestRoom().streams.map((stream) => stream.topic)).toEqual([
+      'videorc.overlay.set',
+      'videorc.overlay.set',
+      'videorc.overlay.clear'
+    ])
+    expect(warning).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+    warning.mockRestore()
+  })
+
+  it('a newer set cancels an older fetch and never sends the late image', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { room } = client()
+    await room.connect()
+    let release: (value: Awaited<ReturnType<typeof image>>) => void = () => {}
+    const old = room.sendOverlay(
+      takeover,
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    await room.sendOverlay({ ...takeover, imageId: 'new' }, image)
+    release(await image())
+    await old
+    expect(latestRoom().streams).toHaveLength(1)
+    expect(warning).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+    warning.mockRestore()
+  })
+
+  it('sends nothing before the room is joined or after it is left', async () => {
+    const { room } = client()
+    await room.sendOverlay(takeover, image)
+    expect(lk.FakeRoom.rooms).toHaveLength(0)
+    await room.connect()
+    await room.disconnect()
+    await room.sendOverlay(takeover, image)
+    expect(latestRoom().streams).toHaveLength(0)
+  })
 })

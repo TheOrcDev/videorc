@@ -42,6 +42,7 @@ mod chat_commands;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
+mod cloud_control_web;
 mod cloud_show;
 mod cloud_talk;
 mod cohost;
@@ -667,6 +668,12 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
         )
         .route("/preview/{id}", get(preview_handler))
         .route("/sessions/{id}/poster", get(session_poster_handler))
+        // Plan 234 T3: an overlay's bytes for the renderer, which sends
+        // them to a managed talk show's room.
+        .route(
+            cloud_talk::OVERLAY_IMAGE_ROUTE,
+            get(cloud_talk::overlay_image_handler),
+        )
         .route("/compositor/status", get(compositor_status_handler))
         .route(
             "/process/shutdown/prepare",
@@ -931,6 +938,8 @@ async fn cleanup_process_owners_after_finalization(state: AppState) {
     }
     crate::remote_lan_server::stop(&state);
     crate::agent_mcp::shutdown(&state);
+    let cloud_downloads = cloud_show::lock(&state.cloud_show).downloads.clone();
+    cloud_downloads.shutdown().await;
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     state.clean_cut.interrupt_all_for_shutdown();
@@ -6000,12 +6009,18 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.return.set"
         | "cloud.show.goLive"
         | "cloud.show.legs.end"
+        | "cloud.overlay.set"
+        | "cloud.overlay.clear"
+        // Plan 234 T3: the account's cloud recordings, from videorc.com.
+        | "cloud.recordings.list"
         | "repair.restore_file"
         | "preview.snapshot" => Some(Mutation {
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
         }),
 
-        "session.remux_mp4" | "sessions.import" | "repair.repair_file" => Some(Mutation {
+        "session.remux_mp4"
+        | "sessions.import"
+        | "repair.repair_file" => Some(Mutation {
             max_execution_age: WEBSOCKET_MEDIA_MUTATION_MAX_EXECUTION_AGE,
         }),
 
@@ -6037,7 +6052,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.settings.set"
         | "watchdog.idle.report"
         | "cloud.show.reconnectDestination"
-        | "cloud.room.client.report" => Some(DEFAULT_MUTATION_POLICY),
+        | "cloud.room.client.report"
+        | "cloud.recordings.download"
+        | "cloud.recordings.cancelDownload" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start"
         | "cloud.show.resume"
@@ -6051,6 +6068,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.admin.resolve_session_path"
         | "resource.admin.resolve_screen_path"
         | "resource.admin.resolve_background_path"
+        | "resource.admin.resolve_cloud_download_path"
         | "health.ping"
         | "youtube.quota.status"
         | "scheduledStreams.capabilities"
@@ -9271,6 +9289,28 @@ fn resolve_community_export_resource(
     )
 }
 
+/// Plan 234: `cloud.recordings.download` saves into Output's folder, which
+/// the Library names as the `output-directory` capability main issued
+/// (`outputDirectoryCapability` → `outputDirectory`). Absent, the default
+/// folder; a raw folder from the renderer is refused, the admin role (the
+/// smokes) may pass one.
+fn resolve_cloud_download_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    let object = params.as_object_mut().context("params must be an object")?;
+    consume_resource_field(
+        state,
+        object,
+        role,
+        "outputDirectoryCapability",
+        "outputDirectory",
+        resource_authority::ResourceCapabilityKind::OutputDirectory,
+        false,
+    )
+}
+
 /// Plan 225 D12: Import… reads the file main's picker issued as an
 /// `input-file` capability (`sourceCapability` → `path`), like
 /// `sounds.import`; a raw path from the renderer is refused.
@@ -9808,6 +9848,29 @@ async fn handle_text_message_with_role(
                     command.id,
                     "managed-session-path-missing",
                     error.to_string(),
+                ),
+            }
+        }
+        // Plan 234: the Library's Show in Finder for a cloud recording it
+        // downloaded, by job id; only a finished job's file, while it exists.
+        "resource.admin.resolve_cloud_download_path" => {
+            let job_id = command
+                .params
+                .get("jobId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let path = cloud_show::lock(&state.cloud_show)
+                .downloads
+                .finished_path(job_id);
+            match path {
+                Some(path) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({ "path": path.to_string_lossy() }),
+                ),
+                None => ServerResponse::error(
+                    command.id,
+                    "cloud-download-path-missing",
+                    "The downloaded recording is no longer there.",
                 ),
             }
         }
@@ -11971,6 +12034,143 @@ async fn handle_text_message_with_role(
                             ),
                         }
                     }
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 234 T3 (wire section 13.2): the account's cloud recordings,
+        // and a managed one (segments) made into an MP4 on this computer.
+        "cloud.recordings.list" => match cloud_context(state) {
+            Some(context) => match context
+                .cloud_recordings(account::stored_session_token())
+                .await
+            {
+                Ok(recordings) => {
+                    ServerResponse::ok(command.id, serde_json::json!({ "recordings": recordings }))
+                }
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-recordings-failed",
+                    format!("{error:#}"),
+                ),
+            },
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.recordings.download" => {
+            // The Library passes Output's folder as the capability main issued
+            // (`outputDirectoryCapability`), as a session start does; a raw
+            // folder from the renderer is refused, the admin role may pass one.
+            let mut params_value = command.params;
+            if let Err(error) = resolve_cloud_download_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            let params = match serde_json::from_value::<cloud_control_web::RecordingDownloadParams>(
+                params_value,
+            ) {
+                Ok(params) => params,
+                Err(error) => {
+                    return ServerResponse::error(command.id, "invalid-params", error.to_string());
+                }
+            };
+            let folder =
+                match recording::resolve_output_directory(params.output_directory.as_deref()) {
+                    Ok(folder) => folder,
+                    Err(error) => {
+                        return ServerResponse::error(
+                            command.id,
+                            "cloud-recording-download-failed",
+                            format!("{error:#}"),
+                        );
+                    }
+                };
+            let ffmpeg_path = resolve_trusted_ffmpeg_path(
+                params.ffmpeg_path.as_deref(),
+                role,
+                state.smoke_rpc_enabled,
+            );
+            let event_state = state.clone();
+            let emit: cloud_control_web::DownloadEventHook = std::sync::Arc::new(move |event| {
+                event_state.emit_event("cloud.recordings.download", event);
+            });
+            match cloud_context(state) {
+                Some(context) => match context.download_cloud_recording(
+                    account::stored_session_token(),
+                    &params.id,
+                    ffmpeg_path,
+                    folder,
+                    emit,
+                ) {
+                    Ok(download) => ServerResponse::ok(command.id, download),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-recording-download-failed",
+                        format!("{error:#}"),
+                    ),
+                },
+                None => cloud_unavailable(command.id),
+            }
+        }
+        "cloud.recordings.cancelDownload" => {
+            match serde_json::from_value::<cloud_control_web::CancelRecordingDownloadParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    cloud_show::lock(&state.cloud_show)
+                        .downloads
+                        .cancel(&params.job_id);
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        "cloud.overlay.set" => {
+            match serde_json::from_value::<cloud_talk::SmokeOverlaySetParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .set_overlay(
+                            params.slot,
+                            params.orientation,
+                            &params.png_base64,
+                            params.rect,
+                            params.ttl_seconds,
+                        )
+                        .await
+                    {
+                        Ok(()) => ServerResponse::ok(command.id, serde_json::json!({ "ok": true })),
+                        Err(error) => {
+                            ServerResponse::error(command.id, "cloud-overlay-set-failed", error)
+                        }
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        "cloud.overlay.clear" => {
+            match serde_json::from_value::<cloud_talk::SmokeOverlayClearParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .clear_overlay(params.slot, params.orientation)
+                        .await
+                    {
+                        Ok(()) => ServerResponse::ok(command.id, serde_json::json!({ "ok": true })),
+                        Err(error) => {
+                            ServerResponse::error(command.id, "cloud-overlay-clear-failed", error)
+                        }
+                    },
                     None => cloud_unavailable(command.id),
                 },
                 Err(error) => {
@@ -15422,6 +15622,7 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let remember_state = state.clone();
     let camera_state = state.clone();
     let request_state = state.clone();
+    let overlay_state = state.clone();
     cloud_show::CloudHooks {
         emit: std::sync::Arc::new(move |status| {
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
@@ -15468,6 +15669,11 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
         // Plan 224: "Ada wants to join", one event per new request.
         request: std::sync::Arc::new(move |request| {
             request_state.emit_event(cloud_talk::CLOUD_ROOM_REQUESTS_EVENT, request);
+        }),
+        // Plan 234 T3: an overlay for the host's renderer to send to the
+        // room. Small: the bytes are fetched from `OVERLAY_IMAGE_ROUTE`.
+        overlay: std::sync::Arc::new(move |overlay| {
+            overlay_state.emit_event(cloud_talk::CLOUD_ROOM_OVERLAY_EVENT, overlay);
         }),
     }
 }
@@ -18973,6 +19179,8 @@ mod tests {
             // Plan 209 S20: `/buddy` answers at once; the calls run on their
             // own task and report `cohost.act.result`.
             "cohost.act",
+            "cloud.recordings.download",
+            "cloud.recordings.cancelDownload",
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             assert_eq!(
@@ -22970,6 +23178,119 @@ mod tests {
         )
     }
 
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn cloud_overlay_smoke_rpcs_use_the_builders_room_and_node_paths() {
+        for managed in [false, true] {
+            let mut state = test_state();
+            state.smoke_rpc_enabled = true;
+            let mut runner =
+                cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_smoke", true);
+            if managed {
+                cloud_show::lock(&state.cloud_show)
+                    .show
+                    .as_mut()
+                    .unwrap()
+                    .control =
+                    serde_json::from_value(json!({ "kind": "web", "url": "", "token": "" }))
+                        .unwrap();
+            }
+            let mut events = state.events.subscribe();
+            for op in ["set", "clear"] {
+                let mut params = json!({ "slot": "card", "orientation": "h" });
+                if op == "set" {
+                    params["rect"] = json!({ "x": 0.1, "y": 0.2, "w": 0.4, "h": 0.3 });
+                    params["ttlSeconds"] = json!(5);
+                    params["pngBase64"] = json!("iVBORw0KGgo=");
+                }
+                let request =
+                    json!({ "id": op, "method": format!("cloud.overlay.{op}"), "params": params })
+                        .to_string();
+                let call = handle_text_message_with_role(&state, &request, BackendRole::Renderer);
+                if managed {
+                    let answer = call.await;
+                    assert!(answer.ok, "{answer:?}");
+                    assert_eq!(answer.payload.unwrap(), json!({ "ok": true }));
+                    let event = events.recv().await.unwrap();
+                    assert_eq!(event.event, "cloud.room.overlay");
+                    assert_eq!(event.payload["op"], op);
+                    assert_eq!(event.payload["showId"], "sh_smoke");
+                    assert_eq!(event.payload["slot"], "card");
+                    assert_eq!(event.payload["orientation"], "h");
+                    if op == "set" {
+                        assert_eq!(event.payload["ttlSeconds"], 5);
+                        let id = event.payload["imageId"].as_str().unwrap();
+                        assert!(
+                            cloud_show::lock(&state.cloud_show)
+                                .overlay_image(id)
+                                .is_some()
+                        );
+                    }
+                    assert!(
+                        runner.try_recv().is_err(),
+                        "managed overlays send no node intent"
+                    );
+                } else {
+                    let node = async {
+                        tokio::time::timeout(Duration::from_secs(2), runner.recv())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .answer_for_tests(None)
+                    };
+                    let (answer, frame) = tokio::join!(call, node);
+                    assert!(answer.ok, "{answer:?}");
+                    assert_eq!(answer.payload.unwrap(), json!({ "ok": true }));
+                    assert_eq!(frame["kind"], format!("overlay.{op}"));
+                    assert_eq!(frame["slot"], "card");
+                    assert_eq!(frame["orientation"], "h");
+                    if op == "set" {
+                        assert_eq!(frame["pngBase64"], "iVBORw0KGgo=");
+                        assert_eq!(frame["ttlSeconds"], 5);
+                    }
+                    assert!(
+                        events.try_recv().is_err(),
+                        "node overlays emit no room event"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn cloud_overlay_smoke_rpcs_reject_disabled_and_unknown_parameters() {
+        let mut state = test_state();
+        state.smoke_rpc_enabled = false;
+        for method in ["cloud.overlay.set", "cloud.overlay.clear"] {
+            let request = json!({ "id": "overlay", "method": method, "params": {} }).to_string();
+            let answer =
+                handle_text_message_with_role(&state, &request, BackendRole::Renderer).await;
+            assert_eq!(answer.error.unwrap().code, "smoke-method-disabled");
+        }
+        state.smoke_rpc_enabled = true;
+        for (method, params) in [
+            (
+                "cloud.overlay.clear",
+                json!({ "slot": "card", "orientation": "h", "extra": true }),
+            ),
+            (
+                "cloud.overlay.set",
+                json!({ "slot": "card", "orientation": "h", "pngBase64": "iVBORw0KGgo=", "rect": { "x": 0, "y": 0, "w": 1, "h": 1, "extra": true } }),
+            ),
+            (
+                "cloud.overlay.set",
+                json!({ "slot": "invalid", "orientation": "h", "pngBase64": "iVBORw0KGgo=", "rect": { "x": 0, "y": 0, "w": 1, "h": 1 } }),
+            ),
+        ] {
+            let request =
+                json!({ "id": "overlay", "method": method, "params": params }).to_string();
+            let answer =
+                handle_text_message_with_role(&state, &request, BackendRole::Renderer).await;
+            assert_eq!(answer.error.unwrap().code, "invalid-params");
+        }
+    }
+
     /// Plan 224 C-G6 (review L9: the `session.start` refusal and the
     /// no-local-target test): while a room is open, Record and Go Live work
     /// through it. A `session.start` with a stream target, and the solo
@@ -23906,6 +24227,70 @@ mod tests {
                 error.message
             );
         }
+    }
+
+    /// Plan 234: the Library's cloud download saves into the folder main
+    /// issued as a capability; a raw folder from the renderer is refused
+    /// before any download starts, and only main may ask for a finished
+    /// download's file.
+    #[tokio::test]
+    async fn renderer_cloud_recording_download_rejects_a_raw_folder() {
+        let state = test_state();
+        let cases = [
+            (
+                serde_json::json!({ "id": "rec_1", "outputDirectory": "/tmp/renderer-chosen" }),
+                "raw outputDirectory is not accepted",
+            ),
+            (
+                serde_json::json!({ "id": "rec_1", "outputDirectoryCapability": "resource:not-issued" }),
+                "Resource capability",
+            ),
+        ];
+        for (params, expected) in cases {
+            let response = handle_text_message_with_role(
+                &state,
+                &serde_json::json!({
+                    "id": "cloud-download-raw",
+                    "method": "cloud.recordings.download",
+                    "params": params
+                })
+                .to_string(),
+                BackendRole::Renderer,
+            )
+            .await;
+            assert!(!response.ok, "{params} must be refused");
+            let error = response.error.expect("renderer refusal");
+            assert_eq!(error.code, "resource-capability-rejected", "{params}");
+            assert!(
+                error.message.contains(expected),
+                "{params}: {}",
+                error.message
+            );
+        }
+        assert_eq!(
+            authorize_backend_method(
+                BackendRole::Renderer,
+                "resource.admin.resolve_cloud_download_path",
+                false
+            ),
+            Err(crate::backend_authority::MethodAdmissionError::AdminOnly)
+        );
+        let missing = handle_text_message_with_role(
+            &state,
+            &serde_json::json!({
+                "id": "cloud-download-path",
+                "method": "resource.admin.resolve_cloud_download_path",
+                "params": { "jobId": "00000000-0000-4000-8000-000000000000" }
+            })
+            .to_string(),
+            BackendRole::Admin,
+        )
+        .await;
+        assert!(!missing.ok);
+        assert_eq!(
+            missing.error.expect("no such job").code,
+            "cloud-download-path-missing"
+        );
     }
 
     #[tokio::test]

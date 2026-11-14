@@ -196,6 +196,10 @@ fn renderer_smoke_method(method: &str) -> bool {
             // Plan 140 (S9): the drill sets the daily budget to prove a
             // removal sheds at 100% without a request.
             | "test.youtubeQuota.setBudget"
+            // Plan 234: the managed overlay smoke uses the app's renderer
+            // socket and the same runtime switch as the other smoke seams.
+            | "cloud.overlay.set"
+            | "cloud.overlay.clear"
     )
 }
 
@@ -422,6 +426,32 @@ mod tests {
                     admitted,
                     Err(MethodAdmissionError::SmokeDisabled),
                     "release builds must never admit {method}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cloud_overlay_smoke_methods_require_debug_and_the_command_server() {
+        for method in ["cloud.overlay.set", "cloud.overlay.clear"] {
+            for role in [BackendRole::Admin, BackendRole::Renderer] {
+                assert_eq!(
+                    authorize_backend_method(role, method, false),
+                    Err(MethodAdmissionError::SmokeDisabled)
+                );
+                assert_eq!(
+                    authorize_backend_method(role, method, true),
+                    if cfg!(debug_assertions) {
+                        Ok(())
+                    } else {
+                        Err(MethodAdmissionError::SmokeDisabled)
+                    }
+                );
+            }
+            for role in [BackendRole::Remote, BackendRole::Agent] {
+                assert_eq!(
+                    authorize_backend_method(role, method, true),
+                    Err(MethodAdmissionError::AdminOnly)
                 );
             }
         }

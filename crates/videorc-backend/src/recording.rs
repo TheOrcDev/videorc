@@ -27789,7 +27789,7 @@ fn cloud_feed_target(
 /// Dev builds may trust one extra CA, so `smoke:cloud-solo` publishes to its
 /// own MediaMTX with checking on. Packaged builds never read it, like
 /// `VIDEORC_API_BASE_URL`.
-const CLOUD_FEED_CA_FILE_ENV: &str = "VIDEORC_CLOUD_FEED_CA_FILE";
+pub(crate) const CLOUD_FEED_CA_FILE_ENV: &str = "VIDEORC_CLOUD_FEED_CA_FILE";
 const CLOUD_FEED_ROOTS_FILE_NAME: &str = "cloud-feed-roots.pem";
 const PEM_CERTIFICATE_BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
 /// Characters FFmpeg's option dictionary, a tee slave's brackets or
@@ -27823,7 +27823,10 @@ fn cloud_feed_roots_pem(extra_ca_pem: Option<&[u8]>) -> Vec<u8> {
 }
 
 /// The dev override's CA, read in dev builds only; `None` when unset.
-fn cloud_feed_extra_ca_pem(dev_build: bool, env_value: Option<&str>) -> Result<Option<Vec<u8>>> {
+pub(crate) fn cloud_feed_extra_ca_pem(
+    dev_build: bool,
+    env_value: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
     if !dev_build {
         return Ok(None);
     }
@@ -28824,6 +28827,54 @@ mod cloud_seam_tests {
         assert_eq!(
             redact_cloud_test_line("[rtmp @ 0x1] key KEYKEYKEY refused", key),
             "[rtmp @ 0x1] key •••• refused"
+        );
+    }
+
+    /// Plan 234 C4: a managed show's feed goes to LiveKit's RTMPS ingress.
+    /// `ingest_url_problem` takes that address as written, because it is
+    /// RTMPS to a DNS name (the wire contract's contradiction 9: nothing
+    /// had to change). Anything without TLS is still refused in a release
+    /// build, LiveKit's host or not, and the leg is `{serverUrl}/{streamKey}`
+    /// with the certificate checked, as for a node.
+    #[test]
+    fn a_livekit_ingress_is_accepted_as_the_feed_and_nothing_without_tls_is() {
+        use crate::cloud_show::ingest_url_problem;
+        const LIVEKIT: &str = "rtmps://videorc-abc123.rtmp.livekit.cloud/x";
+        for allowed in [
+            LIVEKIT,
+            "rtmps://videorc-abc123.rtmp.livekit.cloud:443/x",
+            "rtmps://ingress.eu.livekit.cloud/live",
+        ] {
+            assert_eq!(ingest_url_problem(allowed, false), None, "{allowed}");
+        }
+        for refused in [
+            "rtmp://videorc-abc123.rtmp.livekit.cloud/x",
+            "rtmp://videorc-abc123.rtmp.livekit.cloud:1935/x",
+            "http://videorc-abc123.rtmp.livekit.cloud/x",
+            "srt://videorc-abc123.rtmp.livekit.cloud:7885",
+            "videorc-abc123.rtmp.livekit.cloud/x",
+        ] {
+            assert!(ingest_url_problem(refused, false).is_some(), "{refused}");
+        }
+        let livekit = ShowIngest {
+            orientation: Horizontal,
+            server_url: LIVEKIT.to_string(),
+            stream_key: INGEST_KEY.to_string(),
+        };
+        let feed =
+            cloud_feed_target(&livekit, None, &roots()).expect("LiveKit's ingress is a feed");
+        assert_eq!(feed.url, format!("{LIVEKIT}/{INGEST_KEY}"));
+        assert_eq!(feed.tls_verification, Some(roots()));
+        assert!(!feed.redacted_url.contains("SECRET"));
+        assert_eq!(feed.target_id, "videorc-cloud-horizontal");
+        // Without TLS the leg is never built in a release build.
+        let plain = ShowIngest {
+            server_url: "rtmp://videorc-abc123.rtmp.livekit.cloud/x".to_string(),
+            ..livekit
+        };
+        assert_eq!(
+            cloud_feed_target(&plain, None, &roots()).is_ok(),
+            cfg!(debug_assertions)
         );
     }
 

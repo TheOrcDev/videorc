@@ -5536,6 +5536,84 @@ export interface CloudRoomRequest {
   device: CloudGuestDevice
 }
 
+/**
+ * `cloud.room.overlay` (plan 234 T3): an overlay for the host's renderer to
+ * send to a managed talk show's room, where the program page draws it. Only
+ * the renderer holds the host's room connection, and the page takes
+ * overlays from nobody else. Never sent on a node show or a solo show.
+ *
+ * The event is small: `set` names the picture by `imageId`, and the bytes
+ * come from the backend's HTTP server (`/cloud/overlays/{imageId}`).
+ */
+export type CloudOverlaySlot = 'card' | 'takeover' | 'hold'
+export type CloudOverlayOrientation = 'h' | 'v'
+export interface CloudOverlayRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+export type CloudRoomOverlayEvent =
+  | {
+      op: 'set'
+      showId: string
+      slot: CloudOverlaySlot
+      orientation: CloudOverlayOrientation
+      /** Fractions of the canvas, 0 to 1. */
+      rect: CloudOverlayRect
+      /** Whole seconds; absent on an overlay that stays until cleared. */
+      ttlSeconds?: number
+      mimeType: string
+      imageId: string
+    }
+  | {
+      op: 'clear'
+      showId: string
+      slot: CloudOverlaySlot
+      orientation: CloudOverlayOrientation
+    }
+
+/**
+ * A cloud recording as `cloud.recordings.list` answers it (plan 234 T3): the
+ * facts and no URL. `format: 'segments'` is a managed recording, which
+ * `cloud.recordings.download` makes into an MP4 on this computer; `'mp4'`
+ * (or no format) is a node recording, downloaded from videorc.com.
+ */
+export interface CloudRecordingItem {
+  id: string
+  showId: string
+  orientation: string
+  startedAt: string
+  expiresAt: string
+  seconds: number
+  bytes: number
+  format?: string
+}
+export interface CloudRecordingsList {
+  recordings: CloudRecordingItem[]
+}
+export interface CloudRecordingDownloadParams {
+  id: string
+  /** Output's "Where recordings go" as the capability main issued (the
+   * renderer's way); the default folder when absent. */
+  outputDirectoryCapability?: string
+  /** A raw folder: the admin role only (the smokes); refused from the renderer. */
+  outputDirectory?: string
+  ffmpegPath?: string
+}
+export interface CloudRecordingDownload {
+  jobId: string
+}
+export interface CloudRecordingDownloadEvent {
+  jobId: string
+  recordingId: string
+  state: 'running' | 'done' | 'failed' | 'cancelled'
+  doneSegments?: number
+  totalSegments?: number
+  path?: string
+  error?: string
+}
+
 /** A guest the host let in, as videorc.com lists them. */
 export interface CloudRoomGuest {
   guestId: string
@@ -6484,6 +6562,9 @@ export interface VideorcApi {
   /** Shows an exported support bundle in Finder or Explorer (plan 174 S3.18).
    * Main reveals only a bundle file inside the backend's export folder. */
   revealSupportBundle: (path: string) => Promise<void>
+  /** Plan 234: Show in Finder for a cloud recording the Library downloaded,
+   * by its download job. Main reveals only the MP4 that job saved. */
+  revealCloudDownload: (jobId: string) => Promise<void>
   /** Plan 209 S7: where `videorc-mcp` lives, for Settings → Remote → Agents'
    * config lines. `install` (Connect) puts the Linux copy in place (D20). */
   getAgentBridge: (install: boolean) => Promise<AgentBridgeInfo>

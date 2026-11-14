@@ -1,5 +1,30 @@
 # Implementation Plans
 
+- 2026-11-13: [Plan 234](234-cloud-on-neon-and-livekit.md), the owner's
+  ask: "plan out Neon + LiveKit managed media". BUILDING since
+  2026-11-13: Phase 0 run, gate G0 answered ("go all recommended and build
+  it"), Phases 1 to 3 in progress, nothing switched on:
+  - Videorc Cloud is merged and released with its switches off, and it has
+    no media server. This plan runs it with none of our own: Neon for data
+    and storage, LiveKit Cloud's managed Ingress and Egress for media.
+  - A web page of ours, opened by LiveKit's egress, draws what viewers
+    see: the feed, Be right back when it stops, and the talk-show stage.
+    The desktop's control socket becomes HTTPS calls to videorc.com; the
+    feed, `CloudStatus` and every UI surface stay.
+  - Phase 0 measured it (`docs/cloud/spike-livekit-managed-2026-11.md`).
+    Quality passes narrowly, 2.7 to 2.8 VMAF points under the node path,
+    with the encoding in D4. Keys pass with a stricter guard. Uploads to
+    Neon pass. The picture is back 4.8 to 6.2 s after a reconnect against
+    a 5 s bar, and about 0.7 frames in 100 are lost where the node path
+    loses none. The owner accepted both at G0; the return bar is now 7 s
+    (Open question 9).
+  - New for the design: LiveKit says nothing when a show's only
+    destination dies (D9), and talk-show lip sync is not settled (D6).
+  - The LiveKit project takes two ingress objects, which is one show. A
+    paid plan comes before any cohort (D13).
+  - Open, for the owner: stream keys pass through videorc.com and LiveKit
+    (D7), the cost per hour against the plans' allowances (D19, private),
+    and 1080p60 (D12). The node path stays in the code (D2).
 - 2026-11-13: [Plan 233](233-green-screen-without-edge-snow.md), the owner's
   stream on 0.22.1: green "snow" still crawls along the head, ears, hair and
   shoulders, in a new place every frame. EXECUTING 2026-11-13 with the

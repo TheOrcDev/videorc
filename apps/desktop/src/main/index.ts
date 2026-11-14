@@ -11803,6 +11803,8 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_session_path',
   'resource.admin.resolve_screen_path',
   'resource.admin.resolve_background_path',
+  // Plan 234: the Library's Show in Finder for a downloaded cloud recording.
+  'resource.admin.resolve_cloud_download_path',
   'resource.admin.preview_surface_bounds',
   'overlays.layout.migrate_highlight_anchor',
   // Plan 214 B3: the saved camera switch, and main's word on the extension.
@@ -16411,6 +16413,23 @@ async function revealSupportBundle(path: unknown): Promise<void> {
   shell.showItemInFolder(supportBundleRevealPath(path, health?.databasePath))
 }
 
+// Plan 234: Show in Finder for a cloud recording the Library downloaded. The
+// renderer names the download job; the backend answers the MP4 that job
+// saved, while it is still there. A renderer path is never revealed.
+async function revealCloudDownload(jobId: unknown): Promise<void> {
+  if (typeof jobId !== 'string' || !/^[0-9a-f-]{36}$/i.test(jobId)) {
+    throw new Error('Cloud download job id is invalid.')
+  }
+  const result = await requestBackendAdmin<{ path: string }>(
+    'resource.admin.resolve_cloud_download_path',
+    { jobId }
+  )
+  if (!result || typeof result.path !== 'string' || result.path.length === 0) {
+    throw new Error('The downloaded recording is no longer there.')
+  }
+  shell.showItemInFolder(result.path)
+}
+
 async function revealManagedBackground(assetId: unknown): Promise<void> {
   if (typeof assetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(assetId)) {
     throw new Error('Managed background asset id is invalid.')
@@ -18012,6 +18031,9 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('resource:reveal-support-bundle', (_event, path: unknown) =>
     revealSupportBundle(path)
+  )
+  secureIpcHandle('resource:reveal-cloud-download', (_event, jobId: unknown) =>
+    revealCloudDownload(jobId)
   )
   // Settings → Remote → Agents (plan 209 S7): the bridge's absolute path for
   // the config line; Connect (`install`) puts the Linux or Windows copy in
