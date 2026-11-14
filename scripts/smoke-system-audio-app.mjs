@@ -95,7 +95,7 @@ import {
   evaluateSystemAudioOffCase,
   evaluateToggleOffCase,
   evaluateToggleOnCase,
-  systemAudioGatesFor,
+  SYSTEM_AUDIO_GATES,
   evaluateToneCapturedCase,
   evaluateMixedToneCapturedCase,
   evaluateStaticScreenEpoch,
@@ -161,7 +161,7 @@ const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? (existsSync(bundledFfmpeg) ? bundledFfmpeg : 'ffmpeg')
 const ffprobePath =
   process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? resolveExistingSiblingFfprobe(ffmpegPath) ?? 'ffprobe'
-const platformGates = systemAudioGatesFor(process.platform)
+const platformGates = SYSTEM_AUDIO_GATES
 const rtmpPort = Number(process.env.VIDEORC_SYSTEM_AUDIO_SMOKE_RTMP_PORT ?? 19853)
 
 const SYSTEM_AUDIO_UNAVAILABLE_HINT =

@@ -216,6 +216,40 @@ pub(crate) fn packet_start_host_nanos(
     now_host_nanos.saturating_sub(duration_nanos)
 }
 
+/// How far past `IAudioClient::Start` the loopback must have delivered audio
+/// before the capture reports itself started, in nanoseconds.
+///
+/// Process loopback opens with about 30 ms of silence: sound that is already
+/// playing reaches it only from the fourth 10 ms engine packet (stamped 37 to
+/// 47 ms after `Start`, every round on Windows 11 build 26300; issue #1319).
+/// The QPC stamps are true, so the earlier audio is simply not in the stream.
+/// A session that attached the slot as soon as `Start` returned put its
+/// cutover a playout delay before `Start`, and an already-playing sound then
+/// entered the mix ~56 ms past the cutover plus that delay. Waiting until the
+/// stream reaches this far joins the slot with that sound already captured.
+pub(crate) const LOOPBACK_WARMUP_NANOS: u64 = 50_000_000;
+
+/// The longest the start waits for [`LOOPBACK_WARMUP_NANOS`]. Process loopback
+/// may deliver nothing at all while nothing plays (decision 11); then there
+/// is no playing sound to wait for, and the start goes ahead without it.
+pub(crate) const LOOPBACK_WARMUP_DEADLINE_MS: u64 = 250;
+
+// The warm-up stays well inside the bus's 150 ms playout delay, and the
+// deadline leaves room for it.
+const _: () = assert!(LOOPBACK_WARMUP_NANOS < 150_000_000);
+const _: () = assert!(LOOPBACK_WARMUP_DEADLINE_MS * 1_000_000 > LOOPBACK_WARMUP_NANOS);
+
+/// Whether the loopback has delivered audio through `start_host_nanos +`
+/// [`LOOPBACK_WARMUP_NANOS`]. `delivered_end_host_nanos` is the end of the
+/// latest packet handed to the consumer.
+pub(crate) fn loopback_warmed_up(
+    start_host_nanos: u64,
+    delivered_end_host_nanos: Option<u64>,
+) -> bool {
+    delivered_end_host_nanos
+        .is_some_and(|end| end >= start_host_nanos.saturating_add(LOOPBACK_WARMUP_NANOS))
+}
+
 fn hresult_name(hresult: i32) -> Option<&'static str> {
     Some(match hresult {
         HRESULT_AUDCLNT_E_DEVICE_INVALIDATED => "AUDCLNT_E_DEVICE_INVALIDATED",
@@ -442,6 +476,10 @@ mod capture {
         pub(crate) pid_excluded: bool,
         pub(crate) sample_format: LoopbackSampleFormat,
         pub(crate) start_latency: Duration,
+        /// How long the start waited for the loopback to deliver audio
+        /// [`LOOPBACK_WARMUP_NANOS`] past `Start`; `None` when it gave up at
+        /// [`LOOPBACK_WARMUP_DEADLINE_MS`] (nothing was playing).
+        pub(crate) warm_up: Option<Duration>,
     }
 
     /// State shared by the capture thread and the consumer handle.
@@ -548,6 +586,7 @@ mod capture {
                         pid_excluded = info.pid_excluded,
                         format = ?info.sample_format,
                         start_ms = info.start_latency.as_millis() as u64,
+                        warm_up_ms = info.warm_up.map(|waited| waited.as_millis() as u64),
                         "System audio capture started"
                     );
                     capture.info = info;
@@ -807,7 +846,7 @@ mod capture {
         let opened = ComApartment::initialize().and_then(|apartment| {
             open_session(options).map(|(session, info)| (apartment, session, info))
         });
-        let (_apartment, session, info) = match opened {
+        let (_apartment, session, mut info) = match opened {
             Ok(opened) => opened,
             Err(failure) => {
                 shared.failure.record(failure.clone());
@@ -816,6 +855,18 @@ mod capture {
                 return;
             }
         };
+        let _mmcss = MmcssTask::join();
+        let mut discontinuities = 0u64;
+        match warm_up(&session, shared, &mut discontinuities) {
+            Ok(waited) => info.warm_up = waited,
+            Err(failure) => {
+                session.stop();
+                shared.failure.record(failure.clone());
+                shared.close();
+                let _ = startup_tx.send(Err(failure));
+                return;
+            }
+        }
         // The handle is gone (start timed out, or it was dropped): stop at
         // once instead of capturing for nobody.
         if stop_requested(stop_rx) || startup_tx.send(Ok(info)).is_err() {
@@ -823,8 +874,7 @@ mod capture {
             shared.close();
             return;
         }
-        let _mmcss = MmcssTask::join();
-        run_capture_loop(&session, shared, stop_rx);
+        run_capture_loop(&session, shared, stop_rx, discontinuities);
         session.stop();
         shared.close();
         // `session` releases the clients, then `_apartment` leaves the MTA.
@@ -869,6 +919,7 @@ mod capture {
                         pid_excluded: root.names_electron_main(),
                         sample_format: format,
                         start_latency: started.elapsed(),
+                        warm_up: None,
                     };
                     return Ok((session, info));
                 }
@@ -1023,8 +1074,48 @@ mod capture {
             .map_err(|error| starting("IUnknown::QueryInterface(IAudioClient)", &error))
     }
 
-    fn run_capture_loop(session: &Session, shared: &CaptureShared, stop_rx: &mpsc::Receiver<()>) {
-        let mut discontinuities = 0u64;
+    /// Drains packets until the loopback has delivered audio
+    /// [`LOOPBACK_WARMUP_NANOS`] past `Start` (issue #1319), for at most
+    /// [`LOOPBACK_WARMUP_DEADLINE_MS`]. Every packet goes to the consumer as
+    /// usual. Returns how long it waited, or `None` at the deadline. It never
+    /// reads the stop channel: a stop sent meanwhile is seen right after.
+    fn warm_up(
+        session: &Session,
+        shared: &CaptureShared,
+        discontinuities: &mut u64,
+    ) -> Result<Option<Duration>, SystemAudioFailure> {
+        let began = Instant::now();
+        let deadline = began + Duration::from_millis(LOOPBACK_WARMUP_DEADLINE_MS);
+        let mut delivered_end = None;
+        loop {
+            drain_packets(session, shared, discontinuities, &mut delivered_end)?;
+            if loopback_warmed_up(session.anchor.host_nanos, delivered_end) {
+                return Ok(Some(began.elapsed()));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            let wait_ms = (deadline - now)
+                .as_millis()
+                .clamp(1, u128::from(CAPTURE_EVENT_WAIT_MS)) as u32;
+            // SAFETY: the event outlives the session.
+            if unsafe { WaitForSingleObject(session.event.0, wait_ms) } == WAIT_FAILED {
+                return Err(SystemAudioFailure::StartFailed(format!(
+                    "waiting for the first loopback packets failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+    }
+
+    fn run_capture_loop(
+        session: &Session,
+        shared: &CaptureShared,
+        stop_rx: &mpsc::Receiver<()>,
+        mut discontinuities: u64,
+    ) {
+        let mut delivered_end = None;
         loop {
             if stop_requested(stop_rx) || shared.stopping.load(Ordering::Acquire) {
                 break;
@@ -1040,7 +1131,9 @@ mod capture {
             }
             // Signalled or timed out, drain: a timeout drain is cheap and
             // covers a missed signal.
-            if let Err(failure) = drain_packets(session, shared, &mut discontinuities) {
+            if let Err(failure) =
+                drain_packets(session, shared, &mut discontinuities, &mut delivered_end)
+            {
                 shared.fail(failure);
                 break;
             }
@@ -1053,11 +1146,14 @@ mod capture {
         }
     }
 
-    /// Reads every pending packet. An error is terminal.
+    /// Reads every pending packet, and sets `delivered_end` to the end of
+    /// the last one handed to the consumer (host nanoseconds). An error is
+    /// terminal.
     fn drain_packets(
         session: &Session,
         shared: &CaptureShared,
         discontinuities: &mut u64,
+        delivered_end: &mut Option<u64>,
     ) -> Result<(), SystemAudioFailure> {
         let running = |stage: &str, error: &windows::core::Error| {
             failure_from_error(SystemAudioPhase::Running, stage, error)
@@ -1112,6 +1208,10 @@ mod capture {
                 Ok(samples) if samples.is_empty() => {}
                 Ok(samples) => {
                     let pts = packet_start_host_nanos(flags, qpc_position, now_host_nanos, frames);
+                    *delivered_end = Some(pts.saturating_add(
+                        u64::from(frames).saturating_mul(1_000_000_000)
+                            / u64::from(SYSTEM_AUDIO_SAMPLE_RATE),
+                    ));
                     shared.push(system_audio_frame(samples, pts, &session.anchor));
                 }
                 Err(error) => {
@@ -1325,6 +1425,35 @@ mod tests {
         );
         assert_eq!(packet_start_host_nanos(0, 0, now, 960), now - 20_000_000);
         assert_eq!(packet_start_host_nanos(0, 0, 5, 960), 0, "never underflows");
+    }
+
+    #[test]
+    fn system_audio_windows_start_waits_until_already_playing_sound_is_in_the_stream() {
+        // Issue #1319: Start at host 7 s. Process loopback opens with three
+        // silent 10 ms packets; sound already playing arrives from 7.037 s.
+        let start = 7_000_000_000u64;
+        let packet_end = |index: u64| start + 7_000_000 + (index + 1) * 10_000_000;
+        assert!(!loopback_warmed_up(start, None), "nothing delivered yet");
+        // Through the silent lead and the first audible packet: not yet.
+        for index in 0..4 {
+            assert!(
+                !loopback_warmed_up(start, Some(packet_end(index))),
+                "packet {index} ends {} ms after Start",
+                (packet_end(index) - start) / 1_000_000
+            );
+        }
+        // By the packet ending 57 ms after Start, the playing sound is in.
+        assert!(loopback_warmed_up(start, Some(packet_end(4))));
+        assert!(loopback_warmed_up(
+            start,
+            Some(start + LOOPBACK_WARMUP_NANOS)
+        ));
+        assert!(!loopback_warmed_up(
+            start,
+            Some(start + LOOPBACK_WARMUP_NANOS - 1)
+        ));
+        // A late anchor never wraps.
+        assert!(!loopback_warmed_up(u64::MAX - 1, Some(u64::MAX - 1)));
     }
 
     #[test]
