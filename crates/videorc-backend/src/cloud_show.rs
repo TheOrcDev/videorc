@@ -3921,6 +3921,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// (plan 222 review M1): the runner may still hold the platforms, so the
     /// next launch or Go Live asks the web about it before any direct leg.
     pub async fn end_current_show(&self, bearer: Option<String>) -> Result<CloudStatus> {
+        let deadline =
+            tokio::time::Instant::now() + crate::cloud_control_web::CONTROL_INTENT_BUDGET;
         let (show_id, tx, on_web_control) = {
             let mut runtime = lock(&self.slot);
             runtime.failed = None;
@@ -3947,15 +3949,23 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         }
         if let Some(bearer) = bearer {
             let destinations = lock(&self.slot).destinations_generation.clone();
-            let _stopping = destinations.stopping().await;
             // On web control this request is the show's only end (the
             // intent above sends nothing), so it gets the route's one retry
             // (plan 234, wire section 2). On the socket it stays one try.
             let ended = if on_web_control {
-                crate::cloud_control_web::with_one_cloud_retry(|| {
-                    self.web.end_show(&bearer, &show_id)
+                tokio::time::timeout_at(deadline, async {
+                    let _stopping = destinations.stopping().await;
+                    crate::cloud_control_web::with_one_cloud_retry_until(deadline, || {
+                        self.web.end_show(&bearer, &show_id)
+                    })
+                    .await
                 })
                 .await
+                .unwrap_or_else(|_| {
+                    Err(CloudApiError::Transport(
+                        "The cloud request timed out.".to_string(),
+                    ))
+                })
             } else {
                 self.web.end_show(&bearer, &show_id).await
             };

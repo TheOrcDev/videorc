@@ -288,25 +288,44 @@ fn retryable(error: &CloudApiError) -> bool {
     }
 }
 
-/// Section 2's retry rule around one call.
+/// Provider RPCs have 25 s; Reconnect has 10 s. Keep three seconds
+/// for dispatch and response delivery. Both attempts spend one deadline.
+pub(crate) const CONTROL_INTENT_BUDGET: Duration = Duration::from_secs(22);
+const RECONNECT_INTENT_BUDGET: Duration = Duration::from_secs(7);
+const MIN_USEFUL_RETRY: Duration = Duration::from_secs(2);
+
 pub(crate) async fn with_one_retry<T, E, F, Fut>(
+    deadline: tokio::time::Instant,
     mut call: F,
     retryable: impl Fn(&E) -> bool,
+    timed_out: impl Fn() -> E,
 ) -> std::result::Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = std::result::Result<T, E>>,
 {
-    match call().await {
-        Err(error) if retryable(&error) => {
+    let first = tokio::time::timeout_at(deadline, call())
+        .await
+        .map_err(|_| timed_out())?;
+    match first {
+        Err(error)
+            if retryable(&error)
+                && deadline.saturating_duration_since(tokio::time::Instant::now())
+                    >= RETRY_DELAY + MIN_USEFUL_RETRY =>
+        {
             tokio::time::sleep(RETRY_DELAY).await;
-            call().await
+            tokio::time::timeout_at(deadline, call())
+                .await
+                .map_err(|_| timed_out())?
         }
         answer => answer,
     }
 }
 
-/// `with_one_retry` for a route that fails with a `CloudApiError`.
+fn intent_timeout() -> CloudApiError {
+    CloudApiError::Transport("The cloud request timed out. Try again.".to_string())
+}
+
 pub(crate) async fn with_one_cloud_retry<T, F, Fut>(
     call: F,
 ) -> std::result::Result<T, CloudApiError>
@@ -314,7 +333,18 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = std::result::Result<T, CloudApiError>>,
 {
-    with_one_retry(call, retryable).await
+    with_one_cloud_retry_until(tokio::time::Instant::now() + CONTROL_INTENT_BUDGET, call).await
+}
+
+pub(crate) async fn with_one_cloud_retry_until<T, F, Fut>(
+    deadline: tokio::time::Instant,
+    call: F,
+) -> std::result::Result<T, CloudApiError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<T, CloudApiError>>,
+{
+    with_one_retry(deadline, call, retryable, intent_timeout).await
 }
 
 /// A failure as one line, from its status and code. The web's own `message`
@@ -1377,6 +1407,30 @@ async fn send_web_intent<W: CloudWebApi>(
     destinations: &DestinationGeneration,
     frame: Value,
 ) -> AckResult {
+    let reconnect = frame["kind"] == "destinations.set" && frame["replace"] != true;
+    let budget = if reconnect {
+        RECONNECT_INTENT_BUDGET
+    } else {
+        CONTROL_INTENT_BUDGET
+    };
+    let deadline = tokio::time::Instant::now() + budget;
+    tokio::time::timeout_at(
+        deadline,
+        send_web_intent_until(web, bearer, show_id, floor, destinations, frame, deadline),
+    )
+    .await
+    .unwrap_or_else(|_| Err(failure_line(&intent_timeout())))
+}
+
+async fn send_web_intent_until<W: CloudWebApi>(
+    web: &W,
+    bearer: &str,
+    show_id: &str,
+    floor: &AtomicU64,
+    destinations: &DestinationGeneration,
+    frame: Value,
+    deadline: tokio::time::Instant,
+) -> AckResult {
     let kind = frame
         .get("kind")
         .and_then(Value::as_str)
@@ -1390,6 +1444,7 @@ async fn send_web_intent<W: CloudWebApi>(
                 .as_u64()
                 .unwrap_or_else(|| destinations.current());
             let answer = with_one_retry(
+                deadline,
                 || async {
                     let _sending = destinations.sending.lock().await;
                     if !destinations.accepts(expected) {
@@ -1405,6 +1460,10 @@ async fn send_web_intent<W: CloudWebApi>(
                     web.set_destinations(bearer, show_id, &body).await
                 },
                 |failure: &DestinationsFailure| retryable(&failure.error),
+                || DestinationsFailure {
+                    error: intent_timeout(),
+                    refused: Vec::new(),
+                },
             )
             .await;
             match answer {
@@ -1439,7 +1498,7 @@ async fn send_web_intent<W: CloudWebApi>(
                 Err(error) => return Err(format!("{error:#}")),
             };
             let png = png.as_str();
-            with_one_cloud_retry(|| web.set_hold_image(bearer, show_id, png))
+            with_one_cloud_retry_until(deadline, || web.set_hold_image(bearer, show_id, png))
                 .await
                 .map(|()| None)
                 .map_err(|error| failure_line(&error))
@@ -1458,7 +1517,7 @@ async fn send_web_intent<W: CloudWebApi>(
                     fields.remove(socket_only);
                 }
             }
-            with_one_cloud_retry(|| web.set_stage(bearer, show_id, &stage))
+            with_one_cloud_retry_until(deadline, || web.set_stage(bearer, show_id, &stage))
                 .await
                 .map(|answer| raise_floor(floor, &answer))
                 .map_err(|error| failure_line(&error))
@@ -1466,14 +1525,14 @@ async fn send_web_intent<W: CloudWebApi>(
         "legs.end" => {
             let _stopping = destinations.stopping().await;
             let body = DestinationsBody::for_legs_end(&frame);
-            with_one_cloud_retry(|| web.end_legs(bearer, show_id, &body))
+            with_one_cloud_retry_until(deadline, || web.end_legs(bearer, show_id, &body))
                 .await
                 .map(|answer| raise_floor(floor, &answer))
                 .map_err(|error| body.scrub(&legs_end_problem(&error)))
         }
         "recording.start" | "recording.stop" => {
             let on = kind == "recording.start";
-            with_one_cloud_retry(|| web.set_recording(bearer, show_id, on))
+            with_one_cloud_retry_until(deadline, || web.set_recording(bearer, show_id, on))
                 .await
                 .map(|answer| raise_floor(floor, &answer))
                 .map_err(|error| recording_problem(&error))
@@ -2490,6 +2549,33 @@ rtmps://h/app/key 'http://x.test/y'";
             "abcd-ef-ghTij:kl",
         ] {
             assert_eq!(named(odd, "../x"), "talk-h.mp4", "{odd}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_cloud_attempts_share_one_deadline_and_skip_useless_retries() {
+        for first_seconds in [5, 20] {
+            let attempts = std::sync::atomic::AtomicUsize::new(0);
+            let start = tokio::time::Instant::now();
+            let answer = with_one_cloud_retry_until(start + CONTROL_INTENT_BUDGET, || {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    tokio::time::sleep(Duration::from_secs(if n == 0 {
+                        first_seconds
+                    } else {
+                        30
+                    }))
+                    .await;
+                    Err::<(), _>(CloudApiError::NodeUnreachable)
+                }
+            })
+            .await;
+            assert!(answer.is_err());
+            assert!(start.elapsed() <= CONTROL_INTENT_BUDGET);
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                if first_seconds == 20 { 1 } else { 2 }
+            );
         }
     }
 
