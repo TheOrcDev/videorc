@@ -8316,17 +8316,26 @@ fn hydrate_stream_key_secret_refs(state: &AppState, params: &mut StartSessionPar
     else {
         return Ok(());
     };
-    let credentials = if streaming.targets.iter().any(|target| {
+    let credentials = stream_key_account_credentials(state, streaming)?;
+    hydrate_stream_key_secret_refs_from_credentials(streaming, &credentials, secrets::get_secret)
+}
+
+/// The connected accounts an OAuth target's key comes from, read only when
+/// an enabled OAuth target names no key of its own.
+fn stream_key_account_credentials(
+    state: &AppState,
+    streaming: &StreamingSettings,
+) -> Result<Vec<PlatformAccountCredentials>> {
+    if streaming.targets.iter().any(|target| {
         target.enabled
             && target.stream_key.trim().is_empty()
             && target.auth_mode == StreamAuthMode::Oauth
             && target.stream_key_secret_ref.is_none()
     }) {
-        state.database.list_platform_account_credentials()?
+        state.database.list_platform_account_credentials()
     } else {
-        Vec::new()
-    };
-    hydrate_stream_key_secret_refs_from_credentials(streaming, &credentials, secrets::get_secret)
+        Ok(Vec::new())
+    }
 }
 
 fn hydrate_stream_key_secret_refs_from_credentials(
@@ -27656,9 +27665,26 @@ fn cloud_hold_image(state: &AppState) -> Option<String> {
 /// hand-over, and names their platforms for the consent line. No
 /// `StreamTarget` leaves this function: the desktop opens no leg.
 pub(crate) fn cloud_talk_handover(
+    state: &AppState,
     streaming: &StreamingSettings,
 ) -> Result<(Vec<crate::cloud_show::HandoverDestination>, Vec<String>)> {
-    let targets = stream_targets_from_streaming(streaming)?;
+    let credentials = stream_key_account_credentials(state, streaming)?;
+    cloud_talk_handover_with(streaming, &credentials, secrets::get_secret)
+}
+
+/// A talk show's Go Live hands its destinations over with no local session,
+/// so the keys the renderer names only by their secret ref (it never holds a
+/// stored key) are read here, the way a session start reads them
+/// (`hydrate_stream_key_secret_refs`). On a copy: the caller's settings, which
+/// also reach the chat, never carry a key.
+fn cloud_talk_handover_with(
+    streaming: &StreamingSettings,
+    credentials: &[PlatformAccountCredentials],
+    get_secret: impl FnMut(&str) -> Result<String>,
+) -> Result<(Vec<crate::cloud_show::HandoverDestination>, Vec<String>)> {
+    let mut streaming = streaming.clone();
+    hydrate_stream_key_secret_refs_from_credentials(&mut streaming, credentials, get_secret)?;
+    let targets = stream_targets_from_streaming(&streaming)?;
     let mut platforms: Vec<String> = Vec::new();
     for target in &targets {
         let platform = crate::streaming::stream_platform_id(target.platform).to_string();
@@ -39440,6 +39466,54 @@ mod tests {
             youtube.stream_key_secret_ref.as_deref(),
             Some("platform:youtube:UC123:stream-key")
         );
+    }
+
+    #[test]
+    fn a_talk_show_go_live_reads_a_stored_key_by_its_secret_ref() {
+        // Plan 234 smoke: the renderer names a stored key by its secret ref
+        // only, and the talk show's hand-over refused it as missing.
+        let mut streaming =
+            streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "")]);
+        let twitch = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.auth_mode = StreamAuthMode::ManualRtmp;
+        twitch.stream_key_secret_ref = Some("manual:twitch:stream-key".to_string());
+        twitch.stream_key_present = true;
+
+        let (destinations, platforms) = cloud_talk_handover_with(&streaming, &[], |secret_ref| {
+            assert_eq!(secret_ref, "manual:twitch:stream-key");
+            Ok("secret-twitch-key".to_string())
+        })
+        .unwrap();
+        assert_eq!(destinations.len(), 1);
+        assert_eq!(
+            destinations[0].url,
+            "rtmp://live.twitch.tv/app/secret-twitch-key"
+        );
+        assert_eq!(platforms, vec!["twitch".to_string()]);
+        // The caller's settings never carry the key.
+        assert!(
+            streaming
+                .targets
+                .iter()
+                .all(|target| target.stream_key.is_empty())
+        );
+
+        // A target with neither a key nor a ref is still refused by name.
+        let twitch = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.stream_key_secret_ref = None;
+        let refused = cloud_talk_handover_with(&streaming, &[], |_| {
+            panic!("no secret is read without a ref")
+        })
+        .unwrap_err();
+        assert!(format!("{refused:#}").contains("stream key is missing"));
     }
 
     #[test]

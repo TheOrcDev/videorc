@@ -11996,7 +11996,7 @@ async fn handle_text_message_with_role(
                 Ok(params) => match cloud_context(state) {
                     Some(context) => {
                         let (destinations, platforms) =
-                            match recording::cloud_talk_handover(&params.streaming) {
+                            match recording::cloud_talk_handover(state, &params.streaming) {
                                 Ok(resolved) => resolved,
                                 Err(error) => {
                                     return ServerResponse::error(
