@@ -6390,6 +6390,7 @@ const cloudRecordingsListSchema = objectSchema(
 const cloudRecordingDownloadParamsSchema = objectSchema(
   {
     id: stringSchema({ minLength: 1, maxLength: 128 }),
+    outputDirectoryCapability: optionalSchema(boundedString),
     outputDirectory: optionalSchema(boundedPath),
     ffmpegPath: optionalSchema(boundedPath)
   },

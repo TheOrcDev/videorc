@@ -650,10 +650,16 @@ struct RunningDownload {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// How many finished downloads keep their file for "Show in Finder".
+const FINISHED_DOWNLOADS_KEPT: usize = 32;
+
 #[derive(Default)]
 struct DownloadJobsState {
     closing: bool,
     running: HashMap<String, RunningDownload>,
+    /// The MP4 each finished job saved, newest last, by job id: main reveals
+    /// one by its id (the Library's Show in Finder), never by a renderer path.
+    finished: std::collections::VecDeque<(String, PathBuf)>,
 }
 
 #[derive(Default)]
@@ -728,11 +734,23 @@ impl RecordingDownloadJobs {
             .catch_unwind()
             .await;
             let (state, path, error) = match outcome {
-                Ok(Ok(path)) => (
-                    DownloadState::Done,
-                    Some(path.to_string_lossy().into_owned()),
-                    None,
-                ),
+                Ok(Ok(path)) => {
+                    let mut jobs = registry
+                        .0
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if jobs.finished.len() >= FINISHED_DOWNLOADS_KEPT {
+                        jobs.finished.pop_front();
+                    }
+                    jobs.finished
+                        .push_back((event.job_id.clone(), path.clone()));
+                    drop(jobs);
+                    (
+                        DownloadState::Done,
+                        Some(path.to_string_lossy().into_owned()),
+                        None,
+                    )
+                }
                 Ok(Err(_)) if *cancelled.borrow() => (DownloadState::Cancelled, None, None),
                 Ok(Err(error)) => (
                     DownloadState::Failed,
@@ -779,6 +797,21 @@ impl RecordingDownloadJobs {
         if let Some(job) = jobs.running.values().find(|job| job.job_id == job_id) {
             let _ = job.cancel.send(true);
         }
+    }
+
+    /// The MP4 a finished job saved, while it is still a file there:
+    /// `resource.admin.resolve_cloud_download_path` (main's Show in Finder).
+    pub(crate) fn finished_path(&self, job_id: &str) -> Option<PathBuf> {
+        let jobs = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        jobs.finished
+            .iter()
+            .rev()
+            .find(|(id, _)| id == job_id)
+            .map(|(_, path)| path.clone())
+            .filter(|path| path.is_file())
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -2620,6 +2653,42 @@ rtmps://h/app/key 'http://x.test/y'";
         for absent in ["path", "error", "doneSegments", "totalSegments"] {
             assert!(wire.get(absent).is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn a_finished_download_is_revealed_by_its_job_id_only_while_its_file_exists() {
+        let temporary = TemporaryRecordingDirectory::create().unwrap();
+        let saved = temporary.0.join("talk-2026-11-14-1204-h.mp4");
+        std::fs::write(&saved, b"mp4").unwrap();
+        let jobs = Arc::new(RecordingDownloadJobs::default());
+        let (finished, done) = tokio::sync::oneshot::channel::<()>();
+        let finished = std::sync::Mutex::new(Some(finished));
+        let emit: DownloadEventHook = Arc::new(move |event: RecordingDownloadEvent| {
+            if event.state != DownloadState::Running {
+                if let Some(finished) = finished.lock().unwrap().take() {
+                    let _ = finished.send(());
+                }
+            }
+        });
+        let path = saved.clone();
+        let ok = jobs
+            .start("rec_ok".to_string(), emit, move |_| async move { Ok(path) })
+            .unwrap();
+        done.await.unwrap();
+        let failing = jobs
+            .start(
+                "rec_failed".to_string(),
+                Arc::new(|_: RecordingDownloadEvent| {}),
+                |_| async { bail!("Recording segment 3 could not be downloaded.") },
+            )
+            .unwrap();
+        jobs.shutdown().await;
+
+        assert_eq!(jobs.finished_path(&ok.job_id), Some(saved.clone()));
+        assert_eq!(jobs.finished_path(&failing.job_id), None);
+        assert_eq!(jobs.finished_path("not-a-job"), None);
+        std::fs::remove_file(&saved).unwrap();
+        assert_eq!(jobs.finished_path(&ok.job_id), None);
     }
 
     #[cfg(unix)]

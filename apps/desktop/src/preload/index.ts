@@ -267,6 +267,7 @@ const api: VideorcApi = {
   revealSession: (sessionId) => invoke('resource:reveal-session', sessionId),
   revealBackgroundAsset: (assetId) => invoke('resource:reveal-background', assetId),
   revealSupportBundle: (path) => invoke('resource:reveal-support-bundle', path),
+  revealCloudDownload: (jobId) => invoke('resource:reveal-cloud-download', jobId),
   getAgentBridge: (install) => invoke('agents:bridge', install),
   addAgentToApp: (app, token) => invoke('agents:add-to-app', app, token),
   obsDiscover: () => invoke('obs:discover'),

@@ -297,6 +297,7 @@ export const electronInvokeApiMethods = {
   'resource:reveal-session': 'revealSession',
   'resource:reveal-background': 'revealBackgroundAsset',
   'resource:reveal-support-bundle': 'revealSupportBundle',
+  'resource:reveal-cloud-download': 'revealCloudDownload',
   'agents:bridge': 'getAgentBridge',
   'agents:add-to-app': 'addAgentToApp',
   'resource:open-session': 'openSession',
@@ -2055,6 +2056,7 @@ const specificRuntimeInvokeContracts = {
   'resource:reveal-session': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-background': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-support-bundle': invokeContract(tupleSchema([pathSchema])),
+  'resource:reveal-cloud-download': invokeContract(tupleSchema([boundedIdentifier])),
   // Plan 209 S7: install (Connect) or not; the bridge's absolute path and
   // whether this install has it. Never a token.
   'agents:bridge': invokeContract(

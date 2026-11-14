@@ -45,6 +45,8 @@ export const IPC_INVOKE_ROLES = {
   'resource:reveal-session': MAIN_ONLY,
   'resource:reveal-background': MAIN_ONLY,
   'resource:reveal-support-bundle': MAIN_ONLY,
+  // Plan 234: the Library's Show in Finder for a downloaded cloud recording.
+  'resource:reveal-cloud-download': MAIN_ONLY,
   // Settings → Remote → Agents (plan 209 S7): the bridge's path for the
   // config line, and the Linux copy on Connect. The Studio renderer only.
   'agents:bridge': MAIN_ONLY,

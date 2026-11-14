@@ -6068,6 +6068,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.admin.resolve_session_path"
         | "resource.admin.resolve_screen_path"
         | "resource.admin.resolve_background_path"
+        | "resource.admin.resolve_cloud_download_path"
         | "health.ping"
         | "youtube.quota.status"
         | "scheduledStreams.capabilities"
@@ -9288,6 +9289,28 @@ fn resolve_community_export_resource(
     )
 }
 
+/// Plan 234: `cloud.recordings.download` saves into Output's folder, which
+/// the Library names as the `output-directory` capability main issued
+/// (`outputDirectoryCapability` → `outputDirectory`). Absent, the default
+/// folder; a raw folder from the renderer is refused, the admin role (the
+/// smokes) may pass one.
+fn resolve_cloud_download_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    let object = params.as_object_mut().context("params must be an object")?;
+    consume_resource_field(
+        state,
+        object,
+        role,
+        "outputDirectoryCapability",
+        "outputDirectory",
+        resource_authority::ResourceCapabilityKind::OutputDirectory,
+        false,
+    )
+}
+
 /// Plan 225 D12: Import… reads the file main's picker issued as an
 /// `input-file` capability (`sourceCapability` → `path`), like
 /// `sounds.import`; a raw path from the renderer is refused.
@@ -9825,6 +9848,29 @@ async fn handle_text_message_with_role(
                     command.id,
                     "managed-session-path-missing",
                     error.to_string(),
+                ),
+            }
+        }
+        // Plan 234: the Library's Show in Finder for a cloud recording it
+        // downloaded, by job id; only a finished job's file, while it exists.
+        "resource.admin.resolve_cloud_download_path" => {
+            let job_id = command
+                .params
+                .get("jobId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let path = cloud_show::lock(&state.cloud_show)
+                .downloads
+                .finished_path(job_id);
+            match path {
+                Some(path) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({ "path": path.to_string_lossy() }),
+                ),
+                None => ServerResponse::error(
+                    command.id,
+                    "cloud-download-path-missing",
+                    "The downloaded recording is no longer there.",
                 ),
             }
         }
@@ -12014,8 +12060,19 @@ async fn handle_text_message_with_role(
             None => cloud_unavailable(command.id),
         },
         "cloud.recordings.download" => {
+            // The Library passes Output's folder as the capability main issued
+            // (`outputDirectoryCapability`), as a session start does; a raw
+            // folder from the renderer is refused, the admin role may pass one.
+            let mut params_value = command.params;
+            if let Err(error) = resolve_cloud_download_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
             let params = match serde_json::from_value::<cloud_control_web::RecordingDownloadParams>(
-                command.params,
+                params_value,
             ) {
                 Ok(params) => params,
                 Err(error) => {
@@ -24170,6 +24227,70 @@ mod tests {
                 error.message
             );
         }
+    }
+
+    /// Plan 234: the Library's cloud download saves into the folder main
+    /// issued as a capability; a raw folder from the renderer is refused
+    /// before any download starts, and only main may ask for a finished
+    /// download's file.
+    #[tokio::test]
+    async fn renderer_cloud_recording_download_rejects_a_raw_folder() {
+        let state = test_state();
+        let cases = [
+            (
+                serde_json::json!({ "id": "rec_1", "outputDirectory": "/tmp/renderer-chosen" }),
+                "raw outputDirectory is not accepted",
+            ),
+            (
+                serde_json::json!({ "id": "rec_1", "outputDirectoryCapability": "resource:not-issued" }),
+                "Resource capability",
+            ),
+        ];
+        for (params, expected) in cases {
+            let response = handle_text_message_with_role(
+                &state,
+                &serde_json::json!({
+                    "id": "cloud-download-raw",
+                    "method": "cloud.recordings.download",
+                    "params": params
+                })
+                .to_string(),
+                BackendRole::Renderer,
+            )
+            .await;
+            assert!(!response.ok, "{params} must be refused");
+            let error = response.error.expect("renderer refusal");
+            assert_eq!(error.code, "resource-capability-rejected", "{params}");
+            assert!(
+                error.message.contains(expected),
+                "{params}: {}",
+                error.message
+            );
+        }
+        assert_eq!(
+            authorize_backend_method(
+                BackendRole::Renderer,
+                "resource.admin.resolve_cloud_download_path",
+                false
+            ),
+            Err(crate::backend_authority::MethodAdmissionError::AdminOnly)
+        );
+        let missing = handle_text_message_with_role(
+            &state,
+            &serde_json::json!({
+                "id": "cloud-download-path",
+                "method": "resource.admin.resolve_cloud_download_path",
+                "params": { "jobId": "00000000-0000-4000-8000-000000000000" }
+            })
+            .to_string(),
+            BackendRole::Admin,
+        )
+        .await;
+        assert!(!missing.ok);
+        assert_eq!(
+            missing.error.expect("no such job").code,
+            "cloud-download-path-missing"
+        );
     }
 
     #[tokio::test]
