@@ -265,7 +265,7 @@
     "probe:recording-native-preview:videotoolbox-output": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT=videotoolbox-h264 -- pnpm probe:recording-native-preview:videotoolbox",
     "probe:recording-native-preview:videotoolbox-mpegts-output": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT=videotoolbox-h264-mpegts -- pnpm probe:recording-native-preview:videotoolbox",
     "smoke:encoder-bridge": "node scripts/smoke-encoder-bridge-app.mjs",
-    "smoke:streaming-secrets": "node scripts/smoke-streaming-secrets.mjs",
+    "smoke:streaming-secrets": "node scripts/with-build-slot.mjs cargo build -p videorc-backend && node scripts/smoke-streaming-secrets.mjs",
     "smoke:platform-lifecycle": "node scripts/smoke-platform-lifecycle.mjs",
     "smoke:provider-readiness": "node scripts/smoke-provider-readiness.mjs",
     "smoke:provider-readiness:evidence": "node scripts/smoke-provider-readiness.mjs --markdown",

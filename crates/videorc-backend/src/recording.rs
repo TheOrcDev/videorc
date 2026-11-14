@@ -4607,9 +4607,9 @@ async fn start_session_with_timeline(
             // user's remembered capture; the performance check deletes them.
             state.database.mark_session_performance_check(&session_id)?;
         } else {
-            state
-                .database
-                .save_setting("last_capture_session", &params)?;
+            // `params` holds each destination's key from the secret store
+            // (hydrated above); the saved copy holds none.
+            state.database.save_last_capture_session(&params)?;
         }
     }
     if !stream_targets.is_empty() {
@@ -20077,7 +20077,7 @@ fn replay_ring_prewarm_video(remembered: Option<&StartSessionParams>) -> VideoSe
 pub(crate) fn spawn_windows_replay_ring_prewarm(state: &AppState) {
     let remembered = state
         .database
-        .load_setting::<StartSessionParams>("last_capture_session")
+        .load_setting::<StartSessionParams>(crate::storage::LAST_CAPTURE_SESSION_SETTING_KEY)
         .unwrap_or_else(|error| {
             tracing::warn!(
                 "Could not load the remembered capture for the encoder prewarm: {error}"
@@ -39476,6 +39476,190 @@ mod tests {
 
         validate_session_entitlements(&params, &snapshot).unwrap();
         validate_outputs(&params).unwrap();
+    }
+
+    fn stored_setting_text(state: &AppState, key: &str) -> Option<String> {
+        use rusqlite::OptionalExtension;
+        state
+            .database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn stored_session_outputs_text(state: &AppState) -> String {
+        let conn = state.database.lock().unwrap();
+        let mut statement = conn.prepare("SELECT output_json FROM sessions").unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n")
+    }
+
+    /// A stream request with one Custom destination whose key is saved under
+    /// `secret_ref`, and the renderer's legacy one-destination copy carrying
+    /// `typed_key` raw (what it sends when moving a key to the secret store
+    /// failed). Sources are the test pattern alone: no device is opened.
+    fn secret_ref_stream_params(secret_ref: &str, typed_key: &str) -> StartSessionParams {
+        let mut params = base_params(false, true);
+        params.sources = SourceSelection {
+            screen_id: None,
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: true,
+        };
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.output.rtmp.stream_key = typed_key.to_string();
+        let mut streaming =
+            streaming_for(&[(StreamPlatform::Custom, "rtmp://127.0.0.1:9/live", "")]);
+        let custom = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Custom)
+            .unwrap();
+        custom.stream_key_secret_ref = Some(secret_ref.to_string());
+        custom.stream_key_present = true;
+        params.streaming = Some(streaming);
+        params
+    }
+
+    /// 2026-11-14: `start_session` reads each destination's key from the
+    /// secret store into its request, then saved that request as
+    /// `last_capture_session`, so the row held the key in plain text (since
+    /// 2026-10-23). Neither the remembered capture nor the Library row may
+    /// hold a key. Live captions with no microphone refuse this start after
+    /// both rows are written and before any capture or encoder process
+    /// spawns, so the test touches no device and no network.
+    #[tokio::test]
+    async fn a_session_start_never_saves_a_stream_key_in_the_database() {
+        let state = test_state();
+        let unique = Uuid::new_v4().simple().to_string();
+        let secret_ref = format!("stream-target:session-key-test-{unique}:manual-stream-key");
+        let stored_key = format!("test-stored-key-{unique}");
+        let typed_key = format!("test-typed-key-{unique}");
+        secrets::put_secret(&secret_ref, &stored_key).unwrap();
+        let mut params = secret_ref_stream_params(&secret_ref, &typed_key);
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            ..Default::default()
+        });
+
+        let result = timeout(
+            Duration::from_secs(20),
+            start_session(state.clone(), params),
+        )
+        .await
+        .expect("the refusal comes before any process spawns");
+        let _ = secrets::delete_secret(&secret_ref);
+        let error = format!(
+            "{:#}",
+            result.expect_err("captions without a microphone refuse the start")
+        );
+        assert!(
+            error.contains(CAPTIONS_NATIVE_AUDIO_REQUIRED_MESSAGE),
+            "the start must get past both writes: {error}"
+        );
+        assert!(state.recording.lock().await.is_none());
+
+        let remembered =
+            stored_setting_text(&state, crate::storage::LAST_CAPTURE_SESSION_SETTING_KEY)
+                .expect("the start remembered its capture");
+        assert!(!remembered.contains(&stored_key), "{remembered}");
+        assert!(!remembered.contains(&typed_key), "{remembered}");
+        assert!(
+            remembered.contains(&secret_ref),
+            "the secret ref stays so a later start can fetch the key: {remembered}"
+        );
+        let library = stored_session_outputs_text(&state);
+        assert!(
+            library.contains("\"rtmp\""),
+            "the Library row was written: {library}"
+        );
+        assert!(!library.contains(&stored_key), "{library}");
+        assert!(!library.contains(&typed_key), "{library}");
+    }
+
+    /// The scrub's other half: an old build's remembered capture (keys
+    /// hydrated) is scrubbed once at open and still restores. The Windows
+    /// encoder prewarm reads its video profile, and a later start fetches the
+    /// key again from the secret ref that stayed.
+    #[test]
+    fn a_scrubbed_remembered_capture_still_restores() {
+        let state = test_state();
+        let secret_ref = "stream-target:custom:manual-stream-key";
+        let stored_key = "test-stored-key-restore";
+        let typed_key = "test-typed-key-restore";
+        let mut hydrated = secret_ref_stream_params(secret_ref, typed_key);
+        hydrated.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1600,
+            height: 900,
+            fps: 30,
+            bitrate_kbps: 5_000,
+        };
+        hydrate_stream_key_secret_refs_from_credentials(
+            hydrated.streaming.as_mut().unwrap(),
+            &[],
+            |_| Ok(stored_key.to_string()),
+        )
+        .unwrap();
+        // What a build from 2026-10-23 wrote, on a database that predates the
+        // one-time scrub.
+        state
+            .database
+            .save_setting(crate::storage::LAST_CAPTURE_SESSION_SETTING_KEY, &hydrated)
+            .unwrap();
+        state
+            .database
+            .delete_setting(crate::storage::STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY)
+            .unwrap();
+        assert!(
+            stored_setting_text(&state, crate::storage::LAST_CAPTURE_SESSION_SETTING_KEY)
+                .unwrap()
+                .contains(stored_key)
+        );
+
+        state.database.migrate_for_marker_test();
+
+        let scrubbed =
+            stored_setting_text(&state, crate::storage::LAST_CAPTURE_SESSION_SETTING_KEY).unwrap();
+        assert!(!scrubbed.contains(stored_key), "{scrubbed}");
+        assert!(!scrubbed.contains(typed_key), "{scrubbed}");
+        let restored = state
+            .database
+            .load_setting::<StartSessionParams>(crate::storage::LAST_CAPTURE_SESSION_SETTING_KEY)
+            .unwrap()
+            .expect("the scrubbed row still reads back as a request");
+        assert_eq!(
+            replay_ring_prewarm_video(Some(&restored)),
+            hydrated.output.video
+        );
+
+        let mut streaming = restored.streaming.expect("destinations survive the scrub");
+        assert!(
+            stream_targets_from_streaming(&streaming).is_err(),
+            "no key on disk"
+        );
+        hydrate_stream_key_secret_refs_from_credentials(&mut streaming, &[], |requested| {
+            assert_eq!(requested, secret_ref);
+            Ok(stored_key.to_string())
+        })
+        .unwrap();
+        let targets = stream_targets_from_streaming(&streaming).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].url,
+            format!("rtmp://127.0.0.1:9/live/{stored_key}")
+        );
     }
 
     #[test]

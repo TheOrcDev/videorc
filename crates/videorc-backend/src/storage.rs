@@ -93,6 +93,173 @@ pub struct SessionTiming {
 
 const PERFORMANCE_CHECK_PROCESSING_KIND: &str = "performance-check";
 
+/// `app_settings` key of the remembered capture: the last Record or Go Live
+/// request, which the Windows encoder prewarm reads back for its video
+/// profile. Written only through [`Database::save_last_capture_session`].
+pub(crate) const LAST_CAPTURE_SESSION_SETTING_KEY: &str = "last_capture_session";
+
+/// Written in the same transaction as the one-time scrub of stream
+/// credentials older builds left in the database
+/// ([`scrub_stored_stream_credentials_once`]), so it runs once per database.
+pub(crate) const STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY: &str =
+    "stored_stream_credentials_scrubbed";
+
+/// Clears every stream credential from a capture request (the JSON of a
+/// `StartSessionParams`) before it is written to the database: each
+/// destination's `streamKey`, the `serverUrl` of a full-URL destination (the
+/// URL is the key there) and the legacy one-destination `output.rtmp` server
+/// and key. Stream keys live in the secret store; a session start reads them
+/// into its in-memory request, and a key typed but never saved there has no
+/// business on disk either. Every field stays present (as an empty string)
+/// and `streamKeySecretRef` stays, so the row still reads back as a request
+/// and a later start fetches each saved key from the secret store again.
+/// Returns whether anything was cleared.
+fn clear_capture_request_credentials(request: &mut serde_json::Value) -> bool {
+    let mut cleared = request
+        .pointer_mut("/output/rtmp")
+        .is_some_and(clear_rtmp_credentials);
+    if let Some(targets) = request
+        .pointer_mut("/streaming/targets")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for target in targets {
+            cleared |= clear_string_field(target, "streamKey");
+            if target.get("urlMode").and_then(serde_json::Value::as_str) == Some("full-url") {
+                cleared |= clear_string_field(target, "serverUrl");
+            }
+        }
+    }
+    cleared
+}
+
+/// The legacy one-destination block (`RtmpSettings`): nothing reads its
+/// server or key back from the database, and a custom server URL can carry
+/// the key.
+fn clear_rtmp_credentials(rtmp: &mut serde_json::Value) -> bool {
+    let server = clear_string_field(rtmp, "serverUrl");
+    let key = clear_string_field(rtmp, "streamKey");
+    server || key
+}
+
+fn clear_string_field(object: &mut serde_json::Value, field: &str) -> bool {
+    let Some(serde_json::Value::String(text)) = object.get_mut(field) else {
+        return false;
+    };
+    if text.is_empty() {
+        return false;
+    }
+    text.clear();
+    true
+}
+
+/// `sessions.output_json` for a new row, without the legacy `rtmp` server
+/// and key ([`clear_rtmp_credentials`]). No reader uses them, and the
+/// renderer still sends a raw key there when moving it to the secret store
+/// failed.
+fn session_output_json(output: &OutputSettings) -> Result<String> {
+    let mut output = serde_json::to_value(output)?;
+    if let Some(rtmp) = output.get_mut("rtmp") {
+        clear_rtmp_credentials(rtmp);
+    }
+    Ok(serde_json::to_string(&output)?)
+}
+
+/// From 2026-10-23 (`c5033f622`) every Record or Go Live saved the remembered
+/// capture after the start had read each destination's key from the secret
+/// store, so `last_capture_session` held those keys in plain text; and a raw
+/// key the renderer still held reached `sessions.output_json` as
+/// `output.rtmp.streamKey`. This clears both once. The marker is written in
+/// the same transaction as the scrubbed rows, so an interrupted launch leaves
+/// both or neither, and every later launch reads one row and stops.
+///
+/// An UPDATE leaves the old row's bytes in freed page space until SQLite
+/// reuses it, so the scrub runs with `secure_delete` on (zeroing what it
+/// frees) and then checkpoints the write-ahead log, which moves the zeroed
+/// pages over the old ones in the database file now rather than at some
+/// later checkpoint.
+fn scrub_stored_stream_credentials_once(conn: &mut Connection) -> Result<()> {
+    let scrubbed = conn
+        .query_row(
+            "SELECT 1 FROM app_settings WHERE key = ?1",
+            params![STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if scrubbed {
+        return Ok(());
+    }
+    let set_secure_delete = |conn: &Connection, value: i64| {
+        conn.pragma_update_and_check(None, "secure_delete", value, |row| row.get::<_, i64>(0))
+    };
+    let secure_delete: i64 = conn.pragma_query_value(None, "secure_delete", |row| row.get(0))?;
+    set_secure_delete(conn, 1)?;
+    let scrub = scrub_stored_stream_credentials(conn);
+    set_secure_delete(conn, secure_delete)?;
+    scrub?;
+    // Best effort: a reader holding the log open only delays it.
+    if let Err(error) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
+        tracing::warn!("Could not checkpoint after scrubbing stored stream credentials: {error}");
+    }
+    Ok(())
+}
+
+/// The scrub itself, in one transaction with its marker. A remembered
+/// capture that is not JSON is deleted: nothing can read it back, and it may
+/// hold a key.
+fn scrub_stored_stream_credentials(conn: &mut Connection) -> Result<()> {
+    let transaction = conn.transaction()?;
+    let remembered: Option<String> = transaction
+        .query_row(
+            "SELECT value_json FROM app_settings WHERE key = ?1",
+            params![LAST_CAPTURE_SESSION_SETTING_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let now = Utc::now().to_rfc3339();
+    if let Some(remembered) = remembered {
+        match serde_json::from_str::<serde_json::Value>(&remembered) {
+            Ok(mut request) => {
+                if clear_capture_request_credentials(&mut request) {
+                    transaction.execute(
+                        "UPDATE app_settings SET value_json = ?2, updated_at = ?3 WHERE key = ?1",
+                        params![
+                            LAST_CAPTURE_SESSION_SETTING_KEY,
+                            serde_json::to_string(&request)?,
+                            now
+                        ],
+                    )?;
+                }
+            }
+            Err(_) => {
+                transaction.execute(
+                    "DELETE FROM app_settings WHERE key = ?1",
+                    params![LAST_CAPTURE_SESSION_SETTING_KEY],
+                )?;
+            }
+        }
+    }
+    // CASE, not AND: SQLite may evaluate AND terms in any order, and a JSON
+    // function on a malformed row would fail the whole open.
+    transaction.execute(
+        "UPDATE sessions
+            SET output_json = json_set(output_json, '$.rtmp.serverUrl', '', '$.rtmp.streamKey', '')
+          WHERE CASE
+                    WHEN NOT json_valid(output_json) THEN 0
+                    WHEN json_type(output_json, '$.rtmp') IS NOT 'object' THEN 0
+                    ELSE ifnull(json_extract(output_json, '$.rtmp.serverUrl'), '') <> ''
+                      OR ifnull(json_extract(output_json, '$.rtmp.streamKey'), '') <> ''
+                END",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)",
+        params![STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY, "1", now],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Plan 200 C1/C3: the take facts an MP4 export stamps into the file.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Mp4ExportTakeRow {
@@ -1726,7 +1893,7 @@ impl Database {
                 session.stream_preset,
                 serde_json::to_string(&session.sources)?,
                 serde_json::to_string(&session.layout)?,
-                serde_json::to_string(&session.output)?,
+                session_output_json(&session.output)?,
             ],
         )?;
         transaction.execute(
@@ -1808,7 +1975,7 @@ impl Database {
                 duration_ms,
                 serde_json::to_string(&session.sources)?,
                 serde_json::to_string(&session.layout)?,
-                serde_json::to_string(&session.output)?,
+                session_output_json(&session.output)?,
                 file_size_bytes,
             ],
         )?;
@@ -6695,6 +6862,19 @@ impl Database {
             .transpose()
     }
 
+    /// Remembers a Record or Go Live request with every stream credential
+    /// cleared ([`clear_capture_request_credentials`]). `request` is the
+    /// started session's own, which carries the keys read from the secret
+    /// store.
+    pub fn save_last_capture_session(
+        &self,
+        request: &crate::protocol::StartSessionParams,
+    ) -> Result<()> {
+        let mut request = serde_json::to_value(request)?;
+        clear_capture_request_credentials(&mut request);
+        self.save_setting(LAST_CAPTURE_SESSION_SETTING_KEY, &request)
+    }
+
     pub fn save_setting<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
@@ -8201,7 +8381,7 @@ impl Database {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
@@ -8837,6 +9017,11 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_agent_activity_agent_at
                 ON agent_activity(agent_id, at DESC, id DESC);",
         )?;
+        // A privacy cleanup never keeps the app from opening its data: a
+        // failed scrub leaves no marker, so the next launch tries again.
+        if let Err(error) = scrub_stored_stream_credentials_once(&mut conn) {
+            tracing::warn!("Could not scrub stream credentials older builds stored: {error:#}");
+        }
         Ok(())
     }
 
@@ -12567,6 +12752,284 @@ mod tests {
         let page = database.list_session_items_page(None, 10).unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].take_id, None);
+    }
+
+    /// Every credential shape a session's own request carries once the start
+    /// has read the keys from the secret store: an OAuth key and a full-URL
+    /// destination behind secret refs, a manual key typed but never saved,
+    /// and the legacy `output.rtmp` server and key.
+    const LEAKED_CREDENTIALS: [&str; 5] = [
+        "test-oauth-key",
+        "test-full-url-key",
+        "test-typed-key",
+        "test-rtmp-path-key",
+        "test-legacy-key",
+    ];
+
+    fn capture_request_with_credentials() -> crate::protocol::StartSessionParams {
+        use crate::streaming::{StreamAuthMode, StreamMode, StreamUrlMode, StreamingSettings};
+        let session = sample_session("request");
+        let mut output = session.output;
+        output.stream_enabled = true;
+        output.rtmp = RtmpSettings {
+            preset: RtmpPreset::Custom,
+            server_url: "rtmp://example.test/app/test-rtmp-path-key".to_string(),
+            stream_key: "test-legacy-key".to_string(),
+        };
+        let mut targets = crate::streaming::default_stream_targets();
+        for target in &mut targets {
+            match target.platform {
+                StreamPlatform::Youtube if target.id == "youtube" => {
+                    target.enabled = true;
+                    target.auth_mode = StreamAuthMode::Oauth;
+                    target.stream_key = "test-oauth-key".to_string();
+                    target.stream_key_secret_ref =
+                        Some("platform:youtube:test-channel:stream-key".to_string());
+                    target.stream_key_present = true;
+                }
+                StreamPlatform::Custom => {
+                    target.enabled = true;
+                    target.url_mode = Some(StreamUrlMode::FullUrl);
+                    target.server_url = "rtmp://example.test/live/test-full-url-key".to_string();
+                    target.stream_key_secret_ref =
+                        Some("stream-target:custom:manual-stream-key".to_string());
+                    target.stream_key_present = true;
+                }
+                StreamPlatform::Twitch => {
+                    target.enabled = true;
+                    target.stream_key = "test-typed-key".to_string();
+                    target.stream_key_present = true;
+                }
+                _ => {}
+            }
+        }
+        let enabled_target_ids = targets
+            .iter()
+            .filter(|target| target.enabled)
+            .map(|target| target.id.clone())
+            .collect();
+        crate::protocol::StartSessionParams {
+            sources: session.sources,
+            layout: session.layout,
+            scene: None,
+            output,
+            audio: Default::default(),
+            streaming: Some(StreamingSettings {
+                enabled: true,
+                mode: StreamMode::Multi,
+                targets,
+                selected_target_id: None,
+                default_output_preset: VideoPreset::Tutorial1080p30,
+                default_bitrate_kbps: 6000,
+                enabled_target_ids,
+            }),
+            captions: None,
+            simulcast: None,
+            requested_at_ms: None,
+            replay: None,
+            purpose: Default::default(),
+        }
+    }
+
+    fn setting_text(database: &Database, key: &str) -> Option<String> {
+        database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn session_output_text(database: &Database, session_id: &str) -> String {
+        database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT output_json FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn assert_no_credentials(text: &str) {
+        for credential in LEAKED_CREDENTIALS {
+            assert!(!text.contains(credential), "{credential} in {text}");
+        }
+    }
+
+    #[test]
+    fn the_remembered_capture_and_library_row_are_saved_without_credentials() {
+        let database = test_database();
+        let request = capture_request_with_credentials();
+        assert!(
+            LEAKED_CREDENTIALS
+                .iter()
+                .all(|credential| serde_json::to_string(&request)
+                    .unwrap()
+                    .contains(credential)),
+            "the fixture carries every shape"
+        );
+
+        database.save_last_capture_session(&request).unwrap();
+        let mut session = sample_session("library-row");
+        session.output = request.output.clone();
+        database.create_session(&session).unwrap();
+
+        let remembered = setting_text(&database, LAST_CAPTURE_SESSION_SETTING_KEY).unwrap();
+        assert_no_credentials(&remembered);
+        for secret_ref in [
+            "platform:youtube:test-channel:stream-key",
+            "stream-target:custom:manual-stream-key",
+        ] {
+            assert!(remembered.contains(secret_ref), "{remembered}");
+        }
+        let restored = database
+            .load_setting::<crate::protocol::StartSessionParams>(LAST_CAPTURE_SESSION_SETTING_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.output.video, request.output.video);
+        let youtube = restored
+            .streaming
+            .unwrap()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "youtube")
+            .unwrap();
+        assert_eq!(
+            youtube.server_url, "rtmp://a.rtmp.youtube.com/live2",
+            "a server-and-key destination keeps its server"
+        );
+        let library = session_output_text(&database, "library-row");
+        assert_no_credentials(&library);
+        assert!(library.contains("\"keepOriginalMkv\""), "{library}");
+    }
+
+    /// Databases written from 2026-10-23 hold keys in the remembered capture
+    /// (and raw legacy keys in Library rows). The first open after the fix
+    /// clears them and records that it did; later opens leave the rows alone.
+    #[test]
+    fn credentials_older_builds_stored_are_scrubbed_once() {
+        let database = test_database();
+        assert!(
+            setting_text(&database, STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY).is_some(),
+            "a new database is born scrubbed"
+        );
+        let request = capture_request_with_credentials();
+        database
+            .delete_setting(STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY)
+            .unwrap();
+        // What a build from 2026-10-23 wrote.
+        database
+            .save_setting(LAST_CAPTURE_SESSION_SETTING_KEY, &request)
+            .unwrap();
+        database.create_session(&sample_session("old-row")).unwrap();
+        database
+            .create_session(&sample_session("never-streamed"))
+            .unwrap();
+        database
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET output_json = json_set(output_json,
+                    '$.rtmp.serverUrl', 'rtmp://example.test/app/test-rtmp-path-key',
+                    '$.rtmp.streamKey', 'test-legacy-key')
+                  WHERE id = 'old-row'",
+                [],
+            )
+            .unwrap();
+        let untouched = session_output_text(&database, "never-streamed");
+        let secure_delete = |database: &Database| -> i64 {
+            database
+                .lock()
+                .unwrap()
+                .pragma_query_value(None, "secure_delete", |row| row.get(0))
+                .unwrap()
+        };
+        let secure_delete_before = secure_delete(&database);
+
+        database.migrate().unwrap();
+
+        assert_eq!(
+            secure_delete(&database),
+            secure_delete_before,
+            "secure_delete is on for the scrub only"
+        );
+
+        let remembered = setting_text(&database, LAST_CAPTURE_SESSION_SETTING_KEY).unwrap();
+        assert_no_credentials(&remembered);
+        assert!(remembered.contains("stream-target:custom:manual-stream-key"));
+        let restored = database
+            .load_setting::<crate::protocol::StartSessionParams>(LAST_CAPTURE_SESSION_SETTING_KEY)
+            .unwrap()
+            .expect("the scrubbed row still reads back as a request");
+        assert_eq!(restored.output.video, request.output.video);
+        let old_row = session_output_text(&database, "old-row");
+        assert_no_credentials(&old_row);
+        assert!(old_row.contains("\"keepOriginalMkv\""), "{old_row}");
+        assert_eq!(
+            session_output_text(&database, "never-streamed"),
+            untouched,
+            "a row with no credential is not rewritten"
+        );
+        assert!(setting_text(&database, STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY).is_some());
+
+        // Once: a later open neither reads nor rewrites the row.
+        database
+            .save_setting(LAST_CAPTURE_SESSION_SETTING_KEY, &request)
+            .unwrap();
+        database.migrate().unwrap();
+        assert!(
+            setting_text(&database, LAST_CAPTURE_SESSION_SETTING_KEY)
+                .unwrap()
+                .contains("test-oauth-key")
+        );
+    }
+
+    #[test]
+    fn a_remembered_capture_that_is_not_json_is_dropped_by_the_scrub() {
+        let database = test_database();
+        database
+            .delete_setting(STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY)
+            .unwrap();
+        database
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)",
+                params![
+                    LAST_CAPTURE_SESSION_SETTING_KEY,
+                    "{\"streamKey\":\"test-typed-key\"",
+                    "2026-11-14T00:00:00Z"
+                ],
+            )
+            .unwrap();
+        database
+            .create_session(&sample_session("malformed"))
+            .unwrap();
+        database
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET output_json = '{\"rtmp\":' WHERE id = 'malformed'",
+                [],
+            )
+            .unwrap();
+
+        database
+            .migrate()
+            .expect("a malformed Library row never fails the open");
+
+        assert_eq!(
+            setting_text(&database, LAST_CAPTURE_SESSION_SETTING_KEY),
+            None
+        );
+        assert_eq!(session_output_text(&database, "malformed"), "{\"rtmp\":");
+        assert!(setting_text(&database, STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY).is_some());
     }
 
     fn sample_session(id: &str) -> NewSession {
