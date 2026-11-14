@@ -74,7 +74,10 @@ const openRoom = {
 
 function deps(onError: TalkShowRoomControllerDeps['onError']): TalkShowRoomControllerDeps {
   return {
-    client: { requestTyped: vi.fn(async () => ({})) } as unknown as BackendClient,
+    client: {
+      requestTyped: vi.fn(async () => ({})),
+      on: vi.fn(() => () => {})
+    } as unknown as BackendClient,
     cloudStatus: openRoom,
     commitCloudStatus: () => {},
     cameraId: null,

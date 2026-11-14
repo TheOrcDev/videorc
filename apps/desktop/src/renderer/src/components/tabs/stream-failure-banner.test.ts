@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { StreamTargetRuntime } from '@/lib/backend'
 
-import { StreamFailureBanner } from './streaming-tab'
+import { destinationsOnAir, StreamFailureBanner } from './streaming-tab'
 
 // Plan 174 S0.1 (D-4): the failure banner's destructive action ends the
 // whole livestream, says so, and asks through the End livestream dialog.
@@ -81,5 +81,21 @@ describe('StreamFailureBanner', () => {
     const source = readFileSync(join(__dirname, 'streaming-tab.tsx'), 'utf8')
     expect(source).toContain("requestStopSession('failure-banner')")
     expect(source).not.toMatch(/onEndLivestream=\{\(\) => void stopSession\(\)\}/)
+  })
+})
+
+describe('the destinations the failure banner counts', () => {
+  it('leaves out the cloud feed', () => {
+    // Plan 234 copy check: one of three failed on a cloud show read 'The
+    // other 3 destinations keep streaming', the feed counted as one.
+    const live = (targetId: string, state: StreamTargetRuntime['state']) => ({ targetId, state })
+    expect(
+      destinationsOnAir([
+        live('videorc-cloud-horizontal', 'live'),
+        live('youtube', 'live'),
+        live('twitch', 'live'),
+        live('kick', 'failed')
+      ])
+    ).toBe(2)
   })
 })

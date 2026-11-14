@@ -1,0 +1,240 @@
+{
+  "$comment": "Plan 234 (managed media): the constants of docs/cloud/managed-media-wire.md that the desktop and the web both hold, written from that file. The desktop pins its Rust constants to this fixture (cargo test -p videorc-backend cloud_managed_wire_fixture); the web copies it to tests/fixtures/cloud-managed-wire.json and pins its own. Change the contract first, then this file, then the code. No prices, costs, keys, tokens or account ids belong here.",
+  "version": 1,
+  "contract": "docs/cloud/managed-media-wire.md",
+
+  "control": {
+    "$comment": "Section 1. A create or current answer without control.kind means the node socket. Any kind this list does not hold is a transport the desktop does not know: it ends the show and streams directly with unknownKindFallback.",
+    "kinds": ["web"],
+    "absentKindMeans": "node",
+    "unknownKindFallback": "cloud-node-unreachable",
+    "webUrl": "",
+    "webToken": "",
+    "managedNodeId": "livekit"
+  },
+
+  "routes": {
+    "$comment": "Section 2. Bearer auth. :id is the show id (sh_ plus 22 base62).",
+    "create": { "method": "POST", "path": "/api/cloud/shows" },
+    "current": { "method": "GET", "path": "/api/cloud/shows/current" },
+    "destinations": { "method": "PUT", "path": "/api/cloud/shows/:id/destinations" },
+    "legsEnd": { "method": "POST", "path": "/api/cloud/shows/:id/legs/end" },
+    "state": { "method": "GET", "path": "/api/cloud/shows/:id/state", "query": "since" },
+    "holdImage": { "method": "PUT", "path": "/api/cloud/shows/:id/hold-image" },
+    "stage": { "method": "PUT", "path": "/api/cloud/shows/:id/stage" },
+    "recording": { "method": "POST", "path": "/api/cloud/shows/:id/recording" },
+    "end": { "method": "POST", "path": "/api/cloud/shows/:id/end" },
+    "lost": { "method": "POST", "path": "/api/cloud/shows/:id/lost" },
+    "recordings": { "method": "GET", "path": "/api/cloud/recordings" },
+    "recordingPlaylist": { "method": "GET", "path": "/api/cloud/recordings/:id/playlist" },
+    "programBeacon": { "method": "POST", "path": "/api/cloud/program/beacon" },
+    "programHoldImage": {
+      "method": "GET",
+      "path": "/api/cloud/program/hold-image",
+      "query": ["show", "v"]
+    }
+  },
+
+  "retry": {
+    "$comment": "Section 2. After a network error or a 5xx, once. Never after a 4xx. Every route is safe to repeat.",
+    "times": 1,
+    "afterMs": 1000
+  },
+
+  "errors": {
+    "$comment": "status and error.code, per route. `common` applies to every route of section 2 that acts on an existing show.",
+    "common": [
+      { "status": 400, "code": "invalid-request" },
+      { "status": 401, "code": "unauthorized" },
+      { "status": 404, "code": "cloud-show-not-found" },
+      { "status": 409, "code": "cloud-show-ended" },
+      { "status": 409, "code": "cloud-control-mismatch" },
+      { "status": 503, "code": "cloud-media-unavailable" },
+      { "status": 503, "code": "cloud-storage-unavailable" },
+      { "status": 503, "code": "cloud-tables-missing" }
+    ],
+    "create": [
+      { "status": 403, "code": "cloud-not-entitled" },
+      { "status": 422, "code": "cloud-quality" },
+      { "status": 503, "code": "cloud-full" },
+      { "status": 503, "code": "cloud-node-unreachable" },
+      { "status": 503, "code": "cloud-disabled" }
+    ],
+    "destinations": [
+      { "status": 422, "code": "cloud-destinations-refused" },
+      { "status": 503, "code": "cloud-full" }
+    ],
+    "legsEnd": [{ "status": 409, "code": "cloud-legs-end-solo" }],
+    "holdImage": [
+      { "status": 400, "code": "hold-image-invalid" },
+      { "status": 409, "code": "cloud-hold-image-talk" },
+      { "status": 413, "code": "hold-image-too-large" }
+    ],
+    "stage": [
+      { "status": 409, "code": "cloud-stage-solo" },
+      { "status": 422, "code": "invalid-stage" }
+    ],
+    "recording": [
+      { "status": 409, "code": "cloud-recording-solo" },
+      { "status": 409, "code": "cloud-recording-no-target" },
+      { "status": 409, "code": "cloud-recording-on-air" },
+      { "status": 503, "code": "cloud-full" },
+      { "status": 503, "code": "cloud-media-unavailable" }
+    ],
+    "recordings": [
+      { "status": 404, "code": "cloud-recording-not-found" },
+      { "status": 409, "code": "cloud-recording-needs-desktop" }
+    ],
+    "program": [
+      { "status": 400, "code": "invalid-beacon" },
+      { "status": 401, "code": "program-token-refused" },
+      { "status": 410, "code": "cloud-show-ended" }
+    ]
+  },
+
+  "destinationRefusals": {
+    "$comment": "Section 8.1: the codes of refused[] in a destinations answer, in the guard's order. They name an id and a code, never a URL.",
+    "codes": [
+      "destination-malformed",
+      "destination-scheme",
+      "destination-userinfo",
+      "destination-no-app",
+      "destination-trailing-slash",
+      "destination-key-too-short",
+      "destination-changed"
+    ],
+    "minKeyPieceChars": 12
+  },
+
+  "limits": {
+    "$comment": "Sections 2 and 11.",
+    "destinationsPerRequest": 16,
+    "destinationIdBytes": 1024,
+    "destinationPlatformBytes": 1024,
+    "destinationLabelBytes": 1024,
+    "destinationUrlBytes": 4096,
+    "holdImageBytes": 2097152,
+    "holdImageSidePixels": 1920,
+    "overlayBytes": 2097152,
+    "stageIdentities": 8,
+    "stageIdentityChars": 128,
+    "roomMetadataBytes": 4096,
+    "beaconBytes": 4096,
+    "outputPixels": 2073600,
+    "outputFps": 30,
+    "showSeconds": 42900,
+    "holdMaxSecondsChoices": [300, 900, 1800, 3600]
+  },
+
+  "rev": {
+    "$comment": "Section 3. A whole number per show. It grows by one on every material change and never goes back.",
+    "start": 1,
+    "material": [
+      "phase",
+      "hold.active",
+      "hold.reason",
+      "feeds[].connected",
+      "legs[] added or removed",
+      "legs[].state",
+      "legs[].resend",
+      "destinationsSet",
+      "restarts",
+      "holdImageSet",
+      "program counter leaving 0 or returning to 0",
+      "room (all but participants[].sinceMs)",
+      "recording.active",
+      "recording.problem"
+    ],
+    "notMaterial": [
+      "liveSeconds",
+      "hold.remainingSeconds",
+      "recording.seconds",
+      "feeds[].kbps",
+      "program.audioRmsDb",
+      "program counter that only grows"
+    ]
+  },
+
+  "state": {
+    "$comment": "Section 3. The answer is { rev, state }. waitSeconds are the web's longest waits when since equals rev; a wait that runs out answers 200 with the same rev. The rest are the desktop's poll loop.",
+    "answerFields": ["rev", "state"],
+    "waitSeconds": { "calm": 25, "trouble": 2, "talkWithGuests": 5 },
+    "revCheckIntervalMs": 1000,
+    "requestTimeoutMs": 35000,
+    "restAfterAnswerMs": 250,
+    "backoffSeconds": [1, 2, 4, 8, 15],
+    "askCurrentFromFailure": 2,
+    "desktopSeenStampSeconds": 5,
+    "desktopConnectedSeconds": 15
+  },
+
+  "phases": ["starting", "live", "hold", "ended"],
+  "holdReasons": ["feed-lost"],
+
+  "legs": {
+    "$comment": "Sections 8.3 to 8.5. `messages` is the closed list of legs[].error, chosen by the web. `resend` is section 8.4.",
+    "states": ["connecting", "live", "reconnecting", "failed", "ended"],
+    "messages": {
+      "guard": "Videorc Cloud can't carry this stream address.",
+      "failed": "Could not connect to the platform.",
+      "kicked": "The platform stopped answering.",
+      "noDesktopUrl": "Stop, then go live again to reconnect."
+    },
+    "resend": {
+      "desktopSpacingSeconds": 30,
+      "webGivesUpSeconds": 30,
+      "kickSpacingSeconds": 300,
+      "kicksPerShow": 3
+    }
+  },
+
+  "endReasons": [
+    "host-ended",
+    "no-feed",
+    "hold-limit",
+    "max-show",
+    "egress-lost",
+    "media-lost",
+    "room-finished",
+    "expired"
+  ],
+
+  "timers": {
+    "$comment": "Section 11, in seconds.",
+    "noFeedSeconds": 60,
+    "egressLostSeconds": 60,
+    "testShowAfterFirstFrameSeconds": 30,
+    "testShowExpiresSeconds": 120,
+    "lostFeedDownSeconds": 20,
+    "lostReportCooldownSeconds": 60,
+    "liveKitCallSeconds": 8
+  },
+
+  "recordings": {
+    "$comment": "Section 13.2. `format` of an item of GET /api/cloud/recordings: `segments` is a managed take (the desktop fetches its playlist and makes the MP4), `mp4` a node recording (it downloads from the account page). A playlist's segment lines are presigned URLs that live playlistUrlSeconds.",
+    "formats": { "managed": "segments", "node": "mp4" },
+    "playlistContentType": "application/vnd.apple.mpegurl",
+    "playlistUrlSeconds": 21600
+  },
+
+  "return": {
+    "$comment": "Section 6.4: cloud.return.set on a managed show sends nothing and answers this RPC error.",
+    "code": "cloud-return-failed",
+    "message": "The program return is not available on this show."
+  },
+
+  "overlay": {
+    "$comment": "Section 6.3: byte streams from host:<showId> on the room connection.",
+    "topics": { "set": "videorc.overlay.set", "clear": "videorc.overlay.clear" },
+    "version": "1",
+    "clearVersion": 1,
+    "ttlMinSeconds": 1,
+    "slots": ["card", "takeover", "hold"],
+    "orientations": ["h", "v"],
+    "setAttributes": ["v", "slot", "o", "x", "y", "w", "h", "ttl"],
+    "clearBodyFields": ["v", "slot", "o"],
+    "mimeTypes": ["image/png", "image/jpeg", "image/webp"],
+    "maxBytes": 2097152,
+    "resentWhenPageJoinsGrows": ["takeover", "hold"]
+  }
+}

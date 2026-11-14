@@ -96,8 +96,10 @@ describe('Electron IPC contract', () => {
     // 176: plan 226 S4 adds the Stream Manager's chat commands (get, push),
     // its `!go` relay pair, the failed replies (get, push) and ⋯ Chat commands….
     // The merged API includes community, Stream Manager screen actions and HTML banners.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(179)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(179)
+    // 180: plan 234 adds resource:reveal-cloud-download (the Library's Show
+    // in Finder for a downloaded cloud recording, by its job id).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(180)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(180)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
