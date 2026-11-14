@@ -1,4 +1,4 @@
-# Buddy voice commands: contract (plan 140)
+# Sidekick voice commands: contract (plan 140)
 
 These are the binding shapes for plan 140's slices, which several agents build
 in parallel. Parts D, E and F (plan 209) cross the web ↔ desktop line;
@@ -8,12 +8,13 @@ Parts A–C and G are desktop-internal, but every slice builds against them.
 All new serialized optional fields use
 `#[serde(default, skip_serializing_if = …)]` in Rust and `optionalSchema` in
 `backend-rpc-contract.ts`. Code, wire and storage names keep `cohost`;
-user-facing copy says "Buddy" (it said "Orcle" until plans 164 and 170).
+user-facing copy says "Sidekick" (it said "Orcle" until plans 164 and 170,
+and "Buddy" until plan 236; wire names keep `buddy`).
 Values that were already saved or sent between apps keep the old spelling
 (plan 170 D22): the moderation source `orcle-voice` (the Rust variant
 `BuddyVoice` carries a serde rename) and the service-flags `orcle` section.
-The examples speak the wake word "buddy"; the hidden Orcle aliases still
-work until they are removed after 0.9.140.
+The examples speak the wake word "sidekick"; the hidden old name "buddy"
+still works for two releases (plan 236 D2), and the Orcle aliases are gone.
 
 ## Named session markers (desktop, plan 152)
 
@@ -71,18 +72,18 @@ a hide-all; "show all banners" is not a command. The name is every word
 between the verb and the noun, minus leading small words ("show me the
 follow me banner" names "follow me"), at most six words.
 
-**Precedence.** When the sentence said to Buddy (the words after the wake
+**Precedence.** When the sentence said to Sidekick (the words after the wake
 word, up to the first sentence mark) contains "banner" or "banners", the
 banner grammar runs first and the utterance never reaches the highlight and
-clear grammar (the marker precedence above): "Buddy, pin the banner." is
+clear grammar (the marker precedence above): "Sidekick, pin the banner." is
 never a highlight of a viewer called "banner". The same holds when the
 highlight grammar would read a banner noun into its command across a
-sentence mark ("Buddy, show. Nice banner."). A later sentence that only
-mentions a banner leaves an earlier command alone: "Buddy, highlight that
+sentence mark ("Sidekick, show. Nice banner."). A later sentence that only
+mentions a banner leaves an earlier command alone: "Sidekick, highlight that
 comment. Nice banner." is still the highlight. An addressed, closed sentence
-with the noun that is not a banner command is `unknown` ("Buddy didn't catch
+with the noun that is not a banner command is `unknown` ("Sidekick didn't catch
 that: '…'."), and it is never offered to the cloud command parser (plan 140
-S8), which knows comments only. One still open ("Buddy, take the banner", no
+S8), which knows comments only. One still open ("Sidekick, take the banner", no
 "down" yet) is nothing until it closes. Without the wake word, a structured
 phrase that reads a banner noun is not a comment command ("delete that
 banner, it's spam"). Utterances without the noun behave exactly as before:
@@ -95,7 +96,7 @@ when it is heard (`banners::match_banner_name`): both sides go through
 `cohost_command::spoken_form` (lowercase, ASCII-folded, alphanumeric words),
 and a name's own trailing "banner" is dropped ("Logo banner" answers to "the
 logo banner"). An exact name wins; otherwise the spoken words must begin
-exactly one name. No match is `not-found` ("Buddy couldn't find a banner
+exactly one name. No match is `not-found` ("Sidekick couldn't find a banner
 named 'rainbow'."); two or more are `not-found` too, with the names ("Which
 banner? Sponsor or Sponsor Acme."). Without a name, a show means the only
 banner and a hide the only one showing; with several it is the same "Which
@@ -107,8 +108,8 @@ banner?" sentence.
 every refusal lands on the card verbatim with status `refused` ("Four
 banners are showing. Hide one first."). The voice gates are the usual ones
 (`unavailable` when voice commands are paused or without Premium); there is
-no banner gate of its own, because Buddy is Premium. A banner moves only for
-the Buddy session that heard the command. The card's sentences: "Showed the
+no banner gate of its own, because Sidekick is Premium. A banner moves only for
+the Sidekick session that heard the command. The card's sentences: "Showed the
 Sponsor banner.", "The Sponsor banner is already showing.", "Hid the Sponsor
 banner.", "The Sponsor banner isn't showing.", "Hid all banners.", "No banner
 is showing.", "You have no banners yet." A banner command never opens a
@@ -121,11 +122,11 @@ The wire kinds `show-banner`, `hide-banner` and `hide-banners` join part B's
 
 ## Spoken greetings (desktop)
 
-"Buddy, say hello to Jay", "Buddy, say hi to Jay in the chat", "Buddy, tell
-Jay welcome" and "Buddy, greet Jay" take the local `greet` command. Buddy's
-persona name also works; `Bodhi` is accepted as a transcription of Buddy.
+"Sidekick, say hello to Jay", "Sidekick, say hi to Jay in the chat", "Sidekick, tell
+Jay welcome" and "Sidekick, greet Jay" take the local `greet` command. Sidekick's
+persona name also works; `Bodhi` is accepted as a transcription of Sidekick.
 These shapes always need the wake word, regardless of `wakeWordRequired`.
-Reported speech ("I said hello to Jay") does nothing. Free-form "Buddy,
+Reported speech ("I said hello to Jay") does nothing. Free-form "Sidekick,
 say …" stays on the existing planner path.
 
 The recent-author matcher resolves the spoken name, preferring exact names;
@@ -137,14 +138,14 @@ uses "Hi {name}, welcome to the stream!".
 
 This command uses the Say lane: the bubble appears immediately, replacing a
 current bubble, in every talk mode. "In the chat" never authorizes a chat
-post. With Show on stream off, the command surface says "Buddy isn't on
+post. With Show on stream off, the command surface says "Sidekick isn't on
 stream, so it can't show the bubble." Session, consent and voice gates are
 checked again after the AI call; a newer command retires the old greeting.
 
 ## A. Chat moderation (desktop, S4)
 
 Moderation is a chat feature. Manual removal is free; voice-sourced removal is
-Premium (Buddy).
+Premium (Sidekick).
 
 ### Rust API (`live_chat_moderation.rs`), used by S3
 
@@ -252,7 +253,7 @@ A provider's own deletion keeps its provider type (Twitch
 `channel.chat.message_delete`, YouTube/Kick `message-delete`). The matching
 `ModerationOperation` carries the plain `outcome` sentence and `outcomeCode`.
 
-## B. Buddy command state and settings (desktop, S3, read by S6)
+## B. Sidekick command state and settings (desktop, S3, read by S6)
 
 ### `CohostState.command?`: the latest command (absent when none)
 
@@ -290,17 +291,17 @@ Additive notes from S3 (the shapes above are unchanged):
   `expiresAt` is absent and `message` says "Removing coders_x's comment…": show
   no buttons then. A removal card without `operationId` is still opening (a
   few milliseconds); answers wait for it.
-- A highlight of a comment Buddy flagged with high severity is a `confirm`
-  card too (`kind: highlight`, no `operationId`): "Buddy flagged this
+- A highlight of a comment Sidekick flagged with high severity is a `confirm`
+  card too (`kind: highlight`, no `operationId`): "Sidekick flagged this
   (harassment). Show it anyway?"
-- `kind: unknown` comes with `status: not-found` and "Buddy didn't catch that:
-  '…'" (only after a clearly addressed "Buddy"; never while a card is open).
+- `kind: unknown` comes with `status: not-found` and "Sidekick didn't catch that:
+  '…'" (only after a clearly addressed "Sidekick"; never while a card is open).
 - Choosers and highlight cards expire after 20 s (`expired`); a removal card
   follows its moderation operation (`expired`: "Nothing was removed.").
 
 `CohostState.commandAvailability?` (additive, S3) carries the kill switches of
 part D: `{ "voiceCommands": "on|paused", "remove": "on|paused" }`. It is absent
-while both are on, and present on every state, Buddy running or not. The
+while both are on, and present on every state, Sidekick running or not. The
 renderer shows "Voice commands are paused by Videorc." and "Removing messages
 is paused by Videorc." from it.
 
@@ -414,7 +415,7 @@ an existing free string, so this is not a new enum value.
 Gates run in the same order as the spotlight route: session, body, schema,
 consent, then `decideCohostAccess`. A request fails with:
 
-- 403 `"Buddy requires Videorc Premium."` without `liveCohost`;
+- 403 `"Sidekick requires Videorc Premium."` without `liveCohost`;
 - 503 `command-disabled` unless `VIDEORC_AI_COHOST_COMMAND_ENABLED` is `true`, or when `VIDEORC_AI_COHOST_COMMAND_DISABLED` is set (the parser ships off);
 - 503 `judge-unconfigured` without a Jev model;
 - 429 when the daily cap `VIDEORC_AI_COHOST_DAILY_COMMAND_LIMIT` (default 300)
@@ -429,19 +430,19 @@ recorded as kind `cohost-command`.
   and Jev is configured.
 - `limits.dailyCommandCalls`.
 
-The desktop calls the parser only when that flag is true, Buddy heard the wake
+The desktop calls the parser only when that flag is true, Sidekick heard the wake
 word, and the local grammar matched nothing.
 
-## F. Buddy planner (`POST /api/ai/buddy/act`, plan 209 S17)
+## F. Sidekick planner (`POST /api/ai/buddy/act`, plan 209 S17)
 
-Buddy's tool planner. The desktop sends one sentence the streamer said to
-Buddy (by voice after the wake word, when the local grammar did not know
-it, or typed as `/buddy …`), Buddy's tool subset from the catalog, the
+Sidekick's tool planner. The desktop sends one sentence the streamer said to
+Sidekick (by voice after the wake word, when the local grammar did not know
+it, or typed as `/buddy …`), Sidekick's tool subset from the catalog, the
 names that exist right now and the studio's state; the route answers with
 the tool calls to run, in order, and one line for the strip. Chat comes
 along only when the sentence is about a comment, at most 20 comments, as
 quoted viewer data (D18). The desktop is the authority: it checks every
-returned call against the catalog and Buddy's subset (D15), applies the D14
+returned call against the catalog and Sidekick's subset (D15), applies the D14
 spoken confirmations, and runs the calls in order.
 
 ### Request
@@ -495,7 +496,7 @@ zod strict: unknown keys are rejected at every level.
 - `tools` holds 1–45 entries with unique names: `name` is snake_case
   (`^[a-z][a-z0-9_]{0,63}$`), `description` 1–400 characters, `inputSchema`
   a JSON Schema object of at most 4096 characters serialized. The desktop
-  sends Buddy's subset from the catalog (D15) with the catalog's own
+  sends Sidekick's subset from the catalog (D15) with the catalog's own
   descriptions and schemas; the argument names in the examples here are
   illustrative, the catalog's schemas are the truth.
 - `names` has all five lists, each at most 60 names of at most 80
@@ -530,7 +531,7 @@ zod strict: unknown keys are rejected at every level.
   serialized. Every `tool` is one of the request's `tools`: the route drops
   anything else (defence in depth; the desktop checks again against the
   catalog and D15's subset).
-- `line` is one sentence of 1–140 characters for Buddy's strip, no line
+- `line` is one sentence of 1–140 characters for Sidekick's strip, no line
   breaks, no links.
 - `unknown: true` is present, and `calls` empty, when nothing fits: the
   sentence was not a request, asked for something the tools cannot do, or
@@ -538,7 +539,7 @@ zod strict: unknown keys are rejected at every level.
 - With `comments` in the request the route never returns `stop` or
   `go_live`: the sentence was about a comment, so either is a mishearing or
   chat text steering the model. Such a call is dropped and, when nothing
-  else survives, the answer is `unknown: true` with the line "Buddy can't do
+  else survives, the answer is `unknown: true` with the line "Sidekick can't do
   that." The same line and flag come back when every call the model
   proposed named a tool outside the request's `tools`.
 - A question ("how many viewers", "am I live") is answered in `line` from
@@ -564,7 +565,7 @@ planner's own switch and allowance:
 then the Gateway: 503 `ai-gateway-not-configured`, 504 `act-timeout` when
 the 3 s budget runs out, 502 `ai-gateway-error` for anything else. The
 desktop reads any 403 as "no planner for the rest of this session" and
-keeps the old path; on anything else it says "Buddy didn't catch that" for
+keeps the old path; on anything else it says "Sidekick didn't catch that" for
 that sentence and asks again next time.
 
 ### Model and budget
@@ -602,47 +603,47 @@ are logged by tool name and reason only).
 { "buddy": { "act": 1 } }
 ```
 
-`act` is `1` when this user may call the route (Buddy enabled for them, the
+`act` is `1` when this user may call the route (Sidekick enabled for them, the
 Gateway configured, `VIDEORC_AI_BUDDY_ACT_DISABLED` unset), `0` otherwise.
 The desktop asks the planner only while it is `1`; a desktop that does not
 know the block treats it as `0` and keeps the old wake-word path.
 
-## G. Buddy uses the tools (desktop, plan 209 S18 to S20)
+## G. Sidekick uses the tools (desktop, plan 209 S18 to S20)
 
 Desktop-internal; part F is the wire to videorc.com.
 
-**The caller.** Buddy is a built-in caller of the agent tool path
-(`buddy_act.rs`), never a token agent: id `buddy`, name `Buddy`, no registry
+**The caller.** Sidekick is a built-in caller of the agent tool path
+(`buddy_act.rs`), never a token agent: id `buddy`, name `Sidekick`, no registry
 entry, no presence, never in the agents list. Its calls go through
 `agent_call::run_tool` (schema, a rate limit of its own, the backend
 executors or the Studio relay, whose `agent.intent` carries
-`agentId: "buddy"`) and land in Activity as "Buddy". A successful `onAir`
-call carries its D11 notice ("Buddy ended the livestream.").
+`agentId: "buddy"`) and land in Activity as "Sidekick". A successful `onAir`
+call carries its D11 notice ("Sidekick ended the livestream.").
 
 **D15 at the desktop.** `buddy_act::buddy_tool` admits a call only when the
 catalog has the tool and marks it `buddy`; anything else is refused before
-it runs ("Buddy can't use notify.", "Buddy has no tool called …") and logged
-as a refused Buddy row. The Studio checks again: an `agent.intent` from
+it runs ("Sidekick can't use notify.", "Sidekick has no tool called …") and logged
+as a refused Sidekick row. The Studio checks again: an `agent.intent` from
 `buddy` for a tool outside the subset never reaches a handler
 (`executeAgentIntent`). The planner says names; `buddy_act::resolve_names`
 maps `sceneId`, `soundId`, `bannerId`, `takeoverId` and `destinations` to
 ids (exact name or alias, then one unique beginning), and anything else is
 left for the tool to refuse in its own words.
 
-**S18, the grammar.** A banner command runs Buddy's `set_banner` through the
+**S18, the grammar.** A banner command runs Sidekick's `set_banner` through the
 tool path; its card keeps the grammar's sentences. Highlight, clear and
 removal keep their engine executor (the chooser, "show it anyway?", the
 `source: command` card, the voice removal card) and land in Activity as
-Buddy's `set_highlight` and `remove_chat_message` once they reach `done`,
+Sidekick's `set_highlight` and `remove_chat_message` once they reach `done`,
 `refused` or `unavailable` (once per status, from `cohost.state`). A voice
-marker keeps its spoken time and `voice` source and lands as Buddy's
+marker keeps its spoken time and `voice` source and lands as Sidekick's
 `add_marker`.
 
 **S19, by voice.** A wake-word `unknown` goes to the planner when
-`buddy.act` is 1, no 403 came back since the last capability read or Buddy
-session, Premium, the voice switch, Buddy on and its session's consent;
+`buddy.act` is 1, no 403 came back since the last capability read or Sidekick
+session, Premium, the voice switch, Sidekick on and its session's consent;
 otherwise the part E path runs exactly as before. A 403 turns the planner
-off and the old path takes that sentence; any other failure is "Buddy
+off and the old path takes that sentence; any other failure is "Sidekick
 didn't catch that: '…'.". Comments ride along only when the sentence is
 about one (`about_comment`: a chat word, "this one", or an author's name),
 from the parser's own pool. The calls run in order; by voice D14 halts
@@ -652,9 +653,9 @@ do not run).
 
 `CohostCommand.kind` gains `act`:
 
-- `status: "confirm"` with `expiresAt` 20 s out: 'Go live? Say "Buddy,
-  yes".', 'End the livestream? Say "Buddy, yes".' or 'Stop the recording?
-  Say "Buddy, yes".', after what ran so far. "Buddy, yes" (or
+- `status: "confirm"` with `expiresAt` 20 s out: 'Go live? Say "Sidekick,
+  yes".', 'End the livestream? Say "Sidekick, yes".' or 'Stop the recording?
+  Say "Sidekick, yes".', after what ran so far. "Sidekick, yes" (or
   `cohost.command.confirm`) runs the plan on from that call; a spoken yes
   without the wake word leaves the card open (plan 209 review fix 17); while it runs the card keeps `confirm` without `expiresAt` ("On
   it…"), then finishes in place (same `id`). "No" is `cancelled`
@@ -664,10 +665,10 @@ do not run).
 
 **S20, typed.** `cohost.act {actId, sentence, consentToProcessChat}`
 (renderer only, never a LAN route) answers at once with
-`{actId, status, message}`: a gate's sentence (`unavailable`: "Buddy
+`{actId, status, message}`: a gate's sentence (`unavailable`: "Sidekick
 requires Videorc Premium.", "Voice commands are paused by Videorc.",
-Cloud AI consent, "Buddy can't take requests right now.", "Sign in to ask
-Buddy."; `refused`: an empty or over-long sentence) or `working`. The
+Cloud AI consent, "Sidekick can't take requests right now.", "Sign in to ask
+Sidekick."; `refused`: an empty or over-long sentence) or `working`. The
 planner and the calls then run on their own task, with no wake word and no
 D14 halt, and the final answer arrives as the `cohost.act.result` event
 (`done`, `refused`, `unavailable` or `not-found`, never `working`). The

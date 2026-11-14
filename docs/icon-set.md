@@ -21,7 +21,7 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today (plan 235, 2026-11-14): **95 semantic slots over 91 glyphs** in the shared registry. Eight of the glyphs sit outside the Nucleo count: seven platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; `TwitchIcon`, `TiktokIcon`, `InstagramIcon` and `FacebookIcon` come from Phosphor) and `BuddyIcon`, Buddy's own mark (the owner's Buddy artwork since plan 164; plan 119 added the slot). That leaves 83 inside the Nucleo count. The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
+Today (plan 235, 2026-11-14): **95 semantic slots over 91 glyphs** in the shared registry. Eight of the glyphs sit outside the Nucleo count: seven platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; `TwitchIcon`, `TiktokIcon`, `InstagramIcon` and `FacebookIcon` come from Phosphor) and `BuddyIcon`, Sidekick's own mark (the owner's Sidekick artwork since plan 164; plan 119 added the slot). That leaves 83 inside the Nucleo count. The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
@@ -42,7 +42,7 @@ Plan 210 S8b (2026-10-29) added `HiddenIcon` (EyeSlash) for Hide screen: the
 screen is hidden from viewers, a meaning no slot had (`PreviewIcon`'s eye opens
 the Preview window). It is one more glyph inside the Nucleo count.
 
-The Buddy page's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
+The Sidekick page's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
 a small picture opened larger to look at it, a meaning no slot had
 (`SearchIcon` finds, `PreviewIcon` opens the Preview window, `FrameIcon` is
 the output frame). That made **92 slots over 88 glyphs**.

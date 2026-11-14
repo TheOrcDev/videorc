@@ -50,7 +50,7 @@ saved, starting with their @name, in the chat they asked in (plan 226).
 - **Failures**: a reply that can't go out (no permission to post, the
   YouTube limit, a platform error) shows once in the Stream Manager:
   "!go couldn't answer on YouTube: …".
-- Buddy doesn't answer a message that starts with one of your commands.
+- Sidekick doesn't answer a message that starts with one of your commands.
 
 ## For developers
 
