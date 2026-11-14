@@ -4612,11 +4612,11 @@ mod tests {
         // answered 502 with this envelope; the desktop must carry both parts.
         assert_eq!(
             parse_error_envelope(
-                r#"{"error":{"code":"ai-gateway-error","message":"The Buddy tick failed on every configured model."}}"#
+                r#"{"error":{"code":"ai-gateway-error","message":"The Sidekick tick failed on every configured model."}}"#
             ),
             (
                 "ai-gateway-error".to_string(),
-                "The Buddy tick failed on every configured model.".to_string()
+                "The Sidekick tick failed on every configured model.".to_string()
             )
         );
         assert_eq!(

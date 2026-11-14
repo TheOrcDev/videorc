@@ -9352,7 +9352,7 @@ mod tests {
             errored.detail,
             Some(crate::cohost::CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Buddy tick failed on every configured model.".to_string(),
+                message: "The Sidekick tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
