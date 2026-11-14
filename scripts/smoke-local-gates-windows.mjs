@@ -19,6 +19,7 @@ import {
   windowsLocalGateOutputDir
 } from './lib/windows-local-gates.mjs'
 import { packagedAppPayloadIdentity } from './lib/performance-contract.mjs'
+import { readWindowsPowerSource } from './lib/windows-power-source.mjs'
 import { sha256File } from './lib/windows-alpha-release.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
@@ -32,7 +33,8 @@ const host = evaluateWindowsLocalGateHost({
   // boxes run the gates as an unsupported configuration.
   allowUnsupportedBuild:
     !requireInstalledCandidate && process.env.VIDEORC_ALLOW_UNSUPPORTED_WINDOWS === '1',
-  requireKnownBuild: requireInstalledCandidate
+  requireKnownBuild: requireInstalledCandidate,
+  powerSource: readWindowsPowerSource()
 })
 let candidateIdentity = null
 let candidateBinding = null

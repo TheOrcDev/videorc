@@ -12,6 +12,7 @@ import {
 } from './performance-contract.mjs'
 import { sha256File } from './windows-alpha-release.mjs'
 import { WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS } from './windows-d3d11-media.mjs'
+import { windowsBatteryPowerWarning } from './windows-power-source.mjs'
 import { assertPendingWindowsCandidateManifest } from './windows-release-candidate.mjs'
 
 export const WINDOWS_LOCAL_GATE_MANIFEST_NAME = 'windows-local-gates.manifest.json'
@@ -40,9 +41,13 @@ export function evaluateWindowsLocalGateHost({
   arch = process.arch,
   release = '',
   allowUnsupportedBuild = false,
-  requireKnownBuild = false
+  requireKnownBuild = false,
+  powerSource = 'unknown'
 } = {}) {
   const failures = []
+  // #1042: battery power is named, never a blocker or a looser gate.
+  const batteryWarning = windowsBatteryPowerWarning(powerSource)
+  const warnings = batteryWarning ? [batteryWarning] : []
   if (platform !== 'win32') {
     failures.push(`requires Windows 11 x64; current platform is ${platform}`)
   }
@@ -61,7 +66,9 @@ export function evaluateWindowsLocalGateHost({
   return {
     ok: failures.length === 0,
     failures,
-    build
+    warnings,
+    build,
+    powerSource
   }
 }
 
@@ -1763,6 +1770,10 @@ export function formatWindowsLocalGatePlan({ host, steps }) {
       lines.push(`[blocked] host: ${failure}`)
     }
   }
+  lines.push(`[info] host power: ${host.powerSource ?? 'unknown'}`)
+  for (const warning of host.warnings ?? []) {
+    lines.push(`[warn] host: ${warning}`)
+  }
 
   for (const [index, step] of steps.entries()) {
     const env = step.env
@@ -1831,7 +1842,9 @@ export function createWindowsLocalGateManifest({
       arch,
       release,
       build: host.build,
-      failures: [...host.failures]
+      powerSource: host.powerSource ?? 'unknown',
+      failures: [...host.failures],
+      warnings: [...(host.warnings ?? [])]
     },
     evidence: {
       outputDir,

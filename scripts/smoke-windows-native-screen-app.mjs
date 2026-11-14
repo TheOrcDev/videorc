@@ -40,6 +40,7 @@ import {
   windowsNativeScreenRecordingArtifactGates,
   windowsNativeScreenRequiresFinalDiagnostics
 } from './lib/windows-native-screen-gates.mjs'
+import { readWindowsPowerSource, windowsBatteryPowerWarning } from './lib/windows-power-source.mjs'
 import {
   assertBundledBackgroundFrame,
   connectBackend,
@@ -54,6 +55,14 @@ const options = parseWindowsNativeScreenArgs(process.argv.slice(2))
 
 if (process.platform !== 'win32') {
   throw new Error('The native Windows screen smoke must run on Windows.')
+}
+
+// #1042: a frame-count or pool-pressure miss on battery names its cause.
+const powerSource = readWindowsPowerSource()
+console.log(`Windows native screen smoke host power: ${powerSource}`)
+const batteryPowerWarning = windowsBatteryPowerWarning(powerSource)
+if (batteryPowerWarning) {
+  console.warn(`Windows native screen smoke WARNING: ${batteryPowerWarning}`)
 }
 
 const performanceModeValue = performanceMode()
