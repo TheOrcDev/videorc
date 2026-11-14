@@ -9430,7 +9430,9 @@ mod tests {
             Some(crate::cohost::CohostListening {
                 state: crate::cohost::CohostListeningState::Blocked,
                 reason_code: Some("listen-monthly-quota-exhausted".to_string()),
-                message: Some("Buddy's listening allowance for this month is used up.".to_string()),
+                message: Some(
+                    "Sidekick's listening allowance for this month is used up.".to_string()
+                ),
                 remaining_seconds: Some(0),
             })
         );
