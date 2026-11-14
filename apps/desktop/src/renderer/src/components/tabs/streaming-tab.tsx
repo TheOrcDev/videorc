@@ -80,7 +80,7 @@ import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 import { lockAlertAction, unlockActionForReason } from '@/lib/lock-view'
 import { destinationSetup } from '@/lib/destination-readiness'
 import { destinationLabel } from '@/lib/platform-copy'
-import { destinationsOnAir, otherDestinationsLine } from '@/lib/stream-target-notices'
+import { otherDestinationsLine } from '@/lib/stream-target-notices'
 import { destinationStateLabel } from '@/lib/state-labels'
 import { broadcastThumbnailHint } from '@/lib/broadcast-info'
 import { streamLanguageOptions } from '@/lib/stream-languages'
@@ -449,6 +449,20 @@ const DESTINATION_PROBLEM_STATES: ReadonlySet<StreamTargetRuntime['state']> = ne
  * whole livestream (every destination and the recording), so it says so and
  * asks through the End livestream dialog (plan 174 S0.1, D-4).
  */
+/**
+ * How many destinations are on air, for the failure banner: this computer's
+ * feed to Videorc Cloud (`videorc-cloud-*`, as stream-target-notices reads
+ * it) is no destination. Here, in the lazy page, so the eager bundle keeps
+ * its bytes.
+ */
+export function destinationsOnAir(
+  targets: readonly Pick<StreamTargetRuntime, 'targetId' | 'state'>[]
+): number {
+  return targets.filter(
+    (target) => target.state === 'live' && !target.targetId.startsWith('videorc-cloud-')
+  ).length
+}
+
 export function StreamFailureBanner({
   problems,
   onAir = 0,

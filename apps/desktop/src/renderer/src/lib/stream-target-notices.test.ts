@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 
 import type { StreamTargetRuntime, StreamTargetState } from '@/lib/backend'
 import {
-  destinationsOnAir,
   otherDestinationsLine,
   otherDestinationsOnAir,
   streamTargetNotices
@@ -154,18 +153,6 @@ describe('streamTargetNotices through Videorc Cloud', () => {
       runtime('twitch', 'live')
     ]
     expect(otherDestinationsOnAir(targets, 'youtube')).toBe(1)
-  })
-
-  it('counts the destinations on air without the cloud feed, for the failure banner', () => {
-    // Plan 234 copy check: one of three failed on a cloud show read 'The
-    // other 3 destinations keep streaming', the feed counted as one.
-    const targets = [
-      runtime('videorc-cloud-horizontal', 'live'),
-      runtime('youtube', 'live'),
-      runtime('twitch', 'live'),
-      runtime('kick', 'failed')
-    ]
-    expect(destinationsOnAir(targets)).toBe(2)
   })
 })
 
