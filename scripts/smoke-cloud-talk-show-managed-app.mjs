@@ -12,7 +12,7 @@
  */
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import {
@@ -286,11 +286,18 @@ try {
       await waitFor(async () => (await count('takeover')) > before, 'reconnect takeover replay')
       assert.equal(await count('card'), 1)
       assert.equal(h.calls('destinations').length, puts)
+      // Random pixels do not compress: a PNG well over the 2 MiB limit.
+      const noise = join(h.root, 'overlay-noise.rgb')
+      writeFileSync(noise, randomBytes(1200 * 1000 * 3))
       const large = runMedia(h.ffmpeg, [
         '-f',
-        'lavfi',
+        'rawvideo',
+        '-pix_fmt',
+        'rgb24',
+        '-s',
+        '1200x1000',
         '-i',
-        'nullsrc=s=1200x1000,geq=r=random(1)*255:g=random(2)*255:b=random(3)*255',
+        noise,
         '-frames:v',
         '1',
         '-f',
@@ -375,13 +382,18 @@ try {
     }
   )
   await step(
-    'relaunch Resume resends stage but no destinations; 401 then sign-in regains room controls',
+    'relaunch Resume sends no stage and no destinations; 401 then sign-in regains room controls',
     async () => {
+      // stageSet stays true once a PUT stage succeeded, so the desktop never
+      // sends it again (wire contract, state.room); nor the destinations.
       const puts = h.calls('destinations').length,
         stageCount = h.calls('stage').length
       await hostReconnect(h)
-      await waitFor(() => h.calls('stage').length > stageCount, 'stage after Resume')
-      assert.equal(h.calls('destinations').length, puts)
+      await holdFor(
+        () => h.calls('stage').length === stageCount && h.calls('destinations').length === puts,
+        'Resume sent the stage or the destinations again',
+        4000
+      )
       const at = Date.now()
       h.web.hooks.failNext('state', 1, 401)
       h.web.hooks.patch(h.showId, (s) => {
