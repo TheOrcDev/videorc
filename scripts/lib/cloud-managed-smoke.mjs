@@ -103,7 +103,14 @@ export async function managedHarness(kind, pass = 1) {
     sockets = new Set(),
     cleanups = []
   const sessionToken = randomBytes(32).toString('base64url')
-  const cert = join(root, 'local-cert.pem'),
+  // A test root and a localhost leaf it signs. The leaf must not be a CA:
+  // rustls (the dev downloader) refuses a CA certificate as the server's own
+  // (CaUsedAsEndEntity), which a single self-signed certificate is.
+  const ca = join(root, 'local-ca.pem'),
+    caKey = join(root, 'local-ca-key.pem'),
+    csr = join(root, 'local-leaf.csr'),
+    leafExtensions = join(root, 'local-leaf.ext'),
+    cert = join(root, 'local-cert.pem'),
     key = join(root, 'local-key.pem')
   runMedia('openssl', [
     'req',
@@ -112,15 +119,51 @@ export async function managedHarness(kind, pass = 1) {
     'rsa:2048',
     '-nodes',
     '-keyout',
-    key,
+    caKey,
     '-out',
-    cert,
+    ca,
     '-days',
     '1',
     '-subj',
-    '/CN=localhost',
+    '/CN=Videorc managed smoke test root',
     '-addext',
-    'subjectAltName=DNS:localhost,IP:127.0.0.1'
+    'basicConstraints=critical,CA:TRUE',
+    '-addext',
+    'keyUsage=critical,keyCertSign,cRLSign'
+  ])
+  runMedia('openssl', [
+    'req',
+    '-newkey',
+    'rsa:2048',
+    '-nodes',
+    '-keyout',
+    key,
+    '-out',
+    csr,
+    '-subj',
+    '/CN=localhost'
+  ])
+  writeFileSync(
+    leafExtensions,
+    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n'
+  )
+  runMedia('openssl', [
+    'x509',
+    '-req',
+    '-in',
+    csr,
+    '-CA',
+    ca,
+    '-CAkey',
+    caKey,
+    '-set_serial',
+    '1',
+    '-days',
+    '1',
+    '-extfile',
+    leafExtensions,
+    '-out',
+    cert
   ])
   const startChild = (name, cmd, args, options = {}) => {
     const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], ...options })
@@ -173,7 +216,8 @@ export async function managedHarness(kind, pass = 1) {
         }
       : undefined
   const env = {
-    VIDEORC_CLOUD_FEED_CA_FILE: cert,
+    // The test root: the feed's FFmpeg and the dev recording downloader.
+    VIDEORC_CLOUD_FEED_CA_FILE: ca,
     VIDEORC_SMOKE_SKIP_PREBUILD: '1',
     VIDEORC_DISABLE_AUTO_PREVIEW: '1',
     VIDEORC_SMOKE_COMMAND_SERVER: '1',
