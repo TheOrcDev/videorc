@@ -25,6 +25,7 @@
     "recording": { "method": "POST", "path": "/api/cloud/shows/:id/recording" },
     "end": { "method": "POST", "path": "/api/cloud/shows/:id/end" },
     "lost": { "method": "POST", "path": "/api/cloud/shows/:id/lost" },
+    "recordings": { "method": "GET", "path": "/api/cloud/recordings" },
     "recordingPlaylist": { "method": "GET", "path": "/api/cloud/recordings/:id/playlist" },
     "programBeacon": { "method": "POST", "path": "/api/cloud/program/beacon" },
     "programHoldImage": {
@@ -209,6 +210,13 @@
     "liveKitCallSeconds": 8
   },
 
+  "recordings": {
+    "$comment": "Section 13.2. `format` of an item of GET /api/cloud/recordings: `segments` is a managed take (the desktop fetches its playlist and makes the MP4), `mp4` a node recording (it downloads from the account page). A playlist's segment lines are presigned URLs that live playlistUrlSeconds.",
+    "formats": { "managed": "segments", "node": "mp4" },
+    "playlistContentType": "application/vnd.apple.mpegurl",
+    "playlistUrlSeconds": 21600
+  },
+
   "return": {
     "$comment": "Section 6.4: cloud.return.set on a managed show sends nothing and answers this RPC error.",
     "code": "cloud-return-failed",
@@ -219,6 +227,8 @@
     "$comment": "Section 6.3: byte streams from host:<showId> on the room connection.",
     "topics": { "set": "videorc.overlay.set", "clear": "videorc.overlay.clear" },
     "version": "1",
+    "clearVersion": 1,
+    "ttlMinSeconds": 1,
     "slots": ["card", "takeover", "hold"],
     "orientations": ["h", "v"],
     "setAttributes": ["v", "slot", "o", "x", "y", "w", "h", "ttl"],
