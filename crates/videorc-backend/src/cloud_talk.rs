@@ -2035,7 +2035,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// is over.
     pub async fn resume_room(&self, bearer: Option<String>) -> Result<CloudStatus> {
         let bearer = bearer_or_bail(bearer)?;
-        let show_id = {
+        let (show_id, held_room, uncontrolled) = {
             let runtime = lock(&self.slot);
             let Some(show) = runtime.show.as_ref() else {
                 bail!("There's no Videorc Cloud show to resume.");
@@ -2043,11 +2043,18 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             if show.record.kind != "talk" {
                 bail!("The show on Videorc Cloud is not a talk show.");
             }
-            if runtime.talk.is_some() {
-                return Ok(runtime.status());
-            }
-            show.record.id.clone()
+            (
+                show.record.id.clone(),
+                runtime.talk.is_some(),
+                runtime.control_tx.is_none(),
+            )
         };
+        if held_room {
+            if uncontrolled {
+                self.connect_talk_control(&bearer, &show_id).await?;
+            }
+            return Ok(lock(&self.slot).status());
+        }
         if let Err(message) = (self.hooks.camera)(CameraHandover::Lend).await {
             return Err(RoomOpenRefusal::CameraBusy(message).into());
         }

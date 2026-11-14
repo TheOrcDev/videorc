@@ -4105,8 +4105,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 // still give that show is its poll back. A refused sign-in
                 // stopped the poll and left the show held; this is the
                 // launch check of the sign-in that followed.
-                let poll_stopped = runtime.talk.is_none()
-                    && runtime.control_tx.is_none()
+                let poll_stopped = runtime.control_tx.is_none()
                     && control.transport_kind() == ControlKind::Web
                     && runtime
                         .show
@@ -12349,6 +12348,56 @@ mod tests {
             "hostShape": "rounded"
         }))
         .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_managed_room_regains_control_after_sign_in_or_resume() {
+        for resume in [false, true] {
+            let harness = harness(true);
+            managed_room(&harness).await;
+            let web = harness.context.web.clone();
+            harness
+                .context
+                .talk_go_live(Some("bearer".to_string()), destinations(), vec![])
+                .await
+                .unwrap();
+            web.set_state(managed_talk_state(live_legs(), true, 1));
+            web.fail_polls([CloudApiError::Unauthorized]);
+            web.set_state(managed_talk_state(live_legs(), true, 1));
+            wait_until(|| lock(&harness.context.slot).control_tx.is_none()).await;
+            let mut current = managed_current("live");
+            current.show.as_mut().unwrap().kind = "talk".to_string();
+            web.current.lock().unwrap().push_back(Ok(current));
+            let before_camera = harness.camera.lock().unwrap().len();
+            let status = if resume {
+                harness
+                    .context
+                    .resume_room(Some("fresh-bearer".to_string()))
+                    .await
+                    .unwrap()
+            } else {
+                harness
+                    .context
+                    .detect_current_show("fresh-bearer")
+                    .await
+                    .unwrap()
+            };
+            assert!(status.connected);
+            assert!(status.room.is_some());
+            assert_eq!(
+                harness.camera.lock().unwrap().len(),
+                before_camera,
+                "the room keeps its camera"
+            );
+            assert_eq!(web.destination_bodies().len(), 1, "no destinations re-sent");
+            harness
+                .context
+                .set_stage(stage_with_a_guest())
+                .await
+                .unwrap();
+            harness.context.recording_start().await.unwrap();
+            harness.context.legs_end().await.unwrap();
+        }
     }
 
     #[tokio::test(start_paused = true)]
