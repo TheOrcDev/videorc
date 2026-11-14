@@ -15,14 +15,14 @@ import type { StudioActionContext, StudioActionExecutor, StudioActionFields } fr
 
 export const BUDDY_TOOL_COPY = {
   empty: 'Say what to change: on, talk or onStream.',
-  unavailable: "Buddy isn't available in this Studio.",
-  loading: 'Loading your Buddy settings… Try again in a moment.',
-  premium: 'Buddy requires Videorc Premium.',
+  unavailable: "Sidekick isn't available in this Studio.",
+  loading: 'Loading your Sidekick settings… Try again in a moment.',
+  premium: 'Sidekick requires Videorc Premium.',
   consent: BUDDY_CONSENT_OFF_REASON,
   // Plan 211 D12: the old `chatMode` argument. The catalog keeps it as a
   // string of any value so an agent holding the old schema reads these
   // sentences instead of a schema error.
-  autoGone: 'Auto is gone: Buddy never posts in chat on its own. Use talk: bubble.',
+  autoGone: 'Auto is gone: Sidekick never posts in chat on its own. Use talk: bubble.',
   chatMode: 'chatMode is now talk: off, bubble or suggest.'
 } as const
 
@@ -79,12 +79,12 @@ async function saveBuddy(
       autoChat
     )
     if (Object.keys(patch).length > 0) saved = await buddy.saveSettings(patch)
-    if (on !== undefined) said.push(on ? 'Buddy Live is on.' : 'Buddy Live is off.')
+    if (on !== undefined) said.push(on ? 'Sidekick Live is on.' : 'Sidekick Live is off.')
     if (talk) said.push(`${buddyTalkLabel(current?.persona?.name)}: ${BUDDY_TALK_LABELS[talk]}.`)
   }
   if (onStream !== undefined) {
     if (onStream !== buddy.showOnStream) await buddy.setShowOnStream(onStream)
-    said.push(onStream ? 'Buddy is on stream.' : 'Buddy is off the stream.')
+    said.push(onStream ? 'Sidekick is on stream.' : 'Sidekick is off the stream.')
   }
   return {
     ok: true,

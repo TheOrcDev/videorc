@@ -1338,9 +1338,13 @@ impl AppState {
         let watchdog_settings = crate::watchdog::load_settings(&database);
         let watchdog_takeover = crate::watchdog::load_takeover(&database);
         // Plan 172 D5: the default Buddy wears its bundled pack when it ships.
+        // Plan 236 D3: the persona named "Buddy" is renamed once first.
         let cohost_settings = crate::cohost_library::alive::default_buddy_alive(
             &database,
-            crate::cohost::load_cohost_settings(&database),
+            crate::cohost::migrate_cohost_settings(
+                &database,
+                crate::cohost::load_cohost_settings(&database),
+            ),
             crate::resource_authority::configured_managed_buddy_roots()
                 .get(1)
                 .map(std::path::PathBuf::as_path),

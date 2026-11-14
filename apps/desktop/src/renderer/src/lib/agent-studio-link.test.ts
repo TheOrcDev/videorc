@@ -117,7 +117,7 @@ describe('AgentStudioLink (plan 209 S6)', () => {
   })
 
   // Review fix 1: Stop agents, Off and Remove reach what the link holds.
-  it('marks held intents cancelled: every agent but Buddy, or one agent', async () => {
+  it('marks held intents cancelled: every agent but Sidekick, or one agent', async () => {
     let finish: () => void = () => undefined
     const run = vi.fn(
       (_intent: AgentIntent) =>

@@ -55,7 +55,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('the live Buddy row (plan 213 B2)', () => {
+describe('the live Sidekick row (plan 213 B2)', () => {
   it('says it opens the Stream Manager, in its hint and its name', () => {
     expect(COHOST_ROW_OPENS).toBe('Open Stream Manager')
     const hintLines = [
@@ -63,11 +63,11 @@ describe('the live Buddy row (plan 213 B2)', () => {
     ].map((line) => line.textContent)
     expect(hintLines.at(-1)).toBe('Open Stream Manager')
     const name = container.querySelector('button')?.textContent ?? ''
-    expect(name.startsWith('Buddy ')).toBe(true)
+    expect(name.startsWith('Sidekick ')).toBe(true)
     expect(name.endsWith('. Open Stream Manager')).toBe(true)
   })
 
-  it('keeps Buddy presence dot, and a click opens the Stream Manager', () => {
+  it('keeps Sidekick presence dot, and a click opens the Stream Manager', () => {
     expect(container.querySelector('button [data-slot="cohost-presence-dot"]')).not.toBeNull()
     act(() => container.querySelector('button')?.click())
     expect(mocked.openCommentsWindow).toHaveBeenCalledTimes(1)

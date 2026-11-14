@@ -26,7 +26,7 @@ app. Two checks hold them (see [Guards](#guards)).
 - Sentence case on every button, menu item, tab, title, label, toast and
   status word: "Save local recording", "Needs reconnect".
 - Capitalize only names:
-  - Videorc, Premium, Buddy (or the name the streamer gave it), Buddy Live;
+  - Videorc, Premium, Sidekick (or the name the streamer gave it), Sidekick Live;
   - Go Live, as the action's name ("Go Live", "Use for Go Live…"); the verb
     in a sentence is lowercase ("Go live", "when you go live");
   - pages, sidebar groups and windows: Studio, Sources, Scene, Assets,
@@ -104,23 +104,23 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
   - macOS 15 and later: "Allow Videorc Camera in System Settings → General
     → Login Items & Extensions → Camera Extensions."
 - Community (plan 225) reads the same everywhere. The tab is **Community**,
-  in Buddy after Chat. A viewer is a **person** with **accounts**; the
+  in Sidekick after Chat. A viewer is a **person** with **accounts**; the
   chip on the first row of their stream is "Regular · 14", "Back · 3 wk"
   (weeks under 8, then "Back · 3 mo") or the milestone label ("10th
   stream", "5 in a row", "One year"); "First chat" stays as it was. Say
   "in a row", never "streak" (Twitch's word), and "regular", never "VIP" or
   "loyal". The card is "About {name}", with "Same person as…", "Not the
   same" ("Split off"), "Mark as bot" / "Not a bot", "Forget {name}…" and
-  the note's line "Only you see this. Buddy never changes it." Links the
+  the note's line "Only you see this. Sidekick never changes it." Links the
   streamer settles are "Links that need you", with "Same person" and "Not
   the same"; a suggestion reads "Might be the same as {name} on
   {platform}"; a cancelled or hijacked word reads "A !link with {name} on
   {platform} needs you". The settings are "Remember my community",
   "Regular after", "Welcome regulars on stream", "Show milestone cards
-  automatically", "Buddy remembers" and "Community sync"; the data actions
+  automatically", "Sidekick remembers" and "Community sync"; the data actions
   are "Export…", "Import…" and "Forget everyone…" (the confirm "Forget
   everyone?"). The YouTube line is exactly "YouTube viewers are remembered
-  for 30 days after they chat (YouTube's rules)." Buddy's bubble lines for
+  for 30 days after they chat (YouTube's rules)." Sidekick's bubble lines for
   the viewers' commands are "Done, {name}. I've forgotten you.", "Welcome
   back to the list, {name}.", "Unlinked, {name}." and "Linked: {name} on
   {platform} and {name} on {platform}." (one name when both match); the
@@ -241,4 +241,7 @@ reorder and delete use the session lock; explain that scope beside them.
     "Import From OBS" fails; "Open Stream Manager" passes.
 - `pnpm lint` runs `scripts/check-em-dashes.mjs` (no em dash in app copy).
 - `renderer-buddy-name-guard.test.ts` keeps the companion's retired names
-  out of copy.
+  out of copy (plans 170 and 171, and "Buddy" since plan 236). The Buddy
+  check reads only what a person reads (JSX text and string literals): code
+  names stay `buddy`. The backend's words have the same check,
+  `the_backend_copy_says_sidekick_not_buddy` in `buddy_act.rs`.

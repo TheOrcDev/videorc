@@ -636,7 +636,7 @@ export function CohostSessionRow({ look = 'default' }: { look?: StudioLook }): R
     <FactRow
       look={look}
       icon={BuddyIcon}
-      label="Buddy"
+      label="Sidekick"
       hint={<NavigableRowHintLines lines={hintLines} />}
       value={
         <>

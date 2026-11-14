@@ -124,7 +124,8 @@ const SETTINGS_KEYWORDS: Readonly<Record<SettingsTabId, readonly string[]>> = {
 }
 
 const BUDDY_KEYWORDS: Readonly<Record<BuddyTabId, readonly string[]>> = {
-  live: ['profile', 'persona', 'buddy live', 'status'],
+  // Plan 236: "buddy" still finds the page by its old name.
+  live: ['profile', 'persona', 'sidekick live', 'buddy', 'status'],
   chat: ['posting', 'suggest', 'bubble', 'moderation'],
   community: ['regulars', 'viewers', 'people', 'link', 'forget'],
   voice: ['commands', 'speak', 'listen'],
@@ -619,17 +620,17 @@ export function CommandPalette({
         <CommandSeparator />
 
         {/* Plan 150: every Buddy tab is one jump away, like Settings'. */}
-        <CommandGroup heading="Buddy">
+        <CommandGroup heading="Sidekick">
           {BUDDY_TABS.map((tab) => (
             <CommandItem
               key={tab.id}
-              value={`Open Buddy → ${tab.label}`}
+              value={`Open Sidekick → ${tab.label}`}
               keywords={[...BUDDY_KEYWORDS[tab.id]]}
               onSelect={() => run(() => openBuddy(tab.id))}
             >
               <OwnBuddyIcon className="size-4" />
               {tab.label}
-              <Context>Buddy</Context>
+              <Context>Sidekick</Context>
             </CommandItem>
           ))}
         </CommandGroup>

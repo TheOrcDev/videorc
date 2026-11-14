@@ -121,7 +121,7 @@ describe('CohostPane: Remove from chat on a flagged message (plan 140, S6)', () 
     expect(onDismissFlag).not.toHaveBeenCalled()
   })
 
-  it('says Buddy never posts on its own (plan 211 D6)', async () => {
+  it('says Sidekick never posts on its own (plan 211 D6)', async () => {
     await renderPane()
     const hint = container.querySelector<HTMLElement>('[data-slot="cohost-acts-on-ask"]')
     expect(hint?.textContent).toBe('Never posts on its own.')

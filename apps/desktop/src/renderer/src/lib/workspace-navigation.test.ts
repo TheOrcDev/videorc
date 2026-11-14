@@ -66,7 +66,7 @@ describe('openWorkspaceTab', () => {
     )
   })
 
-  it('carries a Settings or Buddy tab, and the session a Library action is about', () => {
+  it('carries a Settings or Sidekick tab, and the session a Library action is about', () => {
     const sent = capture(() => {
       openWorkspaceTab('settings', 'permissions')
       openWorkspaceTab('ai', 'clean-cut')

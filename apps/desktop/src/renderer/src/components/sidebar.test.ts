@@ -133,9 +133,9 @@ describe('sidebar zones (plan 174 D8, plan 235 D6)', () => {
 
   // Plan 235 D7: a plain glyph like its neighbours, never the Buddy artwork,
   // whatever Buddy the streamer has.
-  it('draws the Buddy row with a plain glyph, filled while it is the page', () => {
+  it('draws the Sidekick row with a plain glyph, filled while it is the page', () => {
     const idle = rowOf(renderSidebar(), 'ai')
-    expect(idle).toContain('>Buddy<')
+    expect(idle).toContain('>Sidekick<')
     expect(idle).not.toContain('<image')
     expect(idle).not.toContain('buddy-emblem')
     expect(idle).not.toContain('aria-current')

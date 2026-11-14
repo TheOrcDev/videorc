@@ -28,11 +28,11 @@ import { formatClipMarkClock } from '../../../shared/clip-marks'
 
 /** The website's line for the report, word for word (plan 119 S5). */
 export const BUDDY_REPORT_DESCRIPTION =
-  'Buddy saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
+  'Sidekick saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
 
-export const BUDDY_REPORT_EMPTY = 'The report appears here after your first stream with Buddy.'
-export const BUDDY_REPORT_OFF = 'Buddy was off for this stream.'
-export const BUDDY_REPORT_TURN_ON = 'Turn on Buddy to also catch questions.'
+export const BUDDY_REPORT_EMPTY = 'The report appears here after your first stream with Sidekick.'
+export const BUDDY_REPORT_OFF = 'Sidekick was off for this stream.'
+export const BUDDY_REPORT_TURN_ON = 'Turn on Sidekick to also catch questions.'
 export const BUDDY_REPORT_NEXT_STREAM = 'It joins your next stream.'
 export const BUDDY_REPORT_UNTITLED = 'Untitled stream'
 

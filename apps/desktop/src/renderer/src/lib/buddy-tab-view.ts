@@ -30,24 +30,24 @@ export const BUDDY_LIVE_POWERS: readonly {
   {
     title: 'Never miss a question',
     description:
-      'Questions from every platform, grouped, each with a drafted reply you approve. Answer out loud and Buddy clears it.',
+      'Questions from every platform, grouped, each with a drafted reply you approve. Answer out loud and Sidekick clears it.',
     tab: 'chat'
   },
   {
     title: 'Chat stays safe',
     description:
-      'Spam, scams and abuse are flagged against your own rules. Buddy removes a comment only when you tell it to.',
+      'Spam, scams and abuse are flagged against your own rules. Sidekick removes a comment only when you tell it to.',
     tab: 'chat'
   },
   {
     title: 'The room, handled',
     description:
-      "Buddy greets first-timers, reminds you of your promises, nudges you in dead air, tells you when viewers say your audio broke, and can put the comment you're talking about on screen.",
+      "Sidekick greets first-timers, reminds you of your promises, nudges you in dead air, tells you when viewers say your audio broke, and can put the comment you're talking about on screen.",
     tab: 'chat'
   },
   {
-    title: 'Talk to Buddy',
-    description: 'Ask Buddy to put a comment on stream, take it down, or remove it from chat.',
+    title: 'Talk to Sidekick',
+    description: 'Ask Sidekick to put a comment on stream, take it down, or remove it from chat.',
     tab: 'voice'
   }
 ]
@@ -67,9 +67,9 @@ export const CLOUD_AI_CLEAN_CUT_USE =
 export const CLOUD_AI_USES: readonly string[] = [
   COHOST_CHAT_CONSENT_SENTENCE,
   BUDDY_HEARS_YOU_USE,
-  "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
-  "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Buddy you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the Buddy or your account.",
-  "Buddy talks on stream: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI. It says them in its bubble, and posts one on your own account only when you click its card in Suggest.",
+  "Creating a Sidekick: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Sidekicks you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
+  "Creating an Alive Sidekick: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Sidekick you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the Sidekick or your account.",
+  "Sidekick talks on stream: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI. It says them in its bubble, and posts one on your own account only when you click its card in Suggest.",
   CLOUD_AI_CLEAN_CUT_USE
 ]
 
@@ -144,24 +144,24 @@ export interface BuddyLiveView {
   streamManager: boolean
 }
 
-export const BUDDY_SIGNED_OUT_REASON = 'Sign in to use Buddy Live, part of Videorc Premium.'
+export const BUDDY_SIGNED_OUT_REASON = 'Sign in to use Sidekick Live, part of Videorc Premium.'
 
 /**
  * The Premium sentence for Buddy Live (docs/ui-copy.md), in place of the
  * server's "Buddy requires Videorc Premium.": picking a Buddy, greetings,
  * Say and reactions stay free, so the lock names what it locks (plan 174 F-19).
  */
-export const BUDDY_LIVE_PREMIUM_REASON = 'Buddy Live is part of Videorc Premium.'
+export const BUDDY_LIVE_PREMIUM_REASON = 'Sidekick Live is part of Videorc Premium.'
 
 /** The Chat tab's lock adds what stays free under it. */
 export const BUDDY_CHAT_FREE_NOTE = 'Greetings are free.'
 
 /** Points at the Cloud AI section beside the status (plan 174 E-6, F-5). */
 export const BUDDY_CONSENT_OFF_REASON =
-  "Cloud AI isn't allowed, so Buddy can't read chat or hear you. Allow it under Cloud AI."
+  "Cloud AI isn't allowed, so Sidekick can't read chat or hear you. Allow it under Cloud AI."
 
 /** Why the Buddy Live switch waits before the backend has answered. */
-export const BUDDY_LIVE_LOADING_REASON = 'Loading your Buddy settings…'
+export const BUDDY_LIVE_LOADING_REASON = 'Loading your Sidekick settings…'
 
 function status(
   kind: BuddyLiveStatusKind,
@@ -252,19 +252,19 @@ export const BUDDY_VOICE_COMMANDS: readonly {
     title: 'Highlight',
     result: 'Puts it on stream.',
     phrases: [
-      'Buddy, highlight the comment from coders X',
-      'Buddy, put this one up',
-      'Buddy, show the last comment',
-      "Buddy, show coders X's question"
+      'Sidekick, highlight the comment from coders X',
+      'Sidekick, put this one up',
+      'Sidekick, show the last comment',
+      "Sidekick, show coders X's question"
     ]
   },
   {
     title: 'Clear',
     result: 'Takes it off stream.',
     phrases: [
-      'Buddy, take it down',
-      'Buddy, clear the highlight',
-      'Buddy, remove it from the screen'
+      'Sidekick, take it down',
+      'Sidekick, clear the highlight',
+      'Sidekick, remove it from the screen'
     ]
   },
   {
@@ -272,7 +272,7 @@ export const BUDDY_VOICE_COMMANDS: readonly {
     result: 'Shows it first. Removes it when you confirm.',
     phrases: [
       'This one is toxic. Remove it from our chat.',
-      'Buddy, delete the comment from coders X'
+      'Sidekick, delete the comment from coders X'
     ]
   },
   {
@@ -285,26 +285,31 @@ export const BUDDY_VOICE_COMMANDS: readonly {
     title: 'Banners',
     result: 'Shows or hides your banners by name.',
     phrases: [
-      'Buddy, show the sponsor banner',
-      'Buddy, take the sponsor banner down',
-      'Buddy, hide the banners'
+      'Sidekick, show the sponsor banner',
+      'Sidekick, take the sponsor banner down',
+      'Sidekick, hide the banners'
     ]
   },
   {
     // The Buddy itself (`cohost_command.rs`, the presence grammar): the same
     // switch as "{name} on stream" in the Stream Manager's Buddy pane.
     title: 'On stream',
-    result: 'Puts Buddy on the stream, or takes it off.',
-    phrases: ['Buddy, show up', 'Buddy, come on screen', 'Buddy, hide', 'Buddy, go away']
+    result: 'Puts Sidekick on the stream, or takes it off.',
+    phrases: [
+      'Sidekick, show up',
+      'Sidekick, come on screen',
+      'Sidekick, hide',
+      'Sidekick, go away'
+    ]
   },
   {
     // Plan 174 F-16: the marker command (`marker_voice.rs`), with your title.
     title: 'Marker',
     result: 'Marks this moment in your recording, under the title you say.',
     phrases: [
-      'Buddy, make a marker here for the Q&A',
-      'Buddy, add a marker called Q&A',
-      'Buddy, mark this as Q&A'
+      'Sidekick, make a marker here for the Q&A',
+      'Sidekick, add a marker called Q&A',
+      'Sidekick, mark this as Q&A'
     ]
   }
 ]
@@ -318,27 +323,37 @@ export function buddyVoicePhrasesLabel(phrases: readonly string[], count = phras
 }
 
 /**
- * The words that start a command (plan 174 F-16): "Buddy" always, and the
+ * The names that already wake it (plan 236 D2, `cohost_command::WAKE_WORDS`),
+ * written without spaces or dashes: "Side kick" and "side-kick" are
+ * "sidekick". The old name stays hidden: the line never offers it.
+ */
+const WAKE_WORD_NAMES = new Set(['sidekick', 'sidekicks', 'buddy', 'bodhi'])
+
+/**
+ * The words that start a command (plan 174 F-16): "Sidekick" always, and the
  * name the streamer gave it, the way the backend wakes on it
  * (`cohost_command::wake_name_tokens`: a word of three letters or more).
  */
 export function buddyWakeWordsLine(name: string | null | undefined): string {
   const own = name?.trim() ?? ''
-  const wakes = own && own.toLowerCase() !== 'buddy' && /[\p{L}\p{N}]{3,}/u.test(own)
-  return wakes ? `Start with “Buddy” or your Buddy's own name, “${own}”.` : 'Start with “Buddy”.'
+  const joined = own.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+  const wakes = own && !WAKE_WORD_NAMES.has(joined) && /[\p{L}\p{N}]{3,}/u.test(own)
+  return wakes
+    ? `Start with “Sidekick” or your Sidekick's own name, “${own}”.`
+    : 'Start with “Sidekick”.'
 }
 
 export const BUDDY_VOICE_COMMANDS_DESCRIPTION =
-  'Ask Buddy to put a comment on stream, take it down, or remove it from chat.'
+  'Ask Sidekick to put a comment on stream, take it down, or remove it from chat.'
 
-export const BUDDY_VOICE_COMMANDS_OFF = 'Turn on Buddy Live to use voice commands.'
+export const BUDDY_VOICE_COMMANDS_OFF = 'Turn on Sidekick Live to use voice commands.'
 
 /** The numbers the web guide promises (contract part A). */
 export const BUDDY_REMOVAL_LIMITS =
   'A removal waits 20 seconds for your answer, then nothing is removed. At most 10 removals a minute.'
 
 export const BUDDY_REMOVAL_FALLBACK =
-  "If the platform can't remove it, Buddy hides it in Videorc and tells you viewers may still see it."
+  "If the platform can't remove it, Sidekick hides it in Videorc and tells you viewers may still see it."
 
 export const BUDDY_VOICE_PREMIUM =
   "Voice commands are part of Videorc Premium. Remove from chat, in a comment's menu, is free for everyone."
@@ -409,7 +424,7 @@ export function removeMessagesRows(
           accountLabel,
           ready,
           status: REMOVE_MESSAGES_NEEDS_ACCESS,
-          message: 'Authorize X Live to let Buddy remove messages.',
+          message: 'Authorize X Live to let Sidekick remove messages.',
           action: { kind: 'authorize-x', label: 'Authorize X Live' }
         }
       ]
@@ -421,7 +436,7 @@ export function removeMessagesRows(
         accountLabel,
         ready,
         status: REMOVE_MESSAGES_NEEDS_ACCESS,
-        message: `Reconnect ${label} to let Buddy remove messages.`,
+        message: `Reconnect ${label} to let Sidekick remove messages.`,
         action: { kind: 'reconnect', label: 'Reconnect' }
       }
     ]

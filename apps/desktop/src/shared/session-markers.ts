@@ -320,12 +320,13 @@ export function classifyComposerDraft(
   if (banner) return classifyBannerCommand(banner[1] ?? '', banners)
   const sound = /^\/sound(?:\s+([\s\S]*))?$/i.exec(text)
   if (sound) return classifySoundCommand(sound[1] ?? '', sounds)
-  const buddy = /^\/buddy(?:\s+([\s\S]*))?$/i.exec(text)
+  // Plan 236 D4: `/sidekick`, and `/buddy` kept as a silent alias.
+  const buddy = /^\/(?:sidekick|buddy)(?:\s+([\s\S]*))?$/i.exec(text)
   if (buddy) return classifyBuddyCommand(buddy[1] ?? '')
   return {
     kind: 'error',
     message:
-      'Unknown command. Use /hide, /show, /marker [title], /clip, /banner [name], /sound [name], /buddy [words], or /help. To send a literal slash, start with //.'
+      'Unknown command. Use /hide, /show, /marker [title], /clip, /banner [name], /sound [name], /sidekick [words], or /help. To send a literal slash, start with //.'
   }
 }
 /** Plan 199 D6: what `/clip` says when it is given a length nobody offers. */

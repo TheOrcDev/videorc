@@ -85,12 +85,12 @@ describe('set_buddy (plan 209 S13)', () => {
       ok: false,
       message:
         chatMode === 'auto'
-          ? 'Auto is gone: Buddy never posts in chat on its own. Use talk: bubble.'
+          ? 'Auto is gone: Sidekick never posts in chat on its own. Use talk: bubble.'
           : 'chatMode is now talk: off, bubble or suggest.'
     })
   })
 
-  it('turns Buddy Live on with the Stream Manager command save, never the microphone', async () => {
+  it('turns Sidekick Live on with the Stream Manager command save, never the microphone', async () => {
     const access = buddy()
     const outcome = await executeAgentIntent(
       call('set_buddy', { on: true }),
@@ -99,7 +99,7 @@ describe('set_buddy (plan 209 S13)', () => {
     expect(access.saveSettings).toHaveBeenCalledWith({ enabled: true })
     expect(outcome).toEqual({
       ok: true,
-      message: 'Buddy Live is on.',
+      message: 'Sidekick Live is on.',
       result: { on: true, talk: 'bubble', onStream: false }
     })
   })
@@ -126,18 +126,18 @@ describe('set_buddy (plan 209 S13)', () => {
     expect(patch).not.toHaveProperty('listen')
     expect(patch.autoChat?.talk).toBe('suggest')
     expect(patch.autoChat?.greetings.templates).toEqual(templates)
-    expect(outcome.message).toBe('Buddy talks: Suggest.')
+    expect(outcome.message).toBe('Sidekick talks: Suggest.')
   })
 
-  it('refuses Buddy Live without Premium or consent, but always turns it off', async () => {
+  it('refuses Sidekick Live without Premium or consent, but always turns it off', async () => {
     expect(
       await executeAgentIntent(
         call('set_buddy', { on: true }),
         context({
-          buddy: buddy({ entitled: false, entitlementReason: 'Buddy requires Videorc Premium.' })
+          buddy: buddy({ entitled: false, entitlementReason: 'Sidekick requires Videorc Premium.' })
         })
       )
-    ).toEqual({ ok: false, message: 'Buddy requires Videorc Premium.' })
+    ).toEqual({ ok: false, message: 'Sidekick requires Videorc Premium.' })
     expect(
       await executeAgentIntent(
         call('set_buddy', { on: true }),
@@ -153,7 +153,7 @@ describe('set_buddy (plan 209 S13)', () => {
     expect(on.saveSettings).toHaveBeenCalledWith({ enabled: false })
   })
 
-  it('puts Buddy on stream through the header switch, and refuses an empty call', async () => {
+  it('puts Sidekick on stream through the header switch, and refuses an empty call', async () => {
     const access = buddy()
     const outcome = await executeAgentIntent(
       call('set_buddy', { onStream: true }),
@@ -161,7 +161,7 @@ describe('set_buddy (plan 209 S13)', () => {
     )
     expect(access.setShowOnStream).toHaveBeenCalledWith(true)
     expect(access.saveSettings).not.toHaveBeenCalled()
-    expect(outcome.message).toBe('Buddy is on stream.')
+    expect(outcome.message).toBe('Sidekick is on stream.')
     expect(await executeAgentIntent(call('set_buddy'), context({ buddy: access }))).toEqual({
       ok: false,
       message: BUDDY_TOOL_COPY.empty
@@ -177,18 +177,18 @@ describe('set_buddy (plan 209 S13)', () => {
 
 // The Stream Deck's Buddy key: Buddy Live through `set_buddy`'s own save and
 // gates, so a key and an agent run the same rules.
-describe('remote Buddy Live intents', () => {
-  it('turns Buddy Live on and off with the Stream Manager command save', async () => {
+describe('remote Sidekick Live intents', () => {
+  it('turns Sidekick Live on and off with the Stream Manager command save', async () => {
     const access = buddy()
     await expect(executeRemote('buddyLiveOn', context({ buddy: access }))).resolves.toMatchObject({
       ok: true,
-      message: 'Buddy Live is on.'
+      message: 'Sidekick Live is on.'
     })
     expect(access.saveSettings).toHaveBeenCalledWith({ enabled: true })
     const live = buddy({ settings: { enabled: true, autoChat: DEFAULT_COHOST_AUTO_CHAT } })
     await expect(executeRemote('buddyLiveOff', context({ buddy: live }))).resolves.toMatchObject({
       ok: true,
-      message: 'Buddy Live is off.'
+      message: 'Sidekick Live is off.'
     })
     expect(live.saveSettings).toHaveBeenCalledWith({ enabled: false })
   })
@@ -214,7 +214,7 @@ describe('remote Buddy Live intents', () => {
     ).resolves.toEqual({ ok: false, message: BUDDY_CONSENT_OFF_REASON })
   })
 
-  it('always lets Buddy Live off, and says when Buddy is not there', async () => {
+  it('always lets Sidekick Live off, and says when Sidekick is not there', async () => {
     const live = buddy({
       entitled: false,
       consented: false,

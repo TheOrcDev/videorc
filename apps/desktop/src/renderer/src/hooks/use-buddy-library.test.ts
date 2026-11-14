@@ -114,14 +114,14 @@ describe('createBuddyLibraryController (plan 170 D12, D13)', () => {
     expect(controller.getState().pending).toBe('sync')
     expect(await controller.use('official:orc')).toBe(false)
     await first
-    const raw = 'database error: private storage path /Users/streamer/Buddy'
+    const raw = 'database error: private storage path /Users/streamer/Sidekick'
     fake.refuseWith(new Refused('cohost-library-not-implemented', raw))
     expect(await controller.use('official:orc')).toBe(false)
     expect(controller.getState()).toMatchObject({
       pending: null,
       problem: {
         code: 'cohost-library-not-implemented',
-        message: `Couldn't update your Buddy library. ${UNKNOWN_REASON}`
+        message: `Couldn't update your Sidekick library. ${UNKNOWN_REASON}`
       }
     })
     expect(controller.getState().problem?.message).not.toContain(raw)

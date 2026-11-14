@@ -1,9 +1,10 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
-// The companion is Buddy everywhere. Two old names are guarded, each in any
-// case and each with its own reasoned allow-list; an entry that matches
+// The companion is Sidekick everywhere a person reads it. Three old names
+// are guarded, each with its own reasoned allow-list; an entry that matches
 // nothing fails too, so a list never outlives the uses it excuses.
 //
 // - "Orcle" (plan 170, Phase R step 4) may stay only as one of the values in
@@ -15,9 +16,19 @@ import { describe, expect, it } from 'vitest'
 //   slug `golem`, its kind "Golem" in the onboarding lead's creature list,
 //   its art, and the golem example descriptions and chips. Those are in
 //   GOLEM_ALLOWED.
+// - "Buddy" (plan 236 D1, D-5) is the name the companion had until plan
+//   236, and a name a program reads keeps it: identifiers, file names,
+//   comments, test ids, wire and saved values (`buddy`, `bundled:buddy`,
+//   `cohost.buddy.state`). So this guard reads only what a person reads, in
+//   the renderer's and shared sources (tests excepted): every JSX text and
+//   every string or template literal, JSX attributes included. It fails on
+//   "Buddy" or "Buddies" as the name is written, and on a lowercase "buddy"
+//   inside a sentence; the rest is in BUDDY_ALLOWED.
 
 const RENDERER_ROOT = join(__dirname, '..')
 const SELF = 'src/renderer-buddy-name-guard.test.ts'
+/** `apps/desktop/src`: the renderer and the shared copy helpers. */
+const DESKTOP_SOURCE_ROOT = join(RENDERER_ROOT, '..')
 
 interface Allowed {
   /** Path under `apps/desktop/src/renderer/`, forward slashes. */
@@ -114,7 +125,7 @@ const GOLEM_ALLOWED: readonly Allowed[] = [
   },
   {
     file: 'src/assets/buddy/official/README.md',
-    text: "Buddy the Golem's official poses",
+    text: "Sidekick the Golem's official poses",
     reason: CREATURE_ART
   },
   {
@@ -194,6 +205,13 @@ const GOLEM_ALLOWED: readonly Allowed[] = [
   }
 ]
 
+const LOG_TAG = "a log line's tag, read only in Health's app log; log tags keep the old name (D1)"
+
+/** Paths under `apps/desktop/src`, forward slashes. */
+const BUDDY_ALLOWED: readonly Allowed[] = [
+  { file: 'renderer/src/lib/buddy-overlay.ts', text: 'Buddy overlay:', reason: LOG_TAG }
+]
+
 /**
  * Every "orcle" in a line, in any case, except the camelCase seam of a word
  * ending in "for" before one starting "Clean" (`streamingForCleanup`).
@@ -205,6 +223,92 @@ function orcleHits(line: string): number {
 /** Every "golem" in a line, in any case. */
 function golemHits(line: string): number {
   return [...line.matchAll(/golem/gi)].length
+}
+
+/**
+ * Every "Buddy" or "Buddies" in a text as the name is written, and every
+ * lowercase "buddy" in a sentence. A camelCase identifier (`useBuddyLook`)
+ * and a one-word machine value (`buddy`, `bundled:buddy`) never count.
+ */
+function buddyHits(text: string): number {
+  const named = [...text.matchAll(/\bBudd(?:y|ies)\b/g)].length
+  const spoken = /\s/.test(text.trim())
+    ? [...text.matchAll(/(?<![\w.:/-])budd(?:y|ies)\b(?![\w.:/-])/g)].length
+    : 0
+  return named + spoken
+}
+
+/** Every text a person could read in `source`: JSX text, string and template literals. */
+function readableTexts(path: string, source: string): Array<{ line: number; text: string }> {
+  const file = ts.createSourceFile(
+    path,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  )
+  const found: Array<{ line: number; text: string }> = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node) || ts.isImportTypeNode(node)) {
+      return
+    }
+    // Console output is a developer's log, like the copy guards' CODE_CALLS.
+    if (ts.isCallExpression(node) && /^console\.\w+$/.test(node.expression.getText(file))) return
+    if (
+      ts.isJsxText(node) ||
+      ts.isStringLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node) ||
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node)
+    ) {
+      const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+      found.push({ line: line + 1, text: node.text })
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+/** The renderer's and shared sources a person's words come from, tests excepted. */
+function copySources(): string[] {
+  const files: string[] = []
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory)) {
+      const path = join(directory, entry)
+      if (statSync(path).isDirectory()) {
+        if (entry !== 'node_modules') walk(path)
+      } else if (/\.tsx?$/.test(entry) && !/\.(test|d)\.tsx?$/.test(entry)) {
+        files.push(path)
+      }
+    }
+  }
+  walk(join(DESKTOP_SOURCE_ROOT, 'renderer'))
+  walk(join(DESKTOP_SOURCE_ROOT, 'shared'))
+  return files
+}
+
+/** The readable texts that still say Buddy, and the allow-list entries that excused one. */
+function scanCopy(allowList: readonly Allowed[]): Scan {
+  const offenders: string[] = []
+  const used = new Set<Allowed>()
+  for (const absolute of copySources()) {
+    const path = relative(DESKTOP_SOURCE_ROOT, absolute).split(sep).join('/')
+    const allowed = allowList.filter((entry) => entry.file === path)
+    for (const { line, text } of readableTexts(path, readFileSync(absolute, 'utf8'))) {
+      if (buddyHits(text) === 0) continue
+      let rest = text
+      for (const entry of allowed) {
+        if (rest.includes(entry.text)) {
+          used.add(entry)
+          rest = rest.split(entry.text).join('')
+        }
+      }
+      if (buddyHits(rest) > 0) offenders.push(`${path}:${line}: ${text.trim().slice(0, 120)}`)
+    }
+  }
+  return { offenders, used }
 }
 
 function rendererFiles(): string[] {
@@ -258,7 +362,7 @@ function staleEntries(allowList: readonly Allowed[], used: Set<Allowed>): string
     .map((entry) => `${entry.file}: ${entry.text}`)
 }
 
-describe('the companion is Buddy in the renderer, not Orcle (plan 170 D19, D22)', () => {
+describe('the companion is not Orcle in the renderer (plan 170 D19, D22)', () => {
   const { offenders, used } = scan(orcleHits, ORCLE_ALLOWED)
 
   it('finds the old name in every case, but not inside a camelCase seam', () => {
@@ -279,7 +383,7 @@ describe('the companion is Buddy in the renderer, not Orcle (plan 170 D19, D22)'
   })
 })
 
-describe('the companion is Buddy in the renderer, not Golem (plan 171 D9, D4)', () => {
+describe('the companion is not Golem in the renderer (plan 171 D9, D4)', () => {
   const { offenders, used } = scan(golemHits, GOLEM_ALLOWED)
 
   it('finds "golem" in every case and inside identifiers', () => {
@@ -299,3 +403,48 @@ describe('the companion is Buddy in the renderer, not Golem (plan 171 D9, D4)', 
     for (const entry of GOLEM_ALLOWED) expect(entry.reason.length).toBeGreaterThan(20)
   })
 })
+
+// Whole-source AST scans are CPU-bound; under a parallel full run they can
+// pass vitest's 5 s default, like the copy guards.
+describe(
+  'the companion is Sidekick in renderer copy, not Buddy (plan 236 D-5)',
+  { timeout: 30_000 },
+  () => {
+    const { offenders, used } = scanCopy(BUDDY_ALLOWED)
+
+    it('finds the name as written and "buddy" in a sentence, never in code', () => {
+      expect(buddyHits('Buddy, Buddies and Buddy’s look')).toBe(3)
+      expect(buddyHits('thanks buddy for the help')).toBe(1)
+      expect(buddyHits('useBuddyLook BuddyPetError onBuddyActRequest')).toBe(0)
+      expect(buddyHits('buddy')).toBe(0)
+      expect(buddyHits('bundled:buddy cohost.buddy.state videorc://buddy /buddy')).toBe(0)
+      expect(buddyHits('Sidekick and my sidekick')).toBe(0)
+    })
+
+    it('reads JSX text, attributes and string literals, and skips imports', () => {
+      const source = [
+        "import { BuddyIcon } from '@/components/buddy-emblem'",
+        'export const a = <CommandGroup heading="Buddy">Ask Buddy</CommandGroup>',
+        'export const b = `Open ${name} in Buddy`',
+        '// Buddy in a comment stays',
+        "console.warn('[buddy] stopped: Buddy is off')"
+      ].join('\n')
+      const texts = readableTexts('sample.tsx', source)
+        .filter(({ text }) => buddyHits(text) > 0)
+        .map(({ line, text }) => `${line}: ${text}`)
+      expect(texts).toEqual(['2: Buddy', '2: Ask Buddy', '3:  in Buddy'])
+    })
+
+    it('keeps "Buddy" out of every text a person reads, but the allowed ones', () => {
+      expect(offenders).toEqual([])
+    })
+
+    it('has no allow-list entry that matches nothing', () => {
+      expect(staleEntries(BUDDY_ALLOWED, used)).toEqual([])
+    })
+
+    it('gives every allow-list entry a reason', () => {
+      for (const entry of BUDDY_ALLOWED) expect(entry.reason.length).toBeGreaterThan(20)
+    })
+  }
+)

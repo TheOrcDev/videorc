@@ -111,7 +111,9 @@ describe('NavigableRow (B-25)', () => {
 
   it('is a button with the focus ring when it navigates, and keeps its tooltip', async () => {
     const onNavigate = vi.fn()
-    await render(h(NavigableRow, { label: 'Buddy', hint: 'Reading chat', value: 'On', onNavigate }))
+    await render(
+      h(NavigableRow, { label: 'Sidekick', hint: 'Reading chat', value: 'On', onNavigate })
+    )
     const button = container.querySelector('button[data-slot="navigable-row"]') as HTMLElement
     expect(button.className).toContain('focus-visible:ring-2')
     expect(button.className).toContain('hover:bg-accent')

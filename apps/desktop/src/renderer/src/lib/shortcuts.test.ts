@@ -31,7 +31,7 @@ describe('SHORTCUTS registry', () => {
     })
     expect(SHORTCUTS.find((entry) => entry.id === 'nav-ai')).toMatchObject({
       accelerators: ['CmdOrCtrl+8'],
-      label: 'Buddy'
+      label: 'Sidekick'
     })
   })
 

@@ -2179,7 +2179,7 @@ describe('backend RPC contract', () => {
     ).toThrow('clip.marks.list')
   })
 
-  it('validates the Buddy report RPCs and the saved event (plan 119 S1)', () => {
+  it('validates the Sidekick report RPCs and the saved event (plan 119 S1)', () => {
     const report = {
       version: 1,
       sessionId: 'session-1',
@@ -2336,7 +2336,7 @@ describe('backend RPC contract', () => {
       removeConfirm: 'confirm',
       persona: {
         id: 'default',
-        name: 'Buddy',
+        name: 'Sidekick',
         personality: '',
         bubbleStyle: 'speech',
         images: {},
@@ -2746,7 +2746,7 @@ describe('backend RPC contract', () => {
     // and closed: a bad code/status shape fails the event like any other.
     const detail = {
       code: 'ai-gateway-error',
-      message: 'The Buddy tick failed on every configured model.',
+      message: 'The Sidekick tick failed on every configured model.',
       status: 502
     }
     const errored = { ...state, status: 'error', reason: 'gateway-error', detail }
@@ -2806,7 +2806,7 @@ describe('backend RPC contract', () => {
       removeConfirm: 'confirm',
       persona: {
         id: 'default',
-        name: 'Buddy',
+        name: 'Sidekick',
         personality: '',
         bubbleStyle: 'speech',
         images: {},
@@ -3059,7 +3059,7 @@ describe('backend RPC contract', () => {
     ).toThrow('liveChat.moderation.request')
   })
 
-  it('types and exactly validates Buddy voice commands, their answers and the kill switches (plan 140 S3)', () => {
+  it('types and exactly validates Sidekick voice commands, their answers and the kill switches (plan 140 S3)', () => {
     const base = {
       sessionId: 'session-1',
       status: 'listening',
@@ -3125,7 +3125,7 @@ describe('backend RPC contract', () => {
       heard: 'what is the weather',
       kind: 'unknown',
       status: 'not-found',
-      message: "Buddy didn't catch that: 'what is the weather'.",
+      message: "Sidekick didn't catch that: 'what is the weather'.",
       at: '2026-10-04T12:00:00Z'
     }
     for (const status of [
@@ -3250,7 +3250,7 @@ describe('backend RPC contract', () => {
       removeConfirm: 'countdown',
       persona: {
         id: 'default',
-        name: 'Buddy',
+        name: 'Sidekick',
         personality: '',
         bubbleStyle: 'speech',
         images: {},
@@ -4369,7 +4369,7 @@ describe('caption service outage contract', () => {
     const listening = {
       state: 'blocked',
       reasonCode: 'service-unavailable',
-      message: "Videorc AI is unavailable, so Buddy can't hear you right now."
+      message: "Videorc AI is unavailable, so Sidekick can't hear you right now."
     }
     expect(
       validateBackendEventPayload('session.marker.voice.status', { sessionId: 'live', listening })

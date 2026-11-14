@@ -33,7 +33,7 @@ seconds"). Code keeps the older names (`replay.*` RPCs, `replay_buffer.rs`,
   Stream Manager's **Clip 30 s** button (where Mark clip used to be, with
   the key in its hint), the `clipMark` global shortcut, ⌘K **Save a
   30-second clip**, a Stream Deck or phone `clipMark` intent, `/clip` in the
-  Stream Manager's own composer, and the spoken "clip that" / "Buddy, clip
+  Stream Manager's own composer, and the spoken "clip that" / "Sidekick, clip
   that". The last minute: the **1 min** button beside it, the
   `clipMarkLong` shortcut, ⌘K **Save a 1-minute clip**, `clipMark` with
   `seconds: 60`, `/clip 60`, and the spoken "clip the last minute" or "long
@@ -58,8 +58,8 @@ with or without the wake word in front) saves 30 seconds; "clip the last
 minute" and "long clip" save the minute (plan 199). A phrase is matched
 across two transcript finals, and a second phrase of either length within
 10 s of the first is the same moment said twice. Each is heard by the transcript the
-session already produces: live captions, or Buddy listening. So the spoken
-clip works **while a recording or livestream runs with captions on or Buddy
+session already produces: live captions, or Sidekick listening. So the spoken
+clip works **while a recording or livestream runs with captions on or Sidekick
 listening on**, exactly where "clip that" marked a clip before. The idle
 ring starts no transcription of its own: nothing paid runs because the
 buffer does, so with Videorc open and no session the clip is the button,

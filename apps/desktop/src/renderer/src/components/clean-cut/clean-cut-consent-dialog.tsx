@@ -18,7 +18,7 @@ export type CleanCutConsentAsk =
   | { kind: 'start'; sessionId: string; mode: CleanCutMode; targetMinutes: number }
 
 /** The heading over the rest of the list: what the same switch also allows. */
-export const CLEAN_CUT_CONSENT_ALSO = 'Allowing cloud AI also covers Buddy:'
+export const CLEAN_CUT_CONSENT_ALSO = 'Allowing cloud AI also covers Sidekick:'
 
 /**
  * Cloud AI consent, asked where Clean cut needs it (plan 119 decision 3): the

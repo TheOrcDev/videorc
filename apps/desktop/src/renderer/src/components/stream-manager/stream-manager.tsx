@@ -232,11 +232,11 @@ function cohostTone(state: CohostState | null, alerts: number): StatusDotTone {
 function cohostDotLabel(state: CohostState | null): string | null {
   switch (state?.status) {
     case 'listening':
-      return 'Buddy is listening'
+      return 'Sidekick is listening'
     case 'paused':
-      return 'Buddy is paused'
+      return 'Sidekick is paused'
     case 'error':
-      return 'Buddy has a problem'
+      return 'Sidekick has a problem'
     default:
       return null
   }
@@ -1002,18 +1002,18 @@ export function StreamManager({
           {
             id: commandCardId,
             label: commandChooser
-              ? 'Buddy asks which comment you meant'
-              : 'Buddy asks whether to show a flagged comment'
+              ? 'Sidekick asks which comment you meant'
+              : 'Sidekick asks whether to show a flagged comment'
           }
         ]
       : []),
     ...removalPane.cards.map((card) => ({
       id: card.operationId,
-      label: `Buddy asks before removing ${card.authorName}'s message${card.timer ? `, ${card.timer}` : ''}`
+      label: `Sidekick asks before removing ${card.authorName}'s message${card.timer ? `, ${card.timer}` : ''}`
     })),
     ...proposedUtteranceIds.map((id) => ({
       id,
-      label: `${buddyName ?? 'Buddy'} wants to post, it expires soon`
+      label: `${buddyName ?? 'Sidekick'} wants to post, it expires soon`
     })),
     ...(communityCall
       ? linkCards.map((link) => ({ id: linkMadeId(link), label: linkMadeTitle(link) }))
@@ -1048,7 +1048,7 @@ export function StreamManager({
             onPackReactions={setBuddyPackReactions}
           />
         ) : (
-          <span className="shrink-0 text-xs font-medium">Buddy</span>
+          <span className="shrink-0 text-xs font-medium">Sidekick</span>
         )}
         <Badge className={cn('shrink-0', CHAT_HEADER_TIGHT_HIDDEN)} variant="outline">
           Alpha
@@ -1238,7 +1238,7 @@ export function StreamManager({
         <Empty className="min-h-0 flex-1">
           <EmptyHeader>
             <EmptyDescription>
-              Buddy reads chat during a live stream: questions, flags and the room's mood.
+              Sidekick reads chat during a live stream: questions, flags and the room's mood.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -1338,7 +1338,7 @@ export function StreamManager({
                   <PaneLabel
                     dot={cohostTone(cohostState, activeAlerts)}
                     dotLabel={cohostDotLabel(cohostState)}
-                    label="Buddy"
+                    label="Sidekick"
                     unseen={buddyUnseen}
                   />
                 </TabsTrigger>
@@ -1367,7 +1367,7 @@ export function StreamManager({
                   <PaneLabel
                     dot={cohostTone(cohostState, activeAlerts)}
                     dotLabel={cohostDotLabel(cohostState)}
-                    label="Buddy"
+                    label="Sidekick"
                     unseen={buddyUnseen}
                   />
                 </TabsTrigger>

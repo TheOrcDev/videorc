@@ -346,7 +346,7 @@ describe('CohostPane', () => {
       gate: {
         allowed: false,
         featureId: 'live-cohost',
-        reason: 'Buddy requires Videorc Premium.',
+        reason: 'Sidekick requires Videorc Premium.',
         upgradeUrl: 'https://www.videorc.com/premium'
       },
       onUpgrade: () => undefined
@@ -355,7 +355,7 @@ describe('CohostPane', () => {
     // hand-rolled notice box.
     expect(markup).toContain('data-slot="cohost-notice"')
     expect(markup).toMatch(/data-slot="alert"[^>]*data-variant="locked"/)
-    expect(markup).toContain('Buddy requires Videorc Premium.')
+    expect(markup).toContain('Sidekick requires Videorc Premium.')
     expect(markup).toContain('View Premium')
     expect(markup).not.toContain('Premium Alpha')
     expect(markup).not.toContain('data-testid="cohost-pane"')
@@ -364,7 +364,7 @@ describe('CohostPane', () => {
   it('asks for cloud-AI consent with the whole disclosure and a way to the dialog', () => {
     const markup = renderPane({ consented: false, onEnableConsent: () => undefined })
     expect(markup).toContain('data-slot="cohost-consent"')
-    expect(markup).toContain('Buddy needs cloud AI')
+    expect(markup).toContain('Sidekick needs cloud AI')
     // Plan 174 S0.2: every cloud use, wrapping, never a truncated line with
     // the rest in a tooltip; the action opens the consent dialog.
     for (const use of CLOUD_AI_USES) expect(markup).toContain(use.replaceAll("'", '&#x27;'))
@@ -393,7 +393,7 @@ describe('CohostPane', () => {
     expect(markup).not.toContain('Nothing sends without you.')
     expect(markup).toContain('Never posts on its own.')
     // The whole sentence is the line's tooltip, never a native title (S1.10).
-    expect(markup).not.toContain('title="Buddy never posts')
+    expect(markup).not.toContain('title="Sidekick never posts')
     expect(markup).toMatch(
       /<span(?=[^>]*data-slot="cohost-acts-on-ask")(?=[^>]*data-base-ui-tooltip-trigger)/
     )
@@ -465,21 +465,22 @@ describe('CohostPane', () => {
     expect(markup).toMatch(/data-testid="cohost-pane"/)
     expect(markup).toMatch(/class="[^"]*min-h-0 flex-1 flex-col[^"]*" data-testid="cohost-pane"/)
     expect(markup).not.toContain('data-slot="collapsible')
-    expect(markup).not.toContain('>Buddy<')
+    expect(markup).not.toContain('>Sidekick<')
     expect(markup).not.toContain('Alpha')
     // The rows are 32 px (plan 174 F-8), never palette-scale.
     expect(markup).toMatch(/class="[^"]*h-row[^"]*"[^>]*data-cohost-row="question"/)
   })
 
   it("names the failed tick in the server's words as the chip tooltip and a secondary line", () => {
-    const detail = 'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
+    const detail =
+      'ai-gateway-error (HTTP 502): The Sidekick tick failed on every configured model.'
     const markup = renderPane({
       state: state({
         status: 'error',
         reason: 'gateway-error',
         detail: {
           code: 'ai-gateway-error',
-          message: 'The Buddy tick failed on every configured model.',
+          message: 'The Sidekick tick failed on every configured model.',
           status: 502
         }
       })
@@ -488,7 +489,7 @@ describe('CohostPane', () => {
     // here the failed tick keeps its own line.
     expect(markup).toContain(`title="${detail}"`)
     expect(markup).toContain('data-slot="cohost-error-detail"')
-    expect(markup).toContain('once Buddy is reading chat again')
+    expect(markup).toContain('once Sidekick is reading chat again')
     expect(markup).not.toContain('Reading chat. Questions')
     // Monochrome: only the presence DOT carries the error accent; the label and
     // the detail line stay chrome.
@@ -515,10 +516,10 @@ describe('the one-time listening card (plan 068 D3)', () => {
       createElement(CohostListenPrompt, { enabled, listen, onTurnOn: () => undefined })
     )
 
-  it('asks a Buddy user with listening off', () => {
+  it('asks a Sidekick user with listening off', () => {
     const markup = renderPrompt(true, false)
     expect(markup).toContain('data-slot="cohost-listen-prompt"')
-    expect(markup).toContain('Buddy can hear you while you&#x27;re live')
+    expect(markup).toContain('Sidekick can hear you while you&#x27;re live')
     // The consent names the cloud step and what is (not) kept (plan 068 D3).
     expect(markup).toContain('goes to Videorc&#x27;s cloud speech-to-text and comes back as text')
     expect(markup).toContain('Videorc servers don&#x27;t keep it.')
@@ -527,7 +528,7 @@ describe('the one-time listening card (plan 068 D3)', () => {
     expect(markup).toContain('>Not now<')
   })
 
-  it('stays away when listening is on or unknown, or Buddy cannot run', () => {
+  it('stays away when listening is on or unknown, or Sidekick cannot run', () => {
     expect(renderPrompt(true, true)).toBe('')
     expect(renderPrompt(true, undefined)).toBe('')
     expect(renderPrompt(false, false)).toBe('')
@@ -570,12 +571,12 @@ describe('Welcome back (plan 225 C3)', () => {
     expect(renderPane({ state: state() })).not.toContain('cohost-welcome-back')
   })
 
-  it('stays when Buddy Live is off or locked: welcomes are free (D6)', () => {
+  it('stays when Sidekick Live is off or locked: welcomes are free (D6)', () => {
     const withAda = state({ welcomeBack: [ada] })
     expect(renderPane({ enabled: false, state: withAda })).toContain('>Welcome back<')
     expect(
       renderPane({
-        gate: { allowed: false, featureId: 'cohost', reason: 'Buddy Live is Premium.' } as never,
+        gate: { allowed: false, featureId: 'cohost', reason: 'Sidekick Live is Premium.' } as never,
         state: withAda
       })
     ).toContain('>Welcome back<')

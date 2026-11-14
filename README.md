@@ -9,7 +9,7 @@
 # Videorc
 
 Videorc is an open-source, AI-native desktop studio for creators: record your
-screen and camera, stream to multiple platforms at once, and bring Buddy, an AI
+screen and camera, stream to multiple platforms at once, and bring Sidekick, an AI
 producer that keeps up with your chat while you're live. All from one window.
 
 **Current release tracks**
@@ -45,7 +45,7 @@ happens underneath.
   YouTube (other platforms ingest up to 1080p).
 - **Live captions.** Streaming speech-to-text (~1s latency) with optional
   caption burn-in on the stream, the recording, both, or neither.
-- **Buddy, your AI companion.** Name it, give it a personality and looks, and
+- **Sidekick, your AI companion.** Name it, give it a personality and looks, and
   it catches questions from every platform with a drafted reply you approve,
   flags spam and abuse against your own rules, greets first-timers and reminds
   you of your promises. It posts only in the modes you turn on, and everything
@@ -65,7 +65,7 @@ happens underneath.
 - **Rust backend** owns capture, composition, recording, and streaming; the
   shell talks to it over an authenticated localhost WebSocket protocol.
 - **FFmpeg** (an LGPL-compliant build, bundled) drives encoding and output.
-- **SQLite** local session library — your recordings and Buddy's stream
+- **SQLite** local session library — your recordings and Sidekick's stream
   reports stay on your machine.
 
 ## Open source & pricing
@@ -74,7 +74,7 @@ The desktop app — capture, scenes, recording, streaming, captions UI — is fr
 software under **AGPL-3.0**. You can build it, run it, and audit every line
 that touches your camera, microphone, and screen.
 
-Cloud AI features (live captions and Buddy) run through a signed-in Videorc
+Cloud AI features (live captions and Sidekick) run through a signed-in Videorc
 account: the desktop app never holds AI provider keys, and nothing goes to the
 cloud until you turn it on. Hosted AI is what funds the project.
 

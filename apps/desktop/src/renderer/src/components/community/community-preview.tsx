@@ -52,7 +52,7 @@ export function CommunityPreview(): ReactElement {
   const packId = persona?.avatar?.kind === 'alive' ? persona.avatar.packId : BUDDY_STILL_PACK_ID
   return (
     <PanelSection
-      description="Hear how Buddy welcomes a regular and celebrates a milestone. Only here: nothing goes live."
+      description="Hear how Sidekick welcomes a regular and celebrates a milestone. Only here: nothing goes live."
       title="Preview"
       data-testid="community-preview"
     >

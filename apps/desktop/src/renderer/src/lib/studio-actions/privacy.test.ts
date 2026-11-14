@@ -47,7 +47,7 @@ describe('privacy callers', () => {
   })
 })
 
-it('the agent catalog executor marks Buddy separately and offers no show tool', async () => {
+it('the agent catalog executor marks Sidekick separately and offers no show tool', async () => {
   const runScreenPrivacy = vi.fn().mockResolvedValue({ ok: true })
   const context = { runScreenPrivacy } as unknown as StudioActionContext
   for (const agentId of ['buddy', 'agent']) {

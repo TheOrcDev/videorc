@@ -17,7 +17,7 @@ only via ⌘K, sources diagnostics list unbounded
 >
 > - **Sidebar** (plan 235, 2026-11-14): Studio ⌘1 as the chrome slab, then
 >   Setup (Sources ⌘2, Scene ⌘3, Assets ⌘4, Captions ⌘5, Output ⌘6), then
->   Livestream (Destinations ⌘7, Buddy ⌘8; Buddy keeps Clean cut and every
+>   Livestream (Destinations ⌘7, Sidekick ⌘8; Sidekick keeps Clean cut and every
 >   feature, the page sells Premium), Library ⌘9, and Settings ⌘, in a
 >   bottom block. Health has no row: the status bar's state opens it.
 > - **Devices**: Sources is the home of every screen, window, camera,
@@ -33,7 +33,7 @@ only via ⌘K, sources diagnostics list unbounded
 >   "Keep streaming" focused. It never starts Go Live (plan 174 D1).
 > - **Names**: Destinations became Livestream, and Destinations again in
 >   plan 235 (inside a Livestream group); Recording became Output, AI
->   became Buddy, and the live chat rail became the Stream Manager window
+>   became Sidekick, and the live chat rail became the Stream Manager window
 >   (⇧⌘J).
 > - **Chat in Studio** (2026-10-27, plan 204): the Studio has chat again,
 >   as an option off by default: a Chat section in the inspector under
@@ -215,7 +215,7 @@ metadata each. Restructure into the design language's master pattern:
 ### 7. AI — unchanged
 
 Already coherent (session picker → artifacts). Reached from sidebar ⌘7 and
-per-session from Library. _Now the Buddy page, second in the sidebar on ⌘9;
+per-session from Library. _Now the Sidekick page, second in the sidebar on ⌘9;
 Clean cut is its last tab._ The consent panel stays — it is a real decision,
 not noise.
 

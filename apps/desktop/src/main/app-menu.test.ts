@@ -155,7 +155,7 @@ describe('appMenuTemplate on macOS', () => {
       'Captions CmdOrCtrl+5',
       'Output CmdOrCtrl+6',
       'Destinations CmdOrCtrl+7',
-      'Buddy CmdOrCtrl+8',
+      'Sidekick CmdOrCtrl+8',
       'Library CmdOrCtrl+9'
     ])
     click(pages.find((item) => item.label === 'Destinations'))

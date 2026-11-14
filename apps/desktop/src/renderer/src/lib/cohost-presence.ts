@@ -156,10 +156,10 @@ function presenceTooltip(
 ): string[] {
   const lines: string[] = []
   if (kind === 'off') {
-    lines.push('Buddy is off. It reads live chat, groups questions and drafts replies.')
+    lines.push('Sidekick is off. It reads live chat, groups questions and drafts replies.')
   }
   if (kind === 'starting') {
-    lines.push('Buddy is starting. Waiting for the first pass.')
+    lines.push('Sidekick is starting. Waiting for the first pass.')
   }
 
   const lastPass = cohostAgoLabel(state?.lastTickAt ?? null, nowMs)
@@ -241,9 +241,9 @@ export function cohostEmptyStateCopy(view: CohostPresenceView, state: CohostStat
   if (view.kind === 'listening') return 'Reading chat. Questions will appear here.'
   if (view.kind === 'starting') return 'Starting. Questions from chat will appear here.'
   if (view.kind === 'retrying') {
-    return "Videorc AI didn't answer. Buddy is trying again; questions will appear here."
+    return "Videorc AI didn't answer. Sidekick is trying again; questions will appear here."
   }
-  return 'Questions from chat will appear here once Buddy is reading chat again.'
+  return 'Questions from chat will appear here once Sidekick is reading chat again.'
 }
 
 /**

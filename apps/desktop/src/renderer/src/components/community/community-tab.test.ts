@@ -97,7 +97,7 @@ const account = (platform: 'twitch' | 'kick' | 'x', name: string) => ({
   lastSeenAt: '2026-10-01T18:00:00Z'
 })
 
-describe('Buddy → Community (plan 225 D12)', () => {
+describe('Sidekick → Community (plan 225 D12)', () => {
   it('starts empty: the next-stream line and no regulars yet', async () => {
     await mount()
     expect(text()).toContain('Videorc starts remembering your chat from your next stream.')
@@ -178,15 +178,15 @@ describe('Buddy → Community (plan 225 D12)', () => {
     studio.gate = {
       allowed: false,
       featureId: 'cohost',
-      reason: 'Buddy Live is part of Premium.',
+      reason: 'Sidekick Live is part of Premium.',
       upgradeUrl: 'https://videorc.com/premium'
     } as unknown as EntitlementUiGate
     await mount()
     const premium = container.querySelector('[data-testid="community-premium"]')
-    expect(premium?.textContent).toContain('Buddy remembers')
+    expect(premium?.textContent).toContain('Sidekick remembers')
     expect(premium?.textContent).toContain('Community sync')
     expect(premium?.textContent).toContain(
-      'Buddy remembers what your regulars tell it with Premium.'
+      'Sidekick remembers what your regulars tell it with Premium.'
     )
     const switches = premium?.querySelectorAll('[role="switch"]') ?? []
     expect(
@@ -199,7 +199,7 @@ describe('Buddy → Community (plan 225 D12)', () => {
 
   // Plan 225 D10: "Let Buddy remember…" is offered once, after a stream
   // regulars came to, to a streamer who can turn it on.
-  it('offers Buddy remembers once regulars came, and Turn on flips the switch', async () => {
+  it('offers Sidekick remembers once regulars came, and Turn on flips the switch', async () => {
     client.summary = {
       people: 12,
       regulars: 2,
@@ -209,7 +209,7 @@ describe('Buddy → Community (plan 225 D12)', () => {
       backfill: { state: 'done', done: 3, total: 3 }
     }
     await mount()
-    expect(text()).toContain('Let Buddy remember what your regulars tell it?')
+    expect(text()).toContain('Let Sidekick remember what your regulars tell it?')
     const on = container.querySelector<HTMLButtonElement>('[data-testid="community-remember-on"]')
     await act(async () => on?.click())
     expect(studio.patch).toHaveBeenCalledWith({
@@ -217,7 +217,7 @@ describe('Buddy → Community (plan 225 D12)', () => {
     })
   })
 
-  it('never offers Buddy remembers without regulars, and Not now only keeps the answer', async () => {
+  it('never offers Sidekick remembers without regulars, and Not now only keeps the answer', async () => {
     await mount()
     expect(container.querySelector('[data-testid="community-remember-offer"]')).toBeNull()
     await act(async () => root.unmount())

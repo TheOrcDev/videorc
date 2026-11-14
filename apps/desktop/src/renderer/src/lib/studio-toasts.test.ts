@@ -109,7 +109,7 @@ describe('cohostStatusToast', () => {
     } as unknown as CohostState
     expect(cohostStatusToast(running, failed)).toEqual({
       kind: 'error',
-      title: 'Buddy stopped: Videorc Premium is required.',
+      title: 'Sidekick stopped: Videorc Premium is required.',
       action: 'view-premium'
     })
     expect(cohostStatusDetail(failed)).toBe('ai-gateway-error: denied')
@@ -122,7 +122,7 @@ describe('cohostStatusToast', () => {
     const stopped = { ...running, status: 'off', reason: 'signed-out' } as CohostState
     expect(cohostStatusToast(running, stopped)).toEqual({
       kind: 'message',
-      title: 'Buddy stopped. You signed out.',
+      title: 'Sidekick stopped. You signed out.',
       action: 'sign-in'
     })
     expect(cohostStatusToast(running, { ...running, status: 'off' } as CohostState)).toBeNull()

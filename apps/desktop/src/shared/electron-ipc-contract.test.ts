@@ -633,7 +633,7 @@ describe('Electron IPC contract', () => {
     expect(validateElectronInvokeResult('comments-window:moderation-result-push', true)).toBe(true)
   })
 
-  it('relays one answer to a Buddy command by id, nothing more (plan 140, S6 part B)', () => {
+  it('relays one answer to a Sidekick command by id, nothing more (plan 140, S6 part B)', () => {
     const choose = {
       requestId: 'r-1',
       sessionId: 'session-1',

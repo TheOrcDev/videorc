@@ -294,9 +294,16 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
 })
 
 describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
-  it('runs Session → Pages → Windows → Scenes → Buddy → Settings → Appearance', async () => {
+  it('runs Session → Pages → Windows → Scenes → Sidekick → Settings → Appearance', async () => {
     await render()
-    expect(headings()).toEqual(['Session', 'Pages', 'Windows', 'Buddy', 'Settings', 'Appearance'])
+    expect(headings()).toEqual([
+      'Session',
+      'Pages',
+      'Windows',
+      'Sidekick',
+      'Settings',
+      'Appearance'
+    ])
     mocked.core.savedScenes = [{ id: 's1', name: 'Talking head' }]
     await render()
     expect(headings()).toEqual([
@@ -304,7 +311,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Pages',
       'Windows',
       'Scenes',
-      'Buddy',
+      'Sidekick',
       'Settings',
       'Appearance'
     ])
@@ -322,7 +329,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Open Captions',
       'Open Output',
       'Open Destinations',
-      'Open Buddy',
+      'Open Sidekick',
       'Open Library',
       'Open Settings',
       'Open Health',
@@ -496,7 +503,7 @@ describe('CommandPalette banners (plan 186 S7)', () => {
       'Windows',
       'Scenes',
       'Banners',
-      'Buddy',
+      'Sidekick',
       'Settings',
       'Appearance'
     ])

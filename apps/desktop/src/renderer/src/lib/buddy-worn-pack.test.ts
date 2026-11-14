@@ -16,7 +16,7 @@ const pack = (packId: string, name: string): BuddyPetSummary => ({
 
 const MOSS = pack('0b9c6c34-5d7e-4b4f-9a7e-3c2d1e0f9a8b', 'Moss')
 const EMBER = pack('7f3e2d1c-0b9a-4876-9543-210fedcba987', 'Ember')
-const SHIPPED = pack('bundled:buddy', 'Buddy')
+const SHIPPED = pack('bundled:buddy', 'Sidekick')
 
 function memory(): Storage {
   const map = new Map<string, string>()

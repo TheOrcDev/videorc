@@ -93,7 +93,7 @@ export interface BuddyPreviewPackRequest {
 const FULL_BOX = [0, 0, 1, 1] as const
 
 function abortError(): Error {
-  const error = new Error('The Buddy pack load was canceled.')
+  const error = new Error('The Sidekick pack load was canceled.')
   error.name = 'AbortError'
   return error
 }
@@ -101,7 +101,7 @@ function abortError(): Error {
 const browserDeps: BuddyPreviewPackDeps = {
   readPackFile: async (personaId, packId, file) => {
     const read = window.videorc?.readBuddyPetFile
-    if (!read) throw new Error('This window cannot read Buddy packs.')
+    if (!read) throw new Error('This window cannot read Sidekick packs.')
     return read(personaId, packId, file)
   },
   decode: async (bytes) => {
@@ -357,7 +357,7 @@ async function loadStillPack(
         // The backend's still pack falls back the same way: idle to the
         // default Buddy, every other state to idle.
         notes.push(
-          `The ${state} image would not load; the ${state === 'idle' ? 'default Buddy' : 'idle image'} shows instead.`
+          `The ${state} image would not load; the ${state === 'idle' ? 'default Sidekick' : 'idle image'} shows instead.`
         )
         loaded.set(
           state,

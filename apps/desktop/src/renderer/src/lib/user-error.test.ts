@@ -311,7 +311,7 @@ describe('inlineUserError', () => {
   })
 
   it('returns the one line and never the raw path', () => {
-    const raw = 'EACCES: permission denied, open /Users/streamer/Buddy'
+    const raw = 'EACCES: permission denied, open /Users/streamer/Sidekick'
     const text = inlineUserError(new Error(raw), IMPORT, 'buddy-look')
     expect(text).toBe(`Couldn't import the image. ${UNKNOWN_REASON}`)
     expect(text).not.toContain('/Users/streamer')

@@ -98,7 +98,7 @@ in Library titled Clip).
 _Avoid_: replay, highlight (for the file)
 
 **On stream**:
-Shown in what viewers see: a chat message, a takeover, Buddy. The actions
+Shown in what viewers see: a chat message, a takeover, Sidekick. The actions
 are "Show on stream" and "Take off stream".
 _Avoid_: On air (for an item), live (for an item)
 
@@ -167,7 +167,7 @@ _Avoid_: screen, takeover screen
 An image the streamer places anywhere on the picture: a sponsor, their
 socials, a logo, a frame. Assets → Banners imports and manages them; the
 Scene page places them and shows or hides them ("Show", "Hide"). A banner
-stays over a takeover and under captions, Buddy and the highlight card.
+stays over a takeover and under captions, Sidekick and the highlight card.
 _Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
 name)
 
@@ -313,7 +313,7 @@ _Avoid_: onboarding (in copy), Setup alone (also a sidebar group and a
 Destinations tab)
 
 **Stream Manager**:
-The live dashboard window: chat, activity, Buddy and the stats bar.
+The live dashboard window: chat, activity, Sidekick and the stats bar.
 _Avoid_: Chat window, Comments window, comments (for chat)
 
 **Chat**:
@@ -390,32 +390,43 @@ What docs and the website call the way agents connect. In agent apps the
 server is named `videorc`.
 _Avoid_: Videorc API, MCP server (in the app's own copy)
 
-### Buddy and Premium
+### Sidekick and Premium
 
-**Buddy**:
-Videorc's AI companion on stream, with no article ("Buddy reads chat"), or the name
-the streamer gave it when the character speaks or acts ("Grum: 5 people
-asking…"). "Buddies" for more than one. "Golem" names only the stone golem
-creature, never the feature.
-_Avoid_: the Buddy, co-host, Orcle, pet, sidekick
+**Sidekick**:
+Videorc's AI companion on stream, with no article ("Sidekick reads chat"),
+or the name the streamer gave it when the character speaks or acts ("Grum: 5
+people asking…"). "Sidekicks" for more than one. Its default name is
+Sidekick, and it is the word that wakes it ("Sidekick, clip that"); speech
+to text also writes "side kick" or "side-kick", and all three wake it. It was
+called Buddy until plan 236, because speech to text heard "Buddy" as "body";
+"buddy" still wakes it, hidden, for two releases. Names a program reads keep
+`buddy` (`/api/buddy/*`, `cohost.buddy*`, `buddy_say`, saved values). "Golem"
+names only the stone golem creature, never the feature.
+_Avoid_: Buddy, buddy, co-host (in copy), the Sidekick, Orcle, pet
 
-**Buddy Live**:
-The switch that lets Buddy join a livestream.
-_Avoid_: Joins my streams, chat mode (for the on switch)
+**Sidekick Live**:
+The switch that lets Sidekick join a livestream.
+_Avoid_: Buddy Live, Joins my streams, chat mode (for the on switch)
 
 **{name} talks**:
-How Buddy talks on its own, named after the streamer's Buddy ("Golmar
-talks", else "Buddy talks"): Off, Bubble (in its bubble on stream, never in
-chat) or Suggest (a card; one click posts it to chat as you). Buddy never
-posts in your chat on its own. It never turns Buddy on or off; Buddy Live
-does. Plan 211.
+How Sidekick talks on its own, named after the streamer's Sidekick ("Golmar
+talks", else "Sidekick talks"): Off, Bubble (in its bubble on stream, never
+in chat) or Suggest (a card; one click posts it to chat as you). Sidekick
+never posts in your chat on its own. It never turns Sidekick on or off;
+Sidekick Live does. Plan 211.
 _Avoid_: Chat posting, chat mode, auto chat, Auto (gone since plan 211)
 
+**`/sidekick`**:
+The Stream Manager composer's command that asks Sidekick to do something
+("/sidekick switch to BRB"). `/buddy` still works, unlisted, for two
+releases.
+_Avoid_: /buddy (in copy)
+
 **Profile**:
-The Buddy page's first tab: Buddy Live and its status, My Buddies, the look,
-the personality and Cloud AI. The page is Buddy; its tabs are Profile, Chat,
-Voice, Reports and Clean cut.
-_Avoid_: the Buddy tab (for the first tab)
+The Sidekick page's first tab: Sidekick Live and its status, My Sidekicks,
+the look, the personality and Cloud AI. The page is Sidekick; its tabs are
+Profile, Chat, Voice, Reports and Clean cut.
+_Avoid_: the Sidekick tab (for the first tab)
 
 **Premium**:
 The paid plan. A locked feature says "{Feature} is part of Videorc Premium."
