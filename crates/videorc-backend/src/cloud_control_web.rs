@@ -581,15 +581,15 @@ pub(crate) struct RemuxOutcome {
 }
 
 /// FFmpeg's arguments for the remux: the playlist by path (never a URL on a
-/// command line), streams copied, the index moved to the front. `-n`: the
-/// output name is chosen free, and nothing is ever overwritten.
+/// command line), streams copied, the index moved to the front. `-y`: the
+/// output is an owned part file; its MP4 format is explicit despite `.part`.
 pub(crate) fn remux_args(playlist: &Path, output: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-hide_banner",
         "-loglevel",
         "error",
         "-nostdin",
-        "-n",
+        "-y",
         "-protocol_whitelist",
         REMUX_PROTOCOL_WHITELIST,
         "-i",
@@ -599,7 +599,7 @@ pub(crate) fn remux_args(playlist: &Path, output: &Path) -> Vec<OsString> {
     .collect();
     args.push(crate::ffmpeg::ffmpeg_path_arg(playlist));
     args.extend(
-        ["-c", "copy", "-movflags", "+faststart"]
+        ["-c", "copy", "-movflags", "+faststart", "-f", "mp4"]
             .iter()
             .map(OsString::from),
     );
@@ -842,17 +842,59 @@ async fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()>
     file.flush().await
 }
 
-/// `folder/name`, or the first `folder/stem (n).ext` that is free.
-fn free_output_path(folder: &Path, name: &str) -> PathBuf {
-    let first = folder.join(name);
-    if !first.exists() {
-        return first;
+/// Every cleanup path owns exactly one create-new file. The final name is
+/// claimed only after the remux has succeeded, under the same rule.
+struct OwnedDownloadFile(Option<PathBuf>);
+
+impl OwnedDownloadFile {
+    fn create(path: PathBuf) -> std::io::Result<Self> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        options.open(&path)?;
+        Ok(Self(Some(path)))
     }
-    let (stem, extension) = name.rsplit_once('.').unwrap_or((name, "mp4"));
-    (2..)
-        .map(|n| folder.join(format!("{stem} ({n}).{extension}")))
-        .find(|candidate| !candidate.exists())
-        .unwrap_or(first)
+
+    fn path(&self) -> &Path {
+        self.0.as_deref().expect("owned file")
+    }
+
+    fn part(folder: &Path, name: &str) -> std::io::Result<Self> {
+        Self::create(folder.join(format!(".{name}.{}.part", uuid::Uuid::new_v4())))
+    }
+
+    fn finish(mut self, folder: &Path, name: &str) -> std::io::Result<PathBuf> {
+        let (stem, extension) = name.rsplit_once('.').unwrap_or((name, "mp4"));
+        for n in 1.. {
+            let candidate = if n == 1 {
+                folder.join(name)
+            } else {
+                folder.join(format!("{stem} ({n}).{extension}"))
+            };
+            let mut claim = match Self::create(candidate.clone()) {
+                Ok(claim) => claim,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            };
+            std::fs::rename(self.path(), &candidate)?;
+            self.0 = None;
+            claim.0 = None;
+            return Ok(candidate);
+        }
+        unreachable!()
+    }
+}
+
+impl Drop for OwnedDownloadFile {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// A managed recording as an MP4 in `folder`: the playlist fetched, written
@@ -887,17 +929,18 @@ where
     write_private_file(&playlist_path, local_playlist.as_bytes())
         .await
         .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
-    let output = free_output_path(folder, &recording.file_name());
-    let outcome = remux(remux_args(&playlist_path, &output)).await;
+    let part = OwnedDownloadFile::part(folder, &recording.file_name())
+        .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
+    let outcome = remux(remux_args(&playlist_path, part.path())).await;
     drop(temporary);
     match outcome {
-        Ok(outcome) if outcome.success => Ok(output),
+        Ok(outcome) if outcome.success => part
+            .finish(folder, &recording.file_name())
+            .map_err(|error| anyhow::anyhow!(storage_problem(&error))),
         Ok(outcome) => {
-            let _ = tokio::fs::remove_file(&output).await;
             bail!("{}", remux_problem(&outcome.stderr));
         }
         Err(error) => {
-            let _ = tokio::fs::remove_file(&output).await;
             bail!("FFmpeg could not be started: {error}");
         }
     }
@@ -2085,7 +2128,7 @@ mod tests {
                 "-loglevel",
                 "error",
                 "-nostdin",
-                "-n",
+                "-y",
                 "-protocol_whitelist",
                 "file",
                 "-i",
@@ -2094,6 +2137,8 @@ mod tests {
                 "copy",
                 "-movflags",
                 "+faststart",
+                "-f",
+                "mp4",
                 "/tmp/out.mp4"
             ]
         );
@@ -2145,6 +2190,28 @@ rtmps://h/app/key 'http://x.test/y'";
         ] {
             assert_eq!(named(odd, "../x"), "talk-h.mp4", "{odd}");
         }
+    }
+
+    #[test]
+    fn colliding_downloads_only_remove_their_own_parts_and_claim_distinct_names() {
+        let temporary = TemporaryRecordingDirectory::create().unwrap();
+        let folder = &temporary.0;
+        let first = OwnedDownloadFile::part(folder, "take.mp4").unwrap();
+        let second = OwnedDownloadFile::part(folder, "take.mp4").unwrap();
+        assert_ne!(first.path(), second.path());
+        std::fs::write(first.path(), b"complete").unwrap();
+        std::fs::write(second.path(), b"incomplete").unwrap();
+        let saved = first.finish(folder, "take.mp4").unwrap();
+        drop(second); // a failing concurrent remux
+        assert_eq!(std::fs::read(&saved).unwrap(), b"complete");
+        let third = OwnedDownloadFile::part(folder, "take.mp4").unwrap();
+        std::fs::write(third.path(), b"another").unwrap();
+        assert_eq!(
+            third.finish(folder, "take.mp4").unwrap(),
+            folder.join("take (2).mp4")
+        );
+        assert_eq!(std::fs::read(saved).unwrap(), b"complete");
+        assert_eq!(std::fs::read_dir(folder).unwrap().count(), 2);
     }
 
     #[test]

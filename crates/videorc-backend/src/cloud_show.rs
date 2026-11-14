@@ -12968,14 +12968,15 @@ mod tests {
                             "-loglevel",
                             "error",
                             "-nostdin",
-                            "-n",
+                            "-y",
                             "-protocol_whitelist",
                             REMUX_PROTOCOL_WHITELIST,
                             "-i"
                         ]
                     );
                     assert_eq!(&args[9..13], ["-c", "copy", "-movflags", "+faststart"]);
-                    assert_eq!(args.len(), 14);
+                    assert_eq!(&args[13..15], ["-f", "mp4"]);
+                    assert_eq!(args.len(), 16);
                     assert!(args.iter().all(|arg| !arg.contains("://")), "{args:?}");
                     let playlist_path = std::path::PathBuf::from(&args[8]);
                     assert_eq!(std::fs::read_to_string(&playlist_path).unwrap(), expected);
@@ -12989,7 +12990,7 @@ mod tests {
                         assert_eq!(mode & 0o777, 0o600, "only this user reads the playlist");
                     }
                     *seen.lock().unwrap() = Some(playlist_path);
-                    std::fs::write(&args[13], b"mp4").unwrap();
+                    std::fs::write(args.last().unwrap(), b"mp4").unwrap();
                     Ok(RemuxOutcome {
                         success: true,
                         stderr: String::new(),
@@ -13019,11 +13020,8 @@ mod tests {
             &folder,
             |args| async move {
                 *seen.lock().unwrap() = Some(std::path::PathBuf::from(&args[8]));
-                assert_eq!(
-                    args[13].to_string_lossy(),
-                    folder_name(&args[13], "talk-2026-11-13-2004-h (2).mp4")
-                );
-                std::fs::write(&args[13], b"half").unwrap();
+                assert!(args.last().unwrap().to_string_lossy().ends_with(".part"));
+                std::fs::write(args.last().unwrap(), b"half").unwrap();
                 Ok(RemuxOutcome {
                     success: false,
                     stderr: format!(
