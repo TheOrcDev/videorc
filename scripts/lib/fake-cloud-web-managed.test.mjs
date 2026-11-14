@@ -333,11 +333,15 @@ test('a stopped take lists one row that starts with the take, now or after the a
   const rows = (await call('recordings')).body.recordings
   assert.equal(rows.length, 1)
   assert.equal(rows[0].startedAt, since)
-  web.hooks.delayNextRecordingRow(2000)
+  // 60 s at this fixture's 0.01 wait scale: 600 ms, long enough to read the
+  // list before the row on a loaded machine, then polled for (no fixed sleep).
+  web.hooks.delayNextRecordingRow(60000)
   await call('recording', { on: true }, id)
   await call('recording', { on: false }, id)
   assert.equal((await call('recordings')).body.recordings.length, 1)
-  await sleep(100)
+  const deadline = Date.now() + 5000
+  while ((await call('recordings')).body.recordings.length < 2 && Date.now() < deadline)
+    await sleep(50)
   assert.equal((await call('recordings')).body.recordings.length, 2)
   assert.throws(() => web.hooks.delayNextRecordingRow(-1))
 })
