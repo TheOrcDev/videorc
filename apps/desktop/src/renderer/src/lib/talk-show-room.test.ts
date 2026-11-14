@@ -24,10 +24,35 @@ const lk = vi.hoisted(() => {
     state = 'disconnected'
     connectedWith: { url: string; token: string } | null = null
     readonly remoteParticipants = new Map()
+    readonly streams: {
+      topic: string
+      mimeType: string
+      totalSize: number
+      attributes?: Record<string, string>
+      bytes: number
+      closed: boolean
+    }[] = []
     readonly localParticipant = {
       publishTrack: vi.fn(async () => {}),
       unpublishTrack: async () => {},
-      publishData: async () => {}
+      publishData: async () => {},
+      streamBytes: async (options: {
+        topic: string
+        mimeType: string
+        totalSize: number
+        attributes?: Record<string, string>
+      }) => {
+        const stream = { ...options, bytes: 0, closed: false }
+        this.streams.push(stream)
+        return {
+          write: async (chunk: Uint8Array) => {
+            stream.bytes += chunk.byteLength
+          },
+          close: async () => {
+            stream.closed = true
+          }
+        }
+      }
     }
     constructor() {
       FakeRoom.rooms.push(this)
@@ -275,5 +300,63 @@ describe("LiveKit's recorder in the room (plan 234 T3)", () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(publishData).toHaveBeenCalledTimes(1)
     await room.disconnect()
+  })
+})
+
+// Plan 234 T3 (wire contract 6.3): a managed show's overlays leave on the
+// host's own room connection, in the order they were handed over, and never
+// while the room is not connected.
+describe('overlays to the program page (plan 234 T3)', () => {
+  const takeover = {
+    op: 'set' as const,
+    showId: 'sh_talk',
+    slot: 'takeover' as const,
+    orientation: 'h' as const,
+    rect: { x: 0, y: 0, w: 1, h: 1 },
+    mimeType: 'image/png',
+    imageId: 'image-1'
+  }
+  const clear = {
+    op: 'clear' as const,
+    showId: 'sh_talk',
+    slot: 'takeover' as const,
+    orientation: 'h' as const
+  }
+  const image = async () => ({ bytes: new Uint8Array(32), mimeType: 'image/png' })
+
+  it('streams a set and then its clear, in that order, with the contract attributes', async () => {
+    const { room } = client()
+    await room.connect()
+    // Handed over back to back: the clear waits for the set.
+    const sends = [room.sendOverlay(takeover, image), room.sendOverlay(clear, image)]
+    await Promise.all(sends)
+    const streams = latestRoom().streams
+    expect(streams.map((stream) => stream.topic)).toEqual([
+      'videorc.overlay.set',
+      'videorc.overlay.clear'
+    ])
+    expect(streams[0].attributes).toEqual({
+      v: '1',
+      slot: 'takeover',
+      o: 'h',
+      x: '0.000000',
+      y: '0.000000',
+      w: '1.000000',
+      h: '1.000000'
+    })
+    expect(streams[0].bytes).toBe(32)
+    expect(streams[1].attributes).toBeUndefined()
+    expect(streams.every((stream) => stream.closed)).toBe(true)
+    await room.disconnect()
+  })
+
+  it('sends nothing before the room is joined or after it is left', async () => {
+    const { room } = client()
+    await room.sendOverlay(takeover, image)
+    expect(lk.FakeRoom.rooms).toHaveLength(0)
+    await room.connect()
+    await room.disconnect()
+    await room.sendOverlay(takeover, image)
+    expect(latestRoom().streams).toHaveLength(0)
   })
 })

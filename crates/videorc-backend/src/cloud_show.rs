@@ -59,10 +59,10 @@ use crate::cloud_control_web::{
     DestinationsFailure, WebControl, WebIntents,
 };
 use crate::cloud_talk::{
-    CloudCameraHook, CloudRecordingStatus, CloudRequestHook, CloudRoomStatus, CreateShowRoom,
-    GuestActionAnswer, GuestActionBody, GuestDecision, GuestsAnswer, RoomPatch, RoomSettingsAnswer,
-    RoomTokenAnswer, RunnerRecordingState, RunnerRoomState, ShowInvite, ShowRoomAnswer, TalkLimits,
-    TalkShowState,
+    CloudCameraHook, CloudOverlayHook, CloudRecordingStatus, CloudRequestHook, CloudRoomStatus,
+    CreateShowRoom, GuestActionAnswer, GuestActionBody, GuestDecision, GuestsAnswer, RoomPatch,
+    RoomSettingsAnswer, RoomTokenAnswer, RunnerRecordingState, RunnerRoomState, ShowInvite,
+    ShowRoomAnswer, TalkLimits, TalkShowState,
 };
 use crate::protocol::{AiCapabilitiesCloud, EntitlementPlan};
 use crate::streaming::{
@@ -1934,6 +1934,9 @@ pub struct CloudHooks {
     pub camera: CloudCameraHook,
     /// Plan 224: `cloud.room.requests`, one per new "wants to join".
     pub request: CloudRequestHook,
+    /// Plan 234 T3: `cloud.room.overlay`, an overlay for the host's
+    /// renderer to send to the room. Web control only.
+    pub overlay: CloudOverlayHook,
 }
 
 impl CloudHooks {
@@ -5485,6 +5488,8 @@ mod tests {
         camera_busy: Arc<std::sync::atomic::AtomicBool>,
         /// Plan 224: every `cloud.room.requests` event.
         requests: Arc<StdMutex<Vec<crate::cloud_talk::CloudRoomRequest>>>,
+        /// Plan 234 T3: every `cloud.room.overlay` event, in order.
+        overlays: Arc<StdMutex<Vec<crate::cloud_talk::CloudRoomOverlayEvent>>>,
     }
 
     fn harness(entitled: bool) -> Harness {
@@ -5499,6 +5504,7 @@ mod tests {
         let camera = Arc::new(StdMutex::new(Vec::new()));
         let camera_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let requests = Arc::new(StdMutex::new(Vec::new()));
+        let overlays = Arc::new(StdMutex::new(Vec::new()));
         let hooks = CloudHooks {
             emit: {
                 let emitted = emitted.clone();
@@ -5538,6 +5544,10 @@ mod tests {
                 let requests = requests.clone();
                 Arc::new(move |request| requests.lock().unwrap().push(request))
             },
+            overlay: {
+                let overlays = overlays.clone();
+                Arc::new(move |overlay| overlays.lock().unwrap().push(overlay))
+            },
         };
         let slot = new_cloud_show_slot_remembering(
             CloudSettings::default(),
@@ -5567,6 +5577,7 @@ mod tests {
             camera,
             camera_busy,
             requests,
+            overlays,
         }
     }
 
@@ -12454,6 +12465,219 @@ mod tests {
                 .unwrap()
                 .active
         );
+    }
+
+    fn overlay_png(width: u32, height: u32) -> String {
+        use base64::Engine as _;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(width, height, image::Rgba([200, 30, 30, 255]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    }
+
+    /// The `set` events since `from`, as (slot, orientation, ttl, image id).
+    fn overlay_sets(harness: &Harness, from: usize) -> Vec<(String, String, Option<u64>, String)> {
+        harness.overlays.lock().unwrap()[from..]
+            .iter()
+            .filter_map(|event| {
+                let json = serde_json::to_value(event).unwrap();
+                (json["op"] == "set").then(|| {
+                    (
+                        json["slot"].as_str().unwrap().to_string(),
+                        json["orientation"].as_str().unwrap().to_string(),
+                        json["ttlSeconds"].as_u64(),
+                        json["imageId"].as_str().unwrap().to_string(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    // Wire section 6.3: on a managed talk show an overlay is not an intent.
+    // The backend hands it to the host's renderer (one small event, the
+    // bytes by id), and hands the untimed ones over again when a program
+    // page joins or the renderer's room connection comes up. A card with a
+    // `ttl` is never sent twice, and a node show sends none of this.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_talk_shows_overlays_go_to_the_renderer_and_again_when_a_page_joins() {
+        use crate::cloud_talk::{CloudOverlayOrientation, CloudOverlayRect, CloudOverlaySlot};
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let web = harness.context.web.clone();
+        let context = &harness.context;
+        let card_rect = CloudOverlayRect {
+            x: 0.05,
+            y: 0.7,
+            w: 0.5,
+            h: 0.2,
+        };
+
+        // A comment card, ten seconds: one event, with the facts of 6.3 and
+        // no bytes. The bytes are there by its id.
+        context
+            .set_overlay(
+                CloudOverlaySlot::Card,
+                CloudOverlayOrientation::H,
+                &overlay_png(64, 16),
+                card_rect,
+                Some(10),
+            )
+            .await
+            .unwrap();
+        {
+            let events = harness.overlays.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            let event = serde_json::to_value(&events[0]).unwrap();
+            assert_eq!(event["op"], "set");
+            assert_eq!(event["showId"], "sh_abc");
+            assert_eq!(event["slot"], "card");
+            assert_eq!(event["orientation"], "h");
+            assert_eq!(
+                event["rect"],
+                json!({ "x": 0.05, "y": 0.7, "w": 0.5, "h": 0.2 })
+            );
+            assert_eq!(event["ttlSeconds"], 10);
+            assert_eq!(event["mimeType"], "image/png");
+            let image_id = event["imageId"].as_str().unwrap();
+            assert!(!image_id.is_empty());
+            assert_eq!(event.as_object().unwrap().len(), 8, "{event}");
+            let (mime, bytes) = lock(&context.slot)
+                .overlay_image(image_id)
+                .expect("the card's bytes are held");
+            assert_eq!(mime, "image/png");
+            assert!(bytes.starts_with(b"\x89PNG"));
+            assert!(lock(&context.slot).overlay_image("nope").is_none());
+        }
+
+        // A takeover, per output, untimed: no `ttlSeconds` key at all.
+        for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+            context
+                .set_overlay(
+                    CloudOverlaySlot::Takeover,
+                    orientation,
+                    &overlay_png(96, 54),
+                    CloudOverlayRect::FULL,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let takeover = overlay_sets(&harness, 1);
+        assert_eq!(takeover.len(), 2);
+        assert_eq!(takeover[0].0, "takeover");
+        assert_eq!(takeover[0].2, None);
+        let untimed = serde_json::to_value(&harness.overlays.lock().unwrap()[1]).unwrap();
+        assert!(untimed.get("ttlSeconds").is_none(), "{untimed}");
+        // Nothing of it was an intent: no route was called.
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.managed.lock().unwrap().stages.is_empty());
+
+        // A program page joins: the takeover goes again, by the same ids,
+        // and the card does not.
+        let sent = harness.overlays.lock().unwrap().len();
+        web.set_state(managed_talk_state(json!([]), false, 1));
+        wait_until(|| harness.overlays.lock().unwrap().len() == sent + 2).await;
+        assert_eq!(overlay_sets(&harness, sent), takeover);
+        // The same count again says nothing new.
+        web.set_state(managed_talk_state(json!([]), true, 1));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(harness.overlays.lock().unwrap().len(), sent + 2);
+
+        // The renderer's room connection comes up (a reconnect): again.
+        let sent = harness.overlays.lock().unwrap().len();
+        context.report_client(crate::cloud_talk::RoomClientReportParams {
+            state: crate::cloud_talk::CloudRoomClientState::Connected,
+            detail: None,
+        });
+        assert_eq!(overlay_sets(&harness, sent), takeover);
+        // Any other report sends nothing.
+        let sent = harness.overlays.lock().unwrap().len();
+        context.report_client(crate::cloud_talk::RoomClientReportParams {
+            state: crate::cloud_talk::CloudRoomClientState::Reconnecting,
+            detail: None,
+        });
+        assert_eq!(harness.overlays.lock().unwrap().len(), sent);
+
+        // The takeover comes down on one output: a clear, its bytes gone,
+        // and the next page to join gets the other output's alone.
+        context
+            .clear_overlay(CloudOverlaySlot::Takeover, CloudOverlayOrientation::H)
+            .await
+            .unwrap();
+        let cleared =
+            serde_json::to_value(harness.overlays.lock().unwrap().last().unwrap()).unwrap();
+        assert_eq!(
+            cleared,
+            json!({ "op": "clear", "showId": "sh_abc", "slot": "takeover", "orientation": "h" })
+        );
+        assert!(lock(&context.slot).overlay_image(&takeover[0].3).is_none());
+        let sent = harness.overlays.lock().unwrap().len();
+        web.set_state(managed_talk_state(json!([]), true, 2));
+        wait_until(|| harness.overlays.lock().unwrap().len() == sent + 1).await;
+        assert_eq!(overlay_sets(&harness, sent), vec![takeover[1].clone()]);
+
+        // An image over the page's 2 MiB: a full-frame picture with no
+        // transparency leaves as a JPEG at its own size.
+        use base64::Engine as _;
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let noise = image::RgbaImage::from_fn(1280, 720, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let bytes = seed.to_le_bytes();
+            image::Rgba([bytes[0], bytes[1], bytes[2], 255])
+        });
+        let mut heavy = std::io::Cursor::new(Vec::new());
+        noise.write_to(&mut heavy, image::ImageFormat::Png).unwrap();
+        let heavy = heavy.into_inner();
+        assert!(heavy.len() > crate::cloud_talk::OVERLAY_MAX_BYTES);
+        let sent = harness.overlays.lock().unwrap().len();
+        context
+            .set_overlay(
+                CloudOverlaySlot::Takeover,
+                CloudOverlayOrientation::H,
+                &base64::engine::general_purpose::STANDARD.encode(heavy),
+                CloudOverlayRect::FULL,
+                None,
+            )
+            .await
+            .unwrap();
+        let fitted = serde_json::to_value(&harness.overlays.lock().unwrap()[sent]).unwrap();
+        assert_eq!(fitted["mimeType"], "image/jpeg");
+        let (_, bytes) = lock(&context.slot)
+            .overlay_image(fitted["imageId"].as_str().unwrap())
+            .unwrap();
+        assert!(bytes.len() <= crate::cloud_talk::OVERLAY_MAX_BYTES);
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1280, 720));
+
+        // Closing the room drops what was up.
+        context
+            .close_room(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert!(lock(&context.slot).overlay_image(&takeover[1].3).is_none());
+
+        // A node talk show: the socket's frame, and no event at all.
+        let node = harness_remembering(true, None);
+        let mut runner =
+            crate::cloud_talk::open_talk_show_for_tests(&node.context.slot, "sh_talk", true);
+        let set = node.context.set_overlay(
+            CloudOverlaySlot::Takeover,
+            CloudOverlayOrientation::H,
+            "iVBORw0KGgo=",
+            CloudOverlayRect::FULL,
+            None,
+        );
+        let answer = async {
+            let intent = runner.recv().await.expect("the runner's intent");
+            intent.answer_for_tests(None)
+        };
+        let (sent, frame) = tokio::join!(set, answer);
+        sent.unwrap();
+        assert_eq!(frame["kind"], "overlay.set");
+        assert!(node.overlays.lock().unwrap().is_empty());
     }
 
     // A managed talk show after a relaunch (wire sections 2.1 and 6.2): the

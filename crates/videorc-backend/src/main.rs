@@ -668,6 +668,12 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
         )
         .route("/preview/{id}", get(preview_handler))
         .route("/sessions/{id}/poster", get(session_poster_handler))
+        // Plan 234 T3: an overlay's bytes for the renderer, which sends
+        // them to a managed talk show's room.
+        .route(
+            cloud_talk::OVERLAY_IMAGE_ROUTE,
+            get(cloud_talk::overlay_image_handler),
+        )
         .route("/compositor/status", get(compositor_status_handler))
         .route(
             "/process/shutdown/prepare",
@@ -15423,6 +15429,7 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let remember_state = state.clone();
     let camera_state = state.clone();
     let request_state = state.clone();
+    let overlay_state = state.clone();
     cloud_show::CloudHooks {
         emit: std::sync::Arc::new(move |status| {
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
@@ -15469,6 +15476,11 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
         // Plan 224: "Ada wants to join", one event per new request.
         request: std::sync::Arc::new(move |request| {
             request_state.emit_event(cloud_talk::CLOUD_ROOM_REQUESTS_EVENT, request);
+        }),
+        // Plan 234 T3: an overlay for the host's renderer to send to the
+        // room. Small: the bytes are fetched from `OVERLAY_IMAGE_ROUTE`.
+        overlay: std::sync::Arc::new(move |overlay| {
+            overlay_state.emit_event(cloud_talk::CLOUD_ROOM_OVERLAY_EVENT, overlay);
         }),
     }
 }

@@ -124,6 +124,7 @@ import type {
   CloudGuestActParams,
   CloudGuestDecideParams,
   CloudRecordingStatus,
+  CloudRoomOverlayEvent,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
   CloudRoomRequest,
@@ -868,6 +869,8 @@ export interface BackendEventMap {
   'cloud.state': CloudStatus
   /** Plan 224: one per new "wants to join", for the Studio's alert. */
   'cloud.room.requests': CloudRoomRequest
+  /** Plan 234 T3: an overlay for the host's renderer to send to the room. */
+  'cloud.room.overlay': CloudRoomOverlayEvent
   /** Plan 223: the full alert list on every change. */
   'watchdog.alerts': WatchdogAlertsView
   'cohost.report.saved': CohostReportSavedEvent
@@ -6316,6 +6319,42 @@ const cloudTalkGoLiveParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CloudTalkGoLiveParams>
 const cloudOpenFlagSchema = objectSchema({ open: booleanSchema }, { allowUnknown: false })
+// Plan 234 T3: the overlay hand-off. Small by contract: the bytes are never
+// in the event (`imageId` names them on the backend's HTTP server).
+const cloudOverlaySlotSchema = enumSchema(['card', 'takeover', 'hold'])
+const cloudOverlayOrientationSchema = enumSchema(['h', 'v'])
+const cloudRoomOverlayEventSchema = unionSchema([
+  objectSchema(
+    {
+      op: literalSchema('set'),
+      showId: stringSchema({ minLength: 1, maxLength: 64 }),
+      slot: cloudOverlaySlotSchema,
+      orientation: cloudOverlayOrientationSchema,
+      rect: objectSchema(
+        {
+          x: numberSchema({ min: 0, max: 1.0001 }),
+          y: numberSchema({ min: 0, max: 1.0001 }),
+          w: numberSchema({ min: 0, max: 1.0001 }),
+          h: numberSchema({ min: 0, max: 1.0001 })
+        },
+        { allowUnknown: false }
+      ),
+      ttlSeconds: optionalSchema(numberSchema({ integer: true, min: 1, max: 86_400 })),
+      mimeType: enumSchema(['image/png', 'image/jpeg', 'image/webp']),
+      imageId: stringSchema({ minLength: 1, maxLength: 64 })
+    },
+    { allowUnknown: false }
+  ),
+  objectSchema(
+    {
+      op: literalSchema('clear'),
+      showId: stringSchema({ minLength: 1, maxLength: 64 }),
+      slot: cloudOverlaySlotSchema,
+      orientation: cloudOverlayOrientationSchema
+    },
+    { allowUnknown: false }
+  )
+]) as RuntimeSchema<CloudRoomOverlayEvent>
 
 const runtimeContracts = {
   'session.sources.get': {
@@ -7140,6 +7179,7 @@ const runtimeEventSchemas = {
   'cohost.act.result': cohostActAnswerSchema,
   'cloud.state': cloudStatusSchema,
   'cloud.room.requests': cloudRoomRequestSchema,
+  'cloud.room.overlay': cloudRoomOverlayEventSchema,
   'watchdog.alerts': watchdogAlertsViewSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   'cohost.community.changed': communitySummarySchema,

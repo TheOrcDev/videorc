@@ -842,6 +842,13 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         // The `rev` last dropped as stale: the same one a second time is the
         // web's current state, and is taken.
         let mut dropped: Option<u64> = None;
+        // The program pages that had joined when this loop began.
+        let mut page_joins: u32 = lock(&self.context.slot)
+            .runner
+            .as_ref()
+            .and_then(|runner| runner.room.as_ref())
+            .and_then(|room| room.page_joins)
+            .unwrap_or(0);
         loop {
             if !self.current() {
                 return LoopExit::Superseded;
@@ -891,9 +898,16 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                         continue;
                     }
                     let fresh = dropped == Some(rev);
+                    let joins = state.room.as_ref().and_then(|room| room.page_joins);
                     if self.absorb_web_state(&web, rev, *state, fresh) {
                         dropped = None;
                         self.resend_legs_that_ask(&call, &mut resent);
+                        // Wire section 6.3: a program page joined. Byte
+                        // streams are not replayed, so what is up goes again.
+                        if joins.is_some_and(|joins| joins > page_joins) {
+                            self.context.resend_untimed_overlays();
+                        }
+                        page_joins = joins.unwrap_or(page_joins).max(page_joins);
                     } else {
                         dropped = Some(rev);
                     }
@@ -1596,6 +1610,38 @@ mod tests {
             assert!(
                 codes(list).contains(&(409, code.to_string())),
                 "{list} {code}"
+            );
+        }
+        assert_eq!(
+            fixture["overlay"]["maxBytes"].as_u64(),
+            Some(crate::cloud_talk::OVERLAY_MAX_BYTES as u64)
+        );
+        // The slots and orientations of the overlay hand-off are the wire's.
+        for (slot, orientation) in [
+            (
+                crate::cloud_talk::CloudOverlaySlot::Card,
+                crate::cloud_talk::CloudOverlayOrientation::H,
+            ),
+            (
+                crate::cloud_talk::CloudOverlaySlot::Takeover,
+                crate::cloud_talk::CloudOverlayOrientation::V,
+            ),
+            (
+                crate::cloud_talk::CloudOverlaySlot::Hold,
+                crate::cloud_talk::CloudOverlayOrientation::H,
+            ),
+        ] {
+            assert!(
+                fixture["overlay"]["slots"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(slot.as_str()))
+            );
+            assert!(
+                fixture["overlay"]["orientations"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(orientation.as_str()))
             );
         }
         assert_eq!(

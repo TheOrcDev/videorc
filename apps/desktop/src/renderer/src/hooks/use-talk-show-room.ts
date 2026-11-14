@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BackendClient } from '@/backendClient'
 import type {
   CloudRoomOpenParams,
+  CloudRoomOverlayEvent,
   CloudRoomTokenAnswer,
   CloudStage,
   CloudStatus,
@@ -32,6 +33,7 @@ export { NO_TALK_SHOW, type TalkShowContextValue }
 const IDLE_SNAPSHOT = IDLE_TALK_SHOW_SNAPSHOT
 
 const loadRoomClient = () => import('@/lib/talk-show-room')
+const loadOverlays = () => import('@/lib/talk-show-overlays')
 
 export type TalkShowRoomControllerDeps = {
   client: BackendClient | null
@@ -196,6 +198,31 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     if (!roomOpen) return
     void clientRef.current?.sendStage(stageRef.current)
   }, [roomOpen, stageKey])
+
+  // Plan 234 T3 (wire contract 6.3): on a managed show the backend hands
+  // each overlay to this renderer, which holds the host's room connection,
+  // and the program page takes it as a byte stream. The event never fires
+  // on a node show; the check below holds that here too.
+  const cloudStatusRef = useRef(cloudStatus)
+  cloudStatusRef.current = cloudStatus
+  useEffect(() => {
+    if (!client || !roomOpen) return
+    return client.on('cloud.room.overlay', (event: CloudRoomOverlayEvent) => {
+      void (async () => {
+        const overlays = await loadOverlays()
+        const status = cloudStatusRef.current
+        if (!overlays.overlayIsForThisRoom(event, status, status?.room?.phase ?? 'closed')) return
+        await clientRef.current?.sendOverlay(event, (imageId) =>
+          overlays.fetchOverlayImage(overlays.overlayImageUrl(client.connection, imageId))
+        )
+      })().catch((error: unknown) => {
+        console.warn(
+          '[talk-show] an overlay could not be sent',
+          error instanceof Error ? error.message : String(error)
+        )
+      })
+    })
+  }, [client, roomOpen])
 
   useEffect(
     () => () => {

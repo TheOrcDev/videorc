@@ -34,8 +34,14 @@ import {
   type RemoteTrackPublication
 } from 'livekit-client'
 
-import type { CloudRoomClientState, CloudRoomQuality, CloudRoomTokenAnswer } from '@/lib/backend'
+import type {
+  CloudRoomClientState,
+  CloudRoomOverlayEvent,
+  CloudRoomQuality,
+  CloudRoomTokenAnswer
+} from '@/lib/backend'
 import { matchMicrophoneDeviceId } from '@/lib/mic-meter'
+import { sendOverlay, type OverlayImage } from '@/lib/talk-show-overlays'
 import {
   RemoteAudioAttachments,
   isRecorderIdentity,
@@ -172,6 +178,8 @@ export class TalkShowRoomClient {
   readonly #audio: RemoteAudioAttachments<HTMLMediaElement>
   #snapshot: TalkShowRoomSnapshot = IDLE_TALK_SHOW_ROOM
   #problem: string | null = null
+  /** Overlays go one at a time, in the order they were handed over. */
+  #overlays: Promise<void> = Promise.resolve()
 
   constructor(deps: TalkShowRoomDeps) {
     this.#deps = deps
@@ -311,6 +319,32 @@ export class TalkShowRoomClient {
       track.stop()
     }
     this.#publish()
+  }
+
+  /**
+   * An overlay to a managed show's program page (plan 234 T3, wire contract
+   * 6.3), as a byte stream on this connection: the page takes one only from
+   * the host. In order, so a clear never overtakes its set. While the room
+   * is not connected nothing is sent; the backend hands what is up over
+   * again when this connection reports back.
+   */
+  sendOverlay(
+    event: CloudRoomOverlayEvent,
+    image: (imageId: string) => Promise<OverlayImage | null>
+  ): Promise<void> {
+    this.#overlays = this.#overlays.then(async () => {
+      const room = this.#room
+      if (this.#closed || !room || room.state !== ConnectionState.Connected) return
+      try {
+        const result = await sendOverlay(event, { publisher: room.localParticipant, image })
+        if (result === 'refused') {
+          console.warn('[talk-show] an overlay was not one the program page takes', event.slot)
+        }
+      } catch (error) {
+        console.warn('[talk-show] an overlay did not reach the room', messageOf(error))
+      }
+    })
+    return this.#overlays
   }
 
   /** The Program monitor (D7): the runner's return, subscribed on demand. */

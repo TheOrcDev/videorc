@@ -818,6 +818,156 @@ impl CloudOverlayRect {
     }
 }
 
+// --- Overlays on web control: the hand-off to the renderer (plan 234 T3) ----
+//
+// On the socket the backend sends `overlay.set` and `overlay.clear` to the
+// runner. A managed talk show has no runner: the program page takes
+// overlays as byte streams, only from `host:<showId>`, and only the
+// renderer holds the host's room connection (wire section 6.3). So here the
+// backend hands each overlay to the renderer, in two parts:
+//
+// - `cloud.room.overlay`, one small event per change: put this up, or take
+//   that down. Never the bytes, and never on a node show or a solo show.
+// - The bytes, by the event's `imageId`, from the backend's token-checked
+//   HTTP server (`OVERLAY_IMAGE_ROUTE`), the way it serves posters.
+//
+// The backend keeps what is up, one per slot and orientation. A program
+// page that joins later saw nothing sent before it, and neither did a
+// renderer that just reconnected, so the untimed ones (a takeover) are
+// handed over again when `room.pageJoins` grows and when the renderer's
+// room connection comes up. A card with a `ttl` is never sent twice.
+
+/// `cloud.room.overlay`: what the host's renderer sends to the room.
+pub const CLOUD_ROOM_OVERLAY_EVENT: &str = "cloud.room.overlay";
+/// `GET /cloud/overlays/{imageId}?token=`: an overlay's bytes.
+pub const OVERLAY_IMAGE_ROUTE: &str = "/cloud/overlays/{id}";
+/// The program page takes an overlay of at most 2 MiB (wire section 6.3).
+pub const OVERLAY_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// The event's payload. `set` names the picture by `imageId`; the renderer
+/// fetches it and streams it on `videorc.overlay.set` with the attributes
+/// of section 6.3. `clear` becomes `videorc.overlay.clear`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum CloudRoomOverlayEvent {
+    #[serde(rename_all = "camelCase")]
+    Set {
+        show_id: String,
+        slot: CloudOverlaySlot,
+        orientation: CloudOverlayOrientation,
+        rect: CloudOverlayRect,
+        /// Whole seconds; absent on an overlay that stays until cleared.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_seconds: Option<u64>,
+        mime_type: String,
+        image_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Clear {
+        show_id: String,
+        slot: CloudOverlaySlot,
+        orientation: CloudOverlayOrientation,
+    },
+}
+
+/// Hands an overlay event to the renderer (`AppState::emit_event`).
+pub type CloudOverlayHook = Arc<dyn Fn(CloudRoomOverlayEvent) + Send + Sync>;
+
+/// An overlay that is up on a managed talk show, with its bytes.
+#[derive(Clone)]
+pub(crate) struct StoredOverlay {
+    image_id: String,
+    slot: CloudOverlaySlot,
+    orientation: CloudOverlayOrientation,
+    rect: CloudOverlayRect,
+    ttl_seconds: Option<u64>,
+    mime_type: &'static str,
+    bytes: axum::body::Bytes,
+}
+
+impl StoredOverlay {
+    fn set_event(&self, show_id: &str) -> CloudRoomOverlayEvent {
+        CloudRoomOverlayEvent::Set {
+            show_id: show_id.to_string(),
+            slot: self.slot,
+            orientation: self.orientation,
+            rect: self.rect,
+            ttl_seconds: self.ttl_seconds,
+            mime_type: self.mime_type.to_string(),
+            image_id: self.image_id.clone(),
+        }
+    }
+}
+
+/// An overlay's image as the page takes it: PNG, JPEG or WebP, at most
+/// `max_bytes`. A PNG inside the limit goes as it is. A larger one with no
+/// transparency (a full-frame takeover) becomes a JPEG at its own size; one
+/// that needs its transparency is scaled down as a PNG.
+fn fit_overlay_image(png: Vec<u8>, max_bytes: usize) -> Result<(Vec<u8>, &'static str)> {
+    use anyhow::Context as _;
+    if png.len() <= max_bytes {
+        return Ok((png, "image/png"));
+    }
+    let decoded = image::load_from_memory(&png).context("The overlay image did not decode.")?;
+    let opaque = !decoded.color().has_alpha()
+        || decoded.to_rgba8().pixels().all(|pixel| pixel[3] == u8::MAX);
+    if opaque {
+        let rgb = decoded.to_rgb8();
+        for quality in [88, 75, 60] {
+            let mut out = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
+                .encode_image(&rgb)
+                .context("The overlay image could not be re-encoded as JPEG.")?;
+            if out.len() <= max_bytes {
+                return Ok((out, "image/jpeg"));
+            }
+        }
+    }
+    let fitted = crate::cloud_control_web::fit_hold_image(png, u32::MAX, max_bytes)?;
+    Ok((fitted, "image/png"))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OverlayImageQuery {
+    token: String,
+}
+
+/// `GET /cloud/overlays/{imageId}`: the bytes of an overlay that is up, for
+/// the renderer and nobody else (the backend's own token). An id that is
+/// not up any more is a 404: the renderer then sends nothing.
+pub(crate) async fn overlay_image_handler(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    axum::extract::Path(image_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<OverlayImageQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse as _;
+    if crate::backend_authority::authenticate_backend_token(
+        &query.token,
+        &state.token,
+        &state.admin_token,
+    )
+    .is_none()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let found = lock(&state.cloud_show).overlay_image(&image_id);
+    match found {
+        Some((mime_type, bytes)) => (
+            [
+                (header::CONTENT_TYPE, mime_type),
+                (header::CACHE_CONTROL, "no-store"),
+                // The renderer reads it with `fetch`, as it reads the
+                // proof surface's frames.
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// The one answer that carries a token (`cloud.room.token.refresh`).
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -927,6 +1077,9 @@ pub(crate) struct TalkShowState {
     pub poll_cursor: Option<String>,
     pub poll_generation: u64,
     pub seen_requests: HashSet<String>,
+    /// Plan 234 (web control): the overlays that are up, one per slot and
+    /// orientation, with their bytes. Empty on a node show.
+    pub(crate) overlays: Vec<StoredOverlay>,
 }
 
 impl std::fmt::Debug for TalkShowState {
@@ -973,6 +1126,7 @@ impl TalkShowState {
             poll_cursor: None,
             poll_generation: 0,
             seen_requests: HashSet::new(),
+            overlays: Vec::new(),
         }
     }
 
@@ -1014,6 +1168,20 @@ impl TalkShowState {
 }
 
 impl CloudShowRuntime {
+    /// Plan 234: the bytes of an overlay that is up on a managed talk show,
+    /// by the id its event named, with their type.
+    pub(crate) fn overlay_image(
+        &self,
+        image_id: &str,
+    ) -> Option<(&'static str, axum::body::Bytes)> {
+        self.talk.as_ref().and_then(|talk| {
+            talk.overlays
+                .iter()
+                .find(|overlay| overlay.image_id == image_id)
+                .map(|overlay| (overlay.mime_type, overlay.bytes.clone()))
+        })
+    }
+
     /// A room this desktop holds (opening, open or closing).
     pub fn talk_show_open(&self) -> bool {
         self.talk.as_ref().is_some_and(|talk| {
@@ -1695,6 +1863,11 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         if !rect.is_valid() {
             return Err("the overlay rect is not inside the canvas".to_string());
         }
+        if self.show_control_kind() == Some(ControlKind::Web) {
+            return self
+                .hand_overlay_to_the_room(slot, orientation, png_base64, rect, ttl_seconds)
+                .await;
+        }
         let tx = self.control_tx()?;
         let id = new_intent_id();
         let mut frame = json!({
@@ -1717,6 +1890,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         slot: CloudOverlaySlot,
         orientation: CloudOverlayOrientation,
     ) -> std::result::Result<(), String> {
+        if self.show_control_kind() == Some(ControlKind::Web) {
+            return self.clear_overlay_in_the_room(slot, orientation);
+        }
         let tx = self.control_tx()?;
         let id = new_intent_id();
         let frame = json!({
@@ -1731,6 +1907,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
 
     /// The renderer's own room connection, for the status (and the watchdog).
     pub fn report_client(&self, params: RoomClientReportParams) -> CloudStatus {
+        let connected = params.state == CloudRoomClientState::Connected;
         {
             let mut runtime = lock(&self.slot);
             if let Some(talk) = runtime.talk.as_mut() {
@@ -1739,7 +1916,105 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         }
         self.hooks.emit_from(&self.slot);
+        // Plan 234 (6.3): a renderer whose room connection just came up
+        // sent nothing while it was away; what is up goes again.
+        if connected {
+            self.resend_untimed_overlays();
+        }
         lock(&self.slot).status()
+    }
+
+    /// Plan 234 (wire section 6.3): the overlay to the host's renderer,
+    /// which sends it to the room. Returns once the hand-off is made: the
+    /// page gives no answer, so there is none to wait for.
+    async fn hand_overlay_to_the_room(
+        &self,
+        slot: CloudOverlaySlot,
+        orientation: CloudOverlayOrientation,
+        png_base64: &str,
+        rect: CloudOverlayRect,
+        ttl_seconds: Option<u64>,
+    ) -> std::result::Result<(), String> {
+        use base64::Engine as _;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(png_base64)
+            .map_err(|_| "the overlay image is not base64".to_string())?;
+        let (bytes, mime_type) = if png.len() <= OVERLAY_MAX_BYTES {
+            (png, "image/png")
+        } else {
+            tokio::task::spawn_blocking(move || fit_overlay_image(png, OVERLAY_MAX_BYTES))
+                .await
+                .map_err(|_| "the overlay image task stopped".to_string())?
+                .map_err(|error| format!("{error:#}"))?
+        };
+        let event = {
+            let mut runtime = lock(&self.slot);
+            let show_id = runtime.show.as_ref().map(|show| show.record.id.clone());
+            let (Some(show_id), Some(talk)) = (show_id, runtime.talk.as_mut()) else {
+                return Err("The room is closed.".to_string());
+            };
+            let stored = StoredOverlay {
+                image_id: uuid::Uuid::new_v4().to_string(),
+                slot,
+                orientation,
+                rect,
+                // The page takes a whole number of 1 or more.
+                ttl_seconds: ttl_seconds.map(|seconds| seconds.max(1)),
+                mime_type,
+                bytes: axum::body::Bytes::from(bytes),
+            };
+            talk.overlays
+                .retain(|overlay| !(overlay.slot == slot && overlay.orientation == orientation));
+            let event = stored.set_event(&show_id);
+            talk.overlays.push(stored);
+            event
+        };
+        (self.hooks.overlay)(event);
+        Ok(())
+    }
+
+    fn clear_overlay_in_the_room(
+        &self,
+        slot: CloudOverlaySlot,
+        orientation: CloudOverlayOrientation,
+    ) -> std::result::Result<(), String> {
+        let event = {
+            let mut runtime = lock(&self.slot);
+            let show_id = runtime.show.as_ref().map(|show| show.record.id.clone());
+            let (Some(show_id), Some(talk)) = (show_id, runtime.talk.as_mut()) else {
+                return Err("The room is closed.".to_string());
+            };
+            talk.overlays
+                .retain(|overlay| !(overlay.slot == slot && overlay.orientation == orientation));
+            CloudRoomOverlayEvent::Clear {
+                show_id,
+                slot,
+                orientation,
+            }
+        };
+        (self.hooks.overlay)(event);
+        Ok(())
+    }
+
+    /// The untimed overlays that are up (a takeover), handed to the
+    /// renderer again: for a program page that joined after they were sent
+    /// (`room.pageJoins` grew), and for a renderer that just reconnected. A
+    /// card with a `ttl` is not sent again.
+    pub(crate) fn resend_untimed_overlays(&self) {
+        let events: Vec<CloudRoomOverlayEvent> = {
+            let runtime = lock(&self.slot);
+            let (Some(show), Some(talk)) = (runtime.show.as_ref(), runtime.talk.as_ref()) else {
+                return;
+            };
+            talk.overlays
+                .iter()
+                .filter(|overlay| overlay.ttl_seconds.is_none())
+                .map(|overlay| overlay.set_event(&show.record.id))
+                .collect()
+        };
+        for event in events {
+            (self.hooks.overlay)(event);
+        }
     }
 
     /// Resume after a relaunch (C-G8): the web still lists the talk show, the

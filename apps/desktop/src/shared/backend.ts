@@ -5536,6 +5536,43 @@ export interface CloudRoomRequest {
   device: CloudGuestDevice
 }
 
+/**
+ * `cloud.room.overlay` (plan 234 T3): an overlay for the host's renderer to
+ * send to a managed talk show's room, where the program page draws it. Only
+ * the renderer holds the host's room connection, and the page takes
+ * overlays from nobody else. Never sent on a node show or a solo show.
+ *
+ * The event is small: `set` names the picture by `imageId`, and the bytes
+ * come from the backend's HTTP server (`/cloud/overlays/{imageId}`).
+ */
+export type CloudOverlaySlot = 'card' | 'takeover' | 'hold'
+export type CloudOverlayOrientation = 'h' | 'v'
+export interface CloudOverlayRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+export type CloudRoomOverlayEvent =
+  | {
+      op: 'set'
+      showId: string
+      slot: CloudOverlaySlot
+      orientation: CloudOverlayOrientation
+      /** Fractions of the canvas, 0 to 1. */
+      rect: CloudOverlayRect
+      /** Whole seconds; absent on an overlay that stays until cleared. */
+      ttlSeconds?: number
+      mimeType: string
+      imageId: string
+    }
+  | {
+      op: 'clear'
+      showId: string
+      slot: CloudOverlaySlot
+      orientation: CloudOverlayOrientation
+    }
+
 /** A guest the host let in, as videorc.com lists them. */
 export interface CloudRoomGuest {
   guestId: string
