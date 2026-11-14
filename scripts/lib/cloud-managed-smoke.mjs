@@ -239,6 +239,11 @@ export async function managedHarness(kind, pass = 1) {
     async command(command, params = {}) {
       return requestSmokeCommand(smoke, command, params, { timeoutMs: 15000 })
     },
+    // `account.refresh` is main's (the admin role): the renderer asks main for
+    // it over IPC, as the app's own account refresh does.
+    async refreshAccount() {
+      return h.eval('return await window.videorc.refreshAccount()')
+    },
     calls(route, after = 0) {
       return web.calls.filter((c) => c.route === route && c.atMs >= after)
     },

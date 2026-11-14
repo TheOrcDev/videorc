@@ -350,7 +350,7 @@ try {
       await waitFor(() => h.calls('state', at).some((c) => c.status === 401), '401', 45000)
       const polls = h.calls('state').length
       await holdFor(() => h.calls('state').length === polls, '401 still polling', 2500)
-      await h.rpc('account.refresh')
+      await h.refreshAccount()
       await h.status((s) => s.connected && s.room?.phase === 'open', 'control regained')
       await h.rpc('cloud.stage.set', { layout: 'solo', onStage: [host] })
       await h.rpc('cloud.recording.start')

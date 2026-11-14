@@ -220,7 +220,7 @@ async function run(pass) {
       await h.status((s) => !s.connected, 'control signed out')
       const count = h.calls('state').length
       await holdFor(() => h.calls('state').length === count, '401 kept polling', 2500)
-      await h.rpc('account.refresh')
+      await h.refreshAccount()
       await h.status((s) => s.connected, 'sign-in control recovery')
     })
     await step(
