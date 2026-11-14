@@ -130,8 +130,17 @@ export async function managedRoomListener(h) {
               canvas.width = 640
               canvas.height = 360
               const ctx = canvas.getContext('2d')
-              ctx.fillStyle = '#00c080'
-              ctx.fillRect(0, 0, 640, 360)
+              // A canvas that never changes yields no frames, and LiveKit
+              // never publishes a track with no media: redraw it, as the
+              // camera does.
+              const draw = () => {
+                ctx.fillStyle = '#00c080'
+                ctx.fillRect(0, 0, 640, 360)
+                ctx.fillStyle = '#fff'
+                ctx.fillRect(Date.now() % 600, 20, 10, 10)
+              }
+              draw()
+              p.screenInterval = setInterval(draw, 100)
               const track = canvas.captureStream(10).getVideoTracks()[0]
               p.screen = track
               p.tracks.push(track)
@@ -139,6 +148,7 @@ export async function managedRoomListener(h) {
                 source: window.LK.Track.Source.ScreenShare
               })
             } else if (p.screen) {
+              clearInterval(p.screenInterval)
               await p.room.localParticipant.unpublishTrack(p.screen)
               p.screen.stop()
               p.screen = null
@@ -152,6 +162,7 @@ export async function managedRoomListener(h) {
         await page.evaluate(async (identity) => {
           const p = window.peers.get(identity)
           clearInterval(p?.interval)
+          clearInterval(p?.screenInterval)
           p?.tracks.forEach((t) => t.stop())
           await p?.audio?.close()
           await p?.room.disconnect()
