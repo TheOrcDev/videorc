@@ -55,8 +55,8 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::cloud_control_web::{
-    ControlStateAnswer, DestinationsAnswer, DestinationsBody, DestinationsFailure, WebControl,
-    WebIntents,
+    ControlRevAnswer, ControlStateAnswer, DestinationsAnswer, DestinationsBody,
+    DestinationsFailure, WebControl, WebIntents,
 };
 use crate::cloud_talk::{
     CloudCameraHook, CloudRecordingStatus, CloudRequestHook, CloudRoomStatus, CreateShowRoom,
@@ -976,6 +976,29 @@ pub trait CloudWebApi: Send + Sync + 'static {
         show_id: &str,
         png_base64: &str,
     ) -> impl Future<Output = std::result::Result<(), CloudApiError>> + Send;
+    /// `PUT …/stage`: the socket's `stage.set`. `stage` is the frame's
+    /// fields.
+    fn set_stage(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        stage: &Value,
+    ) -> impl Future<Output = std::result::Result<ControlRevAnswer, CloudApiError>> + Send;
+    /// `POST …/legs/end`: the socket's `legs.end`. The body carries the
+    /// addresses this computer holds and is never logged.
+    fn end_legs(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &DestinationsBody,
+    ) -> impl Future<Output = std::result::Result<ControlRevAnswer, CloudApiError>> + Send;
+    /// `POST …/recording`: the socket's `recording.start` and `.stop`.
+    fn set_recording(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        on: bool,
+    ) -> impl Future<Output = std::result::Result<ControlRevAnswer, CloudApiError>> + Send;
 }
 
 // --- Wire: the control socket -------------------------------------------------
@@ -2345,7 +2368,7 @@ pub(crate) struct ControlLoop<W: CloudWebApi, C: ControlConnector> {
     hold_image_sent_on_socket: bool,
     /// Plan 224: the runner reports no `stage.set` while this desktop holds
     /// a stage (a restart): send it again, once per socket.
-    resend_stage: bool,
+    pub(crate) resend_stage: bool,
 }
 
 /// A runner that restarted mid-show (plan 184 "When things break"). The
@@ -5007,6 +5030,27 @@ mod tests {
         destinations_answers: VecDeque<std::result::Result<Value, DestinationsFailure>>,
         /// Every `PUT …/hold-image` PNG, base64, in order.
         hold_images: Vec<String>,
+        /// Every `PUT …/stage` body, in order.
+        stages: Vec<Value>,
+        /// Every `POST …/legs/end` body, in order.
+        legs_ends: Vec<Value>,
+        /// Every `POST …/recording` `on`, in order.
+        recordings: Vec<bool>,
+        /// Answers for the next stage, legs/end and recording calls, in the
+        /// order they are made; then `{ ok, rev }`.
+        route_errors: VecDeque<CloudApiError>,
+    }
+
+    impl FakeManaged {
+        /// The next scripted refusal, else `{ ok, rev }` at the current `rev`.
+        fn route_answer(&mut self) -> std::result::Result<ControlRevAnswer, CloudApiError> {
+            match self.route_errors.pop_front() {
+                Some(error) => Err(error),
+                None => Ok(ControlRevAnswer {
+                    rev: Some(self.rev),
+                }),
+            }
+        }
     }
 
     impl FakeWeb {
@@ -5289,6 +5333,39 @@ mod tests {
                 .hold_images
                 .push(png_base64.to_string());
             Ok(())
+        }
+
+        async fn set_stage(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            stage: &Value,
+        ) -> std::result::Result<ControlRevAnswer, CloudApiError> {
+            let mut managed = self.managed.lock().unwrap();
+            managed.stages.push(stage.clone());
+            managed.route_answer()
+        }
+
+        async fn end_legs(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            body: &DestinationsBody,
+        ) -> std::result::Result<ControlRevAnswer, CloudApiError> {
+            let mut managed = self.managed.lock().unwrap();
+            managed.legs_ends.push(body.as_json().clone());
+            managed.route_answer()
+        }
+
+        async fn set_recording(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            on: bool,
+        ) -> std::result::Result<ControlRevAnswer, CloudApiError> {
+            let mut managed = self.managed.lock().unwrap();
+            managed.recordings.push(on);
+            managed.route_answer()
         }
     }
 
@@ -11482,11 +11559,10 @@ mod tests {
         }
     }
 
-    // Plan 234, not built yet (T3): a talk show on web control fails closed
-    // instead of half working, and `cloud.return.set` on a show on web
-    // control answers the contract's line (wire section 6.4).
+    // Wire section 6.4: a show on web control has no return picture.
+    // `cloud.return.set` sends nothing and answers the contract's line.
     #[tokio::test(start_paused = true)]
-    async fn the_return_and_a_talk_show_fail_closed_on_web_control() {
+    async fn the_return_is_not_available_on_web_control() {
         let solo = harness(true);
         managed_live_show(&solo).await;
         let error = solo.context.set_return(true).await.unwrap_err();
@@ -11495,38 +11571,6 @@ mod tests {
             "The program return is not available on this show."
         );
         assert_eq!(solo.context.web.destination_bodies().len(), 1);
-
-        let talk = harness(true);
-        lock(&talk.context.slot).entitlement = talk_entitlement();
-        let mut created = created_talk();
-        created.control = created_managed().control;
-        created.ingest = Vec::new();
-        *talk.context.web.create.lock().unwrap() = Some(Ok(created));
-        let error = talk
-            .context
-            .open_room(Some("bearer".to_string()), room_open_params(), false)
-            .await
-            .unwrap_err();
-        // The existing "rooms aren't available" refusal.
-        assert_eq!(
-            error.downcast_ref::<CloudApiError>(),
-            Some(&CloudApiError::RoomsUnavailable)
-        );
-        assert_eq!(
-            *talk.context.web.end_calls.lock().unwrap(),
-            vec!["sh_abc".to_string()]
-        );
-        {
-            let camera = talk.camera.lock().unwrap();
-            assert_eq!(camera.len(), 2, "the camera was lent and given back");
-            assert!(camera[0] == crate::cloud_talk::CameraHandover::Lend);
-            assert!(camera[1] == crate::cloud_talk::CameraHandover::Return);
-        }
-        let runtime = lock(&talk.context.slot);
-        assert!(runtime.show.is_none());
-        assert!(runtime.talk.is_none());
-        assert!(talk.context.web.polls().is_empty());
-        assert_eq!(talk.context.connector.connects.load(Ordering::SeqCst), 0);
     }
 
     // --- Plan 234: resume and relaunch through `current` (C3) --------------------
@@ -12123,5 +12167,358 @@ mod tests {
         assert_eq!(result.reason, Some(CloudTestReason::CantReach));
         assert_eq!(web.end_calls.lock().unwrap().len(), 1);
         assert!(web.polls().is_empty());
+    }
+
+    // --- Plan 234: talk shows on web control (T3) --------------------------------
+    //
+    // A managed talk show has no ingress and no runner: host and guests join
+    // the room as today, the program page composes the stage from room
+    // metadata the web writes, and the desktop's intents are routes (wire
+    // sections 1, 2.3, 2.5, 2.6, 6.2, 6.3, 13.2). The overlays alone are not
+    // a route: the host's renderer sends them to the room.
+
+    /// A managed talk create answer (wire section 1, "Talk show"): no ingest,
+    /// no runner token, web control, and today's three blocks.
+    fn created_managed_talk() -> CreateShowResponse {
+        let mut created = created_talk();
+        created.show.node_id = "livekit".to_string();
+        created.control = created_managed().control;
+        created.ingest = Vec::new();
+        created
+    }
+
+    /// A managed talk show's `state` (wire section 6.2): the room exists,
+    /// the host is in it, and the return is never on.
+    fn managed_talk_state(legs: Value, stage_set: bool, page_joins: u32) -> Value {
+        let on_air = legs.as_array().is_some_and(|legs| !legs.is_empty());
+        json!({
+            "phase": "live", "liveSeconds": 3, "feeds": [], "legs": legs,
+            "destinationsSet": on_air, "restarts": 0, "holdImageSet": false,
+            "desktopConnected": true,
+            "room": {
+                "connected": true,
+                "participants": [
+                    { "identity": "host:sh_abc", "name": "Orc", "role": "host", "onStage": true,
+                      "video": true, "audio": true, "muted": false, "screen": false,
+                      "quality": "good", "sinceMs": 10 }
+                ],
+                "layout": "solo", "hostAway": false, "returnEnabled": false,
+                "stageSet": stage_set, "pageJoins": page_joins
+            }
+        })
+    }
+
+    /// Open the room of a managed talk show: the create, the first state,
+    /// the camera lent, and the poll running. No socket.
+    async fn managed_room(harness: &Harness) {
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        let web = &harness.context.web;
+        *web.create.lock().unwrap() = Some(Ok(created_managed_talk()));
+        web.set_state(managed_talk_state(json!([]), false, 0));
+        let status = harness
+            .context
+            .open_room(Some("bearer".to_string()), room_open_params(), false)
+            .await
+            .expect("the managed room opens");
+        let room = status.room.expect("a room in the status");
+        assert_eq!(room.phase, crate::cloud_talk::CloudRoomPhase::Open);
+        assert!(matches!(
+            lock(&harness.context.slot).control_tx,
+            Some(ControlHandle::Web(_))
+        ));
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+    }
+
+    fn stage_with_a_guest() -> crate::cloud_talk::CloudStage {
+        serde_json::from_value(json!({
+            "layout": "side-by-side",
+            "onStage": ["host:sh_abc", "g_0123456789abcdefghijkl"],
+            "hostShape": "rounded"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_talk_show_opens_sets_its_stage_goes_live_and_ends_the_livestream() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let web = harness.context.web.clone();
+        // The room is the show's: the camera was lent, nothing was fed, and
+        // the create asked for a talk show.
+        assert_eq!(
+            web.create_kinds.lock().unwrap().as_slice(),
+            &["talk".to_string()]
+        );
+        assert!(harness.camera.lock().unwrap()[0] == crate::cloud_talk::CameraHandover::Lend);
+        {
+            let status = lock(&harness.context.slot).status();
+            assert_eq!(status.show.as_ref().unwrap().node_id, "livekit");
+            assert_eq!(status.session_id, None);
+            let room = status.room.unwrap();
+            assert!(room.connected);
+            assert!(!room.return_enabled);
+            assert_eq!(room.participants.len(), 1);
+        }
+
+        // The stage: `PUT …/stage` with the frame's fields and nothing of
+        // the frame itself.
+        harness
+            .context
+            .set_stage(stage_with_a_guest())
+            .await
+            .unwrap();
+        assert_eq!(
+            web.managed.lock().unwrap().stages,
+            vec![json!({
+                "layout": "side-by-side",
+                "onStage": ["host:sh_abc", "g_0123456789abcdefghijkl"],
+                "hostShape": "rounded"
+            })]
+        );
+
+        // Go Live: the destinations, with `replace`, and no local session.
+        let status = harness
+            .context
+            .talk_go_live(
+                Some("bearer".to_string()),
+                destinations(),
+                vec!["youtube".to_string(), "twitch".to_string()],
+            )
+            .await
+            .unwrap();
+        assert!(status.room.as_ref().unwrap().live);
+        let bodies = web.destination_bodies();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["replace"], true);
+        assert_eq!(bodies[0]["destinations"].as_array().unwrap().len(), 2);
+        web.set_state(managed_talk_state(live_legs(), true, 1));
+        wait_until(|| lock(&harness.context.slot).status().legs.len() == 2).await;
+        // The web has the stage, so it is not sent again.
+        assert_eq!(web.managed.lock().unwrap().stages.len(), 1);
+
+        // End livestream: `POST …/legs/end` with the addresses this
+        // computer holds, cleared only after the answer. The room stays.
+        let status = harness.context.legs_end().await.unwrap();
+        assert_eq!(
+            web.managed.lock().unwrap().legs_ends,
+            vec![json!({ "destinations": [
+                { "id": "youtube-main", "url": format!("rtmps://a.rtmp.youtube.com/live2/{YOUTUBE_KEY}") },
+                { "id": "twitch-main", "url": format!("rtmp://live.twitch.tv/app/{TWITCH_KEY}") }
+            ] })]
+        );
+        let room = status.room.unwrap();
+        assert!(!room.live);
+        assert_eq!(room.phase, crate::cloud_talk::CloudRoomPhase::Open);
+        assert!(
+            lock(&harness.context.slot)
+                .show
+                .as_ref()
+                .unwrap()
+                .destinations
+                .is_empty()
+        );
+        // The state after it: no legs, and `destinationsSet` still true by
+        // the host's choice. Nothing is sent again.
+        let mut ended = managed_talk_state(json!([]), true, 1);
+        ended["destinationsSet"] = json!(true);
+        web.set_state(ended);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(web.destination_bodies().len(), 1);
+        assert_eq!(lock(&harness.context.slot).status().restart, None);
+
+        // A second End livestream has nothing to name, and the web's refusal
+        // reads as the runner's would.
+        web.managed
+            .lock()
+            .unwrap()
+            .route_errors
+            .push_back(web_error(409, "cloud-legs-end-solo"));
+        let error = harness.context.legs_end().await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Couldn't end the livestream: legs.end is for talk shows; a solo show ends with show.end. Try again, or close the room."
+        );
+        assert_eq!(web.managed.lock().unwrap().legs_ends[1], json!({}));
+
+        // Close the room: `POST …/end`, and the camera comes back.
+        harness
+            .context
+            .close_room(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(*web.end_calls.lock().unwrap(), vec!["sh_abc".to_string()]);
+        assert!(
+            harness.camera.lock().unwrap().last()
+                == Some(&crate::cloud_talk::CameraHandover::Return)
+        );
+        assert_eq!(lock(&harness.context.slot).phase(), CloudPhase::Off);
+        // No key left the two bodies that carry them.
+        for status in harness.emitted.lock().unwrap().iter() {
+            let json = serde_json::to_string(status).unwrap();
+            assert!(!json.contains(YOUTUBE_KEY) && !json.contains(TWITCH_KEY));
+        }
+    }
+
+    // Wire section 2.6: Record is `POST …/recording`, and each refusal
+    // reads as the node path's does for the same case (the runner acks
+    // `recording.start` with its `problem`).
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_talk_shows_record_maps_each_refusal_to_the_nodes_words() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        let web = harness.context.web.clone();
+        harness.context.recording_start().await.unwrap();
+        harness.context.recording_stop().await.unwrap();
+        assert_eq!(web.managed.lock().unwrap().recordings, vec![true, false]);
+
+        let refuse =
+            |error: CloudApiError| web.managed.lock().unwrap().route_errors.push_back(error);
+        refuse(web_error(409, "cloud-recording-no-target"));
+        assert_eq!(
+            harness
+                .context
+                .recording_start()
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not start the recording: no-target"
+        );
+        refuse(web_error(409, "cloud-recording-solo"));
+        assert_eq!(
+            harness
+                .context
+                .recording_start()
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not start the recording: the cloud recording is for talk shows"
+        );
+        refuse(web_error(409, "cloud-recording-on-air"));
+        assert_eq!(
+            harness
+                .context
+                .recording_stop()
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not stop the recording: the recording shares the livestream's output; end the livestream first"
+        );
+        // A 503 is tried once more, 1 s later, then said by its code.
+        let before = web.managed.lock().unwrap().recordings.len();
+        refuse(web_error(503, "cloud-media-unavailable"));
+        refuse(web_error(503, "cloud-media-unavailable"));
+        assert_eq!(
+            harness
+                .context
+                .recording_start()
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not start the recording: videorc.com answered 503 cloud-media-unavailable"
+        );
+        assert_eq!(web.managed.lock().unwrap().recordings.len(), before + 2);
+        refuse(CloudApiError::Full);
+        refuse(CloudApiError::Full);
+        assert!(
+            harness
+                .context
+                .recording_start()
+                .await
+                .unwrap_err()
+                .to_string()
+                .ends_with("Videorc Cloud is full right now.")
+        );
+        // The stage route's refusal is said by its code, never the web's words.
+        refuse(web_error(422, "invalid-stage"));
+        assert_eq!(
+            harness
+                .context
+                .set_stage(stage_with_a_guest())
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Videorc Cloud did not take the stage: videorc.com answered 422 invalid-stage"
+        );
+        // The state's recording block reaches the status as a node's does.
+        let mut recording = managed_talk_state(json!([]), true, 0);
+        recording["recording"] = json!({
+            "active": true, "since": "2026-11-13T20:00:00.000Z", "seconds": 12, "bytes": 0,
+            "orientations": ["horizontal"]
+        });
+        web.set_state(recording);
+        wait_until(|| lock(&harness.context.slot).status().recording.is_some()).await;
+        assert!(
+            lock(&harness.context.slot)
+                .status()
+                .recording
+                .unwrap()
+                .active
+        );
+    }
+
+    // A managed talk show after a relaunch (wire sections 2.1 and 6.2): the
+    // launch check holds it, Resume opens the room on web control with no
+    // destination sent, and a web that reports no stage while this desktop
+    // holds one gets it again.
+    #[tokio::test(start_paused = true)]
+    async fn a_managed_talk_show_is_resumed_and_its_stage_goes_again_when_the_web_lost_it() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        let web = harness.context.web.clone();
+        web.set_state(managed_talk_state(live_legs(), true, 1));
+        let held = || {
+            let created = created_managed_talk();
+            CurrentShowResponse {
+                show: Some(ShowRecord {
+                    status: "live".to_string(),
+                    ..created.show
+                }),
+                control: Some(created.control),
+                ingest: Some(Vec::new()),
+            }
+        };
+        web.current.lock().unwrap().push_back(Ok(held()));
+        let status = harness.context.detect_current_show("bearer").await.unwrap();
+        let show = status.show.as_ref().unwrap();
+        assert_eq!(show.kind.as_deref(), Some("talk"));
+        assert!(show.resumable);
+        assert!(status.room.is_none());
+
+        let status = harness
+            .context
+            .resume_room(Some("bearer".to_string()))
+            .await
+            .expect("the managed room resumes");
+        let room = status.room.expect("the room is open again");
+        assert_eq!(room.phase, crate::cloud_talk::CloudRoomPhase::Open);
+        // The egress still pushes: on air, with its legs, and nothing sent.
+        assert!(room.live);
+        assert_eq!(status.legs.len(), 2);
+        assert!(web.destination_bodies().is_empty());
+        assert!(web.managed.lock().unwrap().stages.is_empty());
+        assert_eq!(harness.context.connector.connects.load(Ordering::SeqCst), 0);
+        assert!(harness.camera.lock().unwrap()[0] == crate::cloud_talk::CameraHandover::Lend);
+
+        // The host sets a stage; the web has it.
+        harness
+            .context
+            .set_stage(stage_with_a_guest())
+            .await
+            .unwrap();
+        assert_eq!(web.managed.lock().unwrap().stages.len(), 1);
+        web.set_state(managed_talk_state(live_legs(), true, 1));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(web.managed.lock().unwrap().stages.len(), 1);
+        // The web reports no stage (its room was made again): it goes again.
+        web.set_state(managed_talk_state(live_legs(), false, 1));
+        wait_until(|| web.managed.lock().unwrap().stages.len() == 2).await;
+        let stages = web.managed.lock().unwrap().stages.clone();
+        assert_eq!(stages[0], stages[1]);
+        // The return stays off on this show, whatever the room.
+        let error = harness.context.set_return(true).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The program return is not available on this show."
+        );
     }
 }

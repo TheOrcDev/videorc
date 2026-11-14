@@ -3793,6 +3793,71 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         .await
         .map(|_| ())
     }
+
+    async fn set_stage(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        stage: &serde_json::Value,
+    ) -> std::result::Result<
+        crate::cloud_control_web::ControlRevAnswer,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::stage_path(show_id);
+        self.cloud_json(
+            self.http
+                .put(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(stage),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn end_legs(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        body: &crate::cloud_control_web::DestinationsBody,
+    ) -> std::result::Result<
+        crate::cloud_control_web::ControlRevAnswer,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::legs_end_path(show_id);
+        // Like the destinations: the addresses ride the body and nothing
+        // this client logs.
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body.as_json()),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn set_recording(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        on: bool,
+    ) -> std::result::Result<
+        crate::cloud_control_web::ControlRevAnswer,
+        crate::cloud_show::CloudApiError,
+    > {
+        let path = crate::cloud_control_web::recording_path(show_id);
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({ "on": on })),
+            &path,
+            CLOUD_CONTROL_TIMEOUT,
+        )
+        .await
+    }
 }
 
 pub(crate) async fn read_error_code_and_message(response: reqwest::Response) -> (String, String) {

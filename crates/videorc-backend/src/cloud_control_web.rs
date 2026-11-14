@@ -15,6 +15,9 @@
 //! - `ControlLoop::run_web`: what the show does with each answer. A state is
 //!   absorbed exactly as a socket frame is, so the status, the watchdog and
 //!   the renderer see no difference.
+//! - Talk shows (T3): the stage, End livestream and Record are routes too
+//!   (2.3, 2.5, 2.6). Overlays are not: the host's renderer sends them to
+//!   the room as byte streams (`cloud_talk.rs`, wire section 6.3).
 //!
 //! Stream keys: a destination URL crosses this module once, in the body of
 //! `PUT …/destinations`, over TLS to the configured API base URL. It is
@@ -87,6 +90,18 @@ pub(crate) fn hold_image_path(show_id: &str) -> String {
     format!("/api/cloud/shows/{show_id}/hold-image")
 }
 
+pub(crate) fn stage_path(show_id: &str) -> String {
+    format!("/api/cloud/shows/{show_id}/stage")
+}
+
+pub(crate) fn legs_end_path(show_id: &str) -> String {
+    format!("/api/cloud/shows/{show_id}/legs/end")
+}
+
+pub(crate) fn recording_path(show_id: &str) -> String {
+    format!("/api/cloud/shows/{show_id}/recording")
+}
+
 /// The query name of the state route's last-seen `rev`.
 pub(crate) const STATE_SINCE_QUERY: &str = "since";
 
@@ -119,6 +134,19 @@ impl DestinationsBody {
             body["replace"] = Value::Bool(true);
         }
         Some(Self(body))
+    }
+
+    /// The body of `POST …/legs/end` (section 2.3) from a `legs.end` frame:
+    /// `{ destinations: [{ id, url }] }`, the list this computer holds, so
+    /// the web can take each address off an egress that also records. A
+    /// frame without a list (nothing was handed over) is an empty body.
+    pub(crate) fn for_legs_end(frame: &Value) -> Self {
+        match frame.get("destinations").and_then(Value::as_array) {
+            Some(destinations) if !destinations.is_empty() => {
+                Self(json!({ "destinations": destinations }))
+            }
+            _ => Self(json!({})),
+        }
     }
 
     /// The JSON to send. It holds the keys: for the request body only.
@@ -177,6 +205,26 @@ fn key_piece(url: &str) -> Option<&str> {
     let path = url.split_once("://").map_or(url, |(_, rest)| rest);
     let (_, key) = path.rsplit_once('/')?;
     (key.len() >= 4).then_some(key)
+}
+
+/// The `destinations` a `legs.end` frame carries on web control: each
+/// handed-over destination's id and address, and nothing else of it.
+pub(crate) fn legs_end_destinations(destinations: &[HandoverDestination]) -> Value {
+    Value::Array(
+        destinations
+            .iter()
+            .map(|destination| json!({ "id": destination.id, "url": destination.url }))
+            .collect(),
+    )
+}
+
+/// `{ ok, rev }`: what a route that changes the show answers (sections
+/// 2.3, 2.5 and 2.6).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlRevAnswer {
+    #[serde(default)]
+    pub rev: Option<u64>,
 }
 
 /// `PUT …/destinations` took the list. `refused` names the destinations the
@@ -291,6 +339,37 @@ fn destinations_problem(failure: &DestinationsFailure) -> String {
         line
     } else {
         format!("{line} ({})", codes.join(", "))
+    }
+}
+
+/// A refused `POST …/recording` in the node path's words: the runner acks
+/// `recording.start` with its `problem`, and the desktop says "did not
+/// start the recording: {problem}" (wire section 2.6).
+fn recording_problem(error: &CloudApiError) -> String {
+    match error {
+        CloudApiError::Other {
+            status: 409, code, ..
+        } => match code.as_str() {
+            "cloud-recording-no-target" => "no-target".to_string(),
+            "cloud-recording-solo" => "the cloud recording is for talk shows".to_string(),
+            "cloud-recording-on-air" => {
+                "the recording shares the livestream's output; end the livestream first".to_string()
+            }
+            _ => failure_line(error),
+        },
+        _ => failure_line(error),
+    }
+}
+
+/// A refused `POST …/legs/end` in the runner's words for the same case.
+fn legs_end_problem(error: &CloudApiError) -> String {
+    match error {
+        CloudApiError::Other {
+            status: 409, code, ..
+        } if code == "cloud-legs-end-solo" => {
+            "legs.end is for talk shows; a solo show ends with show.end".to_string()
+        }
+        _ => failure_line(error),
     }
 }
 
@@ -470,15 +549,56 @@ async fn send_web_intent<W: CloudWebApi>(
         // itself right after the intent (`end_current_show`, a failed
         // hand-over). Nothing is sent here, and nothing is confirmed.
         "show.end" => Err("a show on web control ends through videorc.com".to_string()),
+        // Talk shows (T3). Each answer names the `rev` it produced, and
+        // raises the floor as the destinations do.
+        "stage.set" => {
+            let mut stage = frame.clone();
+            if let Some(fields) = stage.as_object_mut() {
+                // The frame's fields and nothing of the frame itself.
+                for socket_only in ["t", "id", "kind"] {
+                    fields.remove(socket_only);
+                }
+            }
+            with_one_cloud_retry(|| web.set_stage(bearer, show_id, &stage))
+                .await
+                .map(|answer| raise_floor(floor, &answer))
+                .map_err(|error| failure_line(&error))
+        }
+        "legs.end" => {
+            let body = DestinationsBody::for_legs_end(&frame);
+            with_one_cloud_retry(|| web.end_legs(bearer, show_id, &body))
+                .await
+                .map(|answer| raise_floor(floor, &answer))
+                .map_err(|error| body.scrub(&legs_end_problem(&error)))
+        }
+        "recording.start" | "recording.stop" => {
+            let on = kind == "recording.start";
+            with_one_cloud_retry(|| web.set_recording(bearer, show_id, on))
+                .await
+                .map(|answer| raise_floor(floor, &answer))
+                .map_err(|error| recording_problem(&error))
+        }
+        // `return.set` never gets here (`set_return` answers before any
+        // intent, wire section 6.4), and overlays go to the room from the
+        // renderer (6.3). Anything else has no route.
         other => {
             tracing::warn!(
                 intent = other,
                 show = show_id,
-                "This intent has no route on web control yet (plan 234 T3); nothing was sent"
+                "This intent has no route on web control; nothing was sent"
             );
-            Err(format!("{other} is not available on this show yet"))
+            Err(format!("{other} is not available on this show"))
         }
     }
+}
+
+/// An answer's `rev` raises the floor before the caller hears of it: a
+/// state older than the answer is not the show's any more.
+fn raise_floor(floor: &AtomicU64, answer: &ControlRevAnswer) -> Option<Value> {
+    if let Some(rev) = answer.rev {
+        floor.fetch_max(rev, Ordering::SeqCst);
+    }
+    None
 }
 
 // --- The state poll -----------------------------------------------------------------
@@ -729,6 +849,13 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             if let Some(destinations) = self.resend.take() {
                 self.send_destinations_again_over_web(&call, &destinations);
             }
+            // Plan 224, on web control: the web reports no stage while this
+            // desktop holds one. The route's answer raises the floor, so the
+            // next state that is taken already has it.
+            if self.resend_stage {
+                self.resend_stage = false;
+                self.send_stage_again_over_web(&call);
+            }
             let answer = {
                 let poll = web.poll();
                 tokio::pin!(poll);
@@ -913,6 +1040,26 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 }
             }
             hooks.emit_from(&slot);
+        });
+    }
+
+    /// The stage again, off the loop like the destinations. A refusal is
+    /// logged; the next state that still reports no stage sends it again.
+    fn send_stage_again_over_web(&self, call: &WebIntentCall) {
+        let stage = lock(&self.context.slot)
+            .talk
+            .as_ref()
+            .map(|talk| talk.stage.clone());
+        let Some(stage) = stage else {
+            return;
+        };
+        let id = new_intent_id();
+        let frame = stage.frame(&id);
+        let call = call.clone();
+        tokio::spawn(async move {
+            if let Err(problem) = call(frame).await {
+                tracing::warn!("Videorc Cloud did not take the stage again: {problem}");
+            }
         });
     }
 
@@ -1298,6 +1445,33 @@ mod tests {
         assert!(fit_hold_image_base64("aGVsbG8=").await.is_err());
     }
 
+    /// Section 2.3: End livestream names what this computer holds by id
+    /// and address, an empty hand-over is an empty body, and neither shows
+    /// a key when printed.
+    #[test]
+    fn the_legs_end_body_names_ids_and_addresses_and_nothing_else() {
+        let mut frame = json!({ "t": "intent", "id": "intent-9", "kind": "legs.end" });
+        assert_eq!(DestinationsBody::for_legs_end(&frame).as_json(), &json!({}));
+        frame["destinations"] = legs_end_destinations(&[HandoverDestination {
+            id: "youtube-main".to_string(),
+            platform: "youtube".to_string(),
+            label: "YouTube".to_string(),
+            orientation: "horizontal".to_string(),
+            url: format!("rtmps://a.rtmp.youtube.com/live2/{KEY}"),
+        }]);
+        let body = DestinationsBody::for_legs_end(&frame);
+        assert_eq!(
+            body.as_json(),
+            &json!({ "destinations": [
+                { "id": "youtube-main", "url": format!("rtmps://a.rtmp.youtube.com/live2/{KEY}") }
+            ] })
+        );
+        assert!(!format!("{body:?}").contains(KEY));
+        assert!(!body.scrub(&format!("refused {KEY}")).contains(KEY));
+        frame["destinations"] = json!([]);
+        assert_eq!(DestinationsBody::for_legs_end(&frame).as_json(), &json!({}));
+    }
+
     /// `protocol-fixtures/cloud-managed-wire.json` is what the web copies.
     /// The desktop's constants are pinned to it here; a value that differs
     /// is a bug in the code, never a reason to edit the fixture alone.
@@ -1406,6 +1580,24 @@ mod tests {
             json!(crate::cloud_show::HOLD_MAX_CHOICES)
         );
         assert_eq!(fixture["return"]["message"], RETURN_UNAVAILABLE_MESSAGE);
+        // Talk shows and recordings (T3).
+        assert_eq!(stage_path("sh_fixture"), route("stage"));
+        assert_eq!(fixture["routes"]["stage"]["method"], "PUT");
+        assert_eq!(legs_end_path("sh_fixture"), route("legsEnd"));
+        assert_eq!(fixture["routes"]["legsEnd"]["method"], "POST");
+        assert_eq!(recording_path("sh_fixture"), route("recording"));
+        assert_eq!(fixture["routes"]["recording"]["method"], "POST");
+        for (list, code) in [
+            ("recording", "cloud-recording-no-target"),
+            ("recording", "cloud-recording-solo"),
+            ("recording", "cloud-recording-on-air"),
+            ("legsEnd", "cloud-legs-end-solo"),
+        ] {
+            assert!(
+                codes(list).contains(&(409, code.to_string())),
+                "{list} {code}"
+            );
+        }
         assert_eq!(
             fixture["limits"]["holdImageBytes"].as_u64(),
             Some(HOLD_IMAGE_MAX_BYTES as u64)

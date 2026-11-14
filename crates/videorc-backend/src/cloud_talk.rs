@@ -245,6 +245,12 @@ pub struct RunnerRoomState {
     /// until the current stage is composed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown: Option<CloudRoomShown>,
+    /// Plan 234 (web control, wire sections 6.2 and 6.3): how many times a
+    /// program page has joined the room. A page that joins later saw none
+    /// of the overlays sent before it, so a rise sends the untimed ones
+    /// again. Never from a runner, and never part of `CloudStatus`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_joins: Option<u32>,
 }
 
 /// `state.room.shown` and `CloudRoomStatus.shown` (review M2): the people
@@ -1196,24 +1202,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             bail!("Videorc Cloud created the show without a room.");
         };
-        // Plan 234: a talk show on anything but the node socket is not built
-        // in this version (the stage, the overlays and the recording have no
-        // route here yet, T3). Fail closed, before anything joins the room:
-        // end the show and give the camera back, rather than open a room
-        // whose stage this desktop cannot set. The host reads the existing
-        // "rooms aren't available" line (`cloud-rooms-unavailable`).
-        if created.control.transport_kind() != ControlKind::Node {
-            tracing::warn!(
-                show = %show_id,
-                kind = ?created.control.kind,
-                "Videorc Cloud opened the talk show on a control transport this version has no talk show for; the show is ended and the room stays closed"
-            );
-            let _ = self.web.end_show(&bearer, &show_id).await;
-            let _ = (self.hooks.camera)(CameraHandover::Return).await;
-            return Err(anyhow::Error::new(CloudApiError::RoomsUnavailable));
-        }
-        if let Some(problem) =
-            crate::cloud_show::control_url_problem(&created.control.url, cfg!(debug_assertions))
+        // The socket's address carries the show token and the keys, so it is
+        // checked before anything connects. Web control (plan 234) has no
+        // address of its own: its routes are the API's, over TLS.
+        if created.control.transport_kind() == ControlKind::Node
+            && let Some(problem) =
+                crate::cloud_show::control_url_problem(&created.control.url, cfg!(debug_assertions))
         {
             let _ = self.web.end_show(&bearer, &show_id).await;
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
@@ -1649,7 +1643,20 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         self.open_room_show_id()?;
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
         let id = new_intent_id();
-        let frame = json!({ "t": "intent", "id": id, "kind": "legs.end" });
+        let mut frame = json!({ "t": "intent", "id": id, "kind": "legs.end" });
+        // Plan 234 (wire section 2.3): the web keeps no address, so on web
+        // control the intent carries the list this computer holds, which is
+        // cleared below only after the answer. The socket's frame has no
+        // payload, as the runner expects.
+        if matches!(tx, ControlHandle::Web(_)) {
+            let held = lock(&self.slot)
+                .show
+                .as_ref()
+                .map(|show| crate::cloud_control_web::legs_end_destinations(&show.destinations));
+            if let Some(held) = held {
+                frame["destinations"] = held;
+            }
+        }
         match tx.intent(frame, id, ACK_TIMEOUT).await {
             Ok(_) => {
                 let mut runtime = lock(&self.slot);
@@ -1759,16 +1766,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
             if runtime.talk.is_some() {
                 return Ok(runtime.status());
-            }
-            // Plan 234: fail closed, as Open the room does. The show stays
-            // held, so End still closes it.
-            if show.control.transport_kind() != ControlKind::Node {
-                tracing::warn!(
-                    show = %show.record.id,
-                    kind = ?show.control.kind,
-                    "This version has no talk show on the control transport Videorc Cloud names; the room is not resumed"
-                );
-                return Err(anyhow::Error::new(CloudApiError::RoomsUnavailable));
             }
             show.record.id.clone()
         };
