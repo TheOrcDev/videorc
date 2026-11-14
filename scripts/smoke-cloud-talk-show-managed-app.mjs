@@ -243,12 +243,24 @@ try {
         (await listener.records()).filter(
           (r) => r.topic === w.overlay.topics.set && r.attributes.slot === slot
         ).length
+      // The renderer's own account of each send, for a failure to name: its
+      // warnings and every overlay image fetch with its answer.
+      await h.eval(
+        'window.__managedOverlayLog=[]; const warn=console.warn.bind(console); console.warn=(...a)=>{window.__managedOverlayLog.push("warn: "+a.map(String).join(" ").slice(0,300)); warn(...a)}; const f=window.fetch.bind(window); window.fetch=async (url,...rest)=>{ if(!String(url).includes("/cloud/overlays/")) return f(url,...rest); try { const r=await f(url,...rest); window.__managedOverlayLog.push("fetch "+r.status); return r } catch(e) { window.__managedOverlayLog.push("fetch failed: "+String(e&&e.message||e).slice(0,200)); throw e } }; return true'
+      )
       await overlay('card', png, 2)
       await overlay('takeover')
-      await waitFor(
-        async () => (await count('card')) === 1 && (await count('takeover')) === 1,
-        'initial overlays'
-      )
+      try {
+        await waitFor(
+          async () => (await count('card')) === 1 && (await count('takeover')) === 1,
+          'initial overlays'
+        )
+      } catch (error) {
+        const seen = await h.eval('return window.__managedOverlayLog')
+        throw new Error(
+          `${error.message}; the listener holds ${(await listener.records()).length} streams; the renderer saw: ${JSON.stringify(seen)}`
+        )
+      }
       for (const record of await listener.records())
         if (record.topic === w.overlay.topics.set)
           checkOverlay(record, {
@@ -333,17 +345,26 @@ try {
       await h.rpc('cloud.stage.set', stage)
       h.web.hooks.shown(h.showId, { layout: 'solo', onStage: [host] })
       await listener.leave(guests[0])
-      await waitFor(async () => {
-        const view = await h.eval(
-          'const p=document.querySelector("[data-testid=show-stage-program]"); return {source:p?.dataset.programSource,tiles:[...(p?.querySelectorAll("[data-stage-identity]")??[])].map(e=>e.dataset.stageIdentity),speaker:[...document.querySelectorAll("button")].some(b=>b.getAttribute("aria-label")==="Listen to the program")}'
+      let lastView = null
+      try {
+        await waitFor(async () => {
+          const view = await h.eval(
+            'const p=document.querySelector("[data-testid=show-stage-program]"); return {tab:document.querySelector("[data-videorc-active-tab]")?.dataset.videorcActiveTab ?? null,source:p?.dataset.programSource,tiles:[...(p?.querySelectorAll("[data-stage-identity]")??[])].map(e=>e.dataset.stageIdentity),speaker:[...document.querySelectorAll("button")].some(b=>b.getAttribute("aria-label")==="Listen to the program")}'
+          )
+          lastView = view
+          return (
+            view.source === 'stage' &&
+            view.tiles.length === 1 &&
+            view.tiles[0] === host &&
+            !view.speaker
+          )
+        }, 'Program draws only shown host')
+      } catch (error) {
+        const room = (await h.rpc('cloud.status')).room
+        throw new Error(
+          `${error.message}; last view ${JSON.stringify(lastView).replaceAll(h.showId, '<show>')}; room shown ${JSON.stringify(room?.shown ?? null).replaceAll(h.showId, '<show>')}, stage ${JSON.stringify(room?.stage ?? null).replaceAll(h.showId, '<show>')}`
         )
-        return (
-          view.source === 'stage' &&
-          view.tiles.length === 1 &&
-          view.tiles[0] === host &&
-          !view.speaker
-        )
-      }, 'Program draws only shown host')
+      }
       await assert.rejects(
         h.rpc('cloud.return.set', { open: true }),
         new RegExp(w.return.message.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
