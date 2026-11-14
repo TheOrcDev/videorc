@@ -1,9 +1,10 @@
 # Implementation Plans
 
 - 2026-11-13: [Plan 234](234-cloud-on-neon-and-livekit.md), the owner's
-  ask: "plan out Neon + LiveKit managed media". BUILDING since
-  2026-11-13: Phase 0 run, gate G0 answered ("go all recommended and build
-  it"), Phases 1 to 3 in progress, nothing switched on:
+  ask: "plan out Neon + LiveKit managed media". BUILT 2026-11-14:
+  Phase 0 run, gate G0 answered ("go all recommended and build it"),
+  Phases 1 to 3 code-complete, reviewed, through their gates and smokes
+  (desktop #1341, web #109); Phase 4 is the owner's; nothing switched on:
   - Videorc Cloud is merged and released with its switches off, and it has
     no media server. This plan runs it with none of our own: Neon for data
     and storage, LiveKit Cloud's managed Ingress and Egress for media.

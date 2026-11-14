@@ -19,10 +19,15 @@
 
 ## Status
 
-- **Status**: BUILDING since 2026-11-13. Phase 0 ran, and the owner
-  answered gate G0 the same day: "go all recommended and build it". Every
-  open question takes its recommended answer. Phases 1 to 3 are being
-  built; nothing is switched on, and no real stream key moves until the
+- **Status**: BUILT 2026-11-14, waiting on the owner. Phase 0 ran, and the
+  owner answered gate G0 on 2026-11-13: "go all recommended and build it".
+  Phases 1 to 3 are code-complete, independently reviewed per side, fixed,
+  through their heavy gates and their smokes (managed solo 10 of 10 in a
+  row, managed talk show passing), on desktop PR #1341 and web PR
+  `TheOrcDev/videorc-web#109`. Nothing has run on LiveKit Cloud since
+  Phase 0: the project's egress allowance is used up. Phase 4 is the
+  owner's: a paid LiveKit plan, the drafts, the merges, the switches and a
+  live test. Nothing is switched on, and no real stream key moves until the
   owner sets the switches (Only the owner 5 and 6).
 - **Priority**: P1. Videorc Cloud is merged and released (0.25.0) with every
   switch off, and it can't be switched on: there is no media server and no
@@ -890,16 +895,15 @@ key moves.
 
 - **Goal**: Videorc Cloud running with no server of ours: Neon for data
   and storage, LiveKit Cloud for media.
-- **Current state**: Phase 0 has run; its note is
-  `docs/cloud/spike-livekit-managed-2026-11.md`. Gate G0 is answered
-  (every recommended answer). Phases 1 to 3 are being built: the web on
-  branch `plan-234-managed-media` in `TheOrcDev/videorc-web`, the desktop
-  on this branch. The node path is merged and off. Production has Neon
-  storage and a LiveKit project that takes two ingress objects, and no
-  VM.
+- **Current state**: Phases 0 to 3 are done: the web on branch
+  `plan-234-managed-media` in `TheOrcDev/videorc-web` (PR #109), the
+  desktop on this branch (PR #1341). The wire contract,
+  `docs/cloud/managed-media-wire.md`, says what was built. The node path
+  is merged and off. Production has Neon storage and a LiveKit project on
+  the entry plan (egress allowance used up), and no VM.
 - **Route**: Orchestrator, fit 10, `fable-5.1`.
-- **Start with** the exact wire contract,
-  `docs/cloud/managed-media-wire.md`. Every lane builds against it.
+- **Start with** Phase 4 (acceptance and cut-over): a paid LiveKit plan,
+  then the first-deploy checklist in the web repo's `docs/cloud.md`.
 - **Where things are**:
   - the runner: `TheOrcDev/videorc-cloud`, `docs/wire-notes.md`;
   - the web control plane: `TheOrcDev/videorc-web`, `lib/cloud/`,
