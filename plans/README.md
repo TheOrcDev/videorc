@@ -15,6 +15,29 @@
     with no switch. The next YouTube compliance report must tell Google
     that stream statistics now go through videorc.com for this email (the
     v1 reply says they stay on the computer).
+- 2026-11-14: [Plan 236](236-buddy-becomes-sidekick.md), the owner's call:
+  Buddy becomes Sidekick everywhere, web included, because speech to text
+  hears "Buddy" as "body" (captions and voice commands). EXECUTING
+  2026-11-14 with the recommended D1–D7 (S0 and the Rust UI pass wait):
+  - Every word a person reads or says changes; every name a program reads
+    stays `buddy` (wire, API, database, saved settings, MCP tool names, ids).
+  - "sidekick" wakes it, in one or two words; "buddy" stays a hidden old name
+    for two releases; a persona named exactly "Buddy" becomes "Sidekick".
+  - Web first (pages, 308s, prompts that know both names), then desktop, then
+    the Rust UI after its Buddy lane lands.
+- 2026-11-14: [Plan 235](235-a-tidy-studio.md), the owner's ask: "make our
+  studio nice and tidy". EXECUTING 2026-11-14, owner answered D1–D9 (Buddy's glyph:
+  UserSound):
+  - Studio inspector: no Ready badge, "Go Live" without the dots, no Session,
+    Audio or Sources titles, a cog instead of "Open Sources" (PR A).
+  - Sidebar: Studio as a 40 px chrome slab, a Livestream group with
+    Destinations (was Livestream) and Buddy, Buddy on a plain glyph, ⌘1–⌘9 in
+    sidebar order (PR B).
+  - A camera-only scene with a background and no green screen covers the
+    background completely: only screen-like sources sit on the stage
+    (`scene_geometry.rs:226`). The camera joins the stage when nothing else is
+    on it and it is not keyed, on every render path (PR C).
+
 - 2026-11-13: [Plan 233](233-green-screen-without-edge-snow.md), the owner's
   stream on 0.22.1: green "snow" still crawls along the head, ears, hair and
   shoulders, in a new place every frame. EXECUTING 2026-11-13 with the

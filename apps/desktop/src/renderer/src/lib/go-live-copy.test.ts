@@ -20,7 +20,8 @@ import {
 // tables it. smoke:start-labels pins the same words from outside the app.
 describe('the going-live vocabulary (plan 174 D3)', () => {
   it('names the transport, ⌘K, the shortcuts and Upcoming the D3 way', () => {
-    expect([RECORD_LABEL, GO_LIVE_LABEL]).toEqual(['Record', 'Go Live…'])
+    // Plan 235 D2: the Studio button drops the "…"; ⌘K keeps it.
+    expect([RECORD_LABEL, GO_LIVE_LABEL]).toEqual(['Record', 'Go Live'])
     expect([START_RECORDING_COMMAND, GO_LIVE_COMMAND]).toEqual(['Start recording', 'Go live…'])
     expect([RECORD_SHORTCUT_LABEL, GO_LIVE_SHORTCUT_LABEL]).toEqual([
       'Record / stop recording',

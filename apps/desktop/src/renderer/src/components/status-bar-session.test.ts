@@ -55,7 +55,7 @@ const dot = (): HTMLElement | null => container.querySelector<HTMLElement>('[dat
 
 describe('StatusBarSessionState', () => {
   it('reads On air with the elapsed time, pulsing, in a polite live region', () => {
-    renderState({ state: 'recording', streamUrl: STREAM_URL, startedAt: STARTED_AT })
+    renderState({ state: 'streaming', streamUrl: STREAM_URL, startedAt: STARTED_AT })
     expect(button()?.textContent).toBe('On air0:00')
     expect(dot()?.dataset.tone).toBe('live')
     expect(dot()?.innerHTML).toContain('animate-ping')
@@ -65,6 +65,35 @@ describe('StatusBarSessionState', () => {
     expect(button()?.textContent).toBe('On air12:04')
     // The clock is hidden from the live region, or every tick is read out.
     expect(button()?.querySelector('[aria-hidden=true]')?.textContent).toBe('12:04')
+  })
+
+  // Plan 235 D1: the Studio's Ready badge is gone, so the status bar carries
+  // its Rec fact: Go Live is record+stream, which the backend reports as
+  // `recording` with a stream URL.
+  it('adds · Rec while on air and recording, and only then', () => {
+    renderState({ state: 'recording', streamUrl: STREAM_URL, startedAt: STARTED_AT })
+    expect(button()?.textContent).toBe('On air· Rec0:00')
+    const rec = container.querySelector('[data-testid=session-also-recording]')
+    expect(rec?.textContent).toBe('· Rec')
+    // Announced with the state, never hidden like the ticking clock.
+    expect(rec?.closest('[aria-hidden=true]')).toBeNull()
+    renderState({ state: 'recording', streamUrl: STREAM_URL }, 'closed')
+    expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
+    renderState({ state: 'recording', startedAt: STARTED_AT })
+    expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
+  })
+
+  // The backend-resilience and captions smokes read the state words here.
+  it('holds the state words alone on data-videorc-session-status', () => {
+    const hook = (): string | undefined =>
+      container.querySelector('[data-videorc-session-status]')?.textContent ?? undefined
+    renderState({ state: 'recording', streamUrl: STREAM_URL, startedAt: STARTED_AT })
+    expect(hook()).toBe('On air')
+    renderState({ state: 'idle' })
+    expect(hook()).toBe('Ready')
+    renderState({ state: 'idle' }, 'closed')
+    expect(hook()).toBe('Videorc is reconnecting…')
+    expect(container.querySelectorAll('[data-videorc-session-status]')).toHaveLength(1)
   })
 
   it('reads a recording as Recording, pulsing, with its clock', () => {

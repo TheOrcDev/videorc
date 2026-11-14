@@ -6,6 +6,7 @@ import {
   LCD_MESSAGE,
   LcdPanel,
   LcdPanelAction,
+  LcdPanelCog,
   LcdPanelHeader,
   LcdPanelKey,
   LcdPanelNavRow,
@@ -14,6 +15,7 @@ import {
   LcdPanelSwitch,
   LcdPanelValue
 } from './lcd-panel'
+import { TooltipProvider } from './ui/tooltip'
 
 const noop = (): void => {}
 
@@ -112,12 +114,29 @@ describe('the Studio screen kit (plan 197)', () => {
     ).toContain('<h3')
   })
 
+  // Plan 235 D4: a screen's way to its page is the cog, named by its words.
+  it('draws the cog in the dim ink, lit on hover, named for the page it opens', () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(LcdPanelCog, { label: 'Open Assets', onOpen: noop })
+      )
+    )
+    expect(markup).toMatch(/<button[^>]*aria-label="Open Assets"/)
+    expect(markup).toContain('text-(--lcd-display-ink-dim)')
+    expect(markup).toContain('hover:text-(--lcd-display-lit)')
+    expect(markup).toContain('type="button"')
+    expect(markup).toContain('<svg')
+    expect(markup).not.toContain('>Open Assets<')
+  })
+
   it('draws Record in the record red and every other key in the ink, sentences dim', () => {
     const record = renderToStaticMarkup(createElement(LcdPanelKey, { tone: 'record' }, 'Record'))
     expect(record).toContain('border-(--live)')
     expect(record).toContain('hover:text-(--glass-solid)')
     expect(record).toContain('type="button"')
-    expect(renderToStaticMarkup(createElement(LcdPanelKey, null, 'Go Live…'))).toContain(
+    expect(renderToStaticMarkup(createElement(LcdPanelKey, null, 'Go Live'))).toContain(
       'border-(--lcd-display-lit)'
     )
     expect(LCD_MESSAGE).toContain('normal-case')
