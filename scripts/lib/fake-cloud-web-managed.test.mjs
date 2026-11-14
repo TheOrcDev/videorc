@@ -102,6 +102,27 @@ test('version gate is numeric, suffix tolerant and fail closed', () => {
   for (const version of [undefined, '', '0.9.0', '0.25.99', 'v0.26.0'])
     assert.equal(managedVersionAllowed(version), false)
 })
+test('the build under test is accepted by its exact version only', async () => {
+  const web = await startFakeCloudWebManaged({ buildVersion: '0.25.2' })
+  try {
+    const capabilities = async (version) =>
+      (
+        await (
+          await fetch(`${web.httpOrigin}/api/ai/capabilities`, {
+            headers: {
+              authorization: `Bearer ${web.sessionToken}`,
+              'user-agent': `Videorc-Desktop/${version}`
+            }
+          })
+        ).json()
+      ).cloud.enabled
+    assert.equal(await capabilities('0.25.2'), true)
+    assert.equal(await capabilities('0.25.1'), false)
+    assert.equal(await capabilities('0.26.0'), true)
+  } finally {
+    await web.close()
+  }
+})
 test('URL masker handles nested values, keys, multiple schemes and retains ordinary strings', () => {
   assert.deepEqual(
     maskManagedUrls({

@@ -164,7 +164,6 @@ export async function managedHarness(kind, pass = 1) {
         }
       : undefined
   const env = {
-    VIDEORC_APP_VERSION: process.env.VIDEORC_APP_VERSION ?? '0.26.0',
     VIDEORC_CLOUD_FEED_CA_FILE: cert,
     VIDEORC_SMOKE_SKIP_PREBUILD: '1',
     VIDEORC_DISABLE_AUTO_PREVIEW: '1',
@@ -547,6 +546,10 @@ export async function managedHarness(kind, pass = 1) {
     }
     web = await startFakeCloudWebManaged({
       sessionToken,
+      // Main reports app.getVersion() to the backend, whatever the shell says.
+      buildVersion: JSON.parse(
+        readFileSync(new URL('../../apps/desktop/package.json', import.meta.url), 'utf8')
+      ).version,
       ingest: [feed],
       tls: { cert: readFileSync(cert), key: readFileSync(key) },
       livekit,

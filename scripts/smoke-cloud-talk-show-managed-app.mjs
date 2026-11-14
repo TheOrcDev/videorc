@@ -1,13 +1,13 @@
 /** Plan 234 T4: managed room/control, real local LiveKit overlay delivery,
  * stage projection and independently managed HLS download jobs.
- * Run: VIDEORC_APP_VERSION=0.26.0 pnpm smoke:cloud-talk-show-managed
+ * Run: pnpm smoke:cloud-talk-show-managed
  * Requires an already built dev backend (never builds), livekit-server --dev,
  * Chrome (VIDEORC_SMOKE_CHROME), openssl, ffmpeg/ffprobe. Env:
- * VIDEORC_APP_VERSION >= 0.26.0; VIDEORC_SMOKE_OUTPUT_DIR;
- * VIDEORC_SMOKE_{FFMPEG,FFPROBE,LIVEKIT}_PATH. The feed's existing
- * VIDEORC_CLOUD_FEED_CA_FILE carries this run's test root to FFmpeg.
- * HTTPS API trust needs a desktop test-root mechanism: none exists at the
- * pinned base. Required checks fail explicitly when a desktop hook is absent.
+ * VIDEORC_SMOKE_OUTPUT_DIR; VIDEORC_SMOKE_{FFMPEG,FFPROBE,LIVEKIT}_PATH. The
+ * fake web takes this build's own version as web-control ready. The feed's
+ * VIDEORC_CLOUD_FEED_CA_FILE also carries this run's test root to the dev
+ * build's recording downloader (segments over HTTPS; the playlist goes
+ * through the API base). Required checks fail explicitly when a hook is absent.
  * Cannot prove real LiveKit egress, webhooks, Neon, or program-page pixels/audio.
  */
 import assert from 'node:assert/strict'

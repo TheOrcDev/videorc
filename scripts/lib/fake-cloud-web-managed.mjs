@@ -63,6 +63,10 @@ export async function startFakeCloudWebManaged({
   probeMedia,
   maxShows = 1,
   managed = true,
+  // The exact version of the desktop build under test. A branch is versioned
+  // as the last release (Electron main always reports app.getVersion()), and
+  // ships as 0.26.0 or later; every other version keeps the fixture's rule.
+  buildVersion,
   ...nodeOptions
 } = {}) {
   // Option wrapper: legacy callers keep the original node fake verbatim.
@@ -77,6 +81,8 @@ export async function startFakeCloudWebManaged({
     delays = new Map(),
     barriers = new Map(),
     answers = new Map()
+  const versionAllowed = (version) =>
+    managedVersionAllowed(version) || (Boolean(buildVersion) && version === buildVersion)
   let controlKind = wire.control.kinds[0],
     closed = false,
     httpsOrigin
@@ -325,7 +331,7 @@ export async function startFakeCloudWebManaged({
         return send(200, { user: { name: 'Smoke', email: 'smoke@example.invalid', image: null } })
       if (path === '/api/ai/capabilities' || path === '/api/cloud/allowance') {
         const version = /^Videorc-Desktop\/(.+)$/.exec(req.headers['user-agent'] ?? '')?.[1]
-        const cloud = { ...allowance, enabled: managedVersionAllowed(version) }
+        const cloud = { ...allowance, enabled: versionAllowed(version) }
         return send(200, path.endsWith('capabilities') ? capabilitiesWithCloud({ cloud }) : cloud)
       }
       if (route === 'current') {
@@ -336,7 +342,7 @@ export async function startFakeCloudWebManaged({
       if (route === 'create') {
         if ([...shows.values()].filter((s) => !s.show.endedAt).length >= maxShows)
           return fail(wire.errors.create.find((e) => e.code.endsWith('full')).code)
-        if (!managedVersionAllowed(body.client?.version))
+        if (!versionAllowed(body.client?.version))
           return fail(wire.errors.create.find((e) => e.status === 403).code)
         if (
           !['solo', 'talk', 'test'].includes(body.kind) ||

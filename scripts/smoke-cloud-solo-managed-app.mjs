@@ -1,10 +1,13 @@
 /** Plan 234 C6: real desktop web control, local TLS ingress, recovery and leaks.
- * Run: VIDEORC_APP_VERSION=0.26.0 pnpm smoke:cloud-solo-managed --repeat 10
+ * Run: pnpm smoke:cloud-solo-managed --repeat 10
  * Needs an already built dev backend (never builds), MediaMTX, ffmpeg/ffprobe,
- * openssl/lsof on macOS. Env: VIDEORC_APP_VERSION >= 0.26.0 (older creates are
- * refused), VIDEORC_SMOKE_OUTPUT_DIR, VIDEORC_SMOKE_{FFMPEG,FFPROBE,MEDIAMTX}_PATH.
+ * openssl/lsof on macOS. Env: VIDEORC_SMOKE_OUTPUT_DIR,
+ * VIDEORC_SMOKE_{FFMPEG,FFPROBE,MEDIAMTX}_PATH. The fake web takes this build's
+ * own version (apps/desktop/package.json) as web-control ready; any other
+ * version keeps the 0.26.0 rule, since main always reports app.getVersion().
  * VIDEORC_MANAGED_PROGRAM_RECORDING names D18's program snapshot (use {pass}
- * for repeat), with a .clock.json containing firstFrameAtMs.
+ * for repeat), with a .clock.json containing firstFrameAtMs; without it the
+ * program-receiver hold card is a named SKIP on every pass.
  * Cannot prove real LiveKit egress, webhooks or Neon. A feed-only receiver cannot
  * prove the program page's hold-card pixels: that remains a required D18 gate.
  */
