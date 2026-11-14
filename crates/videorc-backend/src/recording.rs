@@ -27789,7 +27789,7 @@ fn cloud_feed_target(
 /// Dev builds may trust one extra CA, so `smoke:cloud-solo` publishes to its
 /// own MediaMTX with checking on. Packaged builds never read it, like
 /// `VIDEORC_API_BASE_URL`.
-const CLOUD_FEED_CA_FILE_ENV: &str = "VIDEORC_CLOUD_FEED_CA_FILE";
+pub(crate) const CLOUD_FEED_CA_FILE_ENV: &str = "VIDEORC_CLOUD_FEED_CA_FILE";
 const CLOUD_FEED_ROOTS_FILE_NAME: &str = "cloud-feed-roots.pem";
 const PEM_CERTIFICATE_BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
 /// Characters FFmpeg's option dictionary, a tee slave's brackets or
@@ -27823,7 +27823,10 @@ fn cloud_feed_roots_pem(extra_ca_pem: Option<&[u8]>) -> Vec<u8> {
 }
 
 /// The dev override's CA, read in dev builds only; `None` when unset.
-fn cloud_feed_extra_ca_pem(dev_build: bool, env_value: Option<&str>) -> Result<Option<Vec<u8>>> {
+pub(crate) fn cloud_feed_extra_ca_pem(
+    dev_build: bool,
+    env_value: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
     if !dev_build {
         return Ok(None);
     }

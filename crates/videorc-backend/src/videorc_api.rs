@@ -1817,6 +1817,40 @@ fn shared_http() -> Result<reqwest::Client> {
     Ok(SHARED_HTTP.get_or_init(|| http).clone())
 }
 
+/// The downloader shares the feed's dev-only extra root. Production keeps
+/// normal rustls roots and never even reads the override environment variable.
+/// HTTPS-only also refuses redirects from a segment to plain HTTP.
+fn build_recording_http(
+    dev_build: bool,
+    read_ca_file: impl FnOnce() -> Option<String>,
+) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().https_only(true);
+    if dev_build {
+        let ca_file = read_ca_file();
+        if let Some(pem) = crate::recording::cloud_feed_extra_ca_pem(true, ca_file.as_deref())? {
+            for certificate in reqwest::Certificate::from_pem_bundle(&pem)
+                .context("The recording download test root is not a PEM certificate.")?
+            {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+    }
+    builder
+        .build()
+        .context("Could not build the recording download HTTP client.")
+}
+
+fn recording_http() -> Result<&'static reqwest::Client> {
+    static RECORDING_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = RECORDING_HTTP.get() {
+        return Ok(client);
+    }
+    let client = build_recording_http(cfg!(debug_assertions), || {
+        std::env::var(crate::recording::CLOUD_FEED_CA_FILE_ENV).ok()
+    })?;
+    Ok(RECORDING_HTTP.get_or_init(|| client))
+}
+
 /// A thin client over the Videorc web API.
 #[derive(Clone)]
 pub struct VideorcApiClient {
@@ -3937,19 +3971,9 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
     ) -> std::result::Result<(), crate::cloud_control_web::SegmentFetchError> {
         use crate::cloud_control_web::SegmentFetchError;
         use tokio::io::AsyncWriteExt as _;
-        // Default rustls certificate AND hostname verification. https_only also
-        // refuses an HTTPS redirect to HTTP. No bearer is sent to storage.
-        static RECORDING_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-        let client = match RECORDING_HTTP.get() {
-            Some(client) => client,
-            None => {
-                let client = reqwest::Client::builder()
-                    .https_only(true)
-                    .build()
-                    .map_err(|_| SegmentFetchError::Network)?;
-                RECORDING_HTTP.get_or_init(|| client)
-            }
-        };
+        // Certificate AND hostname verification stay on, including with the
+        // feed's dev test root. No bearer is sent to storage.
+        let client = recording_http().map_err(|_| SegmentFetchError::Network)?;
         let mut response = client
             .get(url)
             .timeout(std::time::Duration::from_secs(90))
@@ -4067,6 +4091,49 @@ mod tests {
     use super::*;
 
     type SeenCommands = std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, serde_json::Value)>>>;
+
+    #[test]
+    fn release_recording_downloads_never_read_the_dev_ca_variable() {
+        build_recording_http(false, || {
+            panic!("a release downloader must not read VIDEORC_CLOUD_FEED_CA_FILE")
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recording_downloads_refuse_plain_http_with_or_without_the_dev_root() {
+        for dev_build in [false, true] {
+            let client = build_recording_http(dev_build, || None).unwrap();
+            let error = client
+                .get("http://127.0.0.1/segment.ts")
+                .send()
+                .await
+                .unwrap_err();
+            assert!(
+                error.is_builder(),
+                "HTTP is refused before a request, dev={dev_build}"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_recording_downloads_append_the_feeds_test_root() {
+        use base64::Engine as _;
+        let path =
+            std::env::temp_dir().join(format!("cloud-download-ca-{}.pem", uuid::Uuid::new_v4()));
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(webpki_root_certs::TLS_SERVER_ROOT_CERTS[0].as_ref());
+        std::fs::write(
+            &path,
+            format!("-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n"),
+        )
+        .unwrap();
+        build_recording_http(true, || Some(path.to_string_lossy().into_owned())).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(build_recording_http(true, || Some(path.to_string_lossy().into_owned())).is_err());
+        // An override naming an unreadable file is inert on the release path.
+        build_recording_http(false, || Some(path.to_string_lossy().into_owned())).unwrap();
+    }
 
     #[test]
     fn caption_service_unavailable_preserves_http_status_and_stable_code() {
