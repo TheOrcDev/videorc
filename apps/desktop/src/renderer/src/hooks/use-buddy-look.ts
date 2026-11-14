@@ -83,7 +83,7 @@ function problemOf(error: unknown): BuddyLookProblem {
       : 'failed'
   return {
     code,
-    message: inlineUserError(error, { action: 'update', object: "Buddy's look" }, 'buddy-look')
+    message: inlineUserError(error, { action: 'update', object: "Sidekick's look" }, 'buddy-look')
   }
 }
 

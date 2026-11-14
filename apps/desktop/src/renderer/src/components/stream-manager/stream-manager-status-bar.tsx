@@ -416,8 +416,8 @@ export function StreamManagerStatusBar({
       ? [
           {
             id: 'cohost-focus' as const,
-            label: 'Buddy',
-            menuLabel: 'Focus Buddy',
+            label: 'Sidekick',
+            menuLabel: 'Focus Sidekick',
             run: onFocusBuddy
           }
         ]

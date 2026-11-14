@@ -200,7 +200,7 @@ describe('overlay start notices (D13)', () => {
     ).toStrictEqual([])
   })
 
-  it('names the shared-encode fallback for highlight and Buddy, never captions', () => {
+  it('names the shared-encode fallback for highlight and Sidekick, never captions', () => {
     expect(
       overlayStartNotices({ recordEnabled: true, streamEnabled: true, auxLeg: 'none' }, layout)
     ).toStrictEqual([
@@ -212,7 +212,7 @@ describe('overlay start notices (D13)', () => {
       {
         item: 'buddy',
         notice:
-          'Both the stream and the recording will include the Buddy: this computer shares one encode for them.'
+          'Both the stream and the recording will include the Sidekick: this computer shares one encode for them.'
       }
     ])
   })
@@ -226,7 +226,7 @@ describe('overlay start notices (D13)', () => {
     ).toStrictEqual([
       'Recording will include highlights while streaming vertical.',
       'Recording will include captions while streaming vertical.',
-      'The horizontal stream will include the Buddy while streaming vertical.'
+      'The horizontal stream will include the Sidekick while streaming vertical.'
     ])
   })
 

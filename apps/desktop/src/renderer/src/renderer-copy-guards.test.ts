@@ -213,7 +213,7 @@ const COMMAND_TAGS = new Set([
 const CAPITALIZED_NAMES = new Set([
   'Videorc',
   'Premium',
-  'Buddy',
+  'Sidekick',
   'Live',
   'Go',
   'Stream',

@@ -77,21 +77,21 @@ function activeTab(slot: 'pane-tabs-narrow' | 'pane-tabs-wide'): string | null {
 function buddyTabUnseen(slot: 'pane-tabs-narrow' | 'pane-tabs-wide'): string | null {
   const tab = [
     ...container.querySelectorAll<HTMLElement>(`[data-slot="${slot}"] [role="tab"]`)
-  ].find((candidate) => candidate.textContent?.includes('Buddy'))
+  ].find((candidate) => candidate.textContent?.includes('Sidekick'))
   return tab?.querySelector('[data-testid="pane-unseen"]')?.textContent ?? null
 }
 
 // The Buddy pane is never on screen in this DOM (no IntersectionObserver), the
 // case these rules exist for: a proposed post behind a tab.
-describe('StreamManager: a proposed Buddy post behind a tab (plan 174 S0.2)', () => {
-  it('brings the Buddy pane forward for a new card, then returns to where you were', async () => {
+describe('StreamManager: a proposed Sidekick post behind a tab (plan 174 S0.2)', () => {
+  it('brings the Sidekick pane forward for a new card, then returns to where you were', async () => {
     await render([])
     expect(activeTab('pane-tabs-narrow')).toBe('chat')
     expect(activeTab('pane-tabs-wide')).toBe('activity')
 
     await render([proposed])
-    expect(activeTab('pane-tabs-narrow')).toBe('buddy')
-    expect(activeTab('pane-tabs-wide')).toBe('buddy')
+    expect(activeTab('pane-tabs-narrow')).toBe('sidekick')
+    expect(activeTab('pane-tabs-wide')).toBe('sidekick')
     expect(container.querySelector('[data-testid="buddy-utterance-card"]')).toBeTruthy()
     // It never takes focus from wherever the streamer is typing.
     expect(document.activeElement).toBe(document.body)
@@ -103,7 +103,7 @@ describe('StreamManager: a proposed Buddy post behind a tab (plan 174 S0.2)', ()
     expect(activeTab('pane-tabs-wide')).toBe('activity')
   })
 
-  it('counts a proposed post in the Buddy tab badge', async () => {
+  it('counts a proposed post in the Sidekick tab badge', async () => {
     await render([])
     expect(buddyTabUnseen('pane-tabs-wide')).toBeNull()
     await render([proposed])
@@ -113,7 +113,7 @@ describe('StreamManager: a proposed Buddy post behind a tab (plan 174 S0.2)', ()
     expect(buddyTabUnseen('pane-tabs-wide')).toBe('2')
   })
 
-  it('never posts on Enter while the Buddy pane is not on screen', async () => {
+  it('never posts on Enter while the Sidekick pane is not on screen', async () => {
     const onCohostUtteranceApprove = vi.fn()
     const onCohostUtteranceDismiss = vi.fn()
     await render([proposed], { onCohostUtteranceApprove, onCohostUtteranceDismiss })
@@ -135,7 +135,7 @@ describe('StreamManager: a proposed Buddy post behind a tab (plan 174 S0.2)', ()
   })
 })
 
-describe('StreamManager: how Buddy talks reaches the relay (plan 211 S-C1, D3)', () => {
+describe('StreamManager: how Sidekick talks reaches the relay (plan 211 S-C1, D3)', () => {
   const autoChat = {
     talk: 'off' as const,
     // The legacy projection rides along; the control never reads or sends it.

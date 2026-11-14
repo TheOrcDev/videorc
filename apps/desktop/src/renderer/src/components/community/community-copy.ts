@@ -18,9 +18,9 @@ export const DEFAULT_COMMUNITY_SETTINGS: CommunitySettings = {
 }
 
 /** D10: the one-time offer, after the first stream regulars came to. */
-export const REMEMBER_OFFER_TITLE = 'Let Buddy remember what your regulars tell it?'
+export const REMEMBER_OFFER_TITLE = 'Let Sidekick remember what your regulars tell it?'
 export const REMEMBER_OFFER_DESCRIPTION =
-  'After a stream, Buddy reads what your regulars said about themselves and keeps a few short memories, so next time it can ask how the borrow checker is treating them. You see and delete every memory. YouTube chat is never read for this.'
+  'After a stream, Sidekick reads what your regulars said about themselves and keeps a few short memories, so next time it can ask how the borrow checker is treating them. You see and delete every memory. YouTube chat is never read for this.'
 
 /** "Forget this memory?": the confirm's title and its one sentence (D10). */
 export function memoryForgetCopy(
@@ -29,7 +29,7 @@ export function memoryForgetCopy(
 ): { title: string; description: string; confirm: string } {
   return {
     title: 'Forget this memory?',
-    description: `Buddy stops remembering “${text}” about ${name}. It can learn it again from a later stream.`,
+    description: `Sidekick stops remembering “${text}” about ${name}. It can learn it again from a later stream.`,
     confirm: 'Forget memory'
   }
 }

@@ -260,7 +260,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(dialog?.querySelector('[data-slot="dialog-description"]')?.textContent).toBe(
       CLOUD_AI_CLEAN_CUT_USE
     )
-    expect(dialog?.textContent).toContain('Allowing cloud AI also covers Buddy:')
+    expect(dialog?.textContent).toContain('Allowing cloud AI also covers Sidekick:')
     for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
     await act(async () => button('Not now').click())
     expect(setAiConsent).not.toHaveBeenCalled()

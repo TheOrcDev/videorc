@@ -7,7 +7,7 @@ import { openWorkspaceTab } from '@/lib/workspace-navigation'
  * stay `cohost`; saved values keep `orcle` (plan 170 D22), like the
  * remembered tab's storage key.
  */
-export const BUDDY_TAB_LABEL = 'Buddy'
+export const BUDDY_TAB_LABEL = 'Sidekick'
 
 /**
  * The Buddy tab's own tabs (plan 150, renamed in plan 164), in strip order,

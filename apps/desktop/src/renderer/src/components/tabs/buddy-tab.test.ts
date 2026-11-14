@@ -94,7 +94,7 @@ const premium = { allowed: true }
 const basic = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Buddy requires Videorc Premium.',
+  reason: 'Sidekick requires Videorc Premium.',
   upgradeUrl: 'https://www.videorc.com/premium'
 }
 
@@ -111,7 +111,7 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
     removeConfirm: 'confirm',
     persona: {
       id: 'default',
-      name: 'Buddy',
+      name: 'Sidekick',
       personality: '',
       bubbleStyle: 'speech',
       images: {},
@@ -243,7 +243,7 @@ async function pressTab(id: BuddyTabId): Promise<void> {
   await act(async () => trigger.click())
 }
 
-describe('Buddy tab strip (plan 150)', () => {
+describe('Sidekick tab strip (plan 150)', () => {
   it('lists six tabs like Settings and opens on Live', async () => {
     await render()
     // Plan 174 D7: the page is Buddy, so its first tab is Profile. Plan 225
@@ -285,8 +285,8 @@ describe('Buddy tab strip (plan 150)', () => {
   })
 })
 
-describe('Buddy tab (plan 119 S2)', () => {
-  it('leads with the status row, then My Buddies and the creation screen, then its powers', async () => {
+describe('Sidekick tab (plan 119 S2)', () => {
+  it('leads with the status row, then My Sidekicks and the creation screen, then its powers', async () => {
     await render()
     const text = document.body.textContent ?? ''
     // Plan 174 D7, F-4: the one status row leads; My Buddies and the creation
@@ -306,17 +306,17 @@ describe('Buddy tab (plan 119 S2)', () => {
     expect(document.getElementById('buddy-name')).toBeTruthy()
     // Plan 174 J2-20: the on switch has one name, Buddy Live; the
     // streamer's name for Buddy sits beside the emblem.
-    expect(text).toContain('Buddy Live')
+    expect(text).toContain('Sidekick Live')
     expect(text).not.toMatch(/joins my streams/i)
     expect(text).toContain('Alpha')
     expect(
       document.querySelector(
         '[data-slot="buddy-live-status-block"] [data-slot="buddy-profile-name"]'
       )?.textContent
-    ).toBe('Buddy')
+    ).toBe('Sidekick')
     // Plan 174 G-2: how to put the Buddy on stream, while it is not.
     expect(document.querySelector('[data-testid="buddy-on-stream-note"]')?.textContent).toContain(
-      'turn on “Buddy on stream”'
+      'turn on “Sidekick on stream”'
     )
     for (const power of BUDDY_LIVE_POWERS) {
       expect(text).toContain(power.title)
@@ -329,7 +329,7 @@ describe('Buddy tab (plan 119 S2)', () => {
     expect(text).toContain('Open Stream Manager')
   })
 
-  it('turns Buddy Live on and off with its own switch, and nothing else (plan 174 S3.14a)', async () => {
+  it('turns Sidekick Live on and off with its own switch, and nothing else (plan 174 S3.14a)', async () => {
     await render()
     await act(async () => liveSwitch().click())
     expect(calls.setBuddyLive).toHaveBeenLastCalledWith(true)
@@ -343,14 +343,14 @@ describe('Buddy tab (plan 119 S2)', () => {
     expect(calls.patchCohostSettings).not.toHaveBeenCalled()
   })
 
-  it('locks the switch off, with the reason, for an account that cannot turn Buddy on', async () => {
+  it('locks the switch off, with the reason, for an account that cannot turn Sidekick on', async () => {
     await render({ gate: basic })
     const control = liveSwitch()
     expect(control.hasAttribute('data-disabled')).toBe(true)
     const wrapper = control.closest<HTMLElement>('[data-slot="disabled-reason"]')
     expect(
       document.getElementById(wrapper?.getAttribute('aria-describedby') ?? '')?.textContent
-    ).toBe('Buddy Live is part of Videorc Premium.')
+    ).toBe('Sidekick Live is part of Videorc Premium.')
     // On already: a locked account can still turn Buddy off.
     await render({ gate: basic, cohost: settings({ enabled: true }) })
     expect(liveSwitch().hasAttribute('data-disabled')).toBe(false)
@@ -359,7 +359,7 @@ describe('Buddy tab (plan 119 S2)', () => {
   it('asks for consent in a dialog that names every cloud use, and answers it', async () => {
     await render({ consented: false, consentRequested: true })
     const dialog = document.querySelector('[role="dialog"]')
-    expect(dialog?.textContent).toContain('Turn on Buddy Live?')
+    expect(dialog?.textContent).toContain('Turn on Sidekick Live?')
     // Plan 149: Buddy's emblem leads the dialog, at its large size.
     const emblem = dialog?.querySelector('[data-slot="buddy-emblem"]')
     expect(emblem?.getAttribute('src')).toContain('buddy-emblem-112')
@@ -375,7 +375,7 @@ describe('Buddy tab (plan 119 S2)', () => {
     expect(calls.setAiConsent).not.toHaveBeenCalled()
   })
 
-  it('shows no consent dialog until Buddy Live asks for one', async () => {
+  it('shows no consent dialog until Sidekick Live asks for one', async () => {
     await render({ consented: false })
     expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
@@ -383,7 +383,7 @@ describe('Buddy tab (plan 119 S2)', () => {
   it('asks a signed-out streamer to sign in', async () => {
     await render({ signedIn: false, gate: basic })
     const unlock = document.querySelector('[data-testid="buddy-live-unlock"]')
-    expect(unlock?.textContent).toContain('Sign in to use Buddy Live, part of Videorc Premium.')
+    expect(unlock?.textContent).toContain('Sign in to use Sidekick Live, part of Videorc Premium.')
     // Locked means disabled with one reason: the switch cannot turn Buddy on.
     expect(liveSwitch().hasAttribute('data-disabled')).toBe(true)
     await act(async () => button('Sign in').click())
@@ -393,7 +393,7 @@ describe('Buddy tab (plan 119 S2)', () => {
   it('offers Premium to a Basic account, in the one Premium sentence (plan 174 F-19)', async () => {
     await render({ gate: basic })
     expect(document.querySelector('[data-testid="buddy-live-unlock"]')?.textContent).toContain(
-      'Buddy Live is part of Videorc Premium.'
+      'Sidekick Live is part of Videorc Premium.'
     )
     expect(liveSwitch().hasAttribute('data-disabled')).toBe(true)
     await act(async () => button('View Premium').click())
@@ -427,12 +427,12 @@ describe('Buddy tab (plan 119 S2)', () => {
     expect(calls.openCommentsWindow).toHaveBeenCalledTimes(1)
   })
 
-  it('names what needs attention when cloud AI was revoked with Buddy on', async () => {
+  it('names what needs attention when cloud AI was revoked with Sidekick on', async () => {
     await render({ cohost: settings({ enabled: true }), consented: false })
     expect(statusLine().getAttribute('data-status')).toBe('attention')
     expect(statusLine().textContent).toContain('Needs attention')
     expect(statusLine().textContent).toContain(
-      "Cloud AI isn't allowed, so Buddy can't read chat or hear you. Allow it under Cloud AI."
+      "Cloud AI isn't allowed, so Sidekick can't read chat or hear you. Allow it under Cloud AI."
     )
   })
 })
@@ -451,11 +451,11 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     expect(block.querySelector('[data-testid="buddy-live-pointer"]')).toBeNull()
     expect(document.getElementById('cohost-listen')).toBeTruthy()
     // The three-column pitch is gone; Live lists what Buddy does as rows.
-    expect(document.querySelector('ul[aria-label="What Buddy does"]')).toBeNull()
+    expect(document.querySelector('ul[aria-label="What Sidekick does"]')).toBeNull()
     expect(document.querySelectorAll('[data-power-tab]')).toHaveLength(BUDDY_LIVE_POWERS.length)
   })
 
-  it("puts the streamer's own Buddy in the header, not the golem", async () => {
+  it("puts the streamer's own Sidekick in the header, not the golem", async () => {
     const owl = settings()
     owl.persona = {
       ...owl.persona,
@@ -497,7 +497,7 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     await render({ tab: 'chat', gate: basic })
     // Greetings stay free under the lock, and the lock says so (plan 174 F-19).
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
-      'Buddy Live is part of Videorc Premium. Greetings are free.'
+      'Sidekick Live is part of Videorc Premium. Greetings are free.'
     )
     // Greetings are free (plan 164 D6): editable under the same lock.
     expect((document.getElementById('buddy-greetings-enabled') as HTMLButtonElement).disabled).toBe(
@@ -513,19 +513,19 @@ describe('Locked means disabled, with one reason, on every tab (plan 150, D7)', 
   it('gives a signed-out streamer the same sign-in reason on Live, Chat and Voice', async () => {
     await render({ signedIn: false })
     expect(document.querySelector('[data-testid="buddy-live-unlock"]')?.textContent).toContain(
-      'Sign in to use Buddy Live'
+      'Sign in to use Sidekick Live'
     )
     expect((document.getElementById('cohost-listen') as HTMLButtonElement).disabled).toBe(true)
 
     await render({ signedIn: false, tab: 'chat' })
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
-      'Sign in to use Buddy Live'
+      'Sign in to use Sidekick Live'
     )
     expect((document.getElementById('cohost-answers') as HTMLButtonElement).disabled).toBe(true)
 
     await render({ signedIn: false, tab: 'voice' })
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
-      'Sign in to use Buddy Live'
+      'Sign in to use Sidekick Live'
     )
     expect(document.querySelector('[data-testid="buddy-voice-commands-off"]')).toBeNull()
     expect((document.getElementById('buddy-wake-word') as HTMLButtonElement).disabled).toBe(true)
@@ -539,11 +539,11 @@ describe('Reports (plan 119 S3, plan 150)', () => {
     expect(document.getElementById('buddy-live-switch')).toBeNull()
     expect(mocked.reportAsks.at(-1)).toBeNull()
     expect(document.body.textContent).toContain(
-      'The report appears here after your first stream with Buddy.'
+      'The report appears here after your first stream with Sidekick.'
     )
   })
 
-  it("opens on the session Library's Buddy report asked for", async () => {
+  it("opens on the session Library's Sidekick report asked for", async () => {
     await render({ reportSessionId: 'stream-7' })
     expect(mocked.reportAsks.at(-1)).toBe('stream-7')
   })
@@ -578,15 +578,15 @@ describe('Cloud AI and the settings tabs (plan 119 S2, plan 150)', () => {
     expect(calls.setBuddyLive).not.toHaveBeenCalled()
   })
 
-  it("holds Buddy's settings without a second Enable switch", async () => {
+  it("holds Sidekick's settings without a second Enable switch", async () => {
     await render({ cohost: settings({ enabled: true }), tab: 'chat' })
     expect(document.getElementById('cohost-tone')).toBeTruthy()
     expect(document.getElementById('cohost-enabled')).toBeNull()
-    expect(document.body.textContent).not.toContain('Enable Buddy')
+    expect(document.body.textContent).not.toContain('Enable Sidekick')
   })
 })
 
-describe('Clean cut in the Buddy tab (plan 119 S14)', () => {
+describe('Clean cut in the Sidekick tab (plan 119 S14)', () => {
   it('is its own tab', async () => {
     await render({ tab: 'clean-cut' })
     expect(document.querySelector('[data-slot="clean-cut"]')).toBeTruthy()
@@ -617,7 +617,7 @@ describe('Clean cut in the Buddy tab (plan 119 S14)', () => {
   })
 })
 
-describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
+describe('Sidekick tab: Voice commands (plan 140, S6 part A)', () => {
   const connectPlatformAccount = vi.fn(async () => undefined)
   const authorizeXLive = vi.fn(async () => undefined)
   const accounts = [
@@ -653,31 +653,31 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
       expect(text).toContain(title)
     }
     // Plan 174 F-16: the Buddy's own name starts a command too.
-    expect(text).toContain('Start with “Buddy”')
-    expect(text).toContain('“Buddy, highlight the comment from coders X”')
+    expect(text).toContain('Start with “Sidekick”')
+    expect(text).toContain('“Sidekick, highlight the comment from coders X”')
     expect(text).toContain('“This one is toxic. Remove it from our chat.”')
     expect(text).toContain(
-      'Buddy never posts in your chat on its own. It removes a comment only when you tell it to.'
+      'Sidekick never posts in your chat on its own. It removes a comment only when you tell it to.'
     )
     expect(text).toContain('20 seconds')
     expect(text).toContain('At most 10 removals a minute.')
     expect(voice.querySelector('[data-testid="buddy-voice-commands-off"]')).toBeNull()
   })
 
-  it('says to turn on Buddy Live first while it is off, with a way to its tab', async () => {
+  it('says to turn on Sidekick Live first while it is off, with a way to its tab', async () => {
     await render({ tab: 'voice' })
     const off = section().querySelector('[data-testid="buddy-voice-commands-off"]') as HTMLElement
-    expect(off.textContent).toContain('Turn on Buddy Live to use voice commands.')
+    expect(off.textContent).toContain('Turn on Sidekick Live to use voice commands.')
     // Plan 174 F-5: the button names the tab as the strip does, never "Live".
     expect(off.querySelector('button')?.textContent).toBe('Go to Profile')
     await act(async () => off.querySelector('button')!.click())
     expect(calls.onTabChange).toHaveBeenLastCalledWith('live')
   })
 
-  it('leads with one reason when Buddy is locked, and disables the settings (plan 150)', async () => {
+  it('leads with one reason when Sidekick is locked, and disables the settings (plan 150)', async () => {
     await render({ tab: 'voice', gate: basic })
     expect(section().querySelector('[data-testid="buddy-tab-unlock"]')?.textContent).toContain(
-      'Buddy Live is part of Videorc Premium.'
+      'Sidekick Live is part of Videorc Premium.'
     )
     expect(section().querySelector('[data-testid="buddy-voice-commands-off"]')).toBeNull()
     expect((document.getElementById('buddy-wake-word') as HTMLButtonElement).disabled).toBe(true)
@@ -695,7 +695,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
     expect(highlight.children).toHaveLength(2)
     expect(highlight.firstElementChild?.getAttribute('data-slot')).toBe('list-row')
     expect(highlight.firstElementChild?.textContent).toContain('Puts it on stream.')
-    expect(highlight.lastElementChild?.textContent).toContain('“Buddy, put this one up”')
+    expect(highlight.lastElementChild?.textContent).toContain('“Sidekick, put this one up”')
     expect(highlight.querySelector('[title]')).toBeNull()
     expect(section().querySelector('[data-slot="buddy-voice-commands-premium"]')).toBeTruthy()
   })
@@ -721,11 +721,11 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
     // One line per row: the short status shows, the whole fix is the button's
     // name and tooltip (a Tooltip, never a native title: plan 174 S1.10).
     expect(rows[1].textContent).toContain('Needs access')
-    expect(rows[1].textContent).not.toContain('to let Buddy remove messages')
+    expect(rows[1].textContent).not.toContain('to let Sidekick remove messages')
     const reconnect = rows[1].querySelector('button')!
     expect(reconnect.textContent).toBe('Reconnect')
     expect(reconnect.getAttribute('aria-label')).toBe(
-      'Reconnect Twitch to let Buddy remove messages.'
+      'Reconnect Twitch to let Sidekick remove messages.'
     )
     expect(reconnect.hasAttribute('title')).toBe(false)
     expect(reconnect.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
@@ -733,7 +733,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
     expect(rows[2].textContent).toContain('Needs access')
     expect(authorize.textContent).toBe('Authorize X Live')
     expect(authorize.getAttribute('aria-label')).toBe(
-      'Authorize X Live to let Buddy remove messages.'
+      'Authorize X Live to let Sidekick remove messages.'
     )
     expect(authorize.hasAttribute('title')).toBe(false)
 
@@ -759,7 +759,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
       tab: 'voice'
     })
     const voice = section()
-    expect(voice.textContent).toContain('Commands need “Buddy” first')
+    expect(voice.textContent).toContain('Commands need “Sidekick” first')
     expect(voice.textContent).toContain('YouTube always asks you to confirm.')
     expect(voice.textContent).toContain('A removal waits 20 seconds for your answer')
     const wake = document.getElementById('buddy-wake-word') as HTMLButtonElement

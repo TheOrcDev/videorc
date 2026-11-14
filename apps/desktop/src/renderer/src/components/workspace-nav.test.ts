@@ -110,11 +110,11 @@ describe('workspace navigation', () => {
     // Plan 235 D7: a plain glyph, named for the page.
     expect(WORKSPACE_TABS.find((tab) => tab.id === 'ai')).toEqual({
       id: 'ai',
-      label: 'Buddy',
+      label: 'Sidekick',
       icon: BuddyPageIcon
     })
     expect(shortcutDigitFor('ai')).toBe('8')
-    expect(workspaceTabLabel('ai')).toBe('Buddy')
+    expect(workspaceTabLabel('ai')).toBe('Sidekick')
   })
 
   it('names each sidebar page once, and every page but Health has a row', () => {

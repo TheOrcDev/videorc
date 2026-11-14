@@ -214,7 +214,9 @@ pub struct BackgroundStage {
 }
 
 impl BackgroundStage {
-    /// No stage: every source keeps its own transform.
+    /// No stage: every source keeps its own transform. Only the macOS and
+    /// Windows render paths use it outside tests.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub const NONE: Self = Self {
         margin: 0.0,
         camera: false,

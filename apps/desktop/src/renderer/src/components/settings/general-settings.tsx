@@ -238,7 +238,7 @@ function ElsewhereList(): ReactElement {
       />
       <NavigableRow
         icon={BuddyIcon}
-        label="Buddy, chat posting and Clean cut"
+        label="Sidekick, chat posting and Clean cut"
         value={workspaceTabLabel('ai')}
         onNavigate={() => openWorkspaceTab('ai')}
       />

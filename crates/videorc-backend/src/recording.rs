@@ -8319,17 +8319,26 @@ fn hydrate_stream_key_secret_refs(state: &AppState, params: &mut StartSessionPar
     else {
         return Ok(());
     };
-    let credentials = if streaming.targets.iter().any(|target| {
+    let credentials = stream_key_account_credentials(state, streaming)?;
+    hydrate_stream_key_secret_refs_from_credentials(streaming, &credentials, secrets::get_secret)
+}
+
+/// The connected accounts an OAuth target's key comes from, read only when
+/// an enabled OAuth target names no key of its own.
+fn stream_key_account_credentials(
+    state: &AppState,
+    streaming: &StreamingSettings,
+) -> Result<Vec<PlatformAccountCredentials>> {
+    if streaming.targets.iter().any(|target| {
         target.enabled
             && target.stream_key.trim().is_empty()
             && target.auth_mode == StreamAuthMode::Oauth
             && target.stream_key_secret_ref.is_none()
     }) {
-        state.database.list_platform_account_credentials()?
+        state.database.list_platform_account_credentials()
     } else {
-        Vec::new()
-    };
-    hydrate_stream_key_secret_refs_from_credentials(streaming, &credentials, secrets::get_secret)
+        Ok(Vec::new())
+    }
 }
 
 fn hydrate_stream_key_secret_refs_from_credentials(
@@ -27660,9 +27669,26 @@ fn cloud_hold_image(state: &AppState) -> Option<String> {
 /// hand-over, and names their platforms for the consent line. No
 /// `StreamTarget` leaves this function: the desktop opens no leg.
 pub(crate) fn cloud_talk_handover(
+    state: &AppState,
     streaming: &StreamingSettings,
 ) -> Result<(Vec<crate::cloud_show::HandoverDestination>, Vec<String>)> {
-    let targets = stream_targets_from_streaming(streaming)?;
+    let credentials = stream_key_account_credentials(state, streaming)?;
+    cloud_talk_handover_with(streaming, &credentials, secrets::get_secret)
+}
+
+/// A talk show's Go Live hands its destinations over with no local session,
+/// so the keys the renderer names only by their secret ref (it never holds a
+/// stored key) are read here, the way a session start reads them
+/// (`hydrate_stream_key_secret_refs`). On a copy: the caller's settings, which
+/// also reach the chat, never carry a key.
+fn cloud_talk_handover_with(
+    streaming: &StreamingSettings,
+    credentials: &[PlatformAccountCredentials],
+    get_secret: impl FnMut(&str) -> Result<String>,
+) -> Result<(Vec<crate::cloud_show::HandoverDestination>, Vec<String>)> {
+    let mut streaming = streaming.clone();
+    hydrate_stream_key_secret_refs_from_credentials(&mut streaming, credentials, get_secret)?;
+    let targets = stream_targets_from_streaming(&streaming)?;
     let mut platforms: Vec<String> = Vec::new();
     for target in &targets {
         let platform = crate::streaming::stream_platform_id(target.platform).to_string();
@@ -27793,7 +27819,7 @@ fn cloud_feed_target(
 /// Dev builds may trust one extra CA, so `smoke:cloud-solo` publishes to its
 /// own MediaMTX with checking on. Packaged builds never read it, like
 /// `VIDEORC_API_BASE_URL`.
-const CLOUD_FEED_CA_FILE_ENV: &str = "VIDEORC_CLOUD_FEED_CA_FILE";
+pub(crate) const CLOUD_FEED_CA_FILE_ENV: &str = "VIDEORC_CLOUD_FEED_CA_FILE";
 const CLOUD_FEED_ROOTS_FILE_NAME: &str = "cloud-feed-roots.pem";
 const PEM_CERTIFICATE_BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
 /// Characters FFmpeg's option dictionary, a tee slave's brackets or
@@ -27827,7 +27853,10 @@ fn cloud_feed_roots_pem(extra_ca_pem: Option<&[u8]>) -> Vec<u8> {
 }
 
 /// The dev override's CA, read in dev builds only; `None` when unset.
-fn cloud_feed_extra_ca_pem(dev_build: bool, env_value: Option<&str>) -> Result<Option<Vec<u8>>> {
+pub(crate) fn cloud_feed_extra_ca_pem(
+    dev_build: bool,
+    env_value: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
     if !dev_build {
         return Ok(None);
     }
@@ -28828,6 +28857,54 @@ mod cloud_seam_tests {
         assert_eq!(
             redact_cloud_test_line("[rtmp @ 0x1] key KEYKEYKEY refused", key),
             "[rtmp @ 0x1] key •••• refused"
+        );
+    }
+
+    /// Plan 234 C4: a managed show's feed goes to LiveKit's RTMPS ingress.
+    /// `ingest_url_problem` takes that address as written, because it is
+    /// RTMPS to a DNS name (the wire contract's contradiction 9: nothing
+    /// had to change). Anything without TLS is still refused in a release
+    /// build, LiveKit's host or not, and the leg is `{serverUrl}/{streamKey}`
+    /// with the certificate checked, as for a node.
+    #[test]
+    fn a_livekit_ingress_is_accepted_as_the_feed_and_nothing_without_tls_is() {
+        use crate::cloud_show::ingest_url_problem;
+        const LIVEKIT: &str = "rtmps://videorc-abc123.rtmp.livekit.cloud/x";
+        for allowed in [
+            LIVEKIT,
+            "rtmps://videorc-abc123.rtmp.livekit.cloud:443/x",
+            "rtmps://ingress.eu.livekit.cloud/live",
+        ] {
+            assert_eq!(ingest_url_problem(allowed, false), None, "{allowed}");
+        }
+        for refused in [
+            "rtmp://videorc-abc123.rtmp.livekit.cloud/x",
+            "rtmp://videorc-abc123.rtmp.livekit.cloud:1935/x",
+            "http://videorc-abc123.rtmp.livekit.cloud/x",
+            "srt://videorc-abc123.rtmp.livekit.cloud:7885",
+            "videorc-abc123.rtmp.livekit.cloud/x",
+        ] {
+            assert!(ingest_url_problem(refused, false).is_some(), "{refused}");
+        }
+        let livekit = ShowIngest {
+            orientation: Horizontal,
+            server_url: LIVEKIT.to_string(),
+            stream_key: INGEST_KEY.to_string(),
+        };
+        let feed =
+            cloud_feed_target(&livekit, None, &roots()).expect("LiveKit's ingress is a feed");
+        assert_eq!(feed.url, format!("{LIVEKIT}/{INGEST_KEY}"));
+        assert_eq!(feed.tls_verification, Some(roots()));
+        assert!(!feed.redacted_url.contains("SECRET"));
+        assert_eq!(feed.target_id, "videorc-cloud-horizontal");
+        // Without TLS the leg is never built in a release build.
+        let plain = ShowIngest {
+            server_url: "rtmp://videorc-abc123.rtmp.livekit.cloud/x".to_string(),
+            ..livekit
+        };
+        assert_eq!(
+            cloud_feed_target(&plain, None, &roots()).is_ok(),
+            cfg!(debug_assertions)
         );
     }
 
@@ -39393,6 +39470,54 @@ mod tests {
             youtube.stream_key_secret_ref.as_deref(),
             Some("platform:youtube:UC123:stream-key")
         );
+    }
+
+    #[test]
+    fn a_talk_show_go_live_reads_a_stored_key_by_its_secret_ref() {
+        // Plan 234 smoke: the renderer names a stored key by its secret ref
+        // only, and the talk show's hand-over refused it as missing.
+        let mut streaming =
+            streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "")]);
+        let twitch = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.auth_mode = StreamAuthMode::ManualRtmp;
+        twitch.stream_key_secret_ref = Some("manual:twitch:stream-key".to_string());
+        twitch.stream_key_present = true;
+
+        let (destinations, platforms) = cloud_talk_handover_with(&streaming, &[], |secret_ref| {
+            assert_eq!(secret_ref, "manual:twitch:stream-key");
+            Ok("secret-twitch-key".to_string())
+        })
+        .unwrap();
+        assert_eq!(destinations.len(), 1);
+        assert_eq!(
+            destinations[0].url,
+            "rtmp://live.twitch.tv/app/secret-twitch-key"
+        );
+        assert_eq!(platforms, vec!["twitch".to_string()]);
+        // The caller's settings never carry the key.
+        assert!(
+            streaming
+                .targets
+                .iter()
+                .all(|target| target.stream_key.is_empty())
+        );
+
+        // A target with neither a key nor a ref is still refused by name.
+        let twitch = streaming
+            .targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch.stream_key_secret_ref = None;
+        let refused = cloud_talk_handover_with(&streaming, &[], |_| {
+            panic!("no secret is read without a ref")
+        })
+        .unwrap_err();
+        assert!(format!("{refused:#}").contains("stream key is missing"));
     }
 
     #[test]

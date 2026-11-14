@@ -181,7 +181,7 @@ export const YOUTUBE_RETENTION_LINE =
 
 /** Why "Buddy remembers" is locked without Premium (D6). */
 export const BUDDY_REMEMBERS_LOCK_REASON =
-  'Buddy remembers what your regulars tell it with Premium.'
+  'Sidekick remembers what your regulars tell it with Premium.'
 
 /** Why the manual link refuses an X account (D4 a). */
 export const X_SELF_LINK_REASON = 'X viewers link themselves with !link'
@@ -253,7 +253,7 @@ export function lastChatLabel(iso: string, nowMs: number): string | null {
 
 /** The disclosure line for the channel description (H2), with Copy. */
 export const COMMUNITY_DISCLOSURE_LINE =
-  'Videorc remembers regulars so Buddy can greet you. Type !forgetme in chat anytime and it forgets you. Type !link word in two of my chats to be one person.'
+  'Videorc remembers regulars so Sidekick can greet you. Type !forgetme in chat anytime and it forgets you. Type !link word in two of my chats to be one person.'
 
 /** A link event in the person dialog's history. */
 export function linkEventLabel(kind: 'self' | 'manual' | 'split' | 'suggestion-accepted'): string {

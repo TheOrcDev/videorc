@@ -119,7 +119,7 @@ describe('StreamManager highlight slot (plan 095, S2)', () => {
     expect(buddy).not.toMatch(/data-variant="chrome"[^>]*>On stream</)
   })
 
-  it('lights the Buddy badge for the question on stream, without the Activity dot', () => {
+  it('lights the Sidekick badge for the question on stream, without the Activity dot', () => {
     const markup = render(live(chat.id))
     const buddy = markup.slice(markup.indexOf('data-pane="buddy"'))
     expect(buddy).toMatch(/data-variant="chrome"[^>]*>On stream</)
@@ -166,7 +166,7 @@ describe('StreamManager Remove messages reconnect (plan 140, S5)', () => {
       })
     )
 
-  it('scrolls the Buddy pane as a whole, so a short window never hides the Say box', () => {
+  it('scrolls the Sidekick pane as a whole, so a short window never hides the Say box', () => {
     // Hyprland tiled the window at 320x331 (under its 360 px minimum): the
     // fixed header, chat controls and Say footer overflowed under the status
     // bar, which then took every click meant for the Say box.
@@ -174,12 +174,12 @@ describe('StreamManager Remove messages reconnect (plan 140, S5)', () => {
     expect(pane?.[1].split(' ')).toEqual(expect.arrayContaining(['min-h-0', 'overflow-y-auto']))
   })
 
-  it('puts one quiet row in the Buddy pane for each platform missing the permission', () => {
+  it('puts one quiet row in the Sidekick pane for each platform missing the permission', () => {
     const markup = renderWith({})
     const buddy = markup.slice(markup.indexOf('data-slot="buddy-pane"'))
     expect(buddy).toContain('data-slot="remove-messages-reconnect"')
-    expect(buddy).toContain('Reconnect Twitch to let Buddy remove messages.')
-    expect(markup.match(/to let Buddy remove messages/g)).toHaveLength(1)
+    expect(buddy).toContain('Reconnect Twitch to let Sidekick remove messages.')
+    expect(markup.match(/to let Sidekick remove messages/g)).toHaveLength(1)
     expect(markup).not.toContain('Reconnect YouTube')
     expect(markup).not.toContain('Reconnect Kick')
   })
@@ -238,7 +238,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
       })
     )
 
-  it('puts the open card at the top of the Buddy pane, above everything that scrolls', () => {
+  it('puts the open card at the top of the Sidekick pane, above everything that scrolls', () => {
     const markup = renderWith({})
     const buddy = markup.slice(markup.indexOf('data-slot="buddy-pane"'))
     const cards = buddy.indexOf('data-slot="removal-cards"')
@@ -250,7 +250,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
     expect(markup.match(/data-testid="removal-card"/g)).toHaveLength(1)
   })
 
-  it('puts what Buddy heard, then the chooser, above the removal cards (part B)', () => {
+  it('puts what Sidekick heard, then the chooser, above the removal cards (part B)', () => {
     const markup = renderWith({
       onAnswerCommand: () => undefined,
       cohostState: {
@@ -310,7 +310,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
   })
 })
 
-describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, plan 211 D1)', () => {
+describe('StreamManager Sidekick Live and how Sidekick talks (plan 174 S3.14a, D7, plan 211 D1)', () => {
   const autoChat = {
     talk: 'suggest' as const,
     mode: 'suggest' as const,
@@ -334,7 +334,7 @@ describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, pla
       })
     )
 
-  it('puts the Buddy Live switch in the pane header, with no popover and no second home', () => {
+  it('puts the Sidekick Live switch in the pane header, with no popover and no second home', () => {
     const markup = renderWith({})
     const header = between(
       markup,
@@ -352,14 +352,14 @@ describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, pla
     )
   })
 
-  it('shows how Buddy talks and the read-only behaviour chips under the header', () => {
+  it('shows how Sidekick talks and the read-only behaviour chips under the header', () => {
     const markup = renderWith({ onCohostOpenChatSettings: () => undefined })
     const controls = between(
       markup,
       'data-slot="buddy-chat-controls"',
       'data-slot="buddy-talk-hint"'
     )
-    expect(controls).toContain('Buddy talks')
+    expect(controls).toContain('Sidekick talks')
     expect(controls).toMatch(/data-buddy-talk="suggest"[^>]*aria-checked="true"/)
     expect(controls).not.toContain('data-buddy-talk="auto"')
     expect(controls).not.toContain('role="switch"')
@@ -369,7 +369,7 @@ describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, pla
     expect(markup).toContain('Each message is a card here; one click posts it to chat as you.')
   })
 
-  it('says Bubble says nothing while the Buddy is on no output, Buddy Live on or off (plan 211 D9)', () => {
+  it('says Bubble says nothing while the Sidekick is on no output, Sidekick Live on or off (plan 211 D9)', () => {
     const onAir = {
       ...emptyLiveDashboardState('now'),
       sessionId: 's1',
@@ -418,7 +418,7 @@ describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, pla
         cohostGate: {
           allowed: false,
           featureId: 'live-cohost',
-          reason: 'Buddy requires Videorc Premium.',
+          reason: 'Sidekick requires Videorc Premium.',
           upgradeUrl: 'https://www.videorc.com/premium'
         }
       })
@@ -430,11 +430,11 @@ describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, pla
     ).toBe('Greetings on')
   })
 
-  it('locks the switch off, with the Premium reason, for a Basic account that has Buddy off', () => {
+  it('locks the switch off, with the Premium reason, for a Basic account that has Sidekick off', () => {
     const basic = {
       allowed: false as const,
       featureId: 'live-cohost' as const,
-      reason: 'Buddy requires Videorc Premium.',
+      reason: 'Sidekick requires Videorc Premium.',
       upgradeUrl: 'https://www.videorc.com/premium'
     }
     const locked = renderWith({ cohostGate: basic })

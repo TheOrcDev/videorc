@@ -7,7 +7,7 @@
     {
       "name": "get_status",
       "title": "What's happening",
-      "description": "What Videorc is doing now: idle, recording or live and for how long, each destination with its health and viewers, the scene, the microphone, System audio, banners, the takeover, the comment on stream, Clips, captions, Buddy and warnings. Call it first, and again after acting.",
+      "description": "What Videorc is doing now: idle, recording or live and for how long, each destination with its health and viewers, the scene, the microphone, System audio, banners, the takeover, the comment on stream, Clips, captions, Sidekick and warnings. Call it first, and again after acting.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -774,7 +774,7 @@
     {
       "name": "get_recording",
       "title": "Get a recording",
-      "description": "One take from the Library: its files with full paths on this computer (a separate-source take has its combined, screen and camera files), its markers, chat totals, peak viewers, Buddy's reports and each Clean cut's progress. includeTranscript adds the transcript, when a Clean cut has made one. Use an id from list_recordings.",
+      "description": "One take from the Library: its files with full paths on this computer (a separate-source take has its combined, screen and camera files), its markers, chat totals, peak viewers, Sidekick's reports and each Clean cut's progress. includeTranscript adds the transcript, when a Clean cut has made one. Use an id from list_recordings.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1629,20 +1629,20 @@
     },
     {
       "name": "buddy_say",
-      "title": "Buddy says a line",
-      "description": "Buddy says a line in its speech bubble on the picture, like the Stream Manager's Say box, and never in chat. Viewers see it on stream. Refused while Buddy is off the picture, since nobody would see it.",
+      "title": "Sidekick says a line",
+      "description": "Sidekick says a line in its speech bubble on the picture, like the Stream Manager's Say box, and never in chat. Viewers see it on stream. Refused while Sidekick is off the picture, since nobody would see it.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "text": {
             "type": "string",
-            "description": "What Buddy says, 1 to 200 characters.",
+            "description": "What Sidekick says, 1 to 200 characters.",
             "minLength": 1,
             "maxLength": 200
           },
           "mood": {
             "type": "string",
-            "description": "How Buddy looks while it says it. Default talk.",
+            "description": "How Sidekick looks while it says it. Default talk.",
             "enum": ["talk", "laugh", "think"]
           }
         },
@@ -1673,27 +1673,27 @@
     },
     {
       "name": "set_buddy",
-      "title": "Set up Buddy",
-      "description": "Turn Buddy Live on or off, choose how Buddy talks (off: never on its own, bubble: in its speech bubble on the picture, never in chat, suggest: a card the streamer clicks to post in chat), and put Buddy on the stream or take it off, like the Stream Manager's Buddy controls. Turning Buddy Live on needs Premium and the streamer's Cloud AI consent; talk needs neither.",
+      "title": "Set up Sidekick",
+      "description": "Turn Sidekick Live on or off, choose how Sidekick talks (off: never on its own, bubble: in its speech bubble on the picture, never in chat, suggest: a card the streamer clicks to post in chat), and put Sidekick on the stream or take it off, like the Stream Manager's Sidekick controls. Turning Sidekick Live on needs Premium and the streamer's Cloud AI consent; talk needs neither.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "on": {
             "type": "boolean",
-            "description": "Buddy Live on or off."
+            "description": "Sidekick Live on or off."
           },
           "talk": {
             "type": "string",
-            "description": "How Buddy talks on its own: off, bubble (the default) or suggest. Buddy never posts in chat on its own.",
+            "description": "How Sidekick talks on its own: off, bubble (the default) or suggest. Sidekick never posts in chat on its own.",
             "enum": ["off", "bubble", "suggest"]
           },
           "chatMode": {
             "type": "string",
-            "description": "The old name of talk. Always refused: Buddy never posts in chat on its own. Use talk."
+            "description": "The old name of talk. Always refused: Sidekick never posts in chat on its own. Use talk."
           },
           "onStream": {
             "type": "boolean",
-            "description": "Buddy shows on the stream's picture."
+            "description": "Sidekick shows on the stream's picture."
           }
         },
         "additionalProperties": false
@@ -2827,7 +2827,7 @@
     {
       "name": "get_scene_layout",
       "title": "Read where everything sits on the picture",
-      "description": "List everything on the picture and where it sits: the camera, the screen, Buddy, the highlight card, the captions bar and each banner, with names, switches and rects per orientation as fractions of the canvas from the top left. Use it before moving things, and to find a banner's id by its name.",
+      "description": "List everything on the picture and where it sits: the camera, the screen, Sidekick, the highlight card, the captions bar and each banner, with names, switches and rects per orientation as fractions of the canvas from the top left. Use it before moving things, and to find a banner's id by its name.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -3228,7 +3228,7 @@
     {
       "name": "set_scene_item",
       "title": "Show, hide or shape something on the picture",
-      "description": "Change an item's switches and look, like the Scene inspector: show or hide the camera or the screen, the camera's shape (rectangle, rounded, circle), and Show on stream and Show in recording for Buddy, the highlight card, the captions bar and banners. Use set_banner to show or hide a banner itself.",
+      "description": "Change an item's switches and look, like the Scene inspector: show or hide the camera or the screen, the camera's shape (rectangle, rounded, circle), and Show on stream and Show in recording for Sidekick, the highlight card, the captions bar and banners. Use set_banner to show or hide a banner itself.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3249,11 +3249,11 @@
           },
           "showOnStream": {
             "type": "boolean",
-            "description": "Buddy, highlight, captions or a banner: shown on the livestream."
+            "description": "Sidekick, highlight, captions or a banner: shown on the livestream."
           },
           "showInRecording": {
             "type": "boolean",
-            "description": "Buddy, highlight, captions or a banner: shown in the recording."
+            "description": "Sidekick, highlight, captions or a banner: shown in the recording."
           }
         },
         "required": ["item"],

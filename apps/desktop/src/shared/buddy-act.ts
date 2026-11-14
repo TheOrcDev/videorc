@@ -15,9 +15,12 @@
 
 import type { CommentsCommandResolution } from './backend'
 
-export const BUDDY_COMMAND = '/buddy'
+/** The composer's command (plan 236 D4). `/buddy` stays a silent alias for
+ * two releases, like the spoken "buddy": it works but is never offered. */
+export const BUDDY_COMMAND = '/sidekick'
+export const BUDDY_COMMAND_LEGACY = '/buddy'
 /** The composer's completion hint (S20). */
-export const BUDDY_COMMAND_HINT = ' · Ask Buddy to do something'
+export const BUDDY_COMMAND_HINT = ' · Ask Sidekick to do something'
 /** Contract part F: the planner reads at most this much. */
 export const BUDDY_SENTENCE_MAX_CHARS = 500
 /** A typed request waits this long for its answer: the planner (3.5 s), then
@@ -25,11 +28,11 @@ export const BUDDY_SENTENCE_MAX_CHARS = 500
 export const BUDDY_ACT_RESULT_TIMEOUT_MS = 90_000
 
 /** What a free user reads: the sentence the voice commands use. */
-export const BUDDY_PREMIUM_REQUIRED = 'Buddy requires Videorc Premium.'
-export const BUDDY_EMPTY_SENTENCE = 'Say what Buddy should do, like /buddy switch to BRB.'
-export const BUDDY_TOO_LONG = "That's too long for Buddy. Keep it under 500 characters."
-export const BUDDY_ASKING = 'Asking Buddy…'
-export const BUDDY_NO_ANSWER = "Buddy didn't answer in time."
+export const BUDDY_PREMIUM_REQUIRED = 'Sidekick requires Videorc Premium.'
+export const BUDDY_EMPTY_SENTENCE = 'Say what Sidekick should do, like /sidekick switch to BRB.'
+export const BUDDY_TOO_LONG = "That's too long for Sidekick. Keep it under 500 characters."
+export const BUDDY_ASKING = 'Asking Sidekick…'
+export const BUDDY_NO_ANSWER = "Sidekick didn't answer in time."
 export const BUDDY_UNREACHABLE = "The Stream Manager can't reach Videorc right now."
 
 /** `cohost.act` and its `cohost.act.result`: `working` means accepted; the

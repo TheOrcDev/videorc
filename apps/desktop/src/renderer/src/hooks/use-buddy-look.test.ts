@@ -240,7 +240,7 @@ describe('createBuddyLookController (plan 169 D9)', () => {
     const controller = createBuddyLookController(fake.client)
     await controller.refresh()
     fake.requestTyped.mockImplementationOnce(async () => {
-      throw Object.assign(new Error('private provider failure at /Users/streamer/Buddy'), {
+      throw Object.assign(new Error('private provider failure at /Users/streamer/Sidekick'), {
         code: 'cohost-avatar-busy'
       })
     })

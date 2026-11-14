@@ -368,7 +368,7 @@ describe('fake caption service', () => {
           .filter((part) => part.type === 'transcript-final')
           .slice(2)
           .map((part) => part.text),
-        ['Buddy, highlight the comment', 'from coders X.']
+        ['Sidekick, highlight the comment', 'from coders X.']
       )
       socket.close()
 
@@ -391,7 +391,7 @@ describe('fake caption service', () => {
         [
           ['First scripted final.', 1],
           ['Second scripted final.', 1],
-          ['Buddy, highlight the comment', 1],
+          ['Sidekick, highlight the comment', 1],
           ['from coders X.', 1]
         ]
       )

@@ -165,14 +165,14 @@ export function cohostErrorToastKey(state: CohostState | null): string | null {
 }
 
 export const COHOST_ERROR_TOAST_MESSAGES: Record<CohostReason, string> = {
-  'premium-required': 'Buddy stopped: Videorc Premium is required.',
-  'consent-required': 'Buddy stopped: cloud AI consent is off.',
-  'session-expired': 'Buddy stopped: your Videorc sign-in expired.',
-  'signed-out': 'Buddy stopped: sign in to Videorc to use it.',
-  'quota-exhausted': 'Buddy paused: daily AI quota is used up.',
-  'server-unconfigured': 'Buddy stopped: Videorc AI is unavailable right now.',
-  network: 'Buddy stopped: no connection to Videorc AI.',
-  'gateway-error': 'Buddy stopped: Videorc AI returned an error.'
+  'premium-required': 'Sidekick stopped: Videorc Premium is required.',
+  'consent-required': 'Sidekick stopped: cloud AI consent is off.',
+  'session-expired': 'Sidekick stopped: your Videorc sign-in expired.',
+  'signed-out': 'Sidekick stopped: sign in to Videorc to use it.',
+  'quota-exhausted': 'Sidekick paused: daily AI quota is used up.',
+  'server-unconfigured': 'Sidekick stopped: Videorc AI is unavailable right now.',
+  network: 'Sidekick stopped: no connection to Videorc AI.',
+  'gateway-error': 'Sidekick stopped: Videorc AI returned an error.'
 }
 
 /**
@@ -217,8 +217,8 @@ export function cohostErrorToast(
  * reason and no toast.
  */
 export const COHOST_STOPPED_TOAST_MESSAGES: Partial<Record<CohostReason, string>> = {
-  'premium-required': 'Buddy stopped. Premium ended.',
-  'signed-out': 'Buddy stopped. You signed out.'
+  'premium-required': 'Sidekick stopped. Premium ended.',
+  'signed-out': 'Sidekick stopped. You signed out.'
 }
 
 /**

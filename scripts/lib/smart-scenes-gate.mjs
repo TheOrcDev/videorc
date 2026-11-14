@@ -131,6 +131,10 @@ export function frostFeaturesFromRawFrames(buffer, { width, height, repeatThresh
  *   at most `SHARP_HIDDEN_MAX`) and still (the motion strip repeats).
  * - After Show plus `hideEdgeMs`, the frames are live again (sharp at least
  *   `SHARP_LIVE_MIN`) and moving.
+ * - The fixture's own white flashes (the alignment marks) are not judged as
+ *   live or not: a flash has no edges by design, and a file cut soon after the
+ *   end flash (a clip) would otherwise fall under the live share on them
+ *   alone (issue #1329).
  * - The first frosted frame lands within `hideLatencyMaxMs` of the press, and
  *   the first live frame within `showLatencyMaxMs` of Show.
  *
@@ -174,6 +178,7 @@ export function hideSpanVerdict({
     if (pts == null) continue
     const wall = pts + offsetMs
     if (wall >= hideAtMs - liveBeforeMs && wall < hideAtMs) {
+      if (feature.centre === 'white') continue
       verdict.liveBefore.frames += 1
       before.push(feature.sharp)
       if (feature.sharp >= sharpLiveMin) verdict.liveBefore.sharpFrames += 1
@@ -202,7 +207,7 @@ export function hideSpanVerdict({
       if (verdict.showLatencyMs == null && feature.sharp >= sharpLiveMin) {
         verdict.showLatencyMs = Math.round(wall - showAtMs)
       }
-      if (wall < showAtMs + budget.hideEdgeMs) continue
+      if (wall < showAtMs + budget.hideEdgeMs || feature.centre === 'white') continue
       verdict.liveAfter.frames += 1
       after.push(feature.sharp)
       if (feature.sharp >= sharpLiveMin) verdict.liveAfter.sharpFrames += 1

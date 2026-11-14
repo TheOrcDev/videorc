@@ -177,7 +177,7 @@ async function render({
       : {
           allowed: false,
           featureId: 'cohost',
-          reason: 'Buddy Live is part of Premium.',
+          reason: 'Sidekick Live is part of Premium.',
           upgradeUrl: 'https://videorc.com/premium'
         }
   }
@@ -211,8 +211,8 @@ function button(label: string): HTMLButtonElement {
   return match as HTMLButtonElement
 }
 
-describe('Buddy report card (plan 119 S3)', () => {
-  it('shows what Buddy caught in the last stream', async () => {
+describe('Sidekick report card (plan 119 S3)', () => {
+  it('shows what Sidekick caught in the last stream', async () => {
     await render()
     // Follows the newest stream that ended (a recording is not a stream).
     expect(mocked.asked.at(-1)).toBe('stream-1')
@@ -282,15 +282,15 @@ describe('Buddy report card (plan 119 S3)', () => {
     expect(rows('moments')).toHaveLength(5)
   })
 
-  it('keeps moments and chat for a stream Buddy was off for', async () => {
+  it('keeps moments and chat for a stream Sidekick was off for', async () => {
     await render({
       buddyOn: false,
       report: { payload: payload({ report: null }), loading: false, error: null }
     })
     expect(card().getAttribute('data-state')).toBe('buddy-off')
     const note = document.querySelector('[data-testid="buddy-report-off"]')?.textContent
-    expect(note).toContain('Buddy was off for this stream.')
-    expect(note).toContain('Turn on Buddy to also catch questions.')
+    expect(note).toContain('Sidekick was off for this stream.')
+    expect(note).toContain('Turn on Sidekick to also catch questions.')
     expect(document.querySelector('[data-slot="buddy-report-stats"]')).toBeNull()
     expect(rows('moments')).toHaveLength(3)
     expect(document.querySelector('[data-slot="buddy-report-stream"]')?.textContent).toContain(
@@ -302,7 +302,7 @@ describe('Buddy report card (plan 119 S3)', () => {
     await render({ sessions: [], report: { payload: null, loading: false, error: null } })
     expect(mocked.asked.at(-1)).toBeNull()
     expect(card().getAttribute('data-state')).toBe('empty')
-    expect(text()).toContain('The report appears here after your first stream with Buddy.')
+    expect(text()).toContain('The report appears here after your first stream with Sidekick.')
     expect(document.querySelector('[aria-label="Stream"]')).toBeNull()
   })
 
@@ -393,7 +393,7 @@ describe('BuddyReportCard: the Commands row (plan 140, S6)', () => {
   })
 })
 
-describe('BuddyReportCard: greetings Buddy wrote and skipped (plan 192)', () => {
+describe('BuddyReportCard: greetings Sidekick wrote and skipped (plan 192)', () => {
   it('tags a greeting AI or Line, only when the report says', async () => {
     await render({
       report: {
@@ -467,7 +467,7 @@ describe('BuddyReportCard: greetings Buddy wrote and skipped (plan 192)', () => 
   })
 })
 
-describe('BuddyReportCard: what Buddy said on stream (plan 211 D11)', () => {
+describe('BuddyReportCard: what Sidekick said on stream (plan 211 D11)', () => {
   const said: NonNullable<CohostSessionReport['said']> = [
     {
       id: 'b1',
@@ -523,7 +523,7 @@ describe('BuddyReportCard: what Buddy said on stream (plan 211 D11)', () => {
     expect(document.querySelector('[data-slot="buddy-report-said"]')).toBeNull()
   })
 
-  it("says how many greetings came while the Buddy wasn't on stream, in its name", async () => {
+  it("says how many greetings came while the Sidekick wasn't on stream, in its name", async () => {
     await withSaid(null, {
       greetings: { ...REPORT.greetings, skipped: { noBubble: 46, held: 1 } }
     })
@@ -555,12 +555,12 @@ describe('Reports tab layout (plan 150 S6)', () => {
     )
   })
 
-  it('names the empty tab before any stream with Buddy', async () => {
+  it('names the empty tab before any stream with Sidekick', async () => {
     await render({ report: { payload: null, loading: false, error: null }, sessions: [] })
     const empty = document.querySelector('[data-testid="buddy-report-empty"]')
     expect(empty?.textContent).toContain('No stream reports yet')
     expect(empty?.textContent).toContain(
-      'The report appears here after your first stream with Buddy.'
+      'The report appears here after your first stream with Sidekick.'
     )
   })
 
@@ -639,7 +639,7 @@ describe('BuddyReportCard: the Community block (plan 225 D15, E2)', () => {
     expect(block?.textContent).toContain('Ada')
     expect(block?.querySelector('[data-testid="buddy-report-community-lock"]')).not.toBeNull()
     expect(block?.textContent).toContain(
-      'Buddy writes two sentences about your audience with Premium.'
+      'Sidekick writes two sentences about your audience with Premium.'
     )
   })
 

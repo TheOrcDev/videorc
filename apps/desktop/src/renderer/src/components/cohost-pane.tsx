@@ -281,8 +281,8 @@ export function CohostPane({
     return (
       <>
         <div className="shrink-0 p-2" data-slot="cohost-consent">
-          <Alert aria-label="Buddy needs cloud AI" role="group" icon={BuddyIcon}>
-            <AlertTitle className="text-xs">Buddy needs cloud AI</AlertTitle>
+          <Alert aria-label="Sidekick needs cloud AI" role="group" icon={BuddyIcon}>
+            <AlertTitle className="text-xs">Sidekick needs cloud AI</AlertTitle>
             <AlertDescription className="text-xs">
               <ul className="flex list-disc flex-col gap-0.5 pl-4">
                 {CLOUD_AI_USES.map((use) => (
@@ -433,7 +433,7 @@ export function CohostPane({
           174 F-8, H-21): a stack of cards above never collapses it. */}
       <Command
         ref={rootRef}
-        aria-label="Buddy questions and flags"
+        aria-label="Sidekick questions and flags"
         className="min-h-0 flex-1 bg-transparent outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
         shouldFilter={false}
         tabIndex={0}
@@ -884,8 +884,12 @@ export function CohostListenPrompt({
   }
   return (
     <div className="shrink-0 p-2" data-slot="cohost-listen-prompt">
-      <Alert aria-label="Buddy can hear you while you're live" role="group" icon={MicrophoneIcon}>
-        <AlertTitle className="text-xs">Buddy can hear you while you&apos;re live</AlertTitle>
+      <Alert
+        aria-label="Sidekick can hear you while you're live"
+        role="group"
+        icon={MicrophoneIcon}
+      >
+        <AlertTitle className="text-xs">Sidekick can hear you while you&apos;re live</AlertTitle>
         <AlertDescription className="text-xs">{COHOST_LISTEN_DISCLOSURE}</AlertDescription>
         <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">
           <Button
@@ -1063,7 +1067,7 @@ function CohostSayHiList({
   return (
     <div data-slot="cohost-say-hi">
       <Separator />
-      <HoverHint hint="First time in your chat. Say their name and Buddy takes them off.">
+      <HoverHint hint="First time in your chat. Say their name and Sidekick takes them off.">
         <p className="px-2 pt-1.5 pb-0.5 text-[11px] font-semibold text-subtle">Say hi</p>
       </HoverHint>
       {items.map((entry) => {
@@ -1126,7 +1130,7 @@ function CohostWelcomeBackList({
   return (
     <div data-slot="cohost-welcome-back">
       <Separator />
-      <HoverHint hint="Back in your chat. Wave and Buddy waves on stream; nothing goes to chat.">
+      <HoverHint hint="Back in your chat. Wave and Sidekick waves on stream; nothing goes to chat.">
         <p className="px-2 pt-1.5 pb-0.5 text-[11px] font-semibold text-subtle">Welcome back</p>
       </HoverHint>
       {items.map((entry) => {

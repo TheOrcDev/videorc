@@ -94,11 +94,11 @@ import '@/styles.css'
 function buddyActionContext(command: BuddyActionBody): UserErrorContext {
   switch (command.kind) {
     case 'buddy-say':
-      return { action: 'send', object: "Buddy's line" }
+      return { action: 'send', object: "Sidekick's line" }
     case 'buddy-show-on-stream':
-      return { action: command.showOnStream ? 'show' : 'hide', object: 'Buddy on stream' }
+      return { action: command.showOnStream ? 'show' : 'hide', object: 'Sidekick on stream' }
     case 'buddy-react':
-      return { action: 'play', object: "Buddy's reaction" }
+      return { action: 'play', object: "Sidekick's reaction" }
     case 'chat-show-on-stream':
       return { action: command.showOnStream ? 'show' : 'hide', object: 'chat on stream' }
   }
@@ -691,8 +691,8 @@ function CommentsWindowApp(): ReactElement {
           toastUserError(
             error,
             kind === 'approve-utterance'
-              ? { action: 'post', object: "Buddy's message" }
-              : { action: 'update', object: 'Buddy' },
+              ? { action: 'post', object: "Sidekick's message" }
+              : { action: 'update', object: 'Sidekick' },
             { id: 'cohost-action' }
           )
           return null
@@ -759,7 +759,7 @@ function CommentsWindowApp(): ReactElement {
       .catch((error) =>
         toastUserError(
           error,
-          { action: 'answer', object: 'Buddy' },
+          { action: 'answer', object: 'Sidekick' },
           { id: `cohost-command:${commandId}` }
         )
       )
@@ -778,7 +778,7 @@ function CommentsWindowApp(): ReactElement {
       .catch((error) =>
         toastUserError(
           error,
-          { action: on ? 'turn on' : 'turn off', object: 'Buddy Live' },
+          { action: on ? 'turn on' : 'turn off', object: 'Sidekick Live' },
           { id: 'cohost-enable' }
         )
       )
@@ -836,7 +836,11 @@ function CommentsWindowApp(): ReactElement {
     void window.videorc
       ?.openBuddyTabFromCommentsWindow?.({ requestId: crypto.randomUUID(), tab: 'chat' })
       .catch((error) =>
-        toastUserError(error, { action: 'open', object: 'Buddy → Chat' }, { id: 'buddy-open-tab' })
+        toastUserError(
+          error,
+          { action: 'open', object: 'Sidekick → Chat' },
+          { id: 'buddy-open-tab' }
+        )
       )
   }
 
@@ -852,7 +856,11 @@ function CommentsWindowApp(): ReactElement {
       ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled: true, grantConsent: true })
       .then((state) => state && setCohost(state))
       .catch((error) =>
-        toastUserError(error, { action: 'turn on', object: 'Buddy Live' }, { id: 'cohost-enable' })
+        toastUserError(
+          error,
+          { action: 'turn on', object: 'Sidekick Live' },
+          { id: 'cohost-enable' }
+        )
       )
   }
 
@@ -872,7 +880,7 @@ function CommentsWindowApp(): ReactElement {
       .catch((error) =>
         toastUserError(
           error,
-          { action: 'change', object: "Buddy's chat mode" },
+          { action: 'change', object: "Sidekick's chat mode" },
           { id: 'cohost-auto-chat' }
         )
       )
@@ -893,7 +901,7 @@ function CommentsWindowApp(): ReactElement {
     : {
         allowed: false,
         featureId: 'live-cohost',
-        reason: cohost.entitlementReason ?? 'Buddy requires Videorc Premium.',
+        reason: cohost.entitlementReason ?? 'Sidekick requires Videorc Premium.',
         ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
       }
 

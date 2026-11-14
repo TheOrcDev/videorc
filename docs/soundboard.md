@@ -38,7 +38,7 @@ an airhorn, applause, a laugh track (plan 189). It is free for everyone.
   ([licences](../apps/desktop/resources/sounds/starter/LICENSES.md)).
 - Sounds are in the combined recording and every stream. They are not in
   the separate Microphone or System audio files, captions never transcribe
-  them, and Buddy never hears them.
+  them, and Sidekick never hears them.
 
 ## For developers
 

@@ -210,7 +210,7 @@ describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', ()
     expect(sayInput().disabled).toBe(true)
   })
 
-  it('says in words when the Buddy is on no output, with the switch one click away', async () => {
+  it('says in words when the Sidekick is on no output, with the switch one click away', async () => {
     const onShowOnStreamChange = vi.fn()
     const offOutputsNotice = buddyOffOutputsNotice({
       enabled: true,
@@ -234,7 +234,7 @@ describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', ()
   })
 })
 
-describe('the living Buddy header (plan 168 S-D3)', () => {
+describe('the living Sidekick header (plan 168 S-D3)', () => {
   function chips(): HTMLButtonElement[] {
     return [...container.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-reaction-chip"]')]
   }
@@ -287,8 +287,8 @@ describe('the living Buddy header (plan 168 S-D3)', () => {
     })
     expect(reasons).toEqual([
       null,
-      'Only an Alive Buddy reacts. Make it Alive on the Buddy page.',
-      'Only an Alive Buddy reacts. Make it Alive on the Buddy page.',
+      'Only an Alive Sidekick reacts. Make it Alive on the Sidekick page.',
+      'Only an Alive Sidekick reacts. Make it Alive on the Sidekick page.',
       null
     ])
     await act(async () => chips()[3]!.click())

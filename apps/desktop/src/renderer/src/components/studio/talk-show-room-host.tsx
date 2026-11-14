@@ -36,6 +36,17 @@ export default function TalkShowRoomHost({
   const value = useTalkShowRoomController(deps)
   const [script, setScript] = useState<TalkShowScript | null>(null)
 
+  // Plan 234: a cloud recording that stops is reported to the Library's
+  // Cloud recordings section, which then waits for its row (both lazy).
+  const recordingActive = deps.cloudStatus?.recording?.active ?? false
+  const recordingSince = deps.cloudStatus?.recording?.since
+  useEffect(() => {
+    const nowMs = Date.now()
+    void import('@/lib/cloud-recordings-watch').then((watch) =>
+      watch.noteCloudRecording({ active: recordingActive, since: recordingSince }, nowMs)
+    )
+  }, [recordingActive, recordingSince])
+
   useEffect(() => {
     if (!import.meta.env.DEV) return
     const smokeWindow = window as Window & {

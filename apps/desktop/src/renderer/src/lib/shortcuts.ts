@@ -30,7 +30,7 @@ const SHORTCUT_LIST = [
   { id: 'nav-captions', accelerators: ['CmdOrCtrl+5'], label: 'Captions', group: 'Navigation' },
   { id: 'nav-recording', accelerators: ['CmdOrCtrl+6'], label: 'Output', group: 'Navigation' },
   { id: 'nav-live', accelerators: ['CmdOrCtrl+7'], label: 'Destinations', group: 'Navigation' },
-  { id: 'nav-ai', accelerators: ['CmdOrCtrl+8'], label: 'Buddy', group: 'Navigation' },
+  { id: 'nav-ai', accelerators: ['CmdOrCtrl+8'], label: 'Sidekick', group: 'Navigation' },
   { id: 'nav-library', accelerators: ['CmdOrCtrl+9'], label: 'Library', group: 'Navigation' },
   { id: 'nav-settings', accelerators: ['CmdOrCtrl+,'], label: 'Settings', group: 'Navigation' },
   // ⌘K is "Search" everywhere it is named (plan 174 A-13, docs/ui-copy.md).
@@ -97,7 +97,7 @@ const SHORTCUT_LIST = [
   {
     id: 'cohost-focus',
     accelerators: ['CmdOrCtrl+J'],
-    label: 'Focus Buddy',
+    label: 'Focus Sidekick',
     group: 'Stream Manager'
   },
   {
@@ -125,13 +125,13 @@ const SHORTCUT_LIST = [
   {
     id: 'buddy-card-send',
     accelerators: ['Enter'],
-    label: "Send Buddy's proposed post",
+    label: "Send Sidekick's proposed post",
     group: 'Stream Manager'
   },
   {
     id: 'buddy-card-dismiss',
     accelerators: ['Escape', 'Backspace'],
-    label: "Dismiss Buddy's proposed post",
+    label: "Dismiss Sidekick's proposed post",
     group: 'Stream Manager'
   },
   {

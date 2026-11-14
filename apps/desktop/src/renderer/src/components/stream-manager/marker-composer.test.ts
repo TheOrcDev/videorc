@@ -392,7 +392,7 @@ describe('/sound in the composer (plan 189 S9)', () => {
   })
 })
 
-describe('/buddy in the composer (plan 209 S20)', () => {
+describe('/sidekick in the composer (plan 209 S20)', () => {
   async function mountBuddy(onBuddy?: (sentence: string) => Promise<CohostActAnswer>) {
     onSend.mockClear()
     await act(async () =>
@@ -412,25 +412,30 @@ describe('/buddy in the composer (plan 209 S20)', () => {
     )
   }
 
-  it('offers /buddy with its hint only where Buddy can be asked', async () => {
+  it('offers /sidekick with its hint only where Sidekick can be asked', async () => {
     await mountBuddy(vi.fn())
-    await type('/b')
-    expect(container.textContent).toContain('/buddy')
-    expect(container.textContent).toContain('· Ask Buddy to do something')
+    await type('/si')
+    expect(container.textContent).toContain('/sidekick')
+    expect(container.textContent).toContain('· Ask Sidekick to do something')
+    // Plan 236 D4: `/buddy` still works but is never offered.
+    await mountBuddy(vi.fn())
+    await type('/bu')
+    expect(container.textContent).not.toContain('/buddy')
+    expect(container.textContent).not.toContain('Ask Sidekick to do something')
     await mountBuddy()
-    await type('/b')
-    expect(container.textContent).not.toContain('Ask Buddy to do something')
+    await type('/si')
+    expect(container.textContent).not.toContain('Ask Sidekick to do something')
   })
 
-  it('asks Buddy, shows what it did, clears the draft and never posts to chat', async () => {
+  it('asks Sidekick, shows what it did, clears the draft and never posts to chat', async () => {
     const onBuddy = vi.fn(async (sentence: string) => ({
       actId: 'a1',
       status: 'done' as const,
       message: `Switched to BRB. Pressed Drum roll. (${sentence})`
     }))
     await mountBuddy(onBuddy)
-    await type('/buddy switch to BRB and play the drum roll')
-    expect(container.textContent).toContain('Buddy')
+    await type('/sidekick switch to BRB and play the drum roll')
+    expect(container.textContent).toContain('Sidekick')
     await enter()
     expect(onBuddy).toHaveBeenCalledExactlyOnceWith('switch to BRB and play the drum roll')
     expect(container.textContent).toContain('Switched to BRB. Pressed Drum roll.')
@@ -445,20 +450,20 @@ describe('/buddy in the composer (plan 209 S20)', () => {
       message: BUDDY_PREMIUM_REQUIRED
     }))
     await mountBuddy(onBuddy)
-    await type('/buddy go to BRB')
+    await type('/sidekick go to BRB')
     await enter()
-    expect(container.textContent).toContain('Buddy requires Videorc Premium.')
-    expect(container.querySelector('input')!.value).toBe('/buddy go to BRB')
+    expect(container.textContent).toContain('Sidekick requires Videorc Premium.')
+    expect(container.querySelector('input')!.value).toBe('/sidekick go to BRB')
     expect(onSend).not.toHaveBeenCalled()
   })
 
-  it('asks for words before calling Buddy', async () => {
+  it('asks for words before calling Sidekick', async () => {
     const onBuddy = vi.fn()
     await mountBuddy(onBuddy)
-    await type('/buddy ')
+    await type('/sidekick ')
     await enter()
     expect(onBuddy).not.toHaveBeenCalled()
-    expect(container.textContent).toContain('Say what Buddy should do')
+    expect(container.textContent).toContain('Say what Sidekick should do')
   })
 })
 

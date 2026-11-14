@@ -181,7 +181,7 @@ const SCOPE_RECONNECT_LABELS: Record<ScopeReconnectPlatform, string> = {
 
 /** The quiet sentence for a platform that can't remove messages until a reconnect. */
 export function removeMessagesReconnectCopy(platform: ScopeReconnectPlatform): string {
-  return `Reconnect ${SCOPE_RECONNECT_LABELS[platform]} to let Buddy remove messages.`
+  return `Reconnect ${SCOPE_RECONNECT_LABELS[platform]} to let Sidekick remove messages.`
 }
 
 /**

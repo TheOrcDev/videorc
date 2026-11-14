@@ -38,7 +38,7 @@ function webpSize(bytes: Buffer): { width: number; height: number; alpha: boolea
   return { width, height, alpha: (flags & 0x10) !== 0 }
 }
 
-describe('official Buddy assets', () => {
+describe('official Sidekick assets', () => {
   it('lists the five official characters', () => {
     expect(catalog.avatars.map((entry) => entry.slug)).toEqual([
       'golem',

@@ -208,7 +208,7 @@ function CommandConfirm({
       keys={!view.busy}
       label={
         view.kind === 'act'
-          ? 'Buddy asks first'
+          ? 'Sidekick asks first'
           : view.kind === 'remember'
             ? 'Remember this?'
             : 'Show this comment on stream?'

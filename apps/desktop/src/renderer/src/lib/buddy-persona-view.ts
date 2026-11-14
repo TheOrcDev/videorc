@@ -58,7 +58,7 @@ function defaultBuddyAvatar(): CohostPersona['avatar'] {
 export function freshBuddyPersona(id: string): CohostPersona {
   return {
     id,
-    name: 'Buddy',
+    name: 'Sidekick',
     personality: '',
     bubbleStyle: 'speech',
     images: {},
