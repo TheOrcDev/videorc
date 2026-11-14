@@ -1058,7 +1058,7 @@ export function planBuddyAct(body) {
     calls.push({ at: lower.search(/\b(end|stop)\b/), tool: 'stop', args: {} })
     said.push('stopping')
   }
-  if (!calls.length) return { calls: [], line: "Buddy didn't catch that.", unknown: true }
+  if (!calls.length) return { calls: [], line: "Sidekick can't do that.", unknown: true }
   calls.sort((a, b) => a.at - b.at)
   const line = `${said.join(' and ')}.`
   return {

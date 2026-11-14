@@ -1510,7 +1510,7 @@ try {
   const unseen = await call(bridge, 'buddy_say', { text: BUDDY_LINE })
   if (
     !unseen.isError ||
-    resultText(unseen) !== "Buddy isn't on the picture, so nobody would see it."
+    resultText(unseen) !== "Sidekick isn't on the picture, so nobody would see it."
   ) {
     fail(`buddy_say off the picture: ${JSON.stringify(unseen)}`)
   }

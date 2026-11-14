@@ -458,18 +458,20 @@ export async function startFakeCaptionService({
 const CHUNK_PURPOSES = new Set(['captions', 'listen'])
 
 /**
- * Plan 140 S9: Buddy voice commands as a speech model delivers them. The
+ * Plan 140 S9: Sidekick voice commands as a speech model delivers them. The
  * first is one command cut into two finals; the wake word starts the first.
+ * Plan 236 D2: speech to text also writes the wake word as two words or with
+ * a hyphen, so `clear` and `highlightThisOne` say it those ways.
  */
 export const BUDDY_COMMAND_FINALS = Object.freeze({
-  highlightByNameSplit: Object.freeze(['Buddy, highlight the comment', 'from coders X.']),
-  clear: Object.freeze(['Buddy, clear the highlight.']),
+  highlightByNameSplit: Object.freeze(['Sidekick, highlight the comment', 'from coders X.']),
+  clear: Object.freeze(['Side kick, clear the highlight.']),
   removeThisOne: Object.freeze(['This one is toxic. Remove it from our chat.']),
   confirm: Object.freeze(['Yes.']),
   cancel: Object.freeze(['No.']),
-  highlightThisOne: Object.freeze(['Buddy, put this one up.']),
-  namedMarker: Object.freeze(['Buddy, make a marker here for Shadcn New Library.']),
-  negatedMarker: Object.freeze(["Buddy, don't make a marker for this topic."])
+  highlightThisOne: Object.freeze(['Side-kick, put this one up.']),
+  namedMarker: Object.freeze(['Sidekick, make a marker here for Shadcn New Library.']),
+  negatedMarker: Object.freeze(["Sidekick, don't make a marker for this topic."])
 })
 
 /**
