@@ -31,7 +31,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -957,6 +957,41 @@ impl<W: CloudWebApi, C: ControlConnector> crate::cloud_show::CloudShowContext<W,
     }
 }
 
+/// One show's ordering barrier. An End invalidates retained lists before
+/// waiting for an already-started PUT, then sends its stop after that PUT.
+#[derive(Default)]
+pub(crate) struct DestinationGeneration {
+    value: AtomicU64,
+    stopped: AtomicBool,
+    sending: tokio::sync::Mutex<()>,
+}
+
+impl DestinationGeneration {
+    pub(crate) fn current(&self) -> u64 {
+        self.value.load(Ordering::SeqCst)
+    }
+    pub(crate) fn invalidate(&self) {
+        self.value.fetch_add(1, Ordering::SeqCst);
+    }
+    pub(crate) fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.invalidate();
+    }
+    fn accepts(&self, generation: u64) -> bool {
+        !self.stopped.load(Ordering::SeqCst) && self.current() == generation
+    }
+    pub(crate) async fn stopping(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.sending.lock().await
+    }
+    pub(crate) fn stamp(&self, mut frame: Value) -> Value {
+        // Only an explicit destinations intent can resume after End. Poll
+        // recovery must not revive a retained list while End is in flight.
+        self.stopped.store(false, Ordering::SeqCst);
+        frame["_destinationGeneration"] = json!(self.current());
+        frame
+    }
+}
+
 // --- Intents ----------------------------------------------------------------------
 
 /// An intent's answer, on its way.
@@ -995,6 +1030,7 @@ async fn send_web_intent<W: CloudWebApi>(
     bearer: &str,
     show_id: &str,
     floor: &AtomicU64,
+    destinations: &DestinationGeneration,
     frame: Value,
 ) -> AckResult {
     let kind = frame
@@ -1006,8 +1042,24 @@ async fn send_web_intent<W: CloudWebApi>(
             let Some(body) = DestinationsBody::from_frame(&frame) else {
                 return Err("the destinations could not be read".to_string());
             };
+            let expected = frame["_destinationGeneration"]
+                .as_u64()
+                .unwrap_or_else(|| destinations.current());
             let answer = with_one_retry(
-                || web.set_destinations(bearer, show_id, &body),
+                || async {
+                    let _sending = destinations.sending.lock().await;
+                    if !destinations.accepts(expected) {
+                        return Err(DestinationsFailure {
+                            error: CloudApiError::Other {
+                                status: 409,
+                                code: "stale-destinations".to_string(),
+                                message: String::new(),
+                            },
+                            refused: Vec::new(),
+                        });
+                    }
+                    web.set_destinations(bearer, show_id, &body).await
+                },
                 |failure: &DestinationsFailure| retryable(&failure.error),
             )
             .await;
@@ -1068,6 +1120,7 @@ async fn send_web_intent<W: CloudWebApi>(
                 .map_err(|error| failure_line(&error))
         }
         "legs.end" => {
+            let _stopping = destinations.stopping().await;
             let body = DestinationsBody::for_legs_end(&frame);
             with_one_cloud_retry(|| web.end_legs(bearer, show_id, &body))
                 .await
@@ -1172,6 +1225,7 @@ impl<W: CloudWebApi> WebControl<W> {
         web: Arc<W>,
         bearer: &str,
         show_id: &str,
+        destinations: Arc<DestinationGeneration>,
     ) -> std::result::Result<(Self, RunnerState), HelloFailure> {
         let first = with_one_cloud_retry(|| web.control_state(bearer, show_id, None)).await;
         let (rev, state) = match read_state_answer(first) {
@@ -1211,6 +1265,7 @@ impl<W: CloudWebApi> WebControl<W> {
             bearer.to_string(),
             show_id.to_string(),
             floor.clone(),
+            destinations,
         );
         Ok((
             Self {
@@ -1310,15 +1365,25 @@ fn intent_call<W: CloudWebApi>(
     bearer: String,
     show_id: String,
     floor: Arc<AtomicU64>,
+    destinations: Arc<DestinationGeneration>,
 ) -> WebIntentCall {
     Arc::new(move |frame: Value| -> IntentAnswer {
         let web = web.clone();
         let bearer = bearer.clone();
         let show_id = show_id.clone();
         let floor = floor.clone();
-        Box::pin(
-            async move { send_web_intent(web.as_ref(), &bearer, &show_id, &floor, frame).await },
-        )
+        let destinations = destinations.clone();
+        Box::pin(async move {
+            send_web_intent(
+                web.as_ref(),
+                &bearer,
+                &show_id,
+                &floor,
+                &destinations,
+                frame,
+            )
+            .await
+        })
     })
 }
 
@@ -1339,6 +1404,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         rx: &mut mpsc::UnboundedReceiver<ControlRequest>,
     ) -> LoopExit {
         let call = web.call.clone();
+        let mut sends = tokio::task::JoinSet::new();
         // When each leg last got its address again (section 8.4).
         let mut resent: HashMap<String, tokio::time::Instant> = HashMap::new();
         let mut poll_failed = false;
@@ -1356,15 +1422,15 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             if !self.current() {
                 return LoopExit::Superseded;
             }
-            if let Some(destinations) = self.resend.take() {
-                self.send_destinations_again_over_web(&call, &destinations);
+            if let Some((destinations, generation)) = self.resend.take() {
+                self.send_destinations_again_over_web(&call, &destinations, generation, &mut sends);
             }
             // Plan 224, on web control: the web reports no stage while this
             // desktop holds one. The route's answer raises the floor, so the
             // next state that is taken already has it.
             if self.resend_stage {
                 self.resend_stage = false;
-                self.send_stage_again_over_web(&call);
+                self.send_stage_again_over_web(&call, &mut sends);
             }
             let answer = {
                 let poll = web.poll();
@@ -1373,6 +1439,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     let lost_due = lock(&self.context.slot).lost_report_due_at();
                     tokio::select! {
                         answer = &mut poll => break answer,
+                        _ = sends.join_next(), if !sends.is_empty() => {}
                         request = rx.recv() => {
                             if request.is_none() {
                                 return LoopExit::Superseded;
@@ -1404,7 +1471,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     let joins = state.room.as_ref().and_then(|room| room.page_joins);
                     if self.absorb_web_state(&web, rev, *state, fresh) {
                         dropped = None;
-                        self.resend_legs_that_ask(&call, &mut resent);
+                        self.resend_legs_that_ask(&call, &mut resent, &mut sends);
                         // Wire section 6.3: a program page joined. Byte
                         // streams are not replayed, so what is up goes again.
                         if joins.is_some_and(|joins| joins > page_joins) {
@@ -1486,23 +1553,27 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         &self,
         call: &WebIntentCall,
         resent: &mut HashMap<String, tokio::time::Instant>,
+        sends: &mut tokio::task::JoinSet<()>,
     ) {
-        let asked: Vec<HandoverDestination> = {
+        let (asked, generation): (Vec<HandoverDestination>, u64) = {
             let runtime = lock(&self.context.slot);
             let (Some(show), Some(runner)) = (runtime.show.as_ref(), runtime.runner.as_ref())
             else {
                 return;
             };
-            show.destinations
-                .iter()
-                .filter(|destination| {
-                    runner
-                        .legs
-                        .iter()
-                        .any(|leg| leg.id == destination.id && leg.resend == Some(true))
-                })
-                .cloned()
-                .collect()
+            (
+                show.destinations
+                    .iter()
+                    .filter(|destination| {
+                        runner
+                            .legs
+                            .iter()
+                            .any(|leg| leg.id == destination.id && leg.resend == Some(true))
+                    })
+                    .cloned()
+                    .collect(),
+                runtime.destinations_generation.current(),
+            )
         };
         let now = tokio::time::Instant::now();
         for destination in asked {
@@ -1514,10 +1585,11 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             }
             resent.insert(destination.id.clone(), now);
             let id = new_intent_id();
-            let frame = destinations_set_frame(&id, std::slice::from_ref(&destination), false);
+            let mut frame = destinations_set_frame(&id, std::slice::from_ref(&destination), false);
+            frame["_destinationGeneration"] = json!(generation);
             let call = call.clone();
             let leg = destination.id;
-            tokio::spawn(async move {
+            sends.spawn(async move {
                 if let Err(problem) = call(frame).await {
                     tracing::warn!(
                         leg = %leg,
@@ -1535,14 +1607,17 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         &self,
         call: &WebIntentCall,
         destinations: &[HandoverDestination],
+        destination_generation: u64,
+        sends: &mut tokio::task::JoinSet<()>,
     ) {
         let id = new_intent_id();
-        let frame = destinations_set_frame(&id, destinations, false);
+        let mut frame = destinations_set_frame(&id, destinations, false);
+        frame["_destinationGeneration"] = json!(destination_generation);
         let call = call.clone();
         let slot = self.context.slot.clone();
         let hooks = self.context.hooks.clone();
         let generation = self.generation;
-        tokio::spawn(async move {
+        sends.spawn(async move {
             let Err(problem) = call(frame).await else {
                 return;
             };
@@ -1562,7 +1637,11 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
 
     /// The stage again, off the loop like the destinations. A refusal is
     /// logged; the next state that still reports no stage sends it again.
-    fn send_stage_again_over_web(&self, call: &WebIntentCall) {
+    fn send_stage_again_over_web(
+        &self,
+        call: &WebIntentCall,
+        sends: &mut tokio::task::JoinSet<()>,
+    ) {
         let stage = lock(&self.context.slot)
             .talk
             .as_ref()
@@ -1573,7 +1652,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
         let id = new_intent_id();
         let frame = stage.frame(&id);
         let call = call.clone();
-        tokio::spawn(async move {
+        sends.spawn(async move {
             if let Err(problem) = call(frame).await {
                 tracing::warn!("Videorc Cloud did not take the stage again: {problem}");
             }
@@ -2142,6 +2221,18 @@ rtmps://h/app/key 'http://x.test/y'";
             remux_problem("Error writing trailer: No space left on device"),
             RECORDING_DISK_FULL
         );
+    }
+
+    #[test]
+    fn stopping_also_drops_recovery_collected_while_end_is_in_flight() {
+        let destinations = DestinationGeneration::default();
+        let first = destinations.stamp(frame(true));
+        assert!(destinations.accepts(first["_destinationGeneration"].as_u64().unwrap()));
+        destinations.stop();
+        assert!(!destinations.accepts(first["_destinationGeneration"].as_u64().unwrap()));
+        assert!(!destinations.accepts(destinations.current()));
+        let next_go_live = destinations.stamp(frame(true));
+        assert!(destinations.accepts(next_go_live["_destinationGeneration"].as_u64().unwrap()));
     }
 
     /// `protocol-fixtures/cloud-managed-wire.json` is what the web copies.

@@ -1765,7 +1765,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             bail!("Videorc Cloud needs at least one destination to hand over.");
         }
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
-        {
+        let id = new_intent_id();
+        let frame = {
             let mut runtime = lock(&self.slot);
             if let Some(show) = runtime
                 .show
@@ -1774,11 +1775,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             {
                 show.destinations = destinations.clone();
             }
-        }
-        let id = new_intent_id();
-        // A Go Live hand-over replaces the runner's legs (plan 222 review
-        // M3): the list is every platform the host chose for this show.
-        let frame = crate::cloud_show::destinations_set_frame(&id, &destinations, true);
+            let frame = crate::cloud_show::destinations_set_frame(&id, &destinations, true);
+            if matches!(tx, ControlHandle::Web(_)) {
+                runtime.destinations_generation.stamp(frame)
+            } else {
+                frame
+            }
+        };
         tx.intent(frame, id, ACK_TIMEOUT).await.map_err(|problem| {
             anyhow::anyhow!("Videorc Cloud did not take the destinations: {problem}")
         })?;
@@ -1809,6 +1812,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// silent runner is reported with its reason; nothing else changes.
     pub async fn legs_end(&self) -> Result<CloudStatus> {
         self.open_room_show_id()?;
+        lock(&self.slot).destinations_generation.stop();
         let tx = self.control_tx().map_err(anyhow::Error::msg)?;
         let id = new_intent_id();
         let mut frame = json!({ "t": "intent", "id": id, "kind": "legs.end" });

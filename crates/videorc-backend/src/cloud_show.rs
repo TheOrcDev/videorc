@@ -1450,6 +1450,7 @@ pub struct CloudShowRuntime {
     pub(crate) message: Option<String>,
     /// Bumped with every new show or socket owner so a stale task stops.
     pub(crate) generation: u64,
+    pub(crate) destinations_generation: Arc<crate::cloud_control_web::DestinationGeneration>,
     pub(crate) control_tx: Option<ControlHandle>,
     /// Plan 224: the room this desktop holds, beside `show`; cleared with
     /// it. Its token is the one secret in the runtime.
@@ -1824,6 +1825,7 @@ impl CloudShowRuntime {
     }
 
     fn bump_generation(&mut self) -> u64 {
+        self.destinations_generation.invalidate();
         self.generation += 1;
         self.control_tx = None;
         self.connected = false;
@@ -2236,6 +2238,19 @@ impl ControlHandle {
 }
 
 impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
+    pub(crate) fn destination_frame(&self, frame: Value) -> Value {
+        let runtime = lock(&self.slot);
+        if runtime
+            .show
+            .as_ref()
+            .is_some_and(|show| show.control.transport_kind() == ControlKind::Web)
+        {
+            runtime.destinations_generation.stamp(frame)
+        } else {
+            frame
+        }
+    }
+
     /// Connect or resume: the show's control transport and its first state.
     /// `control` is the create's or `current`'s block, and its kind picks
     /// the transport. The node socket needs neither the bearer nor the show
@@ -2253,7 +2268,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 Ok((ControlLink::Node(transport), welcome))
             }
             ControlKind::Web => {
-                let (web, first) = WebControl::open(self.web.clone(), bearer, show_id).await?;
+                let destinations = lock(&self.slot).destinations_generation.clone();
+                let (web, first) =
+                    WebControl::open(self.web.clone(), bearer, show_id, destinations).await?;
                 Ok((ControlLink::Web(web), first))
             }
             ControlKind::Unknown => Err(HelloFailure::Transport(
@@ -2383,7 +2400,7 @@ pub(crate) struct ControlLoop<W: CloudWebApi, C: ControlConnector> {
     /// A runner restart was already handled on this socket: re-send once.
     pub(crate) restart_seen_on_socket: bool,
     /// Destinations to send again on the current socket (a runner restart).
-    pub(crate) resend: Option<Vec<HandoverDestination>>,
+    pub(crate) resend: Option<(Vec<HandoverDestination>, u64)>,
     /// The hold image to send again on the current socket (a runner restart).
     resend_hold_image: Option<String>,
     /// The hold image went (or was queued) on this socket: at most once each.
@@ -2666,7 +2683,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             if !self.current() {
                 return Ok(LoopExit::Superseded);
             }
-            if let Some(destinations) = self.resend.take() {
+            if let Some((destinations, _generation)) = self.resend.take() {
                 self.send_destinations_again(transport, pending, &destinations)
                     .await?;
             }
@@ -2837,7 +2854,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     destinations_resent,
                 });
                 if let RunnerRestart::Resend(destinations) = restart {
-                    self.resend = Some(destinations);
+                    self.resend = Some((destinations, runtime.destinations_generation.current()));
                 }
                 restarted = true;
             }
@@ -3643,8 +3660,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         let id = new_intent_id();
         // The hand-over replaces the runner's legs (M3): a held show that
         // still runs a platform the host switched off since ends that leg.
-        let frame = destinations_set_frame(&id, destinations, true);
+        let frame = self.destination_frame(destinations_set_frame(&id, destinations, true));
         if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
+            lock(&self.slot).destinations_generation.stop();
             let end_id = new_intent_id();
             let _ = tx
                 .intent(intent_frame(&end_id, "show.end"), end_id, END_ACK_TIMEOUT)
@@ -3913,6 +3931,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }) else {
                 return Ok(runtime.status());
             };
+            runtime.destinations_generation.stop();
             runtime.ending = true;
             (show_id, runtime.control_tx.clone(), on_web_control)
         };
@@ -3926,6 +3945,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 .is_ok();
         }
         if let Some(bearer) = bearer {
+            let destinations = lock(&self.slot).destinations_generation.clone();
+            let _stopping = destinations.stopping().await;
             // On web control this request is the show's only end (the
             // intent above sends nothing), so it gets the route's one retry
             // (plan 234, wire section 2). On the socket it stays one try.
@@ -3968,7 +3989,8 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// (an upsert since C2: a running leg is untouched). Nothing else is
     /// sent, and no other platform notices.
     pub async fn reconnect_destination(&self, target_id: &str) -> Result<CloudStatus> {
-        let (tx, destination) = {
+        let id = new_intent_id();
+        let (tx, frame) = {
             let runtime = lock(&self.slot);
             let Some(show) = runtime.show.as_ref() else {
                 bail!("No cloud show is running.");
@@ -3991,11 +4013,14 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             let Some(tx) = runtime.control_tx.clone() else {
                 bail!("Videorc Cloud is not connected right now.");
             };
-            (tx, destination)
+            let frame = destinations_set_frame(&id, std::slice::from_ref(&destination), false);
+            let frame = if matches!(tx, ControlHandle::Web(_)) {
+                runtime.destinations_generation.stamp(frame)
+            } else {
+                frame
+            };
+            (tx, frame)
         };
-        let id = new_intent_id();
-        // Never `replace`: the other legs keep running (M3).
-        let frame = destinations_set_frame(&id, std::slice::from_ref(&destination), false);
         if let Err(problem) = tx.intent(frame, id, ACK_TIMEOUT).await {
             bail!("Videorc Cloud did not take the reconnect: {problem}");
         }
@@ -12313,6 +12338,59 @@ mod tests {
             "hostShape": "rounded"
         }))
         .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_livestream_invalidates_single_and_full_destination_recovery_retries() {
+        for full_list in [false, true] {
+            let harness = harness(true);
+            managed_room(&harness).await;
+            let web = harness.context.web.clone();
+            harness
+                .context
+                .talk_go_live(Some("bearer".to_string()), destinations(), vec![])
+                .await
+                .unwrap();
+            web.set_state(managed_talk_state(live_legs(), true, 1));
+            wait_until(|| lock(&harness.context.slot).status().legs.len() == 2).await;
+            web.managed
+                .lock()
+                .unwrap()
+                .destinations_answers
+                .push_back(Err(DestinationsFailure {
+                    error: web_error(503, "cloud-media-unavailable"),
+                    refused: Vec::new(),
+                }));
+            let mut state = managed_talk_state(live_legs(), true, 1);
+            if full_list {
+                state["legs"] = json!([]);
+                state["destinationsSet"] = json!(false);
+                state["restarts"] = json!(1);
+            } else {
+                state["legs"][0]["resend"] = json!(true);
+            }
+            web.set_state(state);
+            // The failing first request is observed while virtual time is
+            // still inside the one-second retry gap.
+            wait_until(|| web.destination_bodies().len() == 2).await;
+            harness.context.legs_end().await.unwrap();
+            web.set_state(managed_talk_state(json!([]), true, 1));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert_eq!(
+                web.destination_bodies().len(),
+                2,
+                "no PUT follows End livestream, full_list={full_list}"
+            );
+            assert_eq!(web.managed.lock().unwrap().legs_ends.len(), 1);
+            assert!(
+                lock(&harness.context.slot)
+                    .show
+                    .as_ref()
+                    .unwrap()
+                    .destinations
+                    .is_empty()
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
