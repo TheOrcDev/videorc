@@ -1570,14 +1570,29 @@ pub async fn hold_screen_now(state: &AppState) -> bool {
     let Some(shared) = shared else {
         return false;
     };
+    let started = Instant::now();
     let mut guard = shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let locked = started.elapsed();
     let cpu = frost_cpu_store_now(&mut guard);
+    let cpu_done = started.elapsed();
     #[cfg(target_os = "windows")]
     let texture = frost_d3d11_store_now(&mut guard);
     #[cfg(not(target_os = "windows"))]
     let texture = false;
+    drop(guard);
+    // Issue #1329: the capture and every leg wait on this lock while the
+    // stills are built, so the hide's cost on air is this span.
+    tracing::info!(
+        "[hide-screen] covered the stores in {} ms (lock {} ms, cpu still {} ms: {}, texture still {} ms: {})",
+        started.elapsed().as_millis(),
+        locked.as_millis(),
+        (cpu_done - locked).as_millis(),
+        cpu,
+        (started.elapsed() - cpu_done).as_millis(),
+        texture
+    );
     cpu || texture
 }
 

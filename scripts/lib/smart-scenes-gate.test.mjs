@@ -157,6 +157,38 @@ describe('hideSpanVerdict', () => {
     assert.equal(verdict.hidden.leaks.length, 0)
   })
 
+  it('leaves the white alignment flash out of the live share after Show (issue #1329)', () => {
+    const { features, ptsMs } = frames([
+      { fromMs: 0, toMs: hideAtMs + 150, kind: 'live' },
+      { fromMs: hideAtMs + 150, toMs: showAtMs + 200, kind: 'frosted' },
+      { fromMs: showAtMs + 200, toMs: 10_000, kind: 'live' }
+    ])
+    // A clip cut soon after the end flash: half of its live-after frames
+    // are the flash (white, no edges).
+    const flashed = features.map((feature) =>
+      ptsMs[feature.index] >= 8500 ? { ...feature, sharp: 0, centre: 'white' } : feature
+    )
+    const verdict = hideSpanVerdict({
+      features: flashed,
+      ptsMs,
+      offsetMs: 0,
+      hideAtMs,
+      showAtMs
+    })
+    assert.deepEqual(verdict.failures, [])
+    assert.equal(verdict.liveAfter.sharpFrames, verdict.liveAfter.frames)
+    // A dark, edgeless picture after Show still fails: only the flash is spared.
+    const dull = features.map((feature) =>
+      ptsMs[feature.index] >= 8500 ? { ...feature, sharp: 0 } : feature
+    )
+    assert.match(
+      hideSpanVerdict({ features: dull, ptsMs, offsetMs: 0, hideAtMs, showAtMs }).failures.join(
+        '; '
+      ),
+      /frames after Show are live-sharp/
+    )
+  })
+
   it('fails a live frame leaking inside the hidden span and names it', () => {
     const { features, ptsMs } = frames([
       { fromMs: 0, toMs: hideAtMs + 150, kind: 'live' },
