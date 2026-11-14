@@ -614,7 +614,11 @@ try {
       console.log(
         `[managed talk] Library row ${((Date.now() - stoppedAt) / 1000).toFixed(1)} s after Stop`
       )
-      assert.ok((await buttons(take.id)).includes('Download'))
+      const offered = await buttons(take.id)
+      assert.ok(
+        offered.includes('Download'),
+        `the take's row offers ${JSON.stringify(offered)}: ${await rowText(take.id)}`
+      )
 
       // Download: progress while the segment is held, then Saved and Show in Finder.
       const held = h.web.hooks.pause('segment')
@@ -700,6 +704,7 @@ try {
     await h.kill()
     node = await nodeTalkSentinel(h)
     await h.launch()
+    await h.status((s) => s.show?.id === h.showId, 'the relaunched app holds the show', 45000)
     await h.rpc('cloud.room.resume')
     const at = Date.now()
     const png = runMedia(h.ffmpeg, [
