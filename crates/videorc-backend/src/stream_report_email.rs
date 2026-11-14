@@ -23,7 +23,9 @@
 //!
 //! The renderer's switch (Livestream → After the stream) reads and writes the
 //! web preference through `streamReport.email.get` / `.set`, and
-//! `streamReport.email.sendLast` sends the latest live session's report now.
+//! `streamReport.email.sendLast` sends the latest ended live session's report
+//! now. Each RPC gives up after `RPC_BUDGET`, inside the backend's 10 s
+//! mutation watchdog, so a slow videorc.com never restarts the backend.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -51,6 +53,12 @@ const MAX_AGE: TimeDelta = TimeDelta::days(3);
 /// Retries before a report is given up.
 const MAX_ATTEMPTS: u32 = 10;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// An RPC's whole budget: the account read, the wait for the send lock and
+/// every web call. The backend restarts a mutation that runs past
+/// `WEBSOCKET_MUTATION_MAX_EXECUTION_AGE` (10 s, main.rs), even mid-stream, so
+/// these give up well before it. A send cut off here may still arrive: the web
+/// can finish what it started.
+const RPC_BUDGET: Duration = Duration::from_secs(8);
 /// Leave startup alone before sending what an earlier run left due.
 const STARTUP_DELAY: Duration = Duration::from_secs(30);
 const RETRY_MIN: Duration = Duration::from_secs(60);
@@ -542,6 +550,11 @@ pub(crate) struct WebAccess {
 }
 
 async fn web_access(state: &AppState) -> Option<WebAccess> {
+    // The address and the token are one identity: read both under the account
+    // transition lock, as an account refresh does (account.rs), so a sign-in
+    // between the two reads can't pair one account's address with another's
+    // token. The lock comes before `account_session`, the same order as there.
+    let _transition = state.account_auth_transition.lock().await;
     let email = signed_in_email(state).await?;
     let token = crate::account::stored_session_token()?;
     Some(WebAccess {
@@ -737,8 +750,12 @@ async fn send_due(state: &AppState, client: &reqwest::Client) -> Option<DateTime
     let reports = match queued_reports(&state.database) {
         Ok(reports) => reports,
         Err(error) => {
+            // Look again later; without a time the sender would sleep until
+            // the next stream queued a report.
             tracing::warn!("Stream report: queue unreadable: {error:#}");
-            return None;
+            return Some(
+                Utc::now() + TimeDelta::from_std(RETRY_MIN).unwrap_or(TimeDelta::minutes(1)),
+            );
         }
     };
     let mut next_due: Option<DateTime<Utc>> = None;
@@ -842,6 +859,20 @@ async fn sleep_for(wait: Option<Duration>) {
 
 /// `streamReport.email.get`: the account's choice, read from the web.
 pub(crate) async fn current_state(state: &AppState) -> StreamReportEmailState {
+    if let Ok(snapshot) = tokio::time::timeout(RPC_BUDGET, read_state(state)).await {
+        return snapshot;
+    }
+    // videorc.com is slow: the choice is unknown for now.
+    let email = signed_in_email(state).await;
+    StreamReportEmailState {
+        signed_in: email.is_some(),
+        email,
+        enabled: None,
+        env_disabled: state.stream_report.env_disabled.load(Ordering::Acquire),
+    }
+}
+
+async fn read_state(state: &AppState) -> StreamReportEmailState {
     let env_disabled = state.stream_report.env_disabled.load(Ordering::Acquire);
     let Some(web) = web_access(state).await else {
         // Signed out, or signed in without a readable session token.
@@ -865,6 +896,12 @@ pub(crate) async fn set_enabled(
     state: &AppState,
     enabled: bool,
 ) -> anyhow::Result<StreamReportEmailState> {
+    tokio::time::timeout(RPC_BUDGET, save_enabled(state, enabled))
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("videorc.com didn't answer. Try again.")))
+}
+
+async fn save_enabled(state: &AppState, enabled: bool) -> anyhow::Result<StreamReportEmailState> {
     let env_disabled = state.stream_report.env_disabled.load(Ordering::Acquire);
     let Some(web) = web_access(state).await else {
         anyhow::bail!("Sign in to Videorc to get a report by email.");
@@ -903,10 +940,27 @@ fn preference_state(
     }
 }
 
-/// `streamReport.email.sendLast`: the latest live session's report, now, to
-/// the account's own address. A fresh report id each time: the streamer asked
-/// for another copy. Ignores the 5-minute floor (it is the owner's preview).
+/// `streamReport.email.sendLast`: the latest ended live session's report,
+/// now, to the account's own address. A fresh report id each time: the
+/// streamer asked for another copy. Ignores the 5-minute floor (it is the
+/// owner's preview).
 pub(crate) async fn send_last(state: &AppState) -> StreamReportSendResult {
+    match tokio::time::timeout(RPC_BUDGET, send_last_now(state)).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                "Stream report: Send the last one ran out of its {}s budget.",
+                RPC_BUDGET.as_secs()
+            );
+            StreamReportSendResult {
+                status: StreamReportSendStatus::Failed,
+                email: None,
+            }
+        }
+    }
+}
+
+async fn send_last_now(state: &AppState) -> StreamReportSendResult {
     let result = |status, email: Option<&str>| StreamReportSendResult {
         status,
         email: email.map(str::to_string),
@@ -920,13 +974,31 @@ pub(crate) async fn send_last(state: &AppState) -> StreamReportSendResult {
     let Some(client) = http_client() else {
         return result(StreamReportSendStatus::Failed, Some(&web.email));
     };
+    let status = send_last_as(state, &client, &web).await;
+    result(status, Some(&web.email))
+}
+
+/// "Send the last one" as `web`'s account. The account's choice comes first,
+/// as for an automatic report: an "off" account sends no numbers.
+pub(crate) async fn send_last_as(
+    state: &AppState,
+    client: &reqwest::Client,
+    web: &WebAccess,
+) -> StreamReportSendStatus {
     let _guard = state.stream_report.send_lock.lock().await;
-    let session_id = match state.database.latest_streamed_session_id() {
+    match fetch_preference(client, web).await {
+        PreferenceAnswer::Known { enabled: false, .. } => return StreamReportSendStatus::Disabled,
+        PreferenceAnswer::Known { enabled: true, .. } => {}
+        PreferenceAnswer::Unauthorized => return StreamReportSendStatus::SignedOut,
+        PreferenceAnswer::Missing => return StreamReportSendStatus::Unavailable,
+        PreferenceAnswer::Retry => return StreamReportSendStatus::Failed,
+    }
+    let session_id = match crate::stream_report::latest_ended_live_session(&state.database) {
         Ok(Some(session_id)) => session_id,
-        Ok(None) => return result(StreamReportSendStatus::NoStream, Some(&web.email)),
+        Ok(None) => return StreamReportSendStatus::NoStream,
         Err(error) => {
             tracing::warn!("Stream report: {error:#}");
-            return result(StreamReportSendStatus::Failed, Some(&web.email));
+            return StreamReportSendStatus::Failed;
         }
     };
     let built = crate::stream_report::load_report(
@@ -937,13 +1009,13 @@ pub(crate) async fn send_last(state: &AppState) -> StreamReportSendResult {
     );
     let built = match built {
         Ok(Some(built)) => built,
-        Ok(None) => return result(StreamReportSendStatus::NoStream, Some(&web.email)),
+        Ok(None) => return StreamReportSendStatus::NoStream,
         Err(error) => {
             tracing::warn!("Stream report: could not read the session: {error:#}");
-            return result(StreamReportSendStatus::Failed, Some(&web.email));
+            return StreamReportSendStatus::Failed;
         }
     };
-    let status = match post_report(&client, &web, &built).await {
+    match post_report(client, web, &built).await {
         PostAnswer::Sent => StreamReportSendStatus::Sent,
         PostAnswer::AlreadySent => StreamReportSendStatus::AlreadySent,
         PostAnswer::Disabled => StreamReportSendStatus::Disabled,
@@ -951,8 +1023,7 @@ pub(crate) async fn send_last(state: &AppState) -> StreamReportSendResult {
         PostAnswer::Unauthorized => StreamReportSendStatus::SignedOut,
         PostAnswer::Missing => StreamReportSendStatus::Unavailable,
         PostAnswer::Refused(_) | PostAnswer::Retry => StreamReportSendStatus::Failed,
-    };
-    result(status, Some(&web.email))
+    }
 }
 
 #[cfg(test)]
@@ -1398,6 +1469,53 @@ mod tests {
             Delivery::Dropped
         );
         assert_eq!(web.received.lock().unwrap().len(), asked);
+    }
+
+    #[test]
+    fn every_rpc_gives_up_inside_the_mutation_watchdog() {
+        // A mutation past the watchdog restarts the backend, even mid-stream.
+        assert!(RPC_BUDGET + Duration::from_secs(1) < crate::WEBSOCKET_MUTATION_MAX_EXECUTION_AGE);
+        assert!(
+            RPC_BUDGET < REQUEST_TIMEOUT,
+            "the budget, not the client, cuts an RPC off"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_the_last_one_asks_the_account_first_and_skips_a_running_stream() {
+        let state = test_state();
+        let _ = queued(&state);
+        let client = http_client().unwrap();
+        // Off: no numbers leave the computer.
+        let (base, web) = fake_web((200, json!({ "enabled": false })), (200, json!({}))).await;
+        let ada = access(&base, "ada@example.com");
+        assert_eq!(
+            send_last_as(&state, &client, &ada).await,
+            StreamReportSendStatus::Disabled
+        );
+        assert_eq!(web.received.lock().unwrap().len(), 1, "no POST");
+        // On, with a stream still running: the ended one goes.
+        {
+            let conn = state.database.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (
+                    id, title, started_at, status, mode, sources_json, layout_json, output_json
+                 ) VALUES ('live-2', 'Live now', '2026-11-14T21:00:00Z', 'running', 'stream',
+                    '{}', '{}', '{}')",
+                [],
+            )
+            .unwrap();
+        }
+        *web.preference.lock().unwrap() = (200, json!({ "enabled": true }));
+        *web.report.lock().unwrap() = (200, json!({ "status": "sent" }));
+        assert_eq!(
+            send_last_as(&state, &client, &ada).await,
+            StreamReportSendStatus::Sent
+        );
+        let received = web.received.lock().unwrap().clone();
+        let body = &received.last().unwrap().1;
+        assert_eq!(body["endedAt"], "2026-11-14T19:00:00Z");
+        assert_eq!(body["viewers"]["peak"], 42);
     }
 
     #[tokio::test]

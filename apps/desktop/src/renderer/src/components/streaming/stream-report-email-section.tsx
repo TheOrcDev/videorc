@@ -26,7 +26,7 @@ export function streamReportEmailDescription(state: StreamReportEmailState | nul
   if (!state) return "To your Videorc account's email."
   if (state.envDisabled) return 'Turned off when Videorc started. Reopen Videorc to change it.'
   if (!state.signedIn) return "To your Videorc account's email."
-  if (state.enabled === null) return "Couldn't reach videorc.com. Try again later."
+  if (state.enabled === null) return "Couldn't reach videorc.com."
   return state.email ? `To ${state.email}.` : "To your Videorc account's email."
 }
 
@@ -44,7 +44,7 @@ export function streamReportSendLine(view: StreamReportSendView): string {
     case 'disabled':
       return 'Stream reports are off for your account.'
     case 'no-stream':
-      return 'No live stream yet.'
+      return 'No finished live stream yet.'
     case 'signed-out':
       return 'Sign in to Videorc first.'
     case 'rate-limited':
@@ -60,16 +60,22 @@ export function StreamReportEmailSectionView({
   state,
   send,
   onEnabledChange,
+  onRetry,
   onSendLast
 }: {
   /** `null` until the backend answers. */
   state: StreamReportEmailState | null
   send: StreamReportSendView
   onEnabledChange: (enabled: boolean) => void
+  /** Reads the account's choice again after videorc.com didn't answer. */
+  onRetry: () => void
   onSendLast: () => void
 }): ReactElement {
   const signedOut = state !== null && !state.signedIn
   const usable = state !== null && state.signedIn && !state.envDisabled
+  // Signed in, but the choice couldn't be read: a switch would show "off"
+  // for an account that may be on, so the row offers another read instead.
+  const unread = usable && state?.enabled === null
   return (
     <PanelSection description={STREAM_REPORT_SECTION_DESCRIPTION} title="After the stream">
       {signedOut ? (
@@ -85,12 +91,18 @@ export function StreamReportEmailSectionView({
           description={streamReportEmailDescription(state)}
           label="Email me a report after each stream"
         >
-          <Switch
-            checked={state?.enabled === true}
-            disabled={!usable || state?.enabled === null}
-            id="stream-report-email"
-            onCheckedChange={onEnabledChange}
-          />
+          {unread ? (
+            <Button size="xs" type="button" variant="outline" onClick={onRetry}>
+              Try again
+            </Button>
+          ) : (
+            <Switch
+              checked={state?.enabled === true}
+              disabled={!usable || state?.enabled === null}
+              id="stream-report-email"
+              onCheckedChange={onEnabledChange}
+            />
+          )}
         </SettingsRow>
         <SettingsRow
           data-testid="stream-report-send-last"
@@ -118,6 +130,15 @@ export function StreamReportEmailSection(): ReactElement {
   const [send, setSend] = useState<StreamReportSendView>('idle')
   // Only the latest answer may land: an older read must not undo a newer flip.
   const latest = useRef(0)
+  // What the backend last said, so a failed save puts the switch back.
+  const confirmed = useRef<StreamReportEmailState | null>(null)
+  // Only the latest send may land: an account change or unmount retires one.
+  const sendGeneration = useRef(0)
+
+  const accept = useCallback((next: StreamReportEmailState) => {
+    confirmed.current = next
+    setState(next)
+  }, [])
 
   const refresh = useCallback(() => {
     if (!client) return
@@ -125,20 +146,24 @@ export function StreamReportEmailSection(): ReactElement {
     void client
       .requestTyped('streamReport.email.get')
       .then((next) => {
-        if (request === latest.current) setState(next)
+        if (request === latest.current) accept(next)
       })
       .catch(() => undefined)
-  }, [client])
+  }, [accept, client])
 
   useEffect(() => {
     if (!client) return
     refresh()
     // Signing in or out changes where the report goes.
     const off = client.on('account.changed', () => {
+      sendGeneration.current += 1
       setSend('idle')
       refresh()
     })
-    return off
+    return () => {
+      sendGeneration.current += 1
+      off()
+    }
   }, [client, refresh])
 
   const onEnabledChange = useCallback(
@@ -149,28 +174,34 @@ export function StreamReportEmailSection(): ReactElement {
       client
         .requestTyped('streamReport.email.set', { enabled })
         .then((next) => {
-          if (request === latest.current) setState(next)
+          if (request === latest.current) accept(next)
         })
         .catch((error: unknown) => {
           if (request !== latest.current) return
           toastUserError(error, { action: 'save', object: 'the stream report setting' })
+          // The account still has its old choice: show that, then read it again.
+          setState(confirmed.current)
           refresh()
         })
     },
-    [client, refresh]
+    [accept, client, refresh]
   )
 
   const onSendLast = useCallback(() => {
     if (!client) return
+    const generation = ++sendGeneration.current
     setSend('sending')
     client
       .requestTyped('streamReport.email.sendLast')
       .then((result) => {
+        if (generation !== sendGeneration.current) return
         setSend(result)
         // "Turned off" means the account's choice changed somewhere else.
         if (result.status === 'disabled' || result.status === 'signed-out') refresh()
       })
-      .catch(() => setSend({ status: 'failed' }))
+      .catch(() => {
+        if (generation === sendGeneration.current) setSend({ status: 'failed' })
+      })
   }, [client, refresh])
 
   return (
@@ -178,6 +209,7 @@ export function StreamReportEmailSection(): ReactElement {
       send={send}
       state={state}
       onEnabledChange={onEnabledChange}
+      onRetry={refresh}
       onSendLast={onSendLast}
     />
   )

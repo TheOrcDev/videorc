@@ -11,12 +11,12 @@ The web side (route, email, unsubscribe, privacy copy) is videorc-web's
 
 ## Where it lives
 
-| Piece | File |
-| --- | --- |
-| The numbers, from the session's own rows (pure builder + SQLite reads) | `crates/videorc-backend/src/stream_report.rs` |
-| The queue, the sender, the RPCs | `crates/videorc-backend/src/stream_report_email.rs` |
-| The pending reports (`stream_report_emails`) | `crates/videorc-backend/src/storage.rs` |
-| Livestream → After the stream | `apps/desktop/src/renderer/src/components/streaming/stream-report-email-section.tsx` |
+| Piece                                                                  | File                                                                                 |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| The numbers, from the session's own rows (pure builder + SQLite reads) | `crates/videorc-backend/src/stream_report.rs`                                        |
+| The queue, the sender, the RPCs                                        | `crates/videorc-backend/src/stream_report_email.rs`                                  |
+| The pending reports (`stream_report_emails`)                           | `crates/videorc-backend/src/storage.rs`                                              |
+| Livestream → After the stream                                          | `apps/desktop/src/renderer/src/components/streaming/stream-report-email-section.tsx` |
 
 ## What is sent, and when
 
@@ -66,8 +66,14 @@ compliance").
   After the stream reads and writes it (`streamReport.email.get` / `.set`),
   and so does the email's one-click unsubscribe.
 - **Send the last one** (`streamReport.email.sendLast`) sends the latest live
-  session's report now, with a fresh report id and no 5-minute floor: the way
-  to see the email without streaming again.
+  session that has ended (a stream still running is skipped) now, with a fresh
+  report id and no 5-minute floor: the way to see the email without streaming
+  again. It asks the account's choice first, like an automatic report, so an
+  "off" account sends no numbers.
+- **Each of the three RPCs gives up after 8 s.** `.set` and `.sendLast` are
+  mutations, and the backend restarts a mutation that runs past 10 s, even
+  mid-stream, so a slow videorc.com must never hold one that long.
 - **`VIDEORC_STREAM_REPORT_EMAIL=0`** turns it off for a run. Every smoke
   launcher (`scripts/lib/app-launcher.mjs`) and the live lab set it, so no
-  test ever emails a real inbox.
+  test ever emails a real inbox. The launcher ignores a value left exported in
+  the shell: only a run's own env can turn it on.

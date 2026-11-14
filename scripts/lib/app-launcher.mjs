@@ -205,8 +205,9 @@ export function smokeAppEnv(env = {}, options = {}) {
     // live must not reach the anonymous usage stats unless a run asks to.
     VIDEORC_USAGE_STATS: smokeEnvValue(env, 'VIDEORC_USAGE_STATS') ?? '0',
     // Plan 237: a smoke that goes live must never email the signed-in
-    // account a stream report unless a run asks to.
-    VIDEORC_STREAM_REPORT_EMAIL: smokeEnvValue(env, 'VIDEORC_STREAM_REPORT_EMAIL') ?? '0',
+    // account a stream report unless the run itself asks to: a value left
+    // exported in the shell does not count.
+    VIDEORC_STREAM_REPORT_EMAIL: explicitSmokeEnvValue(env, 'VIDEORC_STREAM_REPORT_EMAIL') ?? '0',
     VIDEORC_SMOKE_SKIP_FIRST_RUN: env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1',
     VIDEORC_APP_DATA_DIR: appDataDir,
     VIDEORC_USER_DATA_DIR: userDataDir,

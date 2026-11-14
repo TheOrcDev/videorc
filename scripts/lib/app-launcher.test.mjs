@@ -344,6 +344,18 @@ test('smokeAppEnv enables ledger reaping by default for isolated smoke launches'
   })
 })
 
+test('smokeAppEnv sends no stream report email unless the run itself asks (plan 237)', () => {
+  withCleanSmokeEnv(() => {
+    const base = { VIDEORC_SMOKE_STATE_DIR: '/tmp/videorc-smoke-state' }
+    process.env.VIDEORC_STREAM_REPORT_EMAIL = '1'
+    assert.equal(smokeAppEnv(base).VIDEORC_STREAM_REPORT_EMAIL, '0', 'the shell does not count')
+    assert.equal(
+      smokeAppEnv({ ...base, VIDEORC_STREAM_REPORT_EMAIL: '1' }).VIDEORC_STREAM_REPORT_EMAIL,
+      '1'
+    )
+  })
+})
+
 test('smokeAppEnv suppresses first-run setup unless the caller explicitly opts in', () => {
   withCleanSmokeEnv(() => {
     const base = { VIDEORC_SMOKE_STATE_DIR: '/tmp/videorc-smoke-state' }

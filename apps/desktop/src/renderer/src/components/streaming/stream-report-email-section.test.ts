@@ -20,6 +20,7 @@ const render = (
       state,
       send,
       onEnabledChange: () => undefined,
+      onRetry: () => undefined,
       onSendLast: () => undefined
     })
   )
@@ -68,10 +69,12 @@ describe('Livestream → After the stream (plan 237)', () => {
     expect(markup).toMatch(SEND_DISABLED)
   })
 
-  it('an unread choice or a run with the email off keeps the switch still, with the reason', () => {
+  it('an unread choice offers another read; a run with the email off keeps the switch still', () => {
     const unknown = render({ ...ON, enabled: null })
-    expect(unknown).toMatch(SWITCH_DISABLED)
-    expect(unknown).toContain(html("Couldn't reach videorc.com. Try again later."))
+    // No switch: it would show "off" for an account that may be on.
+    expect(unknown).not.toContain('role="switch"')
+    expect(unknown).toMatch(/<button(?=[^>]*data-slot="button")[^>]*>Try again<\/button>/)
+    expect(unknown).toContain(html("Couldn't reach videorc.com."))
     const off = render({ ...ON, enabled: false, envDisabled: true })
     expect(off).toMatch(SWITCH_DISABLED)
     expect(off).toMatch(SEND_DISABLED)
@@ -90,7 +93,7 @@ describe('Livestream → After the stream (plan 237)', () => {
     expect(streamReportSendLine({ status: 'disabled' })).toBe(
       'Stream reports are off for your account.'
     )
-    expect(streamReportSendLine({ status: 'no-stream' })).toBe('No live stream yet.')
+    expect(streamReportSendLine({ status: 'no-stream' })).toBe('No finished live stream yet.')
     expect(streamReportSendLine({ status: 'signed-out' })).toBe('Sign in to Videorc first.')
     expect(streamReportSendLine({ status: 'rate-limited' })).toBe(
       "That's 10 reports today. Try again tomorrow."

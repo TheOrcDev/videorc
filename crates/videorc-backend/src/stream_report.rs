@@ -560,6 +560,12 @@ impl SessionFacts {
         self.mode.contains("stream")
     }
 
+    /// Has ended: a running session has no `ended_at` yet, and a report on
+    /// it would cover nothing.
+    pub fn ended(&self) -> bool {
+        self.ended_at.is_some()
+    }
+
     /// The end, or the start plus the duration, or the start.
     pub fn end(&self) -> DateTime<Utc> {
         self.ended_at.unwrap_or_else(|| {
@@ -605,6 +611,27 @@ pub fn session_facts(
             })
         }),
     )
+}
+
+/// The latest live session that has ended, for "Send the last one". A
+/// stream still running is skipped (its report would cover nothing yet), and
+/// so are the Screen and Camera rows of a separate-source take, which share
+/// the take's start.
+pub fn latest_ended_live_session(database: &Database) -> anyhow::Result<Option<String>> {
+    let conn = database.lock()?;
+    conn.query_row(
+        "SELECT id FROM sessions
+         WHERE library_hidden = 0
+           AND mode LIKE '%stream%'
+           AND ended_at IS NOT NULL
+           AND (recording_role IS NULL OR recording_role NOT IN ('screen', 'camera'))
+         ORDER BY started_at DESC
+         LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// `session_chat_authors` rows for one session.
@@ -714,7 +741,7 @@ pub fn load_report(
     let Some(facts) = session_facts(database, session_id)? else {
         return Ok(None);
     };
-    if !facts.live() {
+    if !facts.live() || !facts.ended() {
         return Ok(None);
     }
     let samples = crate::viewer_stats::session_viewer_history(database, session_id)?;
@@ -1063,6 +1090,47 @@ mod tests {
         assert_eq!(
             load_report(&database, "missing", "r".to_string(), vec![]).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn a_stream_still_running_gets_no_report_and_is_not_the_last_one() {
+        let database = Database::open_in_memory_for_tests();
+        crate::stream_report_email::tests_support::seed_live_session(
+            &database,
+            "earlier",
+            "2026-11-13T18:00:00Z",
+            "2026-11-13T19:00:00Z",
+        );
+        {
+            let conn = database.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (
+                    id, title, started_at, status, mode, sources_json, layout_json, output_json
+                 ) VALUES ('running', 'Live now', '2026-11-14T18:00:00Z', 'running', 'stream',
+                    '{}', '{}', '{}')",
+                [],
+            )
+            .unwrap();
+            // A separate-source take's Camera row: ended, but not the stream.
+            conn.execute(
+                "INSERT INTO sessions (
+                    id, title, started_at, ended_at, status, mode, sources_json, layout_json,
+                    output_json, recording_role
+                 ) VALUES ('camera-row', 'Live now: Camera', '2026-11-14T18:00:00Z',
+                    '2026-11-14T18:30:00Z', 'completed', 'record+stream', '{}', '{}', '{}',
+                    'camera')",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            load_report(&database, "running", "r".to_string(), vec![]).unwrap(),
+            None
+        );
+        assert_eq!(
+            latest_ended_live_session(&database).unwrap().as_deref(),
+            Some("earlier")
         );
     }
 }
