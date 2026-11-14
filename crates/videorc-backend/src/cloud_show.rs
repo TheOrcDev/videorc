@@ -1012,6 +1012,12 @@ pub trait CloudWebApi: Send + Sync + 'static {
         bearer: &str,
         recording_id: &str,
     ) -> impl Future<Output = std::result::Result<String, CloudApiError>> + Send;
+    /// A presigned segment, through the verified HTTP client, never FFmpeg.
+    fn recording_segment(
+        &self,
+        url: &str,
+        path: &std::path::Path,
+    ) -> impl Future<Output = std::result::Result<(), crate::cloud_control_web::SegmentFetchError>> + Send;
 }
 
 // --- Wire: the control socket -------------------------------------------------
@@ -5420,6 +5426,15 @@ mod tests {
                     code: "cloud-recording-not-found".to_string(),
                     message: String::new(),
                 })
+        }
+        async fn recording_segment(
+            &self,
+            _url: &str,
+            path: &std::path::Path,
+        ) -> std::result::Result<(), crate::cloud_control_web::SegmentFetchError> {
+            tokio::fs::write(path, b"segment")
+                .await
+                .map_err(crate::cloud_control_web::SegmentFetchError::Storage)
         }
     }
 
@@ -12855,7 +12870,7 @@ mod tests {
         // 1. A remux that works.
         let saved = {
             let seen = seen_playlist.clone();
-            let expected = playlist.clone();
+            let expected = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment-000000.ts\n#EXT-X-ENDLIST\n".to_string();
             download_segments_recording(
                 web.as_ref(),
                 "bearer",

@@ -3930,6 +3930,53 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
         )
         .await
     }
+    async fn recording_segment(
+        &self,
+        url: &str,
+        path: &std::path::Path,
+    ) -> std::result::Result<(), crate::cloud_control_web::SegmentFetchError> {
+        use crate::cloud_control_web::SegmentFetchError;
+        use tokio::io::AsyncWriteExt as _;
+        // Default rustls certificate AND hostname verification. https_only also
+        // refuses an HTTPS redirect to HTTP. No bearer is sent to storage.
+        static RECORDING_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = match RECORDING_HTTP.get() {
+            Some(client) => client,
+            None => {
+                let client = reqwest::Client::builder()
+                    .https_only(true)
+                    .build()
+                    .map_err(|_| SegmentFetchError::Network)?;
+                RECORDING_HTTP.get_or_init(|| client)
+            }
+        };
+        let mut response = client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(90))
+            .send()
+            .await
+            .map_err(|_| SegmentFetchError::Network)?
+            .error_for_status()
+            .map_err(|_| SegmentFetchError::Network)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(path)
+            .await
+            .map_err(SegmentFetchError::Storage)?;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| SegmentFetchError::Network)?
+        {
+            file.write_all(&chunk)
+                .await
+                .map_err(SegmentFetchError::Storage)?;
+        }
+        file.flush().await.map_err(SegmentFetchError::Storage)
+    }
 }
 
 pub(crate) async fn read_error_code_and_message(response: reqwest::Response) -> (String, String) {

@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use futures_util::{StreamExt as _, TryStreamExt as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -479,7 +480,7 @@ pub(crate) fn recording_playlist_path(recording_id: &str) -> String {
 pub(crate) const RECORDING_FORMAT_SEGMENTS: &str = "segments";
 /// What FFmpeg may open while it reads the playlist: the local file, and
 /// HTTPS for the segments. Nothing else: no plain HTTP, no other scheme.
-pub(crate) const REMUX_PROTOCOL_WHITELIST: &str = "file,https,tls,tcp,crypto";
+pub(crate) const REMUX_PROTOCOL_WHITELIST: &str = "file";
 
 /// One item of `GET /api/cloud/recordings`, as the desktop keeps it: the
 /// facts, and no URL of any kind.
@@ -649,13 +650,185 @@ pub(crate) fn scrub_urls(text: &str) -> String {
     scrubbed
 }
 
-/// The temporary playlist: removed when this drops, however the remux ends.
-struct TemporaryPlaylist(PathBuf);
+/// A private scratch directory. The guard also covers unwinding and cancellation.
+struct TemporaryRecordingDirectory(PathBuf);
 
-impl Drop for TemporaryPlaylist {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+const RECORDING_TEMP_PREFIX: &str = "videorc-cloud-download-";
+
+impl TemporaryRecordingDirectory {
+    fn create() -> std::io::Result<Self> {
+        Self::create_in(&std::env::temp_dir())
     }
+
+    fn create_in(root: &Path) -> std::io::Result<Self> {
+        remove_stale_recording_downloads(root, std::time::SystemTime::now());
+        let path = root.join(format!("{RECORDING_TEMP_PREFIX}{}", uuid::Uuid::new_v4()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TemporaryRecordingDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn remove_stale_recording_downloads(root: &Path, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(RECORDING_TEMP_PREFIX))
+        else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(id).is_err() {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if metadata.is_dir()
+            && metadata
+                .modified()
+                .ok()
+                .and_then(|at| now.duration_since(at).ok())
+                .is_some_and(|age| age > Duration::from_secs(24 * 60 * 60))
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Deliberately carries no request or URL, including on TLS failures.
+#[derive(Debug)]
+pub enum SegmentFetchError {
+    Network,
+    Storage(std::io::Error),
+}
+
+const RECORDING_DISK_FULL: &str = "There isn't enough space to save the recording.";
+
+fn storage_problem(error: &std::io::Error) -> &'static str {
+    if error.raw_os_error() == Some(libc::ENOSPC) {
+        RECORDING_DISK_FULL
+    } else {
+        "The recording could not be saved. Check the folder and available space."
+    }
+}
+
+fn remux_problem(stderr: &str) -> String {
+    if stderr
+        .to_ascii_lowercase()
+        .contains("no space left on device")
+    {
+        return RECORDING_DISK_FULL.to_string();
+    }
+    let said = scrub_urls(stderr.trim());
+    let said = said.lines().rev().take(3).collect::<Vec<_>>();
+    let said = said.into_iter().rev().collect::<Vec<_>>().join(" | ");
+    format!("FFmpeg could not make the MP4: {said}")
+}
+
+/// Accept a media playlist only. Unknown URI-bearing tags (keys, maps,
+/// nested playlists, etc.) never reach FFmpeg. No presigned URL goes to disk.
+fn local_recording_playlist(playlist: &str) -> Result<(String, Vec<String>)> {
+    if !playlist.trim_start().starts_with("#EXTM3U") {
+        bail!("videorc.com did not answer with the recording's playlist.");
+    }
+    let mut local = String::new();
+    let mut segments = Vec::new();
+    for line in playlist
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line.starts_with('#') {
+            let tag = line.split(':').next().unwrap_or_default();
+            if !matches!(
+                tag,
+                "#EXTM3U"
+                    | "#EXT-X-VERSION"
+                    | "#EXT-X-TARGETDURATION"
+                    | "#EXT-X-MEDIA-SEQUENCE"
+                    | "#EXTINF"
+                    | "#EXT-X-ENDLIST"
+                    | "#EXT-X-DISCONTINUITY"
+                    | "#EXT-X-PROGRAM-DATE-TIME"
+                    | "#EXT-X-INDEPENDENT-SEGMENTS"
+            ) || line.contains("://")
+                || line.contains("URI=")
+            {
+                bail!("The recording's playlist is not supported.");
+            }
+            local.push_str(line);
+        } else {
+            let valid = reqwest::Url::parse(line).ok().is_some_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+            });
+            if !valid {
+                bail!("The recording's playlist is not supported.");
+            }
+            local.push_str(&segment_name(segments.len()));
+            segments.push(line.to_string());
+        }
+        local.push('\n');
+    }
+    if segments.is_empty() {
+        bail!("The recording's playlist has no segments.");
+    }
+    Ok((local, segments))
+}
+
+fn segment_name(index: usize) -> String {
+    format!("segment-{index:06}.ts")
+}
+
+async fn fetch_recording_segments<W: CloudWebApi>(
+    web: &W,
+    segments: Vec<String>,
+    folder: &Path,
+) -> Result<()> {
+    futures_util::stream::iter(
+        segments
+            .into_iter()
+            .enumerate()
+            .map(|(index, url)| async move {
+                let path = folder.join(segment_name(index));
+                for attempt in 0..3 {
+                    match web.recording_segment(&url, &path).await {
+                        Ok(()) => return Ok(()),
+                        Err(SegmentFetchError::Storage(error)) => {
+                            bail!("{}", storage_problem(&error))
+                        }
+                        Err(SegmentFetchError::Network) if attempt < 2 => {
+                            tokio::time::sleep(RETRY_DELAY).await
+                        }
+                        Err(SegmentFetchError::Network) => {
+                            bail!("Recording segment {index} could not be downloaded.")
+                        }
+                    }
+                }
+                unreachable!()
+            }),
+    )
+    .buffer_unordered(4)
+    .try_collect::<Vec<_>>()
+    .await?;
+    Ok(())
 }
 
 async fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -702,30 +875,26 @@ where
     let playlist = with_one_cloud_retry(|| web.recording_playlist(bearer, &recording.id))
         .await
         .map_err(|error| anyhow::anyhow!("{}", failure_line(&error)))?;
-    if !playlist.trim_start().starts_with("#EXTM3U") {
-        bail!("videorc.com did not answer with the recording's playlist.");
-    }
+    let (local_playlist, segments) = local_recording_playlist(&playlist)?;
+    drop(playlist);
     tokio::fs::create_dir_all(folder)
         .await
-        .with_context(|| format!("Videorc can't save to {}.", folder.display()))?;
-    let temporary = TemporaryPlaylist(
-        std::env::temp_dir().join(format!("videorc-recording-{}.m3u8", uuid::Uuid::new_v4())),
-    );
-    write_private_file(&temporary.0, playlist.as_bytes())
+        .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
+    let temporary = TemporaryRecordingDirectory::create()
+        .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
+    fetch_recording_segments(web, segments, &temporary.0).await?;
+    let playlist_path = temporary.0.join("index.m3u8");
+    write_private_file(&playlist_path, local_playlist.as_bytes())
         .await
-        .context("The recording's playlist could not be written.")?;
-    drop(playlist);
+        .map_err(|error| anyhow::anyhow!(storage_problem(&error)))?;
     let output = free_output_path(folder, &recording.file_name());
-    let outcome = remux(remux_args(&temporary.0, &output)).await;
+    let outcome = remux(remux_args(&playlist_path, &output)).await;
     drop(temporary);
     match outcome {
         Ok(outcome) if outcome.success => Ok(output),
         Ok(outcome) => {
             let _ = tokio::fs::remove_file(&output).await;
-            let said = scrub_urls(outcome.stderr.trim());
-            let said = said.lines().rev().take(3).collect::<Vec<_>>();
-            let said = said.into_iter().rev().collect::<Vec<_>>().join(" | ");
-            bail!("FFmpeg could not make the MP4: {said}");
+            bail!("{}", remux_problem(&outcome.stderr));
         }
         Err(error) => {
             let _ = tokio::fs::remove_file(&output).await;
@@ -1824,7 +1993,7 @@ mod tests {
     /// The playlist goes by path, HTTPS is the only way out, and a URL never
     /// survives into an error.
     #[test]
-    fn the_remux_reads_a_local_playlist_over_https_and_its_errors_carry_no_url() {
+    fn the_remux_reads_local_files_only_and_its_errors_carry_no_url() {
         let args = remux_args(Path::new("/tmp/p.m3u8"), Path::new("/tmp/out.mp4"));
         let args: Vec<String> = args
             .iter()
@@ -1839,7 +2008,7 @@ mod tests {
                 "-nostdin",
                 "-n",
                 "-protocol_whitelist",
-                "file,https,tls,tcp,crypto",
+                "file",
                 "-i",
                 "/tmp/p.m3u8",
                 "-c",
@@ -1897,6 +2066,82 @@ rtmps://h/app/key 'http://x.test/y'";
         ] {
             assert_eq!(named(odd, "../x"), "talk-h.mp4", "{odd}");
         }
+    }
+
+    #[test]
+    fn private_download_folders_are_removed_on_drop_panic_and_stale_start() {
+        let root =
+            std::env::temp_dir().join(format!("cloud-scratch-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let temporary = TemporaryRecordingDirectory::create_in(&root).unwrap();
+        let path = temporary.0.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        std::fs::write(path.join("segment.ts"), b"media").unwrap();
+        drop(temporary);
+        assert!(!path.exists());
+        let temporary = TemporaryRecordingDirectory::create_in(&root).unwrap();
+        let path = temporary.0.clone();
+        assert!(
+            std::panic::catch_unwind(move || {
+                let _guard = temporary;
+                panic!("test unwind");
+            })
+            .is_err()
+        );
+        assert!(!path.exists());
+        let stale = TemporaryRecordingDirectory::create_in(&root).unwrap();
+        let unrelated = root.join("other-folder");
+        std::fs::create_dir(&unrelated).unwrap();
+        remove_stale_recording_downloads(
+            &root,
+            std::time::SystemTime::now() + Duration::from_secs(86_401),
+        );
+        assert!(!stale.0.exists());
+        assert!(unrelated.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_playlists_never_give_ffmpeg_a_network_uri_or_key() {
+        let (local, segments) = local_recording_playlist(
+            "#EXTM3U\n#EXTINF:2,\nhttps://storage.test/a.ts?signature=example\n#EXT-X-ENDLIST\n",
+        )
+        .unwrap();
+        assert_eq!(segments.len(), 1);
+        assert!(!local.contains("://"));
+        assert!(local.contains("segment-000000.ts"));
+        for unsupported in [
+            "http://storage.test/a.ts",
+            "file:///etc/passwd",
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"https://storage.test/key\"",
+            "#EXT-X-MAP:URI=\"https://storage.test/init\"",
+        ] {
+            let error = local_recording_playlist(&format!("#EXTM3U\n{unsupported}\n")).unwrap_err();
+            assert!(!error.to_string().contains("storage.test"));
+        }
+        assert_eq!(
+            storage_problem(&std::io::Error::from_raw_os_error(libc::ENOSPC)),
+            "There isn't enough space to save the recording."
+        );
+    }
+
+    #[test]
+    fn a_full_disk_during_remux_has_a_plain_error() {
+        assert_eq!(
+            remux_problem("av_interleaved_write_frame(): No space left on device"),
+            RECORDING_DISK_FULL
+        );
+        assert_eq!(
+            remux_problem("Error writing trailer: No space left on device"),
+            RECORDING_DISK_FULL
+        );
     }
 
     /// `protocol-fixtures/cloud-managed-wire.json` is what the web copies.
