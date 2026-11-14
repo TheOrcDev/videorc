@@ -1,5 +1,19 @@
 # Implementation Plans
 
+- 2026-11-14: [Plan 237](237-stream-report-email.md), the owner's ask:
+  "report email after each stream that shows how many people we had live,
+  biggest concurrent number, from which platforms". BUILT 2026-11-14 with
+  the recommended answers (desktop and web PRs; web deploys first):
+  - A minute after a live stream ends, the account's email gets peak and
+    average watching, people who chatted, a watching-over-time chart, and
+    per platform: peak, average, chatted, messages, new followers. Plus
+    support, plan 225's community counts and the change since last stream.
+  - The desktop builds it from what it already saves (viewer samples, chat
+    totals, audience); videorc.com renders it through Resend and stores no
+    numbers. No viewer names. One switch beside Phone alerts.
+  - Open: D3 (YouTube's numbers through videorc.com; the v1 Google reply
+    says session statistics stay on the computer). Until then the service
+    flag `streamReport.youtube` is absent and YouTube stays out of the email.
 - 2026-11-13: [Plan 233](233-green-screen-without-edge-snow.md), the owner's
   stream on 0.22.1: green "snow" still crawls along the head, ears, hair and
   shoulders, in a new place every frame. EXECUTING 2026-11-13 with the
