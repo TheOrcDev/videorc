@@ -154,6 +154,11 @@ import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-
 const SessionMarkersDialog = lazy(async () => ({
   default: (await import('@/components/session-markers-dialog')).SessionMarkersDialog
 }))
+// Plan 234: the account's cloud recordings, a section of its own that loads
+// with the Library page, never in the eager bundle.
+const LibraryCloudRecordings = lazy(async () => ({
+  default: (await import('@/components/tabs/library-cloud-recordings')).LibraryCloudRecordings
+}))
 
 /** The table's columns: select, name, scene, duration, size, file, actions. */
 const LIBRARY_COLUMNS =
@@ -745,6 +750,10 @@ export function LibraryTab({
           ) : null}
         </div>
       )}
+
+      <Suspense fallback={null}>
+        <LibraryCloudRecordings />
+      </Suspense>
 
       {liveMarkerSession ? (
         <Suspense fallback={null}>

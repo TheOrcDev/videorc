@@ -153,6 +153,102 @@ describe('the stage (D8)', () => {
   })
 })
 
+// Plan 234 D6 (T3): a managed show has no return picture. The Program
+// monitor keeps its frame, its label and its two waiting lines, and draws
+// the Show stage as the program page reports it. Nothing asks for a return.
+describe('the Program monitor on a managed show (plan 234 D6)', () => {
+  const managedShow = { id: 'sh_talk', nodeId: 'livekit', resumable: false, kind: 'talk' as const }
+  const nodeShow = { id: 'sh_talk', nodeId: 'eu-hel-1', resumable: false, kind: 'talk' as const }
+  const monitor = () => container.querySelector<HTMLElement>('[data-testid="show-stage-program"]')
+  const monitorTiles = () => [
+    ...(monitor()?.querySelectorAll<HTMLElement>('[data-testid="show-stage-tile"]') ?? [])
+  ]
+  const speaker = () =>
+    monitor()?.querySelector('button[aria-label="Listen to the program"]') ?? null
+
+  it("shows a node show's return, with its speaker, and asks for it", async () => {
+    const show = talkShow({ room: { ...NO_TALK_SHOW.room, state: 'connected' } })
+    await mount(talkStatus({ show: nodeShow, room: openRoom({ live: true }) }), show)
+    expect(monitor()?.dataset.programSource).toBe('return')
+    expect(speaker()).not.toBeNull()
+    expect(monitorTiles()).toHaveLength(0)
+    expect(monitor()?.textContent).toContain('Waiting for the program…')
+    expect(show.setMonitor).toHaveBeenCalledWith(true)
+  })
+
+  it('keeps the frame and the empty line before the show starts, with no speaker', async () => {
+    const show = talkShow({ room: { ...NO_TALK_SHOW.room, state: 'connected' } })
+    await mount(talkStatus({ show: managedShow, room: openRoom() }), show)
+    expect(monitor()?.dataset.programSource).toBe('stage')
+    expect(monitor()?.textContent).toContain('Program')
+    expect(monitor()?.textContent).toContain('Program appears when the show starts.')
+    expect(speaker()).toBeNull()
+    expect(monitor()?.querySelector('audio')).toBeNull()
+    expect(monitorTiles()).toHaveLength(0)
+    // No return exists to subscribe to or to ask the backend for.
+    expect(show.setMonitor).not.toHaveBeenCalled()
+  })
+
+  it('waits for the program page once the show runs', async () => {
+    await mount(talkStatus({ show: managedShow, room: openRoom({ live: true }) }), talkShow())
+    expect(monitor()?.textContent).toContain('Waiting for the program…')
+    expect(monitorTiles()).toHaveLength(0)
+    // A cloud recording alone runs the program too.
+    await mount(
+      talkStatus({
+        show: managedShow,
+        room: openRoom(),
+        recording: { active: true, seconds: 3, bytes: 0, orientations: ['horizontal'] }
+      }),
+      talkShow()
+    )
+    expect(monitor()?.textContent).toContain('Waiting for the program…')
+  })
+
+  it('draws the stage the program page reports, with the same geometry and no words', async () => {
+    const participant = (identity: string) => ({
+      identity,
+      name: identity,
+      role: identity === HOST ? ('host' as const) : ('guest' as const),
+      onStage: true,
+      video: true,
+      audio: true,
+      muted: false,
+      screen: false,
+      quality: 'good' as const,
+      sinceMs: 1000,
+      away: false
+    })
+    await mount(
+      talkStatus({
+        show: managedShow,
+        room: openRoom({
+          live: true,
+          guests: [ada, grace],
+          participants: [participant(HOST), participant('g_ada'), participant('g_grace')],
+          stage: { layout: 'side-by-side', onStage: [HOST, 'g_ada', 'g_grace'] },
+          // The page dropped Grace from the layout (her camera stopped).
+          shown: { onStage: [HOST, 'g_ada'] }
+        })
+      }),
+      talkShow()
+    )
+    const tiles = monitorTiles()
+    const plan = planStage(
+      { width: 1920, height: 1080 },
+      { layout: 'side-by-side', people: [HOST, 'g_ada'], screen: null, spotlight: null }
+    )
+    expect(tiles.map((tile) => tile.dataset.stageIdentity)).toEqual([HOST, 'g_ada'])
+    tiles.forEach((tile, index) => {
+      expect(tile.style.left).toBe(`${(plan.tiles[index].rect.x / 1920) * 100}%`)
+      expect(tile.style.width).toBe(`${(plan.tiles[index].rect.w / 1920) * 100}%`)
+    })
+    // The picture only: no name plate and no placeholder words in the small frame.
+    expect(monitor()?.textContent).toBe('Program')
+    expect(speaker()).toBeNull()
+  })
+})
+
 describe('the backstage strip (C-G3)', () => {
   const row = (name: string): HTMLElement =>
     [...container.querySelectorAll<HTMLElement>('[data-testid="show-stage-strip-row"]')].find(

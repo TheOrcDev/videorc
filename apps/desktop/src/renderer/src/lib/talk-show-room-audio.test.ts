@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   RemoteAudioAttachments,
+  isRecorderIdentity,
   isRunnerIdentity,
   playsRemoteAudio
 } from '@/lib/talk-show-room-audio'
@@ -65,6 +66,16 @@ describe('remote audio in the host room', () => {
     expect(isRunnerIdentity('g_runner:sh')).toBe(false)
     expect(playsRemoteAudio('runner:sh_abc')).toBe(false)
     expect(playsRemoteAudio('g_abc')).toBe(true)
+  })
+
+  // Plan 234: a managed show's program page joins the room as LiveKit's
+  // recorder. It is nobody in the room, and it is not the runner either.
+  it("names LiveKit's recorder by its identity prefix only", () => {
+    expect(isRecorderIdentity('EG_a1B2c3D4e5F6')).toBe(true)
+    expect(isRecorderIdentity('host:sh_0123456789abcdefghijkl')).toBe(false)
+    expect(isRecorderIdentity('g_EG_0123456789')).toBe(false)
+    expect(isRecorderIdentity('runner:sh_abc')).toBe(false)
+    expect(isRunnerIdentity('EG_a1B2c3D4e5F6')).toBe(false)
   })
 
   it("a runner audio subscription attaches nothing: the return never plays through the host's speakers", () => {
