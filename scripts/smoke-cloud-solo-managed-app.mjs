@@ -111,25 +111,6 @@ async function run(pass) {
           }
       }
     )
-    await step(
-      'SIGKILL then Resume keeps ingress with no destination resend while egress lives',
-      async () => {
-        const ingress = structuredClone(h.web.shows.get(h.showId).ingest)
-        await h.kill()
-        await h.launch()
-        await h.status((s) => s.show?.resumable, 'resumable show')
-        const at = Date.now()
-        await h.rpc('cloud.show.resume', await h.sessionParams())
-        await h.status((s) => s.show?.id === h.showId && s.phase === 'live', 'resumed show', 45000)
-        await holdFor(
-          () => h.calls('destinations', at).length === 0,
-          'unnecessary destination resend',
-          3000
-        )
-        assert.deepEqual(h.web.shows.get(h.showId).ingest, ingress)
-        h.assertNoDirect()
-      }
-    )
     await step('dead egress resends the full list and a stale state is dropped once', async () => {
       const stale = h.web.snapshot(h.showId)
       stale.state.destinationsSet = false
@@ -173,6 +154,32 @@ async function run(pass) {
       assert.equal(h.calls('destinations', at)[0].body.destinations.length, 1)
       h.assertNoDirect()
     })
+    await step(
+      'SIGKILL then Resume keeps ingress, sends no destinations, and cannot reconnect without URLs',
+      async () => {
+        const ingress = structuredClone(h.web.shows.get(h.showId).ingest)
+        await h.kill()
+        await h.launch()
+        await h.status((s) => s.show?.resumable, 'resumable show')
+        const at = Date.now()
+        await h.rpc('cloud.show.resume', await h.sessionParams())
+        await h.status((s) => s.show?.id === h.showId && s.phase === 'live', 'resumed show', 45000)
+        await holdFor(
+          () => h.calls('destinations', at).length === 0,
+          'unnecessary destination resend',
+          3000
+        )
+        assert.deepEqual(h.web.shows.get(h.showId).ingest, ingress)
+        // Wire 8.4 item 6: a desktop resumed after a relaunch holds no URL, so
+        // it cannot reconnect one destination; it says so and sends nothing.
+        await assert.rejects(
+          h.rpc('cloud.show.reconnectDestination', { targetId: targets[0].id }),
+          /holds this show's keys from before the restart/
+        )
+        assert.equal(h.calls('destinations', at).length, 0)
+        h.assertNoDirect()
+      }
+    )
     await step(
       'poll failures back off and ask current from the second failure; mismatch recovers',
       async () => {
