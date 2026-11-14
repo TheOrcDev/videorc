@@ -39618,10 +39618,12 @@ mod tests {
             .database
             .save_setting(crate::storage::LAST_CAPTURE_SESSION_SETTING_KEY, &hydrated)
             .unwrap();
-        state
-            .database
-            .delete_setting(crate::storage::STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY)
-            .unwrap();
+        for marker in [
+            crate::storage::STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY,
+            crate::storage::STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY,
+        ] {
+            state.database.delete_setting(marker).unwrap();
+        }
         assert!(
             stored_setting_text(&state, crate::storage::LAST_CAPTURE_SESSION_SETTING_KEY)
                 .unwrap()

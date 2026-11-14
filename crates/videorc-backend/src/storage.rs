@@ -98,11 +98,17 @@ const PERFORMANCE_CHECK_PROCESSING_KIND: &str = "performance-check";
 /// profile. Written only through [`Database::save_last_capture_session`].
 pub(crate) const LAST_CAPTURE_SESSION_SETTING_KEY: &str = "last_capture_session";
 
-/// Written in the same transaction as the one-time scrub of stream
-/// credentials older builds left in the database
-/// ([`scrub_stored_stream_credentials_once`]), so it runs once per database.
+/// Written in the same transaction as the one-time scrub of the rows where
+/// older builds stored stream credentials ([`scrub_stored_stream_credentials`]),
+/// so the rows are scrubbed once per database.
 pub(crate) const STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY: &str =
     "stored_stream_credentials_scrubbed";
+
+/// Written once the file itself holds no old copy of those credentials: after
+/// the `VACUUM` and a checkpoint that completed
+/// ([`purge_stored_stream_credentials`]). Until then every open retries.
+pub(crate) const STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY: &str =
+    "stored_stream_credentials_purged";
 
 /// Clears every stream credential from a capture request (the JSON of a
 /// `StartSessionParams`) before it is written to the database: each
@@ -164,44 +170,86 @@ fn session_output_json(output: &OutputSettings) -> Result<String> {
     Ok(serde_json::to_string(&output)?)
 }
 
+/// What [`purge_stored_stream_credentials`] did at this open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredCredentialsPurge {
+    /// An earlier open finished it; nothing ran.
+    AlreadyDone,
+    /// The rows are scrubbed, the file rebuilt and the log emptied: marked done.
+    Done,
+    /// The checkpoint reported busy (a reader still uses the write-ahead log,
+    /// whose old frames may hold old copies): left pending for the next open.
+    CheckpointBusy,
+}
+
+fn setting_exists(conn: &Connection, key: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM app_settings WHERE key = ?1",
+            params![key],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// From 2026-10-23 (`c5033f622`) every Record or Go Live saved the remembered
 /// capture after the start had read each destination's key from the secret
 /// store, so `last_capture_session` held those keys in plain text; and a raw
 /// key the renderer still held reached `sessions.output_json` as
-/// `output.rtmp.streamKey`. This clears both once. The marker is written in
-/// the same transaction as the scrubbed rows, so an interrupted launch leaves
-/// both or neither, and every later launch reads one row and stops.
+/// `output.rtmp.streamKey`. This removes them from the database file, once,
+/// in three steps, at open, before any other connection exists:
 ///
-/// An UPDATE leaves the old row's bytes in freed page space until SQLite
-/// reuses it, so the scrub runs with `secure_delete` on (zeroing what it
-/// frees) and then checkpoints the write-ahead log, which moves the zeroed
-/// pages over the old ones in the database file now rather than at some
-/// later checkpoint.
-fn scrub_stored_stream_credentials_once(conn: &mut Connection) -> Result<()> {
-    let scrubbed = conn
-        .query_row(
-            "SELECT 1 FROM app_settings WHERE key = ?1",
-            params![STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if scrubbed {
-        return Ok(());
+/// 1. The rows are scrubbed with `secure_delete` on, which zeroes what that
+///    UPDATE frees. Their own marker is written in the same transaction, so
+///    an interrupted launch leaves both or neither.
+/// 2. `VACUUM` rebuilds the file from live rows. Every start since
+///    2026-10-23 rewrote the row without `secure_delete`, so older copies of
+///    it sit in freed pages that step 1 never touches.
+/// 3. `wal_checkpoint(TRUNCATE)` moves the rebuilt pages over the old ones
+///    and empties the log, whose old frames hold older copies too. It reports
+///    a reader in its way as `busy` in its first column rather than as an
+///    error, so the result is read.
+///
+/// Only a completed checkpoint writes the purge marker: an error, a busy
+/// checkpoint or an exit in between leaves the purge pending, and the next
+/// open runs steps 2 and 3 again.
+fn purge_stored_stream_credentials(conn: &mut Connection) -> Result<StoredCredentialsPurge> {
+    if setting_exists(conn, STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY)? {
+        return Ok(StoredCredentialsPurge::AlreadyDone);
     }
-    let set_secure_delete = |conn: &Connection, value: i64| {
-        conn.pragma_update_and_check(None, "secure_delete", value, |row| row.get::<_, i64>(0))
-    };
-    let secure_delete: i64 = conn.pragma_query_value(None, "secure_delete", |row| row.get(0))?;
-    set_secure_delete(conn, 1)?;
-    let scrub = scrub_stored_stream_credentials(conn);
-    set_secure_delete(conn, secure_delete)?;
-    scrub?;
-    // Best effort: a reader holding the log open only delays it.
-    if let Err(error) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
-        tracing::warn!("Could not checkpoint after scrubbing stored stream credentials: {error}");
+    if !setting_exists(conn, STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY)? {
+        let set_secure_delete = |conn: &Connection, value: i64| {
+            conn.pragma_update_and_check(None, "secure_delete", value, |row| row.get::<_, i64>(0))
+        };
+        let secure_delete: i64 =
+            conn.pragma_query_value(None, "secure_delete", |row| row.get(0))?;
+        set_secure_delete(conn, 1)?;
+        let scrub = scrub_stored_stream_credentials(conn);
+        set_secure_delete(conn, secure_delete)?;
+        scrub?;
     }
-    Ok(())
+    let started = std::time::Instant::now();
+    conn.execute_batch("VACUUM")?;
+    let vacuum_ms = started.elapsed().as_millis();
+    let checkpoint_busy: i64 =
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    if checkpoint_busy != 0 {
+        return Ok(StoredCredentialsPurge::CheckpointBusy);
+    }
+    conn.execute(
+        "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)",
+        params![
+            STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY,
+            "1",
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    tracing::info!(
+        "Purged stream credentials older builds stored: VACUUM took {vacuum_ms} ms, {} ms in all",
+        started.elapsed().as_millis()
+    );
+    Ok(StoredCredentialsPurge::Done)
 }
 
 /// The scrub itself, in one transaction with its marker. A remembered
@@ -9017,10 +9065,17 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_agent_activity_agent_at
                 ON agent_activity(agent_id, at DESC, id DESC);",
         )?;
-        // A privacy cleanup never keeps the app from opening its data: a
-        // failed scrub leaves no marker, so the next launch tries again.
-        if let Err(error) = scrub_stored_stream_credentials_once(&mut conn) {
-            tracing::warn!("Could not scrub stream credentials older builds stored: {error:#}");
+        // A privacy cleanup never keeps the app from opening its data: what
+        // did not finish leaves its marker unwritten, and the next launch
+        // tries again.
+        match purge_stored_stream_credentials(&mut conn) {
+            Ok(StoredCredentialsPurge::CheckpointBusy) => tracing::warn!(
+                "Stream credentials older builds stored are scrubbed, but the write-ahead log could not be emptied (busy); the next launch retries"
+            ),
+            Ok(StoredCredentialsPurge::AlreadyDone | StoredCredentialsPurge::Done) => {}
+            Err(error) => tracing::warn!(
+                "Could not purge stream credentials older builds stored; the next launch retries: {error:#}"
+            ),
         }
         Ok(())
     }
@@ -12909,20 +12964,28 @@ mod tests {
         assert!(library.contains("\"keepOriginalMkv\""), "{library}");
     }
 
+    /// A database as the builds from 2026-10-23 left it: no purge has run.
+    fn as_before_the_credentials_purge(database: &Database) {
+        for key in [
+            STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY,
+            STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY,
+        ] {
+            assert!(
+                setting_text(database, key).is_some(),
+                "a new database is born purged: {key}"
+            );
+            database.delete_setting(key).unwrap();
+        }
+    }
+
     /// Databases written from 2026-10-23 hold keys in the remembered capture
     /// (and raw legacy keys in Library rows). The first open after the fix
     /// clears them and records that it did; later opens leave the rows alone.
     #[test]
     fn credentials_older_builds_stored_are_scrubbed_once() {
         let database = test_database();
-        assert!(
-            setting_text(&database, STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY).is_some(),
-            "a new database is born scrubbed"
-        );
         let request = capture_request_with_credentials();
-        database
-            .delete_setting(STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY)
-            .unwrap();
+        as_before_the_credentials_purge(&database);
         // What a build from 2026-10-23 wrote.
         database
             .save_setting(LAST_CAPTURE_SESSION_SETTING_KEY, &request)
@@ -12977,6 +13040,7 @@ mod tests {
             "a row with no credential is not rewritten"
         );
         assert!(setting_text(&database, STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY).is_some());
+        assert!(setting_text(&database, STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY).is_some());
 
         // Once: a later open neither reads nor rewrites the row.
         database
@@ -12993,9 +13057,7 @@ mod tests {
     #[test]
     fn a_remembered_capture_that_is_not_json_is_dropped_by_the_scrub() {
         let database = test_database();
-        database
-            .delete_setting(STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY)
-            .unwrap();
+        as_before_the_credentials_purge(&database);
         database
             .lock()
             .unwrap()
@@ -13030,6 +13092,118 @@ mod tests {
         );
         assert_eq!(session_output_text(&database, "malformed"), "{\"rtmp\":");
         assert!(setting_text(&database, STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY).is_some());
+    }
+
+    /// The database file and its log, as bytes: what anyone reading the
+    /// profile on disk would see.
+    fn database_file_bytes(path: &Path) -> Vec<u8> {
+        let mut bytes = std::fs::read(path).unwrap();
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        if let Ok(log) = std::fs::read(PathBuf::from(wal)) {
+            bytes.extend(log);
+        }
+        bytes
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    }
+
+    /// Every start since 2026-10-23 rewrote the remembered capture without
+    /// `secure_delete`, so older copies of a key sit in freed pages that a
+    /// scrub of the live row never touches. The purge's VACUUM and
+    /// checkpoint take them out of the file.
+    #[test]
+    fn the_purge_removes_old_copies_from_freed_pages() {
+        let directory = TestTempDir::new("credentials-purge-freed-pages");
+        let path = directory.join("videorc.sqlite3");
+        let database = Database::open_file_for_tests(&path);
+        as_before_the_credentials_purge(&database);
+        let old_copy = "test-freed-page-key-0123456789";
+        {
+            let conn = database.lock().unwrap();
+            conn.execute(
+                "INSERT INTO app_settings (key, value_json, updated_at) VALUES ('old', ?1, 'now')",
+                params![format!("{{\"streamKey\":\"{old_copy}\"}}")],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM app_settings WHERE key = 'old'", [])
+                .unwrap();
+            let _: i64 = conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+                .unwrap();
+        }
+        assert!(
+            contains_bytes(&database_file_bytes(&path), old_copy),
+            "the deleted copy stays in a freed page, as it did for older builds"
+        );
+
+        database.migrate().unwrap();
+
+        assert!(setting_text(&database, STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY).is_some());
+        assert!(
+            !contains_bytes(&database_file_bytes(&path), old_copy),
+            "the purge leaves no copy anywhere in the file or its log"
+        );
+    }
+
+    /// `wal_checkpoint(TRUNCATE)` reports a reader in its way as `busy`
+    /// instead of failing. Until a checkpoint completes, the log may hold old
+    /// copies, so the purge stays pending and the next open retries it; once
+    /// one completes the marker is written and later opens do nothing.
+    #[test]
+    fn a_busy_checkpoint_keeps_the_purge_pending_until_one_completes() {
+        let directory = TestTempDir::new("credentials-purge-busy-checkpoint");
+        let path = directory.join("videorc.sqlite3");
+        let database = Database::open_file_for_tests(&path);
+        as_before_the_credentials_purge(&database);
+        database
+            .save_setting(
+                LAST_CAPTURE_SESSION_SETTING_KEY,
+                &capture_request_with_credentials(),
+            )
+            .unwrap();
+        // Another connection in a read transaction on an older snapshot.
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT count(*) FROM app_settings", [], |row| row.get(0))
+            .unwrap();
+
+        {
+            let mut conn = database.lock().unwrap();
+            conn.busy_timeout(Duration::from_millis(20)).unwrap();
+            assert_eq!(
+                purge_stored_stream_credentials(&mut conn).unwrap(),
+                StoredCredentialsPurge::CheckpointBusy
+            );
+        }
+        assert_no_credentials(&setting_text(&database, LAST_CAPTURE_SESSION_SETTING_KEY).unwrap());
+        assert!(setting_text(&database, STORED_STREAM_CREDENTIALS_SCRUBBED_SETTING_KEY).is_some());
+        assert_eq!(
+            setting_text(&database, STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY),
+            None,
+            "a busy checkpoint leaves the purge pending"
+        );
+
+        reader.execute_batch("COMMIT").unwrap();
+        drop(reader);
+        let mut conn = database.lock().unwrap();
+        assert_eq!(
+            purge_stored_stream_credentials(&mut conn).unwrap(),
+            StoredCredentialsPurge::Done
+        );
+        drop(conn);
+        assert!(setting_text(&database, STORED_STREAM_CREDENTIALS_PURGED_SETTING_KEY).is_some());
+        let mut conn = database.lock().unwrap();
+        assert_eq!(
+            purge_stored_stream_credentials(&mut conn).unwrap(),
+            StoredCredentialsPurge::AlreadyDone,
+            "the next open does nothing"
+        );
     }
 
     fn sample_session(id: &str) -> NewSession {
