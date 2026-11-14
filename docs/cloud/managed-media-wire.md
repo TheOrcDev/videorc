@@ -206,7 +206,7 @@ Body is `CloudStage` as it serializes (D `cloud_talk.rs:478-491`), the fields of
 | `layout` | `solo`, `side-by-side`, `screen-people` or `spotlight` (D `cloud_talk.rs:329-336`) |
 | `onStage` | At most 8 identities (D `cloud_talk.rs:56`), each 1 to 128 characters, no control character (D `cloud_talk.rs:499-501`) |
 | `spotlight`, `screen`, `hostShape` | Optional. `hostShape` is `rounded` or `circle` |
-| Each identity | ◇ `host:<showId>` or `g_` plus 22 base62 characters. A well-shaped string outside those identities: 422 `invalid-stage`. The check is syntactic; it does not look up guest membership in the room (W `media/stage.ts:126-143`, `media/room.ts:37-43`) |
+| Each identity | ◇ `host:<showId>`, or `g_` plus 22 base62 characters that is in the room: a guest must be among the room's participants (LiveKit's list, read again when the copy is older than 2 s). The host is always accepted, since it may be between connections. Anything else, in `onStage`, `spotlight` or `screen`: 422 `invalid-stage` (W `media/stage.ts`, `media/room.ts`) |
 
 ◇ A bad body shape, layout, identity shape or optional field gives 400 `invalid-request`.
 
@@ -289,7 +289,7 @@ The answer is `{ "rev", "state" }` ◇. `state` deserializes as `RunnerState` wi
 - ◇ **Why a 200 at the timeout, and why the short waits.** Clocks and counters are right only at the moment of an answer. The runner sends a state at least every 2 s, and the watchdog reads counters that must pass 3, 10 and 20 s (D `watchdog/checks.rs:29`, `:59-60`). The short wait gives the desktop that cadence while something is wrong and stays quiet otherwise. A 200 is also what the desktop's reader takes (D `videorc_api.rs:1996`) and what the guests list does (W `talk-route.ts:346-386`).
 - `desktopConnected`: every poll stamps the show, at most once every 5 s. The flag is true while the stamp is under 15 s old.
 
-◇ The normal state answer budgets its wait and LiveKit reads to 30 s, under the desktop's 35 s timeout and the route's `maxDuration: 40`. Each participant or bitrate read has at most 2 s, clipped to the remaining budget; a read due with no time left is skipped. Abandoned-create and test-show teardown currently use their ordinary per-call budgets outside this polling budget (W `managed-route.ts:769-784`, `:833-865`).
+◇ The whole state answer fits a 30 s budget, under the desktop's 35 s timeout and the route's `maxDuration: 40`. Each participant or bitrate read has at most 2 s, clipped to the remaining budget; a read due with no time left is skipped. When a poll ends an abandoned create or a test show, it ends the row and answers the end at once; LiveKit's teardown is left to the reaper's next tick, as for any ended show (W `managed-route.ts`).
 
 **The desktop's poll loop.** The request timeout is 35 s, as the guests poll (D `videorc_api.rs:28-29`). After a 200 the next poll starts 250 ms later with `since` set to the answer's `rev`. After a failure it waits 1, 2, 4, 8, then 15 s (D `cloud_show.rs:92`), reset by a 200. The first poll after a failure carries no `since`, so the answer comes at once and the status can read connected again. A state whose `rev` is below the `rev` of a route answer the desktop already holds is dropped once. `CloudStatus.connected` is true after a 200 and false after the first failed poll. There is no `hello`, `ack` or `ping`: a route's own answer is its ack.
 
@@ -391,8 +391,8 @@ Headers: `Authorization: Bearer <pt>`, `Content-Type: application/json`. At most
 | `phase` | `waiting` (no frame yet), `live` or `hold` |
 | `hold` | Only with `phase: "hold"`. `sinceAt` is the page's `Date.now()` when its stall clock fired |
 | `program` | ◇ Optional, each field optional. D15's fields, defined as the runner's (R:390-396). First appears 1 to 2 s after the solo feed's first frame, or after the talk stage is drawn. `frozenSeconds` only during a hold, once it is 3 or more. Never `avSkewMs` |
-| `shown` | ◇ Talk shows only. `onStage` is the layout as drawn, so it can be shorter than the stage; `screen` is present only for a drawn screen tile. `away` lists drawn people with no camera frame for 5 s and people dropped by the 60 s re-flow. An undrawn person beyond the layout's six-person limit is absent from `away` until re-flowed (W `program/stage.ts:331-344`) |
-| `joined` | ◇ Optional boolean. The page sends `true` only while connected to the room with its overlay handlers registered; absent at load and while rejoining. Counts a join once per `boot` |
+| `shown` | ◇ Talk shows only. `onStage` is the layout as drawn, so it can be shorter than the stage; `screen` is present only for a drawn screen tile. `away` lists everyone on stage with no camera frame for 5 s, drawn or not, including people the 60 s re-flow dropped (W `program/stage.ts`, `shownOf`) |
+| `joined` | ◇ Optional boolean. The page sends `true` only while connected to the room with its overlay handlers registered; absent at load and while rejoining. A join counts each time it goes from absent to `true` within a `boot`, and at a new `boot` |
 | `rec` | `true` on a recording-only page |
 
 When the page sends one:
@@ -410,7 +410,7 @@ Answer: 200 `{ "ok": true, "holdImage": "<version>" }`, or `"holdImage": null`. 
 Stale and out-of-order beacons:
 
 - Same `boot`, `seq` not above the stored one: dropped, answered 200.
-- ◇ A new ordinary `boot` becomes the page of that orientation; beacons from remembered old boots are dropped. `room.pageJoins` grows once, at this boot's first beacon with `joined: true`, never at its load beacon. Losing and rejoining the room in the same boot does not count again.
+- ◇ A new ordinary `boot` becomes the page of that orientation; beacons from remembered old boots are dropped. `room.pageJoins` grows at a boot's first beacon with `joined: true` (never at its load beacon), and again each time a later beacon of the same boot says `joined: true` after one without it: a page that lost and rejoined its room missed every byte stream sent meanwhile, so the desktop sends its untimed overlays again. A duplicate or stale beacon never counts.
 - ◇ A beacon with `rec: true` only grows `pageJoins`, once per remembered recording boot and only with `joined: true`. It never replaces the ordinary page or changes `phase`, `hold`, `program` or `shown`.
 - A counter above 0 is stored with its arrival time. A state answer adds the whole seconds since then.
 - No primary beacon for 25 s: `program` and `room.shown` leave the state.
@@ -633,7 +633,7 @@ Run on every URL before it is sent anywhere. The first row that matches refuses 
 | # | The URL | Code |
 | --- | --- | --- |
 | 1 | ◇ Over 4,096 bytes, outside printable ASCII, has a space, control character or `#`, or does not match the URL shape | `destination-malformed` |
-| 1a | ◇ A broken percent escape in authority or path, or a literal `/` in the query | `destination-malformed` |
+| 1a | ◇ A broken percent escape anywhere (authority, path or query), or a literal `/` in the query | `destination-malformed` |
 | 2 | ◇ Scheme is not exactly lowercase `rtmp` or `rtmps`; capitals and `srt` are refused | `destination-scheme` |
 | 3 | Has user info (`@` in the authority; LiveKit shows the password) | `destination-userinfo` |
 | 4 | ◇ Authority is not a DNS-style host or bracketed IP, optionally followed by a 1 to 5 digit port | `destination-malformed` |
@@ -868,7 +868,7 @@ talk/<userId>/<showId>/<o>/<takeId>/EG_<egressId>.json  LiveKit's manifest
 
 ◇ At each recording start, each orientation's take gets a fresh `storage:write` key pair for the show's branch. It expires 15 minutes after the show's limit. `state_json.takeKeys` remembers its revocation id, branch and mint time before `StartEgress`; its secret exists only in that request.
 
-◇ An ended or unused take's key is revoked when nothing on the row writes with it: immediately under the show lease, otherwise once it is 65 s old. Every remaining key is due 5 minutes after the show's end, including keys still marked in use. Failed revocations stay for retry; successful ones leave `takeKeys` and the orientation's key-id fields. The ended-show reaper retries for its 10 minute take-recovery window (W `media/recording.ts:454-594`, `media/reconcile.ts:729-755`).
+◇ An ended or unused take's key is revoked when nothing on the row writes with it: immediately under the show lease, otherwise once it is 65 s old. Every remaining key is due 5 minutes after the show's end, including keys still marked in use. Failed revocations stay for retry; successful ones leave `takeKeys` and the orientation's key-id fields. Each reaper tick retries the revocations of every ended show whose row still holds key ids (up to 50 shows a tick) until the key's own expiry, 15 minutes after the show's limit; past it the id is dropped without asking Neon (W `media/recording.ts`, `media/reconcile.ts`).
 
 The playlist the desktop fetches:
 
@@ -1009,17 +1009,17 @@ Shared constants. Each has one source. The server imports the page's wire module
 | 36 | Managed `expiresAt` is the create plus 11 h 55 min | The hold no longer adds | D12 |
 | 37 | ◇ Desktop intents spend one 22 s deadline, or 7 s without destination `replace`; one useful retry at most | Fits the 25 s / 10 s RPC watchdogs, including retry and ordering wait | Section 2 |
 | 38 | ◇ Web control LiveKit calls share 45 s inside a 60 s route; create uses 40 s / 52 s cleanup | Leaves time to write partial outcomes before the host kills the function | Sections 1, 2 |
-| 39 | ◇ Normal state polling gets 30 s, with at most 2 s per LiveKit read; teardown is outside this budget | Fits ordinary polls under the desktop's 35 s; records the cleanup gap | Section 3 |
+| 39 | ◇ The whole state answer fits 30 s, with at most 2 s per LiveKit read; a poll that ends a show answers at once and leaves teardown to the reaper | Fits every answer under the desktop's 35 s | Section 3 |
 | 40 | ◇ End livestream and Stop invalidate the destination generation and follow an in-flight PUT | Retained lists and retries cannot revive a stopped stream | Sections 2.2, 2.3 |
 | 41 | ◇ Destination text refuses controls, lone surrogates and `://` | Stored labels and ids cannot carry addresses or break JSON storage | Section 2.2 |
-| 42 | ◇ Guard requires ASCII, lowercase scheme and exactly app/key; rejects query slashes and bad authority/path escapes | Matches LiveKit's redaction shape; query escapes are not validated | Section 8.1 |
+| 42 | ◇ Guard requires ASCII, lowercase scheme and exactly app/key; rejects query slashes and broken escapes anywhere | Matches LiveKit's redaction shape; LiveKit refuses a broken escape and repeats the URL in its error | Section 8.1 |
 | 43 | ◇ Redacted-ref collisions are accepted; no full-URL-derived value is stored | Keeps D7's no-key rule despite indistinguishable key rotations | Section 8.2 |
 | 44 | ◇ Leg results respect `addedAt` with 1 s tolerance; no-start entries win, then latest start and list order | Old failed entries must not defeat a new add | Section 8.3 |
 | 45 | ◇ `legs/end` clears every leg and rejects malformed bodies with 400 | Explicit End livestream must also clear failed and refused legs | Section 2.3 |
-| 46 | ◇ Stage shape errors are 400; foreign identity forms are 422; guest membership is not checked | Records what the parser actually validates | Section 2.5 |
+| 46 | ◇ Stage shape errors are 400; an identity of another form, or a guest not in the room, is 422; the host is always accepted | The page can draw only people in the room | Section 2.5 |
 | 47 | ◇ A beacon retries network/5xx at 1, 2, 4, 8, then 10 s with a new seq; rec pages wait for joined | Failed delivery must not lose page readiness or phase | Section 5.3 |
 | 48 | ◇ Beacons drop `shown`, then `program`, above 4 KiB; program fields are optional | Keeps phase and readiness deliverable when optional data grows | Section 5.3 |
-| 49 | ◇ `shown` describes drawn tiles; away includes drawn-away and re-flowed people | The stage and its visible layout can differ; undrawn extra people remain a gap | Section 5.3 |
+| 49 | ◇ `shown` describes drawn tiles; `away` lists everyone on stage with no camera frame for 5 s, drawn or not | The stage and its visible layout can differ | Section 5.3 |
 | 50 | ◇ Initial joins retry; an unexpected lost room gets 60 s; END only follows a joined room | A failed join is not the end of the recording | Section 5.6 |
 | 51 | ◇ Only the talk mix uses the limiter; solo meters beside one feed | A single feed needs no voice-summing limiter | Section 5.7 |
 | 52 | ◇ Talk hold overlays show immediately and clear back to the stage; decimals and positive whole TTLs | Talk has no automatic hold; attributes stay unambiguous | Section 6.3 |
@@ -1028,7 +1028,7 @@ Shared constants. Each has one source. The server imports the page's wire module
 | 55 | ◇ Room people sort host first, persist sanitized names, and refresh at first look and wait end | Track and name changes must move rev; ended shows retain no room names | Section 6.2 |
 | 56 | ◇ Record always starts a separate segments-only egress on rec=1; sharing is off | Independent Record and Go Live must stop independently until sharing is measured | Sections 6.5, 13.2, contradiction 5 |
 | 57 | ◇ Each take gets a write-only key until limit + 15 min; revocation ids are retained until revoked | Allows early revocation without storing the secret | Sections 7, 13.2 |
-| 58 | ◇ Unused keys revoke under lease or after 65 s; all are due at end + 5 min; ended recovery runs 10 min | Protects starts in flight while bounding post-show writes and recovering lost takes | Sections 13.2, 15 |
+| 58 | ◇ Unused keys revoke under lease or after 65 s; all are due at end + 5 min; failed revocations are retried until the key's own expiry | Protects starts in flight while bounding post-show writes | Sections 13.2, 15 |
 | 59 | ◇ Playlist URLs are absolute; retrieval storage failures are 503 recordings-unavailable; mint failures are media-unavailable | Distinguishes file retrieval from Record control | Section 13.2 |
 | 60 | ◇ Expiry deletes playlist then row; segments leave with the storage branch | Failed deletes retry, and one take is not one MP4 object | Section 13.2 |
 | 61 | ◇ Recording download returns a job id, reports progress by event and accepts cancellation | Long downloads must not sit inside an RPC watchdog | Section 13.2 |
@@ -1065,12 +1065,12 @@ Resolved items retain their original numbers. They are no longer open choices.
 
 Open contradictions and unmeasured behavior:
 
-**10. The desktop copy.** The managed limit is 11 h 55 min from create. The toast still uses 12 hours from on-air time and can overstate time left (D `apps/desktop/src/renderer/src/lib/cloud-toasts.ts:105-120`). Its `cloud-quality` message still says 1080p60 although managed solo/test ingress is limited to 30 fps (same file `:52-54`). The contract follows the managed limits; the copy remains an implementation gap.
+**10. The desktop copy.** *Settled:* a managed show's warning counts down to its `expiresAt` (11 h 55 min from create), a node show keeps the on-air rule, and the `cloud-quality` toast no longer names a resolution: "Videorc Cloud can't carry this stream's quality yet." (D `apps/desktop/src/renderer/src/lib/cloud-toasts.ts`). The backend's own fallback detail still says 1080p60; the renderer never shows it.
 
 **12. Not measured by this revision.** The template query names come from Phase 0. Vertical values, the talk page at 60 fps, an empty stream output and a recorder's seat against `maxParticipants` still carry ⚠. Sharing stays disabled; reading its implementation does not prove LiveKit accepts it.
 
-◇ **13. Stage membership and away coverage.** The stage parser accepts any syntactically valid guest id without checking room membership (section 2.5). The page also omits an away person beyond the six drawn tiles until re-flow (section 5.3). These are narrower checks and coverage than the pending amendments intended (W `media/stage.ts:126-140`, `media/room.ts:37-43`, `program/stage.ts:336-343`).
+◇ **13. Stage membership and away coverage.** *Settled:* the stage route checks a guest against the room's participants (section 2.5), and the page lists everyone away, drawn or not (section 5.3).
 
-◇ **14. The whole state deadline.** Ordinary reads and waits use the 30 s budget. Abandoned-create and test-show cleanup call teardown outside it; slow cleanup can exceed the advertised whole-answer budget (W `managed-route.ts:833-865`). The contract records this gap instead of promising a hard 30 s for those paths.
+◇ **14. The whole state deadline.** *Settled:* a poll that ends an abandoned create or a test show answers at once and leaves teardown to the reaper, so every state answer fits 30 s.
 
 ◇ **15. Overlay changes during a page rejoin.** A successful rejoin in the same boot does not grow `pageJoins`. An untimed overlay changed or cleared while the page was disconnected can therefore stay stale: byte streams are not replayed, and the desktop only replays on a counted page join or its own renderer reconnect (W `media/events.ts:749-752`, `program/source.ts:532-557`; D `cloud_control_web.rs:1911-1915`).
