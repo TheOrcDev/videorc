@@ -4088,6 +4088,32 @@ describe('Stream watchdog wire contract (plan 223)', () => {
     }
   })
 
+  it('reads a cloud recording in both spellings of its orientations', () => {
+    // Plan 234 smoke: the node runner says "h"; the managed web says
+    // "horizontal" and "vertical" (wire contract, state.recording), and a
+    // state the schema refused was dropped whole, freezing the talk show.
+    const base = {
+      phase: 'live',
+      entitled: true,
+      settings: { enabled: true, holdMaxSeconds: 1800, holdMaxChoices: [300, 900, 1800, 3600] },
+      connected: true,
+      directFallbackAvailable: false
+    }
+    for (const orientations of [['h'], ['v'], ['horizontal'], ['horizontal', 'vertical']]) {
+      const status = {
+        ...base,
+        recording: {
+          active: true,
+          since: '2026-11-14T10:00:00.000Z',
+          seconds: 2,
+          bytes: 0,
+          orientations
+        }
+      }
+      expect(validateBackendEventPayload('cloud.state', status)).toEqual(status)
+    }
+  })
+
   it('refuses a check, a severity or a fix outside the catalogue', () => {
     for (const alert of fixture.rejected.alerts) {
       expect(() => validateBackendEventPayload('watchdog.alerts', { alerts: [alert] })).toThrow()

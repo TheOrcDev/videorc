@@ -6088,7 +6088,8 @@ const cloudRecordingStatusSchema = objectSchema(
     since: optionalSchema(timestamp),
     seconds: nonNegativeInteger,
     bytes: nonNegativeInteger,
-    orientations: optionalSchema(arraySchema(stringSchema({ maxLength: 8 }), { maxLength: 4 })),
+    // The node runner says "h", the managed web "horizontal" (wire contract).
+    orientations: optionalSchema(arraySchema(stringSchema({ maxLength: 10 }), { maxLength: 4 })),
     problem: optionalSchema(stringSchema({ maxLength: 200 }))
   },
   { allowUnknown: false }
