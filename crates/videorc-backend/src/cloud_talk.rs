@@ -667,9 +667,9 @@ pub struct RoomClientReportParams {
     pub detail: Option<String>,
 }
 
-/// `cloud.overlay.set`: a PNG into a runner slot (D9). The backend builds
-/// these itself for cards and takeovers (C-G7); the RPC exists for the
-/// smokes and for Be right back.
+/// An overlay slot (D9). Card, takeover and Be right back builders call
+/// `set_overlay` / `clear_overlay` directly. The debug-only `cloud.overlay.*`
+/// smoke RPCs use those same methods and require the smoke command server.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CloudOverlaySlot {
@@ -790,11 +790,34 @@ pub fn takeover_overlays(screen_path: &str) -> Result<Vec<(CloudOverlayOrientati
 
 /// A normalized rect (0 to 1 of the output), the runner's `OverlayRect`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CloudOverlayRect {
     pub x: f64,
     pub y: f64,
     pub w: f64,
     pub h: f64,
+}
+
+/// Smoke seams follow the other debug-only RPCs: strict Rust parameters,
+/// outside the renderer's shared production RPC catalog.
+#[cfg(debug_assertions)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SmokeOverlaySetParams {
+    pub slot: CloudOverlaySlot,
+    pub orientation: CloudOverlayOrientation,
+    pub rect: CloudOverlayRect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+    pub png_base64: String,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SmokeOverlayClearParams {
+    pub slot: CloudOverlaySlot,
+    pub orientation: CloudOverlayOrientation,
 }
 
 impl CloudOverlayRect {

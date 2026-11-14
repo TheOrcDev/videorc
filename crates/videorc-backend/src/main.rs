@@ -6009,6 +6009,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.return.set"
         | "cloud.show.goLive"
         | "cloud.show.legs.end"
+        | "cloud.overlay.set"
+        | "cloud.overlay.clear"
         // Plan 234 T3: the account's cloud recordings, from videorc.com.
         | "cloud.recordings.list"
         | "repair.restore_file"
@@ -12068,6 +12070,52 @@ async fn handle_text_message_with_role(
                         .cancel(&params.job_id);
                     ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
                 }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        "cloud.overlay.set" => {
+            match serde_json::from_value::<cloud_talk::SmokeOverlaySetParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .set_overlay(
+                            params.slot,
+                            params.orientation,
+                            &params.png_base64,
+                            params.rect,
+                            params.ttl_seconds,
+                        )
+                        .await
+                    {
+                        Ok(()) => ServerResponse::ok(command.id, serde_json::json!({ "ok": true })),
+                        Err(error) => {
+                            ServerResponse::error(command.id, "cloud-overlay-set-failed", error)
+                        }
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        "cloud.overlay.clear" => {
+            match serde_json::from_value::<cloud_talk::SmokeOverlayClearParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .clear_overlay(params.slot, params.orientation)
+                        .await
+                    {
+                        Ok(()) => ServerResponse::ok(command.id, serde_json::json!({ "ok": true })),
+                        Err(error) => {
+                            ServerResponse::error(command.id, "cloud-overlay-clear-failed", error)
+                        }
+                    },
+                    None => cloud_unavailable(command.id),
+                },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -23071,6 +23119,119 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn cloud_overlay_smoke_rpcs_use_the_builders_room_and_node_paths() {
+        for managed in [false, true] {
+            let mut state = test_state();
+            state.smoke_rpc_enabled = true;
+            let mut runner =
+                cloud_talk::open_talk_show_for_tests(&state.cloud_show, "sh_smoke", true);
+            if managed {
+                cloud_show::lock(&state.cloud_show)
+                    .show
+                    .as_mut()
+                    .unwrap()
+                    .control =
+                    serde_json::from_value(json!({ "kind": "web", "url": "", "token": "" }))
+                        .unwrap();
+            }
+            let mut events = state.events.subscribe();
+            for op in ["set", "clear"] {
+                let mut params = json!({ "slot": "card", "orientation": "h" });
+                if op == "set" {
+                    params["rect"] = json!({ "x": 0.1, "y": 0.2, "w": 0.4, "h": 0.3 });
+                    params["ttlSeconds"] = json!(5);
+                    params["pngBase64"] = json!("iVBORw0KGgo=");
+                }
+                let request =
+                    json!({ "id": op, "method": format!("cloud.overlay.{op}"), "params": params })
+                        .to_string();
+                let call = handle_text_message_with_role(&state, &request, BackendRole::Renderer);
+                if managed {
+                    let answer = call.await;
+                    assert!(answer.ok, "{answer:?}");
+                    assert_eq!(answer.payload.unwrap(), json!({ "ok": true }));
+                    let event = events.recv().await.unwrap();
+                    assert_eq!(event.event, "cloud.room.overlay");
+                    assert_eq!(event.payload["op"], op);
+                    assert_eq!(event.payload["showId"], "sh_smoke");
+                    assert_eq!(event.payload["slot"], "card");
+                    assert_eq!(event.payload["orientation"], "h");
+                    if op == "set" {
+                        assert_eq!(event.payload["ttlSeconds"], 5);
+                        let id = event.payload["imageId"].as_str().unwrap();
+                        assert!(
+                            cloud_show::lock(&state.cloud_show)
+                                .overlay_image(id)
+                                .is_some()
+                        );
+                    }
+                    assert!(
+                        runner.try_recv().is_err(),
+                        "managed overlays send no node intent"
+                    );
+                } else {
+                    let node = async {
+                        tokio::time::timeout(Duration::from_secs(2), runner.recv())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .answer_for_tests(None)
+                    };
+                    let (answer, frame) = tokio::join!(call, node);
+                    assert!(answer.ok, "{answer:?}");
+                    assert_eq!(answer.payload.unwrap(), json!({ "ok": true }));
+                    assert_eq!(frame["kind"], format!("overlay.{op}"));
+                    assert_eq!(frame["slot"], "card");
+                    assert_eq!(frame["orientation"], "h");
+                    if op == "set" {
+                        assert_eq!(frame["pngBase64"], "iVBORw0KGgo=");
+                        assert_eq!(frame["ttlSeconds"], 5);
+                    }
+                    assert!(
+                        events.try_recv().is_err(),
+                        "node overlays emit no room event"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn cloud_overlay_smoke_rpcs_reject_disabled_and_unknown_parameters() {
+        let mut state = test_state();
+        state.smoke_rpc_enabled = false;
+        for method in ["cloud.overlay.set", "cloud.overlay.clear"] {
+            let request = json!({ "id": "overlay", "method": method, "params": {} }).to_string();
+            let answer =
+                handle_text_message_with_role(&state, &request, BackendRole::Renderer).await;
+            assert_eq!(answer.error.unwrap().code, "smoke-method-disabled");
+        }
+        state.smoke_rpc_enabled = true;
+        for (method, params) in [
+            (
+                "cloud.overlay.clear",
+                json!({ "slot": "card", "orientation": "h", "extra": true }),
+            ),
+            (
+                "cloud.overlay.set",
+                json!({ "slot": "card", "orientation": "h", "pngBase64": "iVBORw0KGgo=", "rect": { "x": 0, "y": 0, "w": 1, "h": 1, "extra": true } }),
+            ),
+            (
+                "cloud.overlay.set",
+                json!({ "slot": "invalid", "orientation": "h", "pngBase64": "iVBORw0KGgo=", "rect": { "x": 0, "y": 0, "w": 1, "h": 1 } }),
+            ),
+        ] {
+            let request =
+                json!({ "id": "overlay", "method": method, "params": params }).to_string();
+            let answer =
+                handle_text_message_with_role(&state, &request, BackendRole::Renderer).await;
+            assert_eq!(answer.error.unwrap().code, "invalid-params");
+        }
     }
 
     /// Plan 224 C-G6 (review L9: the `session.start` refusal and the
