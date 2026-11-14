@@ -36,7 +36,11 @@ import {
 
 import type { CloudRoomClientState, CloudRoomQuality, CloudRoomTokenAnswer } from '@/lib/backend'
 import { matchMicrophoneDeviceId } from '@/lib/mic-meter'
-import { RemoteAudioAttachments, isRunnerIdentity } from '@/lib/talk-show-room-audio'
+import {
+  RemoteAudioAttachments,
+  isRecorderIdentity,
+  isRunnerIdentity
+} from '@/lib/talk-show-room-audio'
 
 export { isRunnerIdentity } from '@/lib/talk-show-room-audio'
 
@@ -321,7 +325,7 @@ export class TalkShowRoomClient {
       .on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
         this.#applySubscriptions()
         // A guest who just joined needs the stage (data is not replayed).
-        if (!isRunnerIdentity(participant.identity)) {
+        if (!isRunnerIdentity(participant.identity) && !isRecorderIdentity(participant.identity)) {
           void this.sendStage(this.#lastStage)
         }
         this.#publish()
@@ -557,6 +561,8 @@ export class TalkShowRoomClient {
     let monitorAudio: MediaStreamTrack | null = null
     if (room) {
       for (const participant of room.remoteParticipants.values()) {
+        // LiveKit's recorder is nobody (plan 234).
+        if (isRecorderIdentity(participant.identity)) continue
         let video: MediaStreamTrack | null = null
         let audio: MediaStreamTrack | null = null
         let screen: MediaStreamTrack | null = null

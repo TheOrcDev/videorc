@@ -232,3 +232,48 @@ it('stops a screen acquired after Close without publishing it', async () => {
   expect(track.stop).toHaveBeenCalledOnce()
   expect(room.snapshot.local.screen).toBeNull()
 })
+
+// Plan 234 T3: a managed show's program page joins the room as LiveKit's
+// recorder (`EG_…`). It is not a person: it is never listed, and its joining
+// does not send the guests' stage message again.
+describe("LiveKit's recorder in the room (plan 234 T3)", () => {
+  const participant = (identity: string, name: string) => ({
+    identity,
+    name,
+    trackPublications: new Map(),
+    connectionQuality: 'good'
+  })
+
+  it('is never listed among the people, and a guest still is', async () => {
+    const { room } = client()
+    await room.connect()
+    const recorder = participant('EG_a1B2c3D4e5F6', '')
+    const ada = participant('g_ada', 'Ada')
+    latestRoom().remoteParticipants.set(recorder.identity, recorder)
+    latestRoom().emit('ParticipantConnected', recorder)
+    expect(room.snapshot.people).toEqual([])
+    latestRoom().remoteParticipants.set(ada.identity, ada)
+    latestRoom().emit('ParticipantConnected', ada)
+    expect(room.snapshot.people.map((person) => person.identity)).toEqual(['g_ada'])
+    await room.disconnect()
+  })
+
+  it('gets no stage message when it joins; a guest who joins does', async () => {
+    const { room } = client()
+    await room.connect()
+    await room.sendStage(['host:sh_talk'])
+    const publishData = vi.fn(async () => {})
+    latestRoom().localParticipant.publishData = publishData
+    const recorder = participant('EG_a1B2c3D4e5F6', '')
+    latestRoom().remoteParticipants.set(recorder.identity, recorder)
+    latestRoom().emit('ParticipantConnected', recorder)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(publishData).not.toHaveBeenCalled()
+    const ada = participant('g_ada', 'Ada')
+    latestRoom().remoteParticipants.set(ada.identity, ada)
+    latestRoom().emit('ParticipantConnected', ada)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(publishData).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+  })
+})
