@@ -19,3 +19,24 @@ export const MANAGED_NODE_ID = 'livekit'
 export function isManagedShow(status: CloudStatus | null | undefined): boolean {
   return status?.show?.nodeId === MANAGED_NODE_ID
 }
+
+/**
+ * What the Program monitor shows (plan 234 D6). A node show's runner sends
+ * its return, what the cloud really sends. A managed show has none, so its
+ * monitor draws the Show stage as the program page reports drawing it
+ * (`room.shown`), in the same frame and with the same words:
+ *
+ * - `empty`: nothing is on air or recording yet;
+ * - `waiting`: the show runs, and no program page has reported a stage yet;
+ * - `shown`: the stage, as the page draws it.
+ */
+export type ProgramMonitorView =
+  | { source: 'return' }
+  | { source: 'stage'; state: 'empty' | 'waiting' | 'shown' }
+
+export function programMonitorView(status: CloudStatus | null | undefined): ProgramMonitorView {
+  if (!isManagedShow(status)) return { source: 'return' }
+  const running = Boolean(status?.room?.live || status?.recording?.active)
+  if (!running) return { source: 'stage', state: 'empty' }
+  return { source: 'stage', state: status?.room?.shown ? 'shown' : 'waiting' }
+}
