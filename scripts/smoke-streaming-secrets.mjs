@@ -13,7 +13,7 @@ import {
 import { rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { devAppSpawnOptions, stopProcess } from './lib/app-launcher.mjs'
 import { compileCaptureModule } from './lib/compile-capture-module.mjs'
@@ -328,11 +328,12 @@ try {
 // and before any capture or encoder process spawns: no device, no network.
 async function proveSessionStartStoresNoStreamKey() {
   const backendBinaryName = process.platform === 'win32' ? 'videorc-backend.exe' : 'videorc-backend'
-  const backendBinary = join(process.cwd(), 'target', 'debug', backendBinaryName)
+  // Where `cargo build` (run by pnpm smoke:streaming-secrets from the repo
+  // root) put it: CARGO_TARGET_DIR when set, relative to that root.
+  const targetDir = resolve(process.cwd(), process.env.CARGO_TARGET_DIR || 'target')
+  const backendBinary = join(targetDir, 'debug', backendBinaryName)
   if (!existsSync(backendBinary)) {
-    throw new Error(
-      `target/debug/${backendBinaryName} is missing; pnpm smoke:streaming-secrets builds it first.`
-    )
+    throw new Error(`${backendBinary} is missing; pnpm smoke:streaming-secrets builds it first.`)
   }
   const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-streaming-secrets-backend-'))
   const appDataDir = join(stateRoot, 'app-data')
@@ -368,6 +369,7 @@ async function proveSessionStartStoresNoStreamKey() {
 
   let backendProcess
   let backend
+  let backendStdout = ''
   let backendOutput = ''
   try {
     backendProcess = spawn(
@@ -393,9 +395,16 @@ async function proveSessionStartStoresNoStreamKey() {
     )
     backendProcess.stdout.setEncoding('utf8')
     backendProcess.stderr.setEncoding('utf8')
-    backendProcess.stdout.on('data', (chunk) => (backendOutput += chunk))
+    backendProcess.stdout.on('data', (chunk) => {
+      backendStdout += chunk
+      backendOutput += chunk
+    })
     backendProcess.stderr.on('data', (chunk) => (backendOutput += chunk))
-    const ready = await waitForReady(backendProcess, () => backendOutput)
+    const ready = await waitForReady(
+      backendProcess,
+      () => backendStdout,
+      () => backendOutput
+    )
     assert.ok(
       typeof ready.adminToken === 'string' && ready.adminToken.length >= 32,
       'the debug backend READY carries its smoke admin credential'
@@ -536,16 +545,30 @@ function profileFiles(directory) {
   })
 }
 
-function waitForReady(child, output) {
+/**
+ * The lines of `text` that a newline has ended. A chunk can end inside a
+ * line, so the last piece waits for the rest of it.
+ */
+function completeLines(text) {
+  return text
+    .split('\n')
+    .slice(0, -1)
+    .map((line) => line.replace(/\r$/, ''))
+}
+
+/**
+ * The backend's READY payload, parsed from stdout alone (stderr can carry
+ * any text) once its line has ended. `output` is everything it printed, for
+ * the failure message.
+ */
+function waitForReady(child, stdout, output) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error(`Backend did not print READY in time.\n${output().slice(-4_000)}`)),
       timeoutMs
     )
     const onData = () => {
-      const line = output()
-        .split(/\r?\n/)
-        .find((candidate) => candidate.startsWith('READY '))
+      const line = completeLines(stdout()).find((candidate) => candidate.startsWith('READY '))
       if (!line) return
       clearTimeout(timer)
       child.stdout.off('data', onData)
