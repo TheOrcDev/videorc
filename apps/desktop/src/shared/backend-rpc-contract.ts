@@ -2464,6 +2464,85 @@ const windowsD3d11TexturePoolPressureSchema = objectSchema(
   { allowUnknown: false }
 )
 
+const windowsD3d11StageTimingSchema = objectSchema(
+  {
+    samples: nonNegativeInteger,
+    p95Ms: numberSchema({ min: 0 }),
+    maxMs: numberSchema({ min: 0 })
+  },
+  { allowUnknown: false }
+)
+
+const nonNegativeMs = numberSchema({ min: 0 })
+
+const windowsD3d11MediaStageTimingsSchema = objectSchema(
+  {
+    loopBusy: windowsD3d11StageTimingSchema,
+    capturePoll: windowsD3d11StageTimingSchema,
+    compose: windowsD3d11StageTimingSchema,
+    deviceLockWait: windowsD3d11StageTimingSchema,
+    cameraUpload: windowsD3d11StageTimingSchema,
+    imageUpload: windowsD3d11StageTimingSchema,
+    previewPass: windowsD3d11StageTimingSchema,
+    encodedPass: windowsD3d11StageTimingSchema,
+    nv12Pass: windowsD3d11StageTimingSchema,
+    fenceSignal: windowsD3d11StageTimingSchema,
+    encoderSubmit: windowsD3d11StageTimingSchema,
+    encoderProcessInput: windowsD3d11StageTimingSchema,
+    encoderPoll: windowsD3d11StageTimingSchema,
+    encoderProcessOutput: windowsD3d11StageTimingSchema,
+    encoderInputHold: windowsD3d11StageTimingSchema,
+    encoderCreditRefusals: nonNegativeInteger,
+    encoderCapacityRefusals: nonNegativeInteger,
+    encoderMaxInFlight: nonNegativeInteger,
+    previewPresent: windowsD3d11StageTimingSchema,
+    setupLoops: nonNegativeInteger,
+    slowestLoop: objectSchema(
+      {
+        totalMs: nonNegativeMs,
+        capturePollMs: nonNegativeMs,
+        composeMs: nonNegativeMs,
+        encoderSubmitMs: nonNegativeMs,
+        encoderPollMs: nonNegativeMs,
+        previewPresentMs: nonNegativeMs,
+        otherCommandMs: nonNegativeMs,
+        commands: nonNegativeInteger
+      },
+      { allowUnknown: false }
+    ),
+    slowestCompose: objectSchema(
+      {
+        totalMs: nonNegativeMs,
+        deviceLockWaitMs: nonNegativeMs,
+        fenceRefreshMs: nonNegativeMs,
+        cameraUploadMs: nonNegativeMs,
+        imageUploadMs: nonNegativeMs,
+        previewPassMs: nonNegativeMs,
+        encodedPassMs: nonNegativeMs,
+        nv12PassMs: nonNegativeMs,
+        fenceSignalMs: nonNegativeMs
+      },
+      { allowUnknown: false }
+    ),
+    gpu: optionalSchema(
+      objectSchema(
+        {
+          upload: windowsD3d11StageTimingSchema,
+          previewPass: windowsD3d11StageTimingSchema,
+          encodedPass: windowsD3d11StageTimingSchema,
+          nv12Pass: windowsD3d11StageTimingSchema,
+          total: windowsD3d11StageTimingSchema,
+          completionLatency: windowsD3d11StageTimingSchema,
+          disjoint: nonNegativeInteger,
+          skipped: nonNegativeInteger
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+
 const windowsD3d11MediaDiagnosticsSchema = objectSchema(
   {
     state: enumSchema(['unavailable', 'probing', 'live', 'draining', 'fallback', 'failed']),
@@ -2521,6 +2600,7 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
     renderTickLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
     renderComposeStageMaxMs: optionalSchema(numberSchema({ min: 0 })),
     texturePoolPressure: optionalSchema(windowsD3d11TexturePoolPressureSchema),
+    mediaStageTimings: optionalSchema(windowsD3d11MediaStageTimingsSchema),
     fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
   },
   { allowUnknown: false }

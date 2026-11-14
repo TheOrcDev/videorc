@@ -20580,6 +20580,138 @@ fn windows_d3d11_texture_pool_pressure(
     }
 }
 
+/// #1042: the media thread's per-stage timing, in the protocol's units.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_media_stage_timings(
+    timings: crate::windows_d3d11_stage_timing::WindowsD3d11MediaStageTimings,
+) -> crate::protocol::WindowsD3d11MediaStageTimingDiagnostics {
+    use crate::protocol::{
+        WindowsD3d11ComposeBreakdownDiagnostics, WindowsD3d11ComposeGpuTimingDiagnostics,
+        WindowsD3d11MediaLoopBreakdownDiagnostics, WindowsD3d11StageTimingDiagnostics,
+    };
+    let ms = |micros: u64| micros as f64 / 1_000.0;
+    let stage = |timing: crate::windows_d3d11_stage_timing::WindowsD3d11StageTiming| {
+        WindowsD3d11StageTimingDiagnostics {
+            samples: timing.samples,
+            p95_ms: ms(timing.p95_micros),
+            max_ms: ms(timing.max_micros),
+        }
+    };
+    let slowest_loop = timings.slowest_loop;
+    let slowest_compose = timings.slowest_compose;
+    crate::protocol::WindowsD3d11MediaStageTimingDiagnostics {
+        loop_busy: stage(timings.loop_busy),
+        capture_poll: stage(timings.capture_poll),
+        compose: stage(timings.compose),
+        device_lock_wait: stage(timings.device_lock_wait),
+        camera_upload: stage(timings.camera_upload),
+        image_upload: stage(timings.image_upload),
+        preview_pass: stage(timings.preview_pass),
+        encoded_pass: stage(timings.encoded_pass),
+        nv12_pass: stage(timings.nv12_pass),
+        fence_signal: stage(timings.fence_signal),
+        encoder_submit: stage(timings.encoder_submit),
+        encoder_process_input: stage(timings.encoder_process_input),
+        encoder_poll: stage(timings.encoder_poll),
+        encoder_process_output: stage(timings.encoder_process_output),
+        encoder_input_hold: stage(timings.encoder_input_hold),
+        encoder_credit_refusals: timings.encoder_credit_refusals,
+        encoder_capacity_refusals: timings.encoder_capacity_refusals,
+        encoder_max_in_flight: timings.encoder_max_in_flight,
+        preview_present: stage(timings.preview_present),
+        setup_loops: timings.setup_loops,
+        slowest_loop: WindowsD3d11MediaLoopBreakdownDiagnostics {
+            total_ms: ms(slowest_loop.total_micros),
+            capture_poll_ms: ms(slowest_loop.capture_poll_micros),
+            compose_ms: ms(slowest_loop.compose_micros),
+            encoder_submit_ms: ms(slowest_loop.encoder_submit_micros),
+            encoder_poll_ms: ms(slowest_loop.encoder_poll_micros),
+            preview_present_ms: ms(slowest_loop.preview_present_micros),
+            other_command_ms: ms(slowest_loop.other_command_micros),
+            commands: slowest_loop.commands,
+        },
+        slowest_compose: WindowsD3d11ComposeBreakdownDiagnostics {
+            total_ms: ms(slowest_compose.total_micros),
+            device_lock_wait_ms: ms(slowest_compose.device_lock_wait_micros),
+            fence_refresh_ms: ms(slowest_compose.fence_refresh_micros),
+            camera_upload_ms: ms(slowest_compose.camera_upload_micros),
+            image_upload_ms: ms(slowest_compose.image_upload_micros),
+            preview_pass_ms: ms(slowest_compose.preview_pass_micros),
+            encoded_pass_ms: ms(slowest_compose.encoded_pass_micros),
+            nv12_pass_ms: ms(slowest_compose.nv12_pass_micros),
+            fence_signal_ms: ms(slowest_compose.fence_signal_micros),
+        },
+        gpu: timings
+            .gpu
+            .map(|gpu| WindowsD3d11ComposeGpuTimingDiagnostics {
+                upload: stage(gpu.upload),
+                preview_pass: stage(gpu.preview_pass),
+                encoded_pass: stage(gpu.encoded_pass),
+                nv12_pass: stage(gpu.nv12_pass),
+                total: stage(gpu.total),
+                completion_latency: stage(gpu.completion_latency),
+                disjoint: gpu.disjoint,
+                skipped: gpu.skipped,
+            }),
+    }
+}
+
+#[cfg(test)]
+mod windows_d3d11_media_stage_timing_tests {
+    use super::windows_d3d11_media_stage_timings;
+    use crate::windows_d3d11_stage_timing::{
+        WindowsD3d11ComposeBreakdown, WindowsD3d11ComposeGpuTimings,
+        WindowsD3d11MediaLoopBreakdown, WindowsD3d11MediaStageTimings, WindowsD3d11StageTiming,
+    };
+
+    #[test]
+    fn media_stage_timings_convert_to_milliseconds_stage_by_stage() {
+        let timings = WindowsD3d11MediaStageTimings {
+            compose: WindowsD3d11StageTiming {
+                samples: 480,
+                p95_micros: 4_500,
+                max_micros: 101_000,
+            },
+            encoder_process_input: WindowsD3d11StageTiming {
+                samples: 470,
+                p95_micros: 250,
+                max_micros: 118_779,
+            },
+            slowest_loop: WindowsD3d11MediaLoopBreakdown {
+                total_micros: 119_500,
+                encoder_submit_micros: 118_900,
+                commands: 2,
+                ..Default::default()
+            },
+            slowest_compose: WindowsD3d11ComposeBreakdown {
+                total_micros: 101_000,
+                camera_upload_micros: 99_000,
+                ..Default::default()
+            },
+            gpu: Some(WindowsD3d11ComposeGpuTimings {
+                skipped: 3,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let wire = windows_d3d11_media_stage_timings(timings);
+        assert_eq!(wire.compose.samples, 480);
+        assert_eq!(wire.compose.p95_ms, 4.5);
+        assert_eq!(wire.compose.max_ms, 101.0);
+        assert_eq!(wire.encoder_process_input.max_ms, 118.779);
+        assert_eq!(wire.slowest_loop.total_ms, 119.5);
+        assert_eq!(wire.slowest_loop.encoder_submit_ms, 118.9);
+        assert_eq!(wire.slowest_loop.commands, 2);
+        assert_eq!(wire.slowest_compose.camera_upload_ms, 99.0);
+        assert_eq!(wire.gpu.expect("gpu block").skipped, 3);
+        assert!(
+            windows_d3d11_media_stage_timings(WindowsD3d11MediaStageTimings::default())
+                .gpu
+                .is_none()
+        );
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn u64_ms_option(micros: u64) -> Option<f64> {
     if micros == 0 {
@@ -20716,6 +20848,11 @@ fn windows_d3d11_live_diagnostics(
             snapshot.device.runtime.texture_pool,
             snapshot.pump.pressure_skips,
         )),
+        media_stage_timings: snapshot
+            .device
+            .runtime
+            .stage_timings
+            .map(windows_d3d11_media_stage_timings),
         fallback_reason: terminal_error.or_else(|| snapshot.pump.capture_source_error.clone())
             .or_else(|| snapshot.pump.capture_cleanup_pending.then(|| "Previous capture is still closing; output continues on the committed source".into()))
             .or_else(|| (snapshot.pump.capture_upload_frames > 0).then(|| "Live capture replacement uses the existing preview BGRA upload route".into()))

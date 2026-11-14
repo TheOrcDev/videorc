@@ -345,6 +345,63 @@ fn windows_scene_sources_live<'a>(
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_D3D11_RENDER_POOL_SLOTS: usize = 5;
 
+/// The per-format texture ceiling the device pool enforces; the primary and
+/// auxiliary NV12 buckets share it.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_D3D11_NV12_POOL_CEILING: usize = 8;
+
+/// The auxiliary (Stream) leg's NV12 bucket.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_D3D11_AUXILIARY_NV12_SLOTS: usize = 3;
+
+/// How the primary leg's Media Foundation encoder is pipelined (#1042).
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowsD3d11PrimaryEncoderPlan {
+    low_latency: bool,
+    /// Inputs the encoder may hold at once (Videorc's own cap; the transform
+    /// also has to issue a credit for each).
+    in_flight: usize,
+    nv12_slots: usize,
+}
+
+/// #1042: on the Intel UHD 620, Quick Sync holds each 1080p60 input for
+/// about 19 ms (p95), longer than one frame. In low-latency mode the
+/// transform hands out input credits one at a time, and Videorc capped the
+/// encoder at two inputs in flight, so 60 fps lasted only while that hold
+/// stayed under about 33 ms. When the iGPU's clock moved it rose to 50–136 ms
+/// for a second or two, the encoder refused hundreds of inputs, and about
+/// one take in eight came up 4–12% short while composition held 60 fps. A
+/// recording has no latency budget, so the Record leg runs the transform in
+/// its pipelined mode with more inputs in flight. A live (Stream) leg keeps
+/// low latency and the original depth.
+///
+/// The NV12 bucket must hold the encoder's inputs plus the texture being
+/// composed and the newest published frame, hence `in_flight = slots - 2`.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_primary_encoder_plan(
+    record: bool,
+    has_auxiliary: bool,
+) -> WindowsD3d11PrimaryEncoderPlan {
+    if !record {
+        return WindowsD3d11PrimaryEncoderPlan {
+            low_latency: true,
+            in_flight: 2,
+            nv12_slots: WINDOWS_D3D11_RENDER_POOL_SLOTS,
+        };
+    }
+    let nv12_slots = if has_auxiliary {
+        WINDOWS_D3D11_NV12_POOL_CEILING - WINDOWS_D3D11_AUXILIARY_NV12_SLOTS
+    } else {
+        WINDOWS_D3D11_NV12_POOL_CEILING - 1
+    };
+    WindowsD3d11PrimaryEncoderPlan {
+        low_latency: false,
+        in_flight: (nv12_slots - 2).min(4),
+        nv12_slots,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowsD3d11MediaMode {
     Disabled,
@@ -1664,6 +1721,10 @@ mod runtime {
                         .to_string(),
                 );
             }
+            let encoder_plan = super::windows_d3d11_primary_encoder_plan(
+                plan.primary_role == WindowsD3d11MediaRole::Record,
+                plan.auxiliary.is_some(),
+            );
             let pool = WindowsD3d11TexturePoolConfig::dimension_keyed(
                 WindowsD3d11BgraTextureDescriptor::new(plan.source_width, plan.source_height)
                     .map_err(|error| error.to_string())?,
@@ -1673,7 +1734,7 @@ mod runtime {
                 3,
                 WindowsD3d11Nv12TextureDescriptor::new(plan.primary.width, plan.primary.height)
                     .map_err(|error| error.to_string())?,
-                super::WINDOWS_D3D11_RENDER_POOL_SLOTS,
+                encoder_plan.nv12_slots,
                 plan.auxiliary
                     .map(|auxiliary| {
                         Ok((
@@ -1681,7 +1742,7 @@ mod runtime {
                                 auxiliary.width,
                                 auxiliary.height,
                             )?,
-                            3,
+                            super::WINDOWS_D3D11_AUXILIARY_NV12_SLOTS,
                         ))
                     })
                     .transpose()
@@ -1766,7 +1827,11 @@ mod runtime {
                 ));
             }
             let primary_encoder = client
-                .create_encoder(plan.primary_role, encoder_config(plan.primary), 2)
+                .create_encoder(
+                    plan.primary_role,
+                    encoder_config(plan.primary, encoder_plan.low_latency),
+                    encoder_plan.in_flight,
+                )
                 .map_err(|error| {
                     format!(
                         "could not attach the {:?} Media Foundation surface encoder: {error}",
@@ -1790,7 +1855,7 @@ mod runtime {
             if let Some(auxiliary) = plan.auxiliary {
                 match client.create_encoder(
                     WindowsD3d11MediaRole::Stream,
-                    encoder_config(auxiliary),
+                    encoder_config(auxiliary, true),
                     2,
                 ) {
                     Ok(status)
@@ -2002,13 +2067,16 @@ mod runtime {
         Arc::new(StdMutex::new(FrameStore::new(0)))
     }
 
-    fn encoder_config(plan: super::WindowsD3d11VideoPlan) -> MediaFoundationEncoderConfig {
+    fn encoder_config(
+        plan: super::WindowsD3d11VideoPlan,
+        low_latency: bool,
+    ) -> MediaFoundationEncoderConfig {
         MediaFoundationEncoderConfig {
             width: plan.width,
             height: plan.height,
             fps: plan.fps,
             bitrate_kbps: plan.bitrate_kbps,
-            low_latency: true,
+            low_latency,
             input_topology:
                 crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
         }
@@ -5820,6 +5888,43 @@ mod tests {
     fn windows_d3d11_sessions_size_deep_render_pools() {
         // Screen-only sessions get the same depth as screen-camera ones (#280).
         assert_eq!(WINDOWS_D3D11_RENDER_POOL_SLOTS, 5);
+    }
+
+    #[test]
+    fn windows_d3d11_record_encoder_pipelines_and_live_keeps_low_latency() {
+        // #1042: a recording trades latency for headroom against Quick Sync's
+        // hold time; a live leg keeps the shipped low-latency depth.
+        let live = windows_d3d11_primary_encoder_plan(false, false);
+        assert_eq!(
+            live,
+            WindowsD3d11PrimaryEncoderPlan {
+                low_latency: true,
+                in_flight: 2,
+                nv12_slots: WINDOWS_D3D11_RENDER_POOL_SLOTS,
+            }
+        );
+        assert_eq!(windows_d3d11_primary_encoder_plan(false, true), live);
+
+        let record = windows_d3d11_primary_encoder_plan(true, false);
+        assert!(!record.low_latency);
+        assert_eq!(record.in_flight, 4);
+        assert_eq!(record.nv12_slots, 7);
+
+        let record_and_stream = windows_d3d11_primary_encoder_plan(true, true);
+        assert!(!record_and_stream.low_latency);
+        assert_eq!(record_and_stream.nv12_slots, 5);
+        assert_eq!(record_and_stream.in_flight, 3);
+
+        // One texture being composed and the newest published frame stay
+        // outside the encoder, and both legs fit the per-format ceiling.
+        for plan in [live, record, record_and_stream] {
+            assert!(plan.in_flight + 2 <= plan.nv12_slots);
+            assert!(plan.nv12_slots <= WINDOWS_D3D11_NV12_POOL_CEILING);
+        }
+        assert!(
+            record_and_stream.nv12_slots + WINDOWS_D3D11_AUXILIARY_NV12_SLOTS
+                <= WINDOWS_D3D11_NV12_POOL_CEILING
+        );
     }
 
     #[test]

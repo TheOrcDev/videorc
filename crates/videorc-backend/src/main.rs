@@ -206,6 +206,8 @@ mod windows_d3d11_preview;
 #[allow(dead_code)]
 mod windows_d3d11_session;
 #[allow(dead_code)]
+mod windows_d3d11_stage_timing;
+#[allow(dead_code)]
 mod windows_d3d11_test_pattern;
 #[cfg(target_os = "windows")]
 mod windows_graphics_capture;

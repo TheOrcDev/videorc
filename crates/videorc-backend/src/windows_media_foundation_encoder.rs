@@ -3,7 +3,7 @@
 //! MTA thread. The legacy compositor path submits I420 bytes; the direct
 //! Windows capture path submits retained D3D11 textures without a CPU readback.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
@@ -456,6 +456,36 @@ struct D3D11ProcessorConfig {
 pub(crate) struct MediaFoundationD3d11EncoderProgress {
     pub(crate) encoded_frames: Vec<MediaFoundationEncodedFrame>,
     pub(crate) released_leases: Vec<WindowsD3d11EncoderLeaseRelease>,
+    /// #1042: what this call spent inside the transform, so the media thread
+    /// can tell a blocking `ProcessInput`/`ProcessOutput` from its own work.
+    pub(crate) call_timings: MediaFoundationD3d11CallTimings,
+}
+
+/// Wall time inside the transform's own calls during one encoder call
+/// (#1042). `None`/zero when the call made no such transform call.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+///
+/// Compact on purpose: it rides in every submission failure, which must stay
+/// small (`clippy::result_large_err`). Microseconds saturate at about 71 min.
+pub(crate) struct MediaFoundationD3d11CallTimings {
+    pub(crate) process_input_micros: Option<u32>,
+    pub(crate) process_output_max_micros: u32,
+    /// The longest the transform held one of the inputs it released during
+    /// this call (successful `ProcessInput` to its tracked-sample release).
+    pub(crate) input_hold_max_micros: u32,
+    pub(crate) process_output_calls: u16,
+    pub(crate) input_releases: u16,
+}
+
+impl MediaFoundationD3d11CallTimings {
+    fn observe_process_output(&mut self, micros: u32) {
+        self.process_output_calls = self.process_output_calls.saturating_add(1);
+        self.process_output_max_micros = self.process_output_max_micros.max(micros);
+    }
+}
+
+fn elapsed_micros(started_at: Instant) -> u32 {
+    u32::try_from(started_at.elapsed().as_micros()).unwrap_or(u32::MAX)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -563,6 +593,8 @@ pub(crate) struct MediaFoundationD3d11H264Encoder {
     ownership: WindowsD3d11EncoderOwnershipState,
     sequence_header: Vec<u8>,
     submitted_pts: VecDeque<i64>,
+    /// #1042: when each in-flight lease's `ProcessInput` succeeded.
+    input_submitted_at: BTreeMap<u64, Instant>,
     last_output_pts: Option<i64>,
     started_at: Instant,
     /// Consecutive `MF_E_TRANSFORM_STREAM_CHANGE` answers since the last frame.
@@ -2741,6 +2773,7 @@ impl MediaFoundationD3d11H264Encoder {
             )?,
             sequence_header,
             submitted_pts: VecDeque::new(),
+            input_submitted_at: BTreeMap::new(),
             last_output_pts: None,
             started_at: Instant::now(),
             stream_changes: StreamChangeBudget::default(),
@@ -2854,7 +2887,9 @@ impl MediaFoundationD3d11H264Encoder {
                 ));
             }
         };
+        let process_input_started_at = Instant::now();
         let process_result = unsafe { self.transform.ProcessInput(0, &sample, 0) };
+        progress.call_timings.process_input_micros = Some(elapsed_micros(process_input_started_at));
         if let Err(error) = process_result {
             let release = self
                 .ownership
@@ -2881,6 +2916,8 @@ impl MediaFoundationD3d11H264Encoder {
         self.ownership
             .commit_process_input(metadata.lease_id)
             .expect("successful ProcessInput must have one reserved lease");
+        self.input_submitted_at
+            .insert(metadata.lease_id, process_input_started_at);
         self.submitted_pts.push_back(metadata.input_pts_100ns);
         // This is the ownership transfer point. No sample, buffer, attributes,
         // texture, or tracked-sample COM reference remains in application code.
@@ -3120,7 +3157,12 @@ impl MediaFoundationD3d11H264Encoder {
     ) -> Result<()> {
         while let Some(event_type) = self.next_event()? {
             if event_type == METransformHaveOutput.0 as u32 {
-                progress.encoded_frames.extend(self.process_one_output()?);
+                let started_at = Instant::now();
+                let output = self.process_one_output();
+                progress
+                    .call_timings
+                    .observe_process_output(elapsed_micros(started_at));
+                progress.encoded_frames.extend(output?);
             } else if event_type == METransformNeedInput.0 as u32 {
                 self.ownership.note_input_credit()?;
             }
@@ -3316,6 +3358,13 @@ impl MediaFoundationD3d11H264Encoder {
             if let WindowsD3d11EncoderReleaseDisposition::Released(release) =
                 self.ownership.release_callback(callback)
             {
+                if let Some(submitted_at) = self.input_submitted_at.remove(&release.lease_id) {
+                    let timings = &mut progress.call_timings;
+                    timings.input_releases = timings.input_releases.saturating_add(1);
+                    timings.input_hold_max_micros = timings
+                        .input_hold_max_micros
+                        .max(elapsed_micros(submitted_at));
+                }
                 progress.released_leases.push(release);
             }
         }
