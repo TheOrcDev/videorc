@@ -77,10 +77,11 @@ try {
     compiled[`${RENDERER}/lib/studio-session-view.ts`]
   )
 
-  // The Studio transport: Record (with its Space chip) and Go Live…, which
-  // opens the dialog.
+  // The Studio transport: Record (with its Space chip) and Go Live, which
+  // opens the dialog. The owner's exception: the Studio button reads without
+  // the "…" (plan 235 D2); ⌘K keeps "Go live…".
   assert.equal(copy.RECORD_LABEL, 'Record')
-  assert.equal(copy.GO_LIVE_LABEL, 'Go Live…')
+  assert.equal(copy.GO_LIVE_LABEL, 'Go Live')
 
   // Its stop control, per state: "End livestream" on air (with the visible
   // line when the recording stops too), "Stop recording" for a recording,

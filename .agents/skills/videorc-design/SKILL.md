@@ -60,7 +60,9 @@ Binding. Follow them as written; a change that would undo one is a question
 for the owner, not a design choice.
 
 - **The toolbar holds only the page title** (2026-09-23). Record and Go
-  Live… sit at the top of the Studio inspector, and a page's own actions sit
+  Live sit at the top of the Studio inspector, with no state row above them
+  (2026-11-14, plan 235 D1: the status bar and the sidebar's Studio row carry
+  the state and the clock), and a page's own actions sit
   in its body.
 - **Buddy stays second in the sidebar, directly under Studio, on ⌘9**
   (2026-10-10, plan 174 D6 and D8). It keeps Clean cut and every other
@@ -231,9 +233,9 @@ Everything except ⌘K uses the desktop scale.
 - **Toolbar** (`Toolbar`, 40 px): the page title (14 px / 600, the window's
   `h1`) on the window's drag band, and nothing else (owner call,
   2026-09-23). Actions live with the content they act on. The Studio's
-  Record, Go Live… and the stop button ("Stop recording", or "End
-  livestream" while on air) and its clock sit at the top of the inspector,
-  right above Session; a page's own actions sit in its body (a filter bar, a
+  Record, Go Live and the stop button ("Stop recording", or "End
+  livestream" while on air) sit at the top of the inspector, with no state
+  row, right above Session; a page's own actions sit in its body (a filter bar, a
   section header, or the PageHeader row). The toolbar never scrolls; only
   `PaneBody` does.
 - **Sidebar** (plan 174 D8).
@@ -349,8 +351,8 @@ links home.
 
 - **Devices**: Sources is the home of every screen, window, camera,
   microphone and system audio source, with its gain and level. The Studio
-  inspector mirrors the few needed mid-session: the Sources section (Screen,
-  Camera, System audio, with Open Sources) and the Microphone section
+  inspector mirrors the few needed mid-session: the Sources group (Screen,
+  Camera, System audio, with the Open Sources cog) and the Microphone group
   (picker, level, mute and its hotkey).
 - **Takeovers**: Assets → Takeovers manages them (import, rename, reorder,
   delete). Studio's Takeover section puts one on stream and takes it off.
@@ -370,7 +372,9 @@ links home.
 One verb pair on every surface (plan 174 D3; the table in
 `docs/ui-copy.md`, strings in `lib/go-live-copy.ts`):
 
-- The Studio buttons read "Record" and **"Go Live…"** (it opens a dialog).
+- The Studio buttons read "Record" and **"Go Live"**: it opens a dialog, and
+  still has no "…", the owner's exception (2026-11-14, plan 235 D2). Its
+  Retro LCD key reads the same.
 - The Go Live dialog's title and primary button read **"Go live"** ("Go
   live on 3 destinations" when it starts more than one).
 - Stopping a livestream is **"End livestream"**, with the line "Your

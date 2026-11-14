@@ -33,8 +33,9 @@ mid-sentence; everything else is sentence case.
 ### Going live and recording
 
 **Go Live**:
-The action that starts a livestream. The Studio button reads "Go Live…"
-because it opens a dialog; the dialog's title and its primary button read
+The action that starts a livestream. The Studio button reads "Go Live"
+(and its Retro LCD key), with no "…" although it opens a dialog: the owner's
+exception (plan 235 D2). The dialog's title and its primary button read
 "Go live"; ⌘K reads "Go live…".
 _Avoid_: Stream (as a button), Start streaming, Confirm Go Live
 
@@ -335,7 +336,7 @@ _Avoid_: wallpaper, background (a scene has one), live background (it never
 moves), glass
 
 **Chrome controls**:
-The polished controls you touch: the chrome primary button (Go Live…,
+The polished controls you touch: the chrome primary button (Go Live,
 Continue, Save), the beads on switches and sliders, the plate on what is
 selected, and the red Record LED that lights while a recording or
 livestream runs. Panels, menus, dialogs and text stay flat.

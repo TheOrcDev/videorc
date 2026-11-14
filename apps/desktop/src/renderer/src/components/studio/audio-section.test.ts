@@ -152,9 +152,11 @@ describe('micMeterInput (plan 092)', () => {
 })
 
 describe('Audio section (plan 201 S2)', () => {
-  it('is titled Audio, with the Microphone then System audio on one scale', () => {
+  // Plan 235 D3: no "Audio" title; the Mixer's own name says it.
+  it('is named Audio with no title, with the Microphone then System audio on one scale', () => {
     const markup = render({}, systemAudioProps())
-    expect(markup).toContain('>Audio</h2>')
+    expect(markup).not.toContain('<h2')
+    expect(markup).toContain('aria-label="Audio"')
     expect(markup).not.toContain('>Microphone</h2>')
     // One audiocn Mixer around both rows, one channel strip each.
     expect(markup.match(/data-slot="mixer"/g)).toHaveLength(1)
@@ -184,7 +186,7 @@ describe('Audio section (plan 201 S2)', () => {
 
   it('drops the System audio row where it cannot run, and stays Audio (Linux, older Windows)', () => {
     const markup = render()
-    expect(markup).toContain('>Audio</h2>')
+    expect(markup).toContain('aria-label="Audio"')
     expect(markup).not.toContain('System audio')
     expect(markup.match(/data-slot="channel-strip"/g)).toHaveLength(1)
   })
@@ -539,7 +541,7 @@ describe('AudioSection (plan 201 S2)', () => {
   it('shows the Microphone only where System audio is not listed', () => {
     setCore({ deviceList: { devices: microphones, warnings: [] } })
     const markup = renderSection()
-    expect(markup).toContain('>Audio</h2>')
+    expect(markup).toContain('aria-label="Audio"')
     expect(markup).not.toContain('data-videorc-studio-system-audio')
   })
 
@@ -548,7 +550,8 @@ describe('AudioSection (plan 201 S2)', () => {
     setClips(false, 'off')
     const markup = renderSection()
     expect(markup.match(/data-slot="lcd-display"/g)).toHaveLength(1)
-    expect(markup).toMatch(/<h2[^>]*>Audio<\/h2>/)
+    expect(markup).not.toMatch(/>Audio<\/h2>/)
+    expect(markup).toContain('aria-label="Audio"')
     expect(markup).toContain('data-videorc-studio-mic-mute=""')
     expect(markup).toContain('data-videorc-studio-system-audio=""')
     expect(markup).toContain('data-videorc-studio-system-audio-level=""')

@@ -9,8 +9,12 @@
 /** The Studio transport's record button. Its Space key chip rides beside it. */
 export const RECORD_LABEL = 'Record'
 
-/** The Studio transport's Go Live button. It opens the Go Live dialog, hence the "…". */
-export const GO_LIVE_LABEL = 'Go Live…'
+/**
+ * The Studio transport's Go Live button and its Retro LCD twin. It opens the
+ * Go Live dialog, yet it reads without the "…": the owner's exception for the
+ * Studio button (plan 235 D2). ⌘K keeps "Go live…".
+ */
+export const GO_LIVE_LABEL = 'Go Live'
 
 /** ⌘K's start commands, one per transport button. */
 export const START_RECORDING_COMMAND = 'Start recording'

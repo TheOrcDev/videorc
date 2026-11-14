@@ -7,10 +7,11 @@ import { StudioContextProviders } from '@/hooks/use-studio'
 import type { RecordingStatus } from '@/lib/backend'
 import { sessionStopControl } from '@/lib/studio-session-view'
 
-import { RetroSessionStatus, RetroSessionTransport } from './retro-lcd-studio'
+import { RetroSessionTransport } from './retro-lcd-studio'
 
 // Plan 197: the Retro LCD transport keeps the inspector's words, hooks and
-// handlers; only the drawing is a screen with keys.
+// handlers; only the drawing is a screen with keys. Plan 235 D1: like the
+// default look, it has no state readout above the keys.
 
 const STARTED_AT = '2026-10-02T18:00:00.000Z'
 const STREAM_URL = 'rtmp://live.twitch.tv/app/***'
@@ -63,7 +64,6 @@ function renderTransport(
           startRequestPending: false,
           recordBlockedReason: null,
           liveStreamBlockedReason: blockedReason,
-          status: createElement(RetroSessionStatus, { recording, wsStatus: 'connected' }),
           onRecord: noop,
           onLiveStream: noop,
           onStop: noop
@@ -78,26 +78,21 @@ const text = (selector: string): string | null | undefined =>
 const screen = (): Element | null => container.querySelector('[data-slot=lcd-display]')
 
 describe('Retro LCD transport (plan 197)', () => {
-  it('reads Go Live as On air in the live tone, with a lit Rec and the clock, on the screen', () => {
+  it('puts only the keys on the screen while on air: no state readout, Rec or clock', () => {
     renderTransport({
       state: 'recording',
       sessionId: 's',
       startedAt: STARTED_AT,
       streamUrl: STREAM_URL
     })
-    // The smokes read these words from this hook.
-    expect(text('[data-videorc-session-status]')).toBe('On air')
-    expect(container.querySelector('[data-videorc-session-status]')?.getAttribute('role')).toBe(
-      'status'
-    )
-    expect(container.querySelector('[data-slot=session-status]')).toHaveProperty(
-      'dataset.tone',
-      'live'
-    )
-    expect(text('[data-testid=session-also-recording]')).toBe('Rec')
-    expect(text('[data-slot=session-clock]')).toBe('0:00')
-    for (const part of ['[data-videorc-session-status]', '[data-slot=session-clock]']) {
-      expect(container.querySelector(part)?.closest('[data-slot=lcd-display]')).toBe(screen())
+    // The state and its hook are the status bar's now (plan 235 D1).
+    for (const part of [
+      '[data-videorc-session-status]',
+      '[data-slot=session-readout]',
+      '[data-testid=session-also-recording]',
+      '[data-slot=session-clock]'
+    ]) {
+      expect(container.querySelector(part), part).toBeNull()
     }
     // Stop is a key on the screen, in the record red, with its note under it.
     const stop = [...container.querySelectorAll('button')].find((button) =>
@@ -113,7 +108,7 @@ describe('Retro LCD transport (plan 197)', () => {
       { state: 'idle' },
       { active: false, blockedReason: 'Turn on a destination in Livestream before you go live.' }
     )
-    expect(text('[data-videorc-session-status]')).toBe('Ready')
+    expect(container.querySelector('[data-videorc-session-status]')).toBeNull()
     const record = [...container.querySelectorAll('button')].find((button) =>
       button.textContent?.startsWith('Record')
     )
