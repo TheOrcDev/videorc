@@ -6120,6 +6120,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "agents.status"
         | "agents.activity.list"
         | "cloud.status"
+        | "cloud.recordings.downloads"
         | "compositor.status"
         | "preview.debug.sample"
         | "preview.camera.status"
@@ -12124,6 +12125,10 @@ async fn handle_text_message_with_role(
                 },
                 None => cloud_unavailable(command.id),
             }
+        }
+        "cloud.recordings.downloads" => {
+            let jobs = cloud_show::lock(&state.cloud_show).downloads.clone();
+            ServerResponse::ok(command.id, jobs.snapshot())
         }
         "cloud.recordings.cancelDownload" => {
             match serde_json::from_value::<cloud_control_web::CancelRecordingDownloadParams>(
@@ -18758,6 +18763,7 @@ mod tests {
             "chatCommands.list",
             "recording.status",
             "capture.recovery.status",
+            "cloud.recordings.downloads",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
             CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD,
         ] {

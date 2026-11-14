@@ -5087,6 +5087,8 @@ mod tests {
         // Plan 224: the talk-show routes, scripted.
         room_tokens: AtomicUsize,
         room_patches: StdMutex<Vec<RoomPatch>>,
+        patch_delay_ms: AtomicUsize,
+        destinations_delay_ms: AtomicUsize,
         rotations: AtomicUsize,
         guests: StdMutex<VecDeque<GuestsAnswer>>,
         decisions: StdMutex<Vec<(String, GuestDecision)>>,
@@ -5286,6 +5288,10 @@ mod tests {
             _show_id: &str,
             patch: &RoomPatch,
         ) -> std::result::Result<RoomSettingsAnswer, CloudApiError> {
+            let delay = self.patch_delay_ms.load(Ordering::SeqCst) as u64;
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
             self.room_patches.lock().unwrap().push(patch.clone());
             Ok(RoomSettingsAnswer {
                 room: crate::cloud_talk::RoomSettingsRecord {
@@ -5399,6 +5405,10 @@ mod tests {
             _show_id: &str,
             body: &DestinationsBody,
         ) -> std::result::Result<DestinationsAnswer, DestinationsFailure> {
+            let delay = self.destinations_delay_ms.load(Ordering::SeqCst) as u64;
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
             let mut managed = self.managed.lock().unwrap();
             managed.destinations.push(body.as_json().clone());
             match managed.destinations_answers.pop_front() {
@@ -12733,6 +12743,40 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn managed_go_live_and_platform_patch_share_one_rpc_budget() {
+        let harness = harness(true);
+        managed_room(&harness).await;
+        harness
+            .context
+            .web
+            .destinations_delay_ms
+            .store(18_000, Ordering::SeqCst);
+        harness
+            .context
+            .web
+            .patch_delay_ms
+            .store(8_000, Ordering::SeqCst);
+        let started = tokio::time::Instant::now();
+        harness
+            .context
+            .talk_go_live(
+                Some("bearer".to_string()),
+                destinations(),
+                vec!["youtube".to_string()],
+            )
+            .await
+            .unwrap();
+        assert!(started.elapsed() <= crate::cloud_control_web::CONTROL_INTENT_BUDGET);
+        assert!(
+            lock(&harness.context.slot)
+                .show
+                .as_ref()
+                .unwrap()
+                .handed_over
+        );
+    }
+
     fn overlay_png(width: u32, height: u32) -> String {
         use base64::Engine as _;
         let mut png = std::io::Cursor::new(Vec::new());
@@ -12843,12 +12887,12 @@ mod tests {
         // and the card does not.
         let sent = harness.overlays.lock().unwrap().len();
         web.set_state(managed_talk_state(json!([]), false, 1));
-        wait_until(|| harness.overlays.lock().unwrap().len() == sent + 2).await;
+        wait_until(|| harness.overlays.lock().unwrap().len() == sent + 5).await;
         assert_eq!(overlay_sets(&harness, sent), takeover);
         // The same count again says nothing new.
         web.set_state(managed_talk_state(json!([]), true, 1));
         tokio::time::sleep(Duration::from_secs(3)).await;
-        assert_eq!(harness.overlays.lock().unwrap().len(), sent + 2);
+        assert_eq!(harness.overlays.lock().unwrap().len(), sent + 5);
 
         // The renderer's room connection comes up (a reconnect): again.
         let sent = harness.overlays.lock().unwrap().len();
@@ -12880,8 +12924,19 @@ mod tests {
         assert!(lock(&context.slot).overlay_image(&takeover[0].3).is_none());
         let sent = harness.overlays.lock().unwrap().len();
         web.set_state(managed_talk_state(json!([]), true, 2));
-        wait_until(|| harness.overlays.lock().unwrap().len() == sent + 1).await;
+        wait_until(|| harness.overlays.lock().unwrap().len() == sent + 5).await;
         assert_eq!(overlay_sets(&harness, sent), vec![takeover[1].clone()]);
+        assert!(
+            harness.overlays.lock().unwrap()[sent..]
+                .iter()
+                .any(|event| {
+                    let event = serde_json::to_value(event).unwrap();
+                    event["op"] == "clear"
+                        && event["slot"] == "takeover"
+                        && event["orientation"] == "h"
+                }),
+            "replay repairs a Hide that the page never received"
+        );
 
         // An image over the page's 2 MiB: a full-frame picture with no
         // transparency leaves as a JPEG at its own size.
@@ -12943,6 +12998,11 @@ mod tests {
         let (sent, frame) = tokio::join!(set, answer);
         sent.unwrap();
         assert_eq!(frame["kind"], "overlay.set");
+        node.context
+            .report_client(crate::cloud_talk::RoomClientReportParams {
+                state: crate::cloud_talk::CloudRoomClientState::Connected,
+                detail: None,
+            });
         assert!(node.overlays.lock().unwrap().is_empty());
     }
 

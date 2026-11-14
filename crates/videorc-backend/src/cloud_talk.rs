@@ -1322,7 +1322,29 @@ impl std::fmt::Display for RoomOpenRefusal {
 
 impl std::error::Error for RoomOpenRefusal {}
 
+/// Follow-up calls spend the same managed RPC budget as the first call.
+/// `None` preserves the node socket's original timing and behaviour.
+async fn within_room_budget<T>(
+    deadline: Option<tokio::time::Instant>,
+    work: impl std::future::Future<Output = T>,
+) -> std::result::Result<T, String> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, work)
+            .await
+            .map_err(|_| "The cloud request timed out. Try again.".to_string()),
+        None => Ok(work.await),
+    }
+}
+
 impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
+    fn room_rpc_deadline(&self) -> Option<tokio::time::Instant> {
+        lock(&self.slot)
+            .show
+            .as_ref()
+            .filter(|show| show.control.transport_kind() == ControlKind::Web)
+            .map(|_| tokio::time::Instant::now() + crate::cloud_control_web::CONTROL_INTENT_BUDGET)
+    }
+
     /// "Open the room" (D17): create the talk show, join its control socket,
     /// lend the camera, start the guests long-poll. The renderer joins the
     /// LiveKit room when the status says `open` (C-G4).
@@ -1332,6 +1354,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         params: RoomOpenParams,
         session_active: bool,
     ) -> Result<CloudStatus> {
+        let started = tokio::time::Instant::now();
         let Some(bearer) = bearer else {
             return Err(RoomOpenRefusal::SignedOut.into());
         };
@@ -1386,10 +1409,12 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         };
         let show_id = created.show.id.clone();
+        let deadline = (created.control.transport_kind() == ControlKind::Web)
+            .then_some(started + crate::cloud_control_web::CONTROL_INTENT_BUDGET);
         // The create's host token is never kept (L4): the renderer joins
         // with a fresh one through `room_token`.
         let (Some(_), Some(invite)) = (created.room.as_ref(), created.invite.clone()) else {
-            let _ = self.web.end_show(&bearer, &show_id).await;
+            let _ = within_room_budget(deadline, self.web.end_show(&bearer, &show_id)).await;
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             bail!("Videorc Cloud created the show without a room.");
         };
@@ -1400,24 +1425,29 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             && let Some(problem) =
                 crate::cloud_show::control_url_problem(&created.control.url, cfg!(debug_assertions))
         {
-            let _ = self.web.end_show(&bearer, &show_id).await;
+            let _ = within_room_budget(deadline, self.web.end_show(&bearer, &show_id)).await;
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             bail!("{problem}");
         }
-        let (transport, welcome) =
-            match self.open_control(&bearer, &show_id, &created.control).await {
-                Ok(connected) => connected,
-                Err(failure) => {
-                    let _ = self.web.end_show(&bearer, &show_id).await;
-                    let _ = (self.hooks.camera)(CameraHandover::Return).await;
-                    let message = match failure {
-                        HelloFailure::BadToken => "the node refused the show token".to_string(),
-                        HelloFailure::NoSuchShow => "the node does not know the show".to_string(),
-                        HelloFailure::Transport(message) => message,
-                    };
-                    bail!("Videorc Cloud could not be reached for the room: {message}");
-                }
-            };
+        let (transport, welcome) = match within_room_budget(
+            deadline,
+            self.open_control(&bearer, &show_id, &created.control),
+        )
+        .await
+        .unwrap_or_else(|message| Err(HelloFailure::Transport(message)))
+        {
+            Ok(connected) => connected,
+            Err(failure) => {
+                let _ = within_room_budget(deadline, self.web.end_show(&bearer, &show_id)).await;
+                let _ = (self.hooks.camera)(CameraHandover::Return).await;
+                let message = match failure {
+                    HelloFailure::BadToken => "the node refused the show token".to_string(),
+                    HelloFailure::NoSuchShow => "the node does not know the show".to_string(),
+                    HelloFailure::Transport(message) => message,
+                };
+                bail!("Videorc Cloud could not be reached for the room: {message}");
+            }
+        };
         if let Some(allowance) = created.allowance.clone() {
             lock(&self.slot).replace_allowance(Some(allowance));
         }
@@ -1618,6 +1648,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         bearer: Option<String>,
         params: GuestActParams,
     ) -> Result<CloudStatus> {
+        let deadline = self.room_rpc_deadline();
         let bearer = bearer_or_bail(bearer)?;
         let show_id = self.open_room_show_id()?;
         if params.action == GuestAction::Rename
@@ -1704,7 +1735,10 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 .as_ref()
                 .map(|talk| talk.stage.clone())
                 .unwrap_or_default();
-            match self.send_stage(&stage).await {
+            match within_room_budget(deadline, self.send_stage(&stage))
+                .await
+                .unwrap_or_else(Err)
+            {
                 Ok(()) => {
                     if let Some(talk) = lock(&self.slot).talk.as_mut() {
                         talk.stage_sent = true;
@@ -1782,6 +1816,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         destinations: Vec<HandoverDestination>,
         platforms: Vec<String>,
     ) -> Result<CloudStatus> {
+        let deadline = self.room_rpc_deadline();
         let bearer = bearer_or_bail(bearer)?;
         let show_id = self.open_room_show_id()?;
         if destinations.is_empty() {
@@ -1824,7 +1859,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         }
         self.hooks.emit_from(&self.slot);
-        self.set_room_platforms(&bearer, platforms).await;
+        let _ = within_room_budget(deadline, self.set_room_platforms(&bearer, platforms)).await;
         Ok(lock(&self.slot).status())
     }
 
@@ -2026,18 +2061,41 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// The untimed overlays that are up (a takeover), handed to the
     /// renderer again: for a program page that joined after they were sent
     /// (`room.pageJoins` grew), and for a renderer that just reconnected. A
-    /// card with a `ttl` is not sent again.
+    /// card with a `ttl` is not sent again; empty managed slots are cleared.
     pub(crate) fn resend_untimed_overlays(&self) {
         let events: Vec<CloudRoomOverlayEvent> = {
             let runtime = lock(&self.slot);
             let (Some(show), Some(talk)) = (runtime.show.as_ref(), runtime.talk.as_ref()) else {
                 return;
             };
-            talk.overlays
-                .iter()
-                .filter(|overlay| overlay.ttl_seconds.is_none())
-                .map(|overlay| overlay.set_event(&show.record.id))
-                .collect()
+            if show.control.transport_kind() != ControlKind::Web {
+                return;
+            }
+            let mut events = Vec::new();
+            for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+                for slot in [
+                    CloudOverlaySlot::Card,
+                    CloudOverlaySlot::Takeover,
+                    CloudOverlaySlot::Hold,
+                ] {
+                    match talk
+                        .overlays
+                        .iter()
+                        .find(|overlay| overlay.slot == slot && overlay.orientation == orientation)
+                    {
+                        Some(overlay) if overlay.ttl_seconds.is_none() => {
+                            events.push(overlay.set_event(&show.record.id))
+                        }
+                        Some(_) => {} // Never restart a timed card's lifetime.
+                        None => events.push(CloudRoomOverlayEvent::Clear {
+                            show_id: show.record.id.clone(),
+                            slot,
+                            orientation,
+                        }),
+                    }
+                }
+            }
+            events
         };
         for event in events {
             (self.hooks.overlay)(event);
@@ -2057,6 +2115,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
     /// the show resumable, or forgets it when the node or the web says it
     /// is over.
     pub async fn resume_room(&self, bearer: Option<String>) -> Result<CloudStatus> {
+        let deadline = self.room_rpc_deadline();
         let bearer = bearer_or_bail(bearer)?;
         let (show_id, held_room, uncontrolled) = {
             let runtime = lock(&self.slot);
@@ -2074,7 +2133,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         };
         if held_room {
             if uncontrolled {
-                self.connect_talk_control(&bearer, &show_id).await?;
+                within_room_budget(deadline, self.connect_talk_control(&bearer, &show_id))
+                    .await
+                    .map_err(anyhow::Error::msg)??;
             }
             return Ok(lock(&self.slot).status());
         }
@@ -2089,7 +2150,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             }
         };
         let unconnected = lock(&self.slot).control_tx.is_none();
-        if unconnected && let Err(error) = self.connect_talk_control(&bearer, &show_id).await {
+        if unconnected
+            && let Err(error) =
+                within_room_budget(deadline, self.connect_talk_control(&bearer, &show_id))
+                    .await
+                    .map_err(anyhow::Error::msg)
+                    .and_then(|answer| answer)
+        {
             let _ = (self.hooks.camera)(CameraHandover::Return).await;
             return Err(error);
         }

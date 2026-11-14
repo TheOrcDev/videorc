@@ -656,6 +656,7 @@ const FINISHED_DOWNLOADS_KEPT: usize = 32;
 #[derive(Default)]
 struct DownloadJobsState {
     closing: bool,
+    latest: HashMap<String, RecordingDownloadEvent>,
     running: HashMap<String, RunningDownload>,
     /// The MP4 each finished job saved, newest last, by job id: main reveals
     /// one by its id (the Library's Show in Finder), never by a renderer path.
@@ -666,6 +667,46 @@ struct DownloadJobsState {
 pub(crate) struct RecordingDownloadJobs(std::sync::Mutex<DownloadJobsState>);
 
 impl RecordingDownloadJobs {
+    /// Current jobs plus the latest bounded terminal results, for reconnects.
+    pub(crate) fn snapshot(&self) -> Vec<RecordingDownloadEvent> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .latest
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn remember(&self, event: &RecordingDownloadEvent) {
+        let mut jobs = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        jobs.latest
+            .insert(event.recording_id.clone(), event.clone());
+        while jobs
+            .latest
+            .values()
+            .filter(|event| event.state != DownloadState::Running)
+            .count()
+            > FINISHED_DOWNLOADS_KEPT
+        {
+            let remove = jobs
+                .latest
+                .iter()
+                .find(|(id, entry)| {
+                    *id != &event.recording_id && entry.state != DownloadState::Running
+                })
+                .map(|(id, _)| id.clone());
+            if let Some(id) = remove {
+                jobs.latest.remove(&id);
+            } else {
+                break;
+            }
+        }
+    }
+
     fn start<F, Fut>(
         self: &Arc<Self>,
         recording_id: String,
@@ -696,21 +737,25 @@ impl RecordingDownloadJobs {
         let registry = self.clone();
         let key = recording_id.clone();
         let task_key = key.clone();
+        let event = RecordingDownloadEvent {
+            job_id,
+            recording_id,
+            state: DownloadState::Running,
+            done_segments: Some(0),
+            total_segments: None,
+            path: None,
+            error: None,
+        };
+        // The snapshot must know the job before its start RPC can return.
+        jobs.latest
+            .insert(event.recording_id.clone(), event.clone());
         let task = tokio::spawn(async move {
             use futures_util::FutureExt as _;
-            let event = RecordingDownloadEvent {
-                job_id,
-                recording_id,
-                state: DownloadState::Running,
-                done_segments: Some(0),
-                total_segments: None,
-                path: None,
-                error: None,
-            };
             emit(event.clone());
             let progress: DownloadProgress = {
                 let emit = emit.clone();
                 let event = event.clone();
+                let registry = registry.clone();
                 let last = std::sync::Mutex::new(None::<std::time::Instant>);
                 Arc::new(move |done, total| {
                     let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -719,11 +764,13 @@ impl RecordingDownloadJobs {
                         return;
                     }
                     *last = Some(now);
-                    emit(RecordingDownloadEvent {
+                    let progress = RecordingDownloadEvent {
                         done_segments: Some(done),
                         total_segments: Some(total),
                         ..event.clone()
-                    });
+                    };
+                    registry.remember(&progress);
+                    emit(progress);
                 })
             };
             let outcome = std::panic::AssertUnwindSafe(work(DownloadControl {
@@ -763,14 +810,16 @@ impl RecordingDownloadJobs {
                     Some("The recording download stopped. Try again.".to_string()),
                 ),
             };
-            emit(RecordingDownloadEvent {
+            let terminal = RecordingDownloadEvent {
                 state,
                 path,
                 error,
                 done_segments: None,
                 total_segments: None,
                 ..event
-            });
+            };
+            registry.remember(&terminal);
+            emit(terminal);
             registry
                 .0
                 .lock()
@@ -2643,6 +2692,10 @@ rtmps://h/app/key 'http://x.test/y'";
             })
             .unwrap();
         assert_eq!(first, duplicate);
+        let snapshot = jobs.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].job_id, first.job_id);
+        assert_eq!(snapshot[0].state, DownloadState::Running);
         ready.await.unwrap();
         jobs.cancel(&first.job_id);
         // Shutdown owns the join even if cancellation was requested by RPC.
@@ -2652,6 +2705,12 @@ rtmps://h/app/key 'http://x.test/y'";
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].state, DownloadState::Running);
         assert_eq!(events[1].state, DownloadState::Cancelled);
+        // The renderer can recover the terminal event even after Cancel
+        // becomes a no-op because the running job has already disappeared.
+        jobs.cancel(&first.job_id);
+        let snapshot = jobs.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].state, DownloadState::Cancelled);
         let wire = serde_json::to_value(&events[1]).unwrap();
         for absent in ["path", "error", "doneSegments", "totalSegments"] {
             assert!(wire.get(absent).is_none());
