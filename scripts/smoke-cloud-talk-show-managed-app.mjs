@@ -12,7 +12,7 @@
  */
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import {
@@ -33,6 +33,18 @@ import {
 } from './lib/cloud-managed-room.mjs'
 import { managedWire as w } from './lib/fake-cloud-web-managed.mjs'
 
+// The backend's private download folder (cloud_control_web.rs), made in the
+// app's TMPDIR. No such folder, playlist or segment outlives its job.
+const DOWNLOAD_TEMP_PREFIX = 'videorc-cloud-download-'
+const downloadTemps = (h) =>
+  readdirSync(h.env.TMPDIR).filter((name) => name.startsWith(DOWNLOAD_TEMP_PREFIX))
+const noDownloadTemps = (h) =>
+  waitFor(
+    () =>
+      downloadTemps(h).length === 0 &&
+      readTree(h.env.TMPDIR).every((p) => !p.endsWith('.m3u8') && !p.endsWith('.ts')),
+    'download temporary folder removed'
+  )
 const h = await managedHarness('talk')
 const blockers = [],
   completed = []
@@ -366,11 +378,25 @@ try {
         async () => (await h.rpc('cloud.recordings.list')).recordings.some((r) => r.id === row.id),
         'recording list catches up'
       )
+      // The smoke's socket is the renderer role: a raw folder is refused, and
+      // the folder goes as the single-use capability main issues, as the
+      // Library passes Output's folder.
+      await assert.rejects(
+        h.rpc(DOWNLOAD.start, { id: row.id, outputDirectory: h.env.VIDEORC_RECORDINGS_DIR }, 5000),
+        /raw outputDirectory is not accepted/
+      )
+      const folder = async () =>
+        (
+          await h.command('authorize-smoke-resource', {
+            kind: 'output-directory',
+            path: h.env.VIDEORC_RECORDINGS_DIR
+          })
+        ).capabilityId
       const start = async (id = row.id, connection) => {
         const at = Date.now(),
           result = await h.rpc(
             DOWNLOAD.start,
-            { id, outputDirectory: h.env.VIDEORC_RECORDINGS_DIR },
+            { id, outputDirectoryCapability: await folder() },
             5000,
             connection
           )
@@ -392,15 +418,7 @@ try {
           'download terminal event',
           90000
         )
-      const noTemps = async () => {
-        await waitFor(
-          () =>
-            readTree(h.env.TMPDIR).every(
-              (p) => !p.includes('videorc-recording') && !p.endsWith('.m3u8') && !p.endsWith('.ts')
-            ),
-          'download temporary folder removed'
-        )
-      }
+      const noTemps = () => noDownloadTemps(h)
       const success = async (job) => {
         const done = await terminal(job)
         assert.equal(done.payload.state ?? done.payload.phase, 'done')
@@ -433,6 +451,8 @@ try {
       try {
         slow = await start()
         await waitFor(() => barrier.hits, 'segment held')
+        // The temporary check looks where the job works: its folder is there now.
+        assert.equal(downloadTemps(h).length, 1, 'a held download has its private folder')
         const at = Date.now()
         await h.rpc('cloud.stage.set', { layout: 'solo', onStage: [host] }, 5000)
         await h.rpc('cloud.recording.start', {}, 5000)
@@ -453,12 +473,19 @@ try {
         false,
         'failed job leaked a segment address'
       )
-      // Two authenticated clients hit the same basename concurrently. Fail the
-      // first segment of one, while preserving the other's completed file.
+      // Two authenticated clients hit the same basename concurrently: two
+      // recordings that started in the same minute (one recording is one job,
+      // so a second start of the same row only names the running job). Fail
+      // the first segment of one, while preserving the other's completed file.
+      const twin = h.web.hooks.addRecording({ showId: h.showId, startedAt: row.startedAt })
+      await waitFor(
+        async () => (await h.rpc('cloud.recordings.list')).recordings.some((r) => r.id === twin.id),
+        'twin recording listed'
+      )
       const connection = await h.backendConnection()
       try {
         h.web.hooks.failNext('segment', 1, 503)
-        const jobs = await Promise.all([start(), start(row.id, connection)])
+        const jobs = await Promise.all([start(), start(twin.id, connection)])
         const results = await Promise.all(jobs.map(terminal))
         const good = results.find((e) => (e.payload.state ?? e.payload.phase) === 'done')
         assert.ok(good, 'at least one colliding download must succeed')
@@ -484,8 +511,11 @@ try {
         cancelBarrier.release()
       }
       await noTemps()
+      // A node recording is a job that fails at once with the account-page words.
       const nodeRow = h.web.hooks.addRecording({ format: w.recordings.formats.node })
-      await assert.rejects(h.rpc(DOWNLOAD.start, { id: nodeRow.id }), /videorc\.com/)
+      const nodeJob = await terminal(await start(nodeRow.id))
+      assert.equal(nodeJob.payload.state, 'failed')
+      assert.match(nodeJob.payload.error ?? '', /videorc\.com/)
       h.scanLeaks()
     }
   )

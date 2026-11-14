@@ -49,11 +49,9 @@ export async function assertUntrustedManagedSegment(h, download) {
       200,
       w.recordings.playlistContentType
     )
-    const job = await h.rpc(
-      download.start,
-      { id: row.id, outputDirectory: h.env.VIDEORC_RECORDINGS_DIR },
-      5000
-    )
+    // No folder: the default (VIDEORC_RECORDINGS_DIR). The renderer role may
+    // not name a raw one.
+    const job = await h.rpc(download.start, { id: row.id }, 5000)
     assert.ok(job.jobId, 'download must be a job')
     const event = await waitFor(
       () =>
