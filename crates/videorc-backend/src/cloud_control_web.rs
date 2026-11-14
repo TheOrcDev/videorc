@@ -964,12 +964,15 @@ impl TemporaryRecordingDirectory {
     fn create_in(root: &Path) -> std::io::Result<Self> {
         remove_stale_recording_downloads(root, std::time::SystemTime::now());
         let path = root.join(format!("{RECORDING_TEMP_PREFIX}{}", uuid::Uuid::new_v4()));
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt as _;
+            let mut builder = std::fs::DirBuilder::new();
             builder.mode(0o700);
-        }
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
         builder.create(&path)?;
         Ok(Self(path))
     }
