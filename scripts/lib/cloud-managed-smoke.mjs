@@ -3,11 +3,11 @@ import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
-  statSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -422,8 +422,8 @@ export async function managedHarness(kind, pass = 1) {
         logs.join('\n'),
         JSON.stringify(events),
         JSON.stringify(web.calls),
-        ...readTree(appData).map((p) => readFileSync(p).toString('latin1')),
-        ...readTree(userData).map((p) => readFileSync(p).toString('latin1'))
+        ...readTree(appData).map(readIfPresent),
+        ...readTree(userData).map(readIfPresent)
       ]
       for (const secret of secrets)
         assert.equal(
@@ -632,12 +632,31 @@ export async function managedHarness(kind, pass = 1) {
     throw error
   }
 }
+// Regular files only. A live Electron profile holds dangling symlinks
+// (SingletonCookie, SingletonLock) and files that come and go mid-scan.
 export function readTree(root) {
   if (!existsSync(root)) return []
   return readdirSync(root).flatMap((name) => {
     const p = join(root, name)
-    return statSync(p).isDirectory() ? readTree(p) : [p]
+    let stats
+    try {
+      stats = lstatSync(p)
+    } catch (error) {
+      if (error.code === 'ENOENT') return []
+      throw error
+    }
+    if (stats.isDirectory()) return readTree(p)
+    return stats.isFile() ? [p] : []
   })
+}
+// The scan's own read, for files a live profile may remove under it.
+function readIfPresent(path) {
+  try {
+    return readFileSync(path).toString('latin1')
+  } catch (error) {
+    if (error.code === 'ENOENT') return ''
+    throw error
+  }
 }
 export function playable(h, path) {
   const probe = JSON.parse(
