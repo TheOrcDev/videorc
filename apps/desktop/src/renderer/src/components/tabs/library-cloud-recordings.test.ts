@@ -272,7 +272,7 @@ describe('Library → Cloud recordings', () => {
     })
     expect(toasts.error).toHaveBeenLastCalledWith(
       "Couldn't download the cloud recording",
-      expect.objectContaining({ description: 'Recording segment 4 could not be downloaded.' })
+      expect.objectContaining({ description: "Part of the recording didn't download. Try again." })
     )
   })
 

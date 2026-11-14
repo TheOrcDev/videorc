@@ -82,13 +82,17 @@ const KNOWN_DOWNLOAD_REFUSALS = [
   /^Videorc can't save to [^\n]{1,512}\.$/,
   /^videorc\.com did not answer with the recording's playlist\.$/,
   /^The recording's playlist (?:is not supported|has no segments)\.$/,
-  /^Recording segment \d+ could not be downloaded\.$/,
   /^The recording download stopped\. Try again\.$/
 ]
+
+/** A segment's number means nothing to a streamer: said plainly instead. */
+const SEGMENT_FAILED = /^Recording segment \d+ could not be downloaded\.$/
+const SEGMENT_FAILED_TEXT = "Part of the recording didn't download. Try again."
 
 /** The backend's sentence when it is one of its own, else null. */
 export function knownCloudDownloadRefusal(raw: string | undefined): string | null {
   const text = raw?.trim()
+  if (text && SEGMENT_FAILED.test(text)) return SEGMENT_FAILED_TEXT
   return text && KNOWN_DOWNLOAD_REFUSALS.some((pattern) => pattern.test(text)) ? text : null
 }
 

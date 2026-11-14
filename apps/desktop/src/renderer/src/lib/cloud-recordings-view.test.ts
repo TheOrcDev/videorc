@@ -82,8 +82,9 @@ describe('a download job in its row', () => {
   })
 
   it("shows the backend's own sentences and withholds anything else", () => {
+    // Plan 234 copy check: the segment's number is said plainly.
     expect(knownCloudDownloadRefusal('Recording segment 7 could not be downloaded.')).toBe(
-      'Recording segment 7 could not be downloaded.'
+      "Part of the recording didn't download. Try again."
     )
     expect(knownCloudDownloadRefusal("There isn't enough space to save the recording.")).toBe(
       "There isn't enough space to save the recording."
