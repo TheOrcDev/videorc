@@ -2664,10 +2664,10 @@ rtmps://h/app/key 'http://x.test/y'";
         let (finished, done) = tokio::sync::oneshot::channel::<()>();
         let finished = std::sync::Mutex::new(Some(finished));
         let emit: DownloadEventHook = Arc::new(move |event: RecordingDownloadEvent| {
-            if event.state != DownloadState::Running {
-                if let Some(finished) = finished.lock().unwrap().take() {
-                    let _ = finished.send(());
-                }
+            if event.state != DownloadState::Running
+                && let Some(finished) = finished.lock().unwrap().take()
+            {
+                let _ = finished.send(());
             }
         });
         let path = saved.clone();
