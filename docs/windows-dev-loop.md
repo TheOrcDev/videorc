@@ -373,6 +373,15 @@ $env:VIDEORC_ALLOW_UNSUPPORTED_WINDOWS = '1'   # only needed below Windows 11
 pnpm smoke:local-gates:windows
 ```
 
+Run it on AC power. The plan prints `[info] host power: ac|battery|unknown`
+and the manifest records `host.powerSource`; on battery it adds a warning,
+and the native-screen and native-preview smokes print the same. Battery is
+never a blocker or a waiver, but a laptop iGPU's encoder is throttled there:
+on the Intel UHD 620 laptop, Quick Sync recorded 1080p60 at about 43 fps on
+battery. On AC, the 1080p60 screen+camera step still misses the 2%
+frame-count gate in about 1 take in 8, during D3D11 media-thread stalls (#1042,
+`docs/acceptance/2026-11-14-windows-uhd620-d3d11-gates-recheck.md`).
+
 The gate writes `windows-local-gates.manifest.json` under the selected
 acceptance directory. Before each candidate-bound smoke, the parent gate hashes
 the actual packaged payload and passes that verified digest to the child; it
