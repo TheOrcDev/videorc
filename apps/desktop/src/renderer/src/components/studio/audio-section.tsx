@@ -241,10 +241,11 @@ export function AudioSectionView({
   systemAudio: SystemAudioRowProps | null
 }): ReactElement {
   return (
-    <PanelSection title="Audio">
+    // No "Audio" title (plan 235 D3): the rows name themselves.
+    <PanelSection>
       {/* One Mixer with Sources' range, so equal heights mean equal loudness.
-          No MixerTitle: the section's heading names it. */}
-      <Mixer aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>
+          No MixerTitle and no heading: its own name says what it is. */}
+      <Mixer aria-label="Audio" aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>
         <MixerChannels className="gap-0" scrollable={false}>
           <GroupedList>
             <MixerRow>

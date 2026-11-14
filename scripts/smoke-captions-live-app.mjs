@@ -790,7 +790,8 @@ async function seedRendererCaptionsProfile(smoke, recordEnabled = true) {
 }
 
 // The session records and streams: the backend reports it as `recording`, and
-// the inspector pill reads "On air" because it is (plan 095 S5, plan 174 D4).
+// the status bar's state reads "On air" because it is (plan 095 S5, plan 174
+// D4; the status bar holds the hook since plan 235 D1).
 async function hydrateRendererActiveSession(smoke) {
   const hydrated = await smokeCommand(smoke, 'eval-js', {
     code: `

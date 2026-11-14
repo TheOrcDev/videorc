@@ -1748,7 +1748,7 @@ export type StudioContextValue = {
   startSession: () => Promise<boolean>
   /**
    * The Studio transport's two starts, which ⌘K, the hotkeys and the remotes
-   * share (plan 174 S2.2 D3, S3.1 B-3). Record starts a local take; Go Live…
+   * share (plan 174 S2.2 D3, S3.1 B-3). Record starts a local take; Go Live
    * opens the Go Live dialog, and records too only when the Output page's
    * "Save local recording" is on. Neither writes the saved output mode. A
    * start that cannot run says why and resolves false; one that only opened

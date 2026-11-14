@@ -146,9 +146,11 @@ const nameOf = (element: Element): string =>
     .join(' ')
 
 describe('StudioChatSection', () => {
-  it('heads the section Chat, with the Stream Manager door and the hide button', async () => {
+  // Plan 235 D3 (the owner's call): no "Chat" title; the list names itself.
+  it('heads the section with the Stream Manager door and the hide button, and no title', async () => {
     await render()
-    expect(container.querySelector('h2')?.textContent).toBe('Chat')
+    expect(container.querySelector('h2')).toBeNull()
+    expect(container.querySelector('ol[aria-label="Chat messages"]')).not.toBeNull()
     const open = container.querySelector<HTMLButtonElement>(
       '[data-testid="studio-chat-open-stream-manager"]'
     )

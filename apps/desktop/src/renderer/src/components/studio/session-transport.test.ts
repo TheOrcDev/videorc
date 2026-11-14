@@ -7,11 +7,12 @@ import { StudioContextProviders } from '@/hooks/use-studio'
 import type { RecordingStatus } from '@/lib/backend'
 import { sessionStopControl } from '@/lib/studio-session-view'
 
-import { SessionStatusPill, SessionTransport } from './session-panel'
+import { SessionTransport } from './session-panel'
 
 // Plan 095 S5: Go Live is record+stream, which the backend reports as
-// `recording`; the inspector must still say On air (plan 174 D4), and its
-// clock must tick from startedAt (running statuses carry no durationMs).
+// `recording`; its stop says the recording stops too (plan 174 D19). Since
+// plan 235 D1 the transport has no state row: the status bar and the
+// sidebar's Studio row say the state and run the clock.
 
 const STARTED_AT = '2026-10-02T18:00:00.000Z'
 const STREAM_URL = 'rtmp://live.twitch.tv/app/***'
@@ -37,10 +38,7 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-function renderTransport(
-  recording: RecordingStatus,
-  { active = true, wsStatus = 'connected', startBlocked = false } = {}
-): void {
+function renderTransport(recording: RecordingStatus, { active = true } = {}): void {
   const stop = sessionStopControl(recording, false)
   act(() =>
     root.render(
@@ -63,7 +61,6 @@ function renderTransport(
           startRequestPending: false,
           recordBlockedReason: null,
           liveStreamBlockedReason: null,
-          status: createElement(SessionStatusPill, { recording, wsStatus, startBlocked }),
           onRecord: noop,
           onLiveStream: noop,
           onStop: noop
@@ -84,36 +81,31 @@ const text = (selector: string): string | null | undefined =>
 const shown = (button: Element | null | undefined): Element | null | undefined =>
   button?.querySelector(':scope > span > span:not([aria-hidden])') ?? button
 
-describe('SessionTransport (plan 095 S5)', () => {
-  it('ticks the session clock from startedAt', () => {
-    renderTransport({ state: 'recording', sessionId: 's', startedAt: STARTED_AT })
-    expect(text('[data-slot=session-clock]')).toBe('0:00')
-
-    act(() => vi.advanceTimersByTime(61_000))
-    expect(text('[data-slot=session-clock]')).toBe('1:01')
-
-    act(() => vi.advanceTimersByTime(3_600_000))
-    expect(text('[data-slot=session-clock]')).toBe('1:01:01')
+describe('SessionTransport (plan 095 S5, plan 235 D1)', () => {
+  it('has no state row above the buttons: no badge, no Rec and no clock, idle or running', () => {
+    for (const [recording, active] of [
+      [{ state: 'idle' }, false],
+      [{ state: 'recording', sessionId: 's', startedAt: STARTED_AT }, true],
+      [{ state: 'recording', sessionId: 's', startedAt: STARTED_AT, streamUrl: STREAM_URL }, true]
+    ] as const) {
+      renderTransport(recording, { active })
+      expect(container.querySelector('[data-videorc-session-status]')).toBeNull()
+      expect(container.querySelector('[data-slot=status-badge]')).toBeNull()
+      expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
+      expect(container.querySelector('[data-slot=session-clock]')).toBeNull()
+      // The buttons lead the section.
+      const transport = container.querySelector('[data-slot=session-transport]')
+      expect(transport?.firstElementChild?.querySelector('button')).not.toBeNull()
+    }
   })
 
-  it('reads Go Live as On air in the live tone, with a quiet Rec', () => {
+  it('stops Go Live with End livestream and says the recording stops too', () => {
     renderTransport({
       state: 'recording',
       sessionId: 's',
       startedAt: STARTED_AT,
       streamUrl: STREAM_URL
     })
-    expect(text('[data-videorc-session-status]')).toBe('On air')
-    expect(
-      container.querySelector('[data-videorc-session-status] [data-slot=status-badge]')
-    ).toHaveProperty('dataset.tone', 'live')
-    expect(container.querySelector('[data-videorc-session-status]')?.getAttribute('role')).toBe(
-      'status'
-    )
-    const rec = container.querySelector('[data-testid=session-also-recording]')
-    expect(rec?.textContent).toBe('Rec')
-    expect(rec?.getAttribute('data-variant')).toBe('outline')
-
     const stop = [...container.querySelectorAll('button')].find((button) =>
       button.textContent?.includes('End livestream')
     )
@@ -122,20 +114,16 @@ describe('SessionTransport (plan 095 S5)', () => {
     expect(text('[data-slot=session-stop-note]')).toBe('Your recording stops too.')
   })
 
-  it('keeps stream-only free of Rec and a recording free of On air', () => {
+  it('keeps the stop note off a stream-only session and a recording', () => {
     renderTransport({
       state: 'streaming',
       sessionId: 's',
       startedAt: STARTED_AT,
       streamUrl: STREAM_URL
     })
-    expect(text('[data-videorc-session-status]')).toBe('On air')
-    expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
     expect(container.querySelector('[data-slot=session-stop-note]')).toBeNull()
 
     renderTransport({ state: 'recording', sessionId: 's', startedAt: STARTED_AT })
-    expect(text('[data-videorc-session-status]')).toBe('Recording')
-    expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
     expect(container.querySelector('[data-slot=session-stop-note]')).toBeNull()
     expect(text('button')).toContain('Stop recording')
   })
@@ -152,7 +140,6 @@ describe('SessionTransport start reasons (plan 174 S1.1, B-9)', () => {
           startRequestPending: false,
           recordBlockedReason: 'Pick a screen or a camera first.',
           liveStreamBlockedReason: null,
-          status: null,
           onRecord: noop,
           onLiveStream: noop,
           onStop: noop
@@ -161,7 +148,7 @@ describe('SessionTransport start reasons (plan 174 S1.1, B-9)', () => {
     )
     const buttons = [...container.querySelectorAll('button')]
     const record = buttons.find((button) => button.textContent?.includes('Record'))
-    const stream = buttons.find((button) => button.textContent?.includes('Go Live…'))
+    const stream = buttons.find((button) => button.textContent?.includes('Go Live'))
     expect(record?.disabled).toBe(true)
     expect(record?.getAttribute('title')).toBeNull()
     const wrapper = record?.closest<HTMLElement>('[data-slot="disabled-reason"]')
@@ -175,10 +162,11 @@ describe('SessionTransport start reasons (plan 174 S1.1, B-9)', () => {
   })
 })
 
-// Plan 174 S2.2 (D3): one verb pair. Record shows its Space key; Go Live…
-// opens the Go Live dialog; each button runs its own start.
+// Plan 174 S2.2 (D3): one verb pair. Record shows its Space key; Go Live
+// opens the Go Live dialog (no "…" on this button, plan 235 D2); each button
+// runs its own start.
 describe('SessionTransport start labels (plan 174 S2.2)', () => {
-  it('reads Record with its Space key and Go Live…, never Stream', () => {
+  it('reads Record with its Space key and Go Live, never Stream', () => {
     const onRecord = vi.fn()
     const onLiveStream = vi.fn()
     act(() =>
@@ -190,7 +178,6 @@ describe('SessionTransport start labels (plan 174 S2.2)', () => {
           startRequestPending: false,
           recordBlockedReason: null,
           liveStreamBlockedReason: null,
-          status: null,
           onRecord,
           onLiveStream,
           onStop: noop
@@ -206,7 +193,7 @@ describe('SessionTransport start labels (plan 174 S2.2)', () => {
         ?.textContent?.replace(key?.textContent ?? '', '')
         .trim()
     ).toBe('Record')
-    expect(buttons[1]?.textContent?.trim()).toBe('Go Live…')
+    expect(buttons[1]?.textContent?.trim()).toBe('Go Live')
     expect(container.textContent).not.toMatch(/\bStream\b/)
 
     act(() => buttons[0]?.click())
@@ -217,18 +204,18 @@ describe('SessionTransport start labels (plan 174 S2.2)', () => {
 })
 
 // Plan 208 S4 (D8): Record and the stop button are metallic red, unlit at
-// idle and lit while the session runs; Go Live… is the chrome primary.
+// idle and lit while the session runs; Go Live is the chrome primary.
 describe('SessionTransport materials (plan 208 D8)', () => {
   const button = (label: string): HTMLButtonElement | undefined =>
     [...container.querySelectorAll('button')].find((candidate) =>
       shown(candidate)?.textContent?.includes(label)
     )
 
-  it('draws Record unlit and Go Live… as the chrome primary', () => {
+  it('draws Record unlit and Go Live as the chrome primary', () => {
     renderTransport({ state: 'idle' }, { active: false })
     expect(button('Record')?.dataset.variant).toBe('record')
     expect(button('Record')?.hasAttribute('data-lit')).toBe(false)
-    expect(button('Go Live…')?.dataset.variant).toBe('default')
+    expect(button('Go Live')?.dataset.variant).toBe('default')
   })
 
   it('lights the stop button while a recording or livestream runs', () => {
@@ -267,7 +254,6 @@ describe('SessionTransport record button (videorc-ui plan 005)', () => {
             startRequestPending: false,
             recordBlockedReason: null,
             liveStreamBlockedReason: null,
-            status: null,
             onRecord: noop,
             onLiveStream: noop,
             onStop: noop,
@@ -312,7 +298,7 @@ describe('SessionTransport record button (videorc-ui plan 005)', () => {
     expect(document.activeElement).toBe(button)
   })
 
-  it('keeps Record off while a Go Live… start is in flight', () => {
+  it('keeps Record off while a Go Live start is in flight', () => {
     renderBare({ startRequestPending: true, startingLivestream: true })
     expect(record()?.disabled).toBe(true)
     expect(record()?.hasAttribute('data-lit')).toBe(false)
@@ -332,41 +318,6 @@ describe('SessionTransport record button (videorc-ui plan 005)', () => {
   })
 })
 
-// Plan 174 S1.3 (B-17): recording, on air and trouble no longer read as the
-// same red chip, and a blocked start no longer reads a green Ready.
-describe('SessionStatusPill (plan 174 S1.3)', () => {
-  const badge = (): Element | null =>
-    container.querySelector('[data-videorc-session-status] [data-slot=status-badge]')
-  const iconCount = (): number => badge()?.querySelectorAll('svg').length ?? 0
-
-  it('leads recording, on air and trouble with an icon, and idle with a dot', () => {
-    renderTransport({ state: 'recording', sessionId: 's', startedAt: STARTED_AT })
-    expect(iconCount()).toBe(1)
-    renderTransport({ state: 'streaming', sessionId: 's', streamUrl: STREAM_URL })
-    expect(iconCount()).toBe(1)
-    renderTransport({ state: 'failed' }, { active: false })
-    expect(text('[data-videorc-session-status]')).toBe('Failed')
-    expect(badge()).toHaveProperty('dataset.tone', 'error')
-    expect(iconCount()).toBe(1)
-    renderTransport({ state: 'idle' }, { active: false })
-    expect(text('[data-videorc-session-status]')).toBe('Ready')
-    expect(iconCount()).toBe(0)
-  })
-
-  it('reads a blocked start as a neutral Not ready', () => {
-    renderTransport({ state: 'idle' }, { active: false, startBlocked: true })
-    expect(text('[data-videorc-session-status]')).toBe('Not ready')
-    expect(badge()).toHaveProperty('dataset.tone', 'neutral')
-  })
-
-  it('says Videorc is reconnecting when the backend drops, not Backend offline', () => {
-    renderTransport({ state: 'idle' }, { active: false, wsStatus: 'closed' })
-    expect(text('[data-videorc-session-status]')).toBe('Videorc is reconnecting…')
-    expect(badge()).toHaveProperty('dataset.tone', 'warn')
-    expect(iconCount()).toBe(1)
-  })
-})
-
 // Plan 174 S3.1: Go Live reads "Checking…" from the first click (B-7), and a
 // stop that overran its finalize window explains Force stop (B-16).
 describe('SessionTransport in flight (plan 174 S3.1)', () => {
@@ -381,7 +332,6 @@ describe('SessionTransport in flight (plan 174 S3.1)', () => {
           goLivePending: true,
           recordBlockedReason: null,
           liveStreamBlockedReason: null,
-          status: null,
           onRecord: noop,
           onLiveStream: noop,
           onStop: noop
@@ -417,7 +367,6 @@ describe('SessionTransport in flight (plan 174 S3.1)', () => {
             startRequestPending: false,
             recordBlockedReason: null,
             liveStreamBlockedReason: null,
-            status: null,
             onRecord: noop,
             onLiveStream: noop,
             onStop: noop
@@ -463,7 +412,6 @@ describe('SessionTransport reason line (plan 174 S3.2)', () => {
                 'Enable at least one livestream destination before streaming.',
               blockedReason: 'Enable at least one livestream destination before streaming.',
               blockedJump: { label: 'Open Livestream', to: 'live' },
-              status: null,
               onRecord: noop,
               onLiveStream: noop,
               onStop: noop
@@ -510,7 +458,6 @@ it.each([false, true])(
             startRequestPending: false,
             recordBlockedReason: null,
             liveStreamBlockedReason: null,
-            status: null,
             onRecord,
             onLiveStream,
             onStop,
