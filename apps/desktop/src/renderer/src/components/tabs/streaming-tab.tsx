@@ -80,7 +80,7 @@ import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
 import { lockAlertAction, unlockActionForReason } from '@/lib/lock-view'
 import { destinationSetup } from '@/lib/destination-readiness'
 import { destinationLabel } from '@/lib/platform-copy'
-import { otherDestinationsLine } from '@/lib/stream-target-notices'
+import { destinationsOnAir, otherDestinationsLine } from '@/lib/stream-target-notices'
 import { destinationStateLabel } from '@/lib/state-labels'
 import { broadcastThumbnailHint } from '@/lib/broadcast-info'
 import { streamLanguageOptions } from '@/lib/stream-languages'
@@ -294,7 +294,7 @@ function StreamingSetup({
             ) : null}
             {isSessionActive && problems.length > 0 && !dismissed ? (
               <StreamFailureBanner
-                onAir={streamTargets.filter((runtime) => runtime.state === 'live').length}
+                onAir={destinationsOnAir(streamTargets)}
                 problems={problems}
                 onDismiss={() => setDismissedKey(problemsKey)}
                 onEndLivestream={() => void requestStopSession('failure-banner')}

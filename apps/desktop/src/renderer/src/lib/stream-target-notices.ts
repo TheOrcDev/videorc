@@ -22,6 +22,13 @@ export function otherDestinationsLine(othersOnAir: number): string | null {
     : `The other ${othersOnAir} destinations keep streaming.`
 }
 
+/** How many destinations are on air: this computer's cloud feed is none. */
+export function destinationsOnAir(
+  targets: readonly Pick<StreamTargetRuntime, 'targetId' | 'state'>[]
+): number {
+  return targets.filter((target) => target.state === 'live' && !isCloudFeedTarget(target)).length
+}
+
 /** How many destinations besides `targetId` are on air in this snapshot. */
 export function otherDestinationsOnAir(
   targets: readonly Pick<StreamTargetRuntime, 'targetId' | 'state'>[],
