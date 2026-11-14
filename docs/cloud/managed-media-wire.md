@@ -1,6 +1,6 @@
 # Managed media: the wire contract (plan 234)
 
-Three lanes build against this file and do not talk to each other: the web server lane, the web program-page lane and the desktop lane. Where two lanes meet, this file is the only source. Change it first, then the code.
+Three lanes built against this file: the web server lane, the web program-page lane and the desktop lane. This revision records the code at the heads below. Where two lanes meet, this file is the only source. Change it first, then the code.
 
 No prices, costs, keys or account ids belong here. This repo is public.
 
@@ -10,17 +10,17 @@ No prices, costs, keys or account ids belong here. This repo is public.
 | --- | --- |
 | ◇ | Decided here, because the plan was silent or vague. Listed in section 17 |
 | ⚠ | Not measured in Phase 0. The lane that builds it proves it first |
-| **new** | A field today's desktop does not have. Always additive and optional |
+| **new** | An additive managed-media field or route, compared with the node contract. Field optionality is stated where used |
 
 | Short name | Source |
 | --- | --- |
-| D | Desktop repo at `0c977b2ca`. Bare file names are under `crates/videorc-backend/src/` |
-| W | Web repo `main` at `acc7c54d`. Bare file names are under `lib/cloud/` |
+| D | Desktop repo at `90e9e6b92`. Bare file names are under `crates/videorc-backend/src/` |
+| W | Web repo at `3f74a19a`. Bare file names are under `lib/cloud/` |
 | R | Runner repo `main`, `docs/wire-notes.md` unless a path is given |
 | P0 | `docs/cloud/spike-livekit-managed-2026-11.md` (the Phase 0 note) |
 | SDK | `livekit-server-sdk` 2.19.2 with `@livekit/protocol` 1.51.0 |
 
-SDK field names were read from the copy Phase 0 ran. The web repo's own `node_modules` is not installed on the machine this was written on.
+SDK field names come from Phase 0 and the checked web source. This revision checks code, not a new LiveKit measurement.
 
 Unchanged conventions: instants are RFC 3339 UTC with milliseconds and durations are seconds (R:7-11). Orientations are `horizontal` and `vertical` on the desktop wire (D `cloud_show.rs:3888-3893`) and `h` and `v` toward LiveKit and the page. Errors are `{ "error": { "code", "message" } }` and every answer is `Cache-Control: private, no-store` (W `shows-route.ts:117-130`). A show id is `sh_` plus 22 base62 characters (W `shows.ts:8`).
 
@@ -50,9 +50,9 @@ Unchanged conventions: instants are RFC 3339 UTC with milliseconds and durations
 | `allowance` | `buildCloudAllowanceBlock` | Same |
 
 - The desktop feeds `{serverUrl}/{streamKey}` (D `recording.rs:27762-27766`), which is how Phase 0 addressed an ingress. Every Phase 0 ingress URL was `rtmps` with a DNS host, so `ingest_url_problem` (D `cloud_show.rs:956-986`) passes it as written.
-- ◇ **`url` and `token` stay as empty strings**, not absent. `ShowControl` needs both (D `cloud_show.rs:643-648`). A build without web control that slips past section 12 then fails its socket connect, ends the show and streams directly (D `cloud_show.rs:3114-3130`). With the fields absent its parse would fail and leave the show open.
+- ◇ **`url` and `token` stay as empty strings**, not absent. `ShowControl` needs both (D `cloud_show.rs:643-648`). A build without web control that slips past section 12 fails its socket connect, ends the show and streams directly (D `cloud_show.rs:3114-3130`). With the fields absent its parse would fail and leave the show open.
 - No `vcs1` show token is minted. A managed create must not need `VIDEORC_CLOUD_SHOW_SIGNING_KEY`, which fails closed today (W `shows-route.ts:323-331`).
-- Desktop: `ShowControl` gains `kind: Option<String>` with `#[serde(default)]`. The type only deserializes; if it ever serializes, add `skip_serializing_if = "Option::is_none"`.
+- Desktop: `ShowControl.kind` is `Option<String>` with `#[serde(default)]`. A missing kind keeps the node path.
 - **A create answer without `control.kind` means the node socket.** Any value other than `"web"` is a transport this build does not know: the desktop ends the show and streams directly with `cloud-node-unreachable`.
 
 **Talk show.** The same, with `"kind": "talk"`, `"ingest": []` (no ingress, D6) and today's three blocks (W `shows-route.ts:600-610`), whose types stay (D `cloud_talk.rs:75-114`):
@@ -72,12 +72,14 @@ Create errors added for a managed show:
 
 | Status | `error.code` | When | Desktop |
 | --- | --- | --- | --- |
-| 422 | `cloud-quality` ◇ | An output is above 1920×1080 pixels or above 30 fps (D12) | **new** mapping to `CloudFallbackReason::CloudQuality` (D `cloud_show.rs:291`): direct, with the existing notice |
+| 422 | `cloud-quality` ◇ | ◇ A solo or test output is above 1920×1080 pixels or above 30 fps (D12). Talk creates are exempt: they have no ingress | **new** mapping to `CloudFallbackReason::CloudQuality` (D `cloud_show.rs:291`): direct, with the existing notice |
 | 503 | `cloud-full` | Open managed shows are at the cap (section 11), or LiveKit answers `resource_exhausted` (an object limit, or HTTP 429 "egress minutes exceeded" once a plan's allowance is used) | Existing (D `cloud_show.rs:825`) |
 | 503 | `cloud-node-unreachable` | LiveKit did not answer, or a call failed | Existing (D `cloud_show.rs:826`) |
 | 503 | `cloud-disabled` | A managed secret of section 10 is missing | Existing |
 
-A create that fails after LiveKit objects exist deletes them, then ends the row with the code as its end reason, as today (W `shows-route.ts:536-541`).
+◇ The show row and its media row are written in one database batch, with `state_json.createPending: true`. The marker is cleared only after the LiveKit create succeeds. The create route has `maxDuration: 60`; its LiveKit calls share a 40 s deadline and failed-create cleanup a 52 s deadline, both from the create's start. A failed create deletes its LiveKit objects and ends the row with its failure code.
+
+◇ A `createPending` row still pending at 60 s is abandoned. For a missing media row, the state route acts immediately; the reaper waits until the create is 60 s old. Both end abandoned creates as `cloud-node-unreachable` and clean up their objects. This create failure counts toward no hourly limit (W `media/lifecycle.ts:49-66`, `media/reconcile.ts:425-431`).
 
 ## 2. Desktop → web routes
 
@@ -85,8 +87,9 @@ Rules for every route below:
 
 - Auth is the desktop's bearer session, as on the other cloud routes (D `videorc_api.rs:3501-3517`). A show that is not the caller's answers 404, as End does (W `shows-route.ts:687-695`).
 - Routes that act on an existing show work while `VIDEORC_CLOUD_DISABLED` is on, like End and current (W `shows-route.ts:616-620`).
-- The desktop retries once, 1 s later, after a network error or a 5xx. It never retries a 4xx. Every route is safe to repeat.
-- The web gives each LiveKit call 8 s, the node's budget today (W `agent-client.ts:17`). LiveKit's error text is never forwarded (section 8.5).
+- ◇ A desktop intent retries at most once, 1 s later, after a network error or a 5xx, never a 4xx. Both attempts and any wait for an earlier destination send share one deadline: 22 s for ordinary control, 7 s for `destinations.set` without `replace: true` (Reconnect and automatic resend). These fit inside the 25 s provider and 10 s Reconnect RPC watchdogs. A retry starts only with at least 3 s left: the delay and 2 s of useful work (D `cloud_control_web.rs:291-322`). Every route is safe to repeat.
+- The web gives each LiveKit call 8 s. LiveKit's error text is never forwarded (section 8.5).
+- ◇ Destinations, `legs/end`, recording and End share a 45 s deadline for their LiveKit calls, inside `maxDuration: 60`. Calls neither start nor keep waiting past it. Destinations, recording and `legs/end` write completed work before answering 503 `cloud-media-unavailable` for an unfinished operation. End still confirms the ended row with `{ ok: true }` and leaves failed teardown to the reaper. The show lease waits at most 5 s and expires after 65 s (section 9). The desktop's shorter deadline can expire before the web finishes; a missing answer does not prove no change occurred.
 
 | Status | Common `error.code` | Meaning |
 | --- | --- | --- |
@@ -142,6 +145,8 @@ Body mirrors `HandoverDestination` (D `cloud_show.rs:1196-1203`) and the frame a
 | `url` | At most 4,096 bytes (R same file `:97`), then the guard of section 8.1 |
 | `replace` | Optional boolean. Sent only when true, as today |
 
+◇ `id`, `platform` and `label` must be plain stored text: a NUL, any C0 or C1 control character, DEL, a lone surrogate or `://` gives 400 `invalid-request`. The message names the field, never its value.
+
 Success: 200 `{ "ok": true, "rev": 12, "refused": [ { "id": "custom-1", "code": "destination-trailing-slash" } ] }`.
 
 - `refused` is omitted when empty. It names ids and codes, never a URL.
@@ -158,17 +163,24 @@ What the web does per destination. This is the runner's upsert (R:163-177), limi
 | Known, different leg ref | Any, without `replace` | Refused: `destination-changed`. Send the full list with `replace` |
 | Not in the list | Any, without `replace` | Nothing |
 | `replace: true` | Every running leg of the orientation is named with the same ref | The upsert above, nothing more |
-| `replace: true` | Some running leg is not named, or is named with another ref | `StopEgress`, then `StartEgress` with this request's list. Every platform of that orientation reconnects; a recording on that egress carries on as a new take (section 13.2) |
+| `replace: true` | Some running leg is not named, or is named with another ref | `StopEgress`, then `StartEgress` with this request's list. Every platform of that orientation reconnects. The current separate recording egress carries on. Only the disabled shared-egress path needs a new take (section 13.2) ◇ |
 
-Idempotent: the same list sent twice changes nothing on a leg that runs. Two requests at once for one show run one after the other (the row lock of section 9).
+Idempotent: the same list sent twice changes nothing on a leg that runs. Two requests at once for one show take the lease of section 9.
+
+◇ Before `StartEgress`, the web writes `startInFlight` on the orientation. If the answer is lost, the next lease holder reconciles LiveKit's egresses and stops unnamed ones before clearing the marker. A start with an unknown outcome keeps the marker.
+
+◇ The desktop stamps retained destination lists with an internal generation. End livestream and Stop invalidate it before waiting for a PUT already in flight, then send their stop after that PUT. Stale retries and automatic resends cannot revive the list. Only a fresh explicit destinations intent reopens sending. The generation never enters the HTTP body (D `cloud_control_web.rs:1368-1401`, `cloud_talk.rs:1836-1839`, `cloud_show.rs:3924-3959`).
+
+◇ A side whose egress died by itself three times in 10 minutes refuses destination requests with 503 `cloud-media-unavailable` for 10 minutes from the third death (section 15).
 
 ### 2.3 `POST …/legs/end`
 
 Body, **new**, additive and optional: `{ "destinations": [ { "id": "youtube-main", "url": "rtmps://…" } ] }`.
 
-- Today's intent has no body (R:227-240). The desktop sends the list it holds in memory (`ActiveShow.destinations`, D `cloud_show.rs:1302`) and clears it only after the answer (D `cloud_talk.rs:1636-1641`).
+- The node intent has no body (R:227-240). The desktop sends the list it holds in memory (`ActiveShow.destinations`, D `cloud_show.rs:1302`) and clears it only after the answer (D `cloud_talk.rs:1636-1641`).
 - Talk shows only. A solo show: 409 `cloud-legs-end-solo`, as the runner refuses it (R:279-285).
-- Per orientation: an egress that only streams is stopped. An egress that also records has its URLs removed with `UpdateStream` when the body names every live leg; otherwise it is stopped and a segments-only egress starts, so the recording carries on as a new take.
+- ◇ The current path stops each streaming egress and leaves the separate recording egress running. It clears every leg, failed and refused legs included. A malformed JSON body or invalid body shape gives 400 `invalid-request`; no body is valid.
+- The disabled shared-egress path (section 6.5) removes its URLs with `UpdateStream` when the body names every live leg; otherwise it stops and starts a segments-only egress as a new take.
 - Afterwards `legs` is `[]`, `destinationsSet` stays `true` and `phase` stays as it was (R:255-268). Success: `{ "ok": true, "rev": 13 }`, also with no legs left (R:269-270).
 
 ### 2.4 `PUT …/hold-image`
@@ -176,7 +188,7 @@ Body, **new**, additive and optional: `{ "destinations": [ { "id": "youtube-main
 Body: `{ "pngBase64": "<standard base64>" }`, today's intent field for field (D `cloud_show.rs:2765`) ◇.
 
 - Solo shows. A talk show: 409 `cloud-hold-image-talk` (it uses the `hold` overlay slot, section 6.3).
-- The decoded bytes are a PNG of at most 2 MiB (2,097,152 bytes) and 1,920 pixels a side. The desktop resizes first: today it allows 8 MiB (D `cloud_show.rs:106`, `:3753`).
+- The decoded bytes are a PNG of at most 2 MiB (2,097,152 bytes) and 1,920 pixels a side. ◇ The desktop fits the image before this request, down to 2 MiB and 1,920 pixels a side; a node still accepts 8 MiB (D `cloud_control_web.rs:73-79`).
 - 413 `hold-image-too-large`. 400 `hold-image-invalid` (not a PNG).
 - Success: `{ "ok": true, "version": "<12 hex of the SHA-256>" }`. `state.holdImageSet` becomes `true`.
 - Best effort, as today (D `cloud_show.rs:2755-2769`): a refusal leaves the default card and never fails a start. There is no clear; the image is deleted when the show ends.
@@ -194,7 +206,9 @@ Body is `CloudStage` as it serializes (D `cloud_talk.rs:478-491`), the fields of
 | `layout` | `solo`, `side-by-side`, `screen-people` or `spotlight` (D `cloud_talk.rs:329-336`) |
 | `onStage` | At most 8 identities (D `cloud_talk.rs:56`), each 1 to 128 characters, no control character (D `cloud_talk.rs:499-501`) |
 | `spotlight`, `screen`, `hostShape` | Optional. `hostShape` is `rounded` or `circle` |
-| Each identity | `host:<showId>` or a guest id (section 5.5). Anything else: 422 `invalid-stage` |
+| Each identity | ◇ `host:<showId>` or `g_` plus 22 base62 characters. A well-shaped string outside those identities: 422 `invalid-stage`. The check is syntactic; it does not look up guest membership in the room (W `media/stage.ts:126-143`, `media/room.ts:37-43`) |
+
+◇ A bad body shape, layout, identity shape or optional field gives 400 `invalid-request`.
 
 The web writes it to the room's metadata (section 6.1) and answers `{ "ok": true, "rev": 14 }`. `state.room.stageSet` is then `true`. A solo show: 409 `cloud-stage-solo`.
 
@@ -207,12 +221,12 @@ Body: `{ "on": true }`.
 | 200 `{ "ok": true, "rev": 15 }` | Started, stopped, or already in that state |
 | 409 `cloud-recording-solo` | Not a talk show |
 | 409 `cloud-recording-no-target` | The show has no recording target (today's `problem: "no-target"`, R:724-726) |
-| 409 `cloud-recording-on-air` ◇ | `on: false` while the recording shares its egress with live streams (section 13.2) |
+| 409 `cloud-recording-on-air` ◇ | Only the disabled shared-egress path, while live streams share the recording egress. Unreachable in the current app (section 13.2) |
 | 503 `cloud-full`, `cloud-media-unavailable` | LiveKit refused or failed |
 
 ### 2.7 `POST …/end` and `POST …/lost`
 
-- **End.** Unchanged request and answer: `{ "ok": true }`, also for a show already over (W `shows-route.ts:700-702`). The web calls `StopEgress` for each active egress, `DeleteIngress` for each ingress and `DeleteRoom`, deletes the hold image, and ends the row `host-ended`. A LiveKit call that fails is logged and left to the reconcile pass.
+- **End.** Unchanged request and answer: `{ "ok": true }`, also for a show already over. ◇ The web ends the row `host-ended` before teardown; there is no stored `ending` phase. It marks each egress as stopped by the web before `StopEgress`, then deletes the ingresses, room and hold image. Late webhooks cannot count this as a restart. A failed cleanup call is logged by code and left to the reconcile pass (W `media/lifecycle.ts:234-249`).
 - **Lost.** Unchanged request (`LostShowReport`, D `cloud_show.rs:693-702`) and answer (`{ "show": … }`, D `cloud_show.rs:706-710`). The web asks LiveKit instead of a node (section 15).
 
 ## 3. `GET …/state?since=<rev>`
@@ -239,8 +253,8 @@ The answer is `{ "rev", "state" }` ◇. `state` deserializes as `RunnerState` wi
 | `liveSeconds` | D `cloud_show.rs:1063-1064` | Seconds since the first on-air beacon, hold included (R:13-18). Worked out at answer time |
 | `feeds[]` | `CloudFeedStatus`, D `cloud_show.rs:344-351` | One per ingress. `connected` from `ingress_started` and `ingress_ended`. `kbps` from `ListIngress`, cached 2 s, omitted when LiveKit reports 0 ⚠ |
 | `legs[]` | `RunnerLeg`, D `cloud_show.rs:1121-1137` | Section 8.3. `legs[].resend` is **new** and optional (section 8.4) |
-| `destinationsSet` | D `cloud_show.rs:1071-1072`, read at `:2111-2114` | `true` while a streaming egress is `STARTING` or `ACTIVE`, or after `legs/end`. `false` when every streaming egress is gone without the host asking. It is already `true` in the `rev` a `PUT …/destinations` answer names, not first at `egress_started`: otherwise the desktop reads a dead egress and sends the list again |
-| `restarts` | D `cloud_show.rs:1075-1076`, read at `:2115-2117` | Times a streaming egress ended by itself while the show was open. Not the count of egresses started ◇. An egress the web stopped itself (`replace`, `legs/end`, End) never counts |
+| `destinationsSet` | D `cloud_show.rs:1071-1072`, read at `:2111-2114` | `true` while a streaming egress is `STARTING` or `ACTIVE`, or after `legs/end`. ◇ `true` also after all destinations failed or the restart cap fired; otherwise `false` when every streaming egress is gone without the host asking. It is already `true` in the `rev` a `PUT …/destinations` answer names, not first at `egress_started`: otherwise the desktop reads a dead egress and sends the list again |
+| `restarts` | D `cloud_show.rs:1075-1076`, read at `:2115-2117` | Times a streaming egress ended by itself while the show was open, except one whose every stream was `FAILED` ◇. Not the count of egresses started. An egress the web stopped itself (`replace`, `legs/end`, End) never counts |
 | `holdImageSet` | D `cloud_show.rs:1079-1080` | A hold image is stored |
 | `desktopConnected` | Not read by the desktop (R:316-322) | A state poll in the last 15 s |
 | `program` | `CloudProgram`, D `cloud_show.rs:1096-1115` | The primary page's beacons (section 5.3). `avSkewMs` is never sent (D15) |
@@ -274,6 +288,8 @@ The answer is `{ "rev", "state" }` ◇. `state` deserializes as `RunnerState` wi
 
 - ◇ **Why a 200 at the timeout, and why the short waits.** Clocks and counters are right only at the moment of an answer. The runner sends a state at least every 2 s, and the watchdog reads counters that must pass 3, 10 and 20 s (D `watchdog/checks.rs:29`, `:59-60`). The short wait gives the desktop that cadence while something is wrong and stays quiet otherwise. A 200 is also what the desktop's reader takes (D `videorc_api.rs:1996`) and what the guests list does (W `talk-route.ts:346-386`).
 - `desktopConnected`: every poll stamps the show, at most once every 5 s. The flag is true while the stamp is under 15 s old.
+
+◇ The normal state answer budgets its wait and LiveKit reads to 30 s, under the desktop's 35 s timeout and the route's `maxDuration: 40`. Each participant or bitrate read has at most 2 s, clipped to the remaining budget; a read due with no time left is skipped. Abandoned-create and test-show teardown currently use their ordinary per-call budgets outside this polling budget (W `managed-route.ts:769-784`, `:833-865`).
 
 **The desktop's poll loop.** The request timeout is 35 s, as the guests poll (D `videorc_api.rs:28-29`). After a 200 the next poll starts 250 ms later with `since` set to the answer's `rev`. After a failure it waits 1, 2, 4, 8, then 15 s (D `cloud_show.rs:92`), reset by a 200. The first poll after a failure carries no `since`, so the answer comes at once and the status can read connected again. A state whose `rev` is below the `rev` of a route answer the desktop already holds is dropped once. `CloudStatus.connected` is true after a 200 and false after the first failed poll. There is no `hello`, `ack` or `ping`: a route's own answer is its ack.
 
@@ -310,13 +326,16 @@ A show with both orientations has two pages. ◇ `phase`, `hold`, `program` and 
 | `endReason` | When | Desktop message |
 | --- | --- | --- |
 | `host-ended` | `POST …/end` | — |
-| `no-feed` | No feed 60 s after the create | D `cloud_show.rs:2174` |
+| `no-feed` | ◇ No feed 60 s after a solo or test create; never a talk show | D `cloud_show.rs:2174` |
 | `hold-limit` | The room closed by `departure_timeout` during a hold, or the reaper found a hold past its limit | D `cloud_show.rs:2172` |
 | `max-show` | 11 h 55 min, or 30 s after a test show's first frame | D `cloud_show.rs:2173` |
 | `egress-lost` ◇ | No streaming egress for 60 s on a solo show, and no desktop to re-send | Generic |
-| `media-lost` | The lost route found no room (section 15) | Generic |
+| `media-lost` ◇ | The lost route confirmed no room and no active egress, or silence twice (section 15) | Generic |
 | `room-finished` | `room_finished` outside a hold (W `livekit-webhook.ts:47`) | Generic |
 | `expired` | The reaper, past `expiresAt` | Generic |
+| `cloud-node-unreachable` ◇ | An abandoned create (section 1) | Create failure |
+
+◇ Talk creates keep the existing 600 s empty timeout, shows-per-hour limit and invite expiry. The invite is revoked when the show ends. There is no `runner-silent` rule for a managed show and no `no-feed` end for a talk room.
 
 ## 5. The program page
 
@@ -357,7 +376,7 @@ payload: { "v": 1, "show": "<showId>", "o": "h" | "v", "role": "program", "iat":
 Headers: `Authorization: Bearer <pt>`, `Content-Type: application/json`. At most 4 KiB.
 
 ```json
-{ "v": 1, "show": "sh_…", "o": "h", "boot": "k3Jd82LmQp0a", "seq": 17, "at": 1794000000123,
+{ "v": 1, "show": "sh_…", "o": "h", "boot": "k3Jd82LmQp0a", "seq": 17, "at": 1794000000123, "joined": true,
   "phase": "hold", "hold": { "reason": "feed-lost", "sinceAt": 1794000000001 },
   "program": { "audioRmsDb": -100.0, "audioSilentSeconds": 3, "blackSeconds": 0, "frozenSeconds": 4 },
   "shown": { "onStage": ["host:sh_…", "g_…"], "screen": "g_…", "away": ["g_…"] } }
@@ -371,25 +390,28 @@ Headers: `Authorization: Bearer <pt>`, `Content-Type: application/json`. At most
 | `at` | The page's `Date.now()` |
 | `phase` | `waiting` (no frame yet), `live` or `hold` |
 | `hold` | Only with `phase: "hold"`. `sinceAt` is the page's `Date.now()` when its stall clock fired |
-| `program` | Optional. D15's fields, defined as the runner's (R:390-396). `frozenSeconds` only once it is 3 or more. Never `avSkewMs` |
-| `shown` | Talk shows only: the stage as drawn. `onStage` and `screen` map to `CloudRoomShown` (D `cloud_talk.rs:252-259`). `away` lists people on stage with no camera frame for 5 s (R:702) |
+| `program` | ◇ Optional, each field optional. D15's fields, defined as the runner's (R:390-396). First appears 1 to 2 s after the solo feed's first frame, or after the talk stage is drawn. `frozenSeconds` only during a hold, once it is 3 or more. Never `avSkewMs` |
+| `shown` | ◇ Talk shows only. `onStage` is the layout as drawn, so it can be shorter than the stage; `screen` is present only for a drawn screen tile. `away` lists drawn people with no camera frame for 5 s and people dropped by the 60 s re-flow. An undrawn person beyond the layout's six-person limit is absent from `away` until re-flowed (W `program/stage.ts:331-344`) |
+| `joined` | ◇ Optional boolean. The page sends `true` only while connected to the room with its overlay handlers registered; absent at load and while rejoining. Counts a join once per `boot` |
 | `rec` | `true` on a recording-only page |
 
 When the page sends one:
 
-1. At load, once: `seq` 1 with `phase: "waiting"`.
-2. At once when `phase`, `hold` or `shown` changes, or a program counter leaves 0 or returns to 0.
+1. ◇ An ordinary page sends at load: `seq` 1 with `phase: "waiting"`. A recording-only page follows rule 5 instead.
+2. ◇ At once when `phase`, `hold`, `shown` or `joined` changes, or a program counter leaves 0 or returns to 0.
 3. Never more than one a second. Changes inside that second fold into the next beacon.
 4. Every 10 s otherwise, with the current values.
-5. A recording-only page (`rec=1`) sends its first beacon and no other.
+5. ◇ A recording-only page (`rec=1`) waits until it has joined, then sends one beacon with `joined: true`. It retries an unanswered beacon, but sends no heartbeat.
+
+◇ A network error or 5xx retries at 1, 2, 4, 8, then every 10 s, with a new `seq` and the latest snapshot. Another 4xx is not retried; 410 stops the sender. Before sending, the page measures UTF-8 JSON bytes. Above 4 KiB it drops `shown` first, then `program`, keeping the page identity, phase, hold and `joined` (W `program/beacon.ts:167-195`).
 
 Answer: 200 `{ "ok": true, "holdImage": "<version>" }`, or `"holdImage": null`. The page fetches the image again when the version changes. Errors: 400 `invalid-beacon` (the shape, a size over 4 KiB, or `show` or `o` not the token's), 401 `program-token-refused`, 410 `cloud-show-ended` (the page stops sending).
 
 Stale and out-of-order beacons:
 
 - Same `boot`, `seq` not above the stored one: dropped, answered 200.
-- A new `boot`: accepted. It becomes the page of that orientation, `room.pageJoins` grows by one, and every later beacon from the old `boot` is dropped.
-- A beacon with `rec: true` only grows `pageJoins`. It never changes `phase`, `hold`, `program` or `shown`.
+- ◇ A new ordinary `boot` becomes the page of that orientation; beacons from remembered old boots are dropped. `room.pageJoins` grows once, at this boot's first beacon with `joined: true`, never at its load beacon. Losing and rejoining the room in the same boot does not count again.
+- ◇ A beacon with `rec: true` only grows `pageJoins`, once per remembered recording boot and only with `joined: true`. It never replaces the ordinary page or changes `phase`, `hold`, `program` or `shown`.
 - A counter above 0 is stored with its arrival time. A state answer adds the whole seconds since then.
 - No primary beacon for 25 s: `program` and `room.shown` leave the state.
 
@@ -408,16 +430,18 @@ Stale and out-of-order beacons:
 | Anything else, `runner:` included | Not ours | Ignored |
 
 - A talk page subscribes to the camera and microphone of everyone on stage and to the screen share the stage names, never to anyone backstage (R:747-752).
-- The web's webhook must accept `feed-h`, `feed-v` and `EG_…` without the "identity we never minted" error it logs today (W `livekit-webhook.ts:141-145`), and must stop ignoring shows that are not talk shows (W same file `:132`).
+- ◇ Managed webhooks handle solo and test shows too. `feed-h`, `feed-v` and `EG_…` are media identities, not foreign people, and write no room-minutes row (W `media/room.ts:46-52`, `media/webhook.ts`).
 
 ### 5.6 Console lines and hold timings
 
 | Line | Logged |
 | --- | --- |
 | `START_RECORDING` | Once per page load. Solo: at the feed's first decoded frame, never before. Talk: when the page has a stage from room metadata. A `rec=1` page follows the same rule |
-| `END_RECORDING` | When the room disconnects (P0: within 139 ms) |
+| `END_RECORDING` | ◇ Once, only after a room was joined: when it closes for good, the page is removed, the show is over, or the 60 s rejoin window expires. Never for an initial join failure |
 
 The egress sends nothing to a platform before `START_RECORDING`.
+
+◇ Initial join failures retry at 1, 2, 4, 8, then every 10 s while the page lives and the show is not over. An unexpected disconnect after a successful join gets a 60 s rejoin window with the same backoff; a solo page holds through it. Explicit room end or removal is final. A successful rejoin keeps the same boot and does not log `START_RECORDING` again (W `program/source.ts:65-98`, `:122-222`).
 
 | Hold step (D5) | Value |
 | --- | --- |
@@ -444,7 +468,7 @@ From P0, "What the program page must do". The page lane keeps each one and tests
 - [ ] Decide the hold on a clock, not when work finishes.
 - [ ] Count decoded frames as well as frame callbacks while covered.
 - [ ] Load the font itself. Do not rely on the recorder having it.
-- [ ] The limiter is an AudioWorklet with a 5 ms look-ahead at −1 dBFS.
+- [ ] ◇ The talk mix limiter is an AudioWorklet with a 5 ms look-ahead at −1 dBFS. The solo page plays one feed without a limiter; its Web Audio meter listens beside the sound path.
 - [ ] Play each remote voice in a media element too, or Chrome feeds Web Audio nothing.
 - [ ] Log `START_RECORDING` exactly once.
 
@@ -466,7 +490,7 @@ From P0, "What the program page must do". The page lane keeps each one and tests
 | Field | Managed source |
 | --- | --- |
 | `connected` | The room exists. True from the create to `room_finished` |
-| `participants[]` | `ListParticipants`, refreshed on each participant webhook and each state answer, cached 2 s. `role` from the identity, `onStage` from the metadata, `sinceMs` since the join |
+| `participants[]` | ◇ `ListParticipants`, refreshed on each participant webhook and a poll's first look, then again at the end of its wait, cached 2 s and subject to the 30 s budget. Host first, then join time and identity. `role` from the identity, `onStage` from metadata, `sinceMs` since the join |
 | `participants[].video`, `audio`, `muted`, `screen` | From each participant's tracks, defined as the runner's (R:705-707) |
 | `participants[].quality` | Always `"good"`. LiveKit's server does not report it (D `cloud_talk.rs:367-375`) |
 | `participants[].away`, `hostAway` | The primary page's `shown.away`. `hostAway` is also true while the host is not in the room |
@@ -476,22 +500,26 @@ From P0, "What the program page must do". The page lane keeps each one and tests
 | `shown` | The primary page's `shown`, without `away`. Absent while no page beacons |
 | `pageJoins` | **new**, optional. Section 6.3 |
 
+◇ Participants and their sanitized display names live in `state_json.participants` during the show, so joins, leaves and track changes can move `rev`. The host sorts first. Names are removed at End and by the reaper's ended-show scrub (section 15).
+
 `pageJoins` on the desktop: `RunnerRoomState.page_joins: Option<u32>` with `#[serde(default, skip_serializing_if = "Option::is_none")]`. It does not enter `CloudStatus`, so the renderer contract is untouched.
 
 ### 6.3 Overlays are byte streams
 
-Sent by the host's renderer on its own room connection. Nothing is stored.
+Sent by the host's renderer on its own room connection. ◇ The backend retains the current images in desktop memory; the web and page persist none.
 
 | Topic | Body | Attributes (all strings) |
 | --- | --- | --- |
-| `videorc.overlay.set` | The image bytes | `v`: `"1"`. `slot`: `card`, `takeover` or `hold`. `o`: `h` or `v`. `x`, `y`, `w`, `h`: 0 to 1 of the canvas. `ttl`: optional whole seconds |
+| `videorc.overlay.set` | The image bytes | `v`: `"1"`. `slot`: `card`, `takeover` or `hold`. `o`: `h` or `v`. `x`, `y`, `w`, `h`: 0 to 1 of the canvas. `ttl`: optional whole seconds, at least 1 ◇ |
 | `videorc.overlay.clear` | UTF-8 JSON `{ "v": 1, "slot": "…", "o": "…" }` | None |
 
 - The fields are today's `overlay.set` and `overlay.clear` (D `cloud_talk.rs:1675-1703`), slot by slot (D `cloud_talk.rs:667-683`), with the rect rule of D `cloud_talk.rs:802-812`.
-- The image is PNG, JPEG or WebP, at most 2 MiB ◇. The stream's MIME type says which. The page fits it inside the rect, centred (R:694-695). Slot `hold` is full frame and replaces the card; clearing it restores the default card (R:696-700).
+- The image is PNG, JPEG or WebP, at most 2 MiB ◇. The stream's MIME type says which. The page fits it inside the rect, centred (R:694-695). ◇ Slot `hold` covers the full talk frame as soon as it is set, above the other overlays. It stays until cleared or its TTL expires; clearing it reveals the stage. A talk page has no automatic hold card.
 - **The page accepts both topics only from `host:<showId>`.** Any other sender is dropped. A guest cannot send one anyway: guests have no `canPublishData` (W `livekit.ts:246`), and the host has it (W `livekit.ts:219`).
 - A page that joins later saw none of it. So when `room.pageJoins` grows, the desktop sends its current untimed overlays (`takeover`, `hold`) again ◇. A card with a `ttl` is not re-sent.
-- Over the size, a bad attribute or an unknown slot: dropped by the page.
+- ◇ Rect numbers are plain unsigned decimals, with 1 to 4 digits before the point and at most 12 after it; no signs or exponent. `ttl` is 1 to 7 digits and at least 1 second. The existing inside-canvas rect rule still applies.
+- ◇ The renderer uses livekit-client `streamBytes`, writes the bytes and closes the stream. A set must finish reading in 30 s; a clear in 5 s. A clear is processed independently, and a late set cannot overwrite a newer clear or set. Over the size, a bad attribute, unknown slot or stalled stream is dropped.
+- ◇ `cloud.room.overlay` hands the renderer `{ op: "set", showId, slot, orientation, rect, ttlSeconds?, mimeType, imageId }` or `{ op: "clear", showId, slot, orientation }`. It fetches set bytes from the backend's token-checked `GET /cloud/overlays/:imageId?token=…`. The backend fits images to 2 MiB and replays untimed overlays on a `pageJoins` increase or the host renderer's room reconnect (D `cloud_talk.rs:845-900`).
 
 ### 6.4 The return
 
@@ -503,13 +531,13 @@ Sent by the host's renderer on its own room connection. Nothing is stored.
 | --- | --- |
 | The room opens | None |
 | Go Live (`PUT …/destinations`) | One streaming egress per orientation that has a destination |
-| Record, nothing running | One egress per output with a segments output and an empty stream output ⚠ |
-| Record, already live | A second, segments-only egress per output (D10), on a `rec=1` page |
-| Go Live while recording on an egress with a stream output | `UpdateStream` adds the URLs. No new egress |
-| `legs/end`, Stop recording | Sections 2.3 and 13.2 |
+| Record, with or without a live stream ◇ | One separate segments-only egress per output, always on a `rec=1` page |
+| Go Live while recording ◇ | Starts a streaming egress. The recording carries on separately |
+| `legs/end` ◇ | Stops streaming, leaves recording and room open |
+| Stop recording ◇ | Stops the recording egress, leaves streaming and room open |
 | Close the room (`POST …/end`) | Every egress is stopped |
 
-⚠ An empty stream output was not run in Phase 0. If LiveKit refuses it, Record starts a segments-only egress and a later Go Live starts its own streaming egress.
+◇ Shared stream-and-segments egress is implemented behind `recordSharesFirstEgress`, but no app caller enables it. Only that disabled path starts Record with an empty stream output, adds URLs to it on Go Live, can need a new take on `replace` or `legs/end`, and can refuse Stop recording with `cloud-recording-on-air`. An empty stream output remains unmeasured ⚠ (W `media/recording.ts:329-332`).
 
 ## 7. The LiveKit calls
 
@@ -553,13 +581,15 @@ egress.startEgress(new StartEgressRequest({
     keyFrameInterval: 2,                  // seconds
     audioCodec: AudioCodec.AAC, audioBitrate: 160, audioFrequency: 48000 }) },
   outputs: [
-    new Output({ config: { case: "stream", value: new StreamOutput({ protocol: StreamProtocol.RTMP, urls }) } }),
-    new Output({                          // talk recording only
+    // Streaming request only; a separate recording request has segments only. ◇
+    ...(urls !== null ? [new Output({ config: { case: "stream",
+      value: new StreamOutput({ protocol: StreamProtocol.RTMP, urls }) } })] : []),
+    ...(segments ? [new Output({          // talk recording request only
       config: { case: "segments", value: new SegmentedFileOutput({
         filenamePrefix: `${takePrefix}seg`, playlistName: `${takePrefix}index.m3u8`,
         segmentDuration: 2 }) },          // always 2 s (D10)
       storage: new StorageConfig({ provider: { case: "s3", value: new S3Upload({
-        accessKey, secret, region, endpoint, bucket, forcePathStyle: true }) } }) }) ] }))
+        accessKey, secret, region, endpoint, bucket, forcePathStyle: true }) } }) })] : []) ] }))
 ```
 
 | Call | Request |
@@ -581,7 +611,7 @@ egress.startEgress(new StartEgressRequest({
 - ◇ Talk `maxParticipants` is today's value (W `shows-route.ts:412`) plus 4, for up to four recorders. ⚠ Cloud counts a recorder in `numParticipants` (P0); whether it counts against the cap is not measured. Solo rooms set no cap.
 - `ListEgress` fills only the older fields: stream results are in `result.value.info` and segment results in `result.value`. Direct answers and webhooks may fill `streamResults` and `segmentResults`. Every reader takes whichever is not empty (P0, S0.3).
 - `StartEgress` needs the project-wide `roomRecord` grant (P0, S0.4). Only the server's API key calls it. Host and guest tokens keep `roomRecord: false` (W `livekit.ts:214`).
-- The recording credential handed to LiveKit is the show branch's, with `storage:write` only, expiring with the show (P0, S0.5). Today's has read and write (W `recording-spaces.ts:247`); the managed provider mints its own.
+- ◇ Each recording take gets its own `storage:write` key pair on the show's branch, expiring 15 minutes after `show.expiresAt`. Only its revocation id and branch metadata are stored; its secret is never stored. Section 13.2 gives the revocation rules.
 
 **Webhooks.** The handler keeps its checks and its once-per-event-id rule (W `livekit-webhook.ts:99-119`). Every write stays idempotent. A lost webhook is repaired by the reconcile pass within a minute.
 
@@ -591,7 +621,7 @@ egress.startEgress(new StartEgressRequest({
 | `ingress_ended` | That feed's `connected` is false. Starts the 5 s hold fallback |
 | `egress_started` | The egress is known and `STARTING`. Its legs are `connecting` |
 | `egress_updated` | Status and stream results are matched to legs (section 8.3). The first `ACTIVE` starts the meter (section 14) |
-| `egress_ended` | The meter's last row. Legs go `ended`. A segments result becomes a recording (section 13.2). A streaming egress that ended by itself on an open show: `destinationsSet` false, `restarts` plus one |
+| `egress_ended` | ◇ The meter's last row. A segments result becomes a recording (section 13.2). Every stream `FAILED`: legs `failed`, `restarts` unchanged, `destinationsSet` true. Other self-ended streaming egresses increment `restarts`; legs leave and `destinationsSet` becomes false unless held by the restart cap or another side (section 15). Web-stopped egresses never count |
 | The four of today | As today. Participant events refresh `room.participants`; the roles `feed` and `egress` write no minutes row. `room_finished` during a hold ends the show `hold-limit` |
 
 ## 8. Stream keys
@@ -602,19 +632,22 @@ Run on every URL before it is sent anywhere. The first row that matches refuses 
 
 | # | The URL | Code |
 | --- | --- | --- |
-| 1 | Over 4,096 bytes, does not parse, or has a space, a control character or a `#` | `destination-malformed` |
-| 2 | Scheme is not `rtmp` or `rtmps` (so `srt://` too) | `destination-scheme` |
-| 3 | Has a user name or a password (LiveKit shows the password) | `destination-userinfo` |
-| 4 | Has no host | `destination-malformed` |
-| 5 | Fewer than two path segments, or an empty segment (LiveKit refuses it and repeats the URL) | `destination-no-app` |
+| 1 | ◇ Over 4,096 bytes, outside printable ASCII, has a space, control character or `#`, or does not match the URL shape | `destination-malformed` |
+| 1a | ◇ A broken percent escape in authority or path, or a literal `/` in the query | `destination-malformed` |
+| 2 | ◇ Scheme is not exactly lowercase `rtmp` or `rtmps`; capitals and `srt` are refused | `destination-scheme` |
+| 3 | Has user info (`@` in the authority; LiveKit shows the password) | `destination-userinfo` |
+| 4 | ◇ Authority is not a DNS-style host or bracketed IP, optionally followed by a 1 to 5 digit port | `destination-malformed` |
+| 5 | Fewer than an app and a key segment, or an empty segment before the final trailing slash | `destination-no-app` |
+| 5a | ◇ More than two named path segments: LiveKit would show a possible secret in the middle whole | `destination-malformed` |
 | 6 | The path ends with `/` (LiveKit shows the whole key) | `destination-trailing-slash` |
-| 7 | The key piece is under 12 characters ◇ | `destination-key-too-short` |
+| 7 | ◇ The last path segment is under 12 characters, or, with a query, its last parameter value is under 12 | `destination-key-too-short` |
+| 7a | ◇ LiveKit's redaction pattern would cut it differently from the web | `destination-malformed` |
 | 8 | A known id with a different leg ref, without `replace` | `destination-changed` |
 | — | Anything else | Accepted |
 
-- **The key piece** is the last path segment plus `?` and the query when there is one. LiveKit redacts those as one piece.
-- ◇ 12: LiveKit shows six characters of any key of nine or more, and most of a shorter one. D7 refuses a key when those six are most of it; at 12 they are half at the worst. A higher floor would refuse platforms whose keys are short (X's are about 12 to 13 characters).
-- Each platform shape of P0's table (YouTube, Twitch, Kick, X, Facebook, custom `rtmp://host/app/key`) has a test that it is accepted. Each leaking shape has a test that it is refused.
+- **The key piece** LiveKit redacts is the last path segment plus `?` and the query when present. The floor is not measured on this combined string: each possible secret end must pass separately ◇.
+- ◇ Without a query, LiveKit shows at most six of a 12-character key. With a query it shows the first three of the path's last segment and the last three of the query's last value: both must have at least 12 characters. A query item without `=` uses the whole last item as its value. The guard checks encoded characters as written, without decoding; malformed percent escapes in the query itself are not checked (W `media/destination-guard.ts:132-142`, `:186-200`).
+- ◇ The accepted platform shapes include YouTube, Twitch, Kick, X, Facebook and custom `rtmp://host/app/key`. A Twitch `?bandwidthtest=true` suffix is refused because its final value is too short. A platform name alone does not exempt a URL from the guard.
 
 ### 8.2 The leg ref
 
@@ -627,6 +660,8 @@ The web's redaction of an accepted URL is `<scheme>://<host>[:<port>]/<path with
 
 Hash: HMAC-SHA256 over the UTF-8 bytes. Key: `VIDEORC_CLOUD_LEG_REF_KEY` (32 bytes). Encoding: base64url, no padding (43 characters). Both refs are stored per leg; nothing else about the URL is. `tail` exists because LiveKit may rewrite a Twitch host (P0, S0.4), so the URL it reports is not the one sent.
 
+◇ Collisions of the redacted refs are accepted. Two keys on the same address with the same first and last three characters are indistinguishable, even with `replace`. A healthy leg keeps the old URL until it fails and Reconnect adds the new one. No hash or other value derived from the full URL is stored to distinguish them (W `media/leg-ref.ts:1-42`).
+
 ### 8.3 Matching LiveKit's results to legs
 
 For each entry in `streamResults` or `result.value.info`:
@@ -634,7 +669,7 @@ For each entry in `streamResults` or `result.value.info`:
 1. Hash the entry's `url` (already redacted by LiveKit) into `ref`. A leg of that egress with that `ref` is the match.
 2. No match: hash its last `{…}` into `tail`. If exactly one unmatched leg has that `tail`, it is the match.
 3. Still none: the entry is ignored and counted in a log line by code.
-4. **Newest wins.** Several entries for one leg (a URL removed and added again): take the greatest `startedAt`, then the last in the list.
+4. ◇ **Newest wins.** A leg stores `addedAt`, when its URL was last sent. Ignore stream entries whose start or end predates `addedAt` by more than 1 s (clock-skew tolerance). Of those left, an entry without a start time is newer than any started entry, then the greatest `startedAt` wins, then the last in the list. A newer `ACTIVE` entry without a retry can revive a failed leg (W `media/legs.ts:90-144`).
 
 | LiveKit says | `legs[].state` |
 | --- | --- |
@@ -642,7 +677,7 @@ For each entry in `streamResults` or `result.value.info`:
 | `ACTIVE`, `retries` not above the stored count | `live` |
 | `ACTIVE`, `retries` above the stored count | `reconnecting` |
 | `FAILED` while the egress is `ACTIVE` | `failed` |
-| `FAILED` or `FINISHED` on an egress that is `ENDING`, `COMPLETE`, `ABORTED` or `LIMIT_REACHED` | `ended`. **Not a dead destination**: the room closed (P0, S0.3) |
+| `FAILED` or `FINISHED` on an egress that is `ENDING`, `COMPLETE`, `ABORTED` or `LIMIT_REACHED` | `ended` for an ordinary teardown. ◇ A self-ended egress whose every stream is `FAILED` keeps failed destination legs instead (section 15) |
 | `FINISHED` on an active egress | The leg leaves the list |
 | Refused by the guard | `failed` |
 
@@ -713,14 +748,15 @@ CREATE TABLE IF NOT EXISTS cloud_show_assets (
 | Column | Holds |
 | --- | --- |
 | `rev` | Section 3. Bumped in the same statement as the change |
-| `state_json` | The last state built, without clocks |
-| `h_json`, `v_json` | Per orientation: `ingressId`, `egressId`, `recordEgressId`, `egressStatus`, `feedConnected`, and the page's `boot`, `seq`, last beacon and its arrival time |
-| `legs_json` | Per leg: `id`, `platform`, `label`, `orientation`, `state`, `since`, `error`, `ref`, `tail`, `retries`, `kickedAt`, `resend` |
+| `state_json` | ◇ `built` (the last material state), `createPending`, `holdImage`, `lease`, `legsEnded`, `roomMissingAt`, `reconciledAt`, `usage.holds`, `usage.pending`; talk: `stage`, `stageSet`, `participants`, `recordingTarget`, `takeKeys` |
+| `h_json`, `v_json` | ◇ Per orientation: ingress id, feed status and timing; streaming and recording egress ids, statuses, starts and ends; `egressStopping`, `startInFlight`, `pastEgresses`, `destinationsHeld`, `egressDeaths`, `restartsHeldUntil`; take ids and revocation ids; `page` with boot, seq, joined, remembered boots, beacon and arrival time; `recBoots` |
+| `legs_json` | Per leg: `id`, `platform`, `label`, `orientation`, `state`, `since`, `error`, `ref`, `tail`, `retries`, `kickedAt`, `resend`, and ◇ `addedAt` |
 | `on_air_at`, `hold_since_at`, `desktop_seen_at` | The anchors of `liveSeconds`, `hold` and `desktopConnected` |
 | `usage_seq`, `usage_cut_at` | Section 14 |
 
 - ◇ One row per show, with a column per orientation, not a row per orientation. `rev` and the state are per show, and one row makes the bump one statement.
-- Every change runs in one transaction that locks the row (`SELECT … FOR UPDATE`), so two webhooks never overwrite each other.
+- ◇ Neon HTTP cannot keep a transaction open across application code. A mutation reads the row and its Postgres `xmin`, computes the change, then uses one fixed database batch to lock and update only that version. A lost compare-and-set race re-reads and recomputes. `rev` moves with the update, so webhooks cannot overwrite each other.
+- ◇ Operations that call LiveKit between writes take an expiring lease in `state_json.lease: { owner, until }`. Acquisition and release each use one statement. The lease lasts 65 s, outliving a 60 s route; a second request checks every 500 ms for at most 5 s, then answers 503. No database transaction stays open while LiveKit runs (W `media/media-store.ts:18-31`, `media/lease.ts:20-25`).
 - `cloud_show_media` joins the readiness list (W `readiness.ts:10-15`) for managed routes only.
 
 ## 10. Configuration
@@ -749,15 +785,15 @@ Desktop, unchanged: `VIDEORC_APP_VERSION` (D `performance_check.rs:405`), and in
 | Hold limit | `holdMaxSeconds`: 300, 900, 1,800 or 3,600 (D `cloud_show.rs:78`) | The room's `departure_timeout`, which starts when the feed's participant has left (D5) |
 | A silent feed that stays in the room | Up to about 100 s past the limit (P0, S0.2) | The reaper ends a hold past `holdMaxSeconds` as `hold-limit` |
 | Room nobody joined | `empty_timeout` 120 s (talk: 600 s) | LiveKit |
-| No feed after the create | 60 s, then `no-feed` | The reaper |
+| No feed after a solo or test create ◇ | 60 s, then `no-feed`; talk shows are exempt | The reaper |
 | Show length | 11 h 55 min from the create, then `max-show` | The reaper, before LiveKit's 12-hour stop |
 | Destinations | 16 per request and per show | `PUT …/destinations` |
-| Quality (D12) | 1920×1080 pixels and 30 fps per output. Above: `cloud-quality` | The create |
+| Quality (D12) ◇ | Solo and test: 1920×1080 pixels and 30 fps per output. Talk is exempt. Above: `cloud-quality` | The create |
 | Stream sent to platforms | 1080p60, H.264 High, 6 Mbps, 2 s keyframes, AAC 48 kHz | `StartEgress` |
 | Hold image | 2 MiB, PNG, 1,920 pixels a side | `PUT …/hold-image` |
 | Overlay | 2 MiB | The page |
 | Stage | 8 identities; room metadata 4,096 bytes | `PUT …/stage` |
-| Beacon | 4 KiB; one a second; every 10 s | The page and the route |
+| Beacon ◇ | 4 KiB, cut `shown` then `program`; one a second; every 10 s, except recording-only pages | The page and the route |
 | State long-poll | 25 s; 2 s and 5 s per section 3 | The state route |
 | `desktopConnected` | A poll in the last 15 s | The web |
 | Lost report | Feed down 20 s (D `cloud_show.rs:97`), then at most one a minute (D `cloud_show.rs:100`) | The desktop |
@@ -767,6 +803,15 @@ Desktop, unchanged: `VIDEORC_APP_VERSION` (D `performance_check.rs:405`), and in
 | Capacity (D13) | `VIDEORC_CLOUD_MAX_SHOWS` open managed shows, test shows included. Over it: 503 `cloud-full` | The create |
 | Kicks (section 8.4) | One per leg per 5 minutes, three per show | The web |
 | LiveKit call | 8 s | The web |
+| Control request ◇ | 45 s for LiveKit calls; `maxDuration` 60 s | The web |
+| Create ◇ | 40 s for LiveKit calls, 52 s for failure cleanup; `maxDuration` 60 s | The web |
+| State answer ◇ | 30 s normal polling budget; each LiveKit read at most 2 s; `maxDuration` 40 s | The state route (section 3) |
+| Desktop intent ◇ | 22 s ordinary; 7 s destinations without `replace`; retries share it | Inside the 25 s provider / 10 s Reconnect RPC watchdog |
+| Show lease ◇ | 65 s TTL; wait at most 5 s, poll every 500 ms | The web |
+| Self-ended streaming egresses ◇ | Three in 10 min per orientation, then 10 min refusal | The web |
+| Room join / rejoin ◇ | Retry 1, 2, 4, 8, then 10 s; rejoin window 60 s | The page |
+| Overlay read ◇ | Set 30 s; clear 5 s, independent of sets | The page |
+| Unused take key ◇ | Revoke at once under lease, otherwise after 65 s; all keys 5 min after show end | Webhook and reaper |
 
 ◇ The capacity default is 1: the project holds two ingress objects, which is one solo show with both orientations (P0). The owner raises it with the plan.
 
@@ -775,14 +820,14 @@ Desktop, unchanged: `VIDEORC_APP_VERSION` (D `performance_check.rs:405`), and in
 | What | Value |
 | --- | --- |
 | The constant (web) | `FIRST_WEB_CONTROL_DESKTOP_VERSION = "0.26.0"` |
-| Why that value | The app is at 0.25.0 (D `apps/desktop/package.json:3`). The next minor is the first build with web control |
+| Why that value | The checked app is at 0.25.2 (D `apps/desktop/package.json:3`). The next minor is the first build with web control |
 | Version on the capabilities path ◇ | `User-Agent: Videorc-Desktop/<version>` (D `videorc_api.rs:1806`, `performance_check.rs:476-478`). `GET /api/ai/capabilities` has no body, and nothing else carries it |
 | Version on a create | `client.version` in the body (D `cloud_show.rs:564-583`, W `shows.ts:428-434`) |
 
 The rule, while `VIDEORC_CLOUD_MEDIA` is `livekit`:
 
 1. The `cloud` block's `enabled` is `false` in `GET /api/ai/capabilities` and `GET /api/cloud/allowance` when the User-Agent is not `Videorc-Desktop/<major>.<minor>.<patch>` or its version is below the constant. Every other field of the block is unchanged.
-2. A create whose `client.version` is missing or below the constant answers 403 `cloud-not-entitled`.
+2. ◇ Every create, talk and test included, whose `client.version` is missing or below the constant answers 403 `cloud-not-entitled`.
 3. Compare the three numbers. A suffix after the patch is ignored.
 
 What an older client is told: nothing but `enabled: false`. It then streams directly and says nothing, as an unentitled account does (D `cloud_show.rs:1873-1876`). A dev backend with no `VIDEORC_APP_VERSION` reports the crate's 0.9.0 (D `performance_check.rs:480-486`) and reads as old, so managed smokes set the variable.
@@ -814,36 +859,55 @@ talk/<userId>/<showId>/<o>/<takeId>/EG_<egressId>.json  LiveKit's manifest
 
 | Step | The web |
 | --- | --- |
-| `{ "on": true }` | Section 6.5. `recording.active` becomes true |
-| `{ "on": false }`, segments-only egress, or a shared egress with no live URL | `StopEgress` |
-| `{ "on": false }`, shared egress, on air | 409 `cloud-recording-on-air` ◇. A running egress cannot lose an output, and stopping it would cut every platform |
+| `{ "on": true }` ◇ | One separate segments-only egress per output on a `rec=1` page, whether live or not. `recording.active` becomes true |
+| `{ "on": false }` ◇ | `StopEgress` for the recording egress; live streams carry on |
+| Disabled shared path, `{ "on": false }`, on air ◇ | 409 `cloud-recording-on-air`. No app caller enables this path (section 6.5) |
 | `egress_ended` with a segments result | One `cloud_recordings` row: `object_key` is the playlist's key, `seconds` and `bytes` from the result, `state` `complete` when it has at least one segment, else `failed` |
 
 `state.recording` (D `cloud_talk.rs:289-304`): `active` while an egress with a segments output is `STARTING` or `ACTIVE`; `since` when the oldest such egress started; `seconds` is now minus `since`; `bytes` is 0 while it runs ⚠ (LiveKit reports the size at the end); `orientations` lists the outputs recording now as `horizontal` and `vertical`; `problem` is `no-target` when the show has no recording target.
 
+◇ At each recording start, each orientation's take gets a fresh `storage:write` key pair for the show's branch. It expires 15 minutes after the show's limit. `state_json.takeKeys` remembers its revocation id, branch and mint time before `StartEgress`; its secret exists only in that request.
+
+◇ An ended or unused take's key is revoked when nothing on the row writes with it: immediately under the show lease, otherwise once it is 65 s old. Every remaining key is due 5 minutes after the show's end, including keys still marked in use. Failed revocations stay for retry; successful ones leave `takeKeys` and the orientation's key-id fields. The ended-show reaper retries for its 10 minute take-recovery window (W `media/recording.ts:454-594`, `media/reconcile.ts:729-755`).
+
 The playlist the desktop fetches:
 
-- **new** `GET /api/cloud/recordings/:id/playlist`, bearer auth. 200 `application/vnd.apple.mpegurl`: the take's `index.m3u8` with every segment line replaced by a presigned GET URL that lives 6 hours ◇. 404 `cloud-recording-not-found`, as the download route (W `recordings.ts:637`).
-- The desktop saves it to a temporary file, remuxes with its own FFmpeg (`-c copy`, as P0 S0.5 did), and deletes the file.
+- **new** `GET /api/cloud/recordings/:id/playlist`, bearer auth. 200 `application/vnd.apple.mpegurl`: the take's `index.m3u8` with every segment line replaced by a presigned GET URL that lives 6 hours ◇. 404 `cloud-recording-not-found`, also for a node recording. Storage/configuration or playlist failures give 503 `cloud-recordings-unavailable` ◇. A failure minting a take key on the Record route instead gives 503 `cloud-media-unavailable`.
+- ◇ The backend fetches the segments itself over HTTPS, verifying certificates and hostnames, without forwarding the account bearer to storage. Four segments download at once, each with up to three attempts. The dev-only extra feed CA may add trust; verification stays on. Redirects to HTTP are refused (D `videorc_api.rs:1820-1840`, `:3967-4002`).
+- ◇ Presigned URLs stay in memory. The backend writes a private temporary directory of local segments and a playlist naming only local files. It rejects nested playlists, keys, maps and unsupported URI-bearing tags. FFmpeg remuxes with `-c copy` and `-protocol_whitelist file`; it opens no network address. Completion, cancellation or failure cleans up the temporary files and owned partial MP4. A completed MP4 gets an unoccupied name in the output folder.
 
-| Existing route | For a managed recording |
+| Route | For a managed recording |
 | --- | --- |
-| `GET /api/cloud/recordings` | The same item (W `recordings.ts:339-348`) plus **new** `format: "segments"` and `playlistUrl`. `downloadUrl` is `""` ◇, so the field stays a string. A node recording gains `format: "mp4"` |
+| `GET /api/cloud/recordings` | The same item plus **new** `format: "segments"` and an absolute `playlistUrl` ◇. `downloadUrl` is `""`, so the field stays a string. A node recording gains `format: "mp4"` |
 | `GET /api/cloud/recordings/:id/download` | 409 `cloud-recording-needs-desktop` ◇. The account page points to the desktop |
 | `POST /api/cloud/recordings` (node-signed) | Node shows only |
 
+◇ Downloads are desktop jobs, not long RPC calls (D `cloud_control_web.rs:588-644`; `apps/desktop/src/shared/backend-rpc-contract.ts:6390-6416`):
+
+| Desktop RPC or event | Shape |
+| --- | --- |
+| `cloud.recordings.download` RPC ◇ | `{ id, outputDirectory?, outputDirectoryCapability?, ffmpegPath? }` → `{ jobId }` immediately. The directory capability is resolved before the backend call |
+| `cloud.recordings.cancelDownload` RPC ◇ | `{ jobId }` → `{ ok: true }` |
+| `cloud.recordings.download` event ◇ | `{ jobId, recordingId, state, doneSegments?, totalSegments?, path?, error? }`. `state` is `running`, `done`, `failed` or `cancelled`. Progress counts segments; `path` is the finished MP4, errors contain no URLs |
+
+◇ A repeated download while that recording's job runs returns the same job. Cancellation kills and reaps an owned FFmpeg child, cleans partial files and emits a terminal event; shutdown cancels and joins the jobs. The renderer's recording list contains facts and format, never presigned URLs.
+
+◇ At recording expiry, maintenance deletes the playlist, then its row. A failed delete keeps the row for retry. Segments and manifests go with the show's storage branch when it expires; deleting a recording row alone does not remove each segment.
+
 ## 14. The meter (D11)
 
-**A cloud second** of a managed show is a wall-clock second in which at least one of its egresses is `ACTIVE`, by LiveKit's own `startedAt` and `endedAt`. Two egresses at once count once. Holds count. An egress in `STARTING` counts nothing yet. A talk show with its room open and no egress counts nothing; a test show counts nothing. An egress whose only destination died still counts (D9).
+**A cloud second** of a managed show is a wall-clock second in which at least one of its egresses is `ACTIVE`, by LiveKit's own `startedAt` and `endedAt`. Two egresses at once count once. Holds count. ◇ An egress in `STARTING`, or one that never reached `ACTIVE`, counts nothing. LiveKit's ended record supplies its own start and end even when the web missed the active event. No time after the show's `endedAt` counts. A talk show with its room open and no egress counts nothing; a test show counts nothing. An egress whose only destination died still counts (D9).
 
 Rows go to `cloud_show_usage`, counted once on `(show_id, seq)` as today (W `meter.ts:446-448`):
 
 | Written by | Row |
 | --- | --- |
-| The reaper, every minute, for each open managed show with an active egress | `seq` is `usage_seq + 1`. `seconds` is the active time since `usage_cut_at`. `hold_seconds` is the part spent in `hold`; `live_seconds` is the rest. `node_id` is NULL |
+| The reaper, every minute, for each open managed show with active time | ◇ One row per unbroken active span since `usage_cut_at`, with consecutive `seq` values. `hold_seconds` is the part spent in `hold`; `live_seconds` is the rest. `node_id` is NULL |
 | `egress_ended`, when no other egress of the show is active | The same, up to that egress's `endedAt` |
 
-`usage_seq` and `usage_cut_at` move in the same transaction as the insert, under the row lock, so a retried tick writes nothing twice. The daily reconcile compares each show's rows with `ListEgress` times and repairs the difference.
+◇ Usage is claim-then-insert. One compare-and-set mutation moves `usage_seq` and `usage_cut_at` and parks the claimed rows in `state_json.usage.pending`. Inserts then deduplicate on `(show_id, seq)`; successful rows leave the pending list. A later tick finishes interrupted inserts with the same sequence numbers. There is no open application transaction joining claim and insert.
+
+◇ Every instant is floored to a whole second. Overlapping streaming and recording spans merge, so simultaneous egresses count once. The daily reconcile looks at non-test managed shows ended in the last 3 days. It first flushes pending usage, then compares with LiveKit's own ended records, capped at the show's `endedAt`. Missing seconds become another row; excess seconds come off the newest rows. If LiveKit omits a known egress or usage is still pending, the show is skipped. The normal month reconcile follows (W `media/usage.ts`).
 
 ## 15. Failures
 
@@ -853,7 +917,9 @@ Rows go to `cloud_show_usage`, counted once on `(show_id, seq)` as today (W `met
 | One of several destinations dies | That leg `reconnecting`, then `failed` after about 31 s | The watchdog's Reconnect: `PUT …/destinations` with that one id |
 | The only destination dies | That leg `reconnecting` with `resend: true` | `PUT …/destinations` with that one id, by itself (section 8.4) |
 | A destination is refused by the guard | That leg `failed` with the fixed message | None |
-| The egress dies | `legs: []`, `destinationsSet: false`, `restarts` plus one | `PUT …/destinations` with the full list, no `replace` (D `cloud_show.rs:2111-2123`, `:2516-2530`) |
+| The streaming egress ends with every stream `FAILED` ◇ | Those legs `failed`, `destinationsSet: true`, `restarts` unchanged | Explicit Reconnect; no automatic full-list resend |
+| The streaming egress dies otherwise ◇ | Its legs leave; `restarts` plus one. `destinationsSet: false` when no other side or held condition keeps it true | `PUT …/destinations` with the full list, no `replace` |
+| The third such death in 10 min on an orientation ◇ | Legs `failed`: `Stop, then go live again to reconnect.`; `destinationsSet: true` | Destination requests for that side give 503 `cloud-media-unavailable` for 10 min from that death |
 | The egress dies, the desktop is gone | — | The web ends the show `egress-lost` after 60 s |
 | The room closes at the hold limit | `phase: "ended"`, `endReason: "hold-limit"` | None. Go Live starts a new show |
 | The feed cannot connect for 20 s, or LiveKit as a whole is down | Any | `POST …/lost` |
@@ -867,11 +933,16 @@ Rows go to `cloud_show_usage`, counted once on `(show_id, seq)` as today (W `met
 | --- | --- |
 | The room exists | Keeps the show. The hold covers it |
 | No room, and no active egress | Ends it `media-lost`. The answer is the ended show |
-| Nothing, twice, 4 s each ◇ | Ends it `media-lost`. The reconcile pass stops any egress that turns up later |
+| Only network failures or timeouts, twice, 4 s each ◇ | Ends it `media-lost`. The reconcile pass stops any egress that turns up later |
+| Any HTTP error, including 429 or 500, or no usable web configuration ◇ | Keeps the show: an HTTP answer proves LiveKit is there; a configuration failure proves nothing about the room |
 
-**The reconcile pass** (the reaper's tick) reads `ListRooms`, `ListIngress` and `ListEgress` and, by the names of section 7: ends an open managed show whose room is gone; stops an egress, and deletes an ingress and a room, whose show is ended; rebuilds the legs, feeds and meter of a show from what LiveKit lists.
+**The reconcile pass** (the reaper's tick) reads `ListRooms`, `ListIngress` and `ListEgress` and, by the names of section 7, cleans ended shows' objects and rebuilds open shows' legs, feeds and meter. ◇ A missing room ends a show only when a second list by its name is also empty, no egress runs, and two ticks in a row find that result. `roomMissingAt` remembers the first finding and clears when the room is seen. A failed list is unknown, never gone.
 
-Objects named by a show id this database has **no row for** may be another environment's live show. They are touched only when `VERCEL_ENV` is `production` or `VIDEORC_CLOUD_RECONCILE_UNKNOWN` is `1`, and only once the show's objects are 10 minutes old. Otherwise they are left alone and counted. One LiveKit project per database is still the rule; this guard only lowers the cost of breaking it.
+◇ The managed tick budgets LiveKit calls to 40 s, with at most 15 s per show. It visits the oldest `reconciledAt` first, so a skipped show gets priority next tick. For 10 minutes after a talk show ends, it also reads its egresses and files takes whose ended webhook was lost.
+
+◇ Every tick retries deleting all ended shows' hold images and scrubs `state_json.participants` and `state_json.built.room`. Names and images left by interrupted End cleanup are removed this way. It also revokes due take keys (section 13.2).
+
+Objects named by a show id this database has **no row for** may be another environment's live show. They are touched only when `VERCEL_ENV` is `production` or `VIDEORC_CLOUD_RECONCILE_UNKNOWN` is `1`, and only once the show's objects are 10 minutes old. ◇ An unknown ingress is removed only if `ListRooms` succeeded in the same tick: the ingress carries no age of its own. Otherwise it is left alone and counted. One LiveKit project per database is still the rule; this guard only lowers the cost of breaking it.
 
 ## 16. File ownership
 
@@ -881,17 +952,17 @@ A lane edits only its own rows. A file not listed belongs to no lane: ask the or
 | --- | --- | --- |
 | Web | Web server | `lib/cloud/**` except `lib/cloud/program/**`. `app/api/cloud/**`, including `app/api/cloud/program/**`, the new `…/shows/[id]/{destinations,legs,state,hold-image,stage,recording}` routes and `…/recordings/[id]/playlist`. `db/migrations/0035_add_cloud_managed_media.sql`, `db/schema.ts`. `tests/cloud-*.test.ts` except `tests/cloud-program-*.test.ts`. `tests/fixtures/cloud-*`. `docs/cloud.md`, `.env.example`, `vercel.json`, `next.config.ts`, `package.json` |
 | Web | Web program page | `app/cloud/program/v1/**`. `lib/cloud/program/**` (the page's client modules). `public/cloud/program/v1/**`. `tests/cloud-program-*.test.ts` and `tests/browser/cloud-program/**` |
-| Desktop | Desktop | `crates/videorc-backend/src/cloud_show.rs`, `cloud_talk.rs`, a new `cloud_control_web.rs`, the cloud section of `videorc_api.rs`, the cloud seam in `recording.rs`. `apps/desktop/src/renderer/src/lib/talk-show-room*.ts`. `scripts/smoke-cloud-solo-managed-app.mjs`, `scripts/smoke-cloud-talk-show-managed-app.mjs` and their fake web under `scripts/lib/`. `protocol-fixtures/cloud-managed-wire.json`. `package.json` scripts |
+| Desktop | Desktop | `crates/videorc-backend/src/cloud_show.rs`, `cloud_talk.rs`, `cloud_control_web.rs`, the cloud section of `videorc_api.rs`, the cloud seam in `recording.rs`. `apps/desktop/src/renderer/src/lib/talk-show-room*.ts`. `scripts/smoke-cloud-solo-managed-app.mjs`, `scripts/smoke-cloud-talk-show-managed-app.mjs` and their fake web under `scripts/lib/`. `protocol-fixtures/cloud-managed-wire.json`. `package.json` scripts |
 | Desktop | Orchestrator | `docs/cloud/managed-media-wire.md` (this file), `plans/234-*.md`, `protocol-fixtures/talk-show-layout.json` |
 
 - The page lane sets its headers (content security policy, `noindex`) inside its own folder and does not edit `next.config.ts`. It adds no dependency: `livekit-client` 2.23.0 is already in `package.json`.
-- The seam (`lib/cloud/media/{index,types,node}.ts` and migration `0034`) is the seam lane's until it lands. The server lane builds `lib/cloud/media/livekit.ts` and new files on top of it.
+- The provider seam is `lib/cloud/media/{index,types,node}.ts` and migration `0034`. The managed server implementation is `lib/cloud/media/livekit.ts` and its supporting modules.
 
-Shared constants. Each lives in one file. The other side copies the values and pins them with a test. Until the lanes merge, every copy is written from this file; a value that differs from this file is a bug in the copy.
+Shared constants. Each has one source. The server imports the page's wire module directly ◇. Cross-repo values are copied and pinned by tests. Copies must agree with this contract.
 
-| Constant | Its one file | Copied to, with a pinning test |
+| Constant | Its one file | Used by, with a pinning test |
 | --- | --- | --- |
-| Beacon JSON, hold timings, overlay topics and attributes, query names, console lines | Web `lib/cloud/program/wire.ts` (page lane) | Web `lib/cloud/media/program-wire.ts` (server lane). `tests/cloud-program-wire-pin.test.ts` (server lane) imports both and asserts they are equal |
+| Beacon JSON, hold timings, overlay topics and attributes, query names, console lines | Web `lib/cloud/program/wire.ts` (page lane) | ◇ The server imports it directly. `lib/cloud/media/program-wire.ts` is gone. `tests/cloud-program-wire-pin.test.ts` prevents a copy, and `tests/cloud-program-meets-server.test.ts` exercises both halves together |
 | Route paths, error codes, `rev` rules, wait times, leg states, end reasons, the closed leg messages, overlay topics | Desktop `protocol-fixtures/cloud-managed-wire.json` (desktop lane) | Web `tests/fixtures/cloud-managed-wire.json` (server lane), with a test that the web's constants match it |
 | The layout geometry | Desktop `protocol-fixtures/talk-show-layout.json` | Web `public/cloud/program/v1/talk-show-layout.json` (page lane). A test pins its SHA-256: `94a0e80ea8cd65d67dd7d3daf6f18b35dacb76f419eae0567a815d1b1ccb461a` |
 | `FIRST_WEB_CONTROL_DESKTOP_VERSION` | Web `lib/cloud/media/client-version.ts` (server lane) | Not copied. The desktop only has to ship as 0.26.0 or later |
@@ -908,23 +979,23 @@ Shared constants. Each lives in one file. The other side copies the values and p
 | 6 | The primary page (`h`, else `v`) decides phase, hold and program | One show has one phase | D8 |
 | 7 | A talk show is `live` once the host joined and never holds | No feed exists to lose; the away plate covers the host | D6, D8 |
 | 8 | `restarts` counts egresses that died, not egresses started | A Record press must not read as a restart | D8 |
-| 9 | Beacons carry `boot` and `seq`; a new `boot` replaces the old page | Orders beacons and survives a page reload | Wire shape |
+| 9 | ◇ Beacons carry `boot`, `seq` and optional `joined`; a new ordinary boot replaces the page, and its first `joined: true` counts once | Orders beacons; overlays replay only after handlers are ready | Wire shape |
 | 10 | Beacon times are relative to the page's own clock | The recorder's clock offset cannot skew `hold.since` | D8 |
 | 11 | The page token is HMAC-SHA256 | One party mints and checks it | D20 |
 | 12 | Hold image is `{ pngBase64 }`, served to the page by version | Mirrors today's intent; the beacon answer tells the page when it changed | Wire shape |
 | 13 | Refused destinations do not fail the others | One bad custom URL should not take a show off every platform | D7 |
-| 14 | Shortest key piece is 12 characters | LiveKit's six shown characters are never most of a key, and short platform keys (X) still pass | D7 |
+| 14 | ◇ The last path segment and, when present, last query value each need 12 characters | Either end may be the secret LiveKit partly shows | D7 |
 | 15 | Two leg refs, `ref` and `tail` | LiveKit may rewrite a Twitch host | D7, D8 |
 | 16 | `legs[].error` is from a closed list | LiveKit's text can carry a URL | D7 |
 | 17 | The only-destination fix asks the desktop to re-send (`resend`) | The web holds no URL to add back | D9 |
 | 18 | `replace` restarts the egress when it must drop a leg | The web holds no URL to remove with | D8 |
 | 19 | `legs/end` takes an optional URL list | The same reason, when a recording shares the egress | Wire shape |
-| 20 | Stop recording on air on a shared egress is refused | An egress cannot lose an output | D10 |
+| 20 | ◇ Stop recording on air is refused only on the disabled shared-egress path | Current app recordings have a separate egress and can stop on air | D10 |
 | 21 | A take is one egress's segment list, under `<o>/<takeId>/` | The id must exist before the egress does | D10 |
 | 22 | Playlist URLs live 6 hours | A long download must start every segment in time | D10 |
 | 23 | Managed recordings answer `downloadUrl: ""` and `format` | Keeps the item's type | D10 |
 | 24 | Overlays: two topics, 2 MiB, PNG, JPEG or WebP | A clear needs a body; photos are large as PNG | D6 |
-| 25 | `room.pageJoins` tells the desktop to re-send overlays | Byte streams are not replayed, and the recorder is hidden | D6 |
+| 25 | ◇ `room.pageJoins` grows at a boot's first `joined: true` and tells the desktop to re-send untimed overlays | Byte streams are not replayed; load can precede ready handlers | D6 |
 | 26 | `cloud.return.set` answers `cloud-return-failed` | The existing code for that RPC | D6 |
 | 27 | Above 1080p30 the create answers 422 `cloud-quality` | The desktop cannot know the provider before it creates | D12 |
 | 28 | The ingress layer is the output's own size | No upscale before the page | D4 |
@@ -936,20 +1007,70 @@ Shared constants. Each lives in one file. The other side copies the values and p
 | 34 | Lost: LiveKit silent twice ends the show | Matches the node rule; the reconcile pass cleans up | D9 |
 | 35 | `egress-lost` after 60 s with no desktop | Nobody holds the keys | D9 |
 | 36 | Managed `expiresAt` is the create plus 11 h 55 min | The hold no longer adds | D12 |
+| 37 | ◇ Desktop intents spend one 22 s deadline, or 7 s without destination `replace`; one useful retry at most | Fits the 25 s / 10 s RPC watchdogs, including retry and ordering wait | Section 2 |
+| 38 | ◇ Web control LiveKit calls share 45 s inside a 60 s route; create uses 40 s / 52 s cleanup | Leaves time to write partial outcomes before the host kills the function | Sections 1, 2 |
+| 39 | ◇ Normal state polling gets 30 s, with at most 2 s per LiveKit read; teardown is outside this budget | Fits ordinary polls under the desktop's 35 s; records the cleanup gap | Section 3 |
+| 40 | ◇ End livestream and Stop invalidate the destination generation and follow an in-flight PUT | Retained lists and retries cannot revive a stopped stream | Sections 2.2, 2.3 |
+| 41 | ◇ Destination text refuses controls, lone surrogates and `://` | Stored labels and ids cannot carry addresses or break JSON storage | Section 2.2 |
+| 42 | ◇ Guard requires ASCII, lowercase scheme and exactly app/key; rejects query slashes and bad authority/path escapes | Matches LiveKit's redaction shape; query escapes are not validated | Section 8.1 |
+| 43 | ◇ Redacted-ref collisions are accepted; no full-URL-derived value is stored | Keeps D7's no-key rule despite indistinguishable key rotations | Section 8.2 |
+| 44 | ◇ Leg results respect `addedAt` with 1 s tolerance; no-start entries win, then latest start and list order | Old failed entries must not defeat a new add | Section 8.3 |
+| 45 | ◇ `legs/end` clears every leg and rejects malformed bodies with 400 | Explicit End livestream must also clear failed and refused legs | Section 2.3 |
+| 46 | ◇ Stage shape errors are 400; foreign identity forms are 422; guest membership is not checked | Records what the parser actually validates | Section 2.5 |
+| 47 | ◇ A beacon retries network/5xx at 1, 2, 4, 8, then 10 s with a new seq; rec pages wait for joined | Failed delivery must not lose page readiness or phase | Section 5.3 |
+| 48 | ◇ Beacons drop `shown`, then `program`, above 4 KiB; program fields are optional | Keeps phase and readiness deliverable when optional data grows | Section 5.3 |
+| 49 | ◇ `shown` describes drawn tiles; away includes drawn-away and re-flowed people | The stage and its visible layout can differ; undrawn extra people remain a gap | Section 5.3 |
+| 50 | ◇ Initial joins retry; an unexpected lost room gets 60 s; END only follows a joined room | A failed join is not the end of the recording | Section 5.6 |
+| 51 | ◇ Only the talk mix uses the limiter; solo meters beside one feed | A single feed needs no voice-summing limiter | Section 5.7 |
+| 52 | ◇ Talk hold overlays show immediately and clear back to the stage; decimals and positive whole TTLs | Talk has no automatic hold; attributes stay unambiguous | Section 6.3 |
+| 53 | ◇ Overlay sends use `streamBytes`; reads time out at 30 s / 5 s, with independent clears | A stalled image cannot block a clear or overwrite newer work | Section 6.3 |
+| 54 | ◇ `cloud.room.overlay` hands image ids to the renderer over the token-checked local byte route | Backend builds images, while only the renderer owns the room connection | Section 6.3, contradiction 1 |
+| 55 | ◇ Room people sort host first, persist sanitized names, and refresh at first look and wait end | Track and name changes must move rev; ended shows retain no room names | Section 6.2 |
+| 56 | ◇ Record always starts a separate segments-only egress on rec=1; sharing is off | Independent Record and Go Live must stop independently until sharing is measured | Sections 6.5, 13.2, contradiction 5 |
+| 57 | ◇ Each take gets a write-only key until limit + 15 min; revocation ids are retained until revoked | Allows early revocation without storing the secret | Sections 7, 13.2 |
+| 58 | ◇ Unused keys revoke under lease or after 65 s; all are due at end + 5 min; ended recovery runs 10 min | Protects starts in flight while bounding post-show writes and recovering lost takes | Sections 13.2, 15 |
+| 59 | ◇ Playlist URLs are absolute; retrieval storage failures are 503 recordings-unavailable; mint failures are media-unavailable | Distinguishes file retrieval from Record control | Section 13.2 |
+| 60 | ◇ Expiry deletes playlist then row; segments leave with the storage branch | Failed deletes retry, and one take is not one MP4 object | Section 13.2 |
+| 61 | ◇ Recording download returns a job id, reports progress by event and accepts cancellation | Long downloads must not sit inside an RPC watchdog | Section 13.2 |
+| 62 | ◇ Backend fetches verified HTTPS segments; FFmpeg reads only local files | Presigned URLs stay in memory and FFmpeg cannot fetch remote input | Section 13.2 |
+| 63 | ◇ Usage claims pending rows before deduplicated inserts | Neon HTTP cannot hold a transaction across application work | Section 14 |
+| 64 | ◇ Meter floors instants to seconds, merges active spans and caps at show end; daily repair looks back 3 days | Counts active time once, even with missed events and late egress ends | Section 14 |
+| 65 | ◇ Row mutations use xmin compare-and-set in a batch; media operations use a 65 s lease with 5 s wait | No application-spanning transaction; concurrent writes and calls stay ordered | Section 9 |
+| 66 | ◇ JSON stores lifecycle markers, egress history, pending usage, page boots and take revocation metadata | Reconcile must recover interrupted requests without a URL or secret | Section 9 |
+| 67 | ◇ Create batches both rows; pending at 60 s is abandoned; missing media ends at once on state, after 60 s on reaper | Interrupted creates must not strand capacity or an infinite state retry | Section 1 |
+| 68 | ◇ End writes host-ended before teardown, marks web-stopped egresses and confirms the ended row even if cleanup fails | Late webhooks must not count an intentional stop as a crash | Section 2.7 |
+| 69 | ◇ Talk keeps existing empty timeout, rate and invite rules; quality exempts talk, old-client gate covers all kinds | No ingress or runner exists to justify solo feed rules for a room | Sections 1, 4, 12 |
+| 70 | ◇ All-streams-failed ends are destination failures; other deaths cap at three per 10 min per side | Wrong keys and repeated crashes must not cause endless automatic restart | Sections 3, 15 |
+| 71 | ◇ Reconcile confirms missing rooms by name across two ticks; unknown ingress cleanup needs a successful room list | One missing or failed list is not proof a live room is gone | Section 15 |
+| 72 | ◇ Reaper budgets calls to 40 s / 15 s per show, visits oldest first, scrubs ended images and names | Slow shows must not starve others or retain interrupted cleanup | Section 15 |
+| 73 | ◇ Lost treats only network failures or timeouts as silence; HTTP errors keep the show | A refusal proves LiveKit answered, not that media vanished | Section 15 |
+| 74 | ◇ Server imports program/wire directly; pin and integration tests exercise both halves | A second copy can drift even when both lanes compile | Section 16 |
 
 ## 18. Contradictions
 
-What the plan, the note and the code cannot all hold, and what this file follows.
+Resolved items retain their original numbers. They are no longer open choices.
 
-1. **Overlays and "no new RPC or event".** The plan says overlays go from the host's renderer as byte streams, and that the desktop needs no new RPC or event. Today the backend builds every overlay PNG (D `comment_highlight.rs:547-563`, `main.rs:8913-8947`) and only the renderer holds the room. *Followed:* the byte-stream contract of 6.3. The desktop lane needs one backend-to-renderer hand-off; its shape is the desktop lane's own.
-2. **D7 against D8 and D9.** D7 says the web forgets every URL. D9 says the web removes and adds a URL by itself, and `replace` and `legs/end` need removals. LiveKit removes by URL, and removal by the redacted form is not measured. *Followed:* D7. The web never removes without a URL from the desktop in the same request (decisions 17 to 19).
-3. **`kbps`.** D8 and D16 read the bitrate from `ListIngress`. Every Phase 0 reading of `averageBitrate` was 0. *Followed:* send `kbps` only when it is above 0; the desktop already reads none as unmeasured.
-4. **`restarts`.** D8 says "how many were started". The desktop reads a rise as a crash and tells the host the show restarted (D `cloud_show.rs:2115-2117`). *Followed:* the code (decision 8).
-5. **Stop recording.** D10 puts stream and segments in one egress when Record comes first. Then the recording cannot stop while the show is on air. *Followed:* D10, with the refusal of decision 20. The owner may prefer a separate recording egress always.
-6. **The stream's size and bitrate.** The create still takes each output's size, frame rate and bitrate; D4 sends 1080p60 at 6 Mbps whatever they are. *Followed:* D4.
-7. **"Field for field what the runner sends today".** Three fields cannot be: `participants[].quality` (the server does not know it), `recording.bytes` while recording, and `program.avSkewMs` (D15 drops it). *Followed:* fixed or absent values, as written above.
-8. **The hold image.** The desktop allows 8 MiB today (D `cloud_show.rs:106`); the plan's route takes 2 MiB. *Followed:* the plan. The desktop resizes first (C4).
-9. **`ingest_url_problem`.** C4 says it must change to accept LiveKit's host. As written it accepts any `rtmps` URL with a DNS host, which is what Phase 0 saw. *Followed:* the code. No change is needed unless LiveKit's URL turns out different.
-10. **The show clock.** The renderer warns against a 12-hour length (D `apps/desktop/src/renderer/src/lib/cloud-toasts.ts:119`); a managed show ends 11 h 55 min after the create. *Followed:* D12. The copy check (C7) reads that toast.
-11. **The webhook handler.** The plan's five events arrive at a handler that ignores every show that is not a talk show and treats `feed-h` and the recorder as foreign (W `livekit-webhook.ts:132`, `:141-145`). *Followed:* the plan; the server lane changes both.
-12. **Not checked.** The names LiveKit appends to a template URL were taken from Phase 0's pages, not from LiveKit's documentation: this task made no network call. Vertical values, the talk page at 60 fps, an empty stream output and the recorder's seat in `maxParticipants` carry a ⚠ for the same reason.
+| # | Contradiction | Settled by |
+| --- | --- | --- |
+| 1 | Overlays and “no new RPC or event” | ◇ `cloud.room.overlay` and the local image route hand backend images to the renderer, which uses room byte streams (section 6.3) |
+| 2 | D7 forgets URLs, but D8/D9 need removals and reconnects | Desktop resends URLs for Reconnect and `legs/end`; replace restarts an egress when removal needs a URL it lacks. No URL is retained (decisions 17 to 19) |
+| 3 | `kbps` is promised, but Phase 0 read 0 | Omit zero bitrate; desktop treats absence as unmeasured (section 3) |
+| 4 | D8 counts starts, but desktop reads restarts as crashes | Count self-ended streaming egresses, except all-streams-failed ends; never Record or web stops (sections 3, 15) |
+| 5 | A shared egress cannot stop recording on air | ◇ Sharing is disabled. Record uses a separate rec=1 egress, so Stop recording leaves streams running; the dormant refusal is documented (sections 6.5, 13.2) |
+| 6 | Create accepts output settings, but D4 fixes platform encoding | Managed egress is always 1080p60 at 6 Mbps; solo/test ingress is limited to 1080p30, talk creates are exempt (sections 1, 7) |
+| 7 | “Field for field” is impossible for quality, running bytes and avSkewMs | `participants[].quality` is `good`, running recording bytes are 0, avSkewMs is absent (sections 3, 6.2, 13.2) |
+| 8 | Desktop accepts 8 MiB hold images; route accepts 2 MiB | ◇ Desktop fits managed uploads to 2 MiB and 1,920 pixels a side before sending (section 2.4) |
+| 9 | C4 asks for an ingress URL guard change | Existing guard already accepts RTMPS on a DNS host. No change needed for the measured LiveKit shape (section 1) |
+| 11 | Old webhook handler ignores solo shows and calls feed/recorder identities foreign | ◇ Managed handler covers solo/test and recognizes media identities without room minutes (sections 5.5, 7) |
+
+Open contradictions and unmeasured behavior:
+
+**10. The desktop copy.** The managed limit is 11 h 55 min from create. The toast still uses 12 hours from on-air time and can overstate time left (D `apps/desktop/src/renderer/src/lib/cloud-toasts.ts:105-120`). Its `cloud-quality` message still says 1080p60 although managed solo/test ingress is limited to 30 fps (same file `:52-54`). The contract follows the managed limits; the copy remains an implementation gap.
+
+**12. Not measured by this revision.** The template query names come from Phase 0. Vertical values, the talk page at 60 fps, an empty stream output and a recorder's seat against `maxParticipants` still carry ⚠. Sharing stays disabled; reading its implementation does not prove LiveKit accepts it.
+
+◇ **13. Stage membership and away coverage.** The stage parser accepts any syntactically valid guest id without checking room membership (section 2.5). The page also omits an away person beyond the six drawn tiles until re-flow (section 5.3). These are narrower checks and coverage than the pending amendments intended (W `media/stage.ts:126-140`, `media/room.ts:37-43`, `program/stage.ts:336-343`).
+
+◇ **14. The whole state deadline.** Ordinary reads and waits use the 30 s budget. Abandoned-create and test-show cleanup call teardown outside it; slow cleanup can exceed the advertised whole-answer budget (W `managed-route.ts:833-865`). The contract records this gap instead of promising a hard 30 s for those paths.
+
+◇ **15. Overlay changes during a page rejoin.** A successful rejoin in the same boot does not grow `pageJoins`. An untimed overlay changed or cleared while the page was disconnected can therefore stay stale: byte streams are not replayed, and the desktop only replays on a counted page join or its own renderer reconnect (W `media/events.ts:749-752`, `program/source.ts:532-557`; D `cloud_control_web.rs:1911-1915`).
