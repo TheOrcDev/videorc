@@ -315,6 +315,10 @@ test('stage/legs/recording talk routes mutate state and preserve room; solo erro
   assert.deepEqual(web.snapshot(id).state.legs, [])
   assert.ok(web.snapshot(id).state.room.connected)
   assert.equal(web.snapshot(id).state.restarts, 0)
+  // An egress that died, then End livestream: nothing is left to lose.
+  web.hooks.egressDied(id)
+  assert.equal((await call('legsEnd', {}, id)).status, 200)
+  assert.equal(web.shows.get(id).egressLostAt, undefined)
   assert.equal((await call('legsEnd', { destinations: 'bad' }, id)).status, 400)
   await call('recording', { on: false }, id)
   assert.equal((await call('recordings')).body.recordings.length, 1)

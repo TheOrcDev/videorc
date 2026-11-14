@@ -605,6 +605,8 @@ export async function startFakeCloudWebManaged({
           return fail(wire.errors.common.find((e) => e.status === 400).code)
         s.state.legs = []
         s.state.destinationsSet = true
+        // No egress runs after End livestream, so none can be lost.
+        delete s.egressLostAt
         changed(s)
         return send(200, { ok: true, rev: s.rev })
       }
