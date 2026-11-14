@@ -690,6 +690,11 @@ import {
   previewProofLayerShape
 } from '../shared/native-preview-proof-geometry'
 import {
+  previewSurfaceLayerUsesBackgroundStage,
+  previewSurfaceSceneSources,
+  sceneCameraOnStage
+} from '../shared/scene-picture-geometry'
+import {
   DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS,
   compositorStatusMetalTargetHandoff,
   nativeCametalLayerStatusMatchesHandoff,
@@ -6140,15 +6145,14 @@ function insetTransformForBackground(
 function transformForPreviewBackground(
   transform: SceneTransform,
   sourceKind: PreviewSurfaceSceneLayerKind,
-  stageMargin: number
+  stageMargin: number,
+  cameraOnStage: boolean
 ): SceneTransform {
-  return stageMargin > 0 && previewLayerUsesBackgroundStage(sourceKind)
+  // The compositor's one stage rule (plan 235 D9 a), shared with the Scene
+  // canvas: this surface keeps no kind list of its own.
+  return stageMargin > 0 && previewSurfaceLayerUsesBackgroundStage(sourceKind, cameraOnStage)
     ? insetTransformForBackground(transform, stageMargin)
     : transform
-}
-
-function previewLayerUsesBackgroundStage(sourceKind: PreviewSurfaceSceneLayerKind): boolean {
-  return ['screen', 'window', 'screen-image', 'test-pattern'].includes(sourceKind)
 }
 
 // The poster <img> for every background; plus the live spec for a live one
@@ -6235,6 +6239,7 @@ function buildPreviewSurfaceScene(
   const backgroundStageMargin = backgroundLayer
     ? previewProofBackgroundStageMargin(params.scene?.background)
     : 0
+  const cameraOnStage = sceneCameraOnStage(params.scene?.sources, params.layout)
   const layers: PreviewSurfaceSceneLayer[] = [
     ...(backgroundLayer ? [backgroundLayer] : []),
     ...(params.scene?.sources ?? []).map((source) => ({
@@ -6244,7 +6249,8 @@ function buildPreviewSurfaceScene(
       transform: transformForPreviewBackground(
         source.transform,
         source.kind,
-        backgroundStageMargin
+        backgroundStageMargin,
+        cameraOnStage
       ),
       visible: source.visible,
       frameUrl: nativePreviewSurfaceFramePollingSuppressed
@@ -6265,7 +6271,8 @@ function buildPreviewSurfaceScene(
       transform: transformForPreviewBackground(
         fullFrameTransform(),
         'screen-image',
-        backgroundStageMargin
+        backgroundStageMargin,
+        cameraOnStage
       ),
       visible: true,
       imageUrl: fileUrlFromPath(activeScreen.imagePath),
@@ -6334,6 +6341,10 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
         nativePreviewCommittedCompositorScene?.backgroundStageMargin ??
         0)
       : previewProofBackgroundStageMargin(statusBackground)
+  const cameraOnStage = sceneCameraOnStage(
+    previewSurfaceSceneSources(status.sceneSources ?? []),
+    status.sceneLayout
+  )
   const layers: PreviewSurfaceSceneLayer[] = [
     ...(backgroundLayer ? [backgroundLayer] : []),
     ...(status.sceneSources ?? []).filter(compositorSceneSourceIsPreviewLayer).map((source) => ({
@@ -6343,7 +6354,8 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
       transform: transformForPreviewBackground(
         source.transform,
         source.kind,
-        backgroundStageMargin
+        backgroundStageMargin,
+        cameraOnStage
       ),
       visible: source.visible,
       frameUrl: suppressFramePolling ? undefined : compositorLayerFrameUrl(source),
