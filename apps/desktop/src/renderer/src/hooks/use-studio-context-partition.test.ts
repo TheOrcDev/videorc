@@ -120,7 +120,6 @@ describe('studio context invalidation boundaries', () => {
     const provider = readFileSync(new URL('./use-studio-mic-visual.tsx', import.meta.url), 'utf8')
     const eagerConsumers = [
       '../components/studio/audio-section.tsx',
-      '../components/studio/session-mic-sliver.tsx',
       '../components/studio/mic-level-meter.tsx',
       '../components/sources/sources-audio-mixer.tsx',
       './use-studio-mic-sources.ts',

@@ -27,7 +27,7 @@ app. Two checks hold them (see [Guards](#guards)).
   status word: "Save local recording", "Needs reconnect".
 - Capitalize only names:
   - Videorc, Premium, Buddy (or the name the streamer gave it), Buddy Live;
-  - Go Live, as the action's name ("Go Live…", "Use for Go Live…"); the verb
+  - Go Live, as the action's name ("Go Live", "Use for Go Live…"); the verb
     in a sentence is lowercase ("Go live", "when you go live");
   - pages and windows: Studio, Sources, Scene, Assets, Livestream, Captions,
     Output, Library, Settings, Health, Stream Manager, Preview, Notes,
@@ -41,7 +41,7 @@ app. Two checks hold them (see [Guards](#guards)).
 
 - One character, "…", never three dots ("...").
 - On a command that opens a further step asking for a choice or input:
-  "Import…", "Rename…", "Choose thumbnail…", "Edit…", "Go Live…", "Pair a
+  "Import…", "Rename…", "Choose thumbnail…", "Edit…", "Go live…" (⌘K), "Pair a
   phone…", "Run setup again…", "What's new…", "Sign in…" and "Authorize X
   Live…" (both open an account flow in the browser).
 - Not on a command that acts at once, or one that only opens a page or a
@@ -65,7 +65,7 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
 
 | Where                 | Copy                                                                            |
 | --------------------- | ------------------------------------------------------------------------------- |
-| Studio buttons        | "Record" (with ␣) and "Go Live…"                                                |
+| Studio buttons        | "Record" (with ␣) and "Go Live": no "…", the owner's exception (plan 235 D2)    |
 | Go Live dialog        | title "Go live"; primary "Go live" or "Go live on 3 destinations"               |
 | Not public on YouTube | "Go live unlisted?" with "Go live unlisted" and "Change privacy" (or Private)   |
 | Stopping while on air | "End livestream", with "Your recording stops too."                              |
