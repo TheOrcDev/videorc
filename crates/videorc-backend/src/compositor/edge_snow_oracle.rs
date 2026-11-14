@@ -916,3 +916,253 @@ fn compose_keyed_4k(
     gpu.compose_target_with_timings(1920, 1080, [0.0, 0.0, 0.0, 1.0], &[source])
         .expect("metal compose")
 }
+
+/// The owner's speck (2026-11-14): a blue mark on the green screen, 6 × 6
+/// texels measured from the raw 4K camera, row by row. It sat at
+/// [`OWNER_SPECK_AT`], left of the subject, in every frame.
+const OWNER_SPECK: [[[u8; 3]; 6]; 6] = [
+    [
+        [33, 129, 97],
+        [1, 98, 65],
+        [19, 114, 87],
+        [45, 141, 113],
+        [41, 137, 80],
+        [30, 125, 68],
+    ],
+    [
+        [20, 116, 84],
+        [0, 95, 63],
+        [18, 113, 86],
+        [41, 136, 109],
+        [43, 138, 81],
+        [34, 130, 73],
+    ],
+    [
+        [28, 104, 122],
+        [36, 112, 130],
+        [47, 107, 169],
+        [38, 98, 160],
+        [34, 119, 102],
+        [41, 126, 109],
+    ],
+    [
+        [35, 111, 129],
+        [51, 128, 145],
+        [49, 109, 171],
+        [33, 93, 155],
+        [31, 115, 98],
+        [44, 128, 111],
+    ],
+    [
+        [29, 118, 116],
+        [36, 125, 123],
+        [33, 115, 140],
+        [24, 106, 131],
+        [26, 120, 84],
+        [34, 129, 92],
+    ],
+    [
+        [34, 123, 121],
+        [12, 101, 99],
+        [17, 99, 124],
+        [31, 113, 138],
+        [29, 124, 87],
+        [29, 124, 87],
+    ],
+];
+const OWNER_SPECK_AT: (u32, u32) = (422, 802);
+/// A 40 × 40 patch of the speck's blue: a real thing in front of the screen,
+/// far too big for the speck cleanup.
+const BLUE_PATCH_AT: (u32, u32) = (180, 420);
+const BLUE_PATCH_SIDE: u32 = 40;
+
+/// The synthetic camera's noisy frame 1 with the owner's speck and the blue
+/// patch on its screen.
+fn frame_with_speck_and_patch(camera: &SyntheticCamera) -> Vec<u8> {
+    let width = camera.width as usize;
+    let mut rgba = camera.noisy_rgba(1);
+    let mut paint = |x: u32, y: u32, rgb: [u8; 3]| {
+        let i = (y as usize * width + x as usize) * 4;
+        rgba[i..i + 3].copy_from_slice(&rgb);
+    };
+    for (dy, row) in OWNER_SPECK.iter().enumerate() {
+        for (dx, rgb) in row.iter().enumerate() {
+            paint(
+                OWNER_SPECK_AT.0 + dx as u32,
+                OWNER_SPECK_AT.1 + dy as u32,
+                *rgb,
+            );
+        }
+    }
+    for dy in 0..BLUE_PATCH_SIDE {
+        for dx in 0..BLUE_PATCH_SIDE {
+            paint(BLUE_PATCH_AT.0 + dx, BLUE_PATCH_AT.1 + dy, [40, 110, 160]);
+        }
+    }
+    rgba
+}
+
+/// Camera texels to check, as `(x, y)`: the speck with the two texels the
+/// key's 5×5 judge spreads it by, the patch's middle, and the head's middle.
+fn speck_area() -> impl Iterator<Item = (u32, u32)> {
+    let (x0, y0) = OWNER_SPECK_AT;
+    (y0 - 2..y0 + 8).flat_map(move |y| (x0 - 2..x0 + 8).map(move |x| (x, y)))
+}
+const PATCH_MIDDLE: (u32, u32) = (
+    BLUE_PATCH_AT.0 + BLUE_PATCH_SIDE / 2,
+    BLUE_PATCH_AT.1 + BLUE_PATCH_SIDE / 2,
+);
+const HEAD_MIDDLE: (u32, u32) = (1536, 648);
+
+/// The speck cleanup on the CPU keyed plane. The key alone keeps the owner's
+/// speck (its judged colour is far outside the cone); the plane keys it out
+/// at 1:1 (the owner's 4K recording) and in the Large slot (the preview),
+/// and keeps the 40 × 40 patch and the subject.
+#[test]
+fn cpu_keyed_plane_drops_the_owners_speck_and_keeps_a_real_patch() {
+    let camera = SyntheticCamera::build(CAMERA_WIDTH, CAMERA_HEIGHT);
+    let spec = default_key_spec();
+    let frame = frame_with_speck_and_patch(&camera);
+    let source = RgbaSource {
+        bytes: &frame,
+        width: camera.width,
+        height: camera.height,
+        format: SourcePixelFormat::Rgba,
+    };
+    let judged = KeyJudgedPlane::build(&source);
+    let (cx, cy) = (OWNER_SPECK_AT.0 + 3, OWNER_SPECK_AT.1 + 3);
+    let alone = chroma_key_alpha_rgb(&spec, judged.rgb(cx, cy));
+    assert!(alone > 200, "the key alone keeps the speck, alpha {alone}");
+    for level in [0u32, 2] {
+        let plane = KeyedLevelPlane::build(
+            &source,
+            &spec,
+            crate::protocol::CameraLook::default(),
+            level,
+        );
+        let alpha = |(x, y): (u32, u32)| plane.texel(x >> level, y >> level)[3];
+        for at in speck_area() {
+            assert_eq!(
+                alpha(at),
+                0.0,
+                "level {level}: speck texel {at:?} keyed out"
+            );
+        }
+        assert!(alpha(PATCH_MIDDLE) > 0.99, "level {level}: the patch stays");
+        assert!(
+            alpha(HEAD_MIDDLE) > 0.99,
+            "level {level}: the subject stays"
+        );
+    }
+}
+
+/// The camera's alpha at each camera texel of `points` when a Metal
+/// compositor draws it full frame onto a `canvas` (over black and over white),
+/// or `None` without a Metal device.
+#[cfg(target_os = "macos")]
+fn metal_alpha_at(
+    frame_rgba: &[u8],
+    camera: &SyntheticCamera,
+    spec: &ChromaKeySpec,
+    (canvas_width, canvas_height): (usize, usize),
+    points: &[(u32, u32)],
+) -> Option<Vec<f32>> {
+    use crate::metal_compositor::{
+        GpuSource, GpuSourceContentKey, GpuSourceKind, GpuSourceSampler, MetalSceneCompositor,
+        SourceMask,
+    };
+    let mut gpu = MetalSceneCompositor::new()?;
+    let bgra: Vec<u8> = frame_rgba
+        .chunks_exact(4)
+        .flat_map(|p| [p[2], p[1], p[0], p[3]])
+        .collect();
+    let mut compose = |background: f64| -> Vec<u8> {
+        let source = GpuSource {
+            kind: GpuSourceKind::Camera,
+            bgra: &bgra,
+            content_key: Some(GpuSourceContentKey {
+                namespace: CAMERA_CAPTURE_STORAGE_CONTENT_NAMESPACE,
+                revision: 1,
+                variant: 0,
+            }),
+            iosurface: None,
+            pixel_buffer: None,
+            texture: None,
+            width: camera.width as usize,
+            height: camera.height as usize,
+            dest: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
+            mirror: false,
+            mask: SourceMask::None,
+            blend: true,
+            chroma_key: scene_chroma_key_into_metal(spec),
+            camera_look: None,
+            corners: None,
+            sampler: GpuSourceSampler::Scene,
+            opacity: 1.0,
+        };
+        gpu.compose_bgra(
+            canvas_width,
+            canvas_height,
+            [background, background, background, 1.0],
+            &[source],
+        )
+        .expect("metal compose")
+    };
+    let black = compose(0.0);
+    let white = compose(1.0);
+    Some(
+        points
+            .iter()
+            .map(|&(x, y)| {
+                let px = (x as usize * canvas_width) / camera.width as usize;
+                let py = (y as usize * canvas_height) / camera.height as usize;
+                let i = (py * canvas_width + px) * 4 + 1;
+                (1.0 - (f32::from(white[i]) - f32::from(black[i])) / 255.0).clamp(0.0, 1.0)
+            })
+            .collect(),
+    )
+}
+
+/// The speck cleanup on the Metal key pass: the owner's speck is keyed out
+/// on a 4K canvas (1:1, the owner's recording) and in the Large slot, the
+/// patch and the subject stay, and the slot agrees with the CPU oracle.
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_key_pass_drops_the_owners_speck_and_keeps_a_real_patch_or_skips() {
+    let spec = default_key_spec();
+    if metal_render(&[0u8; 16], 2, 2, &spec, 0).is_none() {
+        eprintln!("skipping: no Metal device available in this environment");
+        return;
+    }
+    let camera = SyntheticCamera::build(CAMERA_WIDTH, CAMERA_HEIGHT);
+    let frame = frame_with_speck_and_patch(&camera);
+    let speck: Vec<(u32, u32)> = speck_area().collect();
+    for canvas in [
+        (CAMERA_WIDTH as usize, CAMERA_HEIGHT as usize),
+        (SLOT_WIDTH as usize, SLOT_HEIGHT as usize),
+    ] {
+        let alpha = metal_alpha_at(&frame, &camera, &spec, canvas, &speck).expect("metal");
+        let most = alpha.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            most < 0.02,
+            "{canvas:?}: the speck is keyed out, alpha up to {most}"
+        );
+        let kept = metal_alpha_at(&frame, &camera, &spec, canvas, &[PATCH_MIDDLE, HEAD_MIDDLE])
+            .expect("metal");
+        assert!(
+            kept.iter().all(|&a| a > 0.98),
+            "{canvas:?}: patch and subject stay, {kept:?}"
+        );
+    }
+    let cpu = cpu_render(&frame, camera.width, camera.height, &spec);
+    let gpu = metal_render(&frame, camera.width, camera.height, &spec, 1).expect("metal");
+    let alpha_apart = (0..cpu.alpha.len())
+        .filter(|&i| (cpu.alpha[i] - gpu.alpha[i]).abs() > 0.1)
+        .count();
+    assert!(
+        alpha_apart * 100 <= cpu.alpha.len(),
+        "CPU and Metal alpha differ by more than 0.1 on {alpha_apart} of {} pixels",
+        cpu.alpha.len()
+    );
+}

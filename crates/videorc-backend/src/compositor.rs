@@ -68,11 +68,12 @@ use crate::protocol::{
     SceneSource, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
-    CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS, ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask,
-    SceneMaskTester, SignedPixelRect, background_stage_margin, background_zoom_crop,
-    camera_chroma_key, camera_mask, chroma_key_alpha_rgb, chroma_key_despill_rgb,
-    chroma_key_edge_despill_strength, chroma_key_edge_proximity, chroma_key_reduction_level,
-    contain_rect_pixels, scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
+    CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS, ChromaKeySpec, ChromaKeySpecks, PixelRect, SceneCrop,
+    SceneFit, SceneMask, SceneMaskTester, SignedPixelRect, background_stage_margin,
+    background_zoom_crop, camera_chroma_key, camera_mask, chroma_key_alpha_rgb,
+    chroma_key_despill_rgb, chroma_key_edge_despill_strength, chroma_key_edge_proximity,
+    chroma_key_reduction_level, chroma_key_speck_cell, contain_rect_pixels,
+    scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
     scene_source_render_transform,
 };
 #[cfg(target_os = "macos")]
@@ -13467,6 +13468,10 @@ fn blit_linear_rgba_to_yuv420p(
 /// and the draw reads the plane with one bilinear tap: at most a 2× shrink.
 /// At level 0 every texel's alpha and colour are what a 1:1 draw gave.
 ///
+/// Before the colour treatment, the speck cleanup drops tiny kept patches
+/// that keyed-out screen surrounds (`scene_geometry::ChromaKeySpecks`, the
+/// owner's blue mark on the screen of 2026-11-14).
+///
 /// The Metal compositor's key pass is this on the GPU; tests pin the two.
 struct KeyedLevelPlane {
     width: usize,
@@ -13568,6 +13573,14 @@ impl KeyedLevelPlane {
                 }
             });
         drop(across);
+        // The speck cleanup, on pass 1's alpha (the Metal pass's three speck
+        // kernels between its two passes).
+        let specks = ChromaKeySpecks::find(
+            level_width,
+            level_height,
+            chroma_key_speck_cell(source.width, source.height, block as u32),
+            |x, y| texels[y * level_width + x][3],
+        );
         // Pass 2: the colour treatment on each level texel's average colour:
         // despill (Spill removal, or more next to the keyed-out area), then
         // the camera look.
@@ -13575,9 +13588,12 @@ impl KeyedLevelPlane {
         texels
             .par_iter_mut()
             .zip(blurred.par_iter())
-            .for_each(|(texel, &blurred_alpha)| {
+            .enumerate()
+            .for_each(|(index, (texel, &blurred_alpha))| {
                 let alpha = texel[3];
-                if alpha <= 0.0 {
+                if alpha <= 0.0
+                    || specks.drops(index % level_width.max(1), index / level_width.max(1))
+                {
                     *texel = [0.0; 4];
                     return;
                 }
@@ -16657,6 +16673,36 @@ mod tests {
                 ),
                 "{source:?} into {drawn:?}"
             );
+        }
+        // The speck cleanup's ring, kept alpha and cell, mirrored the same way.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                crate::metal_compositor::CHROMA_KEY_SPECK_PARAMS,
+                [
+                    crate::scene_geometry::CHROMA_KEY_SPECK_RING as f32,
+                    crate::scene_geometry::CHROMA_KEY_SPECK_KEPT_ALPHA as f32,
+                ]
+            );
+            for (width, height) in [
+                (3840, 2160),
+                (1920, 1080),
+                (1280, 720),
+                (1080, 1920),
+                (2, 2),
+            ] {
+                for block in [1, 2, 4, 8, 32] {
+                    assert_eq!(
+                        crate::metal_compositor::gpu_chroma_key_speck_cell(width, height, block),
+                        crate::scene_geometry::chroma_key_speck_cell(
+                            width as u32,
+                            height as u32,
+                            block as u32
+                        ),
+                        "{width}x{height} at block {block}"
+                    );
+                }
+            }
         }
     }
 
