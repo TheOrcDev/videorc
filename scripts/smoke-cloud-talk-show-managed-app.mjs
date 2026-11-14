@@ -193,6 +193,8 @@ try {
         h.web.hooks.failNext('recording', error.status >= 500 ? 2 : 1, error.status, error.code)
         await assert.rejects(
           h.rpc(on ? 'cloud.recording.start' : 'cloud.recording.stop'),
+          // The desktop's words for each refusal (cloud_control_web.rs
+          // recording_problem, and the shared CloudApiError for cloud-full).
           new RegExp(
             error === w.errors.recording[0]
               ? 'talk shows'
@@ -200,7 +202,9 @@ try {
                 ? 'no-target'
                 : error === w.errors.recording[2]
                   ? 'end the livestream first'
-                  : error.code
+                  : error.code === 'cloud-full'
+                    ? 'Videorc Cloud is full right now'
+                    : error.code
           )
         )
       }
