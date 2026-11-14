@@ -593,7 +593,11 @@ export async function managedHarness(kind, pass = 1) {
         config,
         `logLevel: warn\nrtmp: yes\nrtmpAddress: 127.0.0.1:${ports.rtmp}\nrtmpEncryption: optional\nrtmpsAddress: 127.0.0.1:${ports.rtmps}\nrtmpServerCert: ${cert}\nrtmpServerKey: ${key}\nrtsp: yes\nrtspAddress: 127.0.0.1:${ports.rtsp}\nrtspTransports: [tcp]\nhls: no\nwebrtc: no\nsrt: no\napi: yes\napiAddress: 127.0.0.1:${ports.api}\npaths:\n  all_others:\n`
       )
-      startChild('mediamtx', process.env.VIDEORC_SMOKE_MEDIAMTX_PATH ?? 'mediamtx', [config])
+      // MediaMTX writes auto.crt and auto.key into its working directory:
+      // the run's folder, never the checkout.
+      startChild('mediamtx', process.env.VIDEORC_SMOKE_MEDIAMTX_PATH ?? 'mediamtx', [config], {
+        cwd: root
+      })
       await waitFor(async () => {
         try {
           return (await fetch(`http://127.0.0.1:${ports.api}/v3/paths/list`)).ok
