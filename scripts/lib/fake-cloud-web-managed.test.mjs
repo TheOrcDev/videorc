@@ -320,6 +320,23 @@ test('stage/legs/recording talk routes mutate state and preserve room; solo erro
   assert.equal((await call('recordings')).body.recordings.length, 1)
   assert.equal((await call('recording', {}, id)).status, 400)
 })
+test('a stopped take lists one row that starts with the take, now or after the asked delay', async (t) => {
+  const { web, call, create } = await fixture(t)
+  const id = await create('talk')
+  await call('recording', { on: true }, id)
+  const since = web.snapshot(id).state.recording.since
+  await call('recording', { on: false }, id)
+  const rows = (await call('recordings')).body.recordings
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].startedAt, since)
+  web.hooks.delayNextRecordingRow(2000)
+  await call('recording', { on: true }, id)
+  await call('recording', { on: false }, id)
+  assert.equal((await call('recordings')).body.recordings.length, 1)
+  await sleep(100)
+  assert.equal((await call('recordings')).body.recordings.length, 2)
+  assert.throws(() => web.hooks.delayNextRecordingRow(-1))
+})
 test('recordings list, absolute HTTPS playlist, presigned HTTPS segments, trusted TLS and untrusted refusal', async (t) => {
   const { web, call } = await fixture(t, { segmentBytes: Buffer.from('segment fixture') })
   const row = web.hooks.addRecording(),

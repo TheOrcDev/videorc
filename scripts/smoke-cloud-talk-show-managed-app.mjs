@@ -519,6 +519,137 @@ try {
       h.scanLeaks()
     }
   )
+  await required(
+    'Library Cloud recordings: the row after Stop, Download progress then Saved, a failure, Cancel, a node row opens the account page',
+    async () => {
+      const section = '[data-testid=library-cloud-recordings]'
+      const rowSelector = (id) => `[data-testid=library-cloud-recording][data-recording-id="${id}"]`
+      const rowText = (id) =>
+        h.eval(
+          `return document.querySelector(${JSON.stringify(rowSelector(id))})?.textContent ?? null`
+        )
+      const buttons = (id) =>
+        h.eval(
+          `return [...(document.querySelector(${JSON.stringify(rowSelector(id))})?.querySelectorAll('button') ?? [])].map((b) => b.textContent.trim())`
+        )
+      const click = (selector, label) =>
+        h.eval(
+          `const b = [...(document.querySelector(${JSON.stringify(selector)})?.querySelectorAll('button') ?? [])].find((b) => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled); if (!b) return false; b.click(); return true`
+        )
+      const rowSays = (id, pattern, label, ms = 30000) =>
+        waitFor(async () => pattern.test((await rowText(id)) ?? ''), label, ms)
+      const doneEvent = (recordingId, state) =>
+        h.events.find(
+          (e) =>
+            e.event === DOWNLOAD.event &&
+            e.payload.recordingId === recordingId &&
+            e.payload.state === state
+        )
+      const listed = async (id) => {
+        assert.ok(await click(section, 'Refresh'), 'the section has Refresh')
+        await waitFor(async () => (await rowText(id)) !== null, 'row listed after Refresh')
+      }
+      await h.command('open-tab', { tab: 'library', waitFor: section })
+
+      // The take's row: listed by the section's own poll after Stop, here 12 s
+      // after Stop (the web still finishing the playlist), inside 2 minutes.
+      const known = new Set(h.web.recordings.map((r) => r.id))
+      h.web.hooks.delayNextRecordingRow(12000)
+      await h.rpc('cloud.recording.start')
+      await h.status((s) => s.recording?.active, 'cloud recording on')
+      await sleep(2000)
+      await h.rpc('cloud.recording.stop')
+      const stoppedAt = Date.now()
+      await h.status((s) => !s.recording?.active, 'cloud recording off')
+      const take = await waitFor(
+        () => h.web.recordings.find((r) => !known.has(r.id)),
+        'the take row on the web',
+        30000
+      )
+      await waitFor(
+        async () => (await rowText(take.id)) !== null,
+        'Library lists the take after Stop',
+        120000 - (Date.now() - stoppedAt)
+      )
+      console.log(
+        `[managed talk] Library row ${((Date.now() - stoppedAt) / 1000).toFixed(1)} s after Stop`
+      )
+      assert.ok((await buttons(take.id)).includes('Download'))
+
+      // Download: progress while the segment is held, then Saved and Show in Finder.
+      const held = h.web.hooks.pause('segment')
+      try {
+        assert.ok(await click(rowSelector(take.id), 'Download'))
+        await rowSays(take.id, /Downloading/, 'row shows Downloading')
+        assert.ok(
+          await h.eval(
+            `return !!document.querySelector(${JSON.stringify(rowSelector(take.id))})?.querySelector('[role=progressbar]')`
+          ),
+          'the row shows a progress bar'
+        )
+        assert.ok((await buttons(take.id)).includes('Cancel'))
+      } finally {
+        held.release()
+      }
+      await rowSays(take.id, /Saved/, 'row shows Saved', 60000)
+      assert.ok((await buttons(take.id)).some((b) => /^Show in /.test(b)))
+      playable(h, doneEvent(take.id, 'done').payload.path)
+
+      // A failed download says so and offers Try again.
+      const broken = h.web.hooks.addRecording({ showId: h.showId })
+      await listed(broken.id)
+      h.web.hooks.failNext('segment', 2, 503)
+      assert.ok(await click(rowSelector(broken.id), 'Download'))
+      await rowSays(broken.id, /Couldn.t download/, 'row shows the failure', 60000)
+      assert.ok((await buttons(broken.id)).includes('Try again'))
+      await noDownloadTemps(h)
+
+      // Cancel takes the row back to Download.
+      const spare = h.web.hooks.addRecording({ showId: h.showId })
+      await listed(spare.id)
+      const hold = h.web.hooks.pause('segment')
+      try {
+        assert.ok(await click(rowSelector(spare.id), 'Download'))
+        await rowSays(spare.id, /Downloading/, 'spare row downloading')
+        assert.ok(await click(rowSelector(spare.id), 'Cancel'))
+        await waitFor(
+          async () =>
+            !/Downloading/.test((await rowText(spare.id)) ?? '') &&
+            (await buttons(spare.id)).includes('Download'),
+          'Cancel takes the row back to Download'
+        )
+        await waitFor(() => doneEvent(spare.id, 'cancelled'), 'cancelled event')
+      } finally {
+        hold.release()
+      }
+      await noDownloadTemps(h)
+
+      // A node recording opens the account page; nothing downloads here.
+      const node = h.web.hooks.addRecording({ format: w.recordings.formats.node })
+      await listed(node.id)
+      const labels = await buttons(node.id)
+      assert.ok(labels.includes('Open videorc.com'))
+      assert.equal(labels.includes('Download'), false)
+      const swapped = await h.eval(
+        `const api = window.videorc; const original = api?.openOAuthUrl; window.__managedOpened = []; try { api.openOAuthUrl = (url) => { window.__managedOpened.push(String(url)); return Promise.resolve() } } catch {} window.__managedRestoreOpener = () => { try { api.openOAuthUrl = original } catch {} }; return api?.openOAuthUrl !== original`
+      )
+      assert.ok(
+        swapped,
+        'the account link opener could not be observed without opening a real browser'
+      )
+      try {
+        assert.ok(await click(rowSelector(node.id), 'Open videorc.com'))
+        const opened = await waitFor(
+          () => h.eval('return window.__managedOpened[0] ?? null'),
+          'account page opened'
+        )
+        assert.equal(new URL(opened).pathname, '/account')
+      } finally {
+        await h.eval('window.__managedRestoreOpener?.(); return true')
+      }
+      await h.command('open-tab', { tab: 'studio' })
+    }
+  )
   await required('untrusted segment TLS is refused by the bundled remux', async () => {
     // The web uses the trusted test root. A separate HTTPS listener has another
     // root and is deliberately NOT added to the feed CA file.

@@ -85,7 +85,8 @@ export async function startFakeCloudWebManaged({
     managedVersionAllowed(version) || (Boolean(buildVersion) && version === buildVersion)
   let controlKind = wire.control.kinds[0],
     closed = false,
-    httpsOrigin
+    httpsOrigin,
+    recordingRowDelayMs = 0
   const controllers = new Set()
   const allowance = cloudAllowanceBlock({ nowMs: Date.now() })
   const changed = (s) => {
@@ -656,7 +657,8 @@ export async function startFakeCloudWebManaged({
           return fail(wire.errors.recording.find((e) => e.code.endsWith('-solo')).code)
         if (typeof body.on !== 'boolean')
           return fail(wire.errors.common.find((e) => e.status === 400).code)
-        const was = s.state.recording.active
+        const was = s.state.recording.active,
+          takeSince = s.state.recording.since
         s.state.recording = {
           active: body.on,
           since: instant(),
@@ -665,7 +667,15 @@ export async function startFakeCloudWebManaged({
           orientations: ['horizontal']
         }
         changed(s)
-        if (was && !body.on) hooks.addRecording({ showId: s.show.id })
+        if (was && !body.on) {
+          // The take's row starts when the take did. A delayed row stands for
+          // the web finishing the playlist after Stop.
+          const row = { showId: s.show.id, ...(takeSince ? { startedAt: takeSince } : {}) }
+          const delay = recordingRowDelayMs
+          recordingRowDelayMs = 0
+          if (delay) setTimeout(() => closed || hooks.addRecording(row), delay * waitScale)
+          else hooks.addRecording(row)
+        }
         return send(200, { ok: true, rev: s.rev })
       }
       fail(wire.errors.common.find((e) => e.status === 404).code)
@@ -742,6 +752,11 @@ export async function startFakeCloudWebManaged({
     },
     controlKind(kind) {
       controlKind = kind
+    },
+    /** The next stopped take's row is listed only after `ms`. */
+    delayNextRecordingRow(ms) {
+      if (!Number.isInteger(ms) || ms < 0) throw new Error('Row delay needs whole milliseconds')
+      recordingRowDelayMs = ms
     },
     legacyControl(id, control) {
       const s = shows.get(id)
