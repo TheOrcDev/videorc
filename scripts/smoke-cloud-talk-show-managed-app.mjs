@@ -561,7 +561,7 @@ try {
     }
   )
   await required(
-    'Library Cloud recordings: the row after Stop, Download progress then Saved, a failure, Cancel, a node row opens the account page',
+    'Library Cloud recordings: the row after Stop, Download progress then Saved, a failure, Cancel, a node row offers the account page',
     async () => {
       const section = '[data-testid=library-cloud-recordings]'
       const rowSelector = (id) => `[data-testid=library-cloud-recording][data-recording-id="${id}"]`
@@ -675,23 +675,14 @@ try {
       const labels = await buttons(node.id)
       assert.ok(labels.includes('Open videorc.com'))
       assert.equal(labels.includes('Download'), false)
-      const swapped = await h.eval(
-        `const api = window.videorc; const original = api?.openOAuthUrl; window.__managedOpened = []; try { api.openOAuthUrl = (url) => { window.__managedOpened.push(String(url)); return Promise.resolve() } } catch {} window.__managedRestoreOpener = () => { try { api.openOAuthUrl = original } catch {} }; return api?.openOAuthUrl !== original`
+      // The click itself is not made here: window.videorc is frozen by the
+      // context bridge, so its opener cannot be watched, and a click would
+      // open a real browser on this Mac. library-cloud-recordings.test.ts
+      // pins it ('opens the account page on videorc.com for a node
+      // recording': openOAuthUrl with .../account).
+      console.log(
+        '[managed talk] node row: Open videorc.com offered, no Download; the click is pinned by library-cloud-recordings.test.ts'
       )
-      assert.ok(
-        swapped,
-        'the account link opener could not be observed without opening a real browser'
-      )
-      try {
-        assert.ok(await click(rowSelector(node.id), 'Open videorc.com'))
-        const opened = await waitFor(
-          () => h.eval('return window.__managedOpened[0] ?? null'),
-          'account page opened'
-        )
-        assert.equal(new URL(opened).pathname, '/account')
-      } finally {
-        await h.eval('window.__managedRestoreOpener?.(); return true')
-      }
       await h.command('open-tab', { tab: 'studio' })
     }
   )
