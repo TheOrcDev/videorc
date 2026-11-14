@@ -254,7 +254,20 @@ export async function hostReconnect(h) {
   const at = Date.now()
   await h.kill()
   await h.launch()
+  // The relaunched app finds the show through its launch check; Resume
+  // before that answers 'no show to resume'.
+  await h.status((s) => s.show?.id === h.showId, 'the relaunched app holds the show', 45000)
   await h.rpc('cloud.room.resume')
   await h.status((s) => s.room?.client === 'connected', 'host reconnected')
   await waitFor(() => h.calls('roomToken', at).length, 'fresh host token')
+}
+
+/** The host's room connection drops and comes back, in the same app: the
+ * room removes it, and the renderer reconnects with a fresh token and reports
+ * connected (the backend's overlay replay trigger, wire 6.3). */
+export async function hostRoomDrop(h) {
+  const at = Date.now()
+  await h.web.roomRpc('RemoveParticipant', { room: h.showId, identity: `host:${h.showId}` })
+  await waitFor(() => h.calls('roomToken', at).length, 'fresh host token after the drop', 45000)
+  await h.status((s) => s.room?.client === 'connected', 'host back in the room', 45000)
 }

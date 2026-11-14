@@ -29,6 +29,7 @@ import {
   managedRoomListener,
   checkOverlay,
   hostReconnect,
+  hostRoomDrop,
   nodeTalkSentinel
 } from './lib/cloud-managed-room.mjs'
 import { managedWire as w } from './lib/fake-cloud-web-managed.mjs'
@@ -275,14 +276,16 @@ try {
         await waitFor(async () => (await count('takeover')) > before, 'page-join takeover replay')
         assert.equal(await count('card'), 1)
       }
+      // The host's room connection drops and comes back in the same app:
+      // the untimed takeover arrives again, the timed card does not, and no
+      // destination is sent. (A relaunch is the Resume step's: overlays set
+      // through this smoke's RPC live only in the backend that set them.)
       const before = await count('takeover'),
-        puts = h.calls('destinations').length,
-        stages = h.calls('stage').length
-      await hostReconnect(h)
+        puts = h.calls('destinations').length
+      await hostRoomDrop(h)
       await waitFor(async () => (await count('takeover')) > before, 'reconnect takeover replay')
       assert.equal(await count('card'), 1)
       assert.equal(h.calls('destinations').length, puts)
-      assert.ok(h.calls('stage').length > stages)
       const large = runMedia(h.ffmpeg, [
         '-f',
         'lavfi',
